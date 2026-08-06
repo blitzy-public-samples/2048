@@ -1,0 +1,623 @@
+// =============================================================================
+// Reward screen — the choose-1-of-3 relic offer.
+// =============================================================================
+//
+// PROVENANCE
+//   Nothing in this file was moved from an existing stylesheet. The product had
+//   one screen, no router and no reward surface. Every declaration below is
+//   new; every value resolves to a token in style/_tokens.scss or to an entry
+//   in the DERIVED VALUES block, which states the arithmetic that produced it.
+//
+//   The vocabulary the surfaces are assembled from already existed:
+//     scrim         `rgba($tile-gold-color, …)`, the `.game-message` win
+//                   tint at style/main.scss L281
+//     panel radius  `$tile-border-radius * 2`, the board radius at
+//                   style/main.scss L228
+//     shade step    `$lightness: -20%`, the step the `button` mixin applies to
+//                   $game-container-background at style/main.scss L188
+//     chip type     the label step and uppercase treatment the score captions
+//                   carry at style/main.scss L95-L97
+//     card entrance the `pop` keyframes at style/main.scss L480-L492, run
+//                   at the duration, delay and fill mode applied at
+//                   L496-L497
+//     rarity ramp   the interpolation the tile ramp performs at
+//                   style/main.scss L403, applied over the rarity index
+//                   in place of the tile exponent
+//
+// SELECTOR SOURCE
+//   index.html L169 declares the container this file styles:
+//     <div class="screen" id="screen-reward" data-screen="reward"
+//          role="dialog" aria-modal="true" aria-label="Choose a relic" hidden>
+//   It ships empty. src/ui/screen-router.ts toggles the `hidden` attribute, and
+//   style/main.scss L170-L177 maps `.screen[hidden]` to `display: none`. The
+//   `display` declaration here is therefore scoped to `:not([hidden])`, and no
+//   selector in this file addresses an element by id.
+//
+//   `.screen-layer` and the shared `.screen` base belong to
+//   style/_screens.scss. This file names neither. Every card rule is scoped to
+//   `.reward-offer`, so none of it reaches the relic entries style/_hud.scss
+//   renders into `.relic-tray`.
+//
+// DOM CONTRACT
+//   src/ui/screens/reward.ts and src/ui/components/relic-card.ts render the
+//   tree below into the container above. `.relic-card` is a <button>, whose
+//   content model is phrasing content, so its description and badge list are
+//   <span> elements rather than <p> and <ul>.
+//
+//     .reward-panel                        the dialog's content surface
+//       h2.reward-heading
+//       p.reward-hint
+//       ul.reward-offers[role="list"]      three items, drawn without
+//         li.reward-offer                  replacement, so no two repeat
+//           button.relic-card[data-rarity]
+//             span.relic-card-header
+//               span.relic-card-shortcut   the 1 / 2 / 3 digit `selectReward`
+//                                          binds in src/input/keymap.ts.
+//                                          Carries aria-hidden="true"
+//               span.relic-card-name
+//             span.relic-card-meta
+//               span.relic-card-rarity
+//               span.relic-card-charges    charge relics only
+//             span.relic-card-description
+//             span.relic-card-hooks
+//               span.relic-hook-badge      one per bound hook, one to six
+//
+//   `data-rarity` sits on `.relic-card` and drives both the card's accent edge
+//   and the rarity chip. Its four values are the members of $reward-rarities;
+//   the unqualified rules render the low anchor for any other value.
+//
+//   `.relic-card-description` is clamped to $reward-description-lines line
+//   boxes with an ellipsis, which bounds the equal-height row whatever the
+//   catalogue holds.
+//
+//   States addressed: `:hover` (behind `@media (hover: hover)`),
+//   `:focus-visible` (through the shared vocabulary in style/_a11y.scss),
+//   `:active`, `[aria-pressed="true"]` for the chosen card, and `[disabled]` /
+//   `[aria-disabled="true"]`. No rule in this file writes `outline: none`, and
+//   no rule can displace the focus ring.
+//
+// LAYERING
+//   The container takes `$z-index-modal`, above `$z-index-hud` and
+//   `$z-index-screen-overlay` and below `$z-index-diagnostics`. The existing
+//   ladder in style/main.scss — 1, 2, 10, 20, 100, 100 — is not renumbered and
+//   not referenced, and `$z-index-modal` is the only stacking value named here.
+//
+//   index.html places `#diagnostics-overlay` at body level as a sibling of
+//   `.screen-layer`, so `<html>` and `<body>` are the only elements the two
+//   trees share. This file names neither, and no rule here places `overflow`,
+//   `clip-path`, `contain`, `filter`, `opacity` or `transform` on an ancestor
+//   of the overlay's mount point. The scrim is tinted through its own
+//   `background` rather than through `opacity` on a wrapper.
+//
+// MEASURED CONTRAST
+//   Across the fallback values below and all three palettes in
+//   style/_themes.scss — default, high-contrast and colourblind-safe — panel
+//   text reads 4.64:1 to 21:1, card text 8.35:1 to 21:1, and the four rarity
+//   chips never below 5.29:1. The focus ring's bright band reads 8.35:1 to
+//   19.49:1 against a card, and its dark band 4.64:1 to 5.00:1 against the
+//   panel and 3.65:1 to 4.08:1 against the scrim. The panel's own edge reads
+//   3.65:1 to 17.15:1 against the scrim. No pair on this surface falls below
+//   the WCAG AA threshold that applies to it, and no palette value is altered
+//   to reach those figures.
+//
+// CONSUMES
+//   tokens   style/_tokens.scss — the core tokens and $z-index-modal
+//   helpers  style/helpers.scss — `animation`, `animation-fill-mode`,
+//            `transition` and `smaller`
+//   a11y     style/_a11y.scss — `focusable`
+//   Sass `@use` is not transitive, so each is loaded here for itself.
+//
+//   Five of the `--theme-*` custom properties style/_themes.scss publishes are
+//   read through `var()` with a token fallback: `--theme-overlay-win`,
+//   `--theme-page-background`, `--theme-text`, `--theme-tile-super` and
+//   `--theme-tile-super-numeral`. Each fallback is the value the default
+//   palette publishes, so this file renders correctly whether or not that
+//   partial is in the graph.
+//
+// The rationale, alternatives and risks behind every item above are recorded in
+// docs/DECISION_LOG.md; this file carries provenance only.
+// =============================================================================
+
+@use "sass:color";
+@use "sass:list";
+@use "sass:math";
+@use "tokens" as *;
+@use "helpers" as *;
+@use "a11y" as *;
+
+// -----------------------------------------------------------------------------
+// DERIVED VALUES
+//
+// style/_tokens.scss carries no length below $tile-border-radius, no
+// typographic scale and no mobile geometry. Every value this file needs outside
+// the token set is derived from a token once, here. No declaration further down
+// carries a literal length, duration, colour or stacking value.
+// -----------------------------------------------------------------------------
+
+// One CSS pixel, as a third of $tile-border-radius. Resolves to 1px.
+$reward-hairline: math.div($tile-border-radius, 3) !default;
+
+// Rhythm, as fractions and multiples of $grid-spacing. The three steps resolve
+// to 5px, 7.5px and 15px, and the panel's padding to 30px.
+$reward-gap-tight: math.div($grid-spacing, 3) !default;
+$reward-gap: math.div($grid-spacing, 2) !default;
+$reward-gutter: $grid-spacing !default;
+$reward-panel-padding: $grid-spacing * 2 !default;
+
+// Mobile rhythm and measure. style/main.scss's `smaller($mobile-threshold)`
+// block redefines $grid-spacing as 10px and $field-width as 280px; both are
+// restated here as fractions of the desktop tokens.
+$reward-mobile-gutter: math.div($grid-spacing * 2, 3) !default;
+$reward-mobile-measure: math.div($field-width * 14, 25) !default;
+
+// Card and panel measures. A card spans two board tracks and the gutter between
+// them; the panel holds three of those, with the board's gutter between them
+// and its own padding around them. They resolve to 227.5px and 772.5px.
+$reward-card-measure: $tile-size * 2 + $grid-spacing !default;
+$reward-panel-measure:
+  $reward-panel-padding * 2 + $reward-card-measure * 3 + $reward-gutter * 2
+  !default;
+
+// Type steps. The two the stylesheet already uses on comparable surfaces are
+// its label step, 13px on the score captions at style/main.scss L96, and its
+// numeral step, 25px on the score values at style/main.scss L75. Both are
+// expressed here as sums of $grid-spacing terms.
+$reward-label-size: $grid-spacing - $reward-hairline * 2 !default;
+$reward-heading-size: $grid-spacing + $reward-mobile-gutter !default;
+
+// Paragraph line height, the value style/main.scss L127 declares on `p`. A
+// ratio, not a length; no token in style/_tokens.scss applies to it.
+$reward-line-height: 1.65 !default;
+
+// Ceiling on the number of line boxes a relic description occupies. A count,
+// not a length; no token in style/_tokens.scss applies to it. Eight lines hold
+// about two hundred characters at the card measure, and a longer description is
+// clamped with an ellipsis, which bounds the height of the equal-height row.
+// Decision D-B in docs/DECISION_LOG.md.
+$reward-description-lines: 8 !default;
+
+// Alpha of the `.game-message` overlay tints at style/main.scss L243 and L281.
+$reward-scrim-alpha: 0.5 !default;
+
+// The lightness step the `button` mixin applies at style/main.scss L188. The
+// card surface takes twice that step, which resolves to #53473c.
+$reward-shade-step: -20% !default;
+$reward-card-surface: color.adjust(
+  $game-container-background,
+  $lightness: $reward-shade-step * 2
+) !default;
+
+// The rarity accent edge, one $tile-border-radius deep. Resolves to 3px.
+$reward-accent-thickness: $tile-border-radius !default;
+
+// Motion. The `pop` keyframes at style/main.scss L480-L492 run for
+// $transition-speed * 2 after a delay of $transition-speed at L496; the state
+// transitions below run for $transition-speed, the duration style/main.scss
+// L375 gives tile movement.
+$reward-pop-duration: $transition-speed * 2 !default;
+$reward-pop-delay: $transition-speed !default;
+$reward-state-duration: $transition-speed !default;
+
+// The rarity tiers in ascending order, as src/ui/screens/reward.ts writes them
+// into `data-rarity`.
+$reward-rarities: common, uncommon, rare, legendary !default;
+
+// -----------------------------------------------------------------------------
+// RARITY RAMP
+//
+// The tile ramp at style/main.scss L398-L448 interpolates linearly in the
+// EXPONENT between the low anchor $tile-color and the high anchor
+// $tile-gold-color: `$gold-percent: ($exponent - 1) / ($limit - 1) * 100`. The
+// two functions below run that same interpolation over the rarity index, so the
+// tiers sit on the beige-to-gold axis the tiles already occupy. The compiled
+// ramp table appears nowhere in this file.
+//
+// Decision D-A in docs/DECISION_LOG.md.
+// -----------------------------------------------------------------------------
+
+// Position of one tier on the ramp, as the percentage of the high anchor the
+// interpolation mixes in. Resolves to 0%, 33.333%, 66.667% and 100%.
+@function reward-rarity-weight($rarity) {
+  $index: list.index($reward-rarities, $rarity);
+
+  @if $index == null {
+    @error "reward-rarity-weight(): unknown rarity `#{$rarity}`. "
+      + "Expected one of #{$reward-rarities}.";
+  }
+
+  @return math.div($index - 1, list.length($reward-rarities) - 1) * 100%;
+}
+
+// The tier's colour, mixed from the ramp's own two anchors.
+@function reward-rarity-color($rarity) {
+  @return color.mix(
+    $tile-gold-color,
+    $tile-color,
+    reward-rarity-weight($rarity)
+  );
+}
+
+// -----------------------------------------------------------------------------
+// SHARED CHIP
+//
+// The rarity chip, the hook badges and the charge count share one outlined
+// pill: no fill, a hairline edge in the element's own text colour, and the
+// label step at the numeral step's line box.
+//
+// Decision D-C in docs/DECISION_LOG.md.
+// -----------------------------------------------------------------------------
+
+@mixin reward-chip($text-transform: uppercase) {
+  // A block container carrying its text on the label step's line box.
+  // Decision D-K in docs/DECISION_LOG.md.
+  display: inline-block;
+  box-sizing: border-box;
+
+  padding: 0 $reward-gap-tight;
+  border: $reward-hairline solid currentColor;
+  border-radius: $tile-border-radius;
+  background: transparent;
+
+  font-size: $reward-label-size;
+  font-weight: bold;
+  line-height: $reward-heading-size;
+  text-transform: $text-transform;
+
+  // A chip wraps to the next row before it shrinks, and shrinks with an
+  // ellipsis only where it is the sole chip on a row narrower than its own
+  // label. Decision D-K in docs/DECISION_LOG.md.
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// -----------------------------------------------------------------------------
+// SCREEN CONTAINER
+// -----------------------------------------------------------------------------
+
+.screen[data-screen="reward"] {
+  position: fixed;
+  inset: 0;
+  z-index: $z-index-modal;
+  box-sizing: border-box;
+  padding: $reward-panel-padding;
+
+  // The win-state tint of the `.game-message` overlay, carried on this
+  // element's own `background`. Decision D-G in docs/DECISION_LOG.md.
+  background: var(
+    --theme-overlay-win,
+    #{rgba($tile-gold-color, $reward-scrim-alpha)}
+  );
+
+  align-items: center;
+  justify-content: center;
+
+  // style/main.scss maps `.screen[hidden]` to `display: none`; the router owns
+  // that attribute, and this declaration is scoped to its absence.
+  // Decision D-H in docs/DECISION_LOG.md.
+  &:not([hidden]) {
+    display: flex;
+  }
+
+  @include smaller($mobile-threshold) {
+    padding: $reward-mobile-gutter;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// PANEL
+// -----------------------------------------------------------------------------
+
+.reward-panel {
+  box-sizing: border-box;
+  inline-size: $reward-panel-measure;
+  max-inline-size: 100%;
+  max-block-size: 100%;
+
+  // Scrolls its own overflow. index.html places `#diagnostics-overlay` as a
+  // sibling of `.screen-layer`, so it is not a descendant of this element and
+  // is not clipped by this declaration.
+  overflow-y: auto;
+  padding: $reward-panel-padding;
+
+  display: flex;
+  flex-direction: column;
+  gap: $reward-gap;
+
+  background: var(--theme-page-background, #{$bright-text-color});
+  color: var(--theme-text, #{$text-color});
+
+  // The panel's visible edge. style/_a11y.scss already draws `dialog-boundary`
+  // on the `[role="dialog"][aria-modal="true"]` element that contains this
+  // panel, so the edge here is a border alone and follows the corner radius.
+  border: $reward-hairline solid var(--theme-text, #{$text-color});
+  border-radius: $tile-border-radius * 2;
+
+  @include smaller($mobile-threshold) {
+    inline-size: $reward-mobile-measure;
+    padding: $reward-mobile-gutter;
+    gap: $reward-mobile-gutter;
+  }
+}
+
+.reward-heading {
+  margin: 0;
+  font-size: $reward-heading-size;
+  font-weight: bold;
+  line-height: $reward-line-height;
+  overflow-wrap: break-word;
+}
+
+// The `p` rule at style/main.scss L124-L128 gives this element a bottom margin;
+// the panel's `gap` owns the spacing instead.
+.reward-hint {
+  margin: 0;
+  line-height: $reward-line-height;
+  overflow-wrap: break-word;
+}
+
+// -----------------------------------------------------------------------------
+// OFFER LIST
+//
+// Three equal tracks that may shrink below their content width, in one row
+// whose items stretch, so cards carrying descriptions of different lengths
+// share a single height. The `smaller($mobile-threshold)` block collapses the
+// row to one track; that is the only breakpoint in this file.
+//
+// Decision D-B in docs/DECISION_LOG.md.
+// -----------------------------------------------------------------------------
+
+.reward-offers {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: $reward-gutter;
+
+  @include smaller($mobile-threshold) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: $reward-mobile-gutter;
+  }
+}
+
+.reward-offer {
+  display: flex;
+  min-inline-size: 0;
+}
+
+// -----------------------------------------------------------------------------
+// CARD
+// -----------------------------------------------------------------------------
+
+.reward-offer .relic-card {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  box-sizing: border-box;
+
+  display: flex;
+  flex-direction: column;
+  gap: $reward-gap;
+
+  padding: $reward-gutter;
+  text-align: start;
+  cursor: pointer;
+
+  background: var(--theme-tile-super, #{$reward-card-surface});
+  color: var(--theme-tile-super-numeral, #{$bright-text-color});
+
+  // The block-start edge is the rarity accent. The tier rules below recolour
+  // it, and the unqualified value is the ramp's low anchor.
+  border: $reward-hairline solid transparent;
+  border-block-start: $reward-accent-thickness solid
+    reward-rarity-color(list.nth($reward-rarities, 1));
+  border-radius: $tile-border-radius;
+
+  // Neutralises the user-agent button styling, so the card inherits the
+  // interface typography the panel carries.
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: normal;
+  -webkit-appearance: none;
+  appearance: none;
+
+  @include smaller($mobile-threshold) {
+    padding: $reward-mobile-gutter;
+    gap: $reward-mobile-gutter;
+  }
+}
+
+// The keycap is held against the block-start edge, level with the first line of
+// a name that wraps.
+.reward-offer .relic-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: $reward-gap-tight;
+  min-inline-size: 0;
+}
+
+// The digit `selectReward` binds in src/input/keymap.ts, drawn as a keycap in
+// the card's own two colours reversed.
+.reward-offer .relic-card-shortcut {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  min-inline-size: $reward-heading-size;
+  padding: 0 $reward-gap-tight;
+  border-radius: $tile-border-radius;
+
+  background: var(--theme-tile-super-numeral, #{$bright-text-color});
+  color: var(--theme-tile-super, #{$reward-card-surface});
+
+  font-size: $reward-label-size;
+  font-weight: bold;
+  line-height: $reward-heading-size;
+}
+
+.reward-offer .relic-card-name {
+  min-inline-size: 0;
+  font-weight: bold;
+  line-height: $reward-line-height;
+  overflow-wrap: break-word;
+}
+
+.reward-offer .relic-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $reward-gap-tight;
+  min-inline-size: 0;
+}
+
+// The tier rules below recolour this chip. The unqualified value is the ramp's
+// low anchor, which any `data-rarity` outside $reward-rarities renders.
+.reward-offer .relic-card-rarity {
+  @include reward-chip;
+  color: reward-rarity-color(list.nth($reward-rarities, 1));
+}
+
+.reward-offer .relic-card-charges {
+  @include reward-chip;
+}
+
+// Clamped to $reward-description-lines line boxes with an ellipsis. The clamp
+// is a ceiling only: a shorter description occupies the lines it needs, and the
+// grid row still sizes to the tallest card.
+.reward-offer .relic-card-description {
+  min-inline-size: 0;
+  line-height: $reward-line-height;
+  overflow-wrap: break-word;
+
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: $reward-description-lines;
+  overflow: hidden;
+}
+
+// Held against the bottom of the card, so a set of one badge and a set of six
+// still leave every card's badge row on the same line as its neighbours'.
+.reward-offer .relic-card-hooks {
+  margin-block-start: auto;
+
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $reward-gap-tight;
+  min-inline-size: 0;
+}
+
+// The six hook names are camelCase identifiers and are rendered as written.
+.reward-offer .relic-hook-badge {
+  @include reward-chip($text-transform: none);
+}
+
+// -----------------------------------------------------------------------------
+// RARITY TIERS
+//
+// One block per member of $reward-rarities, emitted ahead of the state rules
+// below so the disabled state's edge override wins at equal specificity.
+// -----------------------------------------------------------------------------
+
+@each $rarity in $reward-rarities {
+  .reward-offer .relic-card[data-rarity="#{$rarity}"] {
+    border-block-start-color: reward-rarity-color($rarity);
+
+    .relic-card-rarity {
+      color: reward-rarity-color($rarity);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// CARD STATES
+//
+// The focus ring style/_a11y.scss supplies is an OUTER two-tone ring drawn with
+// `outline` and `box-shadow`. The hover and activation rings are INSET
+// `box-shadow` rings on that same property, and each is written
+// `:not(:focus-visible)`, so on a card hovered or activated while it holds
+// keyboard focus the outer ring is the one drawn. The selected state also marks
+// the three border sides the rarity accent does not own, a signal on a property
+// the ring never writes, so a focused selected card shows both.
+//
+// Precedence, highest first: disabled, activation and selection, focus, hover,
+// default. Decision D-E in docs/DECISION_LOG.md.
+// -----------------------------------------------------------------------------
+
+.reward-offer .relic-card {
+  @media (hover: hover) {
+    &:hover:not(:focus-visible) {
+      box-shadow: inset 0 0 0 $reward-hairline
+        var(--theme-tile-super-numeral, #{$bright-text-color});
+    }
+  }
+
+  // Activation and selection. The inline sides and the block-end side are
+  // transparent at rest and take the card's own text colour here, which leaves
+  // `box-shadow` and every measure untouched.
+  // Decision D-E in docs/DECISION_LOG.md.
+  &:active,
+  &[aria-pressed="true"] {
+    border-inline-color: var(
+      --theme-tile-super-numeral,
+      #{$bright-text-color}
+    );
+    border-block-end-color: var(
+      --theme-tile-super-numeral,
+      #{$bright-text-color}
+    );
+  }
+
+  &:active:not(:focus-visible),
+  &[aria-pressed="true"]:not(:focus-visible) {
+    box-shadow: inset 0 0 0 $reward-accent-thickness
+      var(--theme-tile-super-numeral, #{$bright-text-color});
+  }
+
+  // The shared keyboard-focus ring, restated on the card so the ring is carried
+  // at either `tabindex` value a roving-tabindex list moves between its items.
+  @include focusable;
+
+  // src/ui/a11y/ keeps an `aria-disabled` card focusable and announceable, and
+  // this block withdraws pointer interaction only. The accent edge switches
+  // from solid to dashed. Nothing here clears `box-shadow` or `outline`, and
+  // nothing here alters a colour, so the focus ring and every contrast ratio
+  // are unchanged. Decision D-L in docs/DECISION_LOG.md.
+  &[disabled],
+  &[aria-disabled="true"] {
+    cursor: default;
+    pointer-events: none;
+    border-block-start-style: dashed;
+
+    // The card's chips restate the dashed edge, which puts the state on four
+    // outlines. `border-style` is the only property involved, so no colour,
+    // measure or text contrast shifts.
+    .relic-card-rarity,
+    .relic-card-charges,
+    .relic-hook-badge {
+      border-style: dashed;
+    }
+  }
+
+  // The entrance animation and the state transitions are declared only where
+  // the user expresses no reduced-motion preference. Under `reduce` the card
+  // carries neither, so it renders at the end state of `pop` — its natural size
+  // — and the overrides in style/_a11y.scss have nothing left to suppress.
+  @media (prefers-reduced-motion: no-preference) {
+    @include transition(
+      box-shadow $reward-state-duration ease-in-out,
+      border-color $reward-state-duration ease-in-out
+    );
+
+    // The `pop` keyframes declared at style/main.scss L480-L492, at the
+    // duration and delay applied at L496 and the fill mode applied at L497.
+    @include animation(pop $reward-pop-duration ease $reward-pop-delay);
+    @include animation-fill-mode(backwards);
+  }
+}

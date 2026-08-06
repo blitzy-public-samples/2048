@@ -5,6 +5,42 @@
 // rules. Provenance: docs/DECISION_LOG.md.
 @use "a11y";
 
+// CHANGED: `@use "themes"` added. It loads style/_themes.scss, which publishes
+// the `--theme-*` custom properties for the default, high-contrast and
+// colourblind-safe palettes. The screen, HUD, reward and summary partials read
+// those properties through `var(--theme-*, <token fallback>)`, so the palettes
+// only reach the page once this partial is emitted. Provenance:
+// docs/DECISION_LOG.md.
+@use "themes";
+
+// CHANGED: `@use "screens"` added. It loads style/_screens.scss, which carries
+// the `.screen-layer` host and the shared `.screen` container layer that the
+// run-start, stage-progress, game-over, reward and run-summary screens are
+// built on. It stands ahead of `@use "summary"` and `@use "reward"` so the
+// shared layer is emitted before the two per-screen variants that refine it.
+// Provenance: docs/DECISION_LOG.md.
+@use "screens";
+
+// CHANGED: `@use "hud"` added. It loads style/_hud.scss, which carries the
+// in-run heads-up display — the stage index and goal readouts and the
+// active-relic tray rendered in pickup order. Provenance:
+// docs/DECISION_LOG.md.
+@use "hud";
+
+// CHANGED: `@use "summary"` added. It loads style/_summary.scss, which carries
+// the run-summary screen overlay and its panel — the final score and stage
+// readouts, the relics collected in pickup order, and the copyable run seed. It
+// stands beside `@use "a11y"` and ahead of the two `@import` rules for the same
+// reason. Provenance: docs/DECISION_LOG.md.
+@use "summary";
+
+// CHANGED: `@use "reward"` added. It loads style/_reward.scss, which carries
+// the choose-1-of-3 relic reward screen - the `.screen[data-screen="reward"]`
+// layer, its panel and its three relic cards. It stands after `@use "a11y"`,
+// whose `focusable` mixin it applies, and ahead of the two `@import` rules, as
+// the line above does. Provenance: docs/DECISION_LOG.md.
+@use "reward";
+
 @import "helpers";
 @import "fonts/clear-sans.css";
 
