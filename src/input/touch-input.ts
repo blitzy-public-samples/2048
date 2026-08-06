@@ -1,56 +1,19 @@
 /**
  * Swipe gesture path, and the pointer-event-family capability probe.
  *
- * PROVENANCE
- *   Ported from js/keyboard_input_manager.js. That file is deleted.
- *     L4-L13    pointer-family selection    -> detectPointerEventFamily
- *     L5        the IE10 provenance comment -> MS_POINTER_FAMILY
- *     L6-L8     MSPointer event names       -> MS_POINTER_FAMILY
- *     L10-L12   touch event names           -> TOUCH_EVENT_FAMILY
- *     L77       start point variables       -> the `start` binding
- *     L78       host lookup                 -> resolveHost
- *     L80-L95   touchstart handler          -> handleTouchStart
- *     L97-L99   touchmove handler           -> handleTouchMove
- *     L101-L127 touchend handler            -> handleTouchEnd
- *     L117-L126 deltas and threshold        -> measureSwipe
- *     L125      the emitted direction       -> TouchInputOptions.onSwipe
+ * The pointer family is selected once, from `msPointerEnabled`, into a
+ * `PointerEventFamily`, and the three handlers branch on that value. The probe
+ * result is exported as `POINTER_EVENT_FAMILY` and read by the health surface.
  *
- *   `msPointerEnabled` was read at five sites in that file - L4, L81,
- *   L86, L102 and L109. It is read once here, into a
- *   `PointerEventFamily`, and that value is what the three handlers
- *   branch on.
- *
- *   The host lookup at L78 was unchecked and L80 called
- *   `addEventListener` on its result. `resolveHost` null-checks it,
- *   reports the selector and the three event names it was binding, and
- *   `attachTouchInput` returns a detach handle that removes nothing.
- *
- *   The pointer-family check is one of the five capability probes the
- *   retired sources performed and reported nowhere; the other four were
- *   `Function.prototype.bind` (js/bind_polyfill.js), `Element.classList`
- *   (js/classlist_polyfill.js), `requestAnimationFrame`
- *   (js/animframe_polyfill.js) and Web Storage writability
- *   (js/local_storage_manager.js L29-L40). Its result is exported here
- *   as `POINTER_EVENT_FAMILY`, and src/observability/health.ts reads it
- *   from there.
- *
- *   The writability probe discarded its caught value at
- *   js/local_storage_manager.js L37-L39. Every value caught in this
- *   module is reported with its name and its message.
- *
- * CONTENTS
- *   The only import is ./keymap. This module reads no storage, emits no
- *   event name, and imports nothing from src/observability/: a resolved
- *   swipe leaves through the `onSwipe` callback, and every counter, log
- *   and span leaves through the injected `InputReporter`; src/main.ts
- *   bridges that reporter.
- *
- *   Module scope performs one guarded read of `window.navigator` and
- *   touches no document, so the module imports cleanly outside a
- *   browser.
- *
- * The rationale, alternatives and risks behind the choices above are
- * recorded in docs/DECISION_LOG.md; this file carries provenance only.
+ * The only import is ./keymap: this module reads no storage and emits no event
+ * name. A resolved swipe leaves through the `onSwipe` callback, and every
+ * counter, log and span leaves through the injected `InputReporter`, contained
+ * by `createSafeInputReporter`, so a sink that throws breaks neither the attach
+ * path nor any gesture handler. Module scope performs one guarded read of
+ * `window.navigator` and touches no document, so the module imports cleanly
+ * outside a browser. The module boundaries are drawn as Figure 3, "Component
+ * Interaction: Input, Engine, Hook Bus, Relics, Renderer, Persistence", in
+ * docs/architecture/component-interaction.md.
  */
 
 import {
@@ -59,6 +22,7 @@ import {
   DIRECTION_RIGHT,
   DIRECTION_UP,
   NOOP_REPORTER,
+  createSafeInputReporter,
   type Direction,
   type InputReportFields,
   type InputReporter,
@@ -69,65 +33,45 @@ import {
  * 1. Legacy pointer shim
  * ========================================================================== */
 
-/**
- * The one non-standard `Navigator` member this module reads.
- *
- * Ported from the `window.navigator.msPointerEnabled` read at
- * js/keyboard_input_manager.js L4.
- */
+/** The one non-standard `Navigator` member this module reads. */
 export interface MsPointerNavigatorLike {
   /** IE10's pointer-family flag. Absent from a standard `Navigator`. */
   readonly msPointerEnabled?: boolean;
 }
 
-/**
- * The ambient `Navigator`, viewed through `MsPointerNavigatorLike`.
- *
- * `readAmbientMsPointerEnabled` reads `window.navigator` through this
- * view.
- */
+/** The ambient `Navigator`, viewed through `MsPointerNavigatorLike`. */
 interface MsPointerNavigator extends Navigator, MsPointerNavigatorLike {}
 
 /** One entry of a touch list: the two coordinates the port reads. */
 interface TouchPointLike {
-  /** Viewport-relative x, read at L90 and L113. */
   readonly clientX: number;
 
-  /** Viewport-relative y, read at L91 and L114. */
   readonly clientY: number;
 }
 
 /** The subset of `TouchList` the three handlers read. */
 interface TouchListLike {
-  /** Entry count, read at L81, L82, L102 and L103. */
   readonly length: number;
 
   /** Entry at `index`. Absent entries read as `null` or `undefined`. */
   readonly [index: number]: TouchPointLike | null | undefined;
 }
 
-/**
- * The shape the three handlers read off their event.
- *
- * A `TouchEvent` carries the three touch lists; an `MSPointerDown`,
- * `MSPointerMove` or `MSPointerUp` event carries `pageX` and `pageY` and
- * none of the lists. Every added member is optional, so a plain `Event`
- * satisfies this type.
- */
+/** The shape the three handlers read off their event. */
 interface GestureEventLike extends Event {
-  /** Every active touch. Read at L81 and L102. */
+  /** Every active touch. */
   readonly touches?: TouchListLike;
 
-  /** Touches on the event target. Read at L82 and L103. */
+  /** Touches on the event target. */
   readonly targetTouches?: TouchListLike;
 
-  /** Touches that changed. Read at L113 and L114. */
+  /** Touches that changed. */
   readonly changedTouches?: TouchListLike;
 
-  /** Document-relative x. Read at L87 and L110. */
+  /** Document-relative x. */
   readonly pageX?: number;
 
-  /** Document-relative y. Read at L88 and L111. */
+  /** Document-relative y. */
   readonly pageY?: number;
 }
 
@@ -150,7 +94,7 @@ export interface PointerEventFamily {
   readonly touchend: string;
 }
 
-/** Family selected when `msPointerEnabled` is truthy. Ported from L6-L8. */
+/** Family selected when `msPointerEnabled` is truthy. */
 const MS_POINTER_FAMILY: PointerEventFamily = Object.freeze({
   msPointerEnabled: true,
 
@@ -160,7 +104,7 @@ const MS_POINTER_FAMILY: PointerEventFamily = Object.freeze({
   touchend: 'MSPointerUp',
 });
 
-/** Family selected otherwise. Ported from L10-L12. */
+/** Family selected otherwise. */
 const TOUCH_EVENT_FAMILY: PointerEventFamily = Object.freeze({
   msPointerEnabled: false,
   touchstart: 'touchstart',
@@ -171,12 +115,8 @@ const TOUCH_EVENT_FAMILY: PointerEventFamily = Object.freeze({
 /**
  * Reads `msPointerEnabled` off the ambient navigator.
  *
- * Ported from the `window.navigator.msPointerEnabled` read at L4. Both
- * `window` and its `navigator` are checked, so the read is safe outside
- * a browser and cannot throw at module scope.
- *
- * @returns The flag coerced to a boolean, or `false` when there is no
- *   navigator to read.
+ * @returns The flag coerced to a boolean, or `false` when there is no navigator
+ * to read.
  */
 function readAmbientMsPointerEnabled(): boolean {
   if (typeof window === 'undefined') {
@@ -191,19 +131,11 @@ function readAmbientMsPointerEnabled(): boolean {
 /**
  * Selects the pointer event family.
  *
- * Direct port of js/keyboard_input_manager.js L4-L13.
- *
- * @param navigatorLike Navigator view to read. Omitted or `null` reads
- *   the ambient `window.navigator`.
+ * @param navigatorLike Navigator view to read. Omitted or `null` reads the
+ * ambient `window.navigator`.
  * @returns The frozen family. A truthy `msPointerEnabled` selects
- *   `MSPointerDown` / `MSPointerMove` / `MSPointerUp`; anything else
- *   selects `touchstart` / `touchmove` / `touchend`.
- *
- * @example
- * detectPointerEventFamily({ msPointerEnabled: true }).touchstart;
- * // 'MSPointerDown'
- * detectPointerEventFamily({}).touchstart;
- * // 'touchstart'
+ * `MSPointerDown` / `MSPointerMove` / `MSPointerUp`; anything else selects
+ * `touchstart` / `touchmove` / `touchend`.
  */
 export function detectPointerEventFamily(
   navigatorLike?: MsPointerNavigatorLike | null
@@ -216,18 +148,7 @@ export function detectPointerEventFamily(
   return enabled ? MS_POINTER_FAMILY : TOUCH_EVENT_FAMILY;
 }
 
-/**
- * The pointer event family, resolved once when this module loads.
- *
- * Supersedes the three `this.eventTouch*` fields assigned at
- * js/keyboard_input_manager.js L6-L8 and L10-L12. Those three fields were
- * private to the input manager and read by nothing else. `attachTouchInput`
- * defaults to this value, and src/observability/health.ts reads it as one
- * of the capability checks it reports.
- *
- * @example
- * POINTER_EVENT_FAMILY.msPointerEnabled; // false in a standard browser
- */
+/** The pointer event family, resolved once when this module loads. */
 export const POINTER_EVENT_FAMILY: PointerEventFamily =
   detectPointerEventFamily();
 
@@ -253,13 +174,10 @@ const ATTACH_FAILED_METRIC = 'input.touch.attach.failed';
 /** Counter raised once per emitted swipe. */
 const SWIPE_METRIC = 'input.touch.swipe';
 
-/** Counter raised by the multi-touch guard ported from L81-L84. */
 const MULTI_TOUCH_METRIC = 'input.touch.rejected.multiTouch';
 
-/** Counter raised by the still-touching guard ported from L102-L105. */
 const STILL_TOUCHING_METRIC = 'input.touch.rejected.stillTouching';
 
-/** Counter raised when neither axis exceeded the threshold at L123. */
 const BELOW_THRESHOLD_METRIC = 'input.touch.rejected.belowThreshold';
 
 /** Counter raised when the enablement predicate suspended a handler. */
@@ -285,10 +203,6 @@ const UNKNOWN_ERROR_MESSAGE = 'Unknown touch input error.';
 
 /**
  * Reduces a caught value to two reportable fields.
- *
- * Supersedes the discarded catch parameter at
- * js/local_storage_manager.js L37-L39: no value caught in this module is
- * dropped.
  *
  * @param caught Value that was thrown.
  * @returns `errorName` and `errorMessage`, always populated.
@@ -339,9 +253,7 @@ function describeFamily(family: PointerEventFamily): InputReportFields {
 
 /**
  * Minimum travel, in pixels, that the dominant axis must exceed before a
- * gesture resolves. Ported from the literal `10` at
- * js/keyboard_input_manager.js L123, where the comparison is strictly
- * greater than.
+ * gesture resolves.
  */
 export const SWIPE_THRESHOLD_PX = 10;
 
@@ -359,19 +271,13 @@ interface SwipeMeasurement {
   /** Resolved direction, or `null` when the threshold was not exceeded. */
   readonly direction: Direction | null;
 
-  /** `Math.abs(dx)`, as computed at L118. */
   readonly absDx: number;
 
-  /** `Math.abs(dy)`, as computed at L121. */
   readonly absDy: number;
 }
 
 /**
  * Reads the length of one of the three touch lists.
- *
- * An `MSPointer*` event carries no touch list at all, and a malformed
- * event may carry an unusable one; both read as zero rather than
- * throwing. The lengths are read at L81, L82, L102 and L103.
  *
  * @param list List to measure, when the event carried one.
  * @returns The length, or `0` when there is nothing usable to read.
@@ -390,10 +296,6 @@ function readTouchListLength(list: TouchListLike | undefined): number {
 
 /**
  * Reads the first entry of a touch list as a gesture point.
- *
- * Ported from `event.touches[0]` at L90-L91 and
- * `event.changedTouches[0]` at L113-L114. An absent entry, or one
- * carrying unusable coordinates, reads as `null` rather than throwing.
  *
  * @param list List to read, when the event carried one.
  * @returns The point, or `null` when there is none to read.
@@ -417,8 +319,6 @@ function readTouchPoint(
 /**
  * Reads the `pageX`/`pageY` pair an `MSPointer*` event carries.
  *
- * Ported from L87-L88 and L110-L111.
- *
  * @param event Event to read.
  * @returns The point, or `null` when either coordinate is unusable.
  */
@@ -431,8 +331,7 @@ function readPagePoint(event: GestureEventLike): GesturePoint | null {
  *
  * @param x Candidate horizontal coordinate.
  * @param y Candidate vertical coordinate.
- * @returns The point, or `null` when either value is not a finite
- *   number.
+ * @returns The point, or `null` when either value is not a finite number.
  */
 function toGesturePoint(x: unknown, y: unknown): GesturePoint | null {
   if (typeof x !== 'number' || !Number.isFinite(x)) {
@@ -447,17 +346,14 @@ function toGesturePoint(x: unknown, y: unknown): GesturePoint | null {
 }
 
 /**
- * Measures a gesture and resolves the direction it travelled.
- *
- * Direct port of js/keyboard_input_manager.js L117-L126. The two deltas,
- * the `Math.max(absDx, absDy) > 10` test, the dominant-axis choice and
- * the two sign tests are unchanged, so an exact tie between the absolute
- * deltas resolves on the vertical axis: `absDx > absDy` is false there.
+ * Measures a gesture and resolves the direction it travelled. The dominant axis
+ * wins, and an exact tie between the two absolute deltas resolves on the
+ * vertical axis.
  *
  * @param start Point captured by the gesture-start handler.
  * @param end Point captured by the gesture-end handler.
- * @returns The resolved direction with both absolute deltas. `direction`
- *   is `null` when neither axis exceeded `SWIPE_THRESHOLD_PX`.
+ * @returns The resolved direction with both absolute deltas. `direction` is
+ * `null` when neither axis exceeded `SWIPE_THRESHOLD_PX`.
  */
 function measureSwipe(
   start: GesturePoint,
@@ -490,39 +386,24 @@ function measureSwipe(
  * 5. Attaching the gesture path
  * ========================================================================== */
 
-/**
- * Selector the gesture host is looked up by when the caller names none.
- *
- * Ported from the class name at js/keyboard_input_manager.js L78, and the
- * element `index.html` declares.
- */
+/** Selector the gesture host is looked up by when the caller names none. */
 export const DEFAULT_GESTURE_HOST_SELECTOR = '.game-container';
 
-/**
- * Removes every listener one `attachTouchInput` call added.
- *
- * Calling it more than once is harmless, and calling one returned by a
- * failed attach removes nothing.
- */
+/** Removes every listener one `attachTouchInput` call added. */
 export type DetachTouchInput = () => void;
 
 /** What `attachTouchInput` binds, and what it reports through. */
 export interface TouchInputOptions {
   /**
-   * Called once per resolved swipe, with the direction the gesture
-   * travelled.
-   *
-   * Supersedes the emit call at js/keyboard_input_manager.js L125. The
-   * name a swipe is published under is owned by
-   * src/input/input-manager.ts; this module names no event.
+   * Called once per resolved swipe, with the direction the gesture travelled.
    *
    * @param direction Direction the gesture resolved to.
    */
   onSwipe(direction: Direction): void;
 
   /**
-   * Element the three listeners bind to, or a selector to look one up
-   * by. Defaults to `DEFAULT_GESTURE_HOST_SELECTOR`.
+   * Element the three listeners bind to, or a selector to look one up by.
+   * Defaults to `DEFAULT_GESTURE_HOST_SELECTOR`.
    */
   readonly host?: Element | string;
 
@@ -533,34 +414,28 @@ export interface TouchInputOptions {
   readonly ownerDocument?: Document;
 
   /**
-   * Sink for the counters, logs and spans this module raises. Defaults
-   * to `NOOP_REPORTER`.
+   * Sink for the counters, logs and spans this module raises. Defaults to
+   * `NOOP_REPORTER`.
    */
   readonly reporter?: InputReporter;
 
   /**
-   * Family to bind. Defaults to `POINTER_EVENT_FAMILY`, resolved once
-   * when this module loaded.
+   * Family to bind. Defaults to `POINTER_EVENT_FAMILY`, resolved once when this
+   * module loaded.
    */
   readonly family?: PointerEventFamily;
 
   /**
-   * Consulted first by each of the three handlers. Returning `false`
-   * suspends the gesture path: no coordinate is captured, no default
-   * action is cancelled and no swipe is emitted. Absent is read as
-   * always enabled.
+   * Consulted first by each of the three handlers. Returning `false` suspends
+   * the gesture path: no coordinate is captured, no default action is cancelled
+   * and no swipe is emitted. Absent is read as always enabled.
    *
    * @returns Whether the gesture path is live.
    */
   isEnabled?(): boolean;
 }
 
-/**
- * Registration options for all three listeners.
- *
- * `preventDefault()` is called at L94 and L98, so no listener may be
- * passive. Both fields are stated explicitly.
- */
+/** Registration options for all three listeners. */
 const LISTENER_OPTIONS: AddEventListenerOptions = Object.freeze({
   passive: false,
   capture: false,
@@ -582,13 +457,6 @@ function readAmbientDocument(): Document | null {
 
 /**
  * Resolves the element the gesture listeners bind to.
- *
- * Supersedes the unchecked
- * `document.getElementsByClassName("game-container")[0]` lookup at
- * js/keyboard_input_manager.js L78, whose result was handed straight to
- * `addEventListener` at L80. Every failure path reports the selector and
- * the three event names that were being bound, and returns `null`
- * instead of throwing.
  *
  * @param options Options passed to `attachTouchInput`.
  * @param reporter Sink for a failed lookup.
@@ -655,29 +523,24 @@ function resolveHost(
 /**
  * Binds the swipe gesture path and returns the handle that unbinds it.
  *
- * Supersedes js/keyboard_input_manager.js L76-L127. The three handlers
- * are ported one for one from L80-L95, L97-L99 and L101-L127, including
- * both multi-touch guards, the `MSPointer` coordinate branch and the
- * ten-pixel threshold. A resolved swipe is handed to `onSwipe`. The emit
- * call at L125 has no counterpart here; this module names no event.
+ * The injected reporter is contained before it is used, so a sink that throws
+ * breaks neither the attach path nor any gesture handler.
  *
- * @param options Callback, host, reporter, family and enablement
- *   predicate.
- * @returns A detach handle that removes every listener this call bound.
- *   A missing host, an unusable selector or a rejected registration
- *   yields a handle that removes nothing; neither case throws.
- *
- * @example
- * const seen: Direction[] = [];
- * const detach = attachTouchInput({
- *   onSwipe: (direction) => seen.push(direction),
- * });
- * detach();
+ * @param options Callback, host, reporter, family and enablement predicate.
+ * @returns A detach handle that removes every listener this call did bind. A
+ * missing host or an unusable selector binds nothing, so the handle removes
+ * nothing; where some registrations are rejected and others succeed, the handle
+ * removes the ones that succeeded. Neither case throws.
  */
 export function attachTouchInput(
   options: TouchInputOptions
 ): DetachTouchInput {
-  const reporter = options.reporter ?? NOOP_REPORTER;
+  // Contained once here, so every log, counter and span below — including
+  // those emitted from inside a gesture handler — is safe against a sink
+  // that throws.
+  const reporter = createSafeInputReporter(
+    options.reporter ?? NOOP_REPORTER
+  );
   const family = options.family ?? POINTER_EVENT_FAMILY;
   const familyFields = describeFamily(family);
 
@@ -690,8 +553,8 @@ export function attachTouchInput(
     return NOOP_DETACH;
   }
 
-  // Ported from L77: the start point outlives one handler call, and is
-  // not cleared once a gesture completes.
+  // The start point persists until the next gesture start replaces it: a
+  // gesture that ends without one captured emits no swipe and clears nothing.
   let start: GesturePoint | null = null;
   let gestureSpan: InputSpan | null = null;
   let detached = false;
@@ -738,8 +601,8 @@ export function attachTouchInput(
   /**
    * Reports whether the gesture path is live.
    *
-   * @returns The predicate's result, or `true` when none was supplied.
-   *   A predicate that throws suspends the path and is reported.
+   * @returns The predicate's result, or `true` when none was supplied. A
+   * predicate that throws suspends the path and is reported.
    */
   const isEnabled = (): boolean => {
     if (options.isEnabled === undefined) {
@@ -785,7 +648,7 @@ export function attachTouchInput(
     }
   };
 
-  /** Gesture start. Ported from L80-L95. */
+  /** Gesture start. */
   const handleTouchStart = (event: Event): void => {
     if (!isEnabled()) {
       reporter.count(SUSPENDED_METRIC, { stage: 'touchstart' });
@@ -821,10 +684,7 @@ export function attachTouchInput(
     event.preventDefault();
   };
 
-  /**
-   * Gesture move. Ported from L97-L99: it cancels the default action and
-   * does nothing else.
-   */
+  /** Gesture move. */
   const handleTouchMove = (event: Event): void => {
     if (!isEnabled()) {
       reporter.count(SUSPENDED_METRIC, { stage: 'touchmove' });
@@ -835,10 +695,7 @@ export function attachTouchInput(
     event.preventDefault();
   };
 
-  /**
-   * Gesture end. Ported from L101-L127. That range contains no
-   * `preventDefault()` call.
-   */
+  /** Gesture end. Cancels no default action of its own. */
   const handleTouchEnd = (event: Event): void => {
     if (!isEnabled()) {
       reporter.count(SUSPENDED_METRIC, { stage: 'touchend' });
@@ -958,4 +815,3 @@ export function attachTouchInput(
     reporter.count(DETACHED_METRIC, { removed: bound.length });
   };
 }
-

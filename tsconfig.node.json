@@ -1,46 +1,53 @@
-// TypeScript configuration for the Node-context sources: the four root
-// tooling configs and the Playwright specs under tests/e2e/. Those files
-// import from `vite`, `vitest/config` and `@playwright/test`, and each is
-// executed by its own tool's loader.
-//
-// tsconfig.json covers the browser-context sources — src/ and the DOM-context
-// suites under tests/. Between them the two projects claim every TypeScript
-// file in the repository, and they share no file. `npm run typecheck` runs
+// TypeScript configuration for the tooling sources: the four root config
+// files — vite.config.ts, vitest.config.ts, vitest.snapshot.config.ts and
+// playwright.config.ts — each executed by its own tool's loader. No file here
+// reads a Node global. tsconfig.json covers the browser-context sources, the
+// Playwright specs under tests/e2e/ included, so the two projects partition the
+// repository's root file set and share no root file. `npm run typecheck` runs
 // both in sequence.
 //
 // Supersedes .jshintrc, which is deleted along with Rakefile, the only other
-// build-tooling file the repository had. Three conventions .jshintrc encoded
-// are carried forward here: two-space indentation, 80-column lines, and
-// `unused: true` as the two unused-symbol checks below.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+// build-tooling file the repository had. One .jshintrc check has a compiler
+// equivalent and is carried forward here: `unused: true` becomes the two
+// unused-symbol options below. Its `indent: 2` and `maxlen: 80` have none — no
+// option in this file, and no package in the dependency set, enforces
+// indentation or line length. The Node-context sources follow both conventions
+// by authoring discipline.
 {
   "compilerOptions": {
-    // Language level of the Node 24 runtime that .nvmrc and package.json
-    // `engines.node` pin.
+    // Language level of the Node runtime .nvmrc and `engines.node` pin.
     "target": "ES2023",
 
-    // The `page.evaluate()` callbacks in the Playwright specs are authored
-    // against browser globals.
+    // src/theme/tokens.ts, which vite.config.ts imports for the Sass token
+    // projection, is a browser-context module and enters this project through
+    // that import. This list matches tsconfig.json's DOM libraries so the one
+    // module is checked identically by both projects.
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
 
-    // ES module graph, matching package.json `"type": "module"`. Resolution
-    // uses the same bundler-style algorithm as tsconfig.json. `vite`,
-    // `vitest/config` and `@playwright/test` resolve through their packages'
-    // export maps. Every file is a module.
+    // Resolution matches tsconfig.json; `vite`, `vitest/config` and
+    // `@playwright/test` resolve through their packages' export maps.
     "module": "ESNext",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
     "resolveJsonModule": true,
 
-    // Ambient type packages. `node` supplies the `process` global that
-    // playwright.config.ts reads at four sites, and it satisfies the
-    // `/// <reference types="node" />` carried by vite's own declaration
-    // entry point. The other installed @types packages are not named here.
-    "types": ["node"],
+    // Ambient type packages: none. No file in this project reads a Node
+    // global, and an empty list also stops the packages under
+    // node_modules/@types being auto-included, so no ambient global reaches
+    // these files implicitly and the installed `@types/seedrandom` and
+    // `@types/three` — both browser-context declarations — stay out of this
+    // project. package.json declares no @types/node dependency. `vite`,
+    // `vitest/config` and `@playwright/test` are typed through their own
+    // resolved declaration packages, which this list does not affect, and the
+    // `/// <reference types="node" />` in vite's own declaration entry point is
+    // covered by `skipLibCheck` below.
+    "types": [],
 
-    // Strictness gate. This option set matches tsconfig.json exactly.
-    // `npm run typecheck` must report zero diagnostics for both projects.
+    // Permits the explicit `.ts` specifier vite.config.ts uses to reach
+    // src/theme/tokens.ts. Matches tsconfig.json, which declares the same
+    // option for the two application modules that chain carries.
+    "allowImportingTsExtensions": true,
+
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
@@ -48,36 +55,35 @@
     "noImplicitOverride": true,
     "forceConsistentCasingInFileNames": true,
 
-    // Per-file transpilation contract. This option set matches tsconfig.json
-    // exactly: each file stands alone, and type-only syntax is written
+    // Each file is emitted in isolation, so type-only syntax is written
     // explicitly rather than elided.
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "useDefineForClassFields": true,
 
-    // Declaration files of the installed packages are not re-checked.
     "skipLibCheck": true,
 
-    // Type gate only. Vite, Vitest and Playwright each transpile their own
-    // config as they load it; this project emits nothing, which is what
-    // `tsc -p tsconfig.node.json` relies on.
+    // Type gate only: Vite, Vitest and Playwright each transpile their own
+    // config as they load it.
     "noEmit": true
   },
 
-  // The Node-context file set, listed exhaustively. Nothing outside these
-  // five patterns enters this project: src/, js/ and the tests/fixtures,
-  // tests/unit and tests/snapshot subtrees are all unmatched.
+  // The tooling file set, listed exhaustively: the four root configuration
+  // files and nothing else. src/, js/ and every tests/ subtree — tests/e2e
+  // included — are unmatched here; tsconfig.json's `tests/**/*.ts` pattern
+  // claims them.
+  //
+  // A module a config file imports still enters this project through that
+  // import: vite.config.ts imports src/theme/tokens.ts for the Sass token
+  // projection, so tokens.ts and the src/config modules it reads are checked
+  // here as well as under tsconfig.json.
   "include": [
     "vite.config.ts",
     "vitest.config.ts",
     "vitest.snapshot.config.ts",
-    "playwright.config.ts",
-    "tests/e2e/**/*.ts"
+    "playwright.config.ts"
   ],
 
-  // Dependency, build and artifact directories. playwright.config.ts writes
-  // into test-results/ and playwright-report/, and the recorded-gameplay
-  // artifacts land under blitzy/; none of their contents is source.
   "exclude": [
     "node_modules",
     "dist",
@@ -85,9 +91,6 @@
     "test-results",
     "playwright-report",
     "blitzy",
-
-    // Self-contained HTML deck with inline script. It enters no TypeScript
-    // project and no bundler graph.
     "blitzy-deck"
   ]
 }

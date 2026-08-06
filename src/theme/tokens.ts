@@ -1,58 +1,45 @@
 /**
- * Design tokens for the TypeScript layer.
+ * Design tokens for the TypeScript layer, mirroring style/_tokens.scss: the two
+ * files carry the same token names and the same values, so the stylesheet and
+ * the Three.js materials cannot drift. Colours the stylesheet computes with a
+ * Sass function are carried here in their compiled form. Decision DL-TOKEN-01.
  *
- * PROVENANCE
- *   The fourteen tokens in section 1 were transposed from
- *   style/main.scss L4-L22 with their names and values unchanged; the
- *   SCSS names are kebab-case and these are their camelCase
- *   equivalents. Every other export names its own origin file and
- *   line. Numeric tokens are unitless numbers, px for lengths and ms
- *   for durations, with the unit named in each comment.
+ * Declarations and pure functions only: this module reads no DOM and carries
+ * exactly one import, `DEFAULT_BOARD_SIZE` from src/config/default-config.ts,
+ * the repository's single board-size declaration. That module imports only
+ * types, reads no DOM and performs no I/O, so this one stays importable from a
+ * test with no DOM, no WebGL and no browser. Numeric tokens are unitless, px
+ * for lengths and ms for durations, with the unit named in each declaration's
+ * comment.
  *
- *   Where style/main.scss expresses a value as a Sass colour function,
- *   this file carries the compiled result recorded in style/main.css,
- *   the generated stylesheet this change deletes. See
- *   docs/DECISION_LOG.md for the frozen-compiled-hex decision.
- *
- * MIRROR
- *   style/_tokens.scss declares the same tokens for the stylesheet.
- *   See docs/DECISION_LOG.md for the authoritative-side decision.
- *
- * CONTENTS
- *   Declarations and pure functions only. This module imports nothing
- *   and reads no DOM. Its three module-scope calls are annotated pure
- *   for the bundler.
- *
- * The rationale, alternatives and risks behind every choice above are
- * recorded in docs/DECISION_LOG.md; this file carries provenance only.
+ * Section 9 emits `sassTokenProjection` as a Sass map; vite.config.ts passes it
+ * to Dart Sass as `$blitzy-token-projection`, and style/_tokens.scss resolves
+ * each of its tokens through it and raises a Sass `@error` where a projected
+ * value and that file's own fallback disagree.
  */
 
-/* ==========================================================================
- * 1. Core tokens — style/main.scss L4-L22
- * ========================================================================== */
+// The specifier carries its `.ts` extension because vite.config.ts imports this
+// module for the Sass token projection and its native config loader resolves no
+// extensionless specifier. Modules outside that chain are imported without one.
+import { DEFAULT_BOARD_SIZE } from '../config/default-config.ts';
 
-/**
- * Board edge and container width, in px.
- *
- * `$field-width`, style/main.scss L4.
- */
+/* ===== 1. Core tokens ===== */
+
+/** Board edge and container width, in px. */
 export const fieldWidth = 500;
 
-/**
- * Board padding and the gap between adjacent cells, in px.
- *
- * `$grid-spacing`, style/main.scss L5.
- */
+/** Board padding and the gap between adjacent cells, in px. */
 export const gridSpacing = 15;
 
 /**
  * Cells per board row that the stylesheet lays out.
  *
- * `$grid-row-cells`, style/main.scss L6. Presentational mirror only.
- * The game rule is `boardSize` in src/config/default-config.ts and
- * engine code reads the board dimension from there, not from here.
+ * Presentation of the board dimension, read from `DEFAULT_BOARD_SIZE` in
+ * src/config/default-config.ts. Engine code reads the dimension from
+ * `boardSize` on its `RulesConfig`; the projection in section 9 carries the
+ * same value back into the stylesheet.
  */
-export const gridRowCells = 4;
+export const gridRowCells = DEFAULT_BOARD_SIZE;
 
 /**
  * Rejects an argument that is not a finite number.
@@ -70,11 +57,8 @@ function assertFinite(name: string, value: number): void {
 /**
  * Tile footprint for one scale, in px.
  *
- * Reproduces the `$tile-size` expression at style/main.scss L7, which
- * the mobile block re-evaluates with its own values at L480.
- *
- * @throws RangeError when an argument is not finite, or when
- *   `rowCells` is not a positive integer.
+ * @throws RangeError when an argument is not finite, or when `rowCells` is not
+ * a positive integer.
  */
 export function computeTileSize(
   scaleFieldWidth: number,
@@ -94,200 +78,92 @@ export function computeTileSize(
   );
 }
 
-/**
- * Tile footprint at the desktop scale, in px. Resolves to 106.25.
- *
- * `$tile-size`, style/main.scss L7.
- */
+/** Tile footprint at the desktop scale, in px. Resolves to 106.25. */
 export const tileSize = /* @__PURE__ */ computeTileSize(
   fieldWidth,
   gridSpacing,
   gridRowCells,
 );
 
-/**
- * Corner radius of a tile, a cell, a score box and a button, in px.
- *
- * `$tile-border-radius`, style/main.scss L8.
- */
+/** Corner radius of a tile, a cell, a score box and a button, in px. */
 export const tileBorderRadius = 3;
 
-/**
- * The single breakpoint, in px. Resolves to 520.
- *
- * `$mobile-threshold`, style/main.scss L10. Applied as
- * `max-width: 520px` by the `smaller()` mixin at style/main.scss L475.
- */
+/** The single breakpoint, in px. Resolves to 520. */
 export const mobileThreshold = fieldWidth + 20;
 
 /**
- * Names of the two scales the stylesheet defines: the default scale,
- * and the scale that applies at or below `mobileThreshold`.
- *
- * style/main.scss declares exactly one breakpoint, at L475.
+ * Names of the two scales the stylesheet defines: the default scale, and the
+ * scale that applies at or below `mobileThreshold`, the single breakpoint.
  */
 export type ScaleName = 'desktop' | 'mobile';
 
-/**
- * Body text, links and the numerals on low-value tiles.
- *
- * `$text-color`, style/main.scss L12. Spelling follows the source,
- * which writes the hex digits in upper case here and nowhere else.
- */
+/** Body text, links and the numerals on low-value tiles. */
 export const textColor = '#776E65';
 
-/**
- * Numerals from tile value 8 upward, and button labels.
- *
- * `$bright-text-color`, style/main.scss L13.
- */
+/** Numerals from tile value 8 upward, and button labels. */
 export const brightTextColor = '#f9f6f2';
 
-/**
- * The value-2 tile, and the base of every mixed tile colour.
- *
- * `$tile-color`, style/main.scss L15.
- */
+/** The value-2 tile, and the base of every mixed tile colour. */
 export const tileColor = '#eee4da';
 
-/**
- * The value-2048 tile, and the far end of the colour ramp.
- *
- * `$tile-gold-color`, style/main.scss L16.
- */
+/** The value-2048 tile, and the far end of the colour ramp. */
 export const tileGoldColor = '#edc22e';
 
-/**
- * Halo colour of the merge glow.
- *
- * `$tile-gold-glow-color`, style/main.scss L17, declared there as
- * `lighten($tile-gold-color, 15%)` and in style/_tokens.scss as
- * `color.adjust($tile-gold-color, $lightness: 15%)`. Compiled result
- * `rgb(243, 215, 116)`, recorded at style/main.css L352. The only
- * derived token inside the style/main.scss L4-L22 block.
- */
+/** Halo colour of the merge glow. */
 export const tileGoldGlowColor = '#f3d774';
 
-/**
- * Offset between the board and the content above it, in px.
- *
- * `$game-container-margin-top`, style/main.scss L19.
- */
+/** Offset between the board and the content above it, in px. */
 export const gameContainerMarginTop = 40;
 
-/**
- * The board field, and the score and best-score boxes.
- *
- * `$game-container-background`, style/main.scss L20.
- */
+/** The board field, and the score and best-score boxes. */
 export const gameContainerBackground = '#bbada0';
 
 /**
- * Tile movement duration, and the unit the animation delays are
- * expressed in, in ms.
- *
- * `$transition-speed`, style/main.scss L22.
+ * Tile movement duration, and the unit the animation delays are expressed in,
+ * in ms.
  */
 export const transitionSpeed = 100;
 
-/* ==========================================================================
- * 2. Literals declared outside the style/main.scss L4-L22 block
- * ========================================================================== */
+/* ===== 2. Literals the stylesheet declares outside the token block ===== */
 
-/**
- * Page background behind the board.
- *
- * `background` on `html, body`, style/main.scss L28.
- */
+/** Page background behind the board. */
 export const pageBackground = '#faf8ef';
 
-/**
- * Horizontal-rule colour.
- *
- * `border-bottom` on `hr`, style/main.scss L138, declared there as
- * `lighten($text-color, 40%)`. Compiled result recorded at
- * style/main.css L114.
- */
+/** Horizontal-rule colour. */
 export const ruleColor = '#d8d4d0';
 
-/* ==========================================================================
- * 3. Colours style/main.scss derives through a Sass function, carried
- *    in the compiled form recorded in style/main.css
- * ========================================================================== */
+/* ===== 3. Colours the stylesheet derives, in compiled form ===== */
 
-/**
- * Colours the stylesheet computes from a section 1 token.
- *
- * Each member states its own SCSS expression and the style/main.css
- * line the compiled value was read from.
- */
+/** Colours the stylesheet computes from a core token, in compiled form. */
 export const derivedColors = {
-  /**
-   * Primary action buttons.
-   *
-   * `darken($game-container-background, 20%)` in the `button` mixin,
-   * style/main.scss L161. Compiled at style/main.css L186.
-   */
+  /** Primary action buttons. */
   buttonBackground: '#8f7a66',
 
-  /**
-   * Empty board cells.
-   *
-   * `rgba($tile-color, .35)`, style/main.scss L279. Compiled at
-   * style/main.css L223.
-   */
+  /** Empty board cells. */
   gridCellBackground: 'rgba(238, 228, 218, 0.35)',
 
-  /**
-   * The terminal overlay in its loss state.
-   *
-   * `rgba($tile-color, .5)`, style/main.scss L204. Compiled at
-   * style/main.css L166.
-   */
+  /** The terminal overlay in its loss state. */
   overlayLossBackground: 'rgba(238, 228, 218, 0.5)',
 
-  /**
-   * The terminal overlay in its win state.
-   *
-   * `rgba($tile-gold-color, .5)`, style/main.scss L238. Compiled at
-   * style/main.css L197.
-   */
+  /** The terminal overlay in its win state. */
   overlayWinBackground: 'rgba(237, 194, 46, 0.5)',
 
-  /**
-   * The score-delta numeral that rises off the score box.
-   *
-   * `rgba($text-color, .9)`, style/main.scss L102, which supersedes
-   * the `color: red` declaration four lines above it at L98. Compiled
-   * at style/main.css L83.
-   */
+  /** The score-delta numeral that rises off the score box. */
   scoreAdditionColor: 'rgba(119, 110, 101, 0.9)',
 
-  /**
-   * The uppercase SCORE and BEST labels.
-   *
-   * `color: $tile-color` on the `:after` label, style/main.scss L92.
-   */
+  /** The uppercase SCORE and BEST labels. */
   scoreLabelColor: tileColor,
 } as const;
 
-/**
- * Corner radius of the board itself, in px. Resolves to 6.
- *
- * `$tile-border-radius * 2`, style/main.scss L189. Compiled at
- * style/main.css L153.
- */
+/** Corner radius of the board itself, in px. Resolves to 6. */
 export const boardBorderRadius = tileBorderRadius * 2;
 
-/* ==========================================================================
- * 4. Typography — style/main.scss and style/fonts/clear-sans.css
- * ========================================================================== */
+/* ===== 4. Typography ===== */
 
 /**
  * Font stack for the whole user interface.
  *
- * `font-family` on `html, body`, style/main.scss L30. The Clear Sans
- * faces are declared in style/fonts/clear-sans.css.
+ * The Clear Sans faces are declared in style/fonts/clear-sans.css.
  */
 export const fontFamily =
   '"Clear Sans", "Helvetica Neue", Arial, sans-serif';
@@ -295,39 +171,23 @@ export const fontFamily =
 /**
  * Monospace stack for the diagnostics overlay.
  *
- * Mirrors `$diagnostics-font-family`, style/_tokens.scss. System faces
- * only; no web font and no binary asset is added for it.
+ * Mirrors `$diagnostics-font-family`, style/_tokens.scss. System faces only; no
+ * web font and no binary asset is added for it.
  */
 export const monospaceStack =
   'ui-monospace, SFMono-Regular, Menlo, Consolas, ' +
   '"Liberation Mono", monospace';
 
-/**
- * The three weights the shipped Clear Sans faces serve.
- *
- * style/fonts/clear-sans.css declares exactly three `@font-face`
- * blocks: Light at L1-L9, Regular at L11-L19 and Bold at L21-L29.
- * `regular` carries the `normal` keyword exactly as
- * style/fonts/clear-sans.css L17 writes it.
- */
+/** The three weights the shipped Clear Sans faces serve. */
 export const fontWeights = {
-  /** `font-weight: 200`, style/fonts/clear-sans.css L7. */
   light: 200,
 
-  /** `font-weight: normal`, style/fonts/clear-sans.css L17. */
   regular: 'normal',
 
-  /** `font-weight: 700`, style/fonts/clear-sans.css L27. */
   bold: 700,
 } as const;
 
-/**
- * A value that the stylesheet states once per scale, in px.
- *
- * style/main.scss declares its default value at the top level and its
- * mobile value inside the `smaller($mobile-threshold)` block at
- * L475-L549.
- */
+/** A value that the stylesheet states once per scale, in px. */
 export interface ScaledFontSize {
   /** Value above `mobileThreshold`. */
   readonly desktop: number;
@@ -335,108 +195,52 @@ export interface ScaledFontSize {
   readonly mobile: number;
 }
 
-/**
- * Font sizes for the user interface, in px, at both scales.
- *
- * The mobile column comes from the `smaller($mobile-threshold)` block
- * at style/main.scss L475-L549.
- */
+/** Font sizes for the user interface, in px, at both scales. */
 export const fontSizes = {
-  /**
-   * Root font size.
-   *
-   * `html, body`, style/main.scss L31 and L485.
-   */
+  /** Root font size. */
   base: { desktop: 18, mobile: 15 },
 
-  /**
-   * The 2048 wordmark.
-   *
-   * `h1.title`, style/main.scss L43 and L494.
-   */
+  /** The 2048 wordmark. */
   title: { desktop: 80, mobile: 27 },
 
   /**
-   * Score and best-score numerals. The mobile block does not restate
-   * them, so both scales carry the desktop value.
-   *
-   * `$height` at style/main.scss L68, applied at L74.
+   * Score and best-score numerals. The mobile block does not restate them, so
+   * both scales carry the desktop value.
    */
   scoreValue: { desktop: 25, mobile: 25 },
 
   /**
-   * The uppercase SCORE and BEST labels. The mobile block does not
-   * restate them, so both scales carry the desktop value.
-   *
-   * `:after` on the score boxes, style/main.scss L89-L90.
+   * The uppercase SCORE and BEST labels. The mobile block does not restate
+   * them, so both scales carry the desktop value.
    */
   scoreLabel: { desktop: 13, mobile: 13 },
 
-  /**
-   * The You win / Game over verdict on the terminal overlay.
-   *
-   * `.game-message p`, style/main.scss L210-L213 and L539-L541.
-   */
+  /** The You win / Game over verdict on the terminal overlay. */
   overlayVerdict: { desktop: 60, mobile: 30 },
 } as const satisfies Record<string, ScaledFontSize>;
 
-/**
- * Paragraph line height, unitless.
- *
- * `line-height` on `p`, style/main.scss L120.
- */
+/** Paragraph line height, unitless. */
 export const paragraphLineHeight = 1.65;
 
 /**
  * Tile numeral sizes, in px, at both scales.
  *
- * The stylesheet steps the numeral down as the value gains digits.
- * `default` is the base declaration every tile receives; the three
- * remaining steps override it. Declared across the ramp block at
- * style/main.scss L314-L415 and its mobile counterparts at L533-L535.
+ * The stylesheet steps the numeral down as the value gains digits. `default` is
+ * the base declaration every tile receives; the three remaining steps override
+ * it.
  */
 export const tileFontSizes = {
-  /**
-   * Tile values below `tileFontSizeThresholds.threeDigit`.
-   *
-   * `.tile .tile-inner`, style/main.scss L325 and L534.
-   */
+  /** Tile values below `tileFontSizeThresholds.threeDigit`. */
   default: { desktop: 55, mobile: 35 },
 
-  /**
-   * Tile values the ramp tests as `>= 100 and < 1000` at
-   * style/main.scss L385.
-   *
-   * style/main.scss L386 and L390.
-   */
   threeDigit: { desktop: 45, mobile: 25 },
 
-  /**
-   * Tile values the ramp tests as `>= 1000` at style/main.scss L392,
-   * up to and including the last generated ramp step.
-   *
-   * style/main.scss L393 and L396.
-   */
   fourOrMoreDigit: { desktop: 35, mobile: 15 },
 
-  /**
-   * Tile values above the last generated ramp step, which the
-   * stylesheet reaches through `.tile-super` at style/main.scss L405.
-   *
-   * style/main.scss L409 and L412.
-   */
   super: { desktop: 30, mobile: 10 },
 } as const satisfies Record<string, ScaledFontSize>;
 
-/**
- * Lower bounds, in tile value, of the three numeral-size overrides.
- *
- * `threeDigit` and `fourOrMoreDigit` are the literals the ramp
- * compares against at style/main.scss L385 and L392. `super` is the
- * last value the ramp generates: `pow($base, $limit)` over `$base: 2`
- * and `$limit: 11`, style/main.scss L334-L336. A tile above it takes
- * the `.tile-super` branch at style/main.scss L405.
- */
+/** Lower bounds, in tile value, of the three numeral-size overrides. */
 export const tileFontSizeThresholds = {
   threeDigit: 100,
   fourOrMoreDigit: 1000,
@@ -445,12 +249,6 @@ export const tileFontSizeThresholds = {
 
 /**
  * Numeral size for a tile value at one scale, in px.
- *
- * Applies the same bounds, in the same order, as the ramp at
- * style/main.scss L385 and L392 and the `.tile-super` selector at
- * L405: a value above `tileFontSizeThresholds.super` takes the super
- * size, then `>= 1000` takes `fourOrMoreDigit`, then `>= 100` takes
- * `threeDigit`, and anything below that keeps the base declaration.
  *
  * @throws RangeError when `tileValue` is not a finite positive number.
  */
@@ -476,37 +274,25 @@ export function tileFontSize(
   return tileFontSizes.default[scale];
 }
 
+/* ===== 5. Motion ===== */
 
-/* ==========================================================================
- * 5. Motion — style/main.scss transition, keyframes and animation calls
- * ========================================================================== */
-
-/**
- * The easing keywords style/main.scss uses.
- */
+/** The easing keywords style/main.scss uses. */
 export type MotionEasing = 'ease' | 'ease-in' | 'ease-in-out';
 
-/**
- * The `animation-fill-mode` values style/main.scss applies.
- */
+/** The `animation-fill-mode` values style/main.scss applies. */
 export type MotionFillMode = 'backwards' | 'both';
 
 /**
- * The one transition and the four keyframe animations the stylesheet
- * declares, with their timings in ms and their keyframe shapes.
+ * The one transition and the four keyframe animations the stylesheet declares,
+ * with their timings in ms and their keyframe shapes.
  *
- * Declared at style/main.scss L50-L60, L148-L156, L329-L332,
- * L417-L427 and L434-L446, with the calls that apply them at L104,
- * L234, L430 and L450. Keyframe shapes are carried as data: `top` is
- * in px, and `opacity` and `scale` are unitless multipliers.
+ * Keyframe shapes are carried as data: `top` is in px, and `opacity` and
+ * `scale` are unitless multipliers.
  */
 export const motion = {
   /**
-   * Tile movement, declared as a CSS transition and narrowed to
-   * `transform`. It carries no fill mode.
-   *
-   * `transition($transition-speed ease-in-out)`, style/main.scss L329,
-   * narrowed to `transition-property: transform` at L330-L332.
+   * Tile movement, declared as a CSS transition and narrowed to `transform`. It
+   * carries no fill mode.
    */
   movement: {
     duration: transitionSpeed,
@@ -514,12 +300,7 @@ export const motion = {
     property: 'transform',
   },
 
-  /**
-   * The score-delta numeral rising off the score box.
-   *
-   * `animation(move-up 600ms ease-in)`, style/main.scss L104, with
-   * `animation-fill-mode: both` at L105. Keyframes at L50-L60.
-   */
+  /** The score-delta numeral rising off the score box. */
   moveUp: {
     duration: 600,
     easing: 'ease-in' satisfies MotionEasing,
@@ -532,12 +313,8 @@ export const motion = {
   },
 
   /**
-   * The terminal overlay fading in. The delay is
-   * `$transition-speed * 12` and resolves to 1200.
-   *
-   * `animation(fade-in 800ms ease $transition-speed * 12)`,
-   * style/main.scss L234, with `animation-fill-mode: both` at L235.
-   * Keyframes at L148-L156.
+   * The terminal overlay fading in. The delay is `$transition-speed * 12` and
+   * resolves to 1200.
    */
   fadeIn: {
     duration: 800,
@@ -551,12 +328,8 @@ export const motion = {
   },
 
   /**
-   * A newly spawned tile appearing. The `backwards` fill mode holds
-   * the tile at the 0% keyframe until the delay elapses.
-   *
-   * `animation(appear 200ms ease $transition-speed)`,
-   * style/main.scss L430, with `animation-fill-mode: backwards` at
-   * L431. Keyframes at L417-L427.
+   * A newly spawned tile appearing. The `backwards` fill mode holds the tile at
+   * the 0% keyframe until the delay elapses.
    */
   appear: {
     duration: 200,
@@ -570,13 +343,9 @@ export const motion = {
   },
 
   /**
-   * A merged tile popping. The `backwards` fill mode holds the tile at
-   * the 0% keyframe until the delay elapses. `mid` carries the 50%
-   * overshoot, at `offset` through the duration.
-   *
-   * `animation(pop 200ms ease $transition-speed)`, style/main.scss
-   * L450, with `animation-fill-mode: backwards` at L451. Keyframes at
-   * L434-L446.
+   * A merged tile popping. The `backwards` fill mode holds the tile at the 0%
+   * keyframe until the delay elapses. `mid` carries the 50% overshoot, at
+   * `offset` through the duration.
    */
   pop: {
     duration: 200,
@@ -596,34 +365,21 @@ export const motion = {
  * ========================================================================== */
 
 /**
- * The stacking ladder.
- *
- * The first six slots are the ladder style/main.scss already declares
- * and are not renumbered. `tileContainer` stays in the ladder although
- * the WebGL canvas takes over the layers `gridContainer` and
- * `tileContainer` occupy; neither number is reused.
- *
- * The last four slots are new and sit above the existing ceiling of
- * 100. They mirror `$z-index-hud`, `$z-index-screen-overlay`,
- * `$z-index-modal` and `$z-index-diagnostics` in style/_tokens.scss.
+ * The stacking ladder. The first six slots are the established ladder and are
+ * not renumbered, even where the WebGL canvas takes over the layers they
+ * occupy. The last four sit above that ceiling of 100.
  */
 export const zIndex = {
-  /** `.grid-container`, style/main.scss L254. */
   gridContainer: 1,
 
-  /** `.tile-container`, style/main.scss L288. */
   tileContainer: 2,
 
-  /** `.tile-inner`, style/main.scss L323. */
   tileInner: 10,
 
-  /** `.tile-merged .tile-inner`, style/main.scss L449. */
   tileMergedInner: 20,
 
-  /** `.game-message`, style/main.scss L205. */
   gameMessage: 100,
 
-  /** `.score-addition`, style/main.scss L103. */
   scoreAddition: 100,
 
   /** `$z-index-hud`, style/_tokens.scss. */
@@ -639,16 +395,9 @@ export const zIndex = {
   diagnosticsOverlay: 500,
 } as const;
 
-/* ==========================================================================
- * 7. Geometry — style/main.scss at both scales
- * ========================================================================== */
+/* ===== 7. Geometry, at both scales ===== */
 
-/**
- * The lengths one scale resolves to, in px.
- *
- * style/main.scss declares the desktop lengths at L4-L8 and L19, and
- * restates the mobile lengths at L477-L482.
- */
+/** The lengths one scale resolves to, in px. */
 export interface GeometryScale {
   /** Board edge and container width. */
   readonly fieldWidth: number;
@@ -667,11 +416,8 @@ export interface GeometryScale {
 }
 
 /**
- * The lengths a scale is declared with, before `tileSize` and
- * `tileBoxSize` are derived from them.
- *
- * The five members are the declarations style/main.scss makes at
- * L4-L6, L8 and L19, and restates at L477-L479, L481 and L482.
+ * The lengths a scale is declared with, before `tileSize` and `tileBoxSize` are
+ * derived from them.
  */
 export interface GeometryScaleInput {
   readonly fieldWidth: number;
@@ -684,12 +430,8 @@ export interface GeometryScaleInput {
 /**
  * Resolves one scale from the lengths it is declared with.
  *
- * `tileSize` follows `$tile-size` at style/main.scss L7. `tileBoxSize`
- * applies the `ceil()` that style/main.scss L293-L295 applies to the
- * tile's width, height and line height alike.
- *
- * @throws RangeError when an input is not finite, or when
- *   `gridRowCells` is not a positive integer.
+ * @throws RangeError when an input is not finite, or when `gridRowCells` is not
+ * a positive integer.
  */
 export function createGeometryScale(
   input: GeometryScaleInput,
@@ -718,7 +460,6 @@ export function createGeometryScale(
 /**
  * The scale that applies above `mobileThreshold`.
  *
- * Built from the section 1 tokens, style/main.scss L4-L8 and L19.
  * Resolves `tileSize` to 106.25 and `tileBoxSize` to 107.
  */
 export const desktopGeometry = /* @__PURE__ */ createGeometryScale({
@@ -730,43 +471,56 @@ export const desktopGeometry = /* @__PURE__ */ createGeometryScale({
 });
 
 /**
- * The scale that applies at or below `mobileThreshold`.
+ * Board edge and container width at the mobile scale, in px.
  *
- * The `smaller($mobile-threshold)` block restates the lengths at
- * style/main.scss L477-L482. Resolves `tileSize` to 57.5 and
- * `tileBoxSize` to 58.
+ * Projected into `$mobile-field-width` of style/_tokens.scss, which the
+ * `smaller($mobile-threshold)` block of style/main.scss reads instead of
+ * restating the length.
  */
-export const mobileGeometry = /* @__PURE__ */ createGeometryScale({
-  fieldWidth: 280,
-  gridSpacing: 10,
-  gridRowCells: 4,
-  tileBorderRadius: 3,
-  gameContainerMarginTop: 17,
-});
+export const mobileFieldWidth = 280;
 
 /**
- * Both scales, indexable by scale name.
+ * Board padding and the gap between adjacent cells at the mobile
+ * scale, in px.
  *
- * style/main.scss declares exactly these two, separated by the single
- * breakpoint at L475.
+ * Projected into `$mobile-grid-spacing` of style/_tokens.scss, read by the
+ * `smaller($mobile-threshold)` block of style/main.scss.
  */
+export const mobileGridSpacing = 10;
+
+/**
+ * Offset between the board and the content above it at the mobile
+ * scale, in px.
+ *
+ * Projected into `$mobile-game-container-margin-top` of style/_tokens.scss,
+ * read by the `smaller($mobile-threshold)` block of style/main.scss.
+ */
+export const mobileGameContainerMarginTop = 17;
+
+/**
+ * The scale that applies at or below `mobileThreshold`.
+ *
+ * Resolves `tileSize` to 57.5 and `tileBoxSize` to 58.
+ */
+export const mobileGeometry = /* @__PURE__ */ createGeometryScale({
+  fieldWidth: mobileFieldWidth,
+  gridSpacing: mobileGridSpacing,
+  gridRowCells,
+  tileBorderRadius,
+  gameContainerMarginTop: mobileGameContainerMarginTop,
+});
+
+/** Both scales, indexable by scale name; the stylesheet declares these two. */
 export const geometryScales = {
   desktop: desktopGeometry,
   mobile: mobileGeometry,
 } as const satisfies Record<ScaleName, GeometryScale>;
 
 /**
- * Offset of a cell from the board's leading edge along one axis, in
- * px.
+ * Offset of a cell from the board's leading edge along one axis, in px.
  *
- * Reproduces the position step at style/main.scss L302-L303,
- * `floor(($tile-size + $grid-spacing) * ($x - 1))`, including its
- * `floor`. `cellIndex` is zero-based, so the stylesheet's one-based
- * `$x` maps to `cellIndex = $x - 1`. The index is not bounded above; a
- * configured board larger than `gridRowCells` resolves.
- *
- * At the desktop scale the first four indices resolve to 0, 121, 242
- * and 363; at the mobile scale to 0, 67, 135 and 202.
+ * `cellIndex` is zero-based, and is not bounded above: a configured board
+ * larger than `gridRowCells` resolves.
  *
  * @throws RangeError when `cellIndex` is not a non-negative integer.
  */
@@ -789,13 +543,9 @@ export function tilePositionStep(
  * ========================================================================== */
 
 /**
- * Extrusion depths for the WebGL board, in px, each declared as an
- * arithmetic expression on `gridSpacing`.
- *
- * Mirrors `$depth-bevel`, `$depth-board` and `$depth-tile` in
- * style/_tokens.scss. The scale carries lengths only. Camera
- * placement, field of view and light intensity are declared in
- * src/render.
+ * Extrusion depths for the WebGL board, in px, each an arithmetic expression on
+ * `gridSpacing`. Lengths only: camera and lighting values live in src/render.
+ * Decision DL-TOKEN-02.
  */
 export const depthScale = {
   /** `$depth-bevel`, style/_tokens.scss. Resolves to 3. */
@@ -808,3 +558,74 @@ export const depthScale = {
   tile: gridSpacing * 2,
 } as const;
 
+/* ===== 9. Sass projection — the build-time bridge into style/_tokens.scss ===== */
+
+/**
+ * Name of the Sass variable the projection is delivered as.
+ *
+ * style/main.scss declares `$blitzy-token-projection: () !default`
+ * ahead of its `@use` block and passes it to style/_tokens.scss as that
+ * module's `$projection` configuration. The `!default` is what lets a
+ * plain `sass style/main.scss` invocation, which prepends nothing,
+ * compile against style/_tokens.scss's own fallbacks.
+ */
+export const SASS_PROJECTION_VARIABLE = '$blitzy-token-projection';
+
+/**
+ * Every token style/_tokens.scss resolves through the projection, keyed
+ * by the kebab-case name it looks the value up under, valued as the
+ * Sass literal that name resolves to.
+ *
+ * The set is the primitive half of the token layer: the lengths,
+ * counts, colours, durations and z-index slots that are stated rather
+ * than computed. style/_tokens.scss derives `$tile-size`,
+ * `$mobile-threshold`, `$tile-gold-glow-color` and the depth scale from
+ * these, so those four are absent here by construction. The font
+ * stacks are declared in style/_tokens.scss and mirrored by
+ * `monospaceStack` above.
+ *
+ * Each value is written with the unit its SCSS counterpart carries: px
+ * for lengths, ms for durations, bare for counts and z-index slots, and
+ * the hex spelling of the corresponding colour token.
+ */
+export const sassTokenProjection = {
+  'field-width': `${fieldWidth}px`,
+  'grid-spacing': `${gridSpacing}px`,
+  'grid-row-cells': `${gridRowCells}`,
+  'tile-border-radius': `${tileBorderRadius}px`,
+  'text-color': textColor,
+  'bright-text-color': brightTextColor,
+  'tile-color': tileColor,
+  'tile-gold-color': tileGoldColor,
+  'game-container-margin-top': `${gameContainerMarginTop}px`,
+  'game-container-background': gameContainerBackground,
+  'transition-speed': `${transitionSpeed}ms`,
+  'mobile-field-width': `${mobileFieldWidth}px`,
+  'mobile-grid-spacing': `${mobileGridSpacing}px`,
+  'mobile-game-container-margin-top':
+    `${mobileGameContainerMarginTop}px`,
+  'z-index-hud': `${zIndex.hud}`,
+  'z-index-screen-overlay': `${zIndex.screenOverlay}`,
+  'z-index-modal': `${zIndex.modal}`,
+  'z-index-diagnostics': `${zIndex.diagnosticsOverlay}`,
+} as const satisfies Record<string, string>;
+
+/**
+ * Renders `sassTokenProjection` as the SCSS source vite.config.ts
+ * prepends to every stylesheet it compiles, through
+ * `css.preprocessorOptions.scss.additionalData`.
+ *
+ * The output is one variable declaration holding one Sass map, and
+ * nothing else: no `@use`, no `@import` and no rule, so every partial
+ * keeps declaring its own module dependencies. Key order follows
+ * `sassTokenProjection`, which makes the emitted string deterministic
+ * for a given set of token values.
+ *
+ * @returns SCSS source ending in a newline.
+ */
+export function emitSassTokenProjection(): string {
+  const entries = Object.entries(sassTokenProjection)
+    .map(([name, value]) => `  ${name}: ${value},`)
+    .join('\n');
+  return `${SASS_PROJECTION_VARIABLE}: (\n${entries}\n);\n`;
+}

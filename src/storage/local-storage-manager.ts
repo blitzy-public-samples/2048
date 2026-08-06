@@ -1,66 +1,56 @@
 /**
  * Web Storage persistence adapter.
  *
- * Ported from js/local_storage_manager.js L21-L63. Source construct to
- * target, in source order:
- *
- * - `LocalStorageManager` (L21-L27) -> class `LocalStorageManager`
- * - the `storage` strategy field (L26) -> the private `storage` field,
- *   with the selected store named by the public `strategy` field
- * - `localStorageSupported` (L29-L40) -> `probeWebStorage()`, whose
- *   result is also held on the instance as `probe`; the error value
- *   the catch at L37-L39 discarded becomes `StorageErrorInfo`
- * - `getBestScore` (L43-L45) -> `getBestScore()`
- * - `setBestScore` (L47-L49) -> `setBestScore()`
- * - `getGameState` (L52-L55) -> `getGameState()`
- * - `setGameState` (L57-L59) -> `setGameState()`
- * - `clearGameState` (L61-L63) -> `clearGameState()`
- *
- * The `bestScoreKey` (L22) and `gameStateKey` (L23) literals live in
- * ./storage-keys; the in-memory fallback store of L1-L19 lives in
- * ./memory-storage.
- *
- * Test hygiene, mandatory for any suite that touches this adapter:
- * delete the best-score key in teardown — nothing in the application
- * ever deletes it, and a surviving value carries the highest score
- * into every later test; and seed the best-score key BEFORE
- * constructing a manager — the probe and the first legacy read both
- * happen at construction. `OWNED_STORAGE_KEYS` in ./storage-keys lists
- * every key such a teardown removes.
- *
- * Rationale for the decisions behind this file, including the
- * preserved `string | 0` return of `getBestScore()`, is recorded in
- * docs/DECISION_LOG.md.
+ * Construction runs the writability probe once and fixes the store for the
+ * session; it performs no read. Every read, write and removal is guarded, so no
+ * member throws on a storage failure, and `getBestScore()` keeps the frozen
+ * `string | 0` contract. The two unprefixed legacy keys live in
+ * ./storage-keys, and the in-memory fallback store in ./memory-storage.
  */
 
 import {
   BEST_SCORE_KEY,
   GAME_STATE_KEY,
   STORAGE_PROBE_KEY,
+  isOwnedStorageKey,
+  type OwnedStorageKey,
 } from './storage-keys';
 import { MemoryStorage, type StorageLike } from './memory-storage';
 
 export type { StorageLike } from './memory-storage';
 
 /**
- * Which store a manager reads and writes.
- *
- * `'localStorage'` and `'memory'` are the two outcomes of the strategy
- * selection ported from L26. `'injected'` belongs to a store supplied
- * through `LocalStorageManagerOptions.storage` and is never returned
+ * Which store a manager reads and writes. `'injected'` belongs to a store
+ * supplied through `LocalStorageManagerOptions.storage` and is never returned
  * by `probeWebStorage()`.
  */
 export type StorageStrategy = 'localStorage' | 'memory' | 'injected';
 
-/** The storage operation a `StorageFailure` describes. */
+/**
+ * The storage operation a `StorageFailure` describes.
+ *
+ * Every member is emitted. A probe that fails with an error reports one
+ * failure under `STORAGE_PROBE_KEY` in addition to the complete probe
+ * result; a probe that finds no global store at all catches nothing and
+ * so reports no failure.
+ */
 export type StorageOperation = 'probe' | 'read' | 'write' | 'remove';
 
 /**
- * A caught storage error reduced to serialisable fields, superseding
- * the error value the catch at L37-L39 discarded.
+ * Name reported for an operation refused because its key is not one the product
+ * owns.
  */
+const REJECTED_KEY_ERROR_NAME = 'StorageKeyError';
+
+/**
+ * Longest rejected key text a report carries. A rejected key comes from outside
+ * the module and is truncated to this many characters, with an ellipsis
+ * appended, before it reaches a reporter.
+ */
+const MAX_REPORTED_KEY_LENGTH = 64;
+
+/** A caught storage error reduced to serialisable fields. */
 export interface StorageErrorInfo {
-  /** The error's `name`, or `'StorageError'` when it carries none. */
   readonly name: string;
 
   /**
@@ -77,9 +67,8 @@ export interface StorageErrorInfo {
   readonly quota: boolean;
 }
 
-/** The outcome of the writability probe ported from L29-L40. */
+/** The outcome of the writability probe. */
 export interface StorageProbeResult {
-  /** Whether the probe wrote and removed its key successfully. */
   readonly supported: boolean;
 
   /**
@@ -97,32 +86,27 @@ export interface StorageProbeResult {
 
 /** A single failed storage operation. */
 export interface StorageFailure {
-  /** Which operation failed. */
   readonly operation: StorageOperation;
 
-  /** The key the operation targeted. */
   readonly key: string;
 
-  /** The store in use when it failed. */
   readonly strategy: StorageStrategy;
 
-  /** The caught error. */
   readonly error: StorageErrorInfo;
 }
 
 /** A completed write attempt, successful or not. */
 export interface StorageWriteInfo {
-  /** The key written. */
   readonly key: string;
 
   /**
-   * The value's size in bytes as Web Storage charges it: two per
-   * UTF-16 code unit. `0` when serialisation failed before any value
-   * existed.
+   * The adapter's own estimate of the serialised size, at two bytes per UTF-16
+   * code unit. What a browser charges against its quota is
+   * implementation-defined and may differ. `0` when serialisation failed before
+   * any value existed.
    */
   readonly byteLength: number;
 
-  /** Whether the write succeeded. */
   readonly ok: boolean;
 }
 
@@ -130,15 +114,20 @@ export interface StorageWriteInfo {
  * Sink for probe results, failures and write attempts. Every member is
  * optional, so an adapter built without a reporter, or with a partial
  * one, reports only what the sink accepts.
+ *
+ * A member that throws is contained: the throw does not escape the
+ * adapter, does not reach the caller of the storage operation being
+ * reported, and does not change the value that operation returns. Each
+ * contained throw is counted on `LocalStorageManager.reporterFaults`
+ * and described by `LocalStorageManager.lastReporterFault`, and is
+ * never handed back to the sink that raised it. `reporterFailures` is the
+ * count under the name a diagnostics surface reads it by.
  */
 export interface StorageReporter {
-  /** Receives the construction-time probe result. */
   readonly onProbe?: (result: StorageProbeResult) => void;
 
-  /** Receives every failed probe, read, write and removal. */
   readonly onFailure?: (failure: StorageFailure) => void;
 
-  /** Receives every write attempt, successful or not. */
   readonly onWrite?: (info: StorageWriteInfo) => void;
 }
 
@@ -150,43 +139,26 @@ export interface LocalStorageManagerOptions {
    */
   readonly storage?: StorageLike;
 
-  /** Sink for probe, failure and write reports. */
   readonly reporter?: StorageReporter;
 }
 
-/** Value the probe writes before removing it. Ported from L34. */
 const PROBE_VALUE = '1';
 
-/** Name reported when a caught value carries none. */
 const UNKNOWN_ERROR_NAME = 'StorageError';
 
-/** Message reported when a caught object carries none. */
 const UNKNOWN_ERROR_MESSAGE = 'Unknown storage error.';
 
-/** Error names browsers use to report exhausted storage. */
 const QUOTA_ERROR_NAMES: readonly string[] = Object.freeze([
   'QuotaExceededError',
   'NS_ERROR_DOM_QUOTA_REACHED',
 ]);
 
-/** Legacy exception code for exhausted storage. */
 const LEGACY_QUOTA_EXCEEDED_CODE = 22;
 
-/** Bytes Web Storage charges per UTF-16 code unit. */
 const BYTES_PER_UTF16_UNIT = 2;
 
-/** Reporter used when the caller supplies none. */
 const EMPTY_REPORTER: StorageReporter = Object.freeze({});
 
-/**
- * Narrows a value to `StorageLike` by probing for the four operations
- * that interface declares. Applied to the global store, which the type
- * system declares as always present although it is absent outside a
- * browser.
- *
- * @param value Value to test.
- * @returns Whether `value` carries all four storage operations.
- */
 function isStorageLike(value: unknown): value is StorageLike {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -204,27 +176,12 @@ function isStorageLike(value: unknown): value is StorageLike {
   );
 }
 
-/**
- * Reads the global Web Storage instance.
- *
- * Ported from the strategy selection at L26, which is reached only
- * after the probe has already proved the access works.
- *
- * @returns The global store, or `undefined` where it is absent or does
- *   not carry the storage operations.
- */
 function readGlobalStorage(): StorageLike | undefined {
   const candidate: unknown = globalThis.localStorage;
 
   return isStorageLike(candidate) ? candidate : undefined;
 }
 
-/**
- * Reads a caught value's `name`.
- *
- * @param error Caught value, of any type.
- * @returns The reported name, or `'StorageError'`.
- */
 function errorName(error: unknown): string {
   if (error instanceof Error && error.name.length > 0) {
     return error.name;
@@ -241,13 +198,6 @@ function errorName(error: unknown): string {
   return UNKNOWN_ERROR_NAME;
 }
 
-/**
- * Reads a caught value's `message`.
- *
- * @param error Caught value, of any type.
- * @returns The reported message, the printed form of a thrown
- *   primitive, or `'Unknown storage error.'`.
- */
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) {
     return error.message;
@@ -268,15 +218,6 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-/**
- * Whether a caught value reports exhausted storage. Checks the error
- * names browsers use, then the legacy exception code, which is read
- * only where the exception constructor exists.
- *
- * @param error Caught value, of any type.
- * @param name The name already read from `error`.
- * @returns Whether the value reports exhausted storage.
- */
 function isQuotaError(error: unknown, name: string): boolean {
   if (QUOTA_ERROR_NAMES.includes(name)) {
     return true;
@@ -292,14 +233,7 @@ function isQuotaError(error: unknown, name: string): boolean {
   );
 }
 
-/**
- * Reduces a caught value to `StorageErrorInfo`. Total: it accepts any
- * thrown value, including values that are not errors, and never
- * throws.
- *
- * @param error Caught value, of any type.
- * @returns The reportable description of `error`.
- */
+/** Reduces any thrown value, error or not, to `StorageErrorInfo`. Never throws. */
 function describeStorageError(error: unknown): StorageErrorInfo {
   const name = errorName(error);
 
@@ -311,28 +245,46 @@ function describeStorageError(error: unknown): StorageErrorInfo {
 }
 
 /**
- * Probes Web Storage writability.
+ * Shortens a key for reporting. Applied to a rejected key, whose length and
+ * content come from outside the module.
  *
- * Ported from `localStorageSupported`, L29-L40: the global store is
- * read inside the `try`, as L33 does — the property access itself
- * throws where storage is blocked; a probe key is written (L34) and
- * immediately removed (L35); success is reported (L36). Where L37-L39
- * discarded the caught error, this returns it.
+ * @param key Key to shorten.
+ * @returns `key` when it is within the reporting limit, otherwise its first
+ *   `MAX_REPORTED_KEY_LENGTH` characters followed by an ellipsis.
+ */
+function truncateKey(key: string): string {
+  return key.length <= MAX_REPORTED_KEY_LENGTH
+    ? key
+    : `${key.slice(0, MAX_REPORTED_KEY_LENGTH)}…`;
+}
+
+/**
+ * Describes a refused operation as a `StorageErrorInfo`, without constructing or
+ * throwing an error.
  *
- * Callable without constructing a manager. A manager runs this same
- * probe at construction and holds its result as `probe`.
+ * @param key Key that was refused, already shortened.
+ * @returns The reportable description of the refusal.
+ */
+function describeRejectedKey(key: string): StorageErrorInfo {
+  return {
+    name: REJECTED_KEY_ERROR_NAME,
+    message:
+      `Key "${key}" is not owned by this product; the operation was ` +
+      'refused and no storage was touched.',
+    quota: false,
+  };
+}
+
+/**
+ * Probes Web Storage writability: the global store is read inside the `try`,
+ * because the property access itself throws where storage is blocked, then a
+ * probe key is written and immediately removed. Callable without constructing a
+ * manager, which also runs it once at construction.
  *
- * @returns `{ supported: true, strategy: 'localStorage' }` when both
- *   the write and the removal succeed. Otherwise `supported` is
- *   `false` with `strategy` `'memory'`, carrying `error` only when
- *   something threw; a global store that is absent altogether, as
- *   outside a browser, yields no error.
- *
- * @example
- * const result = probeWebStorage();
- * if (!result.supported && result.error !== undefined) {
- *   result.error.quota; // true when storage is full, not blocked
- * }
+ * @returns `{ supported: true, strategy: 'localStorage' }` when both the write
+ *   and the removal succeed. Otherwise `supported` is `false` with `strategy`
+ *   `'memory'`, carrying `error` only when something threw; a global store that
+ *   is absent altogether, as outside a browser, yields no error.
  */
 export function probeWebStorage(): StorageProbeResult {
   try {
@@ -358,27 +310,21 @@ export function probeWebStorage(): StorageProbeResult {
 /**
  * Reads and writes the product's persisted state.
  *
- * Ported from `LocalStorageManager`, L21-L27: construction runs the
- * writability probe once and fixes the store for the session, in that
- * order, exactly as L25-L26 do. Constructing with no arguments is
- * supported: the vanilla composition root injected this constructor
- * rather than an instance (js/application.js L3), and
- * js/game_manager.js L4 constructed it with none.
+ * Construction runs the writability probe once and fixes the store for the
+ * session, in that order, and performs no read of its own; constructing with no
+ * arguments is supported.
  *
- * Every read, write and removal is guarded: setters report and return
- * `false` rather than throwing, and reads fall back to `null`.
+ * Every read, write and removal is guarded: setters report and return `false`
+ * rather than throwing, a raw or JSON read falls back to `null`, and
+ * `getBestScore()` falls back to the number `0`. Reporting is guarded on the
+ * same terms: every reporter callback runs inside a no-throw boundary, so a
+ * throwing sink can neither escape construction nor alter the result of the
+ * operation it was reporting.
  *
- * @example
- * const storage = new LocalStorageManager();
- * storage.setBestScore(13892);
- * storage.getBestScore(); // '13892'
- *
- * @example
- * const storage = new LocalStorageManager({
- *   storage: new MemoryStorage(),
- *   reporter: { onFailure: (failure) => report(failure) },
- * });
- * storage.strategy; // 'injected'
+ * Every key is checked against `isOwnedStorageKey()` before the store is
+ * touched, so the two frozen legacy keys and the product's namespaced keys are
+ * the only keys this adapter can reach. A refused operation reports and returns
+ * its failure value, and touches no storage.
  */
 export class LocalStorageManager {
   /** The construction-time probe result. */
@@ -390,16 +336,44 @@ export class LocalStorageManager {
    */
   readonly strategy: StorageStrategy;
 
-  /** The selected store. Ported from the `storage` field at L26. */
   private readonly storage: StorageLike;
 
-  /** Sink for probe, failure and write reports. */
   private readonly reporter: StorageReporter;
 
+  /** Reporter callbacks that threw and were contained. */
+  private faultCount = 0;
+
+  /** Description of the most recent contained reporter throw. */
+  private faultInfo: StorageErrorInfo | undefined = undefined;
+
   /**
-   * @param options Optional store and reporter. Omitting both probes
-   *   for the global store and falls back to `MemoryStorage`, which is
-   *   what L25-L26 did.
+   * How many reporter callbacks have thrown and been contained.
+   *
+   * `0` for a reporter that never throws, which is every reporter that
+   * behaves. A non-zero count means instrumentation is failing while
+   * persistence is not: the storage operations themselves returned
+   * their true results.
+   */
+  get reporterFaults(): number {
+    return this.faultCount;
+  }
+
+  /**
+   * The most recent contained reporter throw, or `undefined` when no
+   * reporter callback has thrown.
+   *
+   * Reduced to the same serialisable shape as a storage error, so the
+   * fault is inspectable — by a diagnostics surface, or by a caller
+   * checking `reporterFaults` — without being re-delivered to the sink
+   * that raised it.
+   */
+  get lastReporterFault(): StorageErrorInfo | undefined {
+    return this.faultInfo;
+  }
+
+  /**
+   * @param options Optional store and reporter. Omitting both probes for the
+   *   global store and falls back to `MemoryStorage`.
    */
   constructor(options: LocalStorageManagerOptions = {}) {
     this.reporter = options.reporter ?? EMPTY_REPORTER;
@@ -424,19 +398,24 @@ export class LocalStorageManager {
       }
     }
 
-    this.reporter.onProbe?.(this.probe);
+    this.reportProbe();
   }
 
   /**
-   * Reads the persisted best score.
-   *
-   * Ported from L43-L45, preserving L44 exactly: the raw stored string
-   * when a value is present, and the number `0` when it is absent or
-   * empty. Storage is read on every call, never cached; the vanilla
-   * actuation payload re-read this value immediately after writing it
-   * (js/game_manager.js L95).
-   *
-   * The record of this return type is in docs/DECISION_LOG.md.
+   * Number of reporter invocations this manager contained because the reporter
+   * threw, under the name a diagnostics surface reads it by. `0` for a reporter
+   * that never throws; a non-zero value means reports have been lost and the
+   * sink is faulty. Read out of band, because a contained throw is deliberately
+   * not reported back through the sink that produced it.
+   */
+  get reporterFailures(): number {
+    return this.faultCount;
+  }
+
+  /**
+   * Reads the persisted best score. Frozen contract: the raw stored string when
+   * a value is present, and the number `0` when it is absent or empty. Storage
+   * is read on every call and never cached.
    *
    * @returns The stored string, or the number `0`.
    */
@@ -445,10 +424,7 @@ export class LocalStorageManager {
   }
 
   /**
-   * Persists `score` as the best score.
-   *
-   * Ported from L47-L49, where L48 passed the number itself and relied
-   * on implicit coercion; the value is written as `String(score)`.
+   * Persists `score` as the best score, written as `String(score)`.
    *
    * @param score Score to persist.
    * @returns `true` when the write succeeded.
@@ -458,14 +434,11 @@ export class LocalStorageManager {
   }
 
   /**
-   * Reads the persisted board snapshot.
-   *
-   * Ported from L52-L55, keeping L53's falsy check on the raw value
-   * and guarding L54's parse. The result is `unknown`: shape
+   * Reads the persisted board snapshot. The result is `unknown`: shape
    * validation, schema versioning and migration belong to the caller.
    *
-   * @returns The parsed snapshot, or `null` when it is absent or its
-   *   stored text is not valid JSON.
+   * @returns The parsed snapshot, or `null` when it is absent or its stored
+   *   text is not valid JSON.
    */
   getGameState(): unknown {
     return this.readJson(GAME_STATE_KEY);
@@ -473,8 +446,6 @@ export class LocalStorageManager {
 
   /**
    * Persists `state` as the board snapshot.
-   *
-   * Ported from L57-L59.
    *
    * @param state Snapshot to persist.
    * @returns `true` when the write succeeded.
@@ -486,9 +457,6 @@ export class LocalStorageManager {
   /**
    * Removes the persisted board snapshot.
    *
-   * Ported from L61-L63. Which of this and `setGameState` runs on a
-   * given turn stays with the caller (js/game_manager.js L85-L89).
-   *
    * @returns `true` when the removal succeeded.
    */
   clearGameState(): boolean {
@@ -498,13 +466,18 @@ export class LocalStorageManager {
   /**
    * Reads the raw string stored under `key`.
    *
-   * @param key Key to read.
-   * @returns The stored string, or `null` when the key is absent or
-   *   the read threw. The `undefined` an in-memory store yields for an
-   *   absent key is normalised to `null`; a stored empty string is
-   *   returned as `''`.
+   * @param key Key to read. A key the product does not own is refused,
+   *   reported, and reaches no store.
+   * @returns The stored string, or `null` when the key is absent, the
+   *   read threw, or the key was refused. The `undefined` an in-memory
+   *   store yields for an absent key is normalised to `null`; a stored
+   *   empty string is returned as `''`.
    */
-  readRaw(key: string): string | null {
+  readRaw(key: OwnedStorageKey): string | null {
+    if (!this.acceptKey('read', key)) {
+      return null;
+    }
+
     try {
       return this.storage.getItem(key) ?? null;
     } catch (error) {
@@ -515,17 +488,19 @@ export class LocalStorageManager {
   }
 
   /**
-   * Writes `value` under `key`.
+   * Writes `value` under `key`. A failure, exhausted quota included, is reported
+   * and returned rather than thrown.
    *
-   * Supersedes the unguarded writes at L48 and L58: a failure,
-   * exhausted quota included, is reported and returned rather than
-   * thrown.
-   *
-   * @param key Key to write.
+   * @param key Key to write. A key the product does not own is refused,
+   *   reported, and reaches no store.
    * @param value Value to store.
    * @returns `true` when the write succeeded.
    */
-  writeRaw(key: string, value: string): boolean {
+  writeRaw(key: OwnedStorageKey, value: string): boolean {
+    if (!this.acceptKey('write', key)) {
+      return false;
+    }
+
     const byteLength = value.length * BYTES_PER_UTF16_UNIT;
 
     try {
@@ -543,15 +518,17 @@ export class LocalStorageManager {
   }
 
   /**
-   * Removes `key`.
+   * Removes `key`. Removing a key that was never written succeeds.
    *
-   * Supersedes the unguarded removal at L62. Removing a key that was
-   * never written succeeds.
-   *
-   * @param key Key to remove.
+   * @param key Key to remove. A key the product does not own is refused,
+   *   reported, and reaches no store.
    * @returns `true` when the removal succeeded.
    */
-  removeRaw(key: string): boolean {
+  removeRaw(key: OwnedStorageKey): boolean {
+    if (!this.acceptKey('remove', key)) {
+      return false;
+    }
+
     try {
       this.storage.removeItem(key);
     } catch (error) {
@@ -564,16 +541,15 @@ export class LocalStorageManager {
   }
 
   /**
-   * Reads and parses the JSON stored under `key`.
+   * Reads and parses the JSON stored under `key`, guarding the parse.
    *
-   * Guards the bare parse of L54, which threw during startup on a
-   * corrupted value.
-   *
-   * @param key Key to read.
+   * @param key Key to read. A key the product does not own is refused by
+   *   `readRaw`, reported, and reaches no store.
    * @returns The parsed value, or `null` when the key is absent, holds
-   *   an empty string, or holds text that is not valid JSON.
+   *   an empty string, holds text that is not valid JSON, or was
+   *   refused.
    */
-  readJson(key: string): unknown {
+  readJson(key: OwnedStorageKey): unknown {
     const raw = this.readRaw(key);
 
     if (raw === null || raw.length === 0) {
@@ -594,13 +570,18 @@ export class LocalStorageManager {
   /**
    * Serialises `value` and writes it under `key`.
    *
-   * @param key Key to write.
+   * @param key Key to write. A key the product does not own is refused,
+   *   reported, and reaches no store; nothing is serialised for it.
    * @param value Value to serialise.
-   * @returns `true` when both the serialisation and the write
-   *   succeeded. Values that serialise to no JSON text, such as
-   *   `undefined`, a function or a symbol, are reported as failures.
+   * @returns `true` when both the serialisation and the write succeeded. Values
+   *   that serialise to no JSON text, such as `undefined`, a function or a
+   *   symbol, are reported as failures.
    */
-  writeJson(key: string, value: unknown): boolean {
+  writeJson(key: OwnedStorageKey, value: unknown): boolean {
+    if (!this.acceptKey('write', key)) {
+      return false;
+    }
+
     const json = this.serialiseJson(key, value);
 
     if (json === null) {
@@ -611,17 +592,47 @@ export class LocalStorageManager {
   }
 
   /**
-   * Serialises `value`, reporting and returning `null` on failure.
+   * Decides whether an operation may proceed with `key`, reporting a refusal.
    *
-   * Wraps the serialisation at L58, which throws on circular
-   * structures and on `BigInt`, and yields no string for `undefined`,
-   * functions and symbols.
+   * The check runs before the store is touched, so a refused operation performs
+   * no read, no write and no removal. It is a runtime check as well as a
+   * type-level one because a key can reach a call site from persisted or parsed
+   * data, where the type is not enforced.
+   *
+   * @param operation Operation being attempted.
+   * @param key Key it targets.
+   * @returns `true` when the key is owned and the operation may run.
+   */
+  private acceptKey(operation: StorageOperation, key: string): boolean {
+    if (isOwnedStorageKey(key)) {
+      return true;
+    }
+
+    const reported = truncateKey(key);
+
+    this.deliverFailure({
+      operation,
+      key: reported,
+      strategy: this.strategy,
+      error: describeRejectedKey(reported),
+    });
+
+    return false;
+  }
+
+  /**
+   * Serialises `value`, reporting and returning `null` on failure — circular
+   * structures and `BigInt` throw, and `undefined`, functions and symbols yield
+   * no JSON text.
    *
    * @param key Key the value was destined for, for reporting.
    * @param value Value to serialise.
    * @returns The JSON text, or `null` when it could not be produced.
    */
-  private serialiseJson(key: string, value: unknown): string | null {
+  private serialiseJson(
+    key: OwnedStorageKey,
+    value: unknown
+  ): string | null {
     try {
       const json = JSON.stringify(value);
 
@@ -644,6 +655,64 @@ export class LocalStorageManager {
   }
 
   /**
+   * Runs one reporter callback inside a no-throw boundary.
+   *
+   * Every reporter invocation in this class goes through here, so a
+   * throwing sink is contained at the point of delivery: the operation
+   * that was being reported keeps its own outcome, and construction
+   * completes. A contained throw is counted on `reporterFaults` and
+   * described on `lastReporterFault` rather than being re-delivered to
+   * the sink that raised it.
+   *
+   * @param deliver Reporter callback to run.
+   * @param payload Report to hand it.
+   */
+  private contain<T>(deliver: (payload: T) => void, payload: T): void {
+    try {
+      deliver(payload);
+    } catch (error) {
+      this.faultCount += 1;
+      this.faultInfo = describeStorageError(error);
+    }
+  }
+
+  /**
+   * Hands the construction-time probe result to the reporter, and a
+   * failed probe to the failure sink as well.
+   *
+   * `StorageOperation` carries a `'probe'` member and `onFailure`
+   * receives every failed operation, so an unsupported probe that
+   * caught an error is reported on both channels: the complete result
+   * on `onProbe`, then one `StorageFailure` under `STORAGE_PROBE_KEY`.
+   * A probe that found no global store at all carries no error and so
+   * reports no failure.
+   *
+   * Runs once, at the end of construction, after the strategy is fixed
+   * — the strategy the failure carries is therefore the store the
+   * manager actually went on to use.
+   */
+  private reportProbe(): void {
+    const onProbe = this.reporter.onProbe;
+
+    if (onProbe !== undefined) {
+      this.contain(onProbe, this.probe);
+    }
+
+    const error = this.probe.error;
+
+    if (this.probe.supported || error === undefined) {
+      return;
+    }
+
+    this.deliverFailure({
+      operation: 'probe',
+      key: STORAGE_PROBE_KEY,
+      strategy: this.strategy,
+      error,
+    });
+  }
+
+  /**
    * Hands a failed operation to the reporter, when one accepts it.
    *
    * @param operation Operation that failed.
@@ -655,13 +724,11 @@ export class LocalStorageManager {
     key: string,
     error: unknown
   ): void {
-    const onFailure = this.reporter.onFailure;
-
-    if (onFailure === undefined) {
+    if (this.reporter.onFailure === undefined) {
       return;
     }
 
-    onFailure({
+    this.deliverFailure({
       operation,
       key,
       strategy: this.strategy,
@@ -670,14 +737,25 @@ export class LocalStorageManager {
   }
 
   /**
-   * Hands a completed write attempt to the reporter, when one accepts
-   * it.
+   * Delivers one already-described failure to the reporter, when one
+   * accepts it.
    *
-   * @param key Key that was written.
-   * @param byteLength Size of the value in bytes, or `0` when no value
-   *   was produced.
-   * @param ok Whether the write succeeded.
+   * The single delivery point for `StorageFailure`: the read, write and
+   * removal paths reach it through `reportFailure`, and the probe path
+   * reaches it directly with the error the probe already reduced.
+   *
+   * @param failure Failure to deliver.
    */
+  private deliverFailure(failure: StorageFailure): void {
+    const onFailure = this.reporter.onFailure;
+
+    if (onFailure === undefined) {
+      return;
+    }
+
+    this.contain(onFailure, failure);
+  }
+
   private reportWrite(
     key: string,
     byteLength: number,
@@ -689,7 +767,6 @@ export class LocalStorageManager {
       return;
     }
 
-    onWrite({ key, byteLength, ok });
+    this.contain(onWrite, { key, byteLength, ok });
   }
 }
-

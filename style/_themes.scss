@@ -1,60 +1,21 @@
-// =============================================================================
-// Themes — the default palette plus the two additive accessibility palettes.
-// =============================================================================
+// Themes: the default palette plus the two additive accessibility palettes.
 //
-// PROVENANCE
-//   The default palette is a restatement of the colours style/main.scss already
-//   compiles: its fourteen tokens (now style/_tokens.scss), the page background
-//   and horizontal-rule colour it declares as literals, and the tile ramp its
-//   `@while` loop generates. No default value is new and none is altered here.
+// The default palette restates the colours style/main.scss already compiles.
+// Its `diagnostics-*` and `focus-*` entries are the only new values, both
+// derived from the text tokens; no inherited value is altered here.
 //
-//   The generative ramp in this file is a port of the loop in style/main.scss.
-//   It reproduces the same four rules: a base colour interpolated linearly in
-//   the EXPONENT from the low anchor to the high anchor, an accent overlay for
-//   the mid band, a numeral colour that flips from the dark to the bright text
-//   colour at value 8, and a progressive glow shadow suppressed on every tile
-//   that received an accent. Every palette runs through that one port. The
-//   twelve compiled rows are not restated as a table anywhere in this file.
+// The ramp below is one generative port of the stylesheet's tile-ramp loop, run
+// once per palette: a base colour interpolated linearly in the EXPONENT between
+// the two anchors, an accent overlay for the mid band, a numeral colour that
+// flips from the dark to the bright text colour at value 8, and a progressive
+// glow shadow suppressed on every tile that received an accent. The twelve
+// compiled rows are not restated as a table anywhere.
 //
-//   The high-contrast and colourblind-safe palettes are new and additive. They
-//   apply only under the activation attribute below. With no attribute present
-//   the stylesheet renders exactly the colours it rendered before this file
-//   existed.
-//
-// ACTIVATION CONTRACT
-//   `data-theme` on the root element, i.e. `document.documentElement`:
-//
-//     (absent)                        the default palette
-//     data-theme="default"            the default palette, named explicitly
-//     data-theme="high-contrast"      the high-contrast palette
-//     data-theme="colorblind-safe"    the colourblind-safe palette
-//
-//   `$theme-attribute` and `$theme-names` below are the machine-readable form
-//   of that list. src/theme/themes.ts writes the attribute and
-//   src/ui/a11y/settings.ts offers the choice; both read the same three names.
-//
-// CONSUMERS
-//   SCSS  style/main.scss loads this file as `@use "themes"`. The sibling
-//         partials _screens, _hud, _reward, _summary and _a11y read the
-//         `--theme-*` custom properties this file publishes. Each palette
-//         republishes the whole set, and this file names no selector belonging
-//         to those partials. The screen flow, the HUD, the reward cards, the
-//         run summary and the focus ring are reached through that layer.
-//   TS    src/theme/themes.ts mirrors the three palettes for the TypeScript
-//         layer, src/theme/tile-ramp.ts mirrors the ramp port, and
-//         src/render/tile-materials.ts and src/render/number-only-renderer.ts
-//         resolve tile appearance through them.
-//
-// CONTENTS
-//   Section 1  ramp inputs shared by every palette
-//   Section 2  the three palettes
-//   Section 3  the ramp port
-//   Section 4  emission mixins
-//   Section 5  emission
-//
-// The rationale, alternatives and risks behind every item above are recorded in
-// docs/DECISION_LOG.md; this file carries provenance only.
-// =============================================================================
+// Activation contract — `data-theme` on the root element:
+//   absent, or "default"    the default palette, unscoped
+//   "high-contrast"         the high-contrast palette
+//   "colorblind-safe"       the colourblind-safe palette
+// With no attribute present the rendered colours are the stylesheet's own.
 
 @use "sass:color";
 @use "sass:list";
@@ -63,12 +24,8 @@
 @use "tokens" as *;
 @use "helpers" as *;
 
-// -----------------------------------------------------------------------------
-// 1. Ramp inputs shared by every palette
-//
-// These are the constants of the generative ramp, as distinct from the colours
-// a palette supplies to it.
-// -----------------------------------------------------------------------------
+// Constants of the generative ramp, as distinct from the colours a palette
+// supplies to it.
 
 // Tile values are $ramp-base raised to 1 through $ramp-limit, giving 2 to 2048.
 $ramp-base: 2 !default;
@@ -84,11 +41,19 @@ $ramp-glow-from: 4 !default;
 $ramp-glow-halo-divisor: 1.8 !default;
 $ramp-glow-inset-divisor: 3 !default;
 
-// Glow shadow geometry, expressed as multiples of $grid-spacing. Resolves to
-// the 30px blur, 10px spread and 1px inset ring that style/main.scss applies.
+// Glow shadow geometry as multiples of $grid-spacing: the 30px blur, 10px
+// spread and 1px inset ring style/main.scss applies.
 $ramp-glow-blur: $grid-spacing * 2 !default;
 $ramp-glow-spread: math.div($grid-spacing * 2, 3) !default;
 $ramp-glow-inset-width: math.div($grid-spacing, 15) !default;
+
+// Guard on the shared rarity ladder of style/_tokens.scss. Two tiers are the
+// minimum an interpolation between the anchors can be taken across, and it is
+// the same guard style/_hud.scss applies to its own copy of the list.
+@if list.length($rarity-tiers) < 2 {
+  @error "themes: $rarity-tiers needs at least two entries to interpolate "
+    + "between a palette's anchors, received #{list.length($rarity-tiers)}.";
+}
 
 // The accent list of the default palette, one entry per exponent, `false` where
 // a tile takes no accent. The four colours, and the exponents they sit on, are
@@ -106,18 +71,13 @@ $ramp-default-accent-weight: 55% !default;
 $ramp-default-super-tint: #333 !default;
 $ramp-default-super-weight: 95% !default;
 
-// -----------------------------------------------------------------------------
-// 2. The three palettes
-//
-// Every colour a palette applies is declared once, here. The rules in sections
-// 4 and 5 name these keys and never a colour of their own. All three maps carry
-// the same key set.
-// -----------------------------------------------------------------------------
+// Every colour a palette applies is declared once here. The emission mixins
+// below name these keys and never a colour of their own, and all three maps
+// carry the same key set.
 
-// The default palette. Each entry resolves to a token in style/_tokens.scss, to
-// a documented derivative of one, or to a literal style/main.scss already
-// declares. `diagnostics-*` and `focus-*` are the only entries with no
-// counterpart in style/main.scss; both are derived from the text tokens.
+// The default palette. Each entry resolves to a token, to a documented
+// derivative of one, or to a literal the stylesheet already declares, except
+// the `diagnostics-*` and `focus-*` entries derived from the text tokens.
 $palette-default: (
   name: "default",
 
@@ -162,9 +122,9 @@ $palette-default: (
   diagnostics-accent: $tile-gold-color
 );
 
-// The high-contrast palette. Its ramp is a single monotonic luminance ladder
-// from a mid-tone low anchor to a near-black high anchor. It declares no accent
-// band. Every step differs in luminance.
+// The high-contrast palette (decision DL-THEME-01). Its ramp is a single
+// monotonic luminance ladder from a mid-tone low anchor to a near-black high
+// anchor. It declares no accent band. Every step differs in luminance.
 $palette-high-contrast: (
   name: "high-contrast",
 
@@ -208,11 +168,9 @@ $palette-high-contrast: (
   diagnostics-accent: #7fd4ff
 );
 
-// The colourblind-safe palette. Both anchors and all four accents are drawn
-// from the Okabe-Ito colour set - yellow and blue for the anchors, orange,
-// vermillion, reddish purple and bluish green for the accents - and sit on a
-// monotonic luminance ladder. It targets protanopia, deuteranopia and
-// tritanopia.
+// The colourblind-safe palette (decision DL-THEME-02). Both anchors and all
+// four accents are drawn from the Okabe-Ito colour set and sit on a monotonic
+// luminance ladder, so it carries protanopia, deuteranopia and tritanopia.
 $palette-colorblind-safe: (
   name: "colorblind-safe",
 
@@ -256,23 +214,21 @@ $palette-colorblind-safe: (
   diagnostics-accent: #8ecae6
 );
 
-// The attribute that activates a palette, and the three names it accepts. The
-// default palette is listed for completeness; it needs no activation and
-// emits no scoped rules.
+// The attribute that activates a palette and the three names it accepts. The
+// default needs no activation and emits no scoped rules.
 $theme-attribute: "data-theme" !default;
 $theme-names: ("default", "high-contrast", "colorblind-safe") !default;
 
-// The palettes that activation switches between. The default palette is absent
-// by construction: it is the unscoped cascade.
+// The palettes activation switches between. The default is absent by
+// construction: it is the unscoped cascade.
 $themes: (
   "high-contrast": $palette-high-contrast,
   "colorblind-safe": $palette-colorblind-safe
 ) !default;
 
-// Holds $theme-names, $themes and each palette's own `name` to one list of
-// names, in both directions. Two conditions raise a compile-time error here: a
-// name listed in $theme-names that $themes cannot resolve, and a palette keyed
-// in $themes under a name it does not give itself.
+// Holds the name lists to one set in both directions: an unresolvable name in
+// $theme-names, or a palette keyed under a name it does not give itself, raises
+// a compile-time error.
 @each $name in $theme-names {
   @if $name != "default" and not map.has-key($themes, $name) {
     @error "themes: `#{$name}` is listed in $theme-names but absent from "
@@ -291,14 +247,8 @@ $themes: (
   }
 }
 
-// -----------------------------------------------------------------------------
-// 3. The ramp port
-//
-// One generative implementation, run once per palette. A palette supplies the
+// The ramp port: one generative implementation, run once per palette from the
 // two anchors, the accent list, the accent weight and the two glow colours.
-// This section derives every tile's background, numeral colour and glow shadow
-// from them.
-// -----------------------------------------------------------------------------
 
 // Reads one entry from a palette. Fails the build when the key is absent.
 @function palette-value($palette, $key) {
@@ -313,6 +263,23 @@ $themes: (
 // style/main.scss calls.
 @function ramp-power($exponent) {
   @return pow($ramp-base, $exponent);
+}
+
+// A rarity tier's accent: the palette's own two anchors interpolated across the
+// shared $rarity-tiers ladder, linear in the tier's ordinal.
+//
+// This is the same interpolation style/_hud.scss and style/_reward.scss ran,
+// and against the default palette it resolves to the same four colours they
+// compiled; under either additive palette it resolves to that palette's own
+// anchors instead, which is what gives the rarity surfaces theme coverage.
+@function ramp-rarity($palette, $ordinal) {
+  $count: list.length($rarity-tiers);
+
+  @return color.mix(
+    palette-value($palette, tile-high),
+    palette-value($palette, tile-low),
+    math.div($ordinal - 1, $count - 1) * 100%
+  );
 }
 
 // The accent for one exponent, or `false` where the palette declares none.
@@ -387,17 +354,9 @@ $themes: (
   );
 }
 
-// -----------------------------------------------------------------------------
-// 4. Emission mixins
-// -----------------------------------------------------------------------------
-
-// Publishes a palette as `--theme-*` custom properties. This is the surface the
-// sibling partials and the TypeScript layer read: the screen flow, the HUD, the
-// reward cards, the run summary, the focus ring and the diagnostics overlay all
-// resolve their colours from it, and none of their selectors is named here.
-//
-// The per-value tile entries come from the section 3 port, the same source as
-// the rules `palette-ramp` emits.
+// Publishes a palette as `--theme-*` custom properties — the surface the
+// sibling partials and the TypeScript layer read. The per-value tile entries
+// come from the ramp port above, the same source `palette-ramp` emits from.
 @mixin palette-properties($palette) {
   --theme-name: #{palette-value($palette, name)};
 
@@ -443,12 +402,24 @@ $themes: (
     --theme-tile-#{$power}-numeral: #{ramp-numeral($palette, $exponent)};
     $exponent: $exponent + 1;
   }
+
+  // One accent per rarity tier, from the section 3 port. Published for the two
+  // surfaces that present a relic's rarity: style/_hud.scss's active-relic tray
+  // and style/_reward.scss's reward card and rarity chip. Both read these
+  // properties with their own compiled mix as the fallback, so the default
+  // palette renders exactly the colours they rendered before this block
+  // existed.
+  @each $tier in $rarity-tiers {
+    --theme-rarity-#{"" + $tier}: #{ramp-rarity(
+        $palette,
+        list.index($rarity-tiers, $tier)
+      )};
+  }
 }
 
-// Emits the tile ramp for a palette. Nested one level inside `.tile`, so each
-// rule resolves to `.tile.tile-<value> .tile-inner` and, under the theme scope,
-// carries one selector more than the rule style/main.scss compiles for the same
-// tile.
+// Emits the tile ramp for a palette, nested one level inside `.tile`, so each
+// rule carries one selector more than the rule style/main.scss compiles for the
+// same tile.
 @mixin palette-ramp($palette) {
   $exponent: 1;
   @while $exponent <= $ramp-limit {
@@ -462,12 +433,9 @@ $themes: (
 }
 
 // Applies a palette to the surfaces style/main.scss colours at compile time,
-// which cannot read a custom property.
-//
-// Every selector below carries exactly one selector more than the rule
-// style/main.scss compiles for the same element, and the nesting that produces
-// that depth is load-bearing. No declaration uses `!important`, and none
-// applies `filter`, `opacity` or `transform` to an ancestor.
+// which cannot read a custom property. Each selector carries exactly one
+// selector more than the rule it supersedes, so the nesting depth is
+// load-bearing; no declaration uses `!important`.
 @mixin palette-surfaces($palette) {
   // The root element, and the body element that shares its declaration.
   background: palette-value($palette, page-background);
@@ -509,7 +477,16 @@ $themes: (
   .game-container {
     background: palette-value($palette, board-field);
 
-    .grid-cell {
+    // Scoped to `.board-number-only`, matching the scope style/main.scss
+    // applies to the same selector. The cell is produced by
+    // src/render/number-only-renderer.ts inside that layer and nowhere else,
+    // and the two rules carry the same scope so that this one keeps winning:
+    // both gained a class, so this selector stays one class more specific than
+    // the compile-time cell colour it supersedes, and the palette continues to
+    // recolour the lattice. The `cell` palette entry is also emitted as the
+    // `--theme-cell` custom property above, which is how the renderer and the
+    // parallel accessibility board read the empty-cell surface.
+    .board-number-only .grid-cell {
       background: palette-value($palette, cell);
     }
 
@@ -544,31 +521,27 @@ $themes: (
   }
 }
 
-// -----------------------------------------------------------------------------
-// 5. Emission
-// -----------------------------------------------------------------------------
-
-// The default palette is published as custom properties and nothing else. It
-// declares no rule that colours an element style/main.scss already colours, so
-// with no activation attribute present every rendered colour is the colour the
-// stylesheet compiled before this file existed.
+// The default palette publishes custom properties and nothing else, so with no
+// activation attribute every rendered colour is the one the stylesheet
+// compiled before this file existed.
 :root {
   @include palette-properties($palette-default);
 }
 
-// The diagnostics overlay, the surface src/observability/diagnostics-overlay.ts
-// renders into. Its two colours are bound to the custom properties, which
-// resolve against the active palette. This rule declares colour only: the
-// overlay's geometry, its monospace stack and its place on the z-index ladder
-// are declared where the overlay itself is styled.
+// Diagnostics overlay colour, bound to the custom properties so it follows the
+// active palette. This rule declares colour only: the overlay's geometry, its
+// monospace stack and its place on the z-index ladder are declared by
+// `.diagnostics-overlay:not([hidden])` in style/main.scss, which is also where
+// `--theme-diagnostics-accent` is consumed as the overlay's outline. The two
+// rules do not overlap.
 .diagnostics-overlay {
   background: var(--theme-diagnostics-surface);
   color: var(--theme-diagnostics-text);
 }
 
-// The two additive palettes. Each emits two things under its own activation
-// selector: the whole custom-property set again, and the rules that supersede
-// the compile-time colours of style/main.scss.
+// The two additive palettes. Each emits the whole custom-property set again
+// under its own activation selector, plus the rules that supersede the
+// compile-time colours.
 @each $name, $palette in $themes {
   [#{$theme-attribute}="#{$name}"] {
     @include palette-properties($palette);

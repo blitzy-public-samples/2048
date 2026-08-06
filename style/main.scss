@@ -1,80 +1,49 @@
-// =============================================================================
-// style/main.scss — the stylesheet entry point.
-// =============================================================================
+// Stylesheet entry point. src/main.ts imports this file, and this one load
+// emits the whole style layer: helpers, tokens, the Clear Sans faces and the
+// six screen partials. Partials that need a token or an accessibility utility
+// `@use` it for themselves as well, because Sass `@use` is not transitive.
 //
-// CHANGED: index.html's `<link>` to the committed generated CSS was removed;
-// src/main.ts imports this file instead. One load of this file emits the whole
-// style layer: the six partials below are loaded here and nowhere else.
-//
-// CHANGED: the two `@import` rules that stood at L1-L2 are now `@use` rules,
-// and the fourteen-token block that stood at L4-L22 moved to style/_tokens.scss.
-//
-// TRACEABILITY
-//   token block L4-L22   -> style/_tokens.scss -> src/theme/tokens.ts
-//   tile ramp generator  -> src/theme/tile-ramp.ts
-//
-// Provenance for every change in this file: docs/DECISION_LOG.md.
-// =============================================================================
+// Dart Sass migration: divisions use math.div(), the colour and list functions
+// are namespaced (color.mix, color.adjust, list.nth), and the token block that
+// stood at the top of this file now lives in style/_tokens.scss.
 
-// Sass built-in modules. `math` carries the division operator that replaced `/`
-// and the namespaced `ceil()`, `floor()` and `max()`; `color` carries the
-// namespaced `mix()` and the `adjust()` that replaced `lighten()`/`darken()`;
-// `list` carries the namespaced `nth()`.
+// Intake for the authoritative token values. vite.config.ts renders
+// `sassTokenProjection` of src/theme/tokens.ts as a Sass map and prepends a
+// declaration of this variable through
+// `css.preprocessorOptions.scss.additionalData`; that declaration precedes this
+// one, so `!default` leaves it standing. Compiling this file with no such
+// prefix - `sass style/main.scss` run directly - leaves the map empty and
+// style/_tokens.scss resolves its own fallbacks. A variable declaration is
+// permitted ahead of the `@use` rules below because it configures a module one
+// of them loads.
+$blitzy-token-projection: () !default;
+
 @use "sass:color";
 @use "sass:list";
 @use "sass:math";
 
-// CHANGED from `@import "helpers"`. Loaded `as *`: the unqualified `clearfix`,
-// `keyframes`, `animation`, `animation-fill-mode`, `transition`,
-// `transition-property`, `transform` and `smaller` mixins and the `pow()`
-// function in this file resolve to it.
+// Loaded `as *`, so the mixins and `pow()` used below resolve unqualified.
 @use "helpers" as *;
 
-// Design tokens, moved out of this file. Loaded `as *`: the unqualified token
-// references in this file resolve to it.
-@use "tokens" as *;
+// Design tokens, moved out of this file. Loaded `as *`, so the unqualified
+// token references in this file resolve to it, and configured with the
+// projection above. This is the first load of "tokens" in the compilation, so
+// it is the load that may configure it; the partials further down load it
+// unconfigured.
+@use "tokens" as * with (
+  $projection: $blitzy-token-projection
+);
 
-// CHANGED from `@import "fonts/clear-sans.css"`. The three `@font-face` blocks
-// of style/fonts/clear-sans.css are emitted into this stylesheet rather than
+// The three `@font-face` blocks are emitted into this stylesheet rather than
 // fetched by a nested CSS `@import`; the build rebases their nine font URLs.
 @use "fonts/clear-sans";
 
-// style/_a11y.scss — the focus vocabulary, the `.visually-hidden` utility, the
-// parallel accessibility board layer and the reduced-motion overrides.
 @use "a11y";
-
-// style/_themes.scss — the `--theme-*` custom properties for the default,
-// high-contrast and colourblind-safe palettes.
 @use "themes";
-
-// style/_hud.scss — the in-run heads-up display: the stage index and goal
-// readouts and the active-relic tray rendered in pickup order.
 @use "hud";
-
-// style/_reward.scss — the choose-1-of-3 relic reward screen: the
-// `.screen[data-screen="reward"]` layer, its panel and its three relic cards.
 @use "reward";
-
-// style/_summary.scss — the run-summary screen overlay and its panel: the final
-// score and stage readouts, the relics collected in pickup order, and the
-// copyable run seed.
 @use "summary";
-
-// style/_screens.scss — the `.screen-layer` host and the shared `.screen`
-// container layer that the run-start, stage-progress, game-over, reward and
-// run-summary screens are built on.
 @use "screens";
-
-// CHANGED: the fourteen token declarations that stood here - $field-width,
-// $grid-spacing, $grid-row-cells, $tile-size, $tile-border-radius,
-// $mobile-threshold, $text-color, $bright-text-color, $tile-color,
-// $tile-gold-color, $tile-gold-glow-color, $game-container-margin-top,
-// $game-container-background and $transition-speed - moved verbatim to
-// style/_tokens.scss, which `@use "tokens" as *` above loads. Their names and
-// values are unchanged. The board dimension is now declared once, as
-// $grid-row-cells in style/_tokens.scss with `!default`, and the position loop
-// below reads it from there; src/config/default-config.ts carries the
-// engine-side board size.
 
 html, body {
   margin: 0;
@@ -147,9 +116,6 @@ h1.title {
     color: $tile-color;
   }
 
-  // CHANGED: a dead `color: red` declaration that stood between `right` and
-  // `font-size` is removed. The `color: rgba($text-color, .9)` two lines below
-  // it, which overrode it, is unchanged.
   .score-addition {
     position: absolute;
     right: 30px;
@@ -192,7 +158,6 @@ strong {
 
 hr {
   border: none;
-  // CHANGED: `lighten($text-color, 40%)` -> `color.adjust()`. Same value.
   border-bottom: 1px solid color.adjust($text-color, $lightness: 40%);
   margin-top: 20px;
   margin-bottom: 30px;
@@ -213,11 +178,19 @@ hr {
   }
 }
 
-// CHANGED: base visibility protocol for the `hidden` attribute. index.html toggles
-// nine elements by that attribute alone - the six screen-router containers, the
-// settings panel, the diagnostics overlay and the number-only board layer. Each
-// selector carries (0,2,0) specificity; no `!important` is used.
-// Provenance: docs/DECISION_LOG.md.
+// Base visibility for the `hidden` attribute: index.html toggles the six
+// screen-router containers, the settings panel, the diagnostics overlay and
+// the number-only board layer by that attribute alone, with no `!important`.
+// Each selector carries (0,2,0) specificity.
+//
+// This block is the hidden half of that protocol. Every element it names has a
+// shown half of matching specificity, scoped to `:not([hidden])`, and the two
+// selectors are mutually exclusive, so neither can override the other:
+//   .settings-panel      style/_screens.scss section 8, the modal surface
+//   .diagnostics-overlay the block below, the overlay surface
+//   .screen              style/_screens.scss section 3 and style/_reward.scss
+//   .hud                 style/_hud.scss
+//   .board-number-only   `.board-canvas, .board-number-only` further down
 .screen[hidden],
 .hud[hidden],
 .settings-panel[hidden],
@@ -227,17 +200,94 @@ hr {
   display: none;
 }
 
+// The shown state of `#diagnostics-overlay`, the in-page surface that stands in
+// for the metrics endpoint a static bundle cannot serve.
+// src/observability/diagnostics-overlay.ts renders the health results, the
+// frame-time and turn-latency spans, the per-hook dispatch counts and the
+// snapshot export into it, and toggles the `hidden` attribute the block above
+// reads. This rule declares geometry, layering and typography only; the colours
+// stay with the palettes, and the accent is the third property they publish and
+// this its first consumer. Every length resolves to a token or a token
+// derivative.
+.diagnostics-overlay:not([hidden]) {
+  position: fixed;
+
+  // Pinned to the block-end inline-start corner: clear of `.above-game` and of
+  // `.scores-container`, the two regions that occupy the top of the page, and
+  // on the opposite corner from the right-floated `.restart-button`.
+  inset-block-end: $grid-spacing;
+  inset-inline-start: $grid-spacing;
+
+  // The topmost slot of the ladder style/_tokens.scss extends the stylesheet's
+  // own with. It is above `$z-index-modal`, so a readout stays legible while
+  // the settings modal or the reward screen is open, and above the 100 the
+  // terminal overlay carries.
+  z-index: $z-index-diagnostics;
+
+  box-sizing: border-box;
+  inline-size: math.div($field-width * 3, 5);
+
+  // Bounded on both axes against the viewport, which is the containing block of
+  // a fixed element, leaving the corner inset clear on the opposite side. A
+  // long readout scrolls inside the overlay instead of growing over the board.
+  max-inline-size: calc(100% - #{$grid-spacing * 2});
+  max-block-size: calc(100% - #{$grid-spacing * 2});
+  overflow: auto;
+
+  // Keeps a scroll gesture that reaches the end of the readout from chaining to
+  // the page behind it.
+  overscroll-behavior: contain;
+
+  display: flex;
+  flex-direction: column;
+  gap: $grid-spacing;
+
+  padding: $grid-spacing;
+  border-radius: $tile-border-radius * 2;
+
+  // The monospace stack style/_tokens.scss declares, so a metric name, a
+  // duration and a count line up in columns. `.seed-input` and the run
+  // summary's seed readout are set from the same token.
+  font-family: $diagnostics-font-family;
+  font-size: $grid-spacing - a11y.$a11y-hairline * 2;
+  line-height: $grid-spacing;
+
+  // The readout is tabular, not prose: it is set flush to the inline start
+  // whatever the ancestor alignment, and the whitespace of an exported snapshot
+  // survives.
+  text-align: start;
+  white-space: pre-wrap;
+
+  // The accent edge, drawn as an outline so it adds no layout box. This is the
+  // first consumer of the third diagnostics colour the palettes publish.
+  outline: a11y.$a11y-hairline solid
+    var(--theme-diagnostics-accent, #{$tile-gold-color});
+  outline-offset: 0;
+
+  // Responsive placement: below the breakpoint the corner box becomes a strip
+  // across the block end, inset by the mobile gutter on both sides, because
+  // three fifths of the desktop field is most of a narrow viewport.
+  @include smaller($mobile-threshold) {
+    inset-block-end: a11y.$a11y-mobile-grid-spacing;
+    inset-inline-start: a11y.$a11y-mobile-grid-spacing;
+    inset-inline-end: a11y.$a11y-mobile-grid-spacing;
+
+    inline-size: auto;
+    max-inline-size: calc(100% - #{a11y.$a11y-mobile-grid-spacing * 2});
+    max-block-size: calc(100% - #{a11y.$a11y-mobile-grid-spacing * 2});
+
+    gap: a11y.$a11y-mobile-grid-spacing;
+    padding: a11y.$a11y-mobile-grid-spacing;
+  }
+}
+
 // Styles for buttons
 //
-// BLITZY [A11Y]: the label text in this mixin measures 3.79:1 (#f9f6f2 on #8f7a66)
-// at 18px bold, below the WCAG AA 4.5:1 threshold for text under 18.66px.
-// Implemented as the design system specifies; flagged for designer review, not
-// corrected here. Applies to `.restart-button`, `.settings-button` and the two
-// `.game-message` controls. Provenance: docs/DECISION_LOG.md.
+// BLITZY [A11Y]: the label text in this mixin sits below the WCAG AA 4.5:1 text
+// threshold. It applies to `.restart-button`, `.settings-button` and the two
+// `.game-message` controls. Recorded as decision DL-A11Y-01.
 @mixin button {
   display: inline-block;
-  // CHANGED: `darken($game-container-background, 20%)` -> `color.adjust()`.
-  // Same value, #8f7a66.
   background: color.adjust($game-container-background, $lightness: -20%);
   border-radius: 3px;
   padding: 0 20px;
@@ -246,10 +296,8 @@ hr {
   height: 40px;
   line-height: 42px;
 
-  // CHANGED: seven declarations added when index.html's `.restart-button`,
-  // `.retry-button` and `.keep-playing-button` became <button> elements. They
-  // neutralise the user-agent button styling and are a no-op for the <a> elements
-  // that also include this mixin. Provenance: docs/DECISION_LOG.md.
+  // Neutralises the user-agent button styling; a no-op for the <a> elements
+  // that also include this mixin.
   border: none;
   font-family: inherit;
   font-size: inherit;
@@ -257,15 +305,18 @@ hr {
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
+
+  // Hover, activation and disabled treatment. The shared mixin in
+  // style/_a11y.scss is the single declaration of the three states; the same
+  // mixin is included by the screen-flow, relic-tray and run-summary controls.
+  // It writes only `box-shadow`, `cursor`, `pointer-events` and `opacity`, so
+  // no measure in this mixin changes and the focus ring is never overwritten.
+  @include a11y.interactive-states;
 }
 
-// Game field mixin used to render CSS at different width
-//
-// CHANGED: the six geometry values the body reads are now parameters, each
-// defaulting to the token of the same name; the mixin took no arguments and
-// read them from the enclosing scope. The desktop include below passes no
-// arguments and compiles the wide-layout box; the mobile include passes the six
-// locals of its own block. Provenance: docs/DECISION_LOG.md.
+// Game field mixin used to render CSS at different width. The six geometry
+// values are parameters defaulting to the token of the same name, so the
+// mobile block can pass its own.
 @mixin game-field(
   $field-width: $field-width,
   $grid-spacing: $grid-spacing,
@@ -317,8 +368,6 @@ hr {
         height: 60px;
         line-height: 60px;
         margin-top: 222px;
-        // height: $field-width;
-        // line-height: $field-width;
       }
 
       .lower {
@@ -326,14 +375,9 @@ hr {
         margin-top: 59px;
       }
 
-      // CHANGED: the type selector was `a` only; `button` was added when
-      // index.html's `.keep-playing-button` and `.retry-button` became <button>
-      // elements. Tab indentation normalised to two spaces.
-      // Provenance: docs/DECISION_LOG.md.
       a, button {
         @include button;
         margin-left: 9px;
-        // margin-top: 59px;
 
         &.keep-playing-button {
           display: none;
@@ -347,9 +391,6 @@ hr {
         background: rgba($tile-gold-color, .5);
         color: $bright-text-color;
 
-        // CHANGED: selector was `a.keep-playing-button`; the element qualifier was
-        // dropped. Tab indentation normalised to two spaces.
-        // Provenance: docs/DECISION_LOG.md.
         .keep-playing-button {
           display: inline-block;
         }
@@ -361,58 +402,79 @@ hr {
     }
   }
 
-  .grid-container {
-    position: absolute;
-    z-index: 1;
-  }
-
-  .grid-row {
-    margin-bottom: $grid-spacing;
-
-    &:last-child {
-      margin-bottom: 0;
+  // The four lattice selectors are scoped to `.board-number-only`, the element
+  // that produces them. index.html used to ship the lattice as sixteen static
+  // `.grid-cell` elements inside four `.grid-row` elements plus an empty
+  // `.tile-container`; that markup was removed so the board could be built at
+  // the configured size, which left these rules with no producer.
+  // src/render/number-only-renderer.ts is the producer now: it builds
+  // `.grid-container` holding one `.grid-row` per row holding one `.grid-cell`
+  // per column, and a sibling `.tile-container`, into the `#board-number-only`
+  // layer, at whatever size the configuration carries.
+  //
+  // Scoping states that ownership in the selector and bounds the rules to the
+  // layer that draws them: the sibling `#board-canvas` layer draws the same
+  // board as geometry inside a WebGL context and takes nothing from here.
+  // Emitted geometry is unchanged at both scales, the z-index ladder is not
+  // renumbered, and style/_themes.scss scopes its own `.grid-cell` palette
+  // override to match so it keeps superseding the compile-time cell colour.
+  //
+  // The `.tile` block below stays unscoped: its box, its position classes, its
+  // value ramp and the `appear`/`pop` rules are the vocabulary the palette ramp
+  // addresses, and they were never the selectors that lost a producer.
+  .board-number-only {
+    .grid-container {
+      position: absolute;
+      z-index: 1;
     }
 
-    &:after {
-      content: "";
-      display: block;
-      clear: both;
+    .grid-row {
+      margin-bottom: $grid-spacing;
+
+      &:last-child {
+        margin-bottom: 0;
+      }
+
+      &:after {
+        content: "";
+        display: block;
+        clear: both;
+      }
     }
-  }
 
-  .grid-cell {
-    width: $tile-size;
-    height: $tile-size;
-    margin-right: $grid-spacing;
-    float: left;
+    .grid-cell {
+      width: $tile-size;
+      height: $tile-size;
+      margin-right: $grid-spacing;
+      float: left;
 
-    border-radius: $tile-border-radius;
+      border-radius: $tile-border-radius;
 
-    background: rgba($tile-color, .35);
+      background: rgba($tile-color, .35);
 
-    &:last-child {
-      margin-right: 0;
+      &:last-child {
+        margin-right: 0;
+      }
     }
-  }
 
-  .tile-container {
-    position: absolute;
-    z-index: 2;
+    .tile-container {
+      position: absolute;
+      z-index: 2;
+    }
   }
 
   .tile {
     &, .tile-inner {
-      // CHANGED: global `ceil()` -> `math.ceil()`. Same values.
       width: math.ceil($tile-size);
       height: math.ceil($tile-size);
       line-height: math.ceil($tile-size);
     }
 
-    // Build position classes
-    @for $x from 1 through $grid-row-cells {
+    // $grid-row-cells, declared once in style/_tokens.scss, is the board
+  // dimension this loop and the tile geometry above read.
+  @for $x from 1 through $grid-row-cells {
       @for $y from 1 through $grid-row-cells {
         &.tile-position-#{$x}-#{$y} {
-          // CHANGED: global `floor()` -> `math.floor()`. Same values.
           $xPos: math.floor(($tile-size + $grid-spacing) * ($x - 1));
           $yPos: math.floor(($tile-size + $grid-spacing) * ($y - 1));
           @include transform(translate($xPos, $yPos));
@@ -422,20 +484,11 @@ hr {
   }
 }
 
-// End of game-field mixin
 @include game-field;
 
-// NEW: the board host and the two rendering layers index.html declares inside
-// `.game-container`, where the four `.grid-row` rows and the empty
-// `.tile-container` element used to stand. No rule in style/ gave either layer a
-// box before this one.
-//
-// Emitted geometry: the host fills `.game-container`'s content box, which is the
-// tile field at either scale - 470px on the wide layout, 260px on the narrow
-// one - and both layers fill the host without adding a box to the flow.
-// style/_a11y.scss makes the host the positioning context and gives
-// `.board-a11y` the same fill; `.board-canvas` carries `aria-hidden="true"` in
-// the markup. Provenance: docs/DECISION_LOG.md.
+// Board host and its two rendering layers. The host fills `.game-container`'s
+// content box — the tile field at either scale — and both layers fill the host
+// without adding a box to the flow.
 .board-host {
   height: 100%;
 }
@@ -463,7 +516,6 @@ hr {
     font-size: 55px;
   }
 
-  // Movement transition
   @include transition($transition-speed ease-in-out);
   -webkit-transition-property: -webkit-transform;
   -moz-transition-property: -moz-transform;
@@ -486,19 +538,14 @@ hr {
                    false true, // 1024
                    false true; // 2048
 
-  // Build tile colors
   @while $exponent <= $limit {
     $power: pow($base, $exponent);
 
     &.tile-#{$power} .tile-inner {
       // Calculate base background color
-      // CHANGED: `/` division -> `math.div()`, and the weight now carries the
-      // `%` unit that `color.mix()` expects. Same values.
       $gold-percent: math.div($exponent - 1, $limit - 1) * 100%;
-      // CHANGED: global `mix()` -> `color.mix()`. Same values.
       $mixed-background: color.mix($tile-gold-color, $tile-color, $gold-percent);
 
-      // CHANGED: global `nth()` -> `list.nth()` on the three lookups below.
       $nth-color: list.nth($special-colors, $exponent);
 
       $special-background: list.nth($nth-color, 1);
@@ -512,21 +559,15 @@ hr {
         color: $bright-text-color;
       }
 
-      // Set background
       background: $mixed-background;
 
-      // Add glow
-      // CHANGED: `/` division -> `math.div()` and global `max()` ->
-      // `math.max()`. Same values.
       $glow-opacity: math.div(math.max($exponent - 4, 0), $limit - 4);
 
       @if not $special-background {
-        // CHANGED: the two `/` divisions -> `math.div()`. Same values.
         box-shadow: 0 0 30px 10px rgba($tile-gold-glow-color, math.div($glow-opacity, 1.8)),
                     inset 0 0 0 1px rgba(white, math.div($glow-opacity, 3));
       }
 
-      // Adjust font size for bigger numbers
       @if $power >= 100 and $power < 1000 {
         font-size: 45px;
 
@@ -549,7 +590,6 @@ hr {
   // Super tiles (above 2048)
   &.tile-super .tile-inner {
     color: $bright-text-color;
-    // CHANGED: global `mix()` -> `color.mix()`. Same value, #3c3a32.
     background: color.mix(#333, $tile-gold-color, 95%);
 
     font-size: 30px;
@@ -597,12 +637,36 @@ hr {
   @include animation-fill-mode(backwards);
 }
 
+// The row seats three items - the intro copy plus `.restart-button` and
+// `.settings-button` - so it is an explicit flex row at both scales. `.game-intro`
+// bases on the whole line (`flex: 1 1 100%`), which removes the free space that
+// would otherwise admit one control onto the first line, so the two controls
+// always share the second line hugged to the inline end. A flexible basis would
+// not hold that pairing: flex breaks lines against each item's hypothetical main
+// size and applies `flex-grow` only afterwards, per line.
+//
+// `gap` is the single declaration of the space between the controls - $control-gap
+// from style/_tokens.scss at both scales, the same token separating the two
+// `.game-message` controls - so the row carries no length of its own. No clearfix
+// is included: a `:after` would become a flex item and consume one `gap`.
+// Visual order follows DOM order, so `New Game` paints to the left of `Settings`.
 .above-game {
-  @include clearfix;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: $control-gap;
 }
 
 .game-intro {
-  float: left;
+  // Bases on the whole line, so it takes the first line alone and leaves the
+  // second to the pair of controls. The intrinsic minimum is released so a long
+  // word can never force the row wider than `.container`.
+  flex: 1 1 100%;
+  min-width: 0;
+
+  // Both frozen: the 42px line box that centres a single line of intro copy
+  // against a 40px control, and the suppressed paragraph margin.
   line-height: 42px;
   margin-bottom: 0;
 }
@@ -611,18 +675,21 @@ hr {
   @include button;
   display: block;
   text-align: center;
-  float: right;
+
+  // A flex item at its own width. Position on the row is the parent's
+  // `justify-content`, and the gap is the parent's `gap`.
+  flex: 0 0 auto;
 }
 
-// NEW: `.settings-button` accompanies `.restart-button` in index.html's
-// `.above-game` row. Same button vocabulary, floated right, 9px gap.
-// Provenance: docs/DECISION_LOG.md.
+// `.settings-button` accompanies `.restart-button` in index.html's
+// `.above-game` row. Same button vocabulary, and the same flex treatment; the
+// sibling gap is the row's `gap: $control-gap` rather than a margin on this
+// element, so one declaration separates every pair of controls on the row.
 .settings-button {
   @include button;
   display: block;
   text-align: center;
-  float: right;
-  margin-right: 9px;
+  flex: 0 0 auto;
 }
 
 .game-explanation {
@@ -630,14 +697,15 @@ hr {
 }
 
 @include smaller($mobile-threshold) {
-  // Redefine variables for smaller screens
-  $field-width: 280px;
-  $grid-spacing: 10px;
-  $grid-row-cells: 4;
-  // CHANGED: `/` division -> `math.div()`. Same value, 57.5px.
+  // Redefine variables for smaller screens. The three lengths this block
+  // rescales are read from the $mobile-* tokens of style/_tokens.scss rather
+  // than restated here, so the locals below shadow only what this scale
+  // actually changes. Emitted geometry is unchanged: a 280px field, 10px
+  // gutters, 57.5px cells and a 17px offset.
+  $field-width: $mobile-field-width;
+  $grid-spacing: $mobile-grid-spacing;
   $tile-size: math.div($field-width - $grid-spacing * ($grid-row-cells + 1), $grid-row-cells);
-  $tile-border-radius: 3px;
-  $game-container-margin-top: 17px;
+  $game-container-margin-top: $mobile-game-container-margin-top;
 
   html, body {
     font-size: 15px;
@@ -668,29 +736,24 @@ hr {
     margin-bottom: 10px;
   }
 
-  // Show intro and restart button side by side
+  // The percentage widths are gone. `.game-intro` was 55% and
+  // `.restart-button` 42%, which left about 8px of the row for a third control
+  // that was never given a width, so `.settings-button` wrapped. The flex row
+  // above governs this scale too: the intro takes the first line at the full
+  // field width and the two controls share the second line, hugged to the
+  // inline end and separated by the row's $control-gap. Both controls keep the
+  // inline padding of the `button` mixin, so neither label touches its edge.
+  //
+  // `line-height` is the one declaration this scale still needs: the desktop
+  // row centres a single line against a 40px control with a 42px line box,
+  // while here the intro is copy that wraps and takes the body leading.
   .game-intro {
-    width: 55%;
     display: block;
     box-sizing: border-box;
     line-height: 1.65;
   }
 
-  .restart-button {
-    width: 42%;
-    padding: 0;
-    display: block;
-    box-sizing: border-box;
-    margin-top: 2px;
-  }
-
   // Render the game field at the right width
-  //
-  // CHANGED: the include passes the six values redeclared at the top of this
-  // block; it previously passed none. A four-declaration `.game-container`
-  // restatement that stood immediately below it is removed. Emitted geometry
-  // matches the pre-Dart-Sass build: a 280px field, 10px gutters, 57.5px cells,
-  // 58px tiles and a 67px position step. Provenance: docs/DECISION_LOG.md.
   @include game-field(
     $field-width: $field-width,
     $grid-spacing: $grid-spacing,
@@ -700,7 +763,6 @@ hr {
     $game-container-margin-top: $game-container-margin-top
   );
 
-  // Rest of the font-size adjustments in the tile class
   .tile .tile-inner {
     font-size: 35px;
   }

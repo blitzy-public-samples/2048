@@ -1,114 +1,42 @@
-// =============================================================================
-// Run summary — the end-of-run panel: final score, stage reached, the relics
+// Run summary: the end-of-run panel — final score, stage reached, the relics
 // collected in pickup order, and the run seed, displayed and copyable.
-// =============================================================================
 //
-// PROVENANCE
-//   Nothing in this file was moved from an existing stylesheet. The
-//   pre-migration page carried one screen, no router and no run-summary surface
-//   of any kind, so every selector below is new and no existing selector is
-//   renamed, renumbered or superseded.
+// Selector contract. index.html declares the container and nothing inside it;
+// src/ui/screens/run-summary.ts renders these children, in this source order:
 //
-//   Four vocabularies are restated from style/main.scss rather than invented:
-//     - the overlay wash and its fade cadence, from `.game-message`
-//     - the score readout, from `.score-container` / `.best-container`
-//     - the control box, from `@mixin button`, which is declared inside
-//       style/main.scss and is therefore not importable from a partial
-//     - the section divider, which is the global `hr` rule; the panel renders
-//       `<hr>` elements and no rule in this file touches `hr`
+//   section.run-summary                       the panel
+//     h2.run-summary-title
+//     div.run-summary-scores
+//       div.run-summary-score                 one per readout
+//         span.run-summary-score-label        caption first, value second
+//         span.run-summary-score-value
+//     hr
+//     h3.run-summary-relics-title
+//     ol.run-summary-relic-list role="list"   pickup order is source order
+//       li.run-summary-relic                  keeps its `list-item` display
+//         div.run-summary-relic-row           carries the row layout
+//           span.run-summary-relic-name
+//           span.run-summary-relic-rarity
+//           span.run-summary-relic-charges
+//     p.run-summary-relics-empty              rendered when no relic was taken
+//     hr
+//     section.run-summary-seed
+//       span.run-summary-seed-label
+//       code.run-summary-seed-value           the run seed, verbatim
+//       button.run-summary-seed-copy
+//       span.run-summary-seed-status          the text copy confirmation
+//     div.run-summary-actions
+//       button.run-summary-action             one per action
 //
-//   Every colour, length, duration and ratio resolves to a token in
-//   style/_tokens.scss or to the DERIVED VALUES block below. The panel's body
-//   size and family are not declared at all; they are inherited from the
-//   `html, body` rule in style/main.scss, which is 18px wide / 15px narrow on
-//   "Clear Sans", "Helvetica Neue", Arial, sans-serif.
+// `.run-summary-relic` carries no `display`, which leaves the `<li>` at its
+// `list-item` used value: that generates the `::marker` the list is numbered by
+// and keeps the `listitem` role in the accessibility tree, so the row layout is
+// declared one level in on `.run-summary-relic-row`.
 //
-// SELECTOR CONTRACT
-//   index.html declares the container and nothing inside it:
-//     <div class="screen" id="screen-run-summary" data-screen="run-summary"
-//          role="dialog" aria-modal="true" aria-label="Run summary" hidden>
-//   src/ui/screens/run-summary.ts renders the children, in this source order,
-//   with these class names and these element types:
-//     section.run-summary                     the panel
-//       h2.run-summary-title
-//       div.run-summary-scores
-//         div.run-summary-score               one per readout
-//           span.run-summary-score-label      caption first, value second
-//           span.run-summary-score-value
-//       hr
-//       h3.run-summary-relics-title
-//       ol.run-summary-relic-list  role="list"  pickup order is source order
-//         li.run-summary-relic                keeps its `list-item` display
-//           div.run-summary-relic-row         carries the row layout
-//             span.run-summary-relic-name
-//             span.run-summary-relic-rarity
-//             span.run-summary-relic-charges
-//       p.run-summary-relics-empty            rendered when no relic was taken
-//       hr
-//       section.run-summary-seed
-//         span.run-summary-seed-label
-//         code.run-summary-seed-value         the run seed, verbatim
-//         button.run-summary-seed-copy        type="button"
-//         span.run-summary-seed-status        the text copy confirmation
-//       div.run-summary-actions
-//         button.run-summary-action           type="button", one per action
-//
-//   Both controls are `<button type="button">`, which is what makes them
-//   reachable by Tab and activatable by Enter and Space. `.run-summary-relics-
-//   empty` and `.run-summary-seed-status` are toggled with the `hidden`
-//   attribute; no rule here declares `display` on either, so the attribute
-//   keeps working.
-//
-//   `.run-summary-relic` carries no `display` declaration, which leaves the
-//   `<li>` at its `list-item` used value: that is what generates the `::marker`
-//   the list is numbered by and what keeps the `listitem` role in the
-//   accessibility tree. The row layout is therefore declared one level in, on
-//   `.run-summary-relic-row`. CSS Display 3 admits only `flow` and `flow-root`
-//   alongside `list-item`, so a flex list item is not expressible.
-//   `role="list"` on the `<ol>` mirrors index.html's own `.relic-tray`.
-//   Provenance: docs/DECISION_LOG.md.
-//
-// VISIBILITY
-//   The screen router drives the `hidden` attribute, and style/main.scss
-//   already carries `.screen[hidden] { display: none }`. The overlay rule below
-//   is written `.screen[data-screen="run-summary"]:not([hidden])`, so it can
-//   never apply to a hidden screen whatever order the two rules are emitted in.
-//   `data-screen` is the value src/ui/screen-router.ts addresses the container
-//   by; the router does not add or remove a class.
-//
-// THEME BINDING
-//   Every colour is read as `var(--theme-*, <token fallback>)`.
-//   style/_themes.scss publishes those custom properties at `:root` and
-//   republishes the whole set under each additive palette, so the panel follows
-//   the high-contrast and colourblind-safe palettes with no rule of its own.
-//   Each fallback is the same expression that file's default palette uses for
-//   the property it is paired with, so the two agree exactly. This file does
-//   not `@use` style/_themes.scss.
-//
-// LAYERING
-//   The panel's screen occupies $z-index-screen-overlay, the 300 slot. It sits
-//   above the HUD at 200 and below the modal surfaces at 400 and the
-//   diagnostics overlay at 500. index.html places `#diagnostics-overlay` at
-//   body level as a sibling of `.screen-layer`, so their only shared ancestors
-//   are `<body>` and `<html>`; no rule in this file declares `overflow`,
-//   `clip-path`, `contain`, `filter`, `opacity` or `transform` on either of
-//   them, and none renumbers the existing 1 / 2 / 10 / 20 / 100 ladder.
-//
-// CONSUMERS
-//   SCSS  style/main.scss loads this partial as `@use "summary"`. Sass `@use`
-//         is not transitive, so this file loads tokens, helpers and a11y for
-//         itself.
-//   HTML  index.html declares `#screen-run-summary` and `#live-region`.
-//   TS    src/ui/screens/run-summary.ts renders the contract above and
-//         announces the copy result through `#live-region`.
-//
-// EXPORTS
-//   @mixin summary-control   the control box this file applies to its copy and
-//                            action buttons
-//
-// The rationale, alternatives and risks behind every item above are recorded in
-// docs/DECISION_LOG.md; this file carries provenance only.
-// =============================================================================
+// Visibility. The router drives the `hidden` attribute and style/main.scss maps
+// `.screen[hidden]` to `display: none`, so every rule here is written
+// `:not([hidden])` and no rule declares `display` on the two elements that are
+// themselves toggled by the attribute.
 
 @use "sass:color";
 @use "sass:math";
@@ -116,116 +44,80 @@
 @use "helpers" as *;
 @use "a11y" as *;
 
-// -----------------------------------------------------------------------------
-// DERIVED VALUES
-//
-// style/_tokens.scss carries no typographic token, no alpha and no length below
-// $tile-border-radius. Every value this file needs in those ranges is derived
-// from a token once, here, and the value each one resolves to is stated beside
-// it. No declaration further down carries a literal length, duration, colour or
-// ratio.
-// -----------------------------------------------------------------------------
+// Values derived from tokens once, here. No rule below carries a literal
+// length, duration or colour.
 
-// One CSS pixel, reused from style/_a11y.scss's own derivation. Resolves to
-// 1px.
 $summary-hairline: $a11y-hairline !default;
 
-// The panel measure: $field-width on the wide layout and style/_a11y.scss's
-// mobile restatement of it on the narrow one. Resolve to 500px and 280px, the
-// two widths style/main.scss gives `.container`.
+// The panel measure: the two widths style/main.scss gives `.container`.
 $summary-measure: $field-width !default;
 $summary-measure-narrow: $a11y-mobile-field-width !default;
 
-// Rhythm: $grid-spacing on the wide layout and style/_a11y.scss's mobile
-// restatement on the narrow one. Resolve to 15px and 10px.
+// Rhythm: $grid-spacing on the wide layout, its mobile restatement on the
+// narrow one.
 $summary-gutter: $grid-spacing !default;
 $summary-gutter-narrow: $a11y-mobile-grid-spacing !default;
 
-// Panel padding: twice the rhythm on each layout. Resolve to 30px and 20px.
 $summary-panel-padding: $grid-spacing * 2 !default;
 $summary-panel-padding-narrow: $a11y-mobile-grid-spacing * 2 !default;
 
-// Panel corner: twice $tile-border-radius, the radius style/main.scss gives
-// `.game-container`. Resolves to 6px. Inner boxes take $tile-border-radius
-// itself, as `.grid-cell`, `.score-container` and the buttons do.
+// Panel corner: twice $tile-border-radius, the radius the board carries.
 $summary-panel-radius: $tile-border-radius * 2 !default;
 
-// Type scale. The three sizes below are the sizes style/main.scss already
-// compiles: 13px for the `.score-container` caption, 25px for its numerals, and
-// 30px for the `.game-message` verdict at the narrow layout.
-// 13px
+// Type scale: the three sizes style/main.scss already uses.
 $summary-caption-size: $grid-spacing - $summary-hairline * 2 !default;
-// 25px
 $summary-value-size: $game-container-margin-top - $grid-spacing !default;
-// 30px
 $summary-title-size: $grid-spacing * 2 !default;
 
-// Leading. The ratio style/main.scss declares for `p`. A ratio, not a length.
+// Leading, from the `p` rule. A ratio, not a length.
 $summary-line-height: 1.65 !default;
 
-// The score readout's inline padding, wide and narrow: 25px and 10px, the two
-// values style/main.scss gives `.score-container`. Its block padding is
-// $summary-gutter on both layouts, as it is there.
 $summary-readout-inline-padding:
   $game-container-margin-top - $grid-spacing !default;
 $summary-readout-inline-padding-narrow: $a11y-mobile-grid-spacing !default;
 
-// The seed field's own padding. Resolve to 6px and 10px.
 $summary-field-block-padding: $tile-border-radius * 2 !default;
 $summary-field-inline-padding: $a11y-mobile-grid-spacing !default;
 
-// Control box: the height, line height, inline padding and sibling gap
-// style/main.scss's `@mixin button` and `.game-message .lower` compile.
-// Resolve to 40px, 42px, 20px and 9px.
+// Control box geometry, from style/main.scss's `button` mixin.
 $summary-control-size: $game-container-margin-top !default;
 $summary-control-line-height:
   $game-container-margin-top + $summary-hairline * 2 !default;
 $summary-control-inline-padding:
   math.div($game-container-margin-top, 2) !default;
-$summary-control-gap: $tile-border-radius * 3 !default;
+// Defaults to $control-gap, the shared declaration of the sibling-control gap
+// in style/_tokens.scss; the derivation this line carried is the same
+// expression and resolves to the same 9px.
+$summary-control-gap: $control-gap !default;
 
-// The indent the ordered relic list needs to hold its markers outside the
-// content box. Resolves to 40px.
+// The indent that holds the ordered list's markers outside the content box.
 $summary-marker-indent: $game-container-margin-top !default;
 
-// Overlay cadence: the 800ms fade and the 1200ms delay style/main.scss gives
-// `.game-message`, as multiples of $transition-speed.
+// Overlay cadence: the fade duration and delay `.game-message` carries.
 $summary-fade-duration: $transition-speed * 8 !default;
 $summary-fade-delay: $transition-speed * 12 !default;
 
-// The alpha style/main.scss applies to both `.game-message` washes. A ratio,
-// not a length.
+// The alpha both `.game-message` washes carry. A ratio, not a length.
 $summary-wash-alpha: 0.5 !default;
 
 // The whole inline extent of the containing block. A ratio, not a length.
 $summary-fill: 100% !default;
 
-// Colour fallbacks. Each is the expression style/_themes.scss's default palette
-// uses for the custom property it is paired with below, so the fallback and the
-// published value agree. They resolve to the colours style/main.scss compiles:
-// #d8d4d0 for `hr`, #8f7a66 for `@mixin button`, and rgba(238, 228, 218, 0.5)
-// for the `.game-message` wash in its default state.
+// Colour fallbacks. Each is the value style/_themes.scss's default palette
+// publishes for the custom property it is paired with, so the fallback and the
+// published value agree.
 $summary-rule-color: color.adjust($text-color, $lightness: 40%) !default;
 $summary-control-surface:
   color.adjust($game-container-background, $lightness: -20%) !default;
 $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 
-// -----------------------------------------------------------------------------
-// CONTROL BOX
-// -----------------------------------------------------------------------------
-
 // The treatment style/main.scss's `@mixin button` compiles, restated with
-// logical properties and bound to the theme custom properties. The seven
-// user-agent resets are the same seven that mixin carries for the `<button>`
-// elements index.html declares.
+// logical properties and bound to the theme custom properties, together with
+// the same seven user-agent resets that mixin carries.
 //
-// BLITZY [A11Y]: the label measures 3.79:1 (#f9f6f2 on #8f7a66) at the panel's
-// inherited 18px bold, below the WCAG AA 4.5:1 threshold for text under
-// 18.66px. This is the figure style/main.scss already flags for the same
-// surface. Implemented as the design system specifies; flagged for designer
-// review, not corrected here. style/_themes.scss's high-contrast and
-// colourblind-safe palettes supersede both colours through the two custom
-// properties below. Provenance: docs/DECISION_LOG.md.
+// BLITZY [A11Y]: the control label sits below the WCAG AA 4.5:1 text threshold
+// under the default palette, the same figure style/main.scss flags for this
+// surface. Recorded as decision DL-A11Y-06.
 @mixin summary-control {
   display: inline-block;
   box-sizing: border-box;
@@ -246,54 +138,46 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   -webkit-appearance: none;
   appearance: none;
 
-  // Restated from style/_a11y.scss. That file already rings every `<button>`
-  // inside `.screen-layer`; this binds the ring to the control itself.
+  // Restated from style/_a11y.scss, which rings every `<button>` inside
+  // `.screen-layer`; this binds the ring to the control itself.
   @include focusable;
+
+  // The hover, activation and disabled states, from the shared mixin in
+  // style/_a11y.scss. This control previously carried focus only, so the copy
+  // and action buttons gave no feedback on being pointed at, pressed or made
+  // inert. The mixin is the same one style/main.scss's `button` mixin, the
+  // shared screen control and the relic-tray control include, so the states
+  // cannot drift between the four surfaces.
+  @include interactive-states;
 }
 
-// -----------------------------------------------------------------------------
-// 1. THE SCREEN
-//
-// The overlay the panel is centred in. Guarded by `:not([hidden])` so the
-// router's `hidden` attribute stays the only thing that decides whether the
+// The screen: the overlay the panel is centred in, guarded by `:not([hidden])`
+// so the router's attribute stays the only thing that decides whether the
 // screen is laid out.
-// -----------------------------------------------------------------------------
 
 .screen[data-screen="run-summary"]:not([hidden]) {
   position: fixed;
   inset: 0;
   z-index: $z-index-screen-overlay;
 
-  // The panel is the only child. Its `margin: auto` centres it in both axes and
-  // resolves to zero at the start edges once it is taller than the line; the
-  // remainder overflows into this box's own scrolling.
+  // The panel is the only child, and `margin: auto` centres it in both axes.
   display: flex;
   padding: $summary-gutter;
   overflow-y: auto;
 
-  // The wash and the cadence style/main.scss gives `.game-message`: the same
-  // custom property that element resolves in its default state, and the same
-  // 800ms fade after a 1200ms delay.
+  // The wash and the cadence style/main.scss gives `.game-message`.
   background: var(--theme-overlay-loss, $summary-wash);
   @include animation(fade-in $summary-fade-duration ease $summary-fade-delay);
 
-  // `both` holds frame zero through the delay and holds the last frame
-  // afterwards. style/_a11y.scss's reduced-motion layer collapses the delay to
-  // zero and the duration to $a11y-instant, and the retained last frame is
-  // opacity 1, so the panel is never left invisible. `fade-in` is the keyframe
-  // style/main.scss declares; this file declares no keyframe of its own.
+  // `both` holds frame zero through the delay and the last frame afterwards. The
+  // reduced-motion layer collapses delay and duration, and the retained last
+  // frame is opacity 1, so the panel is never left invisible.
   @include animation-fill-mode(both);
 
   // A screen the router has unhidden but not yet rendered into would otherwise
-  // paint the wash and take every pointer event across the whole viewport. The
-  // collapse holds until src/ui/screens/run-summary.ts appends the panel.
-  //
-  // Two independently valid rules rather than one selector list. `:empty`
-  // covers the container index.html declares, which carries no child node;
-  // Chrome counts a whitespace-only text node as content, so `:empty` alone
-  // stops matching the moment any indentation survives inside the element. The
-  // `:has()` form is insensitive to that, and an engine without `:has()` drops
-  // only its own rule and keeps the first.
+  // paint the wash and take every pointer event across the viewport; the collapse
+  // holds until the panel is appended. The two rules are independent, so an
+  // engine without `:has()` drops only its own and keeps the first.
   &:empty {
     display: none;
   }
@@ -307,17 +191,9 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   }
 }
 
-// -----------------------------------------------------------------------------
-// 2. THE PANEL
-//
-// Block flow, not flex. The `<hr>` elements between the panel's sections carry
-// the user agent's `margin-inline: auto`. In block flow those margins resolve
-// to zero and the divider spans the measure; in a flex column they would
-// centre a zero-width item. Block flow also collapses each section's leading
-// margin into the divider's 30px trailing margin, leaving the divider's own
-// margins as the rhythm between sections.
-// Provenance: docs/DECISION_LOG.md.
-// -----------------------------------------------------------------------------
+// Block flow, not flex: the `<hr>` dividers span the measure, and each section's
+// leading margin collapses into the divider's trailing margin, which is the
+// rhythm between sections.
 
 .run-summary {
   margin: auto;
@@ -326,9 +202,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   max-inline-size: $summary-fill;
   padding: $summary-panel-padding;
 
-  // The hairline edge that separates the panel from whatever the wash sits
-  // over, in the same colour as the dividers and the seed field. `border-box`
-  // keeps the outer measure at $summary-measure.
+  // The hairline edge that separates the panel from the wash behind it.
   border: $summary-hairline solid var(--theme-rule, $summary-rule-color);
   border-radius: $summary-panel-radius;
   background: var(--theme-page-background, $bright-text-color);
@@ -336,13 +210,9 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   line-height: $summary-line-height;
   text-align: start;
 
-  // Reverses, for this subtree, the six declarations style/main.scss makes on
-  // `.game-container`: the two touch callouts, the three prefixed
-  // `user-select`s and `touch-action`. index.html mounts the panel outside that
-  // element, and the reversal is declared for the subtree independently of the
-  // mount point. `user-select` and `-webkit-touch-callout` inherit;
-  // `touch-action` does not, and is restated on the seed field itself.
-  // Provenance: docs/DECISION_LOG.md.
+  // Reverses, for this subtree, the touch-callout, `user-select` and
+  // `touch-action` suppression style/main.scss applies to `.game-container`.
+  // `touch-action` does not inherit and is restated on the seed field itself.
   -webkit-touch-callout: default;
   -ms-touch-callout: default;
   -webkit-user-select: text;
@@ -358,13 +228,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   }
 }
 
-// -----------------------------------------------------------------------------
-// 3. HEADINGS
-// -----------------------------------------------------------------------------
-
-// index.html carries the page's only `<h1>`, so the panel opens at `<h2>` and
-// its sections are `<h3>`. Both reset the user-agent margins the panel's block
-// flow would otherwise take from them.
+// index.html carries the page's only `<h1>`, so the panel opens at `<h2>`.
 .run-summary-title {
   margin: 0;
   font-size: $summary-title-size;
@@ -374,8 +238,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   overflow-wrap: break-word;
 }
 
-// The caption vocabulary style/main.scss gives `.score-container:after`: the
-// smallest size in the scale, uppercase and bold.
+// The caption vocabulary style/main.scss gives `.score-container:after`.
 .run-summary-relics-title,
 .run-summary-seed-label {
   margin: 0;
@@ -386,14 +249,9 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   color: inherit;
 }
 
-// -----------------------------------------------------------------------------
-// 4. SCORE READOUTS
-//
-// Final score and stage reached, in the readout vocabulary style/main.scss
-// gives `.score-container` and `.best-container` rather than a second numeric
-// treatment. `flex: 1 1 0` gives the readouts equal measure whatever they
-// contain, and the space between them is a `gap`, not a sibling margin.
-// -----------------------------------------------------------------------------
+// Score readouts: final score and stage reached, in the vocabulary
+// `.score-container` and `.best-container` carry. `flex: 1 1 0` gives them equal
+// measure whatever they contain, and the space between them is a `gap`.
 
 .run-summary-scores {
   display: flex;
@@ -406,14 +264,9 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   }
 }
 
-// BLITZY [A11Y]: under the default palette the numerals measure 2.18:1
-// (#ffffff on #bbada0) and the caption 1.74:1 (#eee4da on #bbada0), below the
-// WCAG AA thresholds of 3:1 for large text and 4.5:1 for small. These are the
-// colours style/main.scss already compiles for `.score-container`. Implemented
-// as the design system specifies; flagged for designer review, not corrected
-// here. style/_themes.scss's high-contrast and colourblind-safe palettes
-// supersede all three colours through the custom properties below.
-// Provenance: docs/DECISION_LOG.md.
+// BLITZY [A11Y]: under the default palette the readout numerals and caption sit
+// below the WCAG AA text thresholds. These are the colours style/main.scss
+// already compiles for `.score-container`. Recorded as decision DL-A11Y-07.
 .run-summary-score {
   flex: 1 1 0;
   min-inline-size: 0;
@@ -450,15 +303,10 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   overflow-wrap: break-word;
 }
 
-// -----------------------------------------------------------------------------
-// 5. RELICS COLLECTED
-//
-// An `<ol>`, so acquisition order is the list's own semantics and the visible
-// numbering is the user agent's marker rather than generated content. The list
-// is rendered in pickup order, the order the hook bus dispatches in, and is
-// never sorted by rarity or name. `list-style-position` stays outside, and the
-// indent below is what holds the markers clear of the item's content box.
-// -----------------------------------------------------------------------------
+// Relics collected. An `<ol>`, so acquisition order is the list's own semantics
+// and the visible numbering is the user agent's marker rather than generated
+// content. The list is rendered in pickup order, the order the hook bus
+// dispatches in, and is never sorted by rarity or name.
 
 .run-summary-relic-list {
   margin-block: $summary-gutter 0;
@@ -467,8 +315,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   list-style: decimal outside;
 
   // A run that collected nothing renders `.run-summary-relics-empty` beside an
-  // empty list; the collapse takes this element's indent and leading margin out
-  // of the flow.
+  // empty list; the collapse takes this element out of the flow.
   &:empty {
     display: none;
   }
@@ -527,15 +374,9 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   }
 }
 
-// -----------------------------------------------------------------------------
-// 6. THE RUN SEED
-//
-// The seed is rendered in full, selectable, and paired with a copy control. The
-// label and the status each take a whole line through a $summary-fill flex
-// basis; the value and the control share the line between them and wrap once
-// the value no longer fits beside it. The value is a `<code>` element and takes
-// no tab stop of its own; the copy control is the keyboard path to the seed.
-// -----------------------------------------------------------------------------
+// The run seed, rendered in full, selectable and paired with a copy control.
+// The value is a `<code>` element and takes no tab stop of its own; the copy
+// control is the keyboard path to the seed.
 
 .run-summary-seed {
   display: flex;
@@ -556,8 +397,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 .run-summary-seed-value {
   flex: 1 1 auto;
 
-  // Releases the intrinsic minimum: a long seed shrinks to the line instead of
-  // pushing the control past the panel edge.
+  // Releases the intrinsic minimum, so a long seed shrinks to the line.
   min-inline-size: 0;
   box-sizing: border-box;
 
@@ -568,9 +408,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   background: transparent;
   color: inherit;
 
-  // The monospace stack style/_tokens.scss declares, in which every character
-  // of the seed is distinguishable. `font-size: inherit` holds the panel's size
-  // against the user agent's smaller default for monospace families.
+  // The monospace stack style/_tokens.scss declares.
   font-family: $diagnostics-font-family;
   font-size: inherit;
   font-weight: normal;
@@ -581,9 +419,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   overflow-wrap: break-word;
   overflow-wrap: anywhere;
 
-  // The reversal restated on the field itself. `touch-action` does not inherit,
-  // and it is what a long press needs; `-webkit-touch-callout` is what raises
-  // the copy callout on iOS.
+  // `touch-action` does not inherit, so the reversal is restated on the field.
   -webkit-touch-callout: default;
   -ms-touch-callout: default;
   -webkit-user-select: text;
@@ -601,9 +437,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   @include summary-control;
 }
 
-// The text confirmation. src/ui/screens/run-summary.ts also announces the copy
-// result through `#live-region`, so nothing here is the sole carrier of the
-// outcome and no colour change stands in for it.
+// The text confirmation of the copy result. No colour change stands in for it.
 .run-summary-seed-status {
   flex: 1 0 $summary-fill;
   font-size: $summary-caption-size;
@@ -611,13 +445,8 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   color: inherit;
 }
 
-// -----------------------------------------------------------------------------
-// 7. ACTIONS
-//
-// The row that carries the new-run control. Aligned to the end of the line and
-// spaced by the same 9px gap style/main.scss puts between the `.game-message`
-// controls.
-// -----------------------------------------------------------------------------
+// Actions: the row carrying the new-run control, spaced by the same gap
+// style/main.scss puts between the `.game-message` controls.
 
 .run-summary-actions {
   display: flex;
@@ -634,4 +463,3 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 .run-summary-action {
   @include summary-control;
 }
-

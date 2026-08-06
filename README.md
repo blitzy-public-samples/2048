@@ -30,19 +30,30 @@ That screenshot is fake, by the way. I never reached 2048 :smile:
 
 Development and release builds run on npm. The pinned runtime is Node.js `24.19.0` — `.nvmrc` carries that version so `nvm use` selects it, and `package.json` requires Node `>=24.19.0` with npm `>=11.0.0`.
 
-Install the dependencies once with `npm install`, then:
+Install the dependencies once with `npm install`, then run any of the scripts below. They are the whole script surface; which of them the source tree can currently satisfy is recorded under [What runs today](#what-runs-today).
 
- - `npm run dev` — start the development server; it prints the local URL to open. The diagnostics overlay, health report and metrics snapshot are exercised here.
+ - `npm run dev` — start the development server, with hot module replacement, on `http://127.0.0.1:5173`
  - `npm run build` — write the production bundle to `dist/`
- - `npm run preview` — serve the built `dist/` locally, the way a static host would
- - `npm run typecheck` — type-check the sources
+ - `npm run preview` — serve the built `dist/` on `http://127.0.0.1:4173`, the way a static host would
+ - `npm run typecheck` — type-check the application sources and the build tooling
  - `npm test` — run the unit suite
  - `npm run test:snapshot` — run the seeded snapshot suite, a separate regression gate
- - `npm run test:e2e` — run the browser suite, which records the gameplay video; `npm run e2e:install` fetches the browser it needs the first time
+ - `npm run test:e2e` — run the browser suite that records the gameplay video; `npm run e2e:install` fetches the browser it needs the first time
+
+Both servers bind `127.0.0.1` and no other interface, so those two URLs answer on this machine only. Reaching a server from another device is an explicit opt-in: `npm run dev -- --host <address>`, or `npm run preview -- --host <address>`.
+
+### What runs today
+
+The TypeScript rewrite is landing in stages, and the commands above run against a source tree that is still filling in. At this commit:
+
+ - `npm install`, `npm run typecheck`, `npm run dev`, `npm run build` and `npm run preview` all work as described. The type check covers `src/` and the four tooling configs and reports no diagnostics, and the build writes a static bundle to `dist/`.
+ - The board is drawn by the number-only renderer, which is both a first-class accessible rendering mode and the fallback for a machine without WebGL. The Three.js renderer arrives with `src/render/three-renderer.ts`.
+ - `npm test` and `npm run test:snapshot` exit reporting no test files: the runners are configured, but the suites under `tests/` are not written yet. `npm run test:e2e` starts its web server and finds no spec to run, because `tests/e2e/gameplay-recording.spec.ts` has not landed, so no gameplay video exists yet.
+ - The diagnostics overlay, health report and metrics snapshot that `npm run dev` is to expose arrive with `src/observability/`, which has not landed either. The stylesheet already carries their presentation.
 
 ### Deploying
 
-One install and one build command — `npm install`, then `npm run build` — is the entire path from a clean machine to a deployable folder. The build emits a fully static bundle into `dist/`: HTML, CSS and JavaScript, plus the font and image assets they reference.
+The build is configured so that one install and one build command — `npm install`, then `npm run build` — is the entire path from a clean machine to a deployable folder. Its output is a fully static bundle in `dist/`: HTML, CSS and JavaScript, plus the font and image assets they reference.
 
 Deployment is copying `dist/` to any static host — GitHub Pages, Netlify, S3, or a directory on a machine that serves files. There is no server, no server-side rendering, no API routes and no serverless functions, and nothing in `dist/` needs a Node process at runtime.
 
@@ -52,14 +63,19 @@ The game used to run straight from the filesystem, by opening `index.html` over 
 
 ### Further documentation
 
- - [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) — Figure 1, *As-Is Architecture*, and Figure 2, *To-Be Architecture*; the component interaction, data flow and hook dispatch figures are in [`docs/architecture/component-interaction.md`](docs/architecture/component-interaction.md), [`docs/architecture/data-flow.md`](docs/architecture/data-flow.md) and [`docs/architecture/hook-dispatch-sequence.md`](docs/architecture/hook-dispatch-sequence.md)
- - [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) — the logging, tracing, metrics and health surfaces, and how to exercise each one against `npm run dev`
+Each document below lands with the code it describes, so this is the map of where a subject is documented rather than a reading list available at this commit.
+
+ - [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) — Figure 1, *As-Is Architecture: Layered Globals with a Push-Based Actuator*, and Figure 2, *To-Be Architecture: Event-Driven Engine with Subscribed Renderer and Hook Bus*
+ - [`docs/architecture/component-interaction.md`](docs/architecture/component-interaction.md) — Figure 3, *Component Interaction: Input, Engine, Hook Bus, Relics, Renderer, Persistence*
+ - [`docs/architecture/data-flow.md`](docs/architecture/data-flow.md) — Figure 4, *Turn Data Flow: From Keystroke to Composited Frame and Persisted Run State*, and Figure 7, *Seeded Determinism: One Run Seed Fanned into Named RNG Substreams*
+ - [`docs/architecture/hook-dispatch-sequence.md`](docs/architecture/hook-dispatch-sequence.md) — Figure 5, *Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard and Error Isolation*
+ - [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) — the logging, tracing, metrics and health surfaces, and how to exercise each one against `npm run dev`, once `src/observability/` is in place
  - [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md) — the decisions behind the toolchain and the architecture, with their alternatives and risks; rationale lives there and nowhere else
 
 ## Contributing
 Changes and improvements are more than welcome! Feel free to fork and open a pull request. Please make your changes in a specific branch and request to pull into `master`! If you can, please make sure the game fully works before sending the PR, as that will help speed up the process.
 
-You can find the same information in the [contributing guide.](https://github.com/gabrielecirulli/2048/blob/master/CONTRIBUTING.md) See [`CONTRIBUTING.md`](CONTRIBUTING.md) in this repository for the house rules, including the current build and style workflow.
+You can find the same information in the [contributing guide.](https://github.com/gabrielecirulli/2048/blob/master/CONTRIBUTING.md) [`CONTRIBUTING.md`](CONTRIBUTING.md) in this repository carries the house rules. Its build and style instructions still describe the retired workflow — the Ruby `sass` gem, `Rakefile` and `.jshintrc`, none of which remain in the tree — and are superseded by the npm commands above until that document is rewritten.
 
 ## License
 2048 is licensed under the [MIT license.](https://github.com/gabrielecirulli/2048/blob/master/LICENSE.txt)

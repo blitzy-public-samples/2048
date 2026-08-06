@@ -1,62 +1,48 @@
-// Keyboard binding table and the shared contracts of the input layer.
-//
-// Ported from js/keyboard_input_manager.js. That file is deleted.
-// Provenance for every construct ported here:
-//   L37-L50   numeric-code-to-direction map  -> DEFAULT_KEY_BINDINGS
-//   L54-L55   modifier predicate             -> hasMoveModifier
-//   L56       numeric code lookup            -> resolveInput
-//   L66       numeric code 82 test           -> the `restart` binding
-//   L60       move preventDefault            -> InputBinding.preventDefault
-//   L131      restart preventDefault         -> InputBinding.preventDefault
-//   L136      keepPlaying preventDefault     -> InputBinding.preventDefault
+// Keyboard binding table and the shared contracts of the input layer: the event
+// names and their payloads, the bindable actions, the input contexts, the
+// binding table, its serialised form and the reporter interface.
 //
 // The direction encoding 0 up / 1 right / 2 down / 3 left is the encoding the
-// vector map at js/game_manager.js L196-L201 reads. The event names 'move',
-// 'restart' and 'keepPlaying' are the three names js/game_manager.js L9-L11
-// subscribes by.
+// engine's direction-vector map reads, and the event names are the ones the
+// engine subscribes by.
 //
 // This module is the root of the src/input import graph: it imports nothing,
-// reads no DOM, and touches no storage. Every function below is pure.
+// reads no DOM and touches no storage. Its functions are pure, except that the
+// deserialising helpers call into the injected `InputReporter`. The input
+// layer's place among the modules is drawn as Figure 3, "Component Interaction:
+// Input, Engine, Hook Bus, Relics, Renderer, Persistence", in
+// docs/architecture/component-interaction.md.
 //
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+// The persisted-keymap limits are declared here as well: the byte limit the
+// persistence layer applies before parsing, and the property-count,
+// entries-per-list and string-length limits `deserializeKeymap` applies to a
+// parsed payload. `createSafeInputReporter` is the containment boundary every
+// report in src/input/ leaves through.
 
 /* --------------------------------------------------------------------------
  * Directions
  * ----------------------------------------------------------------------- */
 
-/**
- * A board direction, carried as the bare number the engine consumes.
- *
- * The four members are the four keys of the vector map at
- * js/game_manager.js L196-L201.
- */
+/** A board direction, carried as the bare number the engine consumes. */
 export type Direction = 0 | 1 | 2 | 3;
 
-/** Upward move. Ported from the `0` values at L38, L42 and L46. */
+/** Upward move. */
 export const DIRECTION_UP = 0;
 
-/** Rightward move. Ported from the `1` values at L39, L43 and L47. */
+/** Rightward move. */
 export const DIRECTION_RIGHT = 1;
 
-/** Downward move. Ported from the `2` values at L40, L44 and L48. */
+/** Downward move. */
 export const DIRECTION_DOWN = 2;
 
-/** Leftward move. Ported from the `3` values at L41, L45 and L49. */
+/** Leftward move. */
 export const DIRECTION_LEFT = 3;
 
 /* --------------------------------------------------------------------------
  * Emitted event names and payloads
  * ----------------------------------------------------------------------- */
 
-/**
- * Every event name the input layer emits, in declaration order.
- *
- * The first three are ported verbatim from the subscription calls at
- * js/game_manager.js L9-L11 and are frozen: the engine subscribes by these
- * literal strings. The remaining eight are additive and address the screen
- * containers `index.html` declares, relic activation, and the settings
- * surface.
- */
+/** Every event name the input layer emits, in declaration order. */
 export const INPUT_EVENT_NAMES = [
   'move',
   'restart',
@@ -74,15 +60,7 @@ export const INPUT_EVENT_NAMES = [
 /** Union of the names in `INPUT_EVENT_NAMES`. */
 export type InputEventName = (typeof INPUT_EVENT_NAMES)[number];
 
-/**
- * The payload each emitted event carries.
- *
- * `'move'` carries the bare `Direction`, exactly as the single `data`
- * argument at js/keyboard_input_manager.js L61 and L125 does.
- * `'selectReward'` carries a zero-based offer index, `'activateRelic'` a
- * zero-based relic slot index, and `'startRun'` an optional seed string.
- * Every other event carries no payload.
- */
+/** The payload each emitted event carries. */
 export type InputEventPayload = {
   readonly [K in InputEventName]: K extends 'move'
     ? Direction
@@ -100,10 +78,6 @@ export type InputEventPayload = {
 /**
  * Every bindable action, in the order the settings panel and the on-screen
  * controls present them, and the order `resolveInput` scans them in.
- *
- * An action is what a key binds to; an event is what the input manager
- * emits. The four movement actions all emit the single `'move'` event with
- * different `Direction` payloads.
  */
 export const INPUT_ACTIONS = [
   'moveUp',
@@ -131,13 +105,7 @@ export type MoveAction = Extract<
   'moveUp' | 'moveRight' | 'moveDown' | 'moveLeft'
 >;
 
-/**
- * Direction each movement action resolves to.
- *
- * Ported from the value column of the map at
- * js/keyboard_input_manager.js L37-L50: the three numeric codes that
- * shared a value there share an action here.
- */
+/** Direction each movement action resolves to. */
 export const MOVE_ACTION_DIRECTIONS: Readonly<Record<MoveAction, Direction>> =
   Object.freeze({
     moveUp: DIRECTION_UP,
@@ -167,10 +135,6 @@ export function isMoveAction(action: InputAction): action is MoveAction {
  * @param action Action to resolve.
  * @returns The direction for a movement action, or `null` for every other
  *   action.
- *
- * @example
- * directionForAction('moveUp');  // 0
- * directionForAction('restart'); // null
  */
 export function directionForAction(action: InputAction): Direction | null {
   return isMoveAction(action) ? MOVE_ACTION_DIRECTIONS[action] : null;
@@ -180,15 +144,7 @@ export function directionForAction(action: InputAction): Direction | null {
  * Binding contexts
  * ----------------------------------------------------------------------- */
 
-/**
- * Every context a binding can be active in.
- *
- * `'game'` carries the bindings ported from
- * js/keyboard_input_manager.js L37-L50 and L66, and nothing else.
- * `'overlay'` is active while a screen or the settings panel holds focus.
- * `'textEntry'` is active while a text field holds focus, where no movement
- * binding resolves.
- */
+/** Every context a binding can be active in. */
 export const INPUT_CONTEXTS = ['game', 'overlay', 'textEntry'] as const;
 
 /** Union of the names in `INPUT_CONTEXTS`. */
@@ -227,8 +183,8 @@ export interface InputBinding {
   readonly keys: readonly string[];
 
   /**
-   * `KeyboardEvent.code` values that trigger the action. Matched exactly,
-   * and independently of `keys`.
+   * `KeyboardEvent.code` values that trigger the action. Matched exactly, and
+   * independently of `keys`.
    */
   readonly codes: readonly string[];
 
@@ -237,14 +193,12 @@ export interface InputBinding {
 
   /**
    * Whether the caller cancels the event's default action once the binding
-   * resolves. Ported from L60, L131 and L136, the only three
-   * `preventDefault()` calls in the superseded file.
+   * resolves.
    */
   readonly preventDefault: boolean;
 
   /**
    * Whether a held Alt, Control, Meta or Shift key suppresses the binding.
-   * Absent is read as `true`, matching the guard at L54-L55 and L58.
    */
   readonly modifierSuppressed?: boolean;
 }
@@ -304,12 +258,7 @@ export interface InputSpan {
   end(): void;
 }
 
-/**
- * Sink for the input layer's logs, counters and boundary timings.
- *
- * Declared in this module; the composition root supplies the
- * implementation. This module imports no observability code.
- */
+/** Sink for the input layer's logs, counters and boundary timings. */
 export interface InputReporter {
   /**
    * Records a structured message.
@@ -351,9 +300,6 @@ const NOOP_SPAN: InputSpan = Object.freeze({
 /**
  * A fully implemented `InputReporter` that discards every report. Every
  * function in this module that accepts a reporter defaults to it.
- *
- * @example
- * const keymap = deserializeKeymap(raw, NOOP_REPORTER);
  */
 export const NOOP_REPORTER: InputReporter = Object.freeze({
   log(): void {
@@ -367,15 +313,80 @@ export const NOOP_REPORTER: InputReporter = Object.freeze({
   },
 });
 
+/**
+ * Wraps a reporter so no member of it can throw into its caller.
+ *
+ * A `log`, `count`, `startSpan` or span `end` that throws is swallowed at
+ * this boundary: the throw does not reach the input path that reported, and
+ * it is not reported back through the same sink. A `startSpan` that throws
+ * yields the no-op span instead.
+ *
+ * Every function in this module that accepts a reporter, and
+ * `attachTouchInput` in src/input/touch-input.ts, wraps its reporter here
+ * once before using it, so an input event, a keymap load and a gesture are
+ * all unaffected by a faulty sink.
+ *
+ * @param reporter Reporter to contain.
+ * @returns A reporter delegating to `reporter` and throwing for nothing.
+ */
+export function createSafeInputReporter(
+  reporter: InputReporter
+): InputReporter {
+  return Object.freeze({
+    log(
+      level: InputReportLevel,
+      message: string,
+      fields?: InputReportFields
+    ): void {
+      try {
+        reporter.log(level, message, fields);
+      } catch {
+        return;
+      }
+    },
+
+    count(metric: string, fields?: InputReportFields): void {
+      try {
+        reporter.count(metric, fields);
+      } catch {
+        return;
+      }
+    },
+
+    startSpan(name: string): InputSpan {
+      const open = reporter.startSpan;
+
+      if (open === undefined) {
+        return NOOP_SPAN;
+      }
+
+      let span: InputSpan;
+
+      try {
+        span = open.call(reporter, name);
+      } catch {
+        return NOOP_SPAN;
+      }
+
+      return Object.freeze({
+        end(): void {
+          try {
+            span.end();
+          } catch {
+            return;
+          }
+        },
+      });
+    },
+  });
+}
+
 /* --------------------------------------------------------------------------
  * Table construction
  * ----------------------------------------------------------------------- */
 
 /**
  * Builds one value per action.
- *
- * The fourteen action names appear as object keys here and nowhere else.
- * The compiler rejects any table that omits one.
  *
  * @param build Called once per action, in `INPUT_ACTIONS` order.
  * @returns A record carrying a value for every action.
@@ -402,8 +413,8 @@ function mapActions<T>(
 }
 
 /**
- * Returns a deeply frozen copy of `binding`, with `modifierSuppressed`
- * resolved to an explicit boolean and each array copied before freezing.
+ * Returns a deeply frozen copy of `binding`, with `modifierSuppressed` resolved
+ * to an explicit boolean and each array copied before freezing.
  *
  * @param binding Binding to copy.
  * @returns The frozen copy.
@@ -429,16 +440,8 @@ function buildKeymap(build: (action: InputAction) => InputBinding): Keymap {
   return Object.freeze(mapActions((action) => freezeBinding(build(action))));
 }
 
-/**
- * Source table `DEFAULT_KEY_BINDINGS` is frozen from.
- *
- * The `'game'` rows carry exactly the thirteen keys the superseded file
- * recognised: the twelve of the map at L37-L50 and the `R` key at L66. Every
- * row added after that port carries an empty key list unless a
- * non-conflicting default is named below.
- */
+/** Source table `DEFAULT_KEY_BINDINGS` is frozen from. */
 const DEFAULT_BINDING_TABLE: Keymap = {
-  // Ported from L38 (numeric code 38), L42 (75) and L46 (87).
   moveUp: {
     action: 'moveUp',
     keys: ['ArrowUp', 'k', 'w'],
@@ -448,7 +451,6 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Ported from L39 (numeric code 39), L43 (76) and L47 (68).
   moveRight: {
     action: 'moveRight',
     keys: ['ArrowRight', 'l', 'd'],
@@ -458,7 +460,6 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Ported from L40 (numeric code 40), L44 (74) and L48 (83).
   moveDown: {
     action: 'moveDown',
     keys: ['ArrowDown', 'j', 's'],
@@ -468,7 +469,6 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Ported from L41 (numeric code 37), L45 (72) and L49 (65).
   moveLeft: {
     action: 'moveLeft',
     keys: ['ArrowLeft', 'h', 'a'],
@@ -478,7 +478,6 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Ported from L66 (numeric code 82); preventDefault from L131.
   restart: {
     action: 'restart',
     keys: ['r'],
@@ -488,8 +487,6 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Bound to no key in the superseded file: L74 bound it to
-  // `.keep-playing-button` only. preventDefault from L136.
   keepPlaying: {
     action: 'keepPlaying',
     keys: [],
@@ -499,8 +496,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Added; no analogue in the superseded file. Activated through the
-  // run-start screen's own control.
+  // Activated through the run-start screen's own control.
   startRun: {
     action: 'startRun',
     keys: [],
@@ -510,8 +506,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Added; no analogue in the superseded file. The three digits address the
-  // three reward offers.
+  // The three digits address the three reward offers.
   selectReward: {
     action: 'selectReward',
     keys: ['1', '2', '3'],
@@ -521,8 +516,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Added; no analogue in the superseded file. Activated through the stage
-  // progress screen's own control.
+  // Activated through the stage progress screen's own control.
   continueStage: {
     action: 'continueStage',
     keys: [],
@@ -532,8 +526,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Added; no analogue in the superseded file. Activated through the run
-  // summary screen's own control.
+  // Activated through the run summary screen's own control.
   endRun: {
     action: 'endRun',
     keys: [],
@@ -543,8 +536,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Added; no analogue in the superseded file. Activated through the relic
-  // tray's own controls.
+  // Activated through the relic tray's own controls.
   activateRelic: {
     action: 'activateRelic',
     keys: [],
@@ -554,8 +546,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Added; no analogue in the superseded file. Activated through the
-  // settings control.
+  // Activated through the settings control.
   openSettings: {
     action: 'openSettings',
     keys: [],
@@ -565,8 +556,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Added; no analogue in the superseded file. Reached through `cancel` or
-  // the settings panel's own control.
+  // Reached through `cancel` or the settings panel's own control.
   closeSettings: {
     action: 'closeSettings',
     keys: [],
@@ -576,7 +566,6 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Added; no analogue in the superseded file.
   cancel: {
     action: 'cancel',
     keys: ['Escape'],
@@ -588,16 +577,12 @@ const DEFAULT_BINDING_TABLE: Keymap = {
 };
 
 /**
- * The default binding table. Frozen at every level: the table itself,
- * each binding, and each of the three arrays a binding carries.
- *
- * @example
- * DEFAULT_KEY_BINDINGS.moveUp.keys; // ['ArrowUp', 'k', 'w']
+ * The default binding table. Frozen at every level: the table itself, each
+ * binding, and each of the three arrays a binding carries.
  */
 export const DEFAULT_KEY_BINDINGS: Keymap = buildKeymap(
   (action) => DEFAULT_BINDING_TABLE[action]
 );
-
 
 /* --------------------------------------------------------------------------
  * Resolution
@@ -617,11 +602,6 @@ export interface ResolvedInput {
 
 /**
  * Reports whether a modifier key is held.
- *
- * Ported from js/keyboard_input_manager.js L54-L55:
- * `event.altKey || event.ctrlKey || event.metaKey || event.shiftKey`. All
- * four flags, no additions and no omissions. The result is coerced to a
- * boolean; the truthiness the port evaluates is unchanged.
  *
  * @param event Event to test.
  * @returns `true` when Alt, Control, Meta or Shift is held.
@@ -654,13 +634,6 @@ function includesContext(
 
 /**
  * Reports whether `binding` matches a key or a code.
- *
- * `keys` are compared with both sides lower-cased, so a value produced
- * with CapsLock engaged still resolves; `codes` are compared exactly. An
- * empty comparison value is skipped rather than matched.
- *
- * Supersedes the numeric code lookup at js/keyboard_input_manager.js L56
- * and the numeric code 82 test at L66.
  *
  * @param binding Binding to test.
  * @param lowerCasedKey `KeyboardEvent.key`, lower-cased.
@@ -705,20 +678,11 @@ function asKeyString(value: unknown): string {
  * Resolves an event to the action it triggers, together with the caller's
  * `preventDefault` obligation.
  *
- * Actions are scanned in `INPUT_ACTIONS` order, so resolution is
- * deterministic. A binding whose context does not match is skipped; so is a
- * binding suppressed by a held modifier, reproducing the guard at
- * js/keyboard_input_manager.js L54-L55 and L58.
- *
  * @param event Event to resolve.
  * @param keymap Table to resolve against.
  * @param context Context currently active.
  * @returns The match, or `null` when no binding applies. `null` is also the
- *   result for a recognised key held with a suppressing modifier.
- *
- * @example
- * resolveInput(event, DEFAULT_KEY_BINDINGS, 'game');
- * // { action: 'moveUp', preventDefault: true }
+ * result for a recognised key held with a suppressing modifier.
  */
 export function resolveInput(
   event: KeyboardEvent,
@@ -756,16 +720,10 @@ export function resolveInput(
 /**
  * Resolves an event to the action it triggers.
  *
- * Thin projection of `resolveInput` for callers that derive their
- * `preventDefault` obligation from the binding themselves.
- *
  * @param event Event to resolve.
  * @param keymap Table to resolve against.
  * @param context Context currently active.
  * @returns The action, or `null` when no binding applies.
- *
- * @example
- * resolveAction(event, DEFAULT_KEY_BINDINGS, 'game'); // 'moveUp'
  */
 export function resolveAction(
   event: KeyboardEvent,
@@ -811,11 +769,8 @@ function mergeBinding(
  * Builds a keymap from the defaults and optional per-action overrides.
  *
  * @param overrides Per-action overrides. Omitting the argument returns
- *   `DEFAULT_KEY_BINDINGS` itself, already frozen.
+ * `DEFAULT_KEY_BINDINGS` itself, already frozen.
  * @returns The frozen keymap.
- *
- * @example
- * createKeymap({ moveUp: { keys: ['ArrowUp'], codes: ['ArrowUp'] } });
  */
 export function createKeymap(overrides?: KeymapOverrides): Keymap {
   if (overrides === undefined) {
@@ -834,9 +789,6 @@ export function createKeymap(overrides?: KeymapOverrides): Keymap {
  * @param action Action to rebind.
  * @param binding Fields to replace on that action's binding.
  * @returns A new frozen keymap.
- *
- * @example
- * remapAction(keymap, 'restart', { keys: ['n'], codes: ['KeyN'] });
  */
 export function remapAction(
   keymap: Keymap,
@@ -853,18 +805,10 @@ export function remapAction(
 /**
  * Finds the binding a key already occupies in a context.
  *
- * The value is compared against `keys` case-insensitively and against
- * `codes` exactly, so a `KeyboardEvent.key` value and a
- * `KeyboardEvent.code` value are both accepted.
- *
  * @param keymap Table to search.
  * @param key Key or code to look for.
  * @param context Context to search within.
  * @returns The occupying binding, or `null` when the key is free.
- *
- * @example
- * findBindingConflict(DEFAULT_KEY_BINDINGS, 'w', 'game');
- * // the `moveUp` binding
  */
 export function findBindingConflict(
   keymap: Keymap,
@@ -892,12 +836,8 @@ export function findBindingConflict(
  * Enumerates the bindings of a keymap in `INPUT_ACTIONS` order.
  *
  * @param keymap Table to enumerate.
- * @param context When given, only bindings active in that context are
- *   returned.
+ * @param context When given, only bindings active in that context are returned.
  * @returns A frozen list of bindings.
- *
- * @example
- * listBindings(DEFAULT_KEY_BINDINGS, 'textEntry').length; // 1
  */
 export function listBindings(
   keymap: Keymap,
@@ -915,7 +855,6 @@ export function listBindings(
 
   return Object.freeze(bindings);
 }
-
 
 /* --------------------------------------------------------------------------
  * Human-readable labels
@@ -991,8 +930,7 @@ function labelForKey(key: string): string {
  * Renders a `KeyboardEvent.code` value as spoken text.
  *
  * @param code Code value.
- * @returns The label, for example `'W'` for `'KeyW'` and `'1'` for
- *   `'Digit1'`.
+ * @returns The label, for example `'W'` for `'KeyW'` and `'1'` for `'Digit1'`.
  */
 function labelForCode(code: string): string {
   if (code.startsWith(LETTER_CODE_PREFIX)) {
@@ -1010,8 +948,8 @@ function labelForCode(code: string): string {
  * Joins labels into one spoken phrase.
  *
  * @param labels Labels to join, already de-duplicated.
- * @returns `UNBOUND_LABEL` for an empty list, the single label for one, `'A
- *   or B'` for two, and `'A, B, or C'` for three or more.
+ * @returns `UNBOUND_LABEL` for an empty list, the single label for one, `'A or
+ * B'` for two, and `'A, B, or C'` for three or more.
  */
 function joinLabels(labels: readonly string[]): string {
   if (labels.length === 0) {
@@ -1036,9 +974,6 @@ function joinLabels(labels: readonly string[]): string {
  *
  * @param action Action to label.
  * @returns The label, for example `'Move up'`.
- *
- * @example
- * describeAction('restart'); // 'New game'
  */
 export function describeAction(action: InputAction): string {
   return ACTION_LABELS[action];
@@ -1047,19 +982,9 @@ export function describeAction(action: InputAction): string {
 /**
  * Renders the keys bound to an action as spoken text.
  *
- * Prefers `keys`, falling back to `codes` when no key is bound, so a binding
- * expressed only by physical position still reads. Duplicate labels are
- * collapsed, so `['w', 'W']` does not read twice.
- *
  * @param keymap Table to read from.
  * @param action Action to describe.
  * @returns The phrase, or `'Not bound'` when the action has no key.
- *
- * @example
- * describeBinding(DEFAULT_KEY_BINDINGS, 'moveUp');
- * // 'Up arrow, K, or W'
- * describeBinding(DEFAULT_KEY_BINDINGS, 'keepPlaying');
- * // 'Not bound'
  */
 export function describeBinding(keymap: Keymap, action: InputAction): string {
   const binding = keymap[action];
@@ -1085,16 +1010,8 @@ export function describeBinding(keymap: Keymap, action: InputAction): string {
 /**
  * Projects a keymap onto plain data.
  *
- * The result contains strings, booleans and arrays only, so a caller can
- * hand it straight to a persistence layer. This module performs no
- * serialisation of its own and touches no storage.
- *
  * @param keymap Table to project.
  * @returns The plain-data projection.
- *
- * @example
- * serializeKeymap(DEFAULT_KEY_BINDINGS).moveUp.keys;
- * // ['ArrowUp', 'k', 'w']
  */
 export function serializeKeymap(keymap: Keymap): SerializedKeymap {
   return mapActions((action) => {
@@ -1151,6 +1068,214 @@ function describeRawType(value: unknown): string {
 /** Narrows a string to a known action name. */
 const INPUT_ACTION_SET: ReadonlySet<string> = new Set(INPUT_ACTIONS);
 
+/* --------------------------------------------------------------------------
+ * Payload limits
+ * ----------------------------------------------------------------------- */
+
+/**
+ * Largest persisted keymap text, in bytes, that may be parsed.
+ *
+ * Web Storage charges two bytes per UTF-16 code unit, and
+ * `measureKeymapPayloadBytes()` measures the same way. A serialised default
+ * keymap is roughly 2 KB, so this leaves room for a fully remapped table
+ * with several bindings per action.
+ *
+ * The persistence layer applies this limit to the stored text BEFORE
+ * parsing it; `deserializeKeymap()` receives already-parsed data and cannot
+ * measure the text it came from.
+ */
+export const MAX_KEYMAP_PAYLOAD_BYTES = 16_384;
+
+/**
+ * Largest number of own properties a persisted keymap may carry.
+ *
+ * `INPUT_ACTIONS` has fourteen members. The allowance above that absorbs a
+ * payload written by a future version carrying actions this one does not
+ * know, while bounding the unknown-action scan.
+ */
+export const MAX_KEYMAP_PROPERTIES = 32;
+
+/**
+ * Largest number of entries one binding's `keys`, `codes` or `contexts`
+ * list may carry.
+ *
+ * Every entry of `keys` and `codes` is compared on every keypress that
+ * reaches `resolveInput`, so this bounds the per-keypress scan for the
+ * lifetime of the loaded table. The widest default binding carries three.
+ */
+export const MAX_KEYMAP_ENTRIES_PER_LIST = 8;
+
+/**
+ * Longest string a persisted `keys`, `codes` or `contexts` entry may
+ * carry.
+ *
+ * The longest value any default binding carries is `'ArrowRight'`, at ten
+ * characters; the longest `KeyboardEvent.code` in general use is a little
+ * over twenty.
+ */
+export const MAX_KEYMAP_STRING_LENGTH = 32;
+
+/**
+ * Largest number of individual unknown-action reports one payload
+ * produces. Past this count the names are no longer reported one by one
+ * and a single total is reported instead.
+ */
+export const MAX_UNKNOWN_ACTION_REPORTS = 4;
+
+/** Bytes charged per UTF-16 code unit, matching Web Storage accounting. */
+const BYTES_PER_UTF16_UNIT = 2;
+
+/**
+ * Longest text a report carries for a value read out of the payload. A
+ * property name comes from outside and is truncated to this many
+ * characters, with an ellipsis appended, before it reaches a sink.
+ */
+const MAX_REPORTED_TEXT_LENGTH = 48;
+
+/**
+ * Shortens a value read out of the payload for reporting.
+ *
+ * @param value Text to shorten.
+ * @returns `value` when it is within the reporting limit, otherwise its
+ *   first `MAX_REPORTED_TEXT_LENGTH` characters followed by an ellipsis.
+ */
+function truncateForReport(value: string): string {
+  return value.length <= MAX_REPORTED_TEXT_LENGTH
+    ? value
+    : `${value.slice(0, MAX_REPORTED_TEXT_LENGTH)}…`;
+}
+
+/** Which declared limit a payload broke. */
+export type KeymapLimitName =
+  | 'propertyCount'
+  | 'entriesPerList'
+  | 'stringLength';
+
+/**
+ * One broken limit, as a report carries it.
+ *
+ * Carries the limit's name, the measurement that broke it, the limit
+ * itself, and — where the violation was inside one binding — the action and
+ * field it was found in. No value read out of the payload is carried, so a
+ * report of a hostile payload is bounded in size whatever that payload
+ * contains.
+ */
+export interface KeymapLimitViolation {
+  /** Which limit was broken. */
+  readonly limit: KeymapLimitName;
+
+  /** The measurement that broke it. */
+  readonly observed: number;
+
+  /** The limit `observed` was tested against. */
+  readonly maximum: number;
+
+  /** Action the violation was found in, where it was inside a binding. */
+  readonly action?: string;
+
+  /** Field the violation was found in, where it was inside a binding. */
+  readonly field?: string;
+}
+
+/** Fields of a persisted binding whose entries are strings. */
+const BOUNDED_LIST_FIELDS: readonly string[] = ['keys', 'codes', 'contexts'];
+
+/**
+ * Measures a persisted keymap text the way Web Storage charges for it.
+ *
+ * @param text Stored text, before parsing.
+ * @returns Size of `text` in bytes.
+ */
+export function measureKeymapPayloadBytes(text: string): number {
+  return text.length * BYTES_PER_UTF16_UNIT;
+}
+
+/**
+ * Reports whether a persisted keymap text is small enough to parse.
+ *
+ * Pure, total, and cheap: it reads the text's length and nothing else. The
+ * persistence layer calls this before `JSON.parse`, so an oversized payload
+ * never becomes an object graph.
+ *
+ * @param text Stored text, before parsing.
+ * @returns `true` when the text is within `MAX_KEYMAP_PAYLOAD_BYTES`.
+ */
+export function isKeymapPayloadWithinLimit(text: string): boolean {
+  return measureKeymapPayloadBytes(text) <= MAX_KEYMAP_PAYLOAD_BYTES;
+}
+
+/**
+ * Finds the first declared limit a parsed payload breaks.
+ *
+ * Walks the payload's own properties in key order and, for each one that is
+ * a record, the three string-list fields in `BOUNDED_LIST_FIELDS`. Returns
+ * as soon as a limit is broken, so the walk is bounded by the limits
+ * themselves.
+ *
+ * Reads lengths only: no key, string entry or other payload value is
+ * carried in the result.
+ *
+ * @param raw Already-parsed persisted value.
+ * @returns The first violation found, or `null` when the payload is within
+ *   every limit.
+ */
+function findKeymapLimitViolation(
+  raw: Record<string, unknown>
+): KeymapLimitViolation | null {
+  const names = Object.keys(raw);
+
+  if (names.length > MAX_KEYMAP_PROPERTIES) {
+    return {
+      limit: 'propertyCount',
+      observed: names.length,
+      maximum: MAX_KEYMAP_PROPERTIES,
+    };
+  }
+
+  for (const name of names) {
+    const entry = raw[name];
+
+    if (!isPlainRecord(entry)) {
+      continue;
+    }
+
+    for (const field of BOUNDED_LIST_FIELDS) {
+      const value = entry[field];
+
+      if (!isUnknownArray(value)) {
+        continue;
+      }
+
+      if (value.length > MAX_KEYMAP_ENTRIES_PER_LIST) {
+        return {
+          limit: 'entriesPerList',
+          observed: value.length,
+          maximum: MAX_KEYMAP_ENTRIES_PER_LIST,
+          action: name,
+          field,
+        };
+      }
+
+      for (const item of value) {
+        if (
+          typeof item === 'string' &&
+          item.length > MAX_KEYMAP_STRING_LENGTH
+        ) {
+          return {
+            limit: 'stringLength',
+            observed: item.length,
+            maximum: MAX_KEYMAP_STRING_LENGTH,
+            action: name,
+            field,
+          };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 /**
  * Reads an array of non-empty strings off a record.
  *
@@ -1158,8 +1283,8 @@ const INPUT_ACTION_SET: ReadonlySet<string> = new Set(INPUT_ACTIONS);
  * @param field Property name.
  * @param action Action the record describes, for reporting.
  * @param reporter Sink for rejected values.
- * @returns The accepted strings, or `null` when the property is absent or
- *   not an array. An explicitly empty array is returned as such.
+ * @returns The accepted strings, or `null` when the property is absent or not
+ * an array. An explicitly empty array is returned as such.
  */
 function readStringList(
   source: Record<string, unknown>,
@@ -1217,8 +1342,8 @@ function readStringList(
  * @param source Record to read from.
  * @param action Action the record describes, for reporting.
  * @param reporter Sink for rejected values.
- * @returns The accepted contexts, or `null` when the property is absent, not
- *   an array, or names no known context.
+ * @returns The accepted contexts, or `null` when the property is absent, not an
+ * array, or names no known context.
  */
 function readContextList(
   source: Record<string, unknown>,
@@ -1266,8 +1391,7 @@ function readContextList(
  * @param field Property name.
  * @param action Action the record describes, for reporting.
  * @param reporter Sink for rejected values.
- * @returns The boolean, or `null` when the property is absent or not a
- *   boolean.
+ * @returns The boolean, or `null` when the property is absent or not a boolean.
  */
 function readBoolean(
   source: Record<string, unknown>,
@@ -1349,35 +1473,67 @@ function readBinding(
 /**
  * Rebuilds a keymap from an already-parsed persisted value.
  *
- * The loader is guarded end to end and throws for no input: `null`,
- * `undefined`, a value of the wrong type, an unknown action name, and a
- * missing or malformed field each fall back to the corresponding default and
- * are reported through `reporter`. Every call emits at least one report.
+ * The loader is guarded end to end: `null`, `undefined`, a value of the wrong
+ * type, an unknown action name and a missing or malformed field each fall back
+ * to the corresponding default and are reported through `reporter`. Every report
+ * leaves through a contained reporter, so a sink that throws cannot fail the
+ * load. Parsing and storage access belong to the persistence layer; this
+ * function reads neither.
  *
- * This function accepts data the caller has already parsed. It performs no
- * text decoding and reads no storage; both belong to the persistence layer.
+ * LIMITS
+ *   A payload that breaks `MAX_KEYMAP_PROPERTIES`,
+ *   `MAX_KEYMAP_ENTRIES_PER_LIST` or `MAX_KEYMAP_STRING_LENGTH` is rejected
+ *   ATOMICALLY: `DEFAULT_KEY_BINDINGS` is returned whole, no field of it is
+ *   read into the result, and the report carries the broken limit's name and
+ *   measurements rather than any payload content. The byte limit,
+ *   `MAX_KEYMAP_PAYLOAD_BYTES`, belongs to the persistence layer and is applied
+ *   through `isKeymapPayloadWithinLimit()` before the text is parsed.
+ *
+ *   Report volume is bounded too: at most `MAX_UNKNOWN_ACTION_REPORTS` unknown
+ *   action names are reported individually, and any remainder is reported as one
+ *   total.
  *
  * @param raw Already-parsed persisted value, of any shape.
  * @param reporter Sink for fallback reports. Defaults to `NOOP_REPORTER`.
- * @returns A frozen keymap. `DEFAULT_KEY_BINDINGS` is returned whole when
- *   `raw` cannot be read at all.
- *
- * @example
- * deserializeKeymap(serializeKeymap(DEFAULT_KEY_BINDINGS));
- * deserializeKeymap(null);          // DEFAULT_KEY_BINDINGS
- * deserializeKeymap({ moveUp: 1 }); // defaults, one report emitted
+ * @returns A frozen keymap. `DEFAULT_KEY_BINDINGS` is returned whole when `raw`
+ *   cannot be read at all or breaks a declared limit.
  */
 export function deserializeKeymap(
   raw: unknown,
   reporter: InputReporter = NOOP_REPORTER
 ): Keymap {
+  const safeReporter = createSafeInputReporter(reporter);
+
   if (!isPlainRecord(raw)) {
-    reporter.log('warn', 'Keymap payload is unreadable; using defaults.', {
+    safeReporter.log(
+      'warn',
+      'Keymap payload is unreadable; using defaults.',
+      { received: describeRawType(raw) }
+    );
+    safeReporter.count('input.keymap.deserialize.rejected', {
       received: describeRawType(raw),
     });
-    reporter.count('input.keymap.deserialize.rejected', {
-      received: describeRawType(raw),
-    });
+
+    return DEFAULT_KEY_BINDINGS;
+  }
+
+  const violation = findKeymapLimitViolation(raw);
+
+  if (violation !== null) {
+    const fields: InputReportFields = {
+      limit: violation.limit,
+      observed: violation.observed,
+      maximum: violation.maximum,
+      ...(violation.action === undefined ? {} : { action: violation.action }),
+      ...(violation.field === undefined ? {} : { field: violation.field }),
+    };
+
+    safeReporter.log(
+      'warn',
+      'Keymap payload exceeds a declared limit; using defaults.',
+      fields
+    );
+    safeReporter.count('input.keymap.deserialize.overLimit', fields);
 
     return DEFAULT_KEY_BINDINGS;
   }
@@ -1394,7 +1550,7 @@ export function deserializeKeymap(
       return fallback;
     }
 
-    const binding = readBinding(action, raw[action], fallback, reporter);
+    const binding = readBinding(action, raw[action], fallback, safeReporter);
 
     if (binding === null) {
       defaulted += 1;
@@ -1407,23 +1563,44 @@ export function deserializeKeymap(
     return binding;
   });
 
+  let unknown = 0;
+
   for (const name of Object.keys(raw)) {
-    if (!INPUT_ACTION_SET.has(name)) {
-      reporter.log('warn', 'Keymap payload names an unknown action.', {
-        action: name,
+    if (INPUT_ACTION_SET.has(name)) {
+      continue;
+    }
+
+    unknown += 1;
+
+    if (unknown <= MAX_UNKNOWN_ACTION_REPORTS) {
+      const reported = truncateForReport(name);
+
+      safeReporter.log('warn', 'Keymap payload names an unknown action.', {
+        action: reported,
       });
-      reporter.count('input.keymap.deserialize.unknownAction', {
-        action: name,
+      safeReporter.count('input.keymap.deserialize.unknownAction', {
+        action: reported,
       });
     }
   }
 
-  reporter.log('info', 'Keymap payload read.', { restored, defaulted });
-  reporter.count('input.keymap.deserialize.completed', {
+  if (unknown > MAX_UNKNOWN_ACTION_REPORTS) {
+    safeReporter.log(
+      'warn',
+      'Keymap payload names further unknown actions; names not reported.',
+      { unknown, reported: MAX_UNKNOWN_ACTION_REPORTS }
+    );
+    safeReporter.count('input.keymap.deserialize.unknownActionOverflow', {
+      unknown,
+      reported: MAX_UNKNOWN_ACTION_REPORTS,
+    });
+  }
+
+  safeReporter.log('info', 'Keymap payload read.', { restored, defaulted });
+  safeReporter.count('input.keymap.deserialize.completed', {
     restored,
     defaulted,
   });
 
   return keymap;
 }
-

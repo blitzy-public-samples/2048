@@ -1,50 +1,32 @@
 /**
- * WebGL capability probe, context-loss handling, and the two injection
- * contracts shared across src/render/.
+ * WebGL capability probe, context-loss handling, and the two injection contracts
+ * shared across src/render/.
  *
- * PROVENANCE
- *   The probe follows the capability check at
- *   js/animframe_polyfill.js L3-L10: that file walked the
- *   `['webkit', 'moz']` vendor list looking for a prefixed
- *   `requestAnimationFrame` (L4-L8), then tested
- *   `!window.requestAnimationFrame` (L10) to decide whether to install
- *   its own fallback. `probeWebGLSupport()` keeps that detect-then-fall-
- *   back shape. The capability tested is a WebGL rendering context
- *   rather than a frame callback, and the outcome is returned as data
- *   instead of being written onto the global object.
+ * The probe detects a rendering context and returns the outcome as frozen,
+ * serialisable data rather than writing anything onto the global object, so the
+ * health surface can report it and a caller can fall back to the number-only
+ * renderer. It is the sixth capability check in the product and the first that
+ * is reported; src/observability/health.ts reads it directly. Its result is held
+ * after the first call; `resetWebGLSupportProbe()` discards it. Every DOM read
+ * is guarded, and the probe canvas is created, read, released and discarded
+ * without ever being appended.
  *
- *   That polyfill was one of five capability checks the retired sources
- *   performed and reported nowhere. The other four were
- *   `Function.prototype.bind` (js/bind_polyfill.js), `Element.classList`
- *   (js/classlist_polyfill.js), the pointer event family
- *   (js/keyboard_input_manager.js L4-L13) and Web Storage writability
- *   (js/local_storage_manager.js L29-L40). `WebGLSupportResult` is the
- *   sixth check and the first that is reported;
- *   src/observability/health.ts reads it directly.
+ * The probe requests no extension that carries an identifier — only
+ * `WEBGL_lose_context`, to release its own context — so no renderer or vendor
+ * string enters `WebGLSupportResult` or any report.
  *
- *   The try/catch envelope around the probe follows the writability
- *   probe at js/local_storage_manager.js L29-L40, whose catch at
- *   L37-L39 discarded its error value. `RenderErrorInfo` carries that
- *   value instead of discarding it.
+ * `RenderReporter`, `NOOP_RENDER_REPORTER` and the containment boundary
+ * `createGuardedRenderReporter` are declared here, and no module under
+ * src/render/ imports src/observability/: reports leave through the injected
+ * reporter, and a reporter that throws is contained at the point of delivery.
+ * This module imports nothing and is the leaf of the src/render/ import graph.
+ * The module boundaries are drawn as Figure 2, "To-Be Architecture:
+ * Event-Driven Engine with Subscribed Renderer and Hook Bus", in
+ * docs/architecture/ARCHITECTURE.md.
  *
- *   Every DOM read here is guarded. js/html_actuator.js L2-L5 used four
- *   `document.querySelector` results unchecked; no lookup in this
- *   folder repeats that.
- *
- * CONTENTS
- *   This module imports nothing, and it is the leaf of the src/render/
- *   import graph. It mutates no document: the probe canvas is created,
- *   read, released and discarded, and is never appended.
- *
- *   `RenderReporter` and `NOOP_RENDER_REPORTER` are declared here. No
- *   module under src/render/ imports src/observability/.
- *
- *   The reduced-motion surface self-detects through `matchMedia` and
- *   accepts an explicit override. src/ui/a11y/settings.ts drives that
- *   override; this module does not import it.
- *
- * The rationale, alternatives and risks behind the choices above are
- * recorded in docs/DECISION_LOG.md; this file carries provenance only.
+ * The reduced-motion surface self-detects through `matchMedia` and accepts an
+ * explicit override; consumers gate the camera and particle effects on it.
+ * src/ui/a11y/settings.ts drives that override; this module does not import it.
  */
 
 /* ==========================================================================
@@ -64,12 +46,7 @@ export type RenderDetail = Readonly<
 /** Severity carried by a `RenderDiagnostic`. */
 export type RenderDiagnosticLevel = 'debug' | 'info' | 'warning' | 'error';
 
-/**
- * A caught value reduced to serialisable fields.
- *
- * Supersedes the discarded catch parameter at
- * js/local_storage_manager.js L37-L39.
- */
+/** A caught value reduced to serialisable fields. */
 export interface RenderErrorInfo {
   /** The value's `name`, or `'RenderError'` when it carries none. */
   readonly name: string;
@@ -132,18 +109,13 @@ export interface RenderTiming {
  * the third.
  *
  * Handlers run synchronously on the calling path, and a handler that
- * throws propagates to its caller. Every render module accepts a
- * reporter as an optional parameter defaulting to
- * `NOOP_RENDER_REPORTER`, so every one of them is constructible with no
- * sink and no mocking library.
- *
- * @example
- * ```ts
- * const reporter = createRenderReporter({
- *   onDiagnostic: (diagnostic) => { records.push(diagnostic); },
- * });
- * const support = probeWebGLSupport(reporter);
- * ```
+ * throws is contained: every entry point in src/render/ passes its
+ * reporter through `createGuardedRenderReporter()` before using it, so a
+ * throw reaches neither the probe, nor a reduced-motion listener, nor a
+ * context-loss listener, nor a frame, and is not reported back through
+ * the sink that produced it. Every render module accepts a reporter as
+ * an optional parameter defaulting to `NOOP_RENDER_REPORTER`, so every
+ * one of them is constructible with no sink and no mocking library.
  */
 export interface RenderReporter {
   /** Receives every diagnostic record. */
@@ -184,7 +156,80 @@ export function createRenderReporter(
     onTiming: partial.onTiming ?? NOOP_RENDER_REPORTER.onTiming,
   };
 
-  return Object.freeze(reporter);
+  return createGuardedRenderReporter(reporter);
+}
+
+/**
+ * Number of reporter invocations contained across this module because
+ * the sink threw.
+ */
+let containedReporterThrows = 0;
+
+/**
+ * Wraps a reporter so no channel of it can throw into its caller.
+ *
+ * A channel that throws is counted on `readContainedReporterThrows()`
+ * and goes no further: the throw does not reach the probe, the
+ * preference dispatch, a context-loss listener or a frame, and it is not
+ * reported back through the sink that produced it.
+ *
+ * Every entry point that accepts a reporter wraps it here once. Wrapping
+ * an already-wrapped reporter is harmless.
+ *
+ * @param reporter Reporter to contain.
+ * @returns A frozen reporter delegating to `reporter` and throwing for
+ *   nothing.
+ */
+export function createGuardedRenderReporter(
+  reporter: RenderReporter,
+): RenderReporter {
+  return Object.freeze({
+    onDiagnostic: (diagnostic: RenderDiagnostic): void => {
+      try {
+        reporter.onDiagnostic(diagnostic);
+      } catch {
+        containedReporterThrows += 1;
+      }
+    },
+
+    onCount: (count: RenderCount): void => {
+      try {
+        reporter.onCount(count);
+      } catch {
+        containedReporterThrows += 1;
+      }
+    },
+
+    onTiming: (timing: RenderTiming): void => {
+      try {
+        reporter.onTiming(timing);
+      } catch {
+        containedReporterThrows += 1;
+      }
+    },
+  });
+}
+
+/**
+ * Reads how many reporter invocations have been contained because the
+ * sink threw.
+ *
+ * `0` for a sink that never throws. A non-zero value means reports have
+ * been lost and the sink is faulty; it is read out of band, because a
+ * contained throw is deliberately not reported through the sink that
+ * produced it. src/observability/diagnostics-overlay.ts renders it.
+ *
+ * @returns The count, across every guarded reporter in this process.
+ */
+export function readContainedReporterThrows(): number {
+  return containedReporterThrows;
+}
+
+/**
+ * Resets the contained-throw count. Present for suites that assert on it.
+ */
+export function resetContainedReporterThrows(): void {
+  containedReporterThrows = 0;
 }
 
 /** Source field carried by every diagnostic this module emits. */
@@ -211,29 +256,77 @@ const UNKNOWN_ERROR_NAME = 'RenderError';
 /** Message reported when a caught value carries none. */
 const UNKNOWN_ERROR_MESSAGE = 'Unknown render error.';
 
+/** Longest name or message text a `RenderErrorInfo` carries. */
+const MAX_ERROR_TEXT_LENGTH = 200;
+
+/**
+ * Shortens reported text to the declared limit.
+ *
+ * @param text Text to shorten.
+ * @returns `text` when it is within the limit, otherwise its first
+ *   `MAX_ERROR_TEXT_LENGTH` characters followed by an ellipsis.
+ */
+function capText(text: string): string {
+  return text.length <= MAX_ERROR_TEXT_LENGTH
+    ? text
+    : `${text.slice(0, MAX_ERROR_TEXT_LENGTH)}…`;
+}
+
 /**
  * Reads a non-empty string property from an object of unknown shape.
  *
+ * Total: the membership test and the read are both contained, because a
+ * `Proxy` can throw from its `has` or `get` trap and an accessor can
+ * throw from its getter. Either throw is read as an absent property.
+ *
  * @param source Object to read from.
  * @param field Property name to read.
- * @returns The property value, or `undefined` where it is absent, not a
- *   string, or empty.
+ * @returns The property value, capped in length, or `undefined` where it
+ *   is absent, unreadable, not a string, or empty.
  */
 function readStringField(source: object, field: string): string | undefined {
-  if (!(field in source)) {
+  let candidate: unknown;
+
+  try {
+    if (!(field in source)) {
+      return undefined;
+    }
+
+    candidate = Reflect.get(source, field);
+  } catch {
     return undefined;
   }
 
-  const candidate: unknown = Reflect.get(source, field);
-
   return typeof candidate === 'string' && candidate.length > 0
-    ? candidate
+    ? capText(candidate)
     : undefined;
+}
+
+/**
+ * Converts a value to text without trusting its own conversion.
+ *
+ * `String()` invokes `toString` or `Symbol.toPrimitive`, either of which
+ * can throw or return an unbounded string. A throw yields the fixed
+ * fallback text, and the result is capped.
+ *
+ * @param value Value to convert.
+ * @returns The converted text, capped, or the fixed fallback text.
+ */
+function safeText(value: unknown): string {
+  try {
+    return capText(String(value));
+  } catch {
+    return UNKNOWN_ERROR_MESSAGE;
+  }
 }
 
 /**
  * Reduces a caught value of any type to serialisable fields, so a
  * report carries it rather than discarding it.
+ *
+ * Total: it accepts any value, including a `Proxy` whose traps throw and
+ * an object whose `toString` throws, returns on every path, and throws
+ * on none. Both fields are capped at `MAX_ERROR_TEXT_LENGTH`.
  *
  * @param error Caught value, of any type, including `null` and
  *   `undefined`.
@@ -241,10 +334,11 @@ function readStringField(source: object, field: string): string | undefined {
  */
 function describeError(error: unknown): RenderErrorInfo {
   if (error instanceof Error) {
+    // An Error subclass can define `name` and `message` as throwing
+    // accessors, so both are read through the contained reader.
     const info: RenderErrorInfo = {
-      name: error.name.length > 0 ? error.name : UNKNOWN_ERROR_NAME,
-      message:
-        error.message.length > 0 ? error.message : UNKNOWN_ERROR_MESSAGE,
+      name: readStringField(error, 'name') ?? UNKNOWN_ERROR_NAME,
+      message: readStringField(error, 'message') ?? UNKNOWN_ERROR_MESSAGE,
     };
 
     return Object.freeze(info);
@@ -262,7 +356,7 @@ function describeError(error: unknown): RenderErrorInfo {
   const info: RenderErrorInfo = {
     name: UNKNOWN_ERROR_NAME,
     message:
-      typeof error === 'function' ? UNKNOWN_ERROR_MESSAGE : String(error),
+      typeof error === 'function' ? UNKNOWN_ERROR_MESSAGE : safeText(error),
   };
 
   return Object.freeze(info);
@@ -320,27 +414,18 @@ export interface WebGLSupportResult {
   readonly reason?: string;
 
   /**
-   * Unmasked renderer string. Absent where `WEBGL_debug_renderer_info`
-   * is unavailable, which is the case in privacy configurations that
-   * strip the extension.
-   */
-  readonly renderer?: string;
-
-  /** Unmasked vendor string. Absent on the same terms as `renderer`. */
-  readonly vendor?: string;
-
-  /**
-   * Whether `WEBGL_debug_renderer_info` was present. Distinguishes a
-   * stripped extension from an extension that reported nothing.
-   */
-  readonly debugRendererInfo: boolean;
-
-  /**
    * Whether the probe context was released through
-   * `WEBGL_lose_context`. `false` where the extension is unavailable, in
-   * which case the context is dropped with the canvas.
+   * `WEBGL_lose_context`. `true` only for `contextRelease` `'released'`.
    */
   readonly contextReleased: boolean;
+
+  /**
+   * Why the probe context was or was not released: released, the
+   * extension was unavailable, or the release attempt failed. The three
+   * cases are distinct, so an unavailable extension is never read as a
+   * failed release.
+   */
+  readonly contextRelease: ContextReleaseOutcome;
 }
 
 /** Mutable form of `WebGLSupportResult`, frozen before it is returned. */
@@ -349,10 +434,8 @@ interface WebGLSupportDraft {
   level: WebGLContextLevel;
   failure?: WebGLProbeFailure;
   reason?: string;
-  renderer?: string;
-  vendor?: string;
-  debugRendererInfo: boolean;
   contextReleased: boolean;
+  contextRelease: ContextReleaseOutcome;
 }
 
 /** One `getContext` attempt, and the value it threw if it threw. */
@@ -361,12 +444,17 @@ interface ContextAttempt {
   readonly error?: RenderErrorInfo;
 }
 
-/** What `WEBGL_debug_renderer_info` reported, if it was present. */
-interface DebugRendererInfo {
-  readonly available: boolean;
-  readonly renderer?: string;
-  readonly vendor?: string;
-}
+/**
+ * Outcome of releasing the probe context.
+ *
+ * `'extension-unavailable'` and `'release-failed'` are separate values
+ * because they are different conditions: the first is a browser that
+ * does not offer `WEBGL_lose_context`, the second is a call that threw.
+ */
+export type ContextReleaseOutcome =
+  | 'released'
+  | 'extension-unavailable'
+  | 'release-failed';
 
 /** Outcome of creating the throwaway probe canvas. */
 interface ProbeCanvas {
@@ -499,93 +587,47 @@ function requestContext(
 }
 
 /**
- * Reads one string-valued context parameter.
- *
- * @param context Context to read from.
- * @param parameter Parameter enum to read.
- * @returns The reported string, or `undefined` where the read failed or
- *   reported a non-string.
- */
-function readContextString(
-  context: WebGLRenderingContext | WebGL2RenderingContext,
-  parameter: number,
-): string | undefined {
-  try {
-    const value: unknown = context.getParameter(parameter);
-
-    return typeof value === 'string' && value.length > 0 ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Reads the unmasked renderer and vendor strings where
- * `WEBGL_debug_renderer_info` is present. The extension is frequently
- * absent, and is stripped entirely in some privacy configurations; the
- * `getExtension` result is checked before it is read.
- *
- * @param context Context to read from.
- * @returns Whether the extension was present, and what it reported.
- */
-function readDebugRendererInfo(
-  context: WebGLRenderingContext | WebGL2RenderingContext,
-): DebugRendererInfo {
-  let extension: WEBGL_debug_renderer_info | null = null;
-
-  try {
-    extension = context.getExtension('WEBGL_debug_renderer_info');
-  } catch {
-    return { available: false };
-  }
-
-  if (extension === null) {
-    return { available: false };
-  }
-
-  const renderer = readContextString(
-    context,
-    extension.UNMASKED_RENDERER_WEBGL,
-  );
-  const vendor = readContextString(context, extension.UNMASKED_VENDOR_WEBGL);
-  const info: DebugRendererInfo = {
-    available: true,
-    ...(renderer === undefined ? {} : { renderer }),
-    ...(vendor === undefined ? {} : { vendor }),
-  };
-
-  return info;
-}
-
-/**
  * Releases the probe context through `WEBGL_lose_context` where that
  * extension is present. Browsers cap simultaneous contexts, and the
  * probe holds one until it is released.
  *
  * @param context Context to release.
- * @returns Whether `loseContext()` was called.
+ * @returns `'released'` when `loseContext()` was called,
+ *   `'extension-unavailable'` when the browser offers no such extension,
+ *   and `'release-failed'` when obtaining it or calling it threw.
  */
 function releaseContext(
   context: WebGLRenderingContext | WebGL2RenderingContext,
-): boolean {
+): ContextReleaseOutcome {
+  let extension: WEBGL_lose_context | null;
+
   try {
-    const extension = context.getExtension('WEBGL_lose_context');
-
-    if (extension === null || typeof extension.loseContext !== 'function') {
-      return false;
-    }
-
-    extension.loseContext();
-
-    return true;
+    extension = context.getExtension('WEBGL_lose_context');
   } catch {
-    return false;
+    return 'release-failed';
   }
+
+  if (extension === null || typeof extension.loseContext !== 'function') {
+    return 'extension-unavailable';
+  }
+
+  try {
+    extension.loseContext();
+  } catch {
+    return 'release-failed';
+  }
+
+  return 'released';
 }
 
 /**
- * Builds the frozen result for a probe that obtained a context, reading
- * the renderer strings and then releasing the context.
+ * Builds the frozen result for a probe that obtained a context, and
+ * releases that context.
+ *
+ * The context's identifying strings are not read. No extension is
+ * requested other than `WEBGL_lose_context`, which carries no identity,
+ * so nothing describing the machine's graphics stack enters the result
+ * or any report derived from it.
  *
  * @param level Level that was obtained.
  * @param context Context that was obtained.
@@ -595,21 +637,13 @@ function supportedResult(
   level: ProbeLevel,
   context: WebGLRenderingContext | WebGL2RenderingContext,
 ): WebGLSupportResult {
-  const info = readDebugRendererInfo(context);
+  const contextRelease = releaseContext(context);
   const draft: WebGLSupportDraft = {
     supported: true,
     level,
-    debugRendererInfo: info.available,
-    contextReleased: releaseContext(context),
+    contextReleased: contextRelease === 'released',
+    contextRelease,
   };
-
-  if (info.renderer !== undefined) {
-    draft.renderer = info.renderer;
-  }
-
-  if (info.vendor !== undefined) {
-    draft.vendor = info.vendor;
-  }
 
   return Object.freeze(draft);
 }
@@ -630,8 +664,8 @@ function failedResult(
     level: 'none',
     failure,
     reason: reason ?? FAILURE_REASONS[failure],
-    debugRendererInfo: false,
     contextReleased: false,
+    contextRelease: 'extension-unavailable',
   };
 
   return Object.freeze(draft);
@@ -691,11 +725,9 @@ function describeSupport(result: WebGLSupportResult): RenderDiagnostic {
   const detail: Record<string, string | number | boolean | null> = {
     supported: result.supported,
     level: result.level,
-    debugRendererInfo: result.debugRendererInfo,
     contextReleased: result.contextReleased,
+    contextRelease: result.contextRelease,
     failure: result.failure ?? null,
-    renderer: result.renderer ?? null,
-    vendor: result.vendor ?? null,
   };
 
   const reason = result.reason ?? FAILURE_REASONS['context-creation-failed'];
@@ -715,11 +747,15 @@ function describeSupport(result: WebGLSupportResult): RenderDiagnostic {
  * Probes for a WebGL rendering context, and reports what it found.
  *
  * The probe creates a throwaway canvas, requests `'webgl2'` and then
- * `'webgl'`, reads the unmasked renderer strings where
- * `WEBGL_debug_renderer_info` allows it, releases the context through
- * `WEBGL_lose_context` where that extension is present, and discards
- * the canvas. It touches no element in the document and throws on no
- * path, including where there is no document at all.
+ * `'webgl'`, releases the context through `WEBGL_lose_context` where
+ * that extension is present, and discards the canvas. It touches no
+ * element in the document and throws on no path, including where there
+ * is no document at all.
+ *
+ * It reads no identifying string from the context and requests no
+ * extension that carries one, so the result and every report derived
+ * from it describe capability only: whether a context was obtained, at
+ * which level, why not, and how the probe context was released.
  *
  * The result is held after the first call and returned unchanged to
  * every later caller. src/main.ts, src/observability/health.ts and
@@ -731,16 +767,6 @@ function describeSupport(result: WebGLSupportResult): RenderDiagnostic {
  * @param reporter Sink for the probe's timing, counter and diagnostic
  *   reports. Defaults to `NOOP_RENDER_REPORTER`.
  * @returns The frozen, serialisable probe result.
- *
- * @example
- * ```ts
- * const support = probeWebGLSupport();
- * if (support.supported) {
- *   mountThreeRenderer();
- * } else {
- *   mountNumberOnlyRenderer();
- * }
- * ```
  */
 export function probeWebGLSupport(
   reporter: RenderReporter = NOOP_RENDER_REPORTER,
@@ -751,6 +777,7 @@ export function probeWebGLSupport(
     return held;
   }
 
+  const guarded = createGuardedRenderReporter(reporter);
   const startedAt = monotonicNow();
   const result = runProbe();
   const durationMs = monotonicNow() - startedAt;
@@ -762,9 +789,9 @@ export function probeWebGLSupport(
     level: result.level,
   });
 
-  reporter.onTiming({ name: PROBE_METRIC, durationMs, detail });
-  reporter.onCount({ name: PROBE_METRIC, value: 1, detail });
-  reporter.onDiagnostic(describeSupport(result));
+  guarded.onTiming({ name: PROBE_METRIC, durationMs, detail });
+  guarded.onCount({ name: PROBE_METRIC, value: 1, detail });
+  guarded.onDiagnostic(describeSupport(result));
 
   return result;
 }
@@ -791,7 +818,22 @@ export function resetWebGLSupportProbe(): void {
 export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
 /** Where an effective reduced-motion value came from. */
-export type MotionPreferenceSource = 'override' | 'media-query' | 'default';
+export type MotionPreferenceSource =
+  | 'override'
+  | 'media-query'
+  | 'fail-safe'
+  | 'default';
+
+/**
+ * State of the reduced-motion media query.
+ *
+ * `'absent'` is a platform that offers no `matchMedia` at all, which
+ * expresses no preference. `'failed'` is a `matchMedia` that exists and
+ * threw, or a query list whose `matches` could not be read; that is an
+ * unknown preference, not an absent one, and it resolves to reduced
+ * motion.
+ */
+export type MotionQueryStatus = 'available' | 'absent' | 'failed';
 
 /**
  * The effective reduced-motion preference, and how it was determined.
@@ -809,15 +851,29 @@ export interface MotionPreference {
 
   /**
    * `'override'` where an override is set, `'media-query'` where the
-   * query answered, and `'default'` where neither applied.
+   * query answered, `'fail-safe'` where the query exists but could not
+   * be read, and `'default'` where no query mechanism exists at all.
    */
   readonly source: MotionPreferenceSource;
 
   /** Whether `matchMedia` produced a usable query list. */
   readonly mediaQuerySupported: boolean;
 
+  /**
+   * State of the query: available, absent, or present and failing. This
+   * is what distinguishes a platform with no `matchMedia` from a
+   * `matchMedia` that threw.
+   */
+  readonly queryStatus: MotionQueryStatus;
+
   /** The override in force, or `null` where the query governs. */
   readonly override: boolean | null;
+
+  /**
+   * The error the query reported, present only when `queryStatus` is
+   * `'failed'`.
+   */
+  readonly error?: RenderErrorInfo;
 }
 
 /** Receives the effective value whenever it changes. */
@@ -842,6 +898,13 @@ const motionSubscriptions = new Set<MotionSubscription>();
 /** Query list held after the first successful `matchMedia` call. */
 let motionQueryList: MediaQueryList | undefined;
 
+/**
+ * The error a `matchMedia` call or a `matches` read reported, held while
+ * the query is failing. `undefined` while the query is available or
+ * absent.
+ */
+let motionQueryError: RenderErrorInfo | undefined;
+
 /** Removes the change listener from `motionQueryList`, once attached. */
 let detachMotionQueryListener: (() => void) | undefined;
 
@@ -865,32 +928,72 @@ function isMediaQueryList(value: unknown): value is MediaQueryList {
 
 /**
  * Resolves the reduced-motion query list, holding it after the first
- * successful call. `matchMedia` is absent under a non-DOM test
- * environment and on older surfaces, and is treated as no preference
- * expressed rather than as an error.
+ * successful call.
  *
- * @returns The query list, or `undefined` where none is obtainable.
+ * Distinguishes the two ways no query list is obtained. An absent
+ * `matchMedia` — a non-DOM test environment, or an older surface — is
+ * `'absent'` and expresses no preference. A `matchMedia` that throws, or
+ * that returns a value carrying no boolean `matches`, is `'failed'`: the
+ * preference is unknown, and `readMotionPreference()` resolves an unknown
+ * preference to reduced motion.
+ *
+ * @returns The query list and its status, with the error the failure
+ *   reported where there was one.
  */
-function resolveMotionQueryList(): MediaQueryList | undefined {
+function resolveMotionQueryList(): {
+  readonly list?: MediaQueryList;
+  readonly status: MotionQueryStatus;
+  readonly error?: RenderErrorInfo;
+} {
   if (motionQueryList !== undefined) {
-    return motionQueryList;
+    return { list: motionQueryList, status: 'available' };
   }
 
   if (typeof globalThis.matchMedia !== 'function') {
-    return undefined;
+    return { status: 'absent' };
+  }
+
+  if (motionQueryError !== undefined) {
+    return { status: 'failed', error: motionQueryError };
   }
 
   try {
     const created: unknown = globalThis.matchMedia(REDUCED_MOTION_QUERY);
 
     if (!isMediaQueryList(created)) {
-      return undefined;
+      motionQueryError = Object.freeze({
+        name: UNKNOWN_ERROR_NAME,
+        message:
+          'matchMedia returned a value carrying no boolean "matches"; ' +
+          'the reduced-motion preference could not be read.',
+      });
+
+      return { status: 'failed', error: motionQueryError };
     }
 
     motionQueryList = created;
 
-    return created;
-  } catch {
+    return { list: created, status: 'available' };
+  } catch (error: unknown) {
+    motionQueryError = describeError(error);
+
+    return { status: 'failed', error: motionQueryError };
+  }
+}
+
+/**
+ * Reads a query list's `matches` without trusting the accessor.
+ *
+ * @param list Query list to read.
+ * @returns The boolean the list reported, or `undefined` where the read
+ *   threw. A throw is recorded as a query failure.
+ */
+function readMotionMatches(list: MediaQueryList): boolean | undefined {
+  try {
+    return list.matches;
+  } catch (error: unknown) {
+    motionQueryError = describeError(error);
+
     return undefined;
   }
 }
@@ -935,59 +1038,80 @@ function attachMotionQueryListener(
  * Reads the effective preference and how it was determined, without
  * throwing on any path.
  *
+ * Resolution order: an override wins; then the media query's answer;
+ * then, where the query exists but could not be read, reduced motion as
+ * the fail-safe; and finally, where no query mechanism exists at all, no
+ * preference expressed.
+ *
  * @returns The frozen, serialisable preference.
  */
 export function readMotionPreference(): MotionPreference {
-  const list = resolveMotionQueryList();
+  const resolved = resolveMotionQueryList();
   const override = motionOverride;
+  const list = resolved.list;
+  const matches = list === undefined ? undefined : readMotionMatches(list);
+  const status: MotionQueryStatus =
+    list === undefined
+      ? resolved.status
+      : matches === undefined
+        ? 'failed'
+        : 'available';
+  const error = status === 'failed' ? motionQueryError : undefined;
 
   if (override !== null) {
-    const preference: MotionPreference = {
+    return Object.freeze({
       reduced: override,
-      source: 'override',
-      mediaQuerySupported: list !== undefined,
+      source: 'override' as const,
+      mediaQuerySupported: status === 'available',
+      queryStatus: status,
       override,
-    };
-
-    return Object.freeze(preference);
+      ...(error === undefined ? {} : { error }),
+    });
   }
 
-  if (list !== undefined) {
-    const preference: MotionPreference = {
-      reduced: list.matches,
-      source: 'media-query',
+  if (matches !== undefined) {
+    return Object.freeze({
+      reduced: matches,
+      source: 'media-query' as const,
       mediaQuerySupported: true,
+      queryStatus: status,
       override,
-    };
-
-    return Object.freeze(preference);
+    });
   }
 
-  const preference: MotionPreference = {
-    reduced: false,
-    source: 'default',
-    mediaQuerySupported: false,
-    override,
-  };
+  if (status === 'failed') {
+    // The preference exists and could not be read. Reducing motion is
+    // the safe resolution of an unknown answer.
+    return Object.freeze({
+      reduced: true,
+      source: 'fail-safe' as const,
+      mediaQuerySupported: false,
+      queryStatus: status,
+      override,
+      ...(error === undefined ? {} : { error }),
+    });
+  }
 
-  return Object.freeze(preference);
+  return Object.freeze({
+    reduced: false,
+    source: 'default' as const,
+    mediaQuerySupported: false,
+    queryStatus: status,
+    override,
+  });
 }
 
 /**
  * Reads the effective reduced-motion preference.
  *
  * Returns the override where one is set, the media query's answer where
- * the query is available, and `false` where neither is — an absent
- * `matchMedia` is no preference expressed, never a thrown error.
+ * the query is available, `true` where the query exists but could not be
+ * read, and `false` where no query mechanism exists at all. An absent
+ * `matchMedia` is no preference expressed; a `matchMedia` that throws is
+ * an unknown preference and resolves to reduced motion. Neither case
+ * throws.
  *
  * @returns Whether motion is to be reduced.
- *
- * @example
- * ```ts
- * if (!queryReducedMotion()) {
- *   playCameraPunch();
- * }
- * ```
  */
 export function queryReducedMotion(): boolean {
   return readMotionPreference().reduced;
@@ -1036,7 +1160,7 @@ function ensureMotionQueryListener(): void {
     return;
   }
 
-  const list = resolveMotionQueryList();
+  const list = resolveMotionQueryList().list;
 
   if (list === undefined) {
     return;
@@ -1093,19 +1217,15 @@ export function setReducedMotionOverride(reduced: boolean | null): void {
  *   `NOOP_RENDER_REPORTER`.
  * @returns An unsubscribe function. Calling it more than once is
  *   harmless.
- *
- * @example
- * ```ts
- * const unsubscribe = subscribeReducedMotion((reduced) => {
- *   particles.setEnabled(!reduced);
- * });
- * ```
  */
 export function subscribeReducedMotion(
   listener: ReducedMotionListener,
   reporter: RenderReporter = NOOP_RENDER_REPORTER,
 ): () => void {
-  const subscription: MotionSubscription = { listener, reporter };
+  const subscription: MotionSubscription = {
+    listener,
+    reporter: createGuardedRenderReporter(reporter),
+  };
 
   motionSubscriptions.add(subscription);
   lastDispatchedReduced = readMotionPreference().reduced;
@@ -1137,6 +1257,7 @@ export function resetMotionPreference(): void {
   motionSubscriptions.clear();
   motionOverride = null;
   motionQueryList = undefined;
+  motionQueryError = undefined;
   lastDispatchedReduced = undefined;
 }
 
@@ -1250,24 +1371,20 @@ function invokeLossHandler(
  *   neither listener operation is reported and attaches nothing.
  * @param handlers Callbacks for the two transitions. Either may be
  *   omitted, and the whole argument may be omitted.
- * @param reporter Sink for both transitions and for a handler that
- *   throws. Defaults to `NOOP_RENDER_REPORTER`.
+ * @param sink Sink for both transitions and for a handler that throws.
+ *   Contained before use. Defaults to `NOOP_RENDER_REPORTER`.
  * @returns A detach function removing both listeners. Calling it more
  *   than once is harmless.
- *
- * @example
- * ```ts
- * const detach = attachContextLossHandlers(canvas, {
- *   onContextLost: () => { renderLoop.stop(); },
- *   onContextRestored: () => { scene.rebuild(); renderLoop.start(); },
- * });
- * ```
  */
 export function attachContextLossHandlers(
   canvas: HTMLCanvasElement,
   handlers: ContextLossHandlers = {},
-  reporter: RenderReporter = NOOP_RENDER_REPORTER,
+  sink: RenderReporter = NOOP_RENDER_REPORTER,
 ): () => void {
+  // Contained once here, so neither listener below can be broken by a
+  // sink that throws while the browser is dispatching to it.
+  const reporter = createGuardedRenderReporter(sink);
+
   if (!isListenerTarget(canvas)) {
     reporter.onDiagnostic({
       level: 'error',

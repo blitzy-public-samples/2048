@@ -15,25 +15,33 @@
  * never be reused for passwords, tokens, session identifiers or any
  * other value that has to be unguessable.
  *
- * Provenance: this module replaces the two `Math.random()` call sites
- * of the vanilla game, which were the only two in that codebase — the
- * spawn-value draw at js/game_manager.js L71 and the spawn-position
- * draw at js/grid.js L41. It introduces no third source: a seed
- * reaches this module only as an argument, and nothing here reads,
- * wraps or assigns to `Math.random`.
+ * Both inputs are bounded. A run seed longer than
+ * `MAX_RUN_SEED_LENGTH` is refused before any substream is built, and
+ * every recorded cursor is checked against `MAX_RNG_CURSOR` before a
+ * single draw is discarded, so a restore performs bounded work for any
+ * payload. `isAcceptableRunSeed()` is the seed limit as a predicate,
+ * for a caller that must not handle an exception.
+ *
+ * This module introduces no source of randomness of its own: a seed reaches
+ * it only as an argument, and nothing here reads, wraps or assigns to
+ * `Math.random`.
  *
  * The fan-out is drawn as Figure 7, "Seeded Determinism: One Run Seed
  * Fanned into Named RNG Substreams", in docs/architecture/data-flow.md.
- *
- * Rationale for the decisions made here is recorded in
- * docs/DECISION_LOG.md.
  */
 
 import {
+  MAX_RNG_CURSOR,
+  MAX_RNG_SEED_LENGTH,
   createSeededRng,
   deriveStreamSeed,
+  type RngRejection,
+  type RngReporter,
   type SeededRng,
 } from './seeded-rng';
+
+export type { RngRejection, RngReporter } from './seeded-rng';
+export { MAX_RNG_CURSOR } from './seeded-rng';
 
 /**
  * The four substream names, in the order every iteration in this
@@ -49,9 +57,9 @@ import {
  * each name is also a stored value.
  */
 export const RNG_STREAM_NAMES = [
-  // Replaces the spawn-value draw of js/game_manager.js L71.
+  // Draws the value of a spawned tile.
   'spawn-value',
-  // Replaces the spawn-position draw of js/grid.js L41.
+  // Draws the cell a tile spawns in.
   'spawn-position',
   'relic-draw',
   'rarity-weight',
@@ -64,6 +72,69 @@ export const RNG_STREAM_NAMES = [
  * declaration of the four names.
  */
 export type StreamName = (typeof RNG_STREAM_NAMES)[number];
+
+/**
+ * Characters the longest substream suffix adds to a run seed.
+ *
+ * Measured through `deriveStreamSeed()` itself, with an empty run seed,
+ * so the delimiter and the label are counted exactly as the derivation
+ * writes them.
+ */
+const LONGEST_STREAM_SUFFIX_LENGTH = RNG_STREAM_NAMES.reduce(
+  (longest, name) => Math.max(longest, deriveStreamSeed('', name).length),
+  0
+);
+
+/**
+ * Longest run seed, in characters, that substreams can be derived from.
+ *
+ * `MAX_RNG_SEED_LENGTH` bounds the seed each substream generator is
+ * built from, and each of those is a run seed plus a derived suffix, so
+ * the run seed itself is bounded by the difference. A run seed within
+ * this limit therefore derives four substream seeds that are all within
+ * theirs.
+ */
+export const MAX_RUN_SEED_LENGTH =
+  MAX_RNG_SEED_LENGTH - LONGEST_STREAM_SUFFIX_LENGTH;
+
+/**
+ * Reports whether `seed` is short enough to derive substreams from.
+ *
+ * Pure and total. The guarded run-state loader and the run-start screen
+ * call this before `createRngStreams()`, which throws for a seed this
+ * rejects.
+ *
+ * @param seed Run seed to measure.
+ * @returns `true` when `seed` is at most `MAX_RUN_SEED_LENGTH`
+ *   characters long.
+ */
+export function isAcceptableRunSeed(seed: string): boolean {
+  return seed.length <= MAX_RUN_SEED_LENGTH;
+}
+
+/**
+ * Hands one rejection to a sink, containing anything the sink throws.
+ *
+ * @param reporter Sink to report through, or `undefined`.
+ * @param rejection Rejection to report.
+ */
+function reportStreamRejection(
+  reporter: RngReporter | undefined,
+  rejection: RngRejection
+): void {
+  const sink = reporter?.onRejected;
+
+  if (sink === undefined) {
+    return;
+  }
+
+  try {
+    sink(rejection);
+  } catch {
+    // A faulty sink is contained here and is not reported back through
+    // itself.
+  }
+}
 
 /**
  * Draw count of every substream, keyed by name.
@@ -88,10 +159,10 @@ export type RngCursorMap = Record<StreamName, number>;
  *
  * ARRAY HANDLING
  *   The array-taking methods read their arguments in the given index
- *   order and never sort, filter, re-key or otherwise mutate them.
- *   js/grid.js builds its available-cell list through `eachCell`
- *   (js/grid.js L58-L64), whose loops are x-outer and y-inner, and the
- *   same draw maps to a different element if that order changes.
+ *   order and never sort, filter, re-key or otherwise mutate them. The
+ *   caller's order is part of the determinism contract: the available-cell
+ *   list is built x-outer and y-inner, and the same draw maps to a
+ *   different element if that order changes.
  */
 export interface RngStream {
   /** Name this substream was created under. */
@@ -117,9 +188,8 @@ export interface RngStream {
   /**
    * Consumes one draw and reduces it to an integer index.
    *
-   * The arithmetic is `Math.floor(next() * maxExclusive)`, ported from
-   * js/grid.js L41 (`cells[Math.floor(Math.random() * cells.length)]`)
-   * so a given draw selects the same index it selected there.
+   * The arithmetic is `Math.floor(next() * maxExclusive)`, so a given draw
+   * selects the same index the vanilla position draw selected.
    *
    * @param maxExclusive Exclusive upper bound of the returned index.
    * @returns An integer in `[0, maxExclusive)`; `0` when
@@ -131,10 +201,8 @@ export interface RngStream {
   /**
    * Selects one element of `items` uniformly, consuming one draw.
    *
-   * Ported from js/grid.js L37-L43, `randomAvailableCell`, including
-   * its boundary: the `if (cells.length)` guard there has no else
-   * branch, so a full board yields no cell. An empty array yields
-   * `undefined` here and consumes no draw.
+   * The vanilla boundary is preserved: a full board yields no cell, so an
+   * empty array yields `undefined` here and consumes no draw.
    *
    * @param items Candidates, read in the given index order.
    * @returns The selected element, or `undefined` when `items` is
@@ -157,8 +225,7 @@ export interface RngStream {
    *
    *   With `items` `[2, 4]` and `weights` `[0.9, 0.1]` the total is
    *   exactly 1, so the walk yields 2 when `r` is less than 0.9 and 4
-   *   otherwise: js/game_manager.js L71
-   *   (`var value = Math.random() < 0.9 ? 2 : 4;`) exactly.
+   *   otherwise — the vanilla spawn distribution exactly.
    *
    * @param items Candidates, read in the given index order.
    * @param weights Relative weight of each entry of `items`, in the
@@ -242,30 +309,59 @@ function mapStreamNames<T>(
 }
 
 /**
- * Reduces one recorded cursor entry to a usable draw count.
+ * Reduces one recorded cursor entry to a usable draw count, refusing
+ * anything outside the bound the fast-forward can absorb.
  *
  * The value reaching here has normally come back out of Web Storage
  * through the guarded run-state loader, so it may be absent, or may
  * have been written by an older or a corrupted payload. Anything that
- * is not a non-negative safe integer is treated as no recorded
- * position and reported as 0. This function never throws.
+ * is not a non-negative safe integer, and anything above
+ * `MAX_RNG_CURSOR`, is treated as no recorded position, reported with
+ * the substream it belonged to, and reduced to 0. This function never
+ * throws.
  *
- * An absent entry is rejected first. `Number.isSafeInteger` then
- * rejects `NaN`, `Infinity`, `-Infinity`, every fractional value,
- * every magnitude beyond the exactly representable integer range, and
- * any value that is not a number at all. The final comparison
- * collapses negatives and `-0` to `+0`.
+ * An absent entry is rejected first, and silently: a cursor map that
+ * predates a substream is a normal older payload, not a refusal.
+ * `Number.isSafeInteger` then rejects `NaN`, `Infinity`, `-Infinity`,
+ * every fractional value, every magnitude beyond the exactly
+ * representable integer range, and any value that is not a number at
+ * all. The bound rejects the rest of the representable range. The final
+ * comparison collapses `-0` to `+0`.
  *
+ * @param name Substream the entry belonged to, for reporting.
  * @param recorded Draw count read from a caller's cursor map.
- * @returns A non-negative safe integer; 0 when `recorded` carries no
- *   usable position.
+ * @param reporter Sink for a refusal.
+ * @returns A non-negative safe integer no greater than
+ *   `MAX_RNG_CURSOR`; 0 when `recorded` carries no usable position.
  */
-function normaliseCursor(recorded: number | undefined): number {
+function normaliseCursor(
+  name: StreamName,
+  recorded: number | undefined,
+  reporter?: RngReporter
+): number {
   if (recorded === undefined) {
     return 0;
   }
 
-  if (!Number.isSafeInteger(recorded)) {
+  if (!Number.isSafeInteger(recorded) || recorded < 0) {
+    reportStreamRejection(reporter, {
+      kind: 'cursor-unusable',
+      stream: name,
+      observed: typeof recorded === 'number' ? recorded : Number.NaN,
+      maximum: MAX_RNG_CURSOR,
+    });
+
+    return 0;
+  }
+
+  if (recorded > MAX_RNG_CURSOR) {
+    reportStreamRejection(reporter, {
+      kind: 'cursor-out-of-range',
+      stream: name,
+      observed: recorded,
+      maximum: MAX_RNG_CURSOR,
+    });
+
     return 0;
   }
 
@@ -301,6 +397,14 @@ function totalWeightOf(
     }
 
     total += weight;
+
+    // The running total is checked as it accumulates: finite weights can sum
+    // to `Infinity`, and `Infinity > 0` would let a draw be taken for a
+    // selection that cannot be made, desynchronising the substream's cursor
+    // from the snapshot that produced it.
+    if (!Number.isFinite(total)) {
+      return undefined;
+    }
   }
 
   return total > 0 ? total : undefined;
@@ -323,8 +427,7 @@ function createStream(name: StreamName, rng: SeededRng): RngStream {
     return rng.next();
   }
 
-  // Ported from js/grid.js L41,
-  // `cells[Math.floor(Math.random() * cells.length)]`.
+  // `Math.floor(next() * maxExclusive)`: the vanilla index arithmetic.
   function nextInt(maxExclusive: number): number {
     if (!Number.isFinite(maxExclusive) || maxExclusive <= 0) {
       return 0;
@@ -333,8 +436,7 @@ function createStream(name: StreamName, rng: SeededRng): RngStream {
     return Math.floor(next() * maxExclusive);
   }
 
-  // Ported from js/grid.js L37-L43, `randomAvailableCell`, whose
-  // `if (cells.length)` guard has no else branch.
+  // An empty candidate list yields `undefined`, as a full board did.
   function pick<T>(items: readonly T[]): T | undefined {
     if (items.length === 0) {
       return undefined;
@@ -344,8 +446,7 @@ function createStream(name: StreamName, rng: SeededRng): RngStream {
     return items[nextInt(items.length)];
   }
 
-  // Ported from js/game_manager.js L71,
-  // `var value = Math.random() < 0.9 ? 2 : 4;`.
+  // Resolves `[2, 4]` at `[0.9, 0.1]` to the vanilla spawn distribution.
   function pickWeighted<T>(
     items: readonly T[],
     weights: readonly number[]
@@ -403,48 +504,51 @@ function createStream(name: StreamName, rng: SeededRng): RngStream {
  *   draws it records, leaving it exactly where the instance that
  *   produced the map stood. Restore is tolerant and never throws: a
  *   missing entry starts that substream at 0, an entry that is not a
- *   non-negative safe integer starts at 0, and a key that is not a
- *   substream name is ignored — only the names in `RNG_STREAM_NAMES`
- *   are read.
+ *   non-negative safe integer starts at 0, an entry above
+ *   `MAX_RNG_CURSOR` starts at 0, and a key that is not a substream
+ *   name is ignored — only the names in `RNG_STREAM_NAMES` are read.
+ *   Every refused entry is reported with the substream it belonged to,
+ *   and the work a restore performs is therefore bounded by
+ *   `MAX_RNG_CURSOR` per substream however the payload was written.
  *
- *   Restore fast-forwards; it does not replay. Provenance for that
- *   behaviour: js/game_manager.js `setup()` (L35-L59) calls
- *   `addStartTiles()` only on a fresh start and skips it when a
- *   previous state is present (L39-L45), and `startTiles` is 2
- *   (js/game_manager.js L7), so a resumed run continues its sequence
- *   and does not take the opening draws again.
+ *   Restore fast-forwards; it does not replay. The opening spawns are
+ *   taken only on a fresh start, so a resumed run continues its sequence
+ *   instead of taking those draws again.
  *
  * @param seed Run seed. Used verbatim; this module never originates
- *   one.
+ *   one. Must be at most `MAX_RUN_SEED_LENGTH` characters long.
  * @param cursors Draw counts to resume each substream from. Defaults
  *   to a fresh start for all four.
+ * @param reporter Sink for a refused seed or cursor. Optional.
  * @returns The run's substreams.
- *
- * @example
- * const streams = createRngStreams('run-seed-2048');
- * const value = streams
- *   .stream('spawn-value')
- *   .pickWeighted([2, 4], [0.9, 0.1]);      // 2 or 4
- * const cell = streams
- *   .stream('spawn-position')
- *   .pick(availableCells);                  // undefined when full
- *
- * @example
- * // Persisting and resuming: the resumed run continues the sequence.
- * const saved = streams.snapshotCursors();
- * const resumed = createRngStreams('run-seed-2048', saved);
- * resumed.stream('spawn-value').cursor === saved['spawn-value'];
+ * @throws {RangeError} If `seed` is longer than `MAX_RUN_SEED_LENGTH`.
+ *   `isAcceptableRunSeed()` answers the same question without throwing.
  */
 export function createRngStreams(
   seed: string,
-  cursors?: Partial<RngCursorMap>
+  cursors?: Partial<RngCursorMap>,
+  reporter?: RngReporter
 ): RngStreams {
+  if (!isAcceptableRunSeed(seed)) {
+    reportStreamRejection(reporter, {
+      kind: 'seed-too-long',
+      observed: seed.length,
+      maximum: MAX_RUN_SEED_LENGTH,
+    });
+
+    throw new RangeError(
+      `A run seed may be at most ${MAX_RUN_SEED_LENGTH} characters ` +
+        `long; this one is ${seed.length}.`
+    );
+  }
+
   const table = mapStreamNames((name) =>
     createStream(
       name,
       createSeededRng(
         deriveStreamSeed(seed, name),
-        normaliseCursor(cursors?.[name])
+        normaliseCursor(name, cursors?.[name], reporter),
+        reporter
       )
     )
   );

@@ -1,103 +1,35 @@
-// =============================================================================
-// Screen flow — the shared screen-container treatment plus the run-start,
-// stage-progress and game-over states.
-// =============================================================================
+// Screen flow: the shared screen-container treatment plus the run-start,
+// stage-progress and game-over states. The `reward` and `run-summary` states
+// belong to _reward and _summary, and the in-flow `hud` state to _hud.
 //
-// PROVENANCE
-//   Nothing in this file was moved from an existing stylesheet. The
-//   pre-migration page carried a single screen, and style/main.scss declares no
-//   rule for `.screen-layer`, `.screen` or any container this file names.
-//
-//   The visual vocabulary restates two blocks style/main.scss already compiles,
-//   applied to the router's containers rather than to `.game-message`. Each
-//   line number below is a line of the 549-line pre-migration file:
-//     - the terminal overlay, L196-L247: the four-edge inset, the
-//       `rgba($tile-color, .5)` loss tint at L204, the
-//       `rgba($tile-gold-color, .5)` win tint with `$bright-text-color` at
-//       L237-L239, `text-align: center` at L207, the 60px verdict paragraph at
-//       L209-L217, the control row at L219-L222 and L224-L226, and
-//       `fade-in 800ms ease $transition-speed * 12` with `both` fill at
-//       L234-L235.
-//     - the `button` mixin, style/main.scss L158-L168, together with the seven
-//       user-agent-reset declarations that file added when index.html's three
-//       controls became <button> elements. That mixin is declared in the
-//       stylesheet entry file; `screen-control` below restates it.
-//
-//   The overlay cadence is reproduced unchanged: 800ms expressed as
-//   `$transition-speed * 8`, after `$transition-speed * 12`, with
-//   `animation-fill-mode: both`. The `fade-in` keyframes are the ones
-//   style/main.scss declares; no keyframe is declared here.
-//
-//   `.game-message` is not addressed from this file. Its own rules, including
-//   its `z-index: 100` at style/main.scss L205 and the `!important` overrides
-//   in the 520px block, are left as they stand.
-//
-// CONSUMERS
-//   SCSS  style/main.scss loads this partial as `@use "screens"`. The sibling
-//         partials _hud, _reward and _summary may load it for the mixins under
-//         EXPORTS. Sass `@use` is not transitive, so each of them loads it for
-//         itself.
-//   HTML  index.html declares `.screen-layer` at body level, holding five
-//         `.screen` containers addressed by `data-screen`, plus
-//         `#settings-panel`. This file styles the shared container and the
-//         `run-start`, `stage-progress` and `game-over` values; `reward` and
-//         `run-summary` belong to _reward and _summary, and the sixth router
-//         state `hud` is in-flow chrome inside <main> styled by _hud.
-//   TS    src/ui/screen-router.ts removes the `hidden` attribute from exactly
-//         one container at a time. src/ui/screens/run-start.ts,
-//         stage-progress.ts and game-over.ts render into the three containers
-//         this file styles.
+// State mechanism: index.html ships every container with the `hidden`
+// attribute and src/ui/screen-router.ts removes it from exactly one container
+// at a time, so an inactive screen is out of the render tree, out of the
+// accessibility tree and unreachable by Tab. `.screen` occupies
+// $z-index-screen-overlay; the established ladder is not renumbered, and
+// `.game-message` is not addressed from this file.
 //
 // EXPORTS
 //   @mixin screen-surface        the shared overlay container presentation
+//   @mixin screen-modal-surface  screen-surface at the modal stacking slot
 //   @mixin screen-panel-surface  the bounded opaque reading surface
 //   @mixin screen-verdict-type   the verdict type treatment, both scales
 //   @mixin screen-text-field     the single-line text field
 //   @mixin screen-control        the button vocabulary and its UA reset
 //   @mixin screen-content        the element-and-class content pairs
-//   .screen, .screen-panel, .screen-verdict, .screen-text, .screen-list,
-//   .screen-label, .screen-field, .screen-actions, .screen-button, .seed-input
 //
-// SELECTOR SOURCE
-//   `.screen-layer`, `.screen`, the `data-screen` values and the `hidden`
-//   attribute are declared by index.html. Every other class below is content
-//   vocabulary for the three src/ui/screens/ modules named above; each is
-//   paired with an element selector scoped to the same three containers.
+// `.screen` occupies $z-index-screen-overlay and `#settings-panel` occupies
+// $z-index-modal, the slot style/_tokens.scss reserves for a modal.
+// style/_reward.scss places the reward container on that same slot, which is the
+// ladder as specified, so the two tie and the tie resolves by tree order:
+// `.screen-layer` computes `position: static` with `z-index: auto` and so forms
+// no stacking context, and `#settings-panel` is the last of the six children
+// index.html declares inside it. Reordering those six children, or giving
+// `.screen-layer` a stacking context, would invert that; no rule here does
+// either. The established ladder is not renumbered.
 //
-// LAYERING
-//   `.screen` occupies `$z-index-screen-overlay`. The ladder style/main.scss
-//   declares — `.grid-container` 1, `.tile-container` 2, `.tile-inner` 10,
-//   `.tile-merged .tile-inner` 20, `.game-message` 100, `.score-addition`
-//   100 — is not renumbered, and no rule here occupies `$z-index-hud`,
-//   `$z-index-modal` or `$z-index-diagnostics`.
-//
-//   index.html places `#diagnostics-overlay` as a SIBLING of `.screen-layer`;
-//   `html` and `body` are their only shared ancestors. This file declares no
-//   rule for `html`, `body` or `.screen-layer`. No `overflow`, `clip-path`,
-//   `contain`, `filter`, `opacity` or `transform` is declared on any ancestor
-//   the overlay shares with a screen. Every tint below is an `rgba()`
-//   background on the screen's own box; no wrapper carries `opacity`.
-//   Exactly two declarations in this file could create a containing block, and
-//   neither is on an ancestor of the overlay's mount point: `overflow: auto` on
-//   `.screen`, and `opacity` on a disabled control, which is a leaf.
-//   `clip-path`, `contain`, `filter`, `transform`, `will-change`,
-//   `backdrop-filter` and `perspective` appear nowhere in this file.
-//
-// CONTENTS
-//   Section 1  derived values
-//   Section 2  exported mixins
-//   Section 3  the shared screen container
-//   Section 4  shared content vocabulary
-//   Section 5  the content pairs for the three owned containers, and run start
-//   Section 6  stage progress
-//   Section 7  game over
-//   Section 8  reduced motion
-//
-// The screen-flow state machine is Figure 6 in docs/architecture/.
-//
-// The rationale, alternatives and risks behind every item above are recorded in
-// docs/DECISION_LOG.md; this file carries provenance only.
-// =============================================================================
+// The screen-flow state machine is Figure 6, "Screen Flow State Machine: Run
+// Start to Run Summary", in docs/architecture/ARCHITECTURE.md.
 
 @use "sass:color";
 @use "sass:math";
@@ -105,68 +37,52 @@
 @use "helpers" as *;
 @use "a11y" as *;
 
-// -----------------------------------------------------------------------------
-// 1. DERIVED VALUES
-//
-// style/_tokens.scss carries no font size, no control geometry, no alpha and no
-// duration other than $transition-speed. Every value this file needs in those
-// ranges is derived from a token once, here, and each names the style/main.scss
-// declaration it reproduces. No rule further down carries a literal length,
-// duration or colour.
-// -----------------------------------------------------------------------------
+// Values derived from tokens once, here. No rule below carries a literal
+// length, duration or colour.
 
-// Verdict type. The terminal overlay's paragraph is 60px at the desktop scale
-// and 30px inside the 520px block. $grid-spacing is 15px.
-// style/main.scss L210 and its mobile counterpart.
-$screen-verdict-size: $grid-spacing * 4 !default; // 60px
-$screen-verdict-size-mobile: $grid-spacing * 2 !default; // 30px
+// Verdict type: the size the terminal overlay's paragraph carries at either
+// scale.
+$screen-verdict-size: $grid-spacing * 4 !default;
+$screen-verdict-size-mobile: $grid-spacing * 2 !default;
 
-// Control geometry, from the `button` mixin at style/main.scss L158-L168:
-// `height: 40px`, `line-height: 42px`, `padding: 0 20px`.
-$screen-control-height: math.div($grid-spacing * 8, 3) !default; // 40px
-$screen-control-line-height: math.div($grid-spacing * 14, 5) !default; // 42px
-$screen-control-padding-inline: math.div($grid-spacing * 4, 3) !default; // 20px
+// Control geometry, from the `button` mixin in style/main.scss:
+$screen-control-height: math.div($grid-spacing * 8, 3) !default;
+$screen-control-line-height: math.div($grid-spacing * 14, 5) !default;
+$screen-control-padding-inline: math.div($grid-spacing * 4, 3) !default;
 
-// The gap between two controls in the overlay's control row.
-// `margin-left: 9px` at style/main.scss L226.
-$screen-control-gap: math.div($grid-spacing * 3, 5) !default; // 9px
+// The gap between two controls in the overlay's control row. Defaults to
+// $control-gap, the shared declaration of that gap in style/_tokens.scss; the
+// independent derivation this line carried resolved to the same 9px.
+$screen-control-gap: $control-gap !default; // 9px
 
-// Inline padding of a text field: two thirds of $grid-spacing, which is the
-// board gutter the 520px block of style/main.scss uses.
-$screen-field-padding-inline: math.div($grid-spacing * 2, 3) !default; // 10px
+$screen-field-padding-inline: math.div($grid-spacing * 2, 3) !default;
 
-// Overlay cadence, unchanged from style/main.scss L234-L235.
-$screen-fade-duration: $transition-speed * 8 !default; // 800ms
-$screen-fade-delay: $transition-speed * 12 !default; // 1200ms
+// Overlay cadence, unchanged from the terminal overlay.
+$screen-fade-duration: $transition-speed * 8 !default;
+$screen-fade-delay: $transition-speed * 12 !default;
 
-// Tint alpha, from `rgba($tile-color, .5)` at style/main.scss L204 and
-// `rgba($tile-gold-color, .5)` at L238.
+// Tint alpha, from the terminal overlay's loss and win tints.
 $screen-tint-alpha: 0.5 !default;
 
-// Surface radius. The board's own corner is `$tile-border-radius * 2`.
-// style/main.scss L189.
-$screen-surface-radius: $tile-border-radius * 2 !default; // 6px
+$screen-surface-radius: $tile-border-radius * 2 !default;
 
-// Panel measure. `.container` is $field-width wide at the desktop scale, and
-// style/_a11y.scss already derives the 520px block's 280px counterpart.
-$screen-panel-measure: $field-width !default; // 500px
-$screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
+$screen-panel-measure: $field-width !default;
+$screen-panel-measure-mobile: $a11y-mobile-field-width !default;
 
-// -----------------------------------------------------------------------------
-// 2. EXPORTED MIXINS
-// -----------------------------------------------------------------------------
-
-// The shared overlay container presentation: a viewport-fixed box that centres
-// its content on both axes and sits on $z-index-screen-overlay. It declares no
-// `opacity`, `transform`, `clip-path`, `contain` or `filter`, and it carries no
-// background of its own — sections 3 and 6 supply the tint.
+// The shared overlay container: a viewport-fixed box that centres its content
+// on both axes at $z-index-screen-overlay, with no background of its own —
+// sections below supply the tint.
 //
 // The second `justify-content` adds the `safe` overflow position; engines that
 // do not parse it keep the plain `center` above.
-@mixin screen-surface {
+//
+// The stacking slot is a parameter, not a declaration a caller overrides, so
+// exactly one `z-index` reaches the emitted rule. `.screen` in section 3 takes
+// the default; `screen-modal-surface` passes `$z-index-modal`.
+@mixin screen-surface($z-index: $z-index-screen-overlay) {
   position: fixed;
   inset: 0;
-  z-index: $z-index-screen-overlay;
+  z-index: $z-index;
 
   display: flex;
   flex-direction: column;
@@ -179,13 +95,9 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   padding: $grid-spacing;
   overflow: auto;
 
-  // style/main.scss L207.
   text-align: center;
 
-  // style/main.scss L234. The delay belongs to the terminal states and is added
-  // in sections 6 and 7.
   @include animation(fade-in $screen-fade-duration ease);
-  // style/main.scss L235.
   @include animation-fill-mode(both);
 
   @include smaller($mobile-threshold) {
@@ -194,10 +106,21 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   }
 }
 
+// The modal variant of the container above, for a surface that is not a router
+// state and must sit over every screen the router presents. It is
+// `screen-surface` with one declaration changed — the stacking slot — so a modal
+// and a screen cannot drift apart in geometry, padding, centring, scrolling,
+// cadence or mobile scale.
+//
+// `$z-index-modal` is the 400 slot style/_tokens.scss reserves. The container
+// it is included in supplies the scrim tint, as sections 3 and 6 do for a
+// screen, and the panel inside it supplies the reading surface.
+@mixin screen-modal-surface {
+  @include screen-surface($z-index-modal);
+}
+
 // The bounded reading surface. Its background and text colour resolve through
-// the `--theme-*` custom properties style/_themes.scss publishes on `:root`,
-// with a token fallback. The edge is the boundary vocabulary style/_a11y.scss
-// applies to the modal surfaces.
+// the `--theme-*` custom properties with token fallbacks.
 @mixin screen-panel-surface {
   box-sizing: border-box;
   inline-size: $screen-panel-measure;
@@ -224,10 +147,7 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   }
 }
 
-// The verdict type treatment. `.game-message p` at style/main.scss L209-L217
-// carries font-size, font-weight, height and line-height; the fixed height and
-// the 222px offset there belong to that element's absolute placement inside the
-// board and are not reproduced.
+// The verdict type treatment, at both scales.
 @mixin screen-verdict-type {
   margin: 0;
   font-size: $screen-verdict-size;
@@ -241,14 +161,9 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   }
 }
 
-// A single-line text field. style/main.scss declares no form control; every
-// declaration here is new, and every value resolves to a token or to a
-// section 1 derivation. `$diagnostics-font-family` is _tokens.scss's monospace
-// stack, which the run-summary seed readout also reads.
-//
-// The six callout, selection and touch-action declarations reverse, on the
-// field itself, the suppression style/main.scss applies to `.game-container`
-// at L177-L186.
+// A single-line text field; style/main.scss declares no form control. The
+// callout, selection and touch-action declarations reverse, on the field
+// itself, the suppression the stylesheet applies to `.game-container`.
 @mixin screen-text-field {
   box-sizing: border-box;
   flex: 1 1 auto;
@@ -277,23 +192,21 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   @include focusable;
 }
 
-// The button vocabulary. It restates the eight declarations of the `button`
-// mixin at style/main.scss L158-L168 — with `background` and `color` resolved
-// through the `--theme-*` custom properties and a token fallback — and adds
-// `box-sizing: border-box`. The seven declarations that follow are the
-// user-agent reset that mixin gained when index.html's three controls became
-// <button> elements. `float: none` is declared as well; `.restart-button` in
-// style/main.scss floats right.
+// The button vocabulary: the declarations of style/main.scss's `button` mixin,
+// with `background` and `color` resolved through the `--theme-*` custom
+// properties, plus `box-sizing`, the user-agent reset and `float: none`, which
+// is now the explicit default because the `.above-game` row is a flex layout and
+// no control in this stylesheet floats.
 //
-// BLITZY [A11Y]: the label measures 3.79:1 (#f9f6f2 on #8f7a66) at the bold
-// base size, below the WCAG AA 4.5:1 threshold for text under 18.66px.
-// Implemented as the design system specifies; flagged for designer review, not
-// corrected here. The same flag stands against the mixin this restates.
+// BLITZY [A11Y]: the control label sits below the WCAG AA 4.5:1 text threshold,
+// and the control's 40px block size sits below the 44px target size WCAG 2.5.5
+// recommends; 40px is the height the design system's `button` mixin declares.
+// Recorded as decisions DL-A11Y-03 and DL-A11Y-04.
 //
-// BLITZY [A11Y]: the control resolves to a 40px block size, below the 44px
-// minimum target size WCAG 2.5.5 recommends. 40px is the height the design
-// system's `button` mixin declares, and it is implemented at that value;
-// flagged for designer review, not enlarged here.
+// BLITZY [A11Y]: the control label sits below the WCAG AA 4.5:1 text threshold,
+// and the control's 40px block size sits below the 44px target size WCAG 2.5.5
+// recommends; 40px is the height the design system's `button` mixin declares.
+// Recorded as decisions DL-A11Y-03 and DL-A11Y-04.
 @mixin screen-control {
   display: inline-block;
   box-sizing: border-box;
@@ -320,16 +233,13 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
 
   @include focusable;
 
-  // The disabled state. style/main.scss declares none; index.html's three
-  // controls are never disabled. `opacity` is applied to the control itself,
-  // and a control is a leaf: it is never an ancestor of
-  // `#diagnostics-overlay`'s mount point. The fraction is $screen-tint-alpha,
-  // the alpha the terminal overlay's tints carry.
+  // The disabled state, which style/main.scss declares none of. `opacity` is
+  // applied to the control itself, which is a leaf. The state is also carried by
+  // the `disabled` attribute and by `aria-disabled`, so it never rests on colour
+  // alone.
   //
-  // BLITZY [A11Y]: at that fraction the label falls below the 3.79:1 that the
-  // enabled control measures. WCAG 1.4.3 exempts an inactive component from
-  // the contrast minimum, and the state is also carried by the HTML `disabled`
-  // attribute and by `aria-disabled`, so it does not rest on colour alone.
+  // BLITZY [A11Y]: at that fraction the label falls below the contrast the
+  // enabled control carries. Recorded as decision DL-A11Y-05.
   &:disabled,
   &[aria-disabled="true"] {
     cursor: default;
@@ -338,11 +248,8 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   }
 }
 
-// The element counterparts of the section 4 classes, for the three containers
-// this file owns. Section 4 addresses the classes the src/ui/screens/ modules
-// apply; this mixin addresses the elements they apply them to. Markup that
-// carries no class receives the same treatment. Each selector here carries two
-// selectors more than its section 4 counterpart.
+// The element counterparts of the class vocabulary above, scoped to the three
+// containers this file owns, so markup that carries no class is treated alike.
 @mixin screen-content {
   h1,
   h2 {
@@ -379,31 +286,18 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   }
 }
 
-// -----------------------------------------------------------------------------
-// 3. THE SHARED SCREEN CONTAINER
-//
-// index.html declares five `.screen` containers inside `.screen-layer`, each
-// shipping the `hidden` attribute. src/ui/screen-router.ts removes it from one
-// at a time. The attribute is the whole active-and-inactive mechanism: with
-// `display: none` an inactive container is out of the render tree, out of the
-// accessibility tree and unreachable by Tab. The `.visually-hidden` utility
-// style/_a11y.scss declares keeps its element in the accessibility tree with a
-// non-zero box, and is not applied to a screen here.
-//
-// The rule below is restated from style/main.scss, which declares the same
-// declaration for `.screen` alongside the other elements index.html toggles by
-// the `hidden` attribute alone. It carries one selector more than the
-// `display: flex` that follows, and no `!important`.
-// -----------------------------------------------------------------------------
+// The shared screen container. The `hidden` attribute is the whole
+// active-and-inactive mechanism; the `.visually-hidden` utility, which keeps its
+// element in the accessibility tree, is deliberately not applied to a screen.
 
 .screen[hidden] {
   display: none;
 }
 
 .screen {
-  // The tint the terminal overlay carries in its loss state, style/main.scss
-  // L204, and the text colour that state inherits from `html, body` at L29.
-  // Section 6 replaces both; sections 5 and 7 take them as they stand.
+  // The tint and text colour the terminal overlay carries in its loss state.
+  // Stage progress replaces both; run start and game over take them as they
+  // stand.
   background: var(
     --theme-overlay-loss,
     #{rgba($tile-color, $screen-tint-alpha)}
@@ -413,14 +307,9 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   @include screen-surface;
 }
 
-// -----------------------------------------------------------------------------
-// 4. SHARED CONTENT VOCABULARY
-//
-// The class form of the section 2 mixins, together with the four small
-// treatments that have no mixin. Every class here is available to all six
-// router states. The element-selector counterparts are emitted in section 5,
-// for the three containers this file styles.
-// -----------------------------------------------------------------------------
+// Shared content vocabulary: the class form of the mixins above plus the four
+// small treatments that have no mixin. Every class is available to all six
+// router states.
 
 .screen-panel {
   @include screen-panel-surface;
@@ -449,9 +338,9 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   font-weight: bold;
 }
 
-// The control row, from `.lower` at style/main.scss L219-L222 and the
-// `margin-left: 9px` between its controls at L226, restated as a flex `gap`. No
-// control carries a margin and no rule names a sibling position.
+// The control row, from `.lower` and the margin between its controls, restated
+// as a flex `gap`. No control carries a margin and no rule names a sibling
+// position.
 .screen-field,
 .screen-actions {
   display: flex;
@@ -469,20 +358,9 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   @include screen-text-field;
 }
 
-// -----------------------------------------------------------------------------
-// 5. THE CONTENT PAIRS FOR THE THREE OWNED CONTAINERS, AND RUN START
-//
-// Emitted once under the three `data-screen` values this file styles. The
-// element selectors inside `screen-content` reach neither `reward` nor
-// `run-summary` nor `#settings-panel`.
-//
-// index.html: `.screen#screen-run-start[data-screen="run-start"]`.
-// src/ui/screens/run-start.ts renders the heading, the copy, the optional seed
-// field and the begin control into it; the seed field accepts the value the run
-// summary reports, and reproduces that run. Run start declares no rule of its
-// own: it takes section 3's presentation unchanged, tint and undelayed fade
-// alike, and composes `.screen-panel` for the copy and the seed field.
-// -----------------------------------------------------------------------------
+// Content pairs for the three containers this file owns, and run start. The
+// element selectors reach neither `reward` nor `run-summary` nor
+// `#settings-panel`. Run start declares no presentation of its own.
 
 .screen[data-screen="run-start"],
 .screen[data-screen="stage-progress"],
@@ -490,18 +368,9 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   @include screen-content;
 }
 
-// -----------------------------------------------------------------------------
-// 6. STAGE PROGRESS
-//
-// index.html: `.screen#screen-stage-progress[data-screen="stage-progress"]`.
-// src/ui/screens/stage-progress.ts renders the stage-clear verdict and the
-// progress readout into it.
-//
-// It takes the tint and text colour the terminal overlay carries in its won
-// state, style/main.scss L237-L239, at the same alpha; the board behind it
-// stays visible through the tint. The verdict sits on the tint, as the terminal
-// overlay's verdict does, and this state adds no surface of its own.
-// -----------------------------------------------------------------------------
+// Stage progress. It takes the tint and text colour the terminal overlay
+// carries in its won state, at the same alpha, so the board stays visible
+// through the tint, and adds no surface of its own.
 
 .screen[data-screen="stage-progress"] {
   background: var(
@@ -510,21 +379,14 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
   );
   color: var(--theme-overlay-win-text, #{$bright-text-color});
 
-  // The frozen overlay cadence, restated from style/main.scss L234-L235. The
-  // `animation` shorthand resets the fill mode; the fill mode is declared
-  // after it.
+  // The frozen overlay cadence. The `animation` shorthand resets the fill mode,
+  // so the fill mode is declared after it.
   @include animation(fade-in $screen-fade-duration ease $screen-fade-delay);
   @include animation-fill-mode(both);
 }
 
-// -----------------------------------------------------------------------------
-// 7. GAME OVER
-//
-// index.html: `.screen#screen-game-over[data-screen="game-over"]`.
-// src/ui/screens/game-over.ts renders the verdict and the run-ending controls
-// into it. It keeps section 3's loss tint, which is the tint `.game-message`
-// carries in the same state, and adds the frozen delay.
-// -----------------------------------------------------------------------------
+// Game over. It keeps the shared loss tint, the tint `.game-message` carries in
+// the same state, and adds the frozen delay.
 
 .screen[data-screen="game-over"] {
   @include animation(fade-in $screen-fade-duration ease $screen-fade-delay);
@@ -532,7 +394,63 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
 }
 
 // -----------------------------------------------------------------------------
-// 8. REDUCED MOTION
+// 8. THE SETTINGS MODAL
+//
+// index.html declares `#settings-panel` with
+// `role="dialog"` and `aria-modal="true"`, and style/_a11y.scss draws the
+// hairline boundary that src/ui/a11y/focus-manager.ts holds focus inside. No
+// rule gave it a shown state: style/main.scss maps `.settings-panel[hidden]` to
+// `display: none` and nothing else addressed the element, so with the attribute
+// removed the panel rendered as an ordinary body-flow block below the board —
+// modal semantics announced to a screen reader with no modal presentation
+// behind them, and no scrim, layering, bounded panel or scrolling.
+//
+// The rule below is scoped to the attribute's absence, which is the whole shown
+// state: style/main.scss owns the hidden state, this owns the shown one, and
+// the two selectors are mutually exclusive, so neither can override the other.
+// style/_reward.scss scopes its own container the same way.
+//
+// The scrim is the neutral tint section 3 gives every screen — the
+// `rgba($tile-color, .5)` the terminal overlay carries, published for all three
+// palettes as `--theme-overlay-loss`. The board stays visible through it. No
+// new palette entry is introduced, so the modal is covered by every theme the
+// moment it is shown.
+//
+// Scrolling, centring, padding, the cadence and the mobile scale all arrive
+// from `screen-modal-surface`, and the focus, hover, activation and disabled
+// treatment of every control inside arrives from `screen-content` by way of
+// `screen-control`.
+// -----------------------------------------------------------------------------
+
+.settings-panel:not([hidden]) {
+  @include screen-modal-surface;
+
+  background: var(
+    --theme-overlay-loss,
+    #{rgba($tile-color, $screen-tint-alpha)}
+  );
+  color: var(--theme-overlay-loss-text, #{$text-color});
+
+  @include screen-content;
+
+  // The panel. src/ui/components/settings-panel.ts renders the body of the
+  // dialog into this container; each of the three grouping elements a settings
+  // body is built from resolves to the bounded reading surface as its direct
+  // child, so the modal presents a panel whichever of them that module uses.
+  // The `.screen-panel` class of section 4 reaches the same surface and is
+  // available here as it is in every other router state.
+  //
+  // The child combinator keeps the treatment to one level: a `fieldset` nested
+  // inside a `form` is content within the panel, not a second panel.
+  > form,
+  > fieldset,
+  > section {
+    @include screen-panel-surface;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 9. REDUCED MOTION
 //
 // The screens take their fade from `fade-in` and declare no opacity of their
 // own. Clearing the animation name and the fill mode leaves each container at
@@ -540,15 +458,18 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default; // 280px
 //
 // style/_a11y.scss collapses `animation-duration`, `animation-delay` and
 // `animation-iteration-count` for `.screen-layer *` in the same media query and
-// applies the same two declarations to `.game-container .game-message`. The two
-// selectors below match the specificity of every rule above that sets an
+// applies the same two declarations to `.game-container .game-message`. The
+// three selectors below match the specificity of every rule above that sets an
 // animation, and stand later in the emitted stylesheet than all of them; no
 // declaration here carries `!important`.
 // -----------------------------------------------------------------------------
 
 @media (prefers-reduced-motion: reduce) {
   .screen,
-  .screen[data-screen] {
+  .screen[data-screen],
+  // The settings modal takes the same `fade-in` from `screen-modal-surface`, at
+  // the specificity section 8 applies it with.
+  .settings-panel:not([hidden]) {
     animation-name: none;
     animation-fill-mode: none;
   }

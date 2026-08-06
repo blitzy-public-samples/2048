@@ -1,85 +1,171 @@
-// =============================================================================
-// Design tokens — the single source of truth for the game's design system.
-// =============================================================================
+// Design tokens. This file declares variables only and emits no CSS.
 //
-// PROVENANCE
-//   The fourteen tokens in the first block were moved here from
-//   style/main.scss L4-L22. Names, values, ordering and grouping are unchanged.
-//   Two declarations were rewritten in the course of that move:
-//     - $tile-size            `/` division   -> `math.div()`
-//     - $tile-gold-glow-color `lighten()`    -> `color.adjust()`
-//   Resolved values after those rewrites: $tile-size 106.25px,
-//   $tile-gold-glow-color rgb(243, 215, 116) / #f3d774.
+// The first block is the game's established token set, unchanged in name,
+// value and order, and is mirrored by src/theme/tokens.ts so the stylesheet
+// and the Three.js materials read one set of values. The blocks after it are
+// new families. Every partial that needs a token loads this file for itself:
+// Sass `@use` is not transitive.
 //
-//   Three further blocks declare token families that did not exist before this
-//   file: the z-index ladder extension, the extrusion depth scale, and the
-//   diagnostics overlay monospace stack.
-//
-// CONSUMERS
-//   SCSS  style/main.scss and the sibling partials _screens, _hud, _reward,
-//         _summary, _a11y and _themes. Each loads this file for itself via
-//         `@use "tokens"`; Sass `@use` is not transitive.
-//   TS    src/theme/tokens.ts mirrors these values for the Three.js layer.
-//
-// CONTENTS
-//   This file declares variables only. It emits no CSS of its own.
-//
-// The rationale, alternatives and risks behind every item above are recorded in
-// docs/DECISION_LOG.md; this file carries provenance only.
-// =============================================================================
+// src/theme/tokens.ts is the authoritative side of that pair. vite.config.ts
+// renders its `sassTokenProjection` as a Sass map and prepends it to every
+// stylesheet it compiles; style/main.scss passes that map here as `$projection`
+// and `_resolve-token()` returns the projected value for every token it
+// carries. A projected value that disagrees with the fallback beside it raises
+// `@error`, so the two sides cannot diverge. `$projection` is empty when no
+// build supplied one, and every token then resolves to its fallback.
 
 @use "sass:color";
+@use "sass:map";
 @use "sass:math";
 
 // -----------------------------------------------------------------------------
-// Moved from style/main.scss L4-L22.
+// Projection intake: configured by style/main.scss from the map vite.config.ts
+// prepends.
 // -----------------------------------------------------------------------------
 
-$field-width: 500px !default;
-$grid-spacing: 15px !default;
-$grid-row-cells: 4 !default;
+$projection: () !default;
+
+// Fallback value of every projected token, keyed by the name the projection
+// uses: the eleven stated members of the established token set, the three
+// mobile-scale lengths its breakpoint restates, and the four z-index slots of
+// the ladder extension declared further down this file.
+$_token-fallbacks: (
+  field-width: 500px,
+  grid-spacing: 15px,
+  grid-row-cells: 4,
+  tile-border-radius: 3px,
+  text-color: #776E65,
+  bright-text-color: #f9f6f2,
+  tile-color: #eee4da,
+  tile-gold-color: #edc22e,
+  game-container-margin-top: 40px,
+  game-container-background: #bbada0,
+  transition-speed: 100ms,
+  mobile-field-width: 280px,
+  mobile-grid-spacing: 10px,
+  mobile-game-container-margin-top: 17px,
+  z-index-hud: 200,
+  z-index-screen-overlay: 300,
+  z-index-modal: 400,
+  z-index-diagnostics: 500,
+);
+
+// Returns the value of one projected token: the projected value when the build
+// supplied one, the fallback otherwise. Private to this module, so `@use
+// "tokens" as *` does not expose it.
+//
+// @param {String} $name - key into $_token-fallbacks and into $projection.
+// @return {*} the resolved token value.
+// @throw when $name names no fallback, or when the projected value and the
+//   fallback disagree.
+@function _resolve-token($name) {
+  $fallback: map.get($_token-fallbacks, $name);
+
+  @if $fallback == null {
+    @error "tokens: `#{$name}` names no fallback in $_token-fallbacks.";
+  }
+
+  $projected: map.get($projection, $name);
+
+  @if $projected == null {
+    @return $fallback;
+  }
+
+  @if $projected != $fallback {
+    @error "tokens: the projected `#{$name}` is #{$projected} and the fallback "
+      + "declared in style/_tokens.scss is #{$fallback}. src/theme/tokens.ts "
+      + "is authoritative; update this file to match it.";
+  }
+
+  @return $projected;
+}
+
+// -----------------------------------------------------------------------------
+// The established token set. The eleven stated values resolve through the
+// projection; the three derived values below are computed from them.
+// -----------------------------------------------------------------------------
+
+$field-width: _resolve-token(field-width) !default;
+$grid-spacing: _resolve-token(grid-spacing) !default;
+$grid-row-cells: _resolve-token(grid-row-cells) !default;
 $tile-size: math.div($field-width - $grid-spacing * ($grid-row-cells + 1), $grid-row-cells) !default;
-$tile-border-radius: 3px !default;
+$tile-border-radius: _resolve-token(tile-border-radius) !default;
 
 $mobile-threshold: $field-width + 20px !default;
 
-$text-color: #776E65 !default;
-$bright-text-color: #f9f6f2 !default;
+$text-color: _resolve-token(text-color) !default;
+$bright-text-color: _resolve-token(bright-text-color) !default;
 
-$tile-color: #eee4da !default;
-$tile-gold-color: #edc22e !default;
+$tile-color: _resolve-token(tile-color) !default;
+$tile-gold-color: _resolve-token(tile-gold-color) !default;
 $tile-gold-glow-color: color.adjust($tile-gold-color, $lightness: 15%) !default;
 
-$game-container-margin-top: 40px !default;
-$game-container-background: #bbada0 !default;
+$game-container-margin-top: _resolve-token(game-container-margin-top) !default;
+$game-container-background: _resolve-token(game-container-background) !default;
 
-$transition-speed: 100ms !default;
+$transition-speed: _resolve-token(transition-speed) !default;
 
 // -----------------------------------------------------------------------------
-// z-index ladder extension.
+// Mobile scale.
 //
-// The existing ladder is declared in style/main.scss and is not renumbered:
-//   .grid-container 1, .tile-container 2, .tile-inner 10,
-//   .tile-merged .tile-inner 20, .game-message 100, .score-addition 100.
-// The four slots below sit above that ceiling of 100. The diagnostics overlay
-// occupies the topmost slot.
+// The three lengths style/main.scss's `smaller($mobile-threshold)` block needs,
+// named here so that block reads them instead of declaring its own. The board
+// dimension and the corner radius are not rescaled there, so the block reads
+// $grid-row-cells and $tile-border-radius above. Mirrored by `mobileFieldWidth`,
+// `mobileGridSpacing` and `mobileGameContainerMarginTop` of
+// src/theme/tokens.ts.
 // -----------------------------------------------------------------------------
 
-$z-index-hud: 200 !default;
-$z-index-screen-overlay: 300 !default;
-$z-index-modal: 400 !default;
-$z-index-diagnostics: 500 !default;
+$mobile-field-width: _resolve-token(mobile-field-width) !default;
+$mobile-grid-spacing: _resolve-token(mobile-grid-spacing) !default;
+$mobile-game-container-margin-top:
+  _resolve-token(mobile-game-container-margin-top) !default;
 
-// -----------------------------------------------------------------------------
+// z-index ladder extension. The established ladder tops out at 100, so these
+// four slots all sit above it, with the diagnostics overlay topmost.
+
+// The four slots resolve through the projection, so `zIndex.hud`,
+// `zIndex.screenOverlay`, `zIndex.modal` and `zIndex.diagnosticsOverlay` of
+// src/theme/tokens.ts and these four variables cannot disagree.
+$z-index-hud: _resolve-token(z-index-hud) !default;
+$z-index-screen-overlay: _resolve-token(z-index-screen-overlay) !default;
+$z-index-modal: _resolve-token(z-index-modal) !default;
+$z-index-diagnostics: _resolve-token(z-index-diagnostics) !default;
+
 // Extrusion depth scale, expressed as explicit multiples of $grid-spacing.
-//
-// Consumed by src/render/tile-mesh-factory.ts and src/render/tile-materials.ts
-// through the src/theme/tokens.ts mirror.
-// -----------------------------------------------------------------------------
 
 $depth-bevel: math.div($grid-spacing, 5) !default;
 $depth-board: $grid-spacing * 1 !default;
 $depth-tile: $grid-spacing * 2 !default;
+
+// -----------------------------------------------------------------------------
+// Sibling-control gap: the gap between two adjacent controls, as three times
+// $tile-border-radius. Resolves to 9px, the `margin-left` style/main.scss
+// applies between the two controls of `.game-message .lower`.
+//
+// It is the single declaration of that gap. style/_screens.scss and
+// style/_summary.scss each derived it independently before this token existed,
+// and both now default to it; style/main.scss reads it for the gap between
+// `.restart-button` and `.settings-button`.
+// -----------------------------------------------------------------------------
+
+$control-gap: $tile-border-radius * 3 !default;
+
+// -----------------------------------------------------------------------------
+// Relic rarity ladder: the one ordered rarity list the style layer generates
+// rarity rules from, lowest first. style/_hud.scss generates the active-relic
+// tray's accent from it, style/_reward.scss generates the reward card's accent
+// and chip from it, and style/_themes.scss derives each palette's rarity
+// accents from it, so the surfaces cannot style different sets of tiers.
+//
+// These are the members of the `Rarity` enumeration of
+// src/relics/relic-types.ts, and `rarity` is a field of one relic.
+// `risk-reward-cursed` is a relic FAMILY - one of the four alongside
+// `spawn-control`, `merge-magic` and `board-manipulation` - and is not a member
+// of this list.
+// -----------------------------------------------------------------------------
+
+$rarity-tiers: common, uncommon, rare, legendary !default;
 
 // -----------------------------------------------------------------------------
 // Diagnostics overlay monospace stack.

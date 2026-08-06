@@ -19,18 +19,17 @@
  * the platform's own randomness keeps its stock behaviour for the
  * lifetime of the process.
  *
- * Provenance: this module replaces the two `Math.random()` call sites
- * of the vanilla game, which were the only two in that codebase — the
- * spawn-value draw at js/game_manager.js L71 (inside `addRandomTile`,
- * L69-L76) and the spawn-position draw at js/grid.js L41 (inside
- * `randomAvailableCell`, L37-L43).
+ * Both inputs are bounded. A seed longer than `MAX_RNG_SEED_LENGTH` and
+ * a resume cursor outside `[0, MAX_RNG_CURSOR]` are rejected before a
+ * generator is built and before a single draw is discarded, so neither
+ * a persisted payload nor a player-entered seed can make construction
+ * cost unbounded work. `isAcceptableRngSeed()` and
+ * `isAcceptableRngCursor()` are the same limits as predicates, for a
+ * caller that validates before constructing.
  *
  * The substream fan-out this module feeds is drawn as Figure 7,
  * "Seeded Determinism: One Run Seed Fanned into Named RNG Substreams",
  * in docs/architecture/data-flow.md.
- *
- * Rationale for the choices made here is recorded in
- * docs/DECISION_LOG.md.
  */
 
 import seedrandom from 'seedrandom';
@@ -45,6 +44,146 @@ import seedrandom from 'seedrandom';
  * label.
  */
 const STREAM_SEED_DELIMITER = '::' as const;
+
+/**
+ * Longest seed, in characters, a generator is built from.
+ *
+ * A seed reaches this module from the composition root, from a
+ * player-entered value on the run-start screen, or from a persisted run
+ * state, and the underlying generator hashes the whole string. Anything
+ * longer than this is rejected rather than hashed.
+ *
+ * src/rng/rng-streams.ts derives its own, smaller run-seed limit from
+ * this one, leaving room for the substream label it appends.
+ */
+export const MAX_RNG_SEED_LENGTH = 256;
+
+/**
+ * Highest resume cursor a generator is fast-forwarded to.
+ *
+ * A restore discards one draw at a time, so the cost of resuming is
+ * linear in this value; the bound is what makes it finite. Measured on
+ * the pinned runtime, 100,000 discarded draws take roughly 11ms, and all
+ * four substreams together roughly 45ms.
+ *
+ * The bound sits far above real play: a turn consumes at most one
+ * spawn-value draw and one spawn-position draw, so this is beyond any
+ * reachable run length.
+ */
+export const MAX_RNG_CURSOR = 100_000;
+
+/**
+ * The same ceiling under the name the run-state loader reads it by. One value,
+ * two names: every fast-forwarding caller shares one policy, so the bound
+ * cannot drift between the generator and the loader that validates a persisted
+ * cursor before it reaches `createSeededRng()`.
+ */
+export const MAX_RESUMABLE_CURSOR = MAX_RNG_CURSOR;
+
+/** Why a seed or a cursor was refused. */
+export type RngRejectionKind =
+  | 'seed-too-long'
+  | 'cursor-unusable'
+  | 'cursor-out-of-range';
+
+/**
+ * One refused seed or cursor, as a report carries it.
+ *
+ * Carries measurements only: the offending length or value, and the
+ * limit it broke. No seed text and no cursor map reaches a sink through
+ * this shape.
+ */
+export interface RngRejection {
+  /** Which limit was broken. */
+  readonly kind: RngRejectionKind;
+
+  /**
+   * Substream the value belonged to, absent when the value was not
+   * substream-scoped.
+   */
+  readonly stream?: string;
+
+  /**
+   * The measurement that broke the limit: a seed's length in
+   * characters, or a cursor's value. `Number.NaN` where the offending
+   * value was not a number at all.
+   */
+  readonly observed: number;
+
+  /** The limit `observed` was tested against. */
+  readonly maximum: number;
+}
+
+/**
+ * Sink for refused seeds and cursors.
+ *
+ * The single member is optional, so an empty object is a complete
+ * implementation. Every invocation is contained: a member that throws
+ * neither reaches the caller nor is reported again.
+ */
+export interface RngReporter {
+  /** Receives every refused seed and cursor. */
+  readonly onRejected?: (rejection: RngRejection) => void;
+}
+
+/**
+ * Hands one rejection to a sink, containing anything the sink throws.
+ *
+ * @param reporter Sink to report through, or `undefined`.
+ * @param rejection Rejection to report.
+ */
+function reportRejection(
+  reporter: RngReporter | undefined,
+  rejection: RngRejection
+): void {
+  const sink = reporter?.onRejected;
+
+  if (sink === undefined) {
+    return;
+  }
+
+  try {
+    sink(rejection);
+  } catch {
+    // A faulty sink is contained here and is not reported back through
+    // itself.
+  }
+}
+
+/**
+ * Reports whether `seed` is short enough to build a generator from.
+ *
+ * Pure and total. A caller that must not handle an exception — the
+ * guarded run-state loader, or the run-start screen validating a
+ * player-entered seed — calls this before `createSeededRng()`.
+ *
+ * @param seed Seed to measure.
+ * @returns `true` when `seed` is at most `MAX_RNG_SEED_LENGTH`
+ *   characters long.
+ */
+export function isAcceptableRngSeed(seed: string): boolean {
+  return seed.length <= MAX_RNG_SEED_LENGTH;
+}
+
+/**
+ * Reports whether `cursor` is a resume position a generator can be
+ * fast-forwarded to in bounded time.
+ *
+ * Pure and total, and accepts a value of any type, because the value
+ * normally arrives from persisted JSON.
+ *
+ * @param cursor Value to test.
+ * @returns `true` when `cursor` is a non-negative safe integer no
+ *   greater than `MAX_RNG_CURSOR`.
+ */
+export function isAcceptableRngCursor(cursor: unknown): boolean {
+  return (
+    typeof cursor === 'number' &&
+    Number.isSafeInteger(cursor) &&
+    cursor >= 0 &&
+    cursor <= MAX_RNG_CURSOR
+  );
+}
 
 /**
  * A seeded generator positioned at a known point in its own sequence.
@@ -84,34 +223,57 @@ export interface SeededRng {
 }
 
 /**
- * Reduces a caller-supplied start cursor to a usable draw count.
+ * Reduces a caller-supplied start cursor to a usable draw count,
+ * refusing anything the fast-forward cannot absorb in bounded time.
  *
  * The value reaching here has normally come back out of Web Storage
  * through the guarded run-state loader, so it may be absent, or may
- * have been written by an older or a corrupted payload. Anything that
- * is not a non-negative safe integer is treated as no recorded
- * position at all and reported as 0. This function never throws.
+ * have been written by an older or a corrupted payload. A value that is
+ * not a non-negative safe integer, and a value above `MAX_RNG_CURSOR`,
+ * are both treated as no recorded position at all: each is reported and
+ * reduced to 0. This function never throws.
  *
  * `Number.isSafeInteger` rejects `NaN`, `Infinity`, `-Infinity`, every
  * fractional value, and every magnitude beyond the exactly
- * representable integer range. The final comparison then collapses
- * negative values and `-0` to `+0`, so the returned count is always
- * usable as a loop bound and always compares identical to 0 when no
- * position was recorded.
+ * representable integer range. The bound then rejects the remaining
+ * range that is representable but too large to walk, so the returned
+ * count is always usable as a loop bound with a fixed worst case.
  *
  * @param startCursor Draw count to resume from, or `undefined`.
- * @returns A non-negative safe integer; 0 when `startCursor` carries
- *   no usable position.
+ * @param reporter Sink for a refusal.
+ * @returns A non-negative safe integer no greater than
+ *   `MAX_RNG_CURSOR`; 0 when `startCursor` carries no usable position.
  */
-function normaliseStartCursor(startCursor: number | undefined): number {
+export function normaliseStartCursor(
+  startCursor: number | undefined,
+  reporter?: RngReporter
+): number {
   if (startCursor === undefined) {
     return 0;
   }
 
-  if (!Number.isSafeInteger(startCursor)) {
+  if (!Number.isSafeInteger(startCursor) || startCursor < 0) {
+    reportRejection(reporter, {
+      kind: 'cursor-unusable',
+      observed: startCursor,
+      maximum: MAX_RNG_CURSOR,
+    });
+
     return 0;
   }
 
+  if (startCursor > MAX_RNG_CURSOR) {
+    reportRejection(reporter, {
+      kind: 'cursor-out-of-range',
+      observed: startCursor,
+      maximum: MAX_RNG_CURSOR,
+    });
+
+    return 0;
+  }
+
+  // Collapses `-0` to `+0`, so the returned count always compares
+  // identical to 0 when no position was recorded.
   return startCursor > 0 ? startCursor : 0;
 }
 
@@ -129,36 +291,43 @@ function normaliseStartCursor(startCursor: number | undefined): number {
  * position as its `cursor`. A resumed run therefore continues its
  * sequence instead of restarting it.
  *
- * Provenance for the resumed case: the vanilla game called
- * `addStartTiles()` only on a fresh start and skipped it when
- * restoring a saved board (js/game_manager.js L35-L59).
+ * A `startCursor` that is absent, fractional, negative, not finite,
+ * beyond the exactly representable integer range, or above
+ * `MAX_RNG_CURSOR` yields a fresh instance at cursor 0 instead of an
+ * error, and is reported through `reporter`.
  *
- * A `startCursor` that is absent, fractional, negative, not finite, or
- * beyond the exactly representable integer range yields a fresh
- * instance at cursor 0 instead of an error.
- *
- * @param seed Seed the sequence is derived from. Used verbatim.
+ * @param seed Seed the sequence is derived from. Used verbatim. Must be
+ *   at most `MAX_RNG_SEED_LENGTH` characters long.
  * @param startCursor Number of draws to discard before the first
  *   `next()` call. Defaults to 0.
+ * @param reporter Sink for a refused seed or cursor. Optional.
  * @returns A generator whose `cursor` reports its true position.
- *
- * @example
- * const rng = createSeededRng('run-seed-2048');
- * rng.next();          // first draw of the sequence
- * rng.cursor;          // 1
- *
- * @example
- * // Resuming a persisted run: both generators agree from here on.
- * const resumed = createSeededRng('run-seed-2048', 3);
- * resumed.cursor;      // 3
- * resumed.next();      // the sequence's fourth draw
+ * @throws {RangeError} If `seed` is longer than `MAX_RNG_SEED_LENGTH`.
+ *   `isAcceptableRngSeed()` answers the same question without throwing.
  */
 export function createSeededRng(
   seed: string,
-  startCursor?: number
+  startCursor?: number,
+  reporter?: RngReporter
 ): SeededRng {
+  if (!isAcceptableRngSeed(seed)) {
+    reportRejection(reporter, {
+      kind: 'seed-too-long',
+      observed: seed.length,
+      maximum: MAX_RNG_SEED_LENGTH,
+    });
+
+    throw new RangeError(
+      `A seed may be at most ${MAX_RNG_SEED_LENGTH} characters long; ` +
+        `this one is ${seed.length}.`
+    );
+  }
+
+  // Bounded before anything is built: the cursor is reduced to a value
+  // inside the limit, and only then is a draw discarded.
+  const cursorLimit = normaliseStartCursor(startCursor, reporter);
   const generator = seedrandom(seed);
-  let cursor = normaliseStartCursor(startCursor);
+  let cursor = cursorLimit;
 
   // Fast-forward: discard the draws the start cursor reports as
   // already consumed.
@@ -195,10 +364,6 @@ export function createSeededRng(
  * @param runSeed Seed for the run as a whole.
  * @param label Substream label, such as `'spawn-value'`.
  * @returns `runSeed` and `label` joined by the stream delimiter.
- *
- * @example
- * deriveStreamSeed('abc', 'spawn-value');    // 'abc::spawn-value'
- * deriveStreamSeed('abc', 'spawn-position'); // 'abc::spawn-position'
  */
 export function deriveStreamSeed(runSeed: string, label: string): string {
   return `${runSeed}${STREAM_SEED_DELIMITER}${label}`;

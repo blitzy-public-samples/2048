@@ -1,86 +1,49 @@
 /**
  * Frame scheduling for src/render/, and the frame-callback seam.
  *
- * PROVENANCE
- *   Generalises the two frame call sites of the superseded renderer.
- *   js/html_actuator.js L13 wrapped the whole of `actuate()` in one
- *   `window.requestAnimationFrame` callback, and js/html_actuator.js
- *   L67-L72 nested a second callback inside `addTile()` to rewrite a
- *   moving tile's position class one frame later. Neither read the
- *   timestamp the callback was handed, neither cancelled, and neither
- *   was measured. A callback registered here receives that timestamp
- *   together with the frame's delta, elapsed time and index, and the
- *   scheduled frame is cancellable.
+ * A registered callback receives the frame's timestamp, delta, elapsed time and
+ * index, and the scheduled frame is cancellable. `requestAnimationFrame` and
+ * `cancelAnimationFrame` are read through guards and are never assumed present;
+ * nothing here writes to the global object.
  *
- *   js/application.js L2 was the third frame call site, deferring
- *   construction of the game by one frame. It is not scheduled here;
- *   src/main.ts owns start-up ordering.
- *
- *   `requestAnimationFrame` and `cancelAnimationFrame` are read through
- *   the guards in section 3 and are never assumed present.
- *   js/animframe_polyfill.js assigned both onto `window` — the prefixed
- *   vendor forms at L4-L8, a `setTimeout` cadence at L10-L21 and a
- *   `clearTimeout` cancel at L23-L27 — and is deleted. Nothing in this
- *   module writes to the global object.
- *
- * CONTENTS
- *   `RenderReporter` and `NOOP_RENDER_REPORTER` from
- *   src/render/webgl-support.ts are the only imports. This module holds
- *   no scene-graph reference and imports neither `three` nor
- *   src/observability/, so src/render/number-only-renderer.ts drives it
- *   on the same terms as src/render/three-renderer.ts.
- *
- *   The platform surfaces read are `requestAnimationFrame`,
- *   `cancelAnimationFrame` and `performance.now`. No document is read
- *   and none is written.
- *
- * CONSUMERS
- *   `onFrameBegin` and `onFrameEnd` are the frame-callback seam:
- *   src/observability/tracer.ts supplies them to open and close a span
- *   around each frame. `getFrameStats()` is read synchronously by
- *   src/observability/metrics.ts, whose histogram bounds are the `le`
- *   values it returns, and is rendered by
- *   src/observability/diagnostics-overlay.ts. Frame durations reach
- *   `RenderReporter.onTiming`. The hooks and the reporter are injected,
- *   each is optional, and the loop is fully functional with none of
- *   them supplied.
- *
- * The rationale, alternatives and risks behind the choices above are
- * recorded in docs/DECISION_LOG.md; this file carries provenance only.
+ * `onFrameBegin` and `onFrameEnd` are the seam a tracer opens and closes a span
+ * across, and `getFrameStats()` returns plain data a metrics surface reads
+ * synchronously. That seam is drawn as Figure 4, "Turn Data Flow: From Keystroke
+ * to Composited Frame and Persisted Run State", in
+ * docs/architecture/data-flow.md. The hooks, the reporter, the scheduler and the
+ * clock are all injected and all optional: the loop is fully functional with
+ * none supplied. The injected reporter is contained once at construction, so no
+ * report emitted from a frame can fail the loop.
  */
 
-import { NOOP_RENDER_REPORTER, type RenderReporter } from './webgl-support';
+import {
+  NOOP_RENDER_REPORTER,
+  createGuardedRenderReporter,
+  type RenderReporter,
+} from './webgl-support';
 
 /* ==========================================================================
  * 1. Frame contract — what a callback receives
  * ========================================================================== */
 
-/**
- * State of one frame, as that frame's callbacks and hooks see it.
- *
- * One instance is reused for every frame of a loop: the fields are
- * overwritten in place immediately before each dispatch, and they hold
- * the running frame's values only for the duration of that dispatch. A
- * consumer that has to retain a value past the end of its own callback
- * copies the field it needs; `getFrameStats()` returns retained values.
- */
+/** State of one frame, as that frame's callbacks and hooks see it. */
 export interface FrameContext {
   /**
-   * Timestamp the frame callback was invoked with, in milliseconds,
-   * exactly as supplied and never adjusted.
+   * Timestamp the frame callback was invoked with, in milliseconds, exactly as
+   * supplied and never adjusted.
    */
   readonly timestamp: number;
 
   /**
-   * Milliseconds since the previous frame, clamped to the loop's
-   * `maxDelta`. Never negative, and `0` on the first frame after the
-   * loop becomes active. Interpolation reads this field.
+   * Milliseconds since the previous frame, clamped to the loop's `maxDelta`.
+   * Never negative, and `0` on the first frame after the loop becomes active.
+   * Interpolation reads this field.
    */
   readonly delta: number;
 
   /**
-   * Milliseconds since the previous frame before clamping. Equal to
-   * `delta` on every frame whose `deltaClamped` is `false`.
+   * Milliseconds since the previous frame before clamping. Equal to `delta` on
+   * every frame whose `deltaClamped` is `false`.
    */
   readonly rawDelta: number;
 
@@ -88,16 +51,16 @@ export interface FrameContext {
   readonly deltaClamped: boolean;
 
   /**
-   * Milliseconds since the first frame of the current activation.
-   * `start()` following `stop()` restarts it at `0`; an idle park and a
-   * later resume do not.
+   * Milliseconds since the first frame of the current activation. `start()`
+   * following `stop()` restarts it at `0`; an idle park and a later resume do
+   * not.
    */
   readonly elapsed: number;
 
   /**
-   * Index of this frame, counting from `1` and rising by exactly one
-   * per frame for the lifetime of the loop. `start()`, `stop()` and
-   * `resetFrameStats()` leave it untouched.
+   * Index of this frame, counting from `1` and rising by exactly one per frame
+   * for the lifetime of the loop. `start()`, `stop()` and `resetFrameStats()`
+   * leave it untouched.
    */
   readonly frame: number;
 }
@@ -105,32 +68,33 @@ export interface FrameContext {
 /**
  * Work performed once per frame.
  *
- * Returning `true` declares that work is still outstanding and that a
- * further frame is wanted. Any other return value, including none,
- * declares this callback idle for the frame. The declaration is read
- * only by a loop constructed with `autoStopWhenIdle`.
+ * Returning `true` declares that work is still outstanding and a further frame
+ * is wanted; any other return value, including none, declares this callback idle
+ * for the frame. The declaration is read only by a loop constructed with
+ * `autoStopWhenIdle`.
  *
- * A callback that throws is contained: the throw is reported, the
- * remaining callbacks of the frame still run, and the next frame is
- * still scheduled.
+ * A callback that throws is caught and reported, and the remaining callbacks of
+ * the frame still run. Whether a further frame follows is then decided as usual,
+ * so a loop with `autoStopWhenIdle` still parks once no callback has declared
+ * outstanding work. A reporter that throws while reporting a contained throw is
+ * not itself contained.
  */
 export type FrameCallback = (context: FrameContext) => boolean | void;
 
 /** Registration handle `addFrameCallback()` returns. */
 export interface FrameSubscription {
   /**
-   * Identifier of this registration, unique within one loop and rising
-   * by one per registration. `0` identifies a registration that was
-   * rejected.
+   * Identifier of this registration, unique within one loop and rising by one
+   * per registration. `0` identifies a registration that was rejected.
    */
   readonly id: number;
 
   /**
-   * Removes the callback. Safe to call from inside a frame, in which
-   * case the callback runs no further frames.
+   * Removes the callback. Safe to call from inside a frame, in which case the
+   * callback runs no further frames.
    *
-   * @returns `true` from the call that removed the callback, and
-   *   `false` from every later call.
+   * @returns `true` from the call that removed the callback, and `false` from
+   * every later call.
    */
   readonly remove: () => boolean;
 }
@@ -140,18 +104,38 @@ export interface FrameSubscription {
  * ========================================================================== */
 
 /**
- * The two scheduling operations a loop needs, injectable in place of
- * the platform pair.
- *
- * A loop constructed with a scheduler reads neither
- * `requestAnimationFrame` nor `cancelAnimationFrame`.
+ * The two scheduling operations a loop needs, injectable in place of the
+ * platform pair.
  */
 export interface FrameScheduler {
   /**
    * Schedules one callback.
    *
+   * The callback may be invoked either after `request` returns, as
+   * `requestAnimationFrame` does, or before it returns, which is what a
+   * deterministic test double does when it calls the callback inline.
+   * Both are supported.
+   *
+   * An inline implementation completes a frame while `request` is still
+   * on the stack, and the loop settles the next frame at the end of a
+   * frame — so a naive loop would re-enter `request` from inside
+   * `request`, once per frame, and exhaust the stack. This loop instead
+   * trampolines: a request raised from inside an inline frame is
+   * recorded rather than issued, and the outermost `request` call
+   * iterates, so a chain of any length runs at constant stack depth.
+   *
+   * Because an inline implementation never yields, a chain that has no
+   * self-terminating condition — continuous scheduling, or a callback
+   * that reports work outstanding forever — would iterate without end.
+   * Each entry into scheduling therefore admits at most
+   * `DEFAULT_MAX_SYNCHRONOUS_CHAIN` inline frames, after which the loop
+   * stops chaining and reports a warning. The limit is far above what a
+   * self-terminating chain needs, so it is reached only where the
+   * configuration and the scheduler cannot progress together.
+   *
    * @param callback Invoked with the frame timestamp in milliseconds.
-   * @returns Handle that `cancel` accepts.
+   * @returns Handle that `cancel` accepts. A handle returned by an
+   *   inline implementation is already spent and is not retained.
    */
   readonly request: (callback: (timestamp: number) => void) => number;
 
@@ -164,15 +148,8 @@ export interface FrameScheduler {
 }
 
 /**
- * How frame durations reach `RenderReporter.onTiming`.
- *
- * - `'aggregate'` — one measurement covering every frame since the
- *   previous measurement, emitted when the loop goes idle: on `stop()`,
- *   on an idle park, on the end of an on-demand frame, and on
- *   `resetFrameStats()`.
- * - `'frame'` — one measurement per frame.
- * - `'none'` — no measurement. `getFrameStats()` is unaffected and
- *   still reports every duration.
+ * How frame durations reach `RenderReporter.onTiming`. The three modes and the
+ * `'aggregate'` default are decision DL-LOOP-01.
  */
 export type FrameTimingMode = 'none' | 'aggregate' | 'frame';
 
@@ -185,51 +162,51 @@ export interface RenderLoopOptions {
   readonly reporter?: RenderReporter;
 
   /**
-   * Upper bound applied to `FrameContext.delta`, in milliseconds.
-   * Defaults to `DEFAULT_MAX_DELTA`. A value that is not a finite
-   * number above zero is reported and replaced by the default.
+   * Upper bound applied to `FrameContext.delta`, in milliseconds. Defaults to
+   * `DEFAULT_MAX_DELTA`. A value that is not a finite number above zero is
+   * reported and replaced by the default.
    */
   readonly maxDelta?: number;
 
   /**
-   * Whether the loop parks itself once no callback reports outstanding
-   * work. Defaults to `false`, in which case `start()` schedules frames
-   * until `stop()`. A parked loop resumes on `invalidate()`.
+   * Whether the loop parks itself once no callback reports outstanding work.
+   * Defaults to `false`, in which case `start()` schedules frames until
+   * `stop()`. A parked loop resumes on `invalidate()`. The idle policy is
+   * decision DL-LOOP-02.
    */
   readonly autoStopWhenIdle?: boolean;
 
   /**
-   * Consecutive frames with no outstanding work that precede a park.
-   * Defaults to `DEFAULT_IDLE_FRAMES`. Read only where
-   * `autoStopWhenIdle` is enabled. A value that is not an integer of at
-   * least one is reported and replaced by the default.
+   * Consecutive frames with no outstanding work that precede a park. Defaults
+   * to `DEFAULT_IDLE_FRAMES`. Read only where `autoStopWhenIdle` is enabled. A
+   * value that is not an integer of at least one is reported and replaced by
+   * the default.
    */
   readonly idleFrames?: number;
 
   /**
-   * Called once per frame, before that frame's callbacks. A throw is
-   * reported and contained.
+   * Called once per frame, before that frame's callbacks. A throw is reported
+   * and contained.
    */
   readonly onFrameBegin?: (context: FrameContext) => void;
 
   /**
-   * Called once per frame, after that frame's callbacks, with the
-   * milliseconds those callbacks and `onFrameBegin` together occupied.
-   * The value is never negative. A throw is reported and contained.
+   * Called once per frame, after that frame's callbacks, with the milliseconds
+   * those callbacks and `onFrameBegin` together occupied. The value is never
+   * negative. A throw is reported and contained.
    */
   readonly onFrameEnd?: (context: FrameContext, durationMs: number) => void;
 
   /**
    * Scheduling pair to use in place of the platform pair. Defaults to
-   * `requestAnimationFrame` and `cancelAnimationFrame`, each read at
-   * the moment it is needed.
+   * `requestAnimationFrame` and `cancelAnimationFrame`, each read at the moment
+   * it is needed.
    */
   readonly scheduler?: FrameScheduler;
 
   /**
-   * Monotonic clock used to measure frame duration, in milliseconds.
-   * Defaults to `performance.now()` where it exists and `Date.now()`
-   * otherwise.
+   * Monotonic clock used to measure frame duration, in milliseconds. Defaults
+   * to `performance.now()` where it exists and `Date.now()` otherwise.
    */
   readonly now?: () => number;
 
@@ -237,23 +214,16 @@ export interface RenderLoopOptions {
   readonly timingMode?: FrameTimingMode;
 
   /**
-   * Inclusive upper bounds of the frame-duration histogram, in
-   * milliseconds. Defaults to `DEFAULT_FRAME_DURATION_BOUNDS`. Values
-   * that are not finite numbers above zero are dropped, and the
-   * remainder are sorted ascending and de-duplicated. An argument
-   * leaving no usable bound is reported and replaced by the default.
+   * Inclusive upper bounds of the frame-duration histogram, in milliseconds.
+   * Defaults to `DEFAULT_FRAME_DURATION_BOUNDS`. Values that are not finite
+   * numbers above zero are dropped, and the remainder are sorted ascending and
+   * de-duplicated. An argument leaving no usable bound is reported and replaced
+   * by the default.
    */
   readonly durationBounds?: readonly number[];
 }
 
-/**
- * One cumulative bucket of the frame-duration histogram.
- *
- * `count` follows the cumulative convention: it counts every frame
- * whose duration was at most `le`, so counts rise across the bucket
- * list and the final count plus `FrameStats.framesOverBounds` equals
- * `FrameStats.sampledFrames`.
- */
+/** One cumulative bucket of the frame-duration histogram. */
 export interface FrameDurationBucket {
   /** Inclusive upper bound of the bucket, in milliseconds. */
   readonly le: number;
@@ -263,17 +233,17 @@ export interface FrameDurationBucket {
 }
 
 /**
- * Frame measurements, read synchronously and returned as plain data.
+ * Frame measurements, read synchronously and returned as plain data: booleans,
+ * numbers and arrays of objects of numbers, with no class instance, scheduling
+ * handle, callback or live reference, so `JSON.stringify()` round-trips the
+ * snapshot and later frames do not mutate it.
  *
- * Every field is a boolean, a finite number, or an array of objects of
- * finite numbers: no class instance, no scheduling handle, no callback
- * and no live reference. `JSON.stringify()` round-trips the value, and
- * the value is a snapshot that later frames do not mutate.
- *
- * Durations and deltas are milliseconds. Fields described as sampled
- * cover the frames since the loop was created or since
- * `resetFrameStats()` was last called; `frames` is not sampled and
- * counts the lifetime of the loop.
+ * Durations and deltas are in milliseconds and are as finite as the clock they
+ * were measured with: the platform clock yields finite values, while an injected
+ * clock or scheduler that reports a non-finite timestamp carries that value into
+ * the derived durations. Fields described as sampled cover the frames since the
+ * loop was created or since `resetFrameStats()` was last called; `frames` counts
+ * the lifetime of the loop.
  */
 export interface FrameStats {
   /** Whether the loop is scheduling frames continuously. */
@@ -286,8 +256,8 @@ export interface FrameStats {
   readonly framePending: boolean;
 
   /**
-   * Whether the scheduling pair this loop uses is available. `false`
-   * reports that `start()` and `requestFrame()` can schedule nothing.
+   * Whether the scheduling pair this loop uses is available. `false` reports
+   * that `start()` and `requestFrame()` can schedule nothing.
    */
   readonly schedulingAvailable: boolean;
 
@@ -346,36 +316,21 @@ export interface FrameStats {
   readonly durationBuckets: readonly FrameDurationBucket[];
 
   /**
-   * Sampled frames whose duration exceeded the highest bucket bound.
-   * The overflow bucket of `durationBuckets`.
+   * Sampled frames whose duration exceeded the highest bucket bound. The
+   * overflow bucket of `durationBuckets`.
    */
   readonly framesOverBounds: number;
 }
 
 /**
- * A frame loop: the scheduler of every per-frame callback in
- * src/render/, and the seam those frames are measured across.
+ * A frame loop: the scheduler of every per-frame callback in src/render/, and
+ * the seam those frames are measured across.
  */
 export interface RenderLoop {
-  /**
-   * Begins scheduling frames continuously, and resumes a parked loop.
-   *
-   * Idempotent: a call made while the loop is already running schedules
-   * nothing, so a loop never holds more than one pending frame however
-   * many times it is started. A call that finds no scheduling pair
-   * available reports the absence and leaves the loop stopped.
-   */
+  /** Begins scheduling frames continuously, and resumes a parked loop. */
   readonly start: () => void;
 
-  /**
-   * Stops scheduling and cancels the pending frame, if any.
-   *
-   * Idempotent: a call made while the loop is already stopped cancels
-   * nothing and reports nothing. Registered callbacks are retained, so
-   * `start()` resumes with the same callbacks; the next activation
-   * begins a fresh `FrameContext.elapsed` and its first frame carries a
-   * delta of `0`.
-   */
+  /** Stops scheduling and cancels the pending frame, if any. */
   readonly stop: () => void;
 
   /** @returns Whether the loop is scheduling frames continuously. */
@@ -387,54 +342,40 @@ export interface RenderLoop {
   /** @returns Whether a scheduled frame has yet to run. */
   readonly isFramePending: () => boolean;
 
-  /**
-   * Schedules a single frame without starting continuous scheduling.
-   *
-   * A call made while a frame is already pending schedules nothing. A
-   * call made from inside a frame schedules exactly one further frame.
-   * The running and parked states are left as they are.
-   */
+  /** Schedules a single frame without starting continuous scheduling. */
   readonly requestFrame: () => void;
 
-  /**
-   * Declares outstanding work and ensures a frame runs.
-   *
-   * Resumes a parked loop into continuous scheduling, and on a running
-   * loop suppresses the next idle park. On a stopped loop the effect is
-   * that of `requestFrame()`.
-   */
+  /** Declares outstanding work and ensures a frame runs. */
   readonly invalidate: () => void;
 
   /**
-   * Registers a callback, which runs on every frame from the next one
-   * onwards. Registration order is dispatch order, and a callback
-   * registered from inside a frame first runs on the following frame.
+   * Registers a callback, which runs on every frame from the next one onwards.
+   * Registration order is dispatch order, and a callback registered from inside
+   * a frame first runs on the following frame.
    *
    * @param callback Work to perform once per frame.
-   * @returns A handle carrying the registration's identifier and its
-   *   removal operation.
+   * @returns A handle carrying the registration's identifier and its removal
+   *   operation.
    */
   readonly addFrameCallback: (callback: FrameCallback) => FrameSubscription;
 
   /**
    * Removes a registered callback by identity. Where one callback was
-   * registered more than once, the earliest registration still present
-   * is removed.
+   * registered more than once, the earliest registration still present is
+   * removed.
    *
    * @param callback Callback to remove.
    * @returns Whether a registration was removed.
    */
   readonly removeFrameCallback: (callback: FrameCallback) => boolean;
 
-  /**
-   * @returns A snapshot of the frame measurements, as plain data.
-   */
+  /** @returns A snapshot of the frame measurements, as plain data. */
   readonly getFrameStats: () => FrameStats;
 
   /**
    * Clears the sampled measurements, having first reported anything an
-   * aggregate measurement still owed. The lifetime frame index, the
-   * registered callbacks and the running state are untouched.
+   * aggregate measurement still owed. The lifetime frame index, the registered
+   * callbacks and the running state are untouched.
    */
   readonly resetFrameStats: () => void;
 }
@@ -482,6 +423,9 @@ const SCHEDULER_UNAVAILABLE_METRIC = 'render.loop.scheduler.unavailable';
 /** Counter name for a scheduling operation that threw. */
 const SCHEDULER_ERROR_METRIC = 'render.loop.scheduler.error';
 
+/** Counter for a synchronous frame chain that reached its limit. */
+const SCHEDULER_CHAIN_METRIC = 'render.loop.scheduler.chain.bounded';
+
 /** Counter name for a rejected construction parameter. */
 const INVALID_OPTION_METRIC = 'render.loop.option.invalid';
 
@@ -494,35 +438,56 @@ const THROWN_NAME = 'RenderError';
 /** Message reported for a thrown value that carries none. */
 const THROWN_MESSAGE = 'Unknown render error.';
 
+/** Longest name or message text a reported throw carries. */
+const MAX_THROWN_TEXT_LENGTH = 200;
+
 /**
- * Nominal interval between frames of a 60 Hz display, in milliseconds.
- * The unit `DEFAULT_MAX_DELTA` is expressed in.
+ * Nominal interval between frames of a 60 Hz display, in milliseconds. The unit
+ * `DEFAULT_MAX_DELTA` is expressed in.
  */
 const NOMINAL_FRAME_INTERVAL = 1000 / 60;
 
-/** Nominal frames of time that `DEFAULT_MAX_DELTA` spans. */
+/** Nominal frames of time that `DEFAULT_MAX_DELTA` spans. Decision DL-LOOP-03. */
 const DEFAULT_MAX_DELTA_FRAMES = 4;
 
 /**
- * Default upper bound on `FrameContext.delta`, in milliseconds: four
- * nominal 60 Hz frames.
+ * Default upper bound on `FrameContext.delta`, in milliseconds: four nominal 60
+ * Hz frames. Decision DL-LOOP-03.
  */
 export const DEFAULT_MAX_DELTA =
   NOMINAL_FRAME_INTERVAL * DEFAULT_MAX_DELTA_FRAMES;
 
 /**
- * Default number of consecutive frames without outstanding work that
- * precede an idle park.
+ * Default number of consecutive frames without outstanding work that precede an
+ * idle park. Decision DL-LOOP-02.
  */
 export const DEFAULT_IDLE_FRAMES = 1;
 
 /**
  * Default inclusive upper bounds of the frame-duration histogram, in
- * milliseconds. src/observability/metrics.ts labels its buckets with
- * these values.
+ * milliseconds. src/observability/metrics.ts labels its buckets with these
+ * values. Decision DL-LOOP-04.
  */
 export const DEFAULT_FRAME_DURATION_BOUNDS: readonly number[] =
   Object.freeze([1, 2, 4, 8, 16, 33, 50, 100]);
+
+/**
+ * Most frames one entry into scheduling will drive from a scheduler that
+ * invokes the frame callback inline, before the loop stops chaining and
+ * reports.
+ *
+ * Such a scheduler never yields, so a chain with no self-terminating
+ * condition would iterate without end. A self-terminating chain settles
+ * within a few frames of `DEFAULT_IDLE_FRAMES`, so this bound is only
+ * ever reached where the configuration and the scheduler cannot make
+ * progress together — continuous scheduling driven inline, or a callback
+ * that reports work outstanding on every frame.
+ *
+ * The platform pair is unaffected: `requestAnimationFrame` returns
+ * before its callback runs, so a chain it drives is one frame deep and
+ * never counts past one.
+ */
+export const DEFAULT_MAX_SYNCHRONOUS_CHAIN = 1024;
 
 /**
  * Reads a monotonic clock where one exists, falling back to the wall
@@ -542,12 +507,12 @@ function monotonicNow(): number {
 }
 
 /**
- * Schedules one frame through the platform pair, which is read at the
- * moment it is needed rather than captured at construction.
+ * Schedules one frame through the platform pair, which is read at the moment it
+ * is needed rather than captured at construction.
  *
  * @param callback Invoked with the frame timestamp in milliseconds.
- * @returns The scheduling handle, or `undefined` where the platform
- *   supplies no `requestAnimationFrame`.
+ * @returns The scheduling handle, or `undefined` where the platform supplies no
+ *   `requestAnimationFrame`.
  */
 function platformRequestFrame(
   callback: (timestamp: number) => void,
@@ -576,19 +541,9 @@ function platformCancelFrame(handle: number): void {
 /**
  * Reports whether frames can be scheduled at all.
  *
- * src/observability/health.ts reports the platform result of this check
- * beside the WebGL probe of src/render/webgl-support.ts.
- *
  * @param scheduler Injected pair to test. Omitted, the platform pair
- *   `requestAnimationFrame` and `cancelAnimationFrame` is tested.
+ * `requestAnimationFrame` and `cancelAnimationFrame` is tested.
  * @returns Whether both scheduling operations are available.
- *
- * @example
- * ```ts
- * if (!isFrameSchedulingAvailable()) {
- *   numberOnlyRenderer.renderOnce(board);
- * }
- * ```
  */
 export function isFrameSchedulingAvailable(
   scheduler?: FrameScheduler,
@@ -607,9 +562,67 @@ export function isFrameSchedulingAvailable(
 }
 
 /**
+ * Reads one text field off a thrown value without trusting the value.
+ *
+ * `Reflect.get` invokes a getter and can be trapped by a `Proxy`, either
+ * of which can throw; a throw here is read as an absent field. The
+ * result is capped at `MAX_THROWN_TEXT_LENGTH`.
+ *
+ * @param error Thrown value, already narrowed to a non-null object.
+ * @param field Field to read.
+ * @returns The field's text, capped, or `undefined` where it is absent,
+ *   unreadable, not a string, or empty.
+ */
+function readThrownText(error: object, field: string): string | undefined {
+  let value: unknown;
+
+  try {
+    value = Reflect.get(error, field);
+  } catch {
+    return undefined;
+  }
+
+  if (typeof value !== 'string' || value.length === 0) {
+    return undefined;
+  }
+
+  return value.length <= MAX_THROWN_TEXT_LENGTH
+    ? value
+    : `${value.slice(0, MAX_THROWN_TEXT_LENGTH)}…`;
+}
+
+/**
+ * Converts a non-object thrown value to capped text without trusting its
+ * own conversion.
+ *
+ * `String()` invokes `toString` or `Symbol.toPrimitive`, either of which
+ * can throw or return an unbounded string.
+ *
+ * @param value Value to convert.
+ * @returns The converted text, capped, or the fixed fallback text.
+ */
+function capThrownText(value: unknown): string {
+  let text: string;
+
+  try {
+    text = String(value);
+  } catch {
+    return THROWN_MESSAGE;
+  }
+
+  return text.length <= MAX_THROWN_TEXT_LENGTH
+    ? text
+    : `${text.slice(0, MAX_THROWN_TEXT_LENGTH)}…`;
+}
+
+/**
  * Reduces a thrown value of any type to the two serialisable fields a
- * diagnostic carries, so a contained throw is reported rather than
- * discarded.
+ * diagnostic carries, so a contained throw is reported rather than discarded.
+ *
+ * Total: it accepts any value, including a `Proxy` whose traps throw, an
+ * object whose `name` or `message` accessor throws, and a value whose
+ * `toString` throws. It returns on every path and throws on none, and
+ * both fields are capped at `MAX_THROWN_TEXT_LENGTH`.
  *
  * @param error Thrown value, of any type, including `null` and
  *   `undefined`.
@@ -619,23 +632,10 @@ function describeThrown(error: unknown): {
   readonly name: string;
   readonly message: string;
 } {
-  if (error instanceof Error) {
-    return {
-      name: error.name.length > 0 ? error.name : THROWN_NAME,
-      message: error.message.length > 0 ? error.message : THROWN_MESSAGE,
-    };
-  }
-
   if (typeof error === 'object' && error !== null) {
-    const message: unknown = Reflect.get(error, 'message');
-    const name: unknown = Reflect.get(error, 'name');
-
     return {
-      name: typeof name === 'string' && name.length > 0 ? name : THROWN_NAME,
-      message:
-        typeof message === 'string' && message.length > 0
-          ? message
-          : THROWN_MESSAGE,
+      name: readThrownText(error, 'name') ?? THROWN_NAME,
+      message: readThrownText(error, 'message') ?? THROWN_MESSAGE,
     };
   }
 
@@ -643,7 +643,7 @@ function describeThrown(error: unknown): {
     return { name: THROWN_NAME, message: THROWN_MESSAGE };
   }
 
-  return { name: THROWN_NAME, message: String(error) };
+  return { name: THROWN_NAME, message: capThrownText(error) };
 }
 
 /**
@@ -676,8 +676,8 @@ function reportInvalidOption(
  *
  * @param value Supplied clamp, in milliseconds, or `undefined`.
  * @param reporter Sink a rejection is reported to.
- * @returns The supplied clamp where it is a finite number above zero,
- *   and `DEFAULT_MAX_DELTA` otherwise.
+ * @returns The supplied clamp where it is a finite number above zero, and
+ * `DEFAULT_MAX_DELTA` otherwise.
  */
 function resolveMaxDelta(
   value: number | undefined,
@@ -701,8 +701,8 @@ function resolveMaxDelta(
  *
  * @param value Supplied threshold, in frames, or `undefined`.
  * @param reporter Sink a rejection is reported to.
- * @returns The supplied threshold where it is an integer of at least
- *   one, and `DEFAULT_IDLE_FRAMES` otherwise.
+ * @returns The supplied threshold where it is an integer of at least one, and
+ * `DEFAULT_IDLE_FRAMES` otherwise.
  */
 function resolveIdleFrames(
   value: number | undefined,
@@ -722,13 +722,13 @@ function resolveIdleFrames(
 }
 
 /**
- * Validates the histogram bounds, dropping unusable values and
- * normalising what remains.
+ * Validates the histogram bounds, dropping unusable values and normalising what
+ * remains.
  *
  * @param value Supplied bounds, in milliseconds, or `undefined`.
  * @param reporter Sink a rejection is reported to.
  * @returns Frozen ascending bounds with no duplicate, and
- *   `DEFAULT_FRAME_DURATION_BOUNDS` where the argument leaves none.
+ * `DEFAULT_FRAME_DURATION_BOUNDS` where the argument leaves none.
  */
 function resolveDurationBounds(
   value: readonly number[] | undefined,
@@ -759,7 +759,6 @@ function resolveDurationBounds(
   return Object.freeze(ascending);
 }
 
-
 /* ==========================================================================
  * 4. The loop
  * ========================================================================== */
@@ -773,9 +772,8 @@ interface FrameEntry {
   readonly callback: FrameCallback;
 
   /**
-   * Whether the registration still runs. A removal clears it, and
-   * during a frame defers the splice until that frame's dispatch has
-   * finished.
+   * Whether the registration still runs. A removal clears it, and during a
+   * frame defers the splice until that frame's dispatch has finished.
    */
   active: boolean;
 }
@@ -799,40 +797,19 @@ type SchedulerOperation = 'request' | 'cancel';
 /**
  * Creates a frame loop.
  *
- * The loop schedules frames, hands each registered callback the frame's
- * timestamp, clamped delta, elapsed time and index, measures the frame,
- * and contains anything a callback or hook throws. It holds no scene
- * reference of any kind, so a WebGL renderer and the number-only
- * renderer drive the same implementation.
- *
- * Every parameter is optional and every default is functional: a loop
- * created with no argument runs on the platform frame callbacks,
- * measures with `performance.now()`, reports to `NOOP_RENDER_REPORTER`
- * and still records everything `getFrameStats()` returns.
- *
  * @param options Construction parameters. Defaults are described on
  *   `RenderLoopOptions`.
  * @returns A frozen loop.
- *
- * @example
- * ```ts
- * const loop = createRenderLoop({
- *   reporter,
- *   autoStopWhenIdle: true,
- *   onFrameBegin: (frame) => tracer.startSpan('render.frame', frame),
- *   onFrameEnd: (frame, durationMs) => tracer.endSpan(frame, durationMs),
- * });
- *
- * loop.addFrameCallback((frame) => animations.advance(frame.delta));
- * loop.start();
- *
- * engineEvents.on('state:commit', () => loop.invalidate());
- * ```
  */
 export function createRenderLoop(
   options: RenderLoopOptions = {},
 ): RenderLoop {
-  const reporter = options.reporter ?? NOOP_RENDER_REPORTER;
+  // Contained once here, so no report emitted from a frame, a scheduler
+  // call, a hook or a park can be turned into a loop failure by a sink
+  // that throws.
+  const reporter = createGuardedRenderReporter(
+    options.reporter ?? NOOP_RENDER_REPORTER,
+  );
   const scheduler = options.scheduler;
   const clock = options.now ?? monotonicNow;
   const hookBegin = options.onFrameBegin;
@@ -870,6 +847,21 @@ export function createRenderLoop(
   let workPending = false;
   let idleStreak = 0;
   let removalPending = false;
+
+  /**
+   * Whether a `scheduleFrame` call is on the stack. A scheduler that
+   * invokes the frame callback inline completes a whole frame inside
+   * `request`, and the end of that frame settles the next one, so
+   * scheduling re-enters itself. This marker is what turns that
+   * re-entry into an iteration of the outermost call.
+   */
+  let scheduling = false;
+
+  /**
+   * Whether a re-entrant `scheduleFrame` asked for another frame while
+   * the outermost call held the slot. Read and cleared by that call.
+   */
+  let chainRequested = false;
 
   let frameIndex = 0;
   let origin: number | undefined;
@@ -955,6 +947,33 @@ export function createRenderLoop(
     });
   };
 
+  /**
+   * Reports a synchronous frame chain that reached its limit, and so was
+   * not continued.
+   *
+   * @param frames Inline frames the chain drove before stopping.
+   */
+  const reportChainBound = (frames: number): void => {
+    const detail = Object.freeze({
+      frames,
+      limit: DEFAULT_MAX_SYNCHRONOUS_CHAIN,
+      frame: frameIndex,
+    });
+
+    reporter.onCount({ name: SCHEDULER_CHAIN_METRIC, value: 1, detail });
+    reporter.onDiagnostic({
+      level: 'warning',
+      source: DIAGNOSTIC_SOURCE,
+      message:
+        'A synchronous frame scheduler drove the chain to its limit; ' +
+        'scheduling stopped. The scheduler invokes the frame callback ' +
+        'before returning, so it never yields, and this loop has no ' +
+        'self-terminating condition: enable autoStopWhenIdle, stop ' +
+        'reporting work outstanding, or supply a scheduler that defers.',
+      detail,
+    });
+  };
+
   /** Reports that no frame could be scheduled. */
   const reportSchedulingUnavailable = (): void => {
     reporter.onCount({ name: SCHEDULER_UNAVAILABLE_METRIC, value: 1 });
@@ -985,8 +1004,8 @@ export function createRenderLoop(
   };
 
   /**
-   * Reports the frames measured since the previous report, where the
-   * loop is reporting in aggregate and at least one frame is owed.
+   * Reports the frames measured since the previous report, where the loop is
+   * reporting in aggregate and at least one frame is owed.
    */
   const flushBatchTiming = (): void => {
     if (timingMode !== 'aggregate' || unreportedFrames === 0) {
@@ -1035,15 +1054,13 @@ export function createRenderLoop(
   };
 
   /**
-   * Schedules one frame, unless one is already pending.
+   * Issues one request to the scheduler.
    *
-   * @returns Whether a frame is pending on return.
+   * @returns `'pending'` where the frame is scheduled and has not run,
+   *   `'ran'` where the scheduler invoked the callback before returning,
+   *   and `'failed'` where no frame could be scheduled at all.
    */
-  const scheduleFrame = (): boolean => {
-    if (framePending) {
-      return true;
-    }
-
+  const requestOneFrame = (): 'pending' | 'ran' | 'failed' => {
     const ticket = frameIndex;
     let handle: number | undefined;
 
@@ -1055,31 +1072,109 @@ export function createRenderLoop(
     } catch (error: unknown) {
       reportSchedulerThrow('request', error);
 
-      return false;
+      return 'failed';
     }
 
     if (handle === undefined) {
       reportSchedulingUnavailable();
 
-      return false;
+      return 'failed';
     }
 
-    // A scheduler that invoked the callback before returning already
-    // advanced the frame index and already settled the next frame. The
-    // handle it returned is spent, and is not stored.
-    if (frameIndex === ticket && !framePending) {
-      framePending = true;
-      pendingHandle = handle;
+    // The frame index advances once per frame, so an index that moved
+    // while `request` was on the stack is the signal that the scheduler
+    // invoked the callback inline. That frame has already run and has
+    // already settled its successor, and the handle it returned is
+    // spent, so the handle is not retained and there is nothing to
+    // cancel.
+    if (frameIndex !== ticket) {
+      return 'ran';
     }
 
-    return true;
+    framePending = true;
+    pendingHandle = handle;
+
+    return 'pending';
+  };
+
+  /**
+   * Schedules one frame, unless one is already pending.
+   *
+   * A scheduler that invokes the frame callback inline finishes a whole
+   * frame inside `request`, and the end of a frame settles the next one,
+   * so scheduling re-enters itself. Recursing on that would add a stack
+   * frame per rendered frame and exhaust the stack; the loop instead
+   * holds a slot for the duration of the outermost call, records a
+   * re-entrant request, and iterates here — so a chain of any length
+   * runs at one constant depth. The chain is bounded by
+   * `DEFAULT_MAX_SYNCHRONOUS_CHAIN`, because a scheduler that never
+   * yields cannot end a chain that has no self-terminating condition.
+   *
+   * @returns Whether a frame was scheduled or run. `false` only where
+   *   the scheduler could schedule nothing, which is the signal callers
+   *   use to undo a state change they had made in anticipation.
+   */
+  const scheduleFrame = (): boolean => {
+    if (framePending) {
+      return true;
+    }
+
+    // Re-entered from inside a frame an inline scheduler is running. The
+    // request is recorded for the call that holds the slot, which issues
+    // it as its next iteration.
+    if (scheduling) {
+      chainRequested = true;
+
+      return true;
+    }
+
+    scheduling = true;
+
+    try {
+      let inlineFrames = 0;
+
+      for (;;) {
+        chainRequested = false;
+
+        const outcome = requestOneFrame();
+
+        if (outcome === 'failed') {
+          // A chain that already ran frames succeeded at what it was
+          // asked to do; only a first request that schedules nothing is
+          // reported as a failure to the caller.
+          return inlineFrames > 0;
+        }
+
+        if (outcome === 'pending') {
+          return true;
+        }
+
+        inlineFrames += 1;
+
+        // The frame ran inline. It scheduled its own successor only if
+        // it re-entered here, and settling that request is this loop's
+        // work rather than a nested call's.
+        if (framePending || !chainRequested) {
+          return true;
+        }
+
+        if (inlineFrames >= DEFAULT_MAX_SYNCHRONOUS_CHAIN) {
+          chainRequested = false;
+          reportChainBound(inlineFrames);
+
+          return true;
+        }
+      }
+    } finally {
+      scheduling = false;
+      chainRequested = false;
+    }
   };
 
   /**
    * Records one frame's measurements.
    *
-   * @param duration Milliseconds the frame's callbacks and hooks
-   *   occupied.
+   * @param duration Milliseconds the frame's callbacks and hooks occupied.
    * @param delta Clamped delta the frame carried.
    */
   const recordFrame = (duration: number, delta: number): void => {
@@ -1139,11 +1234,10 @@ export function createRenderLoop(
   };
 
   /**
-   * Settles what happens after a frame: another frame, a park, or an
-   * idle loop.
+   * Settles what happens after a frame: another frame, a park, or an idle loop.
    *
-   * @param outstanding Whether any callback of the frame declared work
-   *   still outstanding.
+   * @param outstanding Whether any callback of the frame declared work still
+   *   outstanding.
    */
   const concludeFrame = (outstanding: boolean): void => {
     const requested = workPending || frameRequested;
@@ -1557,4 +1651,3 @@ export function createRenderLoop(
 
   return Object.freeze(loop);
 }
-
