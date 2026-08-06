@@ -1,1 +1,23 @@
 .sass-cache/
+
+# Dependencies
+node_modules/
+
+# Build output (static bundle produced by `npm run build`)
+dist/
+
+# Test, coverage and recorded-gameplay artifacts
+coverage/
+test-results/
+playwright-report/
+blitzy/screenshots/
+blitzy/screen_recordings/
+
+# Local environment overrides
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+*.log
