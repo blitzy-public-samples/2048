@@ -4,19 +4,24 @@
   "private": true,
   "description": "2048 — run-based 2.5D roguelike with in-run relics, built on the canonical 2048 rules engine",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gabrielecirulli/2048.git"
+  },
   "type": "module",
   "engines": {
-    "node": ">=24.19.0"
+    "node": ">=24.19.0",
+    "npm": ">=11.0.0"
   },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run --config vitest.config.ts",
+    "test:watch": "vitest --config vitest.config.ts",
     "test:snapshot": "vitest run --config vitest.snapshot.config.ts",
-    "test:e2e": "playwright test",
+    "test:e2e": "playwright test --config playwright.config.ts",
     "e2e:install": "playwright install chromium"
   },
   "dependencies": {
