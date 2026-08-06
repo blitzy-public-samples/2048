@@ -1,3 +1,10 @@
+// CHANGED: `@use "a11y"` added. It loads style/_a11y.scss, which carries the
+// focus vocabulary, the `.visually-hidden` utility, the parallel accessibility
+// board layer and the reduced-motion overrides. Sass requires every `@use` to
+// precede the file's other rules; this one stands ahead of the two `@import`
+// rules. Provenance: docs/DECISION_LOG.md.
+@use "a11y";
+
 @import "helpers";
 @import "fonts/clear-sans.css";
 

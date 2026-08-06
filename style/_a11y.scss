@@ -1,0 +1,321 @@
+// =============================================================================
+// Accessibility layer — focus vocabulary, visually-hidden utilities, the
+// parallel board layer and the reduced-motion overrides.
+// =============================================================================
+//
+// PROVENANCE
+//   Nothing in this file was moved from an existing stylesheet. style/main.scss
+//   declares no `:focus`, `:focus-visible` or `:hover` rule and no
+//   `prefers-reduced-motion` block. Every declaration below is new; every value
+//   comes from a token in style/_tokens.scss or from the DERIVED VALUES block.
+//
+// CONSUMERS
+//   SCSS  style/main.scss loads this partial as `@use "a11y"`. The sibling
+//         partials _screens, _hud, _reward, _summary and _themes load it for
+//         the mixins under EXPORTS. Sass `@use` is not transitive, so each of
+//         them loads it for itself.
+//   HTML  index.html carries `.visually-hidden` on `#live-region`.
+//
+// EXPORTS
+//   @mixin focus-ring       the two-tone ring declarations on their own
+//   @mixin focusable        binds focus-ring to `:focus-visible`, and to
+//                           `:focus` on engines without that selector
+//   @mixin visually-hidden  clip-based hiding that keeps the element in the
+//                           accessibility tree with a non-zero box
+//   @mixin dialog-boundary  the container edge for the modal surfaces
+//   .visually-hidden        the utility-class form of the mixin
+//
+// SELECTOR SOURCE
+//   Every selector below addresses an element index.html declares, or the
+//   `row` and `gridcell` roles that the `role="grid"` on its `#board-a11y`
+//   element owns.
+//
+// SCOPE OF THE REDUCED-MOTION LAYER
+//   index.html places `#diagnostics-overlay` at body level, as a sibling of
+//   `.container` and `.screen-layer`. The reduced-motion selectors are rooted at
+//   those two elements; the overlay is outside their match set. No universal
+//   selector appears in this file, and no rule here places `overflow`,
+//   `clip-path`, `contain`, `filter`, `opacity` or `transform` on `html` or
+//   `body`.
+//
+// The rationale, alternatives and risks behind every item above are recorded in
+// docs/DECISION_LOG.md; this file carries provenance only.
+// =============================================================================
+
+@use "sass:math";
+@use "tokens" as *;
+@use "helpers" as *;
+
+// -----------------------------------------------------------------------------
+// DERIVED VALUES
+//
+// style/_tokens.scss carries no length below $tile-border-radius, no duration
+// below $transition-speed and no mobile-breakpoint geometry. Every value this
+// file needs in those ranges is derived from a token once, here. No declaration
+// further down carries a literal length or duration.
+// -----------------------------------------------------------------------------
+
+// One CSS pixel, as a third of $tile-border-radius. Resolves to 1px.
+$a11y-hairline: math.div($tile-border-radius, 3) !default;
+
+// Ring bands. The inner band is $tile-border-radius wide and the outer band
+// extends the ring to twice that. Resolve to 3px and 6px.
+$a11y-ring-width: $tile-border-radius !default;
+$a11y-ring-extent: $tile-border-radius * 2 !default;
+
+// Board inner extent: $grid-row-cells tracks of $tile-size separated by
+// ($grid-row-cells - 1) gutters of $grid-spacing. Resolves to 470px, which is
+// $field-width less the board's two paddings.
+$a11y-board-extent:
+  $grid-row-cells * $tile-size + ($grid-row-cells - 1) * $grid-spacing !default;
+
+// Mobile board box. style/main.scss's `smaller($mobile-threshold)` block
+// redefines $field-width as 280px and $grid-spacing as 10px; both reductions are
+// restated here as fractions of the desktop tokens. The tile size and the extent
+// are then computed with the same expressions used above.
+$a11y-mobile-field-width: math.div($field-width * 14, 25) !default; // 280px
+$a11y-mobile-grid-spacing: math.div($grid-spacing * 2, 3) !default; // 10px
+$a11y-mobile-tile-size: math.div(
+  $a11y-mobile-field-width - $a11y-mobile-grid-spacing * ($grid-row-cells + 1),
+  $grid-row-cells
+) !default; // 57.5px
+$a11y-mobile-board-extent:
+  $grid-row-cells * $a11y-mobile-tile-size +
+  ($grid-row-cells - 1) * $a11y-mobile-grid-spacing !default; // 260px
+
+// The duration the reduced-motion layer substitutes for the stylesheet's own
+// animation and transition durations. One ten-thousandth of $transition-speed,
+// which resolves to 0.01ms and still dispatches `animationend` and
+// `transitionend`.
+$a11y-instant: math.div($transition-speed, 10000) !default;
+
+// The clip inset that collapses an element's paint region to nothing whatever
+// its box measures: half the box taken off all four sides. It is a ratio, not a
+// length; no token in style/_tokens.scss applies to it.
+$a11y-clip-away: 50% !default;
+
+// -----------------------------------------------------------------------------
+// FOCUS VOCABULARY
+//
+// style/main.scss declares no `:focus`, `:focus-visible` or `:hover` rule; this
+// section is the whole of the interface's focus styling. The sibling partials
+// _screens, _hud, _reward and _summary apply the `focusable` mixin to the
+// controls they own.
+// -----------------------------------------------------------------------------
+
+// The ring: an inner band of $bright-text-color drawn as the outline, and an
+// outer band of $text-color drawn behind it as a spread-only box-shadow. The
+// outline follows whatever border-radius the element already carries, and
+// neither declaration takes part in layout.
+//
+// Measured contrast of the two bands against the surfaces the ring lands on:
+// the $text-color band reads 4.70:1 on the #faf8ef page, 3.98:1 on a value-2
+// tile and 3.43:1 on the loss overlay; the $bright-text-color band reads 3.79:1
+// on the #8f7a66 button surface. The two bands read 4.64:1 against each other.
+// No surface takes both bands below the WCAG 1.4.11 non-text threshold of 3:1,
+// and no palette value is altered to reach those figures.
+@mixin focus-ring {
+  outline: $a11y-ring-width solid $bright-text-color;
+  outline-offset: 0;
+  box-shadow: 0 0 0 $a11y-ring-extent $text-color;
+}
+
+// Binds the ring to keyboard focus. Engines that implement `:focus-visible` get
+// the ring there; engines that do not get it on `:focus`. Neither branch removes
+// an outline.
+@mixin focusable {
+  &:focus-visible {
+    @include focus-ring;
+  }
+
+  @supports not selector(:focus-visible) {
+    &:focus {
+      @include focus-ring;
+    }
+  }
+}
+
+// The interactive element types index.html declares directly — `.restart-button`,
+// `.settings-button`, `.keep-playing-button`, `.retry-button` and the footer
+// anchors — together with those src/ui/, src/input/on-screen-controls.ts and
+// src/observability/diagnostics-overlay.ts render into these three roots at
+// runtime. `[tabindex="-1"]` is excluded from the list; those elements are
+// src/ui/a11y/focus-manager.ts's programmatic focus targets.
+.container,
+.screen-layer,
+.diagnostics-overlay {
+  a[href],
+  button,
+  input,
+  select,
+  [tabindex]:not([tabindex="-1"]) {
+    @include focusable;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// VISUALLY HIDDEN
+// -----------------------------------------------------------------------------
+
+// Drops the element from the visual rendering while leaving it in the
+// accessibility tree with a non-zero box: the box stays $a11y-hairline square
+// and its painted area is clipped away. The element is not removed from the
+// render tree, its visibility is not changed and its font size is not altered;
+// it keeps a bounding box a screen reader and touch exploration can resolve.
+@mixin visually-hidden {
+  position: absolute;
+  inline-size: $a11y-hairline;
+  block-size: $a11y-hairline;
+  padding: 0;
+  border-width: 0;
+  overflow: hidden;
+  clip-path: inset($a11y-clip-away);
+  white-space: nowrap;
+}
+
+// index.html carries this class on `#live-region`, the `aria-live` announcer
+// that src/ui/a11y/live-region.ts writes move, merge, spawn, stage-clear, relic
+// and terminal-state messages into. It is also the utility for the text
+// equivalents of anything drawn inside `#board-canvas`.
+.visually-hidden {
+  @include visually-hidden;
+}
+
+// -----------------------------------------------------------------------------
+// PARALLEL ACCESSIBILITY BOARD
+//
+// index.html's `#board-host` holds three siblings: `#board-canvas`, which
+// carries `aria-hidden="true"` and is therefore one opaque node to a screen
+// reader; `#board-number-only`; and `#board-a11y`, the `role="grid"` counterpart
+// that src/ui/a11y/ fills with one focusable, named cell per board cell. The
+// rules below give that grid the geometry of the visual board; every cell
+// reports a bounding box a screen reader and touch exploration can resolve.
+//
+// The track counts follow the elements src/ui/a11y/ generates, so the layer
+// matches the configured board size at any value it takes.
+// -----------------------------------------------------------------------------
+
+// Positioning context for the layer below. style/main.scss emits this partial's
+// CSS ahead of its own, so a `position` it declares for the same element takes
+// precedence over this one.
+.board-host {
+  position: relative;
+}
+
+.board-a11y {
+  position: absolute;
+  inset: 0;
+
+  // Floor that applies for the frames before src/render/ has measured
+  // `#board-host`. The cells never resolve to a degenerate box.
+  min-inline-size: $a11y-board-extent;
+  min-block-size: $a11y-board-extent;
+
+  // One row track per grid row, each an equal fraction of the layer, with the
+  // gutter the visual board uses between them.
+  display: grid;
+  grid-auto-rows: 1fr;
+  gap: $grid-spacing;
+
+  @include smaller($mobile-threshold) {
+    min-inline-size: $a11y-mobile-board-extent;
+    min-block-size: $a11y-mobile-board-extent;
+    gap: $a11y-mobile-grid-spacing;
+  }
+
+  // One column track per cell in the row, laid out with the same gutter.
+  [role="row"] {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    gap: $grid-spacing;
+
+    @include smaller($mobile-threshold) {
+      gap: $a11y-mobile-grid-spacing;
+    }
+  }
+
+  [role="gridcell"] {
+    // The cell keeps its box and its accessible name; only its painted surface
+    // and text are dropped, and the layer paints nothing over `#board-canvas`.
+    // The track sizing owns the box: the intrinsic minimums are released and
+    // overflowing content is clipped.
+    min-inline-size: 0;
+    min-block-size: 0;
+    overflow: hidden;
+    background: transparent;
+    color: transparent;
+    border-radius: $tile-border-radius;
+
+    // Restated here, so the cells carry the ring at either `tabindex` value a
+    // roving-tabindex grid moves between them.
+    @include focusable;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// MODAL SURFACES
+// -----------------------------------------------------------------------------
+
+// A hairline edge in $text-color drawn as an outline, which adds no layout box.
+// It marks the boundary that src/ui/a11y/focus-manager.ts holds focus inside.
+@mixin dialog-boundary {
+  outline: $a11y-hairline solid $text-color;
+  outline-offset: 0;
+}
+
+// index.html declares six of these inside `.screen-layer`: the five
+// screen-router overlays `#screen-run-start`, `#screen-stage-progress`,
+// `#screen-reward`, `#screen-game-over` and `#screen-run-summary`, plus
+// `#settings-panel`.
+.screen-layer [role="dialog"][aria-modal="true"] {
+  @include dialog-boundary;
+}
+
+// -----------------------------------------------------------------------------
+// REDUCED MOTION
+//
+// The DOM animation this layer neutralises is `move-up` on `.score-addition`,
+// `fade-in` on `.game-message`, `appear` on `.tile-new .tile-inner`, `pop` on
+// `.tile-merged .tile-inner`, and the $transition-speed transform transition on
+// `.tile`, together with whatever the screen partials add. The declarations
+// below collapse duration and delay, which leaves each animation at its end
+// state.
+//
+// The runtime counterparts of this layer are the
+// `prefers-reduced-motion: reduce` checks in src/render/camera-effects.ts and
+// src/render/particles.ts, which gate the camera punch and shake and the merge
+// particle burst inside the canvas.
+//
+// The focus ring above uses no animation and no transition; nothing here
+// suppresses it.
+// -----------------------------------------------------------------------------
+
+@media (prefers-reduced-motion: reduce) {
+  // Rooted at the two elements that hold the animated interface. index.html
+  // places `#diagnostics-overlay` outside both of them; it is not matched, and
+  // its frame-time, turn-latency and hook-dispatch readouts keep updating.
+  //
+  // style/main.scss sets these same longhands through the `animation` and
+  // `transition` shorthands, at a higher specificity and later in the emitted
+  // stylesheet. The declarations here carry `!important`.
+  .container,
+  .container *,
+  .screen-layer,
+  .screen-layer * {
+    animation-delay: 0s !important;
+    animation-duration: $a11y-instant !important;
+    animation-iteration-count: 1 !important;
+    transition-delay: 0s !important;
+    transition-duration: $a11y-instant !important;
+  }
+
+  // The terminal overlay's end state, applied directly. `.game-message` declares
+  // no opacity of its own and takes its fade only from `fade-in`; with the
+  // animation name and the fill both cleared it renders opaque, and the win,
+  // loss and continued-win states are reachable.
+  .game-container .game-message {
+    animation-name: none !important;
+    animation-fill-mode: none !important;
+  }
+}
