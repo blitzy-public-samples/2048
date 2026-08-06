@@ -1,0 +1,91 @@
+// =============================================================================
+// Design tokens — the single source of truth for the game's design system.
+// =============================================================================
+//
+// PROVENANCE
+//   The fourteen tokens in the first block were moved here from
+//   style/main.scss L4-L22. Names, values, ordering and grouping are unchanged.
+//   Two declarations were rewritten in the course of that move:
+//     - $tile-size            `/` division   -> `math.div()`
+//     - $tile-gold-glow-color `lighten()`    -> `color.adjust()`
+//   Resolved values after those rewrites: $tile-size 106.25px,
+//   $tile-gold-glow-color rgb(243, 215, 116) / #f3d774.
+//
+//   Three further blocks declare token families that did not exist before this
+//   file: the z-index ladder extension, the extrusion depth scale, and the
+//   diagnostics overlay monospace stack.
+//
+// CONSUMERS
+//   SCSS  style/main.scss and the sibling partials _screens, _hud, _reward,
+//         _summary, _a11y and _themes. Each loads this file for itself via
+//         `@use "tokens"`; Sass `@use` is not transitive.
+//   TS    src/theme/tokens.ts mirrors these values for the Three.js layer.
+//
+// CONTENTS
+//   This file declares variables only. It emits no CSS of its own.
+//
+// The rationale, alternatives and risks behind every item above are recorded in
+// docs/DECISION_LOG.md; this file carries provenance only.
+// =============================================================================
+
+@use "sass:color";
+@use "sass:math";
+
+// -----------------------------------------------------------------------------
+// Moved from style/main.scss L4-L22.
+// -----------------------------------------------------------------------------
+
+$field-width: 500px !default;
+$grid-spacing: 15px !default;
+$grid-row-cells: 4 !default;
+$tile-size: math.div($field-width - $grid-spacing * ($grid-row-cells + 1), $grid-row-cells) !default;
+$tile-border-radius: 3px !default;
+
+$mobile-threshold: $field-width + 20px !default;
+
+$text-color: #776E65 !default;
+$bright-text-color: #f9f6f2 !default;
+
+$tile-color: #eee4da !default;
+$tile-gold-color: #edc22e !default;
+$tile-gold-glow-color: color.adjust($tile-gold-color, $lightness: 15%) !default;
+
+$game-container-margin-top: 40px !default;
+$game-container-background: #bbada0 !default;
+
+$transition-speed: 100ms !default;
+
+// -----------------------------------------------------------------------------
+// z-index ladder extension.
+//
+// The existing ladder is declared in style/main.scss and is not renumbered:
+//   .grid-container 1, .tile-container 2, .tile-inner 10,
+//   .tile-merged .tile-inner 20, .game-message 100, .score-addition 100.
+// The four slots below sit above that ceiling of 100. The diagnostics overlay
+// occupies the topmost slot.
+// -----------------------------------------------------------------------------
+
+$z-index-hud: 200 !default;
+$z-index-screen-overlay: 300 !default;
+$z-index-modal: 400 !default;
+$z-index-diagnostics: 500 !default;
+
+// -----------------------------------------------------------------------------
+// Extrusion depth scale, expressed as explicit multiples of $grid-spacing.
+//
+// Consumed by src/render/tile-mesh-factory.ts and src/render/tile-materials.ts
+// through the src/theme/tokens.ts mirror.
+// -----------------------------------------------------------------------------
+
+$depth-board: $grid-spacing * 1 !default;
+$depth-tile: $grid-spacing * 2 !default;
+
+// -----------------------------------------------------------------------------
+// Diagnostics overlay monospace stack.
+//
+// Consumed by src/observability/diagnostics-overlay.ts. Independent of the
+// Clear Sans stack that style/main.scss applies to the rest of the interface.
+// -----------------------------------------------------------------------------
+
+$diagnostics-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+  "Liberation Mono", monospace !default;
