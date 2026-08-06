@@ -79,6 +79,32 @@ const SELECTORS = Object.freeze({
   message: '.game-message',
 });
 
+/**
+ * One control the markup declares, and the action a pointer activation on
+ * it publishes.
+ *
+ * Ported from the three `bindButtonPress` calls at
+ * js/keyboard_input_manager.js L72-L74: `.retry-button` and
+ * `.restart-button` both published `restart`, and `.keep-playing-button`
+ * published `keepPlaying`. The order below is the order those three lines
+ * bound them in.
+ *
+ * src/input/input-manager.ts binds no control element itself — it exposes
+ * `restart` and `keepPlaying` for a caller to invoke — so the binding lives
+ * here, at the composition root that already owns every other selector.
+ */
+const CONTROL_BINDINGS: readonly {
+  readonly selector: string;
+  readonly action: 'restart' | 'keepPlaying';
+}[] = Object.freeze([
+  Object.freeze({ selector: '.retry-button', action: 'restart' as const }),
+  Object.freeze({ selector: '.restart-button', action: 'restart' as const }),
+  Object.freeze({
+    selector: '.keep-playing-button',
+    action: 'keepPlaying' as const,
+  }),
+]);
+
 /* --------------------------------------------------------------------------
  * Reporting
  * ----------------------------------------------------------------------- */
@@ -407,6 +433,46 @@ export function start(ownerDocument: Document): Application {
     engine.continuePlaying();
   });
 
+  // Pointer activation of the three controls the markup declares, which is
+  // what js/keyboard_input_manager.js L72-L74 bound through
+  // `bindButtonPress`. Each lookup is guarded: an absent control is
+  // reported and skipped rather than throwing, because none of the vanilla
+  // selector lookups was null-checked.
+  const stopControls: (() => void)[] = [];
+
+  for (const binding of CONTROL_BINDINGS) {
+    const element = ownerDocument.querySelector(binding.selector);
+
+    if (element === null) {
+      reporter.onDiagnostic({
+        level: 'warning',
+        source: 'input',
+        message: 'An input control is absent.',
+        detail: Object.freeze({
+          selector: binding.selector,
+          action: binding.action,
+        }),
+      });
+
+      continue;
+    }
+
+    const onActivate = (event: Event): void => {
+      if (binding.action === 'restart') {
+        input.restart(event);
+
+        return;
+      }
+
+      input.keepPlaying(event);
+    };
+
+    element.addEventListener('click', onActivate);
+    stopControls.push((): void => {
+      element.removeEventListener('click', onActivate);
+    });
+  }
+
   loop.start();
   engine.setup();
 
@@ -419,6 +485,11 @@ export function start(ownerDocument: Document): Application {
       stopMove();
       stopRestart();
       stopContinue();
+
+      for (const stop of stopControls) {
+        stop();
+      }
+
       stopRendering();
       frameSubscription.remove();
       input.detach();
