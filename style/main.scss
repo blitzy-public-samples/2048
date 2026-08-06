@@ -1,68 +1,80 @@
-// CHANGED: `@use "a11y"` added. It loads style/_a11y.scss, which carries the
-// focus vocabulary, the `.visually-hidden` utility, the parallel accessibility
-// board layer and the reduced-motion overrides. Sass requires every `@use` to
-// precede the file's other rules; this one stands ahead of the two `@import`
-// rules. Provenance: docs/DECISION_LOG.md.
+// =============================================================================
+// style/main.scss — the stylesheet entry point.
+// =============================================================================
+//
+// CHANGED: index.html's `<link>` to the committed generated CSS was removed;
+// src/main.ts imports this file instead. One load of this file emits the whole
+// style layer: the six partials below are loaded here and nowhere else.
+//
+// CHANGED: the two `@import` rules that stood at L1-L2 are now `@use` rules,
+// and the fourteen-token block that stood at L4-L22 moved to style/_tokens.scss.
+//
+// TRACEABILITY
+//   token block L4-L22   -> style/_tokens.scss -> src/theme/tokens.ts
+//   tile ramp generator  -> src/theme/tile-ramp.ts
+//
+// Provenance for every change in this file: docs/DECISION_LOG.md.
+// =============================================================================
+
+// Sass built-in modules. `math` carries the division operator that replaced `/`
+// and the namespaced `ceil()`, `floor()` and `max()`; `color` carries the
+// namespaced `mix()` and the `adjust()` that replaced `lighten()`/`darken()`;
+// `list` carries the namespaced `nth()`.
+@use "sass:color";
+@use "sass:list";
+@use "sass:math";
+
+// CHANGED from `@import "helpers"`. Loaded `as *`: the unqualified `clearfix`,
+// `keyframes`, `animation`, `animation-fill-mode`, `transition`,
+// `transition-property`, `transform` and `smaller` mixins and the `pow()`
+// function in this file resolve to it.
+@use "helpers" as *;
+
+// Design tokens, moved out of this file. Loaded `as *`: the unqualified token
+// references in this file resolve to it.
+@use "tokens" as *;
+
+// CHANGED from `@import "fonts/clear-sans.css"`. The three `@font-face` blocks
+// of style/fonts/clear-sans.css are emitted into this stylesheet rather than
+// fetched by a nested CSS `@import`; the build rebases their nine font URLs.
+@use "fonts/clear-sans";
+
+// style/_a11y.scss — the focus vocabulary, the `.visually-hidden` utility, the
+// parallel accessibility board layer and the reduced-motion overrides.
 @use "a11y";
 
-// CHANGED: `@use "themes"` added. It loads style/_themes.scss, which publishes
-// the `--theme-*` custom properties for the default, high-contrast and
-// colourblind-safe palettes. The screen, HUD, reward and summary partials read
-// those properties through `var(--theme-*, <token fallback>)`, so the palettes
-// only reach the page once this partial is emitted. Provenance:
-// docs/DECISION_LOG.md.
+// style/_themes.scss — the `--theme-*` custom properties for the default,
+// high-contrast and colourblind-safe palettes.
 @use "themes";
 
-// CHANGED: `@use "screens"` added. It loads style/_screens.scss, which carries
-// the `.screen-layer` host and the shared `.screen` container layer that the
-// run-start, stage-progress, game-over, reward and run-summary screens are
-// built on. It stands ahead of `@use "summary"` and `@use "reward"` so the
-// shared layer is emitted before the two per-screen variants that refine it.
-// Provenance: docs/DECISION_LOG.md.
-@use "screens";
-
-// CHANGED: `@use "hud"` added. It loads style/_hud.scss, which carries the
-// in-run heads-up display — the stage index and goal readouts and the
-// active-relic tray rendered in pickup order. Provenance:
-// docs/DECISION_LOG.md.
+// style/_hud.scss — the in-run heads-up display: the stage index and goal
+// readouts and the active-relic tray rendered in pickup order.
 @use "hud";
 
-// CHANGED: `@use "summary"` added. It loads style/_summary.scss, which carries
-// the run-summary screen overlay and its panel — the final score and stage
-// readouts, the relics collected in pickup order, and the copyable run seed. It
-// stands beside `@use "a11y"` and ahead of the two `@import` rules for the same
-// reason. Provenance: docs/DECISION_LOG.md.
-@use "summary";
-
-// CHANGED: `@use "reward"` added. It loads style/_reward.scss, which carries
-// the choose-1-of-3 relic reward screen - the `.screen[data-screen="reward"]`
-// layer, its panel and its three relic cards. It stands after `@use "a11y"`,
-// whose `focusable` mixin it applies, and ahead of the two `@import` rules, as
-// the line above does. Provenance: docs/DECISION_LOG.md.
+// style/_reward.scss — the choose-1-of-3 relic reward screen: the
+// `.screen[data-screen="reward"]` layer, its panel and its three relic cards.
 @use "reward";
 
-@import "helpers";
-@import "fonts/clear-sans.css";
+// style/_summary.scss — the run-summary screen overlay and its panel: the final
+// score and stage readouts, the relics collected in pickup order, and the
+// copyable run seed.
+@use "summary";
 
-$field-width: 500px;
-$grid-spacing: 15px;
-$grid-row-cells: 4;
-$tile-size: ($field-width - $grid-spacing * ($grid-row-cells + 1)) / $grid-row-cells;
-$tile-border-radius: 3px;
+// style/_screens.scss — the `.screen-layer` host and the shared `.screen`
+// container layer that the run-start, stage-progress, game-over, reward and
+// run-summary screens are built on.
+@use "screens";
 
-$mobile-threshold: $field-width + 20px;
-
-$text-color: #776E65;
-$bright-text-color: #f9f6f2;
-
-$tile-color: #eee4da;
-$tile-gold-color: #edc22e;
-$tile-gold-glow-color: lighten($tile-gold-color, 15%);
-
-$game-container-margin-top: 40px;
-$game-container-background: #bbada0;
-
-$transition-speed: 100ms;
+// CHANGED: the fourteen token declarations that stood here - $field-width,
+// $grid-spacing, $grid-row-cells, $tile-size, $tile-border-radius,
+// $mobile-threshold, $text-color, $bright-text-color, $tile-color,
+// $tile-gold-color, $tile-gold-glow-color, $game-container-margin-top,
+// $game-container-background and $transition-speed - moved verbatim to
+// style/_tokens.scss, which `@use "tokens" as *` above loads. Their names and
+// values are unchanged. The board dimension is now declared once, as
+// $grid-row-cells in style/_tokens.scss with `!default`, and the position loop
+// below reads it from there; src/config/default-config.ts carries the
+// engine-side board size.
 
 html, body {
   margin: 0;
@@ -135,10 +147,12 @@ h1.title {
     color: $tile-color;
   }
 
+  // CHANGED: a dead `color: red` declaration that stood between `right` and
+  // `font-size` is removed. The `color: rgba($text-color, .9)` two lines below
+  // it, which overrode it, is unchanged.
   .score-addition {
     position: absolute;
     right: 30px;
-    color: red;
     font-size: $height;
     line-height: $height;
     font-weight: bold;
@@ -178,7 +192,8 @@ strong {
 
 hr {
   border: none;
-  border-bottom: 1px solid lighten($text-color, 40%);
+  // CHANGED: `lighten($text-color, 40%)` -> `color.adjust()`. Same value.
+  border-bottom: 1px solid color.adjust($text-color, $lightness: 40%);
   margin-top: 20px;
   margin-bottom: 30px;
 }
@@ -221,7 +236,9 @@ hr {
 // `.game-message` controls. Provenance: docs/DECISION_LOG.md.
 @mixin button {
   display: inline-block;
-  background: darken($game-container-background, 20%);
+  // CHANGED: `darken($game-container-background, 20%)` -> `color.adjust()`.
+  // Same value, #8f7a66.
+  background: color.adjust($game-container-background, $lightness: -20%);
   border-radius: 3px;
   padding: 0 20px;
   text-decoration: none;
@@ -243,7 +260,20 @@ hr {
 }
 
 // Game field mixin used to render CSS at different width
-@mixin game-field {
+//
+// CHANGED: the six geometry values the body reads are now parameters, each
+// defaulting to the token of the same name; the mixin took no arguments and
+// read them from the enclosing scope. The desktop include below passes no
+// arguments and compiles the wide-layout box; the mobile include passes the six
+// locals of its own block. Provenance: docs/DECISION_LOG.md.
+@mixin game-field(
+  $field-width: $field-width,
+  $grid-spacing: $grid-spacing,
+  $grid-row-cells: $grid-row-cells,
+  $tile-size: $tile-size,
+  $tile-border-radius: $tile-border-radius,
+  $game-container-margin-top: $game-container-margin-top
+) {
   .game-container {
     margin-top: $game-container-margin-top;
     position: relative;
@@ -372,17 +402,19 @@ hr {
 
   .tile {
     &, .tile-inner {
-      width: ceil($tile-size);
-      height: ceil($tile-size);
-      line-height: ceil($tile-size);
+      // CHANGED: global `ceil()` -> `math.ceil()`. Same values.
+      width: math.ceil($tile-size);
+      height: math.ceil($tile-size);
+      line-height: math.ceil($tile-size);
     }
 
     // Build position classes
     @for $x from 1 through $grid-row-cells {
       @for $y from 1 through $grid-row-cells {
         &.tile-position-#{$x}-#{$y} {
-          $xPos: floor(($tile-size + $grid-spacing) * ($x - 1));
-          $yPos: floor(($tile-size + $grid-spacing) * ($y - 1));
+          // CHANGED: global `floor()` -> `math.floor()`. Same values.
+          $xPos: math.floor(($tile-size + $grid-spacing) * ($x - 1));
+          $yPos: math.floor(($tile-size + $grid-spacing) * ($y - 1));
           @include transform(translate($xPos, $yPos));
         }
       }
@@ -392,6 +424,30 @@ hr {
 
 // End of game-field mixin
 @include game-field;
+
+// NEW: the board host and the two rendering layers index.html declares inside
+// `.game-container`, where the four `.grid-row` rows and the empty
+// `.tile-container` element used to stand. No rule in style/ gave either layer a
+// box before this one.
+//
+// Emitted geometry: the host fills `.game-container`'s content box, which is the
+// tile field at either scale - 470px on the wide layout, 260px on the narrow
+// one - and both layers fill the host without adding a box to the flow.
+// style/_a11y.scss makes the host the positioning context and gives
+// `.board-a11y` the same fill; `.board-canvas` carries `aria-hidden="true"` in
+// the markup. Provenance: docs/DECISION_LOG.md.
+.board-host {
+  height: 100%;
+}
+
+.board-canvas,
+.board-number-only {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
 
 .tile {
   position: absolute; // Makes transforms relative to the top-left corner
@@ -436,16 +492,20 @@ hr {
 
     &.tile-#{$power} .tile-inner {
       // Calculate base background color
-      $gold-percent: ($exponent - 1) / ($limit - 1) * 100;
-      $mixed-background: mix($tile-gold-color, $tile-color, $gold-percent);
+      // CHANGED: `/` division -> `math.div()`, and the weight now carries the
+      // `%` unit that `color.mix()` expects. Same values.
+      $gold-percent: math.div($exponent - 1, $limit - 1) * 100%;
+      // CHANGED: global `mix()` -> `color.mix()`. Same values.
+      $mixed-background: color.mix($tile-gold-color, $tile-color, $gold-percent);
 
-      $nth-color: nth($special-colors, $exponent);
+      // CHANGED: global `nth()` -> `list.nth()` on the three lookups below.
+      $nth-color: list.nth($special-colors, $exponent);
 
-      $special-background: nth($nth-color, 1);
-      $bright-color: nth($nth-color, 2);
+      $special-background: list.nth($nth-color, 1);
+      $bright-color: list.nth($nth-color, 2);
 
       @if $special-background {
-        $mixed-background: mix($special-background, $mixed-background, 55%);
+        $mixed-background: color.mix($special-background, $mixed-background, 55%);
       }
 
       @if $bright-color {
@@ -456,11 +516,14 @@ hr {
       background: $mixed-background;
 
       // Add glow
-      $glow-opacity: max($exponent - 4, 0) / ($limit - 4);
+      // CHANGED: `/` division -> `math.div()` and global `max()` ->
+      // `math.max()`. Same values.
+      $glow-opacity: math.div(math.max($exponent - 4, 0), $limit - 4);
 
       @if not $special-background {
-        box-shadow: 0 0 30px 10px rgba($tile-gold-glow-color, $glow-opacity / 1.8),
-                    inset 0 0 0 1px rgba(white, $glow-opacity / 3);
+        // CHANGED: the two `/` divisions -> `math.div()`. Same values.
+        box-shadow: 0 0 30px 10px rgba($tile-gold-glow-color, math.div($glow-opacity, 1.8)),
+                    inset 0 0 0 1px rgba(white, math.div($glow-opacity, 3));
       }
 
       // Adjust font size for bigger numbers
@@ -486,7 +549,8 @@ hr {
   // Super tiles (above 2048)
   &.tile-super .tile-inner {
     color: $bright-text-color;
-    background: mix(#333, $tile-gold-color, 95%);
+    // CHANGED: global `mix()` -> `color.mix()`. Same value, #3c3a32.
+    background: color.mix(#333, $tile-gold-color, 95%);
 
     font-size: 30px;
 
@@ -570,7 +634,8 @@ hr {
   $field-width: 280px;
   $grid-spacing: 10px;
   $grid-row-cells: 4;
-  $tile-size: ($field-width - $grid-spacing * ($grid-row-cells + 1)) / $grid-row-cells;
+  // CHANGED: `/` division -> `math.div()`. Same value, 57.5px.
+  $tile-size: math.div($field-width - $grid-spacing * ($grid-row-cells + 1), $grid-row-cells);
   $tile-border-radius: 3px;
   $game-container-margin-top: 17px;
 
@@ -620,19 +685,20 @@ hr {
   }
 
   // Render the game field at the right width
-  @include game-field;
-
-  // CHANGED: four declarations added, restating the mobile board box from the
-  // variables redefined at the top of this block. Dart Sass resolves a mixin body
-  // against the scope it was DEFINED in where Ruby Sass resolved it against the call
-  // site, so `@include game-field` above emits the desktop box. These reproduce the
-  // geometry the pre-Dart-Sass build emitted. Provenance: docs/DECISION_LOG.md.
-  .game-container {
-    margin-top: $game-container-margin-top;
-    padding: $grid-spacing;
-    width: $field-width;
-    height: $field-width;
-  }
+  //
+  // CHANGED: the include passes the six values redeclared at the top of this
+  // block; it previously passed none. A four-declaration `.game-container`
+  // restatement that stood immediately below it is removed. Emitted geometry
+  // matches the pre-Dart-Sass build: a 280px field, 10px gutters, 57.5px cells,
+  // 58px tiles and a 67px position step. Provenance: docs/DECISION_LOG.md.
+  @include game-field(
+    $field-width: $field-width,
+    $grid-spacing: $grid-spacing,
+    $grid-row-cells: $grid-row-cells,
+    $tile-size: $tile-size,
+    $tile-border-radius: $tile-border-radius,
+    $game-container-margin-top: $game-container-margin-top
+  );
 
   // Rest of the font-size adjustments in the tile class
   .tile .tile-inner {
