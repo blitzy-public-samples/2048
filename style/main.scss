@@ -155,7 +155,27 @@ hr {
   }
 }
 
+// CHANGED: base visibility protocol for the `hidden` attribute. index.html toggles
+// nine elements by that attribute alone - the six screen-router containers, the
+// settings panel, the diagnostics overlay and the number-only board layer. Each
+// selector carries (0,2,0) specificity; no `!important` is used.
+// Provenance: docs/DECISION_LOG.md.
+.screen[hidden],
+.hud[hidden],
+.settings-panel[hidden],
+.diagnostics-overlay[hidden],
+.board-number-only[hidden],
+.board-a11y[hidden] {
+  display: none;
+}
+
 // Styles for buttons
+//
+// BLITZY [A11Y]: the label text in this mixin measures 3.79:1 (#f9f6f2 on #8f7a66)
+// at 18px bold, below the WCAG AA 4.5:1 threshold for text under 18.66px.
+// Implemented as the design system specifies; flagged for designer review, not
+// corrected here. Applies to `.restart-button`, `.settings-button` and the two
+// `.game-message` controls. Provenance: docs/DECISION_LOG.md.
 @mixin button {
   display: inline-block;
   background: darken($game-container-background, 20%);
@@ -165,6 +185,18 @@ hr {
   color: $bright-text-color;
   height: 40px;
   line-height: 42px;
+
+  // CHANGED: seven declarations added when index.html's `.restart-button`,
+  // `.retry-button` and `.keep-playing-button` became <button> elements. They
+  // neutralise the user-agent button styling and are a no-op for the <a> elements
+  // that also include this mixin. Provenance: docs/DECISION_LOG.md.
+  border: none;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: bold;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 // Game field mixin used to render CSS at different width
@@ -221,14 +253,18 @@ hr {
         margin-top: 59px;
       }
 
-      a {
+      // CHANGED: the type selector was `a` only; `button` was added when
+      // index.html's `.keep-playing-button` and `.retry-button` became <button>
+      // elements. Tab indentation normalised to two spaces.
+      // Provenance: docs/DECISION_LOG.md.
+      a, button {
         @include button;
         margin-left: 9px;
         // margin-top: 59px;
 
-	&.keep-playing-button {
-	  display: none;
-	}
+        &.keep-playing-button {
+          display: none;
+        }
       }
 
       @include animation(fade-in 800ms ease $transition-speed * 12);
@@ -238,9 +274,12 @@ hr {
         background: rgba($tile-gold-color, .5);
         color: $bright-text-color;
 
-	a.keep-playing-button {
-	  display: inline-block;
-	}
+        // CHANGED: selector was `a.keep-playing-button`; the element qualifier was
+        // dropped. Tab indentation normalised to two spaces.
+        // Provenance: docs/DECISION_LOG.md.
+        .keep-playing-button {
+          display: inline-block;
+        }
       }
 
       &.game-won, &.game-over {
@@ -468,6 +507,17 @@ hr {
   float: right;
 }
 
+// NEW: `.settings-button` accompanies `.restart-button` in index.html's
+// `.above-game` row. Same button vocabulary, floated right, 9px gap.
+// Provenance: docs/DECISION_LOG.md.
+.settings-button {
+  @include button;
+  display: block;
+  text-align: center;
+  float: right;
+  margin-right: 9px;
+}
+
 .game-explanation {
   margin-top: 50px;
 }
@@ -528,6 +578,18 @@ hr {
 
   // Render the game field at the right width
   @include game-field;
+
+  // CHANGED: four declarations added, restating the mobile board box from the
+  // variables redefined at the top of this block. Dart Sass resolves a mixin body
+  // against the scope it was DEFINED in where Ruby Sass resolved it against the call
+  // site, so `@include game-field` above emits the desktop box. These reproduce the
+  // geometry the pre-Dart-Sass build emitted. Provenance: docs/DECISION_LOG.md.
+  .game-container {
+    margin-top: $game-container-margin-top;
+    padding: $grid-spacing;
+    width: $field-width;
+    height: $field-width;
+  }
 
   // Rest of the font-size adjustments in the tile class
   .tile .tile-inner {

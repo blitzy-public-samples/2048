@@ -1,7 +1,13 @@
+// TypeScript configuration for the Node-context files: the tooling configs
+// and the Playwright specs under tests/e2e/. Everything else — src/ and the
+// DOM-context suites under tests/ — is covered by tsconfig.json, and the two
+// projects share no file.
 {
   "compilerOptions": {
     "target": "ES2023",
-    "lib": ["ES2023"],
+    // The `page.evaluate()` callbacks in the Playwright specs reference
+    // browser globals, which the DOM libraries declare.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
@@ -23,7 +29,8 @@
     "vite.config.ts",
     "vitest.config.ts",
     "vitest.snapshot.config.ts",
-    "playwright.config.ts"
+    "playwright.config.ts",
+    "tests/e2e/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

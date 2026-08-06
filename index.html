@@ -1,10 +1,16 @@
 <!DOCTYPE html>
-<html>
+<!-- CHANGED: `lang="en"` added; the element previously carried no attributes. -->
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>2048</title>
 
-  <link href="style/main.css" rel="stylesheet" type="text/css">
+  <!--
+    CHANGED: the stylesheet <link> that stood here, pointing at the committed
+    generated CSS artifact, was removed. Styling now enters through the module graph -
+    src/main.ts imports the SCSS source and the build emits the compiled asset.
+    Provenance: docs/DECISION_LOG.md.
+  -->
   <link rel="shortcut icon" href="favicon.ico">
   <link rel="apple-touch-icon" href="meta/apple-touch-icon.png">
   <link rel="apple-touch-startup-image" href="meta/apple-touch-startup-image-640x1096.png" media="(device-width: 320px) and (device-height: 568px) and (-webkit-device-pixel-ratio: 2)"> <!-- iPhone 5+ -->
@@ -14,67 +20,124 @@
 
   <meta name="HandheldFriendly" content="True">
   <meta name="MobileOptimized" content="320">
-  <meta name="viewport" content="width=device-width, target-densitydpi=160dpi, initial-scale=1.0, maximum-scale=1, user-scalable=no, minimal-ui">
+  <!--
+    CHANGED: viewport directive list narrowed. Four directives were removed - the
+    density target, the upper scale clamp, the scalability lock and the minimal-ui
+    hint. Retained unchanged: width=device-width and initial-scale.
+    Provenance: docs/DECISION_LOG.md.
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body>
   <div class="container">
-    <div class="heading">
+    <!-- CHANGED: the `.heading` element is now a <header> rather than a <div>. Its
+         class name and contents are otherwise unchanged. -->
+    <header class="heading">
       <h1 class="title">2048</h1>
-      <div class="scores-container">
-        <div class="score-container">0</div>
-        <div class="best-container">0</div>
+      <!--
+        CHANGED: `.scores-container` gained `role="group"` and `aria-label`;
+        `.score-container` and `.best-container` gained `role="status"` and
+        `aria-label`. Their visible "SCORE" and "BEST" captions remain stylesheet
+        `:after` content. Both names are carried as attributes; the renderer replaces
+        the textContent of both elements on every commit and appends
+        `.score-addition` into `.score-container`. Class names are unchanged - both
+        belong to the DOM contract.
+        Provenance: docs/DECISION_LOG.md.
+      -->
+      <div class="scores-container" role="group" aria-label="Scores">
+        <div class="score-container" role="status" aria-label="Score">0</div>
+        <div class="best-container" role="status" aria-label="Best score">0</div>
       </div>
-    </div>
+    </header>
 
-    <div class="above-game">
-      <p class="game-intro">Join the numbers and get to the <strong>2048 tile!</strong></p>
-      <a class="restart-button">New Game</a>
-    </div>
-
-    <div class="game-container">
-      <div class="game-message">
-        <p></p>
-        <div class="lower">
-	        <a class="keep-playing-button">Keep going</a>
-          <a class="retry-button">Try again</a>
-        </div>
-      </div>
-
-      <div class="grid-container">
-        <div class="grid-row">
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-        </div>
-        <div class="grid-row">
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-        </div>
-        <div class="grid-row">
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-        </div>
-        <div class="grid-row">
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-          <div class="grid-cell"></div>
-        </div>
+    <!-- CHANGED: <main> landmark added around the game; the page previously had no
+         landmark of any kind. It wraps `.above-game`, the HUD, `.game-container`,
+         the on-screen control mount and `.game-explanation`. -->
+    <main class="game-main" id="game-main">
+      <div class="above-game">
+        <p class="game-intro">Join the numbers and get to the <strong>2048 tile!</strong></p>
+        <!-- CHANGED: `.restart-button` is now <button type="button"> rather than a
+             bare <a> with no href. Its class name and label are unchanged.
+             NEW: `.settings-button` opens `#settings-panel`, the settings surface
+             that src/ui/components/settings-panel.ts and src/ui/a11y/settings.ts
+             render - reduced motion, high-contrast and colourblind palettes,
+             number-only mode, mute and volume, and key remapping. Source order
+             places it after `.restart-button`.
+             Provenance: docs/DECISION_LOG.md. -->
+        <button type="button" class="restart-button">New Game</button>
+        <button type="button" class="settings-button" id="settings-button" aria-haspopup="dialog" aria-controls="settings-panel">Settings</button>
       </div>
 
-      <div class="tile-container">
-
+      <!-- NEW: in-run HUD, screen-router state `hud`. src/ui/screens/hud.ts renders
+           the stage index and goal progress into `#hud-stage`; the relic tray lists
+           active relics in pickup order with their charge counts. The score and best
+           score outlets remain the `.score-container` / `.best-container` elements in
+           the banner above. Hidden until the router activates this state. -->
+      <div class="hud" id="screen-hud" data-screen="hud" role="group" aria-label="Run status" hidden>
+        <div class="hud-stage" id="hud-stage"></div>
+        <ul class="relic-tray" id="relic-tray" role="list" aria-label="Active relics, in pickup order"></ul>
       </div>
-    </div>
 
-    <p class="game-explanation">
-      <strong class="important">How to play:</strong> Use your <strong>arrow keys</strong> to move the tiles. When two tiles with the same number touch, they <strong>merge into one!</strong>
-    </p>
+      <div class="game-container">
+        <div class="game-message">
+          <p></p>
+          <div class="lower">
+            <!-- CHANGED: `.keep-playing-button` and `.retry-button` converted from
+                 bare <a> elements with no href to real <button> elements. Class
+                 names and order are unchanged. The tab character that indented the
+                 first of the two was normalised to two spaces. -->
+            <button type="button" class="keep-playing-button">Keep going</button>
+            <button type="button" class="retry-button">Try again</button>
+          </div>
+        </div>
+
+        <!--
+          CHANGED: the `.grid-container` element, its four `.grid-row` rows and the
+          sixteen static cell elements they held were all removed, and the empty
+          `.tile-container` element that followed them was replaced by the board host
+          below. The board is now generated from the configured board size; it is no
+          longer declared in markup.
+
+          Board host contract, for src/render/three-renderer.ts, src/render/scene.ts,
+          src/render/number-only-renderer.ts and src/ui/a11y/:
+            #board-host          the sized region the renderer measures
+            #board-canvas        the WebGL surface. Carries `aria-hidden="true"`, and
+                                 no width or height attributes - the renderer sets the
+                                 backing store
+            #board-number-only   the number-only rendering mode, which is also the
+                                 non-WebGL fallback. Hidden until a renderer selects it
+            #board-a11y          the parallel accessibility board. src/ui/a11y/ generates
+                                 one focusable, named counterpart per cell from the
+                                 configured board size and clears `aria-busy` when done
+          Provenance: docs/DECISION_LOG.md.
+        -->
+        <div class="board-host" id="board-host">
+          <canvas class="board-canvas" id="board-canvas" aria-hidden="true"></canvas>
+          <div class="board-number-only" id="board-number-only" hidden></div>
+          <div class="board-a11y" id="board-a11y" role="grid" aria-label="Game board" aria-busy="true"></div>
+        </div>
+      </div>
+
+      <!-- NEW: on-screen control host, populated by
+           src/input/on-screen-controls.ts. It carries one focusable, tappable
+           control per keyboard action. -->
+      <div class="on-screen-controls" id="on-screen-controls"></div>
+
+      <!-- CHANGED: the instructional copy named only the arrow keys. It now names
+           every movement modality the input layer binds - arrow keys, WASD, the Vim
+           keys, swipe and the on-screen controls - and names key remapping in
+           Settings. The "How to play:" framing and the "merge into one!" phrasing
+           are unchanged.
+           Provenance: docs/DECISION_LOG.md. -->
+      <p class="game-explanation">
+        <strong class="important">How to play:</strong> Use your <strong>arrow keys</strong>, <strong>WASD</strong>, the Vim keys <strong>H</strong>, <strong>J</strong>, <strong>K</strong>, <strong>L</strong>, a <strong>swipe</strong>, or the <strong>on-screen controls</strong> to move the tiles. Any key can be remapped from <strong>Settings</strong>. When two tiles with the same number touch, they <strong>merge into one!</strong>
+      </p>
+    </main>
+    <!-- CHANGED: <footer> landmark added around the two separators, the authenticity
+         notice and the attributions. The four lines it wraps are byte-identical to
+         the pre-migration file, indentation included; only the wrapper is new.
+         Provenance: docs/DECISION_LOG.md. -->
+    <footer class="page-footer">
     <hr>
     <p>
     <strong class="important">Note:</strong> This site is the official version of 2048. You can play it on your phone via <a href="http://git.io/2048">http://git.io/2048.</a> All other apps or sites are derivatives or fakes, and should be used with caution.
@@ -83,17 +146,51 @@
     <p>
     Created by <a href="http://gabrielecirulli.com" target="_blank">Gabriele Cirulli.</a> Based on <a href="https://itunes.apple.com/us/app/1024!/id823499224" target="_blank">1024 by Veewo Studio</a> and conceptually similar to <a href="http://asherv.com/threes/" target="_blank">Threes by Asher Vollmer.</a>
     </p>
+    </footer>
   </div>
 
-  <script src="js/bind_polyfill.js"></script>
-  <script src="js/classlist_polyfill.js"></script>
-  <script src="js/animframe_polyfill.js"></script>
-  <script src="js/keyboard_input_manager.js"></script>
-  <script src="js/html_actuator.js"></script>
-  <script src="js/grid.js"></script>
-  <script src="js/tile.js"></script>
-  <script src="js/local_storage_manager.js"></script>
-  <script src="js/game_manager.js"></script>
-  <script src="js/application.js"></script>
+  <!--
+    NEW: overlay screen root. The page previously had a single screen and no router.
+    src/ui/screen-router.ts owns these containers and addresses them by their
+    `data-screen` value, which matches the corresponding src/ui/screens/ module name.
+    Every container ships with the `hidden` attribute; the router unhides exactly one
+    at a time.
+
+    The sixth router state, `hud`, is in-flow chrome and lives inside <main> above.
+    The five overlays here sit at body level, outside `.game-container`.
+
+    `#settings-panel` is not a router state. src/ui/components/settings-panel.ts and
+    src/ui/a11y/settings.ts own it, and `#settings-button` in `.above-game` opens it.
+    Provenance: docs/DECISION_LOG.md.
+  -->
+  <div class="screen-layer" id="screen-layer">
+    <div class="screen" id="screen-run-start" data-screen="run-start" role="dialog" aria-modal="true" aria-label="Start a run" hidden></div>
+    <div class="screen" id="screen-stage-progress" data-screen="stage-progress" role="dialog" aria-modal="true" aria-label="Stage progress" hidden></div>
+    <div class="screen" id="screen-reward" data-screen="reward" role="dialog" aria-modal="true" aria-label="Choose a relic" hidden></div>
+    <div class="screen" id="screen-game-over" data-screen="game-over" role="dialog" aria-modal="true" aria-label="Game over" hidden></div>
+    <div class="screen" id="screen-run-summary" data-screen="run-summary" role="dialog" aria-modal="true" aria-label="Run summary" hidden></div>
+    <div class="settings-panel" id="settings-panel" role="dialog" aria-modal="true" aria-label="Settings" hidden></div>
+  </div>
+
+  <!-- NEW: diagnostics overlay host, rendered into by
+       src/observability/diagnostics-overlay.ts. Hidden until that module is
+       toggled on. -->
+  <div class="diagnostics-overlay" id="diagnostics-overlay" hidden></div>
+
+  <!-- NEW: announcer region, written to by src/ui/a11y/live-region.ts. It ships empty
+       in the initial markup and is visually hidden through the `.visually-hidden`
+       utility in style/_a11y.scss rather than by `display: none`. -->
+  <div class="visually-hidden live-region" id="live-region" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <!--
+    CHANGED: the ten classic script elements that stood here, loading the retired
+    `js` directory in a fixed order - the bind, classList and requestAnimationFrame
+    polyfills, the keyboard input manager, the HTML actuator, grid, tile, the
+    localStorage manager, the game manager and the composition root - were replaced by
+    this single module entry. Dependency resolution moves from script load order to
+    the module graph.
+    Provenance: docs/DECISION_LOG.md.
+  -->
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

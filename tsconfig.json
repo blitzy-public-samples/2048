@@ -1,12 +1,40 @@
+// TypeScript configuration for the browser-context sources: the application
+// under src/ and the DOM-context test sources under tests/ (fixtures, unit
+// suite, seeded snapshot suite).
+//
+// The Node-context files — vite.config.ts, vitest.config.ts,
+// vitest.snapshot.config.ts, playwright.config.ts, and the Playwright specs
+// under tests/e2e/ — are covered by tsconfig.node.json. The two projects
+// partition every TypeScript file in the repository, and `npm run typecheck`
+// runs both in sequence.
+//
+// Supersedes .jshintrc, which is deleted. Three source conventions it
+// encoded are carried forward: two-space indentation, 80-column lines,
+// camelCase identifiers. CONTRIBUTING.md states them normatively. Its
+// `unused: true` is carried forward as the two unused-symbol checks below.
+//
+// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 {
   "compilerOptions": {
+    // Language level. vite.config.ts sets `build.target` to the same level.
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
+
+    // ES module graph, resolved the way the bundler resolves it. An
+    // extensionless relative specifier such as './engine/grid' resolves here
+    // exactly as it does at build time. Every file is a module.
     "module": "ESNext",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
+    "resolveJsonModule": true,
+
+    // Ambient type packages. `vite/client` supplies `import.meta.env` and the
+    // stylesheet and asset module declarations. `three` and `seedrandom` are
+    // typed through their own resolved declaration packages rather than
+    // through this list; neither is named here.
     "types": ["vite/client"],
 
+    // Strictness gate. `npm run typecheck` must report zero diagnostics.
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
@@ -14,14 +42,40 @@
     "noImplicitOverride": true,
     "forceConsistentCasingInFileNames": true,
 
+    // Per-file transpilation contract: each file is emitted in isolation by
+    // esbuild, and type-only syntax is written explicitly rather than elided.
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
-    "resolveJsonModule": true,
     "useDefineForClassFields": true,
+
+    // Declaration files of the installed packages are not re-checked.
     "skipLibCheck": true,
 
+    // Type gate only. Vite performs the transpilation; this project emits
+    // nothing, which is what `tsc -p tsconfig.json` relies on.
     "noEmit": true
   },
-  "include": ["src", "tests"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "coverage",
+    "test-results",
+    "playwright-report",
+    "blitzy",
+
+    // Self-contained HTML deck with inline script. It enters no TypeScript
+    // project and no bundler graph.
+    "blitzy-deck",
+
+    // Superseded vanilla sources.
+    "js",
+
+    // Covered by tsconfig.node.json.
+    "vite.config.ts",
+    "vitest.config.ts",
+    "vitest.snapshot.config.ts",
+    "playwright.config.ts",
+    "tests/e2e"
+  ]
 }
