@@ -191,12 +191,26 @@ hr {
 //   .screen              style/_screens.scss section 3 and style/_reward.scss
 //   .hud                 style/_hud.scss
 //   .board-number-only   `.board-canvas, .board-number-only` further down
+//
+// The last two selectors are the control layer
+// src/input/on-screen-controls.ts generates: it marks a control whose action is
+// inactive in the current input context with `hidden`, `aria-hidden`,
+// `disabled` and `tabindex="-1"`, and hides a group whose every control is
+// inactive the same way. Their shown halves are lower-specificity rather than
+// matching: `@mixin screen-control` of style/_screens.scss declares
+// `display: inline-block` at (0,1,0) through `.screen-button`, and the group
+// takes the unstyled block default, so both lose to the (0,2,0) selectors here
+// and neither can reinstate a hidden control. Without these two lines the
+// author-origin `display` of `.screen-button` outranks the user-agent
+// `[hidden]` rule and an inactive control stays painted.
 .screen[hidden],
 .hud[hidden],
 .settings-panel[hidden],
 .diagnostics-overlay[hidden],
 .board-number-only[hidden],
-.board-a11y[hidden] {
+.board-a11y[hidden],
+.on-screen-controls-group[hidden],
+.on-screen-control[hidden] {
   display: none;
 }
 
@@ -690,6 +704,36 @@ hr {
   display: block;
   text-align: center;
   flex: 0 0 auto;
+}
+
+// The on-screen control region: the `#on-screen-controls` root index.html
+// declares empty, and the two `role="group"` rows and the controls
+// src/input/on-screen-controls.ts generates inside it. That module emits class
+// names and data attributes only, so this block is the whole of the layer's
+// layout; the control vocabulary itself is `.screen-button` of
+// style/_screens.scss, and the focus ring is the `.container button` rule of
+// style/_a11y.scss.
+//
+// Both lengths are tokens: $grid-spacing separates the two rows and clears the
+// region from `.game-container`, and $control-gap separates two adjacent
+// controls, which is the same token `.above-game` and the two `.game-message`
+// controls use. The gap is load-bearing beyond rhythm: the focus ring is an
+// outline plus a spread shadow drawn outside the control's box, and a row of
+// flush-adjacent controls would let each neighbour paint over the ring of the
+// control before it.
+.on-screen-controls {
+  display: flex;
+  flex-direction: column;
+  gap: $grid-spacing;
+  margin-block-start: $grid-spacing;
+}
+
+.on-screen-controls-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: $control-gap;
 }
 
 .game-explanation {

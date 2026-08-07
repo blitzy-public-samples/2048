@@ -1,11 +1,12 @@
 // The cell lattice: availability queries, bounds checking and
 // serialisation.
 //
-// Ported from js/grid.js, which is deleted. Every method below is a
-// one-for-one port:
+// Ported from js/grid.js, which is deleted. Every construct below is a
+// one-for-one port, and the map covers all 118 lines of that source:
 //   js/grid.js L1-L4     constructor, empty-or-restore
 //   js/grid.js L7-L19    empty()
 //   js/grid.js L21-L34   fromState()
+//   js/grid.js L37-L43   randomAvailableCell()
 //   js/grid.js L45-L55   availableCells()
 //   js/grid.js L58-L64   eachCell()
 //   js/grid.js L67-L69   cellsAvailable()
@@ -17,16 +18,21 @@
 //   js/grid.js L97-L100  withinBounds()
 //   js/grid.js L102-L117 serialize()
 //
-// `randomAvailableCell` at js/grid.js L37-L43 has no counterpart here.
-// It held one of the vanilla sources' two `Math.random()` calls (L41);
-// the draw moves to the `spawn-position` substream of
-// src/rng/rng-streams.ts, which selects from the list `availableCells()`
-// returns. The list's order is unchanged, so a given draw selects the
-// same cell it selected there.
+// This module adds no member that source did not carry.
+//
+// Two of those lines changed rather than moved:
+//   js/grid.js L29  constructed `Tile` through the ambient global the
+//                   script tags left in scope. It is the imported
+//                   binding below.
+//   js/grid.js L41  drew from the global random source. The draw comes
+//                   from the `spawn-position` substream that
+//                   `randomAvailableCell` receives as an argument.
+//                   That line and js/game_manager.js L71 were the
+//                   vanilla sources' only two randomness call sites.
 //
 // Invariants of this module: it names no engine module other than
-// ./tile and the type-only imports below, reads no DOM, performs no I/O,
-// consumes no randomness and reads no clock.
+// ./tile and the type-only imports below, reads no DOM, performs no
+// I/O, owns no source of randomness and reads no clock.
 //
 // Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
@@ -37,6 +43,7 @@ import type {
   SerializedGrid,
   SerializedTile,
 } from './types';
+import type { RngStream } from '../rng/rng-streams';
 
 /**
  * A square board of cells, each holding one tile or nothing.
@@ -47,23 +54,34 @@ import type {
  */
 export class Grid {
   /**
-   * Edge length in cells.
+   * Edge length in cells. Ported from js/grid.js L2.
    *
-   * Fixed for the lifetime of the instance. A board whose size changes
-   * is a new grid: src/engine/engine.ts constructs one at the
-   * reconciled size, which is what js/game_manager.js L40 and L47 did
-   * on every setup.
+   * Every method below reads this member at call time; none captures
+   * it. A grid is constructed at the size its board has been
+   * reconciled to, which is what js/game_manager.js L40 and L47 did on
+   * every setup.
    */
-  readonly size: number;
+  size: number;
 
-  /** The backing store, `cells[x][y]`. Ported from js/grid.js L3. */
+  /**
+   * The backing store, `cells[x][y]`. Ported from js/grid.js L3.
+   *
+   * Written in place from outside the class: js/game_manager.js
+   * L124-L125 assigned `grid.cells[x][y]` directly, and
+   * src/engine/engine.ts assigns it the same way.
+   */
   cells: CellMatrix<Tile>;
 
   /**
+   * Ported from js/grid.js L1-L4, including the two-argument shape: a
+   * grid is built empty or restored from a serialised matrix, which is
+   * how js/game_manager.js L40-L41 and L47 built one. `size` is
+   * assigned first, as L2 did; both builders read it.
+   *
    * @param size Edge length in cells.
    * @param previousState Serialised cell matrix to restore from, read
-   *   as `previousState[x][y]` exactly as js/grid.js L28 read it. Absent
-   *   or `null`, an empty lattice is built.
+   *   as `previousState[x][y]` exactly as js/grid.js L28 read it.
+   *   Absent or `null`, an empty lattice is built.
    */
   constructor(
     size: number,
@@ -76,11 +94,12 @@ export class Grid {
   /**
    * Builds an empty lattice.
    *
-   * Ported from js/grid.js L7-L19.
+   * Ported from js/grid.js L7-L19: `size` columns on the outer array,
+   * x-outer and y-inner, every cell `null`.
    *
    * @returns A fresh matrix of `null`.
    */
-  private empty(): CellMatrix<Tile> {
+  empty(): CellMatrix<Tile> {
     const cells: CellMatrix<Tile> = [];
 
     for (let x = 0; x < this.size; x += 1) {
@@ -99,15 +118,23 @@ export class Grid {
   /**
    * Builds a lattice from a serialised matrix.
    *
-   * Ported from js/grid.js L21-L34. The loop is bounded by this grid's
-   * own size, so a matrix larger than the grid is truncated and one
-   * smaller yields empty cells rather than throwing: L28 read
-   * `state[x][y]` unguarded, and the guard below is the one addition.
+   * Ported from js/grid.js L21-L34, including L29's truthy test on the
+   * entry: a serialised cell is either a truthy object or `null`.
+   * L29 reached `Tile` as an ambient global; the imported binding
+   * replaces that.
+   *
+   * The double loop is bounded by this grid's own size, so a matrix
+   * wider or taller than the grid is truncated and a smaller one
+   * yields empty cells. src/run/run-state.ts validates a persisted
+   * matrix without requiring it to measure `size` by `size` and
+   * records that this restore absorbs the difference; the check on the
+   * column absorbs a missing one, where js/grid.js L28 read
+   * `state[x][y]` unguarded.
    *
    * @param state Serialised matrix, read as `state[x][y]`.
    * @returns A fresh matrix of tiles and `null`.
    */
-  private fromState(state: CellMatrix<SerializedTile>): CellMatrix<Tile> {
+  fromState(state: CellMatrix<SerializedTile>): CellMatrix<Tile> {
     const cells: CellMatrix<Tile> = [];
 
     for (let x = 0; x < this.size; x += 1) {
@@ -115,16 +142,12 @@ export class Grid {
 
       cells[x] = row;
 
-      const column = state[x];
+      const column: (SerializedTile | null)[] | undefined = state[x];
 
       for (let y = 0; y < this.size; y += 1) {
         const tile = column === undefined ? null : column[y];
 
-        row.push(
-          tile === null || tile === undefined
-            ? null
-            : new Tile(tile.position, tile.value),
-        );
+        row.push(tile ? new Tile(tile.position, tile.value) : null);
       }
     }
 
@@ -132,11 +155,41 @@ export class Grid {
   }
 
   /**
+   * Draws one empty cell.
+   *
+   * Ported from js/grid.js L37-L43. L41 indexed the list
+   * `availableCells()` returns with a draw from the global random
+   * source; the draw is taken from the injected substream instead, and
+   * `RngStream.pick` reduces it by flooring the draw scaled by the
+   * list length, which is the arithmetic L41 applied, over a list whose
+   * order is unchanged.
+   *
+   * The full-board boundary is L40's: `if (cells.length)` carried no
+   * else branch, so the vanilla function fell through and returned
+   * `undefined`. That is preserved, and `RngStream.pick` consumes no
+   * draw for an empty list. js/game_manager.js L70 guarded the call
+   * with `cellsAvailable()`, and src/engine/engine.ts guards its spawn
+   * the same way.
+   *
+   * @param stream The `spawn-position` substream to draw from.
+   * @returns The drawn cell, or `undefined` when no cell is empty.
+   */
+  randomAvailableCell(stream: RngStream): Position | undefined {
+    const cells = this.availableCells();
+
+    if (cells.length) {
+      return stream.pick(cells);
+    }
+
+    return undefined;
+  }
+
+  /**
    * Collects every empty cell.
    *
-   * Ported from js/grid.js L45-L55. The collection order is
-   * `eachCell`'s x-outer, y-inner order and is part of the seeded-spawn
-   * contract: the `spawn-position` substream indexes this list.
+   * Ported from js/grid.js L45-L55. The order is `eachCell`'s, x-outer
+   * and y-inner, and it is the order `randomAvailableCell` draws
+   * against: the same draw selects a different cell if it changes.
    *
    * @returns A fresh array of cell coordinates.
    */
@@ -155,7 +208,9 @@ export class Grid {
   /**
    * Calls `callback` once per cell, x-outer and y-inner.
    *
-   * Ported from js/grid.js L58-L64.
+   * Ported from js/grid.js L58-L64, including the argument order:
+   * js/game_manager.js L114-L119 read the coordinates and the cell's
+   * contents in that order.
    *
    * @param callback Receives the cell's coordinates and its contents.
    */
@@ -175,15 +230,17 @@ export class Grid {
    * @returns `true` when at least one cell is empty.
    */
   cellsAvailable(): boolean {
-    return this.availableCells().length > 0;
+    return !!this.availableCells().length;
   }
 
   /**
    * Reports whether a cell is empty.
    *
    * Ported from js/grid.js L72-L74. A cell outside the lattice reads as
-   * available, because `cellContent` returns `null` for it; the
-   * farthest-position walk relies on that, guarding bounds itself.
+   * available: `cellContent` returns `null` for it. The
+   * farthest-position walk of src/engine/move-resolver.ts pairs this
+   * call with `withinBounds` and guards the bounds itself, exactly as
+   * js/game_manager.js L229-L230 did.
    *
    * @param cell Cell to test.
    * @returns `true` when the cell holds no tile.
@@ -201,20 +258,24 @@ export class Grid {
    * @returns `true` when the cell holds a tile.
    */
   cellOccupied(cell: Position): boolean {
-    return this.cellContent(cell) !== null;
+    return !!this.cellContent(cell);
   }
 
   /**
    * Reads a cell's contents.
    *
-   * Ported from js/grid.js L80-L86, including the bounds safety valve
-   * that returns `null` outside the lattice. That valve is what
-   * terminates the farthest-position walk, and it is preserved
-   * unchanged.
+   * Ported from js/grid.js L80-L86, including the bounds valve at L84:
+   * a cell outside the lattice reads as `null` rather than raising.
+   * Two callers depend on that `null`. The farthest-position walk of
+   * src/engine/move-resolver.ts, ported from js/game_manager.js
+   * L226-L235, steps one cell beyond the last empty cell and
+   * terminates on it, and the neighbour probe of
+   * src/engine/terminal-state.ts, ported from L257, reads cells
+   * deliberately off the lattice along every edge.
    *
    * @param cell Cell to read.
-   * @returns The tile, or `null` when the cell is empty or outside the
-   *   lattice.
+   * @returns The tile, or `null` when the cell is empty or lies
+   *   outside the lattice.
    */
   cellContent(cell: Position): Tile | null {
     if (this.withinBounds(cell)) {
@@ -227,7 +288,10 @@ export class Grid {
   /**
    * Writes a tile into the cell its own coordinates name.
    *
-   * Ported from js/grid.js L89-L91.
+   * Ported from js/grid.js L89-L91, which indexed by `tile.x` and
+   * `tile.y` — the coordinates js/tile.js L2-L3 flattened off the
+   * position the tile was constructed with — and not through a nested
+   * position member.
    *
    * @param tile Tile to insert.
    */
@@ -238,7 +302,8 @@ export class Grid {
   /**
    * Clears the cell a tile's own coordinates name.
    *
-   * Ported from js/grid.js L93-L95.
+   * Ported from js/grid.js L93-L95, indexing by `tile.x` and `tile.y`
+   * as L94 did and writing `null`.
    *
    * @param tile Tile whose cell is cleared.
    */
@@ -249,7 +314,7 @@ export class Grid {
   /**
    * Reports whether a position lies inside the lattice.
    *
-   * Ported from js/grid.js L97-L100.
+   * Ported from js/grid.js L97-L100, reading `this.size` at call time.
    *
    * @param position Position to test.
    * @returns `true` when both coordinates are within `[0, size)`.
@@ -266,12 +331,13 @@ export class Grid {
   /**
    * Projects the lattice to its persisted form.
    *
-   * Ported from js/grid.js L102-L117: an empty cell is a `null` entry
-   * and is never omitted or compacted, so the matrix stays square and
-   * `fromState` can read it back.
+   * Ported from js/grid.js L102-L117, including L109's `null` for an
+   * empty cell: an entry is never omitted or compacted, so the matrix
+   * stays square and `fromState` reads it back. This is the middle
+   * stage of the three-stage snapshot js/game_manager.js L102-L110
+   * wrapped around it, and src/run/run-state.ts carries it verbatim.
    *
-   * @returns A fresh plain object; mutating it does not affect the
-   *   grid.
+   * @returns A fresh plain object; mutating it does not reach the grid.
    */
   serialize(): SerializedGrid {
     const cellState: CellMatrix<SerializedTile> = [];
