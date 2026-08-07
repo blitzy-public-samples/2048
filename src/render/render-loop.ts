@@ -75,8 +75,13 @@ export interface FrameContext {
  * A callback that throws is caught and reported, and the remaining callbacks of
  * the frame still run. Whether a further frame follows is then decided as usual,
  * so a loop with `autoStopWhenIdle` still parks once no callback has declared
- * outstanding work. A reporter that throws while reporting a contained throw is
- * not itself contained.
+ * outstanding work.
+ *
+ * THE REPORTER IS CONTAINED TOO. `createRenderLoop` wraps the sink it is given
+ * in `createGuardedRenderReporter` once, at construction, so a sink that throws
+ * — while reporting a contained callback throw, from a scheduler call, from a
+ * lifecycle hook or from a park — cannot be turned into a loop failure either.
+ * Nothing a callback or a sink throws escapes this loop.
  */
 export type FrameCallback = (context: FrameContext) => boolean | void;
 

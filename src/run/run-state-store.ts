@@ -12,6 +12,9 @@
  *   no guard, so a corrupted value threw during startup. `load()` replaces
  *   that read and returns a result for every input.
  *
+ * docs/TRACEABILITY_MATRIX.md in the order below, TR-RUNSTORE-01 through
+ * TR-RUNSTORE-06
+ *
  *   It called `setItem` with no handler, so a failed write — an exhausted
  *   quota included — left the commit path as an exception. `save()` returns
  *   `false`.
@@ -30,6 +33,13 @@
  *   `bestScore` and `gameState` are neither read, written nor removed here.
  *   `RUN_STATE_KEY` from src/storage/storage-keys.ts is the only key this
  *   module names, and that module is where every key is declared.
+ *
+ * Decisions behind this file: DL-RUNSTORE-01, the board-size
+ * reconciliation policy and its precedence order; DL-RUNSTORE-02, the
+ * matrix index as the authoritative tile position; DL-RUNSTORE-03, the
+ * structural persistence port; DL-RUNSTORE-04, the migration implemented
+ * as a re-stamp; and DL-RUNSTORE-05, the board size an active relic
+ * docs/DECISION_LOG.md, together with DL-RUN-03, the persisted RNG cursor.
  */
 
 import { isSupportedBoardSize } from '../config/default-config';
@@ -151,6 +161,8 @@ function isFiniteNumber(value: unknown): value is number {
  */
 function isBoardEdgeLength(value: unknown): value is number {
   return isSupportedBoardSize(value);
+
+
 }
 
 function diagnose(value: unknown): string[] {
@@ -183,6 +195,8 @@ function measureJsonBytes(value: unknown): number {
  * The four members of src/storage/local-storage-manager.ts this module calls,
  * as a structural port. `LocalStorageManager` satisfies it structurally, so a
  * unit test drives the store with a four-method object and no mocking library.
+ *
+ * mocking library. Decision DL-RUNSTORE-03.
  *
  * `readRaw` powers `exists()` and separates an absent key from a stored value
  * that is not valid JSON, which `readJson` alone reports identically as `null`.
@@ -319,6 +333,8 @@ export interface BoardSizeReconciliationInput {
    * Edge length the active board-mutating relics imply, which takes precedence
    * over `configuredSize`. Ignored when it is not a positive safe integer.
    * Supplied by the caller; this module names no relic-module type.
+   *
+   * relic-module type. Decision DL-RUNSTORE-05.
    */
   readonly relicBoardSize?: number;
 }
@@ -375,6 +391,7 @@ function readTile(cell: unknown): ReadTile | null {
 
   return { value, recordedX, recordedY };
 }
+
 
 function emptyMatrix(size: number): CellMatrix<SerializedTile> {
   const cells: CellMatrix<SerializedTile> = [];
@@ -674,6 +691,8 @@ function readStoredVersion(value: unknown): number | undefined {
  * derived from the value it accompanies. A version the history does not list is
  * refused here as it is by `classifyRunStateVersion()`.
  *
+ * `load()` is keyed on the verdict alone. Decision DL-RUNSTORE-04.
+ *
  * The upgrade is a re-stamp: the envelope is assembled at the current shape and
  * given the current version, then validated by the caller. A future schema
  * version whose members differ adds its own branch to this function; `load()`
@@ -796,10 +815,15 @@ export type RunStateLoadOutcome =
   | 'loaded'
   | 'migrated'
   /**
-   * A stored payload was returned with its board size reconciled, whether
-   * or not it was also migrated. Takes precedence over `'migrated'` and
-   * `'loaded'`; `reconciliation.action` distinguishes the three cases it
-   * covers.
+   * A stored payload was returned after a board-size precedence decision
+   * resolved, whether or not it was also migrated. Takes precedence over
+   * `'migrated'` and `'loaded'`.
+   *
+   * Selected by `reconciliation.reportable`, which is the question this
+   * outcome answers, and NOT by `reconciliation.action`, which describes what
+   * was done to the stored matrix: a decision can resolve without the matrix
+   * needing a single change, and that load is `'reconciled'` too.
+   * `reconciliation.action` distinguishes the cases within it.
    */
   | 'reconciled'
   /**
@@ -1030,6 +1054,12 @@ export class RunStateStore {
    * Reports whether a non-empty value is stored under `RUN_STATE_KEY`. Reads
    * the raw string and parses nothing, and never throws. A stored empty string
    * reads as absent, matching the port's `readJson`.
+   *
+   * A read that threw is reported on the same corruption channel `refuse()`
+   * uses, and carries the same correlation identifier: a report reaching a
+   * sink from this store is attributable to the run whatever path raised it,
+   * so a presence check that failed sits beside that run's other records
+   * rather than in an unattributed one of its own.
    */
   exists(): boolean {
     try {
@@ -1038,6 +1068,7 @@ export class RunStateStore {
       return raw !== null && raw.length > 0;
     } catch (error) {
       const report: MutableCorruptionReport = {
+        correlationId: this.reportedCorrelationId(),
         key: RUN_STATE_KEY,
         verdict: 'malformed',
         problems: [PRESENCE_CHECK_FAILED],
@@ -1127,13 +1158,20 @@ export class RunStateStore {
       this.reportMigration(readStoredVersion(observed));
     }
 
-    if (reconciliation.action !== 'none') {
+    // BRANCHED ON `reportable`, NOT ON `action`. `action` describes what was
+    // done to the stored matrix — nothing, rebuilt, repaired — while
+    // `reportable` is the question this load answers: did a real precedence
+    // decision resolve? A saved size of 4 against a configured size of 5 with a
+    // relic-implied 4 leaves `action` at `'none'`, and reporting on `action`
+    // labelled that load a plain `'loaded'` and told the sink nothing, so the
+    // one decision a reader needs to see was the one decision that was hidden.
+    if (reconciliation.reportable) {
       this.reportReconciliation(reconciliation);
     }
 
     let outcome: RunStateLoadOutcome = 'loaded';
 
-    if (reconciliation.action !== 'none') {
+    if (reconciliation.reportable) {
       outcome = 'reconciled';
     } else if (migrated) {
       outcome = 'migrated';
@@ -1200,6 +1238,13 @@ export class RunStateStore {
     });
   }
 
+  /**
+   * Reports a board size that was reconciled before the grid was rebuilt,
+   * with all three sizes and the dropped count, whether or not any tile
+   * was lost.
+   *
+   * @param reconciliation What the reconciliation weighed and did.
+   */
   private reportReconciliation(
     reconciliation: BoardSizeReconciliation
   ): void {
@@ -1232,6 +1277,13 @@ export class RunStateStore {
     });
   }
 
+  /**
+   * Reports a removal that did not reach the store. Nothing was read and
+   * nothing was serialised, so only the injected correlation identifier
+   * identifies it.
+   *
+   * @param error The caught value, or the constant naming the refusal.
+   */
   private reportRemovalFailure(error: unknown): void {
     const report: RunStateWriteFailureReport = {
       correlationId: this.correlationId,

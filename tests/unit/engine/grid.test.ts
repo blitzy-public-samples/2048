@@ -17,6 +17,9 @@
 // This suite reads no DOM and no storage, installs no mock and replaces no
 // global; the one test double below is hand-written. It runs in the
 // `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
+//
+// Decisions this suite is the evidence for: DL-GRID-01 and DL-GRID-02 in
+// docs/DECISION_LOG.md. Traceability rows: TR-GRID-01 through TR-GRID-14
 
 import { describe, expect, it } from 'vitest';
 
@@ -158,6 +161,12 @@ function createRecordedStream(selectedIndex: number): RecordedStream {
 
       return items[selectedIndex];
     },
+
+    // The double stands in for one substream, and this suite never opens a
+    // transaction over it, so the fork is the double itself.
+    fork(): RngStream {
+      return stream;
+    },
   };
 
   return { stream, picked };
@@ -290,6 +299,7 @@ describe('Grid.fromState (js/grid.js L21-L34)', () => {
     expect(grid.cells[0][0]).toBe(rehydrated);
     expect(rehydrated).toBeInstanceOf(Tile);
   });
+
 
   // A persisted matrix is only a matrix as far as the type system is concerned:
   // it comes back out of JSON, where nothing guarantees it measures the

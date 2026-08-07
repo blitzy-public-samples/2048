@@ -1,0 +1,243 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`a fixed seed under configured rules > reproduces its recorded board at board size 2 1`] = `
+"size 2  score 48  over true  won false  keepPlaying false
+    16     2
+     2     4
+rngCursor
+  spawn-value     11
+  spawn-position  11
+  relic-draw      0
+  rarity-weight   0
+turns resolved  9 of 16"
+`;
+
+exports[`a fixed seed under configured rules > reproduces its recorded board at board size 3 1`] = `
+"size 3  score 68  over false  won false  keepPlaying false
+     4     .     .
+    16     8     4
+     2     4     2
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fixed seed under configured rules > reproduces its recorded board at board size 5 1`] = `
+"size 5  score 64  over false  won false  keepPlaying false
+     .     .     .     .     .
+     2     .     .     .     .
+     4     .     .     .     .
+     2     8     .     .     4
+     2    16     2     .     .
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fixed seed under configured rules > reproduces its recorded board at board size 6 1`] = `
+"size 6  score 68  over false  won false  keepPlaying false
+     .     .     .     .     .     .
+     .     .     .     .     .     .
+     2     .     .     .     .     4
+     .     .     .     .     .     .
+     8     .     .     .     .     .
+     2     4    16     4     .     .
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fixed seed under configured rules > reproduces its recorded board at board size 8 1`] = `
+"size 8  score 68  over false  won false  keepPlaying false
+     .     .     .     .     .     .     .     .
+     .     .     .     .     .     .     .     4
+     .     .     .     .     .     .     .     .
+     2     .     .     .     .     .     .     .
+     .     .     .     .     .     .     .     .
+     4     .     .     .     .     .     .     .
+     8     .     .     .     .     .     .     .
+     4    16     2     .     .     .     .     .
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fixed seed under configured rules > reproduces its recorded board under a lowered win value 1`] = `
+"size 4  score 64  over false  won true  keepPlaying false
+     .     .     .     .
+     .     .     .     4
+     .     .     4    16
+     4     8     2     4
+rngCursor
+  spawn-value     17
+  spawn-position  17
+  relic-draw      0
+  rarity-weight   0
+turns resolved  15 of 16"
+`;
+
+exports[`a fixed seed under configured rules > reproduces its recorded board under a reversed spawn distribution 1`] = `
+"size 4  score 64  over false  won false  keepPlaying false
+     4     .     4     .
+     8     2     .     .
+     8    16     8     .
+     4     8     2     4
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fixed seed under configured rules > reproduces its recorded board with four starting tiles 1`] = `
+"size 4  score 52  over false  won false  keepPlaying false
+     .     .     .     2
+     2     4     .     .
+     8     2     8     .
+     8     2     4     2
+rngCursor
+  spawn-value     20
+  spawn-position  20
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fresh board played from a fixed seed > reproduces its recorded board for seed "daily 2048" 1`] = `
+"size 4  score 52  over false  won false  keepPlaying false
+     2     2     .     .
+     4     .     .     .
+     8     .     .     .
+     8     2     8     2
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fresh board played from a fixed seed > reproduces its recorded board for seed "snapshot-seed-alpha" 1`] = `
+"size 4  score 68  over false  won false  keepPlaying false
+     .     .     .     2
+     .     .     .     .
+     4     4     .     .
+     2    16     4     8
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fresh board played from a fixed seed > reproduces its recorded board for seed "snapshot-seed-bravo" 1`] = `
+"size 4  score 64  over false  won false  keepPlaying false
+     .     .     .     .
+     2     8     .     .
+     4     2     2     .
+     2    16     4     .
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fresh board played from a fixed seed > reproduces its recorded board for seed "snapshot-seed-charlie" 1`] = `
+"size 4  score 64  over false  won false  keepPlaying false
+     .     .     .     2
+     2     4     .     .
+    16     .     .     .
+     4     2     8     4
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a fresh board played from a fixed seed > reproduces its recorded board for seed "x" 1`] = `
+"size 4  score 68  over false  won false  keepPlaying false
+     8     .     .     2
+     4     .     .     .
+     2     8     .     .
+     2    16     2     .
+rngCursor
+  spawn-value     18
+  spawn-position  18
+  relic-draw      0
+  rarity-weight   0
+turns resolved  16 of 16"
+`;
+
+exports[`a restored board played from a fixed seed > reproduces its recorded board from the blocked fixture 1`] = `
+"size 4  score 88  over false  won false  keepPlaying false
+     2     .     .     .
+     4     .     .     2
+     4     8     2     .
+     2    32     4     .
+rngCursor
+  spawn-value     15
+  spawn-position  15
+  relic-draw      0
+  rarity-weight   0
+turns resolved  15 of 16"
+`;
+
+exports[`a restored board played from a fixed seed > reproduces its recorded board from the merge-pair fixture 1`] = `
+"size 4  score 64  over false  won false  keepPlaying false
+     .     .     .     .
+     2     .     .     .
+     2    16     .     2
+     4     8     2     .
+rngCursor
+  spawn-value     15
+  spawn-position  15
+  relic-draw      0
+  rarity-weight   0
+turns resolved  15 of 16"
+`;
+
+exports[`a restored board played from a fixed seed > reproduces its recorded board from the near-loss fixture 1`] = `
+"size 4  score 60  over true  won false  keepPlaying false
+     2    32    16     4
+     8     2    32     8
+    32     8     4    32
+     2     4     2    16
+rngCursor
+  spawn-value     4
+  spawn-position  4
+  relic-draw      0
+  rarity-weight   0
+turns resolved  4 of 16"
+`;
+
+exports[`a restored board played from a fixed seed > reproduces its recorded board from the near-win fixture 1`] = `
+"size 4  score 2048  over false  won true  keepPlaying false
+  2048     .     .     .
+     .     .     .     .
+     .     .     .     .
+     .     .     2     .
+rngCursor
+  spawn-value     1
+  spawn-position  1
+  relic-draw      0
+  rarity-weight   0
+turns resolved  1 of 3"
+`;

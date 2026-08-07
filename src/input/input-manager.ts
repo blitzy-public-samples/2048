@@ -9,6 +9,20 @@
 // separate `R` test routed through `restart`, the swipe path, `restart()` and
 // `keepPlaying()`.
 //
+// traceability row of docs/TRACEABILITY_MATRIX.md:
+//   TR-INPUT-01  L1-L2      the event registry, held below as `listeners`
+//   TR-INPUT-02  L15        the constructor-time `listen()` call
+//   TR-INPUT-03  L18-L23    `on()`, appending to the array for its event name
+//   TR-INPUT-04  L25-L32    `emit()`, walking that array in registration order
+//   TR-INPUT-05  L34, L53   the single `keydown` listener, on the document
+//   TR-INPUT-06  L54-L55    the modifier guard
+//   TR-INPUT-07  L56        the recognised-key test
+//   TR-INPUT-08  L60-L61    `preventDefault()` before the move is published
+//   TR-INPUT-09  L66-L67    the separate `R` test, routed through `restart`
+//   TR-INPUT-10  L76-L127   the swipe path, by way of src/input/touch-input.ts
+//   TR-INPUT-11  L130-L133  `restart()`
+//   TR-INPUT-12  L135-L138  `keepPlaying()`
+//
 // Moved out of this module: the numeric-code table and the numeric `82` test
 // are bindings in src/input/keymap.ts, matched against `event.key` and
 // `event.code`; the three gesture handlers are src/input/touch-input.ts; and
@@ -24,6 +38,10 @@
 // `classifyKeyModality` derives, whether a modifier was held and whether any
 // binding claims the key — never the key or the code itself.
 //
+//
+// Decisions behind this file: DL-INPUT-01, the `event.key` and `event.code`
+// DL-INPUT-02, the keymap, the gesture path and the control bindings living
+// in three sibling modules; and DL-INPUT-03, the appended listener list
 
 import type {
   Direction,
@@ -38,6 +56,7 @@ import type {
 } from './keymap';
 import {
   DEFAULT_KEY_BINDINGS,
+  MOVE_ACTIONS,
   NOOP_REPORTER,
   createSafeInputReporter,
   directionForAction,
@@ -136,7 +155,12 @@ export interface InputManagerOptions {
    * to that context until `setContext()` replaces it; a function is consulted
    * once per keydown. Omitted, the context is read from the document:
    * `'textEntry'` while a text field holds focus, `'overlay'` while a dialog
-   * in `.screen-layer` is shown, and `'game'` otherwise.
+   * in `.screen-layer` is shown or the terminal overlay of `.game-container`
+   * carries `game-won` or `game-over`, and `'game'` otherwise.
+   *
+   * The same value reaches the gesture path and, where a caller passes this
+   * resolver to `mountOnScreenControls` as well, the generated controls — which
+   * is what makes ONE effective context govern every modality.
    */
   readonly context?: InputContext | (() => InputContext);
   readonly pointerFamily?: PointerEventFamily;
@@ -206,6 +230,20 @@ const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
 
 const SHOWN_DIALOG_SELECTOR = '.screen-layer [aria-modal="true"]:not([hidden])';
 
+/**
+ * The terminal overlay of index.html, in its shown state.
+ *
+ * `.game-message` is NOT inside `.screen-layer` — js/html_actuator.js
+ * L124-L127 showed it by adding `game-won` or `game-over`, and index.html keeps
+ * it inside `.game-container` where it has always been. Matching the dialog
+ * selector alone therefore left the context `'game'` while the win overlay held
+ * the screen, and `.keep-playing-button`, whose only context is `'overlay'`,
+ * was unreachable by key and by pointer alike. Both classes are matched because
+ * the stylesheet shows the overlay for either.
+ */
+const SHOWN_TERMINAL_OVERLAY_SELECTOR =
+  '.game-message.game-won, .game-message.game-over';
+
 function isTextEntry(element: Element): boolean {
   const name = element.tagName;
 
@@ -222,14 +260,31 @@ function isTextEntry(element: Element): boolean {
   return element.getAttribute('contenteditable') === 'true';
 }
 
-function resolveDocumentContext(owner: Document): InputContext {
+/**
+ * Resolves the input context from the document alone.
+ *
+ * THE ONE IMPLEMENTATION of the rule. Exported so a router composing further
+ * state on top of it — a settings dialog it owns, say — extends this decision
+ * rather than restating it, which is what keeps one effective context governing
+ * the keyboard, the gesture path and the generated controls alike.
+ *
+ * @param owner Document to read.
+ * @returns `'textEntry'` while a text field holds focus, `'overlay'` while a
+ *   modal dialog in `.screen-layer` or the terminal overlay is shown, and
+ *   `'game'` otherwise.
+ */
+export function resolveDocumentContext(owner: Document): InputContext {
   const active = owner.activeElement;
 
   if (active !== null && isTextEntry(active)) {
     return 'textEntry';
   }
 
-  return owner.querySelector(SHOWN_DIALOG_SELECTOR) === null
+  if (owner.querySelector(SHOWN_DIALOG_SELECTOR) !== null) {
+    return 'overlay';
+  }
+
+  return owner.querySelector(SHOWN_TERMINAL_OVERLAY_SELECTOR) === null
     ? 'game'
     : 'overlay';
 }
@@ -245,19 +300,13 @@ function readAmbientDocument(): Document | null {
 /** The payload index published when no slot names one. */
 const DEFAULT_PAYLOAD_INDEX = 0;
 
-/**
- * Projects a caught value onto a report field.
- *
- * @param error Value that was thrown.
- * @returns Its message where it is an `Error`, else its string form.
- */
-function describeListenerError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
-}
+// A local reduction of a caught value to its message text used to live here,
+// and `reportListenerError` used it to flatten a listener's throw onto a
+// report field. It is gone: every caught value now leaves this module through
+// `InputReporter.failure` unconverted, and the ONE reduction the input layer
+// performs — for a sink that implements no `failure` member — is
+// `describeThrownForFields` in src/input/keymap.ts, which is where
+// `createSafeInputReporter` applies it.
 
 function describePointerFamily(
   family: PointerEventFamily,
@@ -269,6 +318,7 @@ function describePointerFamily(
     touchend: family.touchend,
   };
 }
+
 
 const NOOP_SPAN: InputSpan = Object.freeze({
   end(): void {
@@ -452,6 +502,21 @@ export class InputManager implements InputEmitter {
   /**
    * Reports one callback that threw.
    *
+   * The count is raised first and separately, then the throw is delivered
+   * through `InputReporter.failure`, which takes the caught value UNCONVERTED:
+   * the name, the message, the stack and the cause chain of an `Error` all
+   * survive to the sink, as does the structure of a non-`Error` — a plain
+   * object, an array, `null` or `undefined` — that some code throws instead.
+   * This previously went through `log` with the value flattened to its message
+   * text, which discarded all of that before any sink could see it.
+   *
+   * `failure` is always present here, because `createSafeInputReporter` in
+   * src/input/keymap.ts fills it in: for a sink that implements it the value is
+   * passed through, and for a sink that does not the wrapper falls back to
+   * `log` with `describeThrownForFields`, which that module documents as the
+   * input layer's one and only such reduction. The choice therefore belongs to
+   * the wrapper, and this method never converts a caught value itself.
+   *
    * Contained itself, so a sink that throws while reporting cannot do what the
    * containment above exists to prevent.
    *
@@ -466,14 +531,11 @@ export class InputManager implements InputEmitter {
   ): void {
     try {
       this.reporter.count(LISTENER_ERROR_METRIC, { event, listener: index });
-      this.reporter.log(
+      this.reporter.failure?.(
         'error',
         'An input listener threw; the remaining listeners still ran.',
-        {
-          event,
-          listener: index,
-          error: describeListenerError(error),
-        },
+        error,
+        { event, listener: index },
       );
     } catch {
       // A throwing sink is contained here for the same reason the callback
@@ -506,6 +568,7 @@ export class InputManager implements InputEmitter {
    * The four movement actions all publish `'move'`, carrying their own
    * direction, which is what the shared numeric values of the table at
    * js/keyboard_input_manager.js L37-L50 expressed.
+
    */
   readonly publishAction = (
     action: InputAction,
@@ -625,7 +688,14 @@ export class InputManager implements InputEmitter {
       ownerDocument: owner ?? undefined,
       reporter: this.reporter,
       family: this.pointerFamily,
-      isEnabled: (): boolean => this.listening && !this.suspended,
+      // The SAME effective context every other modality reads, not merely the
+      // listening and suspension flags. A swipe publishes `'move'`, and
+      // movement is only meaningful where a movement action is bound in the
+      // context in force; without this a swipe moved the board while a modal
+      // dialog held the screen and while the terminal overlay was shown, which
+      // no keypress and no on-screen control could do.
+      isEnabled: (): boolean =>
+        this.listening && !this.suspended && this.movementResolves(),
     });
 
     this.reporter.count(LISTEN_METRIC);
@@ -781,6 +851,25 @@ export class InputManager implements InputEmitter {
     this.publishAction(resolved.action, event, resolved.payloadIndex);
   };
 
+  /**
+   * Counts a keydown that resolved to no action, separating a key a binding
+   * does claim but a held modifier suppressed, which is L54-L55's guard,
+   * from a key no binding claims, which is L56's test.
+   *
+   * NO KEYSTROKE IS REPORTED. `event.key` and `event.code` are read to
+   * classify the keydown and are not carried into a field: in the
+   * `'textEntry'` context they are characters a player typed into an
+   * input, a search box or a password field, and this handler is bound to
+   * the document, so it sees every one of them. The report carries the
+   * context, the bounded key family, whether a modifier was held and
+   * whether a binding claims the key — four values drawn from closed sets.
+   * In the `'textEntry'` context even the family is withheld, because a
+   * family is a character class and a character class about a password is
+   * still something about a password.
+   *
+   * @param event Event that resolved to nothing.
+   * @param context Context it was resolved in.
+   */
   private reportUnresolved(
     event: KeyboardEvent,
     context: InputContext,
@@ -837,6 +926,22 @@ export class InputManager implements InputEmitter {
     return classifyKeyModality(
       asEventString(event.key).toLowerCase(),
       asEventString(event.code),
+    );
+  }
+
+  /**
+   * Whether a movement action is bound in the context in force.
+   *
+   * Read from the keymap rather than testing the context against `'game'`, so a
+   * remap that makes movement available elsewhere reaches the gesture path too.
+   *
+   * @returns `true` when at least one of the four movement actions is active.
+   */
+  private movementResolves(): boolean {
+    const context = this.readContext();
+
+    return MOVE_ACTIONS.some((action) =>
+      this.keymap[action].contexts.includes(context),
     );
   }
 

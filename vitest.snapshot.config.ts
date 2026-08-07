@@ -19,6 +19,8 @@
 // the run under CI. Re-recording is the separate opt-in `vitest run --config
 // vitest.snapshot.config.ts -u`.
 //
+// Decision DL-TEST-04.
+//
 // No option below installs, replaces or unstubs a global, and none installs a
 // fake clock. `silent` is `false`, so a log record a spec asserts on reaches
 // the reporter.
@@ -27,6 +29,10 @@
 // sources: `clearGameState()` removed the board snapshot and no vanilla member
 // removed the best score; the writability probe ran once at construction; and
 // `setup()` read the snapshot once.
+//
+// Decisions behind this file: DL-TEST-04, the snapshot write mode left to
+// DL-TEST-05, the snapshot gate kept in its own configuration and its own
+// construct: its constructs are target-only rows TR-TEST-04 and TR-TEST-05
 
 import { defineConfig } from 'vitest/config';
 

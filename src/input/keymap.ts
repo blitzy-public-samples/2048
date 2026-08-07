@@ -111,10 +111,16 @@ export const MOVE_ACTION_DIRECTIONS: Readonly<Record<MoveAction, Direction>> =
     moveLeft: DIRECTION_LEFT,
   });
 
+/** The four movement actions, in the order the direction encoding numbers them. */
+export const MOVE_ACTIONS: readonly MoveAction[] = Object.freeze([
+  'moveUp',
+  'moveRight',
+  'moveDown',
+  'moveLeft',
+] as const satisfies readonly MoveAction[]);
+
 /** Lookup set backing `isMoveAction`. */
-const MOVE_ACTION_SET: ReadonlySet<string> = new Set(
-  Object.keys(MOVE_ACTION_DIRECTIONS)
-);
+const MOVE_ACTION_SET: ReadonlySet<string> = new Set<string>(MOVE_ACTIONS);
 
 /**
  * Narrows `action` to one of the four movement actions.
@@ -744,10 +750,15 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
+  // `C` for continue. js/keyboard_input_manager.js bound no key to it at all —
+  // `.keep-playing-button` at index.html L51 was the only way to reach it — so
+  // this is the key the action gains, and it is remappable like every other.
+  // Nothing else is bound to C in any context, and `restart`'s `r` is bound in
+  // `'game'` alone, so the terminal overlay carries no conflict.
   keepPlaying: {
     action: 'keepPlaying',
-    keys: [],
-    codes: [],
+    keys: ['c'],
+    codes: ['KeyC'],
     contexts: ['overlay'],
     preventDefault: true,
     modifierSuppressed: true,

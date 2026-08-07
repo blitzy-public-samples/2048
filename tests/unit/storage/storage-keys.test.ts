@@ -7,6 +7,9 @@
 // no `window`, no `document` and no `localStorage`, declares no mock and no
 // spy, and holds no state between tests. It passes in the `unit:dom` project
 // vitest.config.ts collects it into and under a DOM-free environment alike.
+//
+// Decisions this suite is the evidence for: DL-STORE-01 in
+// docs/DECISION_LOG.md. Traceability rows: TR-STORE-01 of
 
 import { describe, expect, it } from 'vitest';
 
@@ -327,7 +330,7 @@ describe('namespace and key minting', () => {
 
   it(
     'namespacedKey() throws a TypeError for an empty name, a name with ' +
-      'whitespace and a name holding the delimiter (DL-STORE-01)',
+      'whitespace and a name holding the delimiter',
     () => {
       expect(REJECTED_KEY_NAMES.length).toBeGreaterThan(0);
 

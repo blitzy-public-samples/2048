@@ -69,13 +69,25 @@ const REJECTED_KEY_ERROR_NAME = 'StorageKeyError';
  */
 const MAX_REPORTED_KEY_LENGTH = 64;
 
-/** A caught storage error reduced to serialisable fields. */
+/**
+ * A caught storage error reduced to serialisable fields.
+ *
+ * THE PUBLIC HALF, AND SAFE TO EXPORT. Every field here is bounded and derived
+ * rather than carried: `name` is one of the recognised storage-error names or a
+ * fixed substitute, and `message` is a description this module authored — never
+ * the text the platform, an extension or a hostile `Error` subclass supplied.
+ * A metrics or log export can therefore carry this shape without carrying
+ * anything a source outside the product wrote. The value that WAS thrown
+ * travels separately, on `StorageProbeResult.thrown` and
+ * `StorageFailure.thrown`, for a sink that keeps more of it than a description.
+ */
 export interface StorageErrorInfo {
   readonly name: string;
 
   /**
-   * The error's `message`, or a printable form of the thrown value
-   * when it carries none.
+   * A description of what failed, chosen from this module's own vocabulary by
+   * `describeStorageError()`. Bounded, and free of source-provided text and of
+   * any excerpt of a stored value.
    */
   readonly message: string;
 
@@ -98,10 +110,27 @@ export interface StorageProbeResult {
   readonly strategy: StorageStrategy;
 
   /**
-   * The error that made the probe fail. Absent when the probe
-   * succeeds, and absent when no global store exists at all.
+   * The bounded, exportable description of the error that made the probe fail.
+   * Absent when the probe succeeds, and absent when no global store exists at
+   * all.
    */
   readonly error?: StorageErrorInfo;
+
+  /**
+   * THE VALUE THAT WAS THROWN, exactly as it was caught and unconverted.
+   *
+   * Present whenever `error` is. It is the only member carrying the original
+   * `Error` — its `stack`, its `cause` chain, its subclass — or the non-`Error`
+   * value some environments throw instead. A reporter hands it to
+   * `Logger.failure`, whose serialiser keeps that structure; `error` above
+   * cannot, because reducing to a name, a message and a flag is what discards
+   * it.
+   *
+   * NOT FOR EXPORT. Typed `unknown` because nothing about its shape is
+   * guaranteed, and it may carry source-provided text: a consumer that
+   * publishes rather than logs reads `error` instead.
+   */
+  readonly thrown?: unknown;
 }
 
 /** A single failed storage operation. */
@@ -112,7 +141,17 @@ export interface StorageFailure {
 
   readonly strategy: StorageStrategy;
 
+  /** The bounded, exportable description of what failed. */
   readonly error: StorageErrorInfo;
+
+  /**
+   * THE VALUE THAT WAS THROWN, exactly as it was caught and unconverted, on
+   * the same terms as `StorageProbeResult.thrown`.
+   *
+   * Absent on a failure no value was thrown for — a key this product does not
+   * own, which is refused before any store is touched and so throws nothing.
+   */
+  readonly thrown?: unknown;
 }
 
 /** A completed write attempt, successful or not. */
@@ -168,9 +207,39 @@ const UNKNOWN_ERROR_NAME = 'StorageError';
 
 const UNKNOWN_ERROR_MESSAGE = 'Unknown storage error.';
 
+/** Public message for an operation that ran out of room. */
+const QUOTA_ERROR_MESSAGE = 'Storage is full; the operation was refused.';
+
+/**
+ * Public message for an operation refused for a recognised reason other than
+ * exhausted storage, which in practice is denied access.
+ */
+const DENIED_ERROR_MESSAGE = 'Storage refused the operation.';
+
 const QUOTA_ERROR_NAMES: readonly string[] = Object.freeze([
   'QuotaExceededError',
   'NS_ERROR_DOM_QUOTA_REACHED',
+]);
+
+/**
+ * Every error name this module will put in a report.
+ *
+ * THE ALLOWLIST. A caught value's `name` is kept only if it appears here, so a
+ * name chosen outside the product — by a browser extension, or by an `Error`
+ * subclass whose `name` getter returns whatever it likes — never reaches an
+ * exportable record. Anything else is reported as `UNKNOWN_ERROR_NAME`.
+ *
+ * The two quota names are the ones `isQuotaError()` recognises; `SecurityError`
+ * is what a blocked origin throws; `TypeError` is what a serialisation refusal
+ * throws, including the one this module raises itself for a value JSON cannot
+ * carry; and `StorageKeyError` is this module's own name for a refused key.
+ */
+const REPORTABLE_ERROR_NAMES: readonly string[] = Object.freeze([
+  ...QUOTA_ERROR_NAMES,
+  'SecurityError',
+  'InvalidStateError',
+  'TypeError',
+  REJECTED_KEY_ERROR_NAME,
 ]);
 
 const LEGACY_QUOTA_EXCEEDED_CODE = 22;
@@ -241,27 +310,53 @@ function readErrorText(error: unknown, field: string): string | undefined {
     : undefined;
 }
 
+/**
+ * Reduces a caught value's `name` to one this module recognises.
+ *
+ * ALLOWLISTED. A name is kept only where it is one of the recognised storage
+ * error names; anything else — including a name a hostile `Error` subclass or a
+ * browser extension chose — becomes `UNKNOWN_ERROR_NAME`. The name is a field
+ * an export carries, so it is drawn from a closed set rather than from the
+ * value.
+ *
+ * @param error Caught value to classify.
+ * @returns A recognised name, or `UNKNOWN_ERROR_NAME`.
+ */
 function errorName(error: unknown): string {
-  return readErrorText(error, 'name') ?? UNKNOWN_ERROR_NAME;
+  const carried = readErrorText(error, 'name');
+
+  if (carried === undefined) {
+    return UNKNOWN_ERROR_NAME;
+  }
+
+  return REPORTABLE_ERROR_NAMES.includes(carried)
+    ? carried
+    : UNKNOWN_ERROR_NAME;
 }
 
-function errorMessage(error: unknown): string {
-  const carried = readErrorText(error, 'message');
-
-  if (carried !== undefined) {
-    return carried;
+/**
+ * Chooses the public message for a caught value.
+ *
+ * AUTHORED HERE, NEVER CARRIED. The value's own `message` is deliberately not
+ * read: it is written by the platform, by a browser extension or by whatever
+ * threw, it can carry an excerpt of the value that failed to store, and this
+ * field reaches an exportable log and a downloadable metrics snapshot. The
+ * message is therefore selected from this module's own vocabulary by what the
+ * error IS, and the original text stays on `StorageFailure.thrown` where only a
+ * logger reads it.
+ *
+ * @param name The allowlisted name.
+ * @param quota Whether the error reports exhausted storage.
+ * @returns One of this module's own descriptions.
+ */
+function errorMessage(name: string, quota: boolean): string {
+  if (quota) {
+    return QUOTA_ERROR_MESSAGE;
   }
 
-  if (typeof error === 'object' || typeof error === 'function') {
-    return UNKNOWN_ERROR_MESSAGE;
-  }
-
-  if (typeof error === 'symbol') {
-    return UNKNOWN_ERROR_MESSAGE;
-  }
-
-  // A primitive's conversion cannot throw, and a symbol is excluded above.
-  return String(error);
+  return name === UNKNOWN_ERROR_NAME
+    ? UNKNOWN_ERROR_MESSAGE
+    : DENIED_ERROR_MESSAGE;
 }
 
 function isQuotaError(error: unknown, name: string): boolean {
@@ -284,14 +379,30 @@ function isQuotaError(error: unknown, name: string): boolean {
   }
 }
 
-/** Reduces any thrown value, error or not, to `StorageErrorInfo`. Never throws. */
+/**
+ * Reduces any thrown value, error or not, to the bounded public
+ * `StorageErrorInfo`. Never throws.
+ *
+ * Both fields are drawn from this module's own vocabulary: the name from
+ * `REPORTABLE_ERROR_NAMES` and the message from what the error is. Nothing the
+ * caught value carries as text survives, which is why the value itself travels
+ * beside this description on `StorageFailure.thrown`.
+ *
+ * The quota test reads the value rather than the allowlisted name, so a
+ * `DOMException` carrying the legacy code 22 is still recognised even where its
+ * name is not one this module reports.
+ *
+ * @param error Caught value, of any type.
+ * @returns The exportable description.
+ */
 function describeStorageError(error: unknown): StorageErrorInfo {
   const name = errorName(error);
+  const quota = isQuotaError(error, readErrorText(error, 'name') ?? name);
 
   return {
     name,
-    message: errorMessage(error),
-    quota: isQuotaError(error, name),
+    message: errorMessage(name, quota),
+    quota,
   };
 }
 
@@ -313,15 +424,18 @@ function truncateKey(key: string): string {
  * Describes a refused operation as a `StorageErrorInfo`, without constructing or
  * throwing an error.
  *
- * @param key Key that was refused, already shortened.
+ * The message names no key. The refused key travels on `StorageFailure.key`,
+ * already shortened, so it is carried once in a field of its own rather than
+ * interpolated into text an export publishes.
+ *
  * @returns The reportable description of the refusal.
  */
-function describeRejectedKey(key: string): StorageErrorInfo {
+function describeRejectedKey(): StorageErrorInfo {
   return {
     name: REJECTED_KEY_ERROR_NAME,
     message:
-      `Key "${key}" is not owned by this product; the operation was ` +
-      'refused and no storage was touched.',
+      'The key is not owned by this product; the operation was refused ' +
+      'and no storage was touched.',
     quota: false,
   };
 }
@@ -354,6 +468,10 @@ export function probeWebStorage(): StorageProbeResult {
       supported: false,
       strategy: 'memory',
       error: describeStorageError(error),
+
+      // The value itself, beside its bounded description, so a reporter can
+      // hand the original to a logger rather than a reduction of it.
+      thrown: error,
     };
   }
 }
@@ -659,13 +777,13 @@ export class LocalStorageManager {
       return true;
     }
 
-    const reported = truncateKey(key);
-
+    // No value was thrown: the refusal happens before any store is touched,
+    // so the failure carries a description and no `thrown`.
     this.deliverFailure({
       operation,
-      key: reported,
+      key: truncateKey(key),
       strategy: this.strategy,
-      error: describeRejectedKey(reported),
+      error: describeRejectedKey(),
     });
 
     return false;
@@ -760,6 +878,7 @@ export class LocalStorageManager {
       key: STORAGE_PROBE_KEY,
       strategy: this.strategy,
       error,
+      thrown: this.probe.thrown,
     });
   }
 
@@ -784,6 +903,11 @@ export class LocalStorageManager {
       key,
       strategy: this.strategy,
       error: describeStorageError(error),
+
+      // The caught value travels unconverted, so the stack, the cause chain
+      // and a non-`Error` structure all survive to the logger. The reduction
+      // above is what an export carries; this is what a log record does.
+      thrown: error,
     });
   }
 

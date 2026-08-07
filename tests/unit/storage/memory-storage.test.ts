@@ -17,6 +17,9 @@
 // mocking library, no spy, no storage package. It reads no DOM, no storage
 // global and no clock, consumes no randomness and installs nothing. It runs
 // unchanged in a DOM-free environment.
+//
+// Decisions this suite is the evidence for: DL-STORE-05 in
+// docs/DECISION_LOG.md. Traceability rows: TR-STORE-09 of
 
 import { describe, expect, it } from 'vitest';
 

@@ -16,6 +16,9 @@
 // into an expectation. Every seed is a string literal, and the suite reads no
 // clock, no environment variable and no ambient randomness. It touches no DOM
 // and no storage, writes no snapshot artifact and emits no log.
+//
+// Decisions this suite is the evidence for: DL-RNG-01 through DL-RNG-03 in
+// docs/DECISION_LOG.md. Traceability rows: TR-RNG-03 through TR-RNG-05 of
 
 import { describe, expect, it } from 'vitest';
 
@@ -656,5 +659,133 @@ describe('the sequence is anchored, not merely self-consistent', () => {
     expect(first).toBe(ANCHOR_FIRST_DRAW);
     expect(second).not.toBe(ANCHOR_FIRST_DRAW);
     expect(createSeededRng(ANCHOR_SEED, 1).next()).toBe(second);
+  });
+});
+
+/* ===== 7. The checkpoint primitive (F2) ===== */
+
+// `fork()` is what makes a caller's draws abandonable. The properties below
+// are the ones src/engine/hook-bus.ts depends on to keep a hook handler that
+// throws from consuming randomness.
+
+describe('SeededRng.fork', () => {
+  it('hands back a different instance carrying the same seed and cursor',
+    () => {
+      const rng = createSeededRng(RUN_SEED);
+
+      rng.next();
+      rng.next();
+
+      const fork = rng.fork();
+
+      expect(fork).not.toBe(rng);
+      expect(fork.seed).toBe(rng.seed);
+      expect(fork.cursor).toBe(rng.cursor);
+    });
+
+  it('continues the sequence from where the original stands', () => {
+    const rng = createSeededRng(RUN_SEED);
+    const reference = createSeededRng(RUN_SEED);
+
+    rng.next();
+    reference.next();
+
+    const fork = rng.fork();
+
+    expect([fork.next(), fork.next(), fork.next()]).toEqual([
+      reference.next(),
+      reference.next(),
+      reference.next(),
+    ]);
+  });
+
+  it('leaves the original where it stood however much the fork draws', () => {
+    const rng = createSeededRng(RUN_SEED);
+    const fork = rng.fork();
+
+    for (let taken = 0; taken < 10; taken += 1) {
+      fork.next();
+    }
+
+    expect(rng.cursor).toBe(0);
+    expect(fork.cursor).toBe(10);
+  });
+
+  it('is unaffected by later draws from the original', () => {
+    const rng = createSeededRng(RUN_SEED);
+    const fork = rng.fork();
+    const first = fork.next();
+
+    rng.next();
+    rng.next();
+
+    expect(fork.cursor).toBe(1);
+    expect(first).toBe(createSeededRng(RUN_SEED).next());
+  });
+
+  it('lets a caller adopt a fork\'s draws by replaying them, landing on the ' +
+    'same value a direct draw would have', () => {
+    const rng = createSeededRng(RUN_SEED);
+    const direct = createSeededRng(RUN_SEED);
+    const from = rng.cursor;
+    const fork = rng.fork();
+    const takenByFork = [fork.next(), fork.next()];
+    const taken = fork.cursor - from;
+
+    // The adoption src/engine/hook-bus.ts performs on commit.
+    for (let replayed = 0; replayed < taken; replayed += 1) {
+      rng.next();
+    }
+
+    expect(takenByFork).toEqual([direct.next(), direct.next()]);
+    expect(rng.cursor).toBe(2);
+    expect(rng.next()).toBe(direct.next());
+  });
+
+  it('forks a fork', () => {
+    const rng = createSeededRng(RUN_SEED);
+    const fork = rng.fork();
+
+    fork.next();
+
+    const nested = fork.fork();
+
+    expect(nested.cursor).toBe(1);
+    expect(nested.next()).toBe(createSeededRng(RUN_SEED, 1).next());
+    expect(rng.cursor).toBe(0);
+  });
+
+  it('forks a resumed generator at its resumed position', () => {
+    const rng = createSeededRng(RUN_SEED, 5);
+    const fork = rng.fork();
+
+    expect(fork.cursor).toBe(5);
+    expect(fork.next()).toBe(createSeededRng(RUN_SEED, 5).next());
+  });
+
+  it('produces the same sequence a generator built without forking ' +
+    'produces, so forking changes no draw', () => {
+    const forked = createSeededRng(RUN_SEED);
+    const plain = createSeededRng(RUN_SEED);
+    const taken: number[] = [];
+
+    for (let index = 0; index < 8; index += 1) {
+      // A fork opened and discarded before every draw.
+      forked.fork().next();
+      taken.push(forked.next());
+    }
+
+    expect(taken).toEqual(
+      Array.from({ length: 8 }, (): number => plain.next()),
+    );
+  });
+
+  it('does not patch Math.random', () => {
+    const before = Math.random;
+    const rng = createSeededRng(RUN_SEED);
+
+    rng.fork().next();
+
+    expect(Math.random).toBe(before);
   });
 });

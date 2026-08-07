@@ -38,6 +38,12 @@
 // numeral texture is shared by every mesh carrying a given value, and every
 // geometry, texture and material this module creates is released by
 // `dispose()`.
+//
+// Decisions behind this file: DL-MESH-01, the extrusion depths expressed as
+// arithmetic on `gridSpacing`; DL-MESH-02, the outline and extrusion inset
+// DL-MESH-03, one shared geometry per shape and one shared numeral texture
+// per value; and DL-MESH-04, the mobile scale selected once per factory.
+// Traceability rows: TR-MESH-01 through TR-MESH-10, one per row of the table
 
 import {
   CanvasTexture,
@@ -52,6 +58,10 @@ import {
   Vector3,
 } from 'three';
 
+import {
+  MAX_BOARD_SIZE,
+  isSupportedBoardSize,
+} from '../config/default-config';
 import type { RulesConfig } from '../config/rules-config';
 import type { Position } from '../engine/types';
 import { subscribeToThemeChange } from '../theme/themes';
@@ -190,6 +200,30 @@ function assertPositiveInteger(name: string, value: number): void {
   }
 }
 
+/**
+ * Rejects a board edge length the product does not support.
+ *
+ * `isSupportedBoardSize` of src/config/default-config.ts is the single
+ * board-edge ceiling, and every OTHER consumer of a candidate edge —
+ * persistence, the number-only renderer and the parallel accessibility board —
+ * already measures against it. This module measured only that the value was a
+ * positive integer, so a size the rest of the product refuses reached geometry
+ * construction and a `size` by `size` plate allocation here.
+ *
+ * @param name Parameter name, for the thrown message.
+ * @param value Candidate edge length.
+ * @throws RangeError when `value` is not an integer from 1 through
+ *   `MAX_BOARD_SIZE`.
+ */
+function assertSupportedBoardSize(name: string, value: number): void {
+  if (!isSupportedBoardSize(value)) {
+    throw new RangeError(
+      `tile-mesh-factory: ${name} must be an integer from 1 through ` +
+        `${MAX_BOARD_SIZE}, received ${String(value)}`,
+    );
+  }
+}
+
 function assertFiniteNumber(name: string, value: number): void {
   if (!Number.isFinite(value)) {
     throw new RangeError(
@@ -210,13 +244,14 @@ function assertFiniteNumber(name: string, value: number): void {
  * default scale of style/main.scss and its `smaller($mobile-threshold)` scale
  * resolve through this one call.
  *
- * @throws RangeError when `boardSize` is not a positive integer.
+ * @throws RangeError when `boardSize` is not an integer from 1 through
+ *   `MAX_BOARD_SIZE`.
  */
 export function resolveBoardGeometry(
   boardSize: number,
   scale: ScaleName = 'desktop',
 ): GeometryScale {
-  assertPositiveInteger('boardSize', boardSize);
+  assertSupportedBoardSize('boardSize', boardSize);
   const base = geometryScales[scale];
   return createGeometryScale({
     fieldWidth: base.fieldWidth,
@@ -362,11 +397,11 @@ export function cellToWorldIn(
  * The array is x-major, matching the `CellMatrix` of src/engine/types.ts,
  * whose backing store is indexed `cells[x][y]`.
  *
- * @throws RangeError when `boardSize` is not a positive integer, or when
- *   either coordinate is outside the lattice.
+ * @throws RangeError when `boardSize` is not an integer from 1 through
+ *   `MAX_BOARD_SIZE`, or when either coordinate is outside the lattice.
  */
 export function cellArrayIndex(position: Position, boardSize: number): number {
-  assertPositiveInteger('boardSize', boardSize);
+  assertSupportedBoardSize('boardSize', boardSize);
   for (const axis of ['x', 'y'] as const) {
     const coordinate = position[axis];
     if (
@@ -709,6 +744,7 @@ export interface TileMeshFactoryStats {
   readonly poolReleases: number;
   readonly poolRejections: number;
   readonly tileMeshesRecalled: number;
+
   readonly cachedNumerals: number;
   readonly numeralsCreated: number;
 
@@ -769,6 +805,7 @@ export interface TileMeshFactory {
   buildBoard(boardSize?: number): BoardMeshes;
   readBoard(): BoardMeshes | null;
   cellToWorld(position: Position, target?: Vector3): Vector3;
+
   acquireTileMesh(value: number): TileMesh;
 
   /**
@@ -827,6 +864,7 @@ const SCALE_NAMES: readonly ScaleName[] = Object.freeze([
   'desktop',
   'mobile',
 ]);
+
 
 /**
  * Builds the geometry owner for the WebGL board.
@@ -1389,7 +1427,7 @@ export function createTileMeshFactory(
     assertLive();
 
     const requested = boardSize ?? config.boardSize;
-    assertPositiveInteger('boardSize', requested);
+    assertSupportedBoardSize('boardSize', requested);
 
     // `tileSize` falls as the board size rises, and the bevel takes
     // `depthScale.bevel` off each side of the outline, so a size beyond which

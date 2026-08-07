@@ -21,6 +21,9 @@
 // generator output appears as a literal anywhere in this file. Every seed is a
 // literal declared here, and this suite reads no clock, no environment and no
 // document.
+//
+// Decisions this suite is the evidence for: DL-RNG-04 and DL-RNG-05 in
+// docs/DECISION_LOG.md. Traceability rows: TR-RNG-06 through TR-RNG-09 of
 
 import { describe, expect, it } from 'vitest';
 
@@ -196,6 +199,82 @@ describe('RNG_STREAM_NAMES', () => {
   it('lists exactly four names, none of them repeated', () => {
     expect(RNG_STREAM_NAMES).toHaveLength(4);
     expect(new Set(RNG_STREAM_NAMES).size).toBe(4);
+  });
+
+  it('is frozen at run time, not only readonly at compile time (F9)', () => {
+    expect(Object.isFrozen(RNG_STREAM_NAMES)).toBe(true);
+  });
+
+  it('refuses a runtime write to an entry and keeps its contents exact ' +
+    '(F9)', () => {
+    // The cast is how a caller reaching the tuple through a widened type
+    // would arrive at it; compile-time readonly does not stop that caller.
+    const mutable = RNG_STREAM_NAMES as unknown as string[];
+
+    expect(() => {
+      mutable[0] = 'tampered';
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable[RNG_STREAM_NAMES.length] = 'fifth';
+    }).toThrow(TypeError);
+    expect([...RNG_STREAM_NAMES]).toEqual([
+      'spawn-value',
+      'spawn-position',
+      'relic-draw',
+      'rarity-weight',
+    ]);
+  });
+
+  it('refuses a runtime push, pop, splice, sort, reverse and length ' +
+    'change (F9)', () => {
+    const mutable = RNG_STREAM_NAMES as unknown as string[];
+
+    expect(() => {
+      mutable.push('fifth');
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable.pop();
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable.splice(0, 1);
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable.sort();
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable.reverse();
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable.length = 0;
+    }).toThrow(TypeError);
+    expect(RNG_STREAM_NAMES).toHaveLength(4);
+    expect([...RNG_STREAM_NAMES]).toEqual([
+      'spawn-value',
+      'spawn-position',
+      'relic-draw',
+      'rarity-weight',
+    ]);
+  });
+
+  it('keeps deriving the same four substreams after a refused mutation ' +
+    'attempt (F9)', () => {
+    const mutable = RNG_STREAM_NAMES as unknown as string[];
+    const reference = createRngStreams(RUN_SEED);
+    const expected = reference.stream(SPAWN_VALUE).next();
+
+    try {
+      mutable[0] = 'tampered';
+    } catch {
+      // Refused, which is the point; the derivation below is what it
+      // protects.
+    }
+
+    expect(createRngStreams(RUN_SEED).stream(SPAWN_VALUE).next()).toBe(
+      expected,
+    );
+    expect(
+      Object.keys(createRngStreams(RUN_SEED).snapshotCursors()).sort(),
+    ).toEqual(['rarity-weight', 'relic-draw', 'spawn-position', 'spawn-value']);
   });
 
   it('addresses the names this suite draws through', () => {
@@ -1348,5 +1427,76 @@ describe('RngStream.pick declines a list it cannot index', () => {
     expect(sole).toHaveLength(1);
     expect(stream.pick(sole)).toBe(sole[0]);
     expect(stream.cursor).toBe(1);
+  });
+});
+
+/* ===== The checkpoint primitive of the substream layer (F2) ===== */
+
+// `RngStream.fork()` is what src/engine/hook-bus.ts opens a hook handler's
+// randomness transaction over. The substream layer adds one property to
+// `SeededRng.fork()`: the fork keeps the name, and therefore the helpers, of
+// the substream it came from.
+
+describe('RngStream.fork', () => {
+  it('keeps the substream name', () => {
+    const streams = createRngStreams(RUN_SEED);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(streams.stream(name).fork().name).toBe(name);
+    }
+  });
+
+  it('stands where the substream stands and continues its sequence', () => {
+    const streams = createRngStreams(RUN_SEED);
+    const reference = createRngStreams(RUN_SEED);
+    const stream = streams.stream(SPAWN_POSITION);
+
+    stream.next();
+    reference.stream(SPAWN_POSITION).next();
+
+    const fork = stream.fork();
+
+    expect(fork.cursor).toBe(stream.cursor);
+    expect(fork.next()).toBe(reference.stream(SPAWN_POSITION).next());
+  });
+
+  it('leaves the substream and every other substream untouched', () => {
+    const streams = createRngStreams(RUN_SEED);
+    const before = streams.snapshotCursors();
+    const fork = streams.stream(SPAWN_VALUE).fork();
+
+    fork.nextInt(BOARD_CELL_COUNT);
+    fork.pick([1, 2, 3]);
+    fork.pickWeighted([2, 4], [0.9, 0.1]);
+
+    expect(streams.snapshotCursors()).toEqual(before);
+    expect(fork.cursor).toBe(3);
+  });
+
+  it('draws the vanilla spawn distribution through a fork exactly as ' +
+    'through the substream', () => {
+    const throughFork = createRngStreams(RUN_SEED);
+    const throughStream = createRngStreams(RUN_SEED);
+    const forked: number[] = [];
+    const direct: number[] = [];
+
+    for (let index = 0; index < SEQUENCE_LENGTH; index += 1) {
+      const stream = throughFork.stream(SPAWN_VALUE);
+      const fork = stream.fork();
+
+      forked.push(fork.pickWeighted([2, 4], [0.9, 0.1]) ?? 0);
+
+      // Adopted by replaying the one draw the fork took.
+      stream.next();
+
+      direct.push(
+        throughStream.stream(SPAWN_VALUE).pickWeighted([2, 4], [0.9, 0.1]) ?? 0,
+      );
+    }
+
+    expect(forked).toEqual(direct);
+    expect(throughFork.snapshotCursors()).toEqual(
+      throughStream.snapshotCursors(),
+    );
   });
 });

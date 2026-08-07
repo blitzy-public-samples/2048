@@ -15,6 +15,8 @@
  * `.keep-playing-button`. None of the eight was null-checked, and each result
  * was dereferenced immediately.
  *
+ * docs/TRACEABILITY_MATRIX.md, rows TR-SETTINGS-01 through TR-SETTINGS-06 in
+ *
  * Subscription semantics are those of js/keyboard_input_manager.js — an
  * appended callback list iterated synchronously — with per-listener error
  * isolation added.
@@ -26,6 +28,12 @@
  *
  * Preferences are held in memory for the session: this module reads and writes
  * no storage and declares no storage key.
+ *
+ * Decisions behind this file, all in docs/DECISION_LOG.md: DL-SETTINGS-01,
+ * the locally declared report sink; DL-SETTINGS-02, the guarded mount
+ * resolver; DL-SETTINGS-03, the session-scoped preferences; DL-SETTINGS-04,
+ * a failed `matchMedia` resolving to reduced motion; DL-SETTINGS-05, the
+ * three-state motion setting; and DL-THEME-01 and DL-THEME-02, the two
  */
 
 import {

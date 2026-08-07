@@ -6,15 +6,29 @@
 // isGameTerminated(). hasReachedWinValue and highestTileValue are additions
 // and are marked as such at their declarations.
 //
+// traceability row of docs/TRACEABILITY_MATRIX.md:
+//   TR-TERM-01  L170      the win test the merge branch performed inline
+//   TR-TERM-02  L238-L240 movesAvailable()
+//   TR-TERM-03  L243-L268 tileMatchesAvailable()
+//   TR-TERM-04  L30-L32   isGameTerminated()
+//
 // The win value and the board's edge length are read from the arguments at
 // every call: no binding in this module holds either. The vanilla flag
 // `keepPlaying` is carried as `continuedPlay` here and in
 // src/engine/engine.ts; the input event name and the persisted member name
 // keep the vanilla spelling.
 //
+// declarations: hasReachedWinValue, target-only row TR-TERM-05, and
+// highestTileValue, target-only row TR-TERM-06.
+//
 // Every export is a query that mutates no grid and no tile. This module reads
 // no DOM, performs no I/O, consumes no randomness, reads no clock, memoises
 // nothing and reports nothing.
+//
+// Decisions behind this file: DL-TERM-01, relocating the win evaluation
+// out of the merge branch into this module; DL-TERM-02, preserving strict
+// equality against `config.winValue`; DL-TERM-03, reading the win value,
+// the merge predicate and the board size at use time; and DL-TERM-04, the
 
 import type { MergeTileView, RulesConfig } from '../config/rules-config';
 import type { Grid } from './grid';

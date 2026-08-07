@@ -20,6 +20,10 @@
 // The Web Storage probe, the `probe` and `strategy` members and the reporter
 // failure path are covered by
 // tests/unit/storage/local-storage-manager.test.ts, not here.
+//
+// Decisions this suite is the evidence for: DL-STORE-02 in
+// docs/DECISION_LOG.md. Traceability rows: TR-STORE-01 and TR-STORE-04
+// through TR-STORE-05 of docs/TRACEABILITY_MATRIX.md.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 

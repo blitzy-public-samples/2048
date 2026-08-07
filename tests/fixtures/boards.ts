@@ -22,6 +22,9 @@
 // This module imports two values and three types and nothing else. It reads no
 // DOM and no storage, performs no I/O, consumes no randomness, reads no clock
 // and writes no log.
+//
+// Decisions behind this file: DL-FIXTURE-01, the five boards expressed in
+// the product's own persisted vocabulary, and DL-FIXTURE-02, every builder
 
 import {
   DEFAULT_BOARD_SIZE,

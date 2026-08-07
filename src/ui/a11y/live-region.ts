@@ -8,6 +8,9 @@
 // construction. A markup that declares a polite and an assertive region
 // instead is served by the two assertive options below.
 //
+// every row is target-only in docs/TRACEABILITY_MATRIX.md, rows TR-LIVE-01
+// through TR-LIVE-09 in the order of the table.
+//
 // The region's visually-hidden treatment is the `.visually-hidden` class of
 // style/_a11y.scss, which clips the paint region and keeps the box. Nothing
 // here assigns a style property, and no hiding mechanism that would take the
@@ -21,6 +24,11 @@
 // scheduler, an unrecognised announcement, a non-finite number, an absent
 // spawn position, a refused subscription, a throwing listener and a failed DOM
 // write are each reported through the injected sink and the call continues.
+//
+// Decisions behind this file, all in docs/DECISION_LOG.md: DL-LIVE-01, the
+// coalescing rules; DL-LIVE-02, the clear-then-write sequence; DL-LIVE-03,
+// the polite default with two assertive options; DL-LIVE-04, the queue bound;
+// and DL-A11Y-08, the parallel DOM beside an `aria-hidden` canvas with a
 
 import type {
   MountRoot,
@@ -188,8 +196,9 @@ export const ANNOUNCEMENT_KINDS: readonly AnnouncementKind[] = Object.freeze([
 
 /**
  * The kinds a verdict supersedes within one flush, and the kinds the queue
- * bound discards first. `relicAcquired`, `terminal` and `text` are absent from
- * this list and are never discarded by the bound.
+ * bound discards first. `text` is discarded after these, and `relicAcquired`
+ * and `terminal` only once nothing else remains — the bound is a hard one, so
+ * no kind is exempt from it.
  */
 export const GAMEPLAY_ANNOUNCEMENT_KINDS: readonly AnnouncementKind[] =
   Object.freeze([
@@ -1095,9 +1104,12 @@ export interface LiveRegionAnnouncerOptions {
   readonly context?: string;
 
   /**
-   * Announcements the queue holds before it discards the oldest gameplay
-   * items. Defaults to `DEFAULT_MAX_QUEUED_ANNOUNCEMENTS`. A value that is not
-   * a positive integer is reported and the default is used.
+   * Announcements the queue holds. Reaching it discards the oldest gameplay
+   * item, then the oldest free text, then a superseded verdict, and only then
+   * the oldest `relicAcquired` or `terminal`; the queue never holds more than
+   * this many, whatever kinds they are. Defaults to
+   * `DEFAULT_MAX_QUEUED_ANNOUNCEMENTS`. A value that is not a positive
+   * integer is reported and the default is used.
    */
   readonly maxQueued?: number;
   readonly schedule?: AnnouncerScheduler;
@@ -1785,6 +1797,17 @@ export function createLiveRegionAnnouncer(
     }
   }
 
+  /**
+   * Brings the queue back within its bound, reporting what it discarded.
+   *
+   * The bound is structural: the loop runs until `queue.length <= capacity`,
+   * and `indexOfEvictable` yields a victim for every non-empty queue, so a
+   * run of `terminal` and `relicAcquired` announcements cannot carry the
+   * queue past `capacity`. The tiers `indexOfEvictable` applies are what
+   * keeps the semantics: a protected item is discarded only once no gameplay
+   * item, no free text and no superseded verdict remains, and that count is
+   * reported separately from the rest.
+   */
   function enforceCapacity(): void {
     if (queue.length <= capacity) {
       return;

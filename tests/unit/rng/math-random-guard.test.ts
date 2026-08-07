@@ -288,6 +288,7 @@ describe('seeded sequences are independent of ambient Math.random', () => {
   });
 });
 
+
 describe('Math.random is still the platform built-in', () => {
   it('holds the exact function the property was found carrying', () => {
     const current = Object.getOwnPropertyDescriptor(Math, 'random');
@@ -309,6 +310,7 @@ describe('Math.random is still the platform built-in', () => {
     expect(typeof Math.random).toBe('function');
     expect(Math.random.length).toBe(0);
   });
+
 
   it('draws a float inside the interval the two call sites assumed', () => {
     const drawn = Math.random();

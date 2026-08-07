@@ -7,12 +7,19 @@
 // `bindButtonPress`, its selector lookup, its `'click'` listener and its
 // resolved touch-end listener.
 //
+// traceability row of docs/TRACEABILITY_MATRIX.md:
+//   TR-CONTROL-01  L71-L74    the three control bindings — `.retry-button`
+//   TR-CONTROL-02  L140-L144  `bindButtonPress` — the selector lookup at
+// TR-CONTROL-03.
+//
 // Retained from that port: `bindButtonPress` binds BOTH `'click'` and the
 // resolved touch-end event to one handler, so a tap can dispatch twice. Noted,
 // not fixed.
 //
 // Changed against that port:
 //   - the lookup is null-checked, reported and skipped
+//
+// Changed against that port, decisions DL-CONTROL-01 through DL-CONTROL-04
 //   - a control the markup leaves unfocusable or unnamed is promoted, and the
 //     promotion is reported
 //   - `fn.bind(this)` becomes a lexically scoped handler; js/bind_polyfill.js
@@ -1552,6 +1559,8 @@ export function mountOnScreenControls(
 
         // A generated control binds `'click'` alone; the pair of listeners at
         // js/keyboard_input_manager.js L142-L143 is not reproduced here.
+        //
+        // Decision DL-CONTROL-02.
         bindRecord(record, describeGenerated(binding.action, index), false);
         applyAvailability(element, record.available);
 
@@ -1569,6 +1578,21 @@ export function mountOnScreenControls(
     generatedRoots.push(padGroup, actionGroup);
   }
 
+  /**
+   * Applies the resolved keymap and context to every control: names first, so
+   * a remapped key is announced, then availability.
+   *
+   * Every record is reapplied, the three index.html declares included. A
+   * control unavailable in `context` leaves the accessibility tree and the
+   * tab order whether this layer created its element or not, and `activate`
+   * publishes nothing for it. A markup control's contexts are its own where
+   * its binding declared them and the action's otherwise; its visible label
+   * is never written, and its accessible name is rewritten only where this
+   * layer supplied it.
+   *
+   * @param keymap Table to derive names from.
+   * @param context Context to derive availability from.
+   */
   const apply = (keymap: Keymap, context: InputContext): void => {
     activeKeymap = keymap;
     activeContext = context;

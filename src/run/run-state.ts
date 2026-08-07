@@ -8,10 +8,22 @@
  *
  * RUN IDENTIFIER VERSUS CORRELATION IDENTIFIER
  *   `RunState.runId` identifies the run instance and is persisted with the
- *   envelope. The correlation identifier is derived from the seed alone, is
- *   not persisted, and is what the observability layer keys records on. This
- *   module derives none of its own: the single derivation lives in
+ *   envelope. The correlation identifier is derived from the seed AND that run
+ *   identifier, is not persisted, and is what the observability layer keys
+ *   records on. Both inputs are load-bearing: the seed supplies the prefix a
+ *   stream is grouped by, and the run identifier is what separates two runs of
+ *   one seed within it. Because the run identifier is persisted, a resumed run
+ *   re-derives the identifier it was already reporting under.
+ *
+ *   This module derives none of its own: the single derivation lives in
  *   src/observability/logger.ts and the value arrives by injection.
+ *
+ * RUN IDENTIFIER VERSUS CORRELATION IDENTIFIER
+ *   `RunState.runId` identifies the run instance and is persisted with the
+ *   envelope. The correlation identifier is derived from the seed and that
+ *   run identifier together, is not persisted, and is what the
+ *   observability layer keys records on. `runCorrelationId()` in section 12
+ *   delegates to the single derivation in src/observability/logger.ts.
  *
  * WRAPPED BOARD SNAPSHOT
  *   `RunState.board` carries the pre-migration board snapshot unchanged, in
@@ -27,15 +39,33 @@
  *   `schemaVersion` and `classifyRunStateVersion()` are what a loader decides
  *   against instead.
  *
- * JSON CONTRACT
- *   Every member this module declares, constructs and validates is JSON data:
- *   strings, finite numbers, booleans, plain objects and arrays of those. The
- *   one exception is `PersistedRelic.state`, which is typed `unknown` and is
- *   neither validated nor constrained here — a relic that puts a `Date`, a
- *   `Map`, a class instance or a cycle in it breaks the round-trip, so a relic
- *   is REQUIRED to keep its state JSON data. Given that, and given finite
- *   numbers throughout, `JSON.parse(JSON.stringify(state))` is deep-equal to
- *   `state`.
+ * BOUNDED QUANTITIES
+ *   Three quantities a stored payload carries are bounded rather than
+ *   merely typed, and each bound is read from the module that owns it
+ *   rather than restated here: the board edge against `MAX_BOARD_SIZE` of
+ *   src/config/default-config.ts, every substream draw count against
+ *   `isAcceptableRngCursor()` of src/rng/seeded-rng.ts, and a relic's
+ *   `state` against the shape limits in section 8. A payload breaking one
+ *   of them is refused, not clamped.
+ *
+ * JSON ROUND-TRIP
+ *   Every member of `RunState` is JSON data: strings, finite numbers,
+ *   booleans, plain objects and arrays of those. No `Date`, `Map`, `Set`,
+ *   class instance or method appears anywhere in the envelope, so
+ *   `JSON.parse(JSON.stringify(state))` is deep-equal to `state`. A relic's
+ *   own `state` is the one member whose type is `unknown` on the wire;
+ *   `PersistedRelicState` states the vocabulary it is drawn from,
+ *   `checkRelicState()` decides membership as part of `isRunStateShape()`,
+ *   and `cloneRelicState()` carries nothing outside it, so the round-trip
+ *   holds for that member too.
+ *
+ * Decisions behind this file: DL-RUN-01, the `schemaVersion` member and the
+ * classification it is read through; DL-RUN-02, wrapping the pre-migration
+ * board snapshot verbatim; and DL-RUN-03, persisting the RNG cursor map.
+ * Traceability rows: TR-RUN-01, js/game_manager.js L102-L110's manager
+ * projection wrapped as `RunState.board`; TR-RUN-02, js/grid.js L102-L117's
+ * grid projection; TR-RUN-03, js/tile.js L19-L27's tile projection; and
+ * target-only rows TR-RUN-04 through TR-RUN-06 for the version member, the
  */
 
 import {
@@ -50,7 +80,9 @@ import type {
   SerializedTile,
 } from '../engine/types';
 import {
+  MAX_RUN_SEED_LENGTH,
   RNG_STREAM_NAMES,
+  isAcceptableRunSeed,
   type RngCursorMap,
   type StreamName,
 } from '../rng/rng-streams';
@@ -58,6 +90,7 @@ import {
   MAX_RESUMABLE_CURSOR,
   isAcceptableRngCursor,
 } from '../rng/seeded-rng';
+
 
 /**
  * The board snapshot the envelope wraps, in the shape the pre-migration game
@@ -70,6 +103,8 @@ import {
  * The member name `keepPlaying` is FROZEN ON THE WIRE. The in-class flag it
  * projects is `continuedPlay`; renaming it inside `board` would make a save
  * written by the pre-migration game unreadable.
+ *
+ * the persisted name did not change with it. Decision DL-ENGINE-04.
  */
 export type LegacyBoardSnapshot = SerializedGameState;
 
@@ -101,14 +136,11 @@ export type PersistedRelicState =
   | { readonly [member: string]: PersistedRelicState };
 
 /**
- * One held relic as the envelope persists it: identity, charges remaining
- * and the relic's own opaque state.
- *
- * The persisted form is narrower than the in-memory relic declaration: the
- * wire carries no name, description, rarity or hook table. It is declared
- * here and not imported from the relic modules: this module names no
- * relic-module type, and this folder compiles and is exercised without the
- * relic registry.
+ * One held relic as the envelope persists it: identity, charges remaining and
+ * the relic's own opaque state. Narrower than the in-memory declaration — the
+ * wire carries no name, description, rarity or hook table. Declared here and
+ * not imported, so this folder compiles and is exercised without the relic
+ * modules.
  */
 export interface PersistedRelic {
   readonly id: string;
@@ -120,9 +152,11 @@ export interface PersistedRelic {
   readonly charges?: number;
 
   /**
-   * The relic's own persisted state, opaque to this module and to the store.
-   * Neither validated nor constrained here: a relic is required to keep it
-   * JSON data, on the contract in the module header.
+   * The relic's own persisted state, opaque to this module and to the
+   * store. Declared as `unknown` because that is what the wire carries;
+   * every accepted value is one `PersistedRelicState` describes, which
+   * `checkRelicState()` decides and `describeRunStateProblems()` reports
+   * on.
    */
   readonly state?: unknown;
 }
@@ -566,6 +600,7 @@ function checkRelicState(
       `${path} is nested deeper than ${MAX_RELIC_STATE_DEPTH} levels`
     );
 
+
     return;
   }
 
@@ -817,6 +852,43 @@ function checkString(
   }
 }
 
+/**
+ * Checks the run seed against the bound the RNG layer will apply to it.
+ *
+ * `createRngStreams()` REFUSES a seed longer than `MAX_RUN_SEED_LENGTH`,
+ * because each substream is derived from the run seed plus a suffix and the
+ * generator bounds the result. Validating the member as a string alone let an
+ * envelope load successfully and then fail restoration a moment later, at a
+ * point with no fallback: the load reported success and the run had no
+ * substreams. `isAcceptableRunSeed()` is the RNG layer's own predicate, so the
+ * two cannot disagree about which seeds are usable.
+ *
+ * @param source Envelope being validated.
+ * @param problems List each failure is appended to.
+ */
+function checkRunSeed(
+  source: Record<string, unknown>,
+  problems: string[]
+): void {
+  const member = readForValidation(source, 'seed', 'seed', problems);
+
+  if (!member.readable) {
+    return;
+  }
+
+  if (typeof member.value !== 'string') {
+    addProblem(problems, 'seed is not a string');
+    return;
+  }
+
+  if (!isAcceptableRunSeed(member.value)) {
+    addProblem(
+      problems,
+      `seed is longer than ${MAX_RUN_SEED_LENGTH} characters`
+    );
+  }
+}
+
 function checkRngCursor(value: unknown, problems: string[]): void {
   if (!isRecord(value)) {
     addProblem(problems, 'rngCursor is not an object');
@@ -1031,8 +1103,13 @@ function isJsonSafeRelicState(value: unknown): boolean {
 
 /**
  * Records a problem for every relic entry that is not
- * `{ id, charges?, state? }`. Entry order is read but never rearranged: the
- * index in each reported path is the relic's pickup position.
+ * `{ id, charges?, state? }`, and for every part of an entry's `state` that
+ * falls outside `PersistedRelicState`. Entry order is read but never
+ * rearranged: the index in each reported path is the relic's pickup
+ * position.
+ *
+ * @param value Candidate relic array.
+ * @param problems List to append to.
  */
 function checkRelics(value: unknown, problems: string[]): void {
   if (!Array.isArray(value)) {
@@ -1306,7 +1383,7 @@ export function describeRunStateProblems(value: unknown): string[] {
   }
 
   checkString(value, 'runId', problems);
-  checkString(value, 'seed', problems);
+  checkRunSeed(value, problems);
 
   const cursor = readForValidation(
     value,
@@ -1399,24 +1476,36 @@ export function isCurrentRunState(value: unknown): value is RunState {
 }
 
 /**
- * Depth at which `cloneRelicState()` stops descending and carries the remaining
- * subtree by reference. Relic state is counters and flags, so this bound is
- * never reached by the declared data, and it keeps the copy finite for a
- * self-referential value.
+ * What `cloneRelicState()` carries in place of a value the
+ * `PersistedRelicState` vocabulary does not describe: nothing at all. A
+ * member holding one is omitted from the copy and an array entry holding one
+ * is carried as `null`, which is the projection `JSON.stringify` produces
+ * for the same input.
  */
 const OMITTED_STATE_VALUE = Symbol('run-state.omitted');
 
 /**
  * Copies a relic's opaque state, carrying data alone.
  *
- * Structural and recursive: primitives are returned as they are, arrays and
- * plain objects are rebuilt entry by entry, and anything else — and anything at
- * `MAX_RELIC_STATE_DEPTH` — is carried BY REFERENCE, so the copy is bounded
- * rather than total. Neither `structuredClone` nor a JSON round-trip is used.
+ * Structural and recursive: a string, a finite number, a boolean and `null`
+ * are returned as they are, and an array or plain object is rebuilt entry by
+ * entry so no part of the result is shared with the argument. Neither
+ * `structuredClone` nor a JSON round-trip is used; the copy throws for no
+ * input and catches nothing.
  *
- * Nothing is caught here: state whose own property access throws — an accessor
- * or a proxy trap — propagates that throw to the caller. Relic state is
- * required to be JSON data, for which this cannot arise.
+ * Three boundaries are carried rather than followed, so a state that reached
+ * this function without passing `checkRelicState()` still yields JSON data
+ * and still terminates: a value the vocabulary does not describe is dropped,
+ * a value already on the path from the root is dropped rather than descended
+ * into, and a value below `MAX_RELIC_STATE_DEPTH` is dropped rather than
+ * carried by reference. Each name in `RESERVED_STATE_KEYS` is dropped, and
+ * every member the copy does define is defined as an own data property, so
+ * a `__proto__` member never reaches the inherited setter.
+ *
+ * @param value State to copy.
+ * @param depth Levels descended below the `state` member itself.
+ * @param ancestors Objects on the path from `state` to `value`.
+ * @returns The copy, or `OMITTED_STATE_VALUE` for a value it drops.
  */
 function cloneRelicState(
   value: unknown,
@@ -1544,6 +1633,19 @@ function cloneRelicStateMembers(
   return copy;
 }
 
+/**
+ * Copies one persisted relic, omitting each optional member the original
+ * omits so the copy round-trips through JSON identically.
+ *
+ * A `state` the `PersistedRelicState` vocabulary does not describe is
+ * omitted rather than carried, which is what `JSON.stringify` does with the
+ * same value and what keeps the copy detached from the original.
+ *
+ * @param relic Relic to copy.
+ * @returns A fresh relic.
+ * @throws RangeError when `relic.state` nests deeper than
+ *   `MAX_RELIC_STATE_DEPTH`.
+ */
 function cloneRelic(relic: PersistedRelic): PersistedRelic {
   const copy: { id: string; charges?: number; state?: unknown } = {
     id: relic.id,
@@ -1604,16 +1706,22 @@ function cloneBoardSnapshot(board: LegacyBoardSnapshot): LegacyBoardSnapshot {
 /**
  * Copies an envelope for hand-off.
  *
- * Field-wise throughout: every declared member, every relic, every cell and the
- * cursor map are rebuilt, so no declared part of the copy is shared with the
- * original and relic order is preserved. The cursor map is rebuilt through
- * `normalizeRngCursor()`, so the copy carries one draw count per substream name
- * whatever the original carried.
+ * Field-wise throughout: every member, every relic, every relic state
+ * subtree, every cell and the cursor map are rebuilt, so no part of the copy
+ * is shared with the original and a later mutation of either is invisible to
+ * the other. Relic order is preserved. The cursor map is rebuilt through
+ * `normalizeRngCursor()`, so the copy carries one draw count per substream
+ * name whatever the original carried.
  *
- * The one bounded part is relic state: `cloneRelicState()` carries a non-plain
- * value, and anything at `MAX_RELIC_STATE_DEPTH`, by reference, so a copy can
- * still share such a subtree with the original. It is not caught either — see
- * `cloneRelicState()`.
+ * The result is JSON data whatever the argument carried: a relic state
+ * member outside the `PersistedRelicState` vocabulary is dropped rather than
+ * aliased, and no member of the copy is defined by assignment, so a stored
+ * `__proto__` member cannot reach a prototype.
+ *
+ * @param value Envelope to copy.
+ * @returns A fresh envelope.
+ * @throws RangeError when a relic's `state` nests deeper than 32 levels, which
+ *   cannot be copied without sharing mutable data with the original.
  */
 export function cloneRunState(value: RunState): RunState {
   return {
@@ -1781,8 +1889,6 @@ export interface BoardSizeReconciliationReport {
 
   /** Size recorded in `board.grid.size`. */
   readonly savedSize: number;
-
-  /** Size the active rules configuration declares. */
   readonly configuredSize: number;
 
   /**
@@ -1928,3 +2034,4 @@ export const NOOP_RUN_REPORTER: RunReporter = Object.freeze({
     return;
   },
 });
+

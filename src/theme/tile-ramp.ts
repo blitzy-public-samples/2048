@@ -28,6 +28,9 @@
  * DOM, imports no renderer, creates no GPU object and emits no log, so the unit
  * suite and the separately stored seeded snapshot suite import it with no DOM,
  * no WebGL and no observability stack.
+ *
+ * Decisions behind this file: DL-RAMP-01 through DL-RAMP-04 in
+ * docs/DECISION_LOG.md. Traceability rows: TR-RAMP-01 through TR-RAMP-06, one
  */
 
 import {

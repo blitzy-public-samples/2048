@@ -23,6 +23,9 @@
 //
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock library and writes no snapshot.
+//
+// Decisions this suite is the evidence for: DL-EVENT-01 and DL-EVENT-02 in
+// docs/DECISION_LOG.md. Traceability rows: TR-EVENT-01 through TR-EVENT-08
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -32,6 +35,7 @@ import {
   createEngineEvents,
 } from '../../../src/engine/engine-events';
 import type {
+  BoardProjection,
   EngineEventListener,
   EngineEventName,
   EngineEventPayloadMap,
@@ -43,6 +47,7 @@ import type {
   StageStartEvent,
   StateCommitEvent,
   TileMergeEvent,
+  TileProjection,
   TileSpawnEvent,
 } from '../../../src/engine/engine-events';
 import { Grid } from '../../../src/engine/grid';
@@ -284,6 +289,36 @@ describe('ENGINE_EVENT_NAMES (AAP Contract 1)', () => {
     > = true;
 
     expect(namesAreExactTuple).toBe(true);
+  });
+
+  it('is frozen at run time, not only readonly at compile time (F9)', () => {
+    expect(Object.isFrozen(ENGINE_EVENT_NAMES)).toBe(true);
+  });
+
+  it('refuses a runtime write to an entry and keeps its contents exact ' +
+    '(F9)', () => {
+    const mutable = ENGINE_EVENT_NAMES as unknown as string[];
+
+    expect(() => {
+      mutable[0] = 'tampered';
+    }).toThrow(TypeError);
+    expect([...ENGINE_EVENT_NAMES]).toEqual(EXPECTED_EVENT_NAMES);
+  });
+
+  it('refuses a runtime push, pop and length change (F9)', () => {
+    const mutable = ENGINE_EVENT_NAMES as unknown as string[];
+
+    expect(() => {
+      mutable.push('eighth');
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable.pop();
+    }).toThrow(TypeError);
+    expect(() => {
+      mutable.length = 0;
+    }).toThrow(TypeError);
+    expect(ENGINE_EVENT_NAMES).toHaveLength(EXPECTED_EVENT_NAME_COUNT);
+    expect([...ENGINE_EVENT_NAMES]).toEqual(EXPECTED_EVENT_NAMES);
   });
 
   it('derives EngineEventName from the tuple', () => {
@@ -542,7 +577,7 @@ describe('EngineEvents.emit is synchronous (js/keyboard_input_manager.js ' +
     expect(received[0]).toHaveLength(1);
   });
 
-  it('passes the payload by identity, not a copy (L29)', () => {
+  it('passes a projection of the payload, not the payload itself (F1)', () => {
     const events = createEngineEvents();
     const payload = createStageEnd();
     const received = recordEmissions(events, 'stage:end');
@@ -550,10 +585,11 @@ describe('EngineEvents.emit is synchronous (js/keyboard_input_manager.js ' +
     events.emit('stage:end', payload);
 
     expect(received).toHaveLength(1);
-    expect(received[0]).toBe(payload);
+    expect(received[0]).not.toBe(payload);
+    expect(received[0]).toEqual(payload);
   });
 
-  it('hands every listener of one event the same payload (L28-L30)', () => {
+  it('hands every listener of one event the one projection (L28-L30)', () => {
     const events = createEngineEvents();
     const payload = createStateCommit();
     const first = recordEmissions(events, 'state:commit');
@@ -561,8 +597,8 @@ describe('EngineEvents.emit is synchronous (js/keyboard_input_manager.js ' +
 
     events.emit('state:commit', payload);
 
-    expect(first[0]).toBe(payload);
-    expect(second[0]).toBe(payload);
+    expect(first[0]).not.toBe(payload);
+    expect(first[0]).toBe(second[0]);
   });
 
   it('returns undefined (L25-L32)', () => {
@@ -821,14 +857,21 @@ describe('EngineEvents.emit contains a throwing listener ' +
     expect(caught).toEqual(['first', 'second']);
   });
 
-  it('counts one emission and one contained listener error', () => {
-    const counts: { metric: string; value: number; hook?: string }[] = [];
+  it('counts one emission and one contained listener error, on the event ' +
+    'dimension (F8)', () => {
+    const counts: {
+      metric: string;
+      value: number;
+      event?: string;
+      hook?: string;
+    }[] = [];
     const events = createEngineEvents({
       reporter: {
         onCount: (report): void => {
           counts.push({
             metric: report.metric,
             value: report.value,
+            ...(report.event === undefined ? {} : { event: report.event }),
             ...(report.hook === undefined ? {} : { hook: report.hook }),
           });
         },
@@ -841,10 +884,72 @@ describe('EngineEvents.emit contains a throwing listener ' +
 
     events.emit('stage:end', createStageEnd());
 
+    // The event name is reported under `event`; `hook` names one of the six
+    // hooks and is absent, so a consumer can tell the two counts apart.
     expect(counts).toEqual([
-      { metric: 'engine.event.emit', value: 1, hook: 'stage:end' },
-      { metric: 'engine.event.listener.error', value: 1, hook: 'stage:end' },
+      { metric: 'engine.event.emit', value: 1, event: 'stage:end' },
+      { metric: 'engine.event.listener.error', value: 1, event: 'stage:end' },
     ]);
+  });
+
+  it('counts an emission with no listener registered at all (F8)', () => {
+    const counts: { metric: string; event?: string }[] = [];
+    const events = createEngineEvents({
+      reporter: {
+        onCount: (report): void => {
+          counts.push({ metric: report.metric, event: report.event });
+        },
+      },
+    });
+
+    events.emit('stage:end', createStageEnd());
+    events.emit('move:after', createMoveAfter());
+
+    expect(counts).toEqual([
+      { metric: 'engine.event.emit', event: 'stage:end' },
+      { metric: 'engine.event.emit', event: 'move:after' },
+    ]);
+  });
+
+  it('counts one emission per emit however many listeners are registered ' +
+    '(F8)', () => {
+    const counts: string[] = [];
+    const events = createEngineEvents({
+      reporter: {
+        onCount: (report): void => {
+          if (report.metric === 'engine.event.emit') {
+            counts.push(report.event ?? '');
+          }
+        },
+      },
+    });
+
+    events.emit('stage:end', createStageEnd());
+    events.on('stage:end', () => undefined);
+    events.on('stage:end', () => undefined);
+    events.on('stage:end', () => undefined);
+    events.emit('stage:end', createStageEnd());
+
+    expect(counts).toEqual(['stage:end', 'stage:end']);
+  });
+
+  it('reports no event count under the hook dimension (F8)', () => {
+    const hooks: (string | undefined)[] = [];
+    const events = createEngineEvents({
+      reporter: {
+        onCount: (report): void => {
+          hooks.push(report.hook);
+        },
+      },
+    });
+
+    for (const name of ENGINE_EVENT_NAMES) {
+      if (name === 'stage:end') {
+        events.emit(name, createStageEnd());
+      }
+    }
+
+    expect(hooks).toEqual([undefined]);
   });
 
   it('contains a report sink that throws', () => {
@@ -1009,14 +1114,17 @@ describe('state:commit carries the vanilla actuation payload ' +
     expect(commit?.terminated).toBe(true);
   });
 
-  it('carries the board js/game_manager.js L91 pushed (L91)', () => {
+  it('carries a projection of the board js/game_manager.js L91 pushed ' +
+    '(L91)', () => {
     const events = createEngineEvents();
     const board = createBoard();
     const received = recordEmissions(events, 'state:commit');
 
     events.emit('state:commit', createStateCommit({ board }));
 
-    expect(received[0]?.board).toBe(board);
+    expect(received[0]?.board).not.toBe(board);
+    expect(received[0]?.board.size).toBe(board.size);
+    expect(received[0]?.board.cells[PAIR_X]?.[PAIR_Y]?.value).toBe(PAIR_VALUE);
   });
 
   it('carries every member the vanilla payload carried and no fewer ' +
@@ -1091,7 +1199,8 @@ describe('state:commit carries the vanilla actuation payload ' +
 
     events.emit('state:commit', createStateCommit({ stage }));
 
-    expect(received[0]?.stage).toBe(stage);
+    expect(received[0]?.stage).not.toBe(stage);
+    expect(received[0]?.stage).toEqual(stage);
     expect(received[0]?.stage.goal).toEqual(STAGE_GOAL);
   });
 
@@ -1105,7 +1214,8 @@ describe('state:commit carries the vanilla actuation payload ' +
 
     events.emit('state:commit', createStateCommit({ relics }));
 
-    expect(received[0]?.relics).toBe(relics);
+    expect(received[0]?.relics).not.toBe(relics);
+    expect(received[0]?.relics).toEqual(relics);
   });
 
   it('carries the active relics in pickup order', () => {
@@ -1141,10 +1251,10 @@ describe('state:commit carries the vanilla actuation payload ' +
     const commit = received[0];
 
     expect(commit).toBeDefined();
-    expect(commit?.stage).toBe(EMPTY_STAGE_CONTEXT);
+    expect(commit?.stage).toEqual(EMPTY_STAGE_CONTEXT);
     expect(commit?.stage.stageIndex).toBe(0);
     expect(commit?.stage.goalProgress).toBe(0);
-    expect(commit?.relics).toBe(EMPTY_RELIC_CONTEXT);
+    expect(commit?.relics).toEqual(EMPTY_RELIC_CONTEXT);
     expect(commit?.relics).toHaveLength(0);
   });
 
@@ -1168,21 +1278,22 @@ describe('state:commit carries the vanilla actuation payload ' +
   });
 });
 
-describe('state:commit passes the board by reference (js/html_actuator.js ' +
-  'L16-L22)', () => {
-  it('hands a subscriber the same Grid instance the emitter was given ' +
+describe('state:commit hands a subscriber a detached board projection ' +
+  '(js/html_actuator.js L16-L22)', () => {
+  it('does not hand a subscriber the Grid instance the emitter was given ' +
     '(L10)', () => {
     const events = createEngineEvents();
     const board = createBoard();
-    let seen: Grid | null = null;
+    const seen: BoardProjection[] = [];
 
     events.on('state:commit', (commit) => {
-      seen = commit.board;
+      seen.push(commit.board);
     });
     events.emit('state:commit', createStateCommit({ board }));
 
-    expect(seen).toBe(board);
-    expect(seen).toBeInstanceOf(Grid);
+    expect(seen[0]).not.toBe(board);
+    expect(seen[0]).not.toBeInstanceOf(Grid);
+    expect(seen[0]?.size).toBe(board.size);
   });
 
   it('lets a subscriber walk grid.cells as the actuator did (L16-L22)', () => {
@@ -1204,7 +1315,7 @@ describe('state:commit passes the board by reference (js/html_actuator.js ' +
     expect(drawn).toEqual([PAIR_VALUE, PAIR_VALUE]);
   });
 
-  it('lets a subscriber read value off a live tile (L58, L65)', () => {
+  it('lets a subscriber read value off a projected tile (L58, L65)', () => {
     const events = createEngineEvents();
     const board = createBoard();
     let seen: number | undefined;
@@ -1217,7 +1328,7 @@ describe('state:commit passes the board by reference (js/html_actuator.js ' +
     expect(seen).toBe(PAIR_VALUE);
   });
 
-  it('lets a subscriber read previousPosition off a live tile (L54, ' +
+  it('lets a subscriber read previousPosition off a projected tile (L54, ' +
     'L67)', () => {
     const events = createEngineEvents();
     const board = createBoard();
@@ -1227,7 +1338,7 @@ describe('state:commit passes the board by reference (js/html_actuator.js ' +
     tile?.savePosition();
     tile?.updatePosition({ x: PAIR_NEXT_X, y: PAIR_Y });
 
-    let seen: Position | null | undefined;
+    let seen: Readonly<Position> | null | undefined;
 
     events.on('state:commit', (commit) => {
       seen = commit.board.cells[PAIR_X]?.[PAIR_Y]?.previousPosition;
@@ -1237,37 +1348,50 @@ describe('state:commit passes the board by reference (js/html_actuator.js ' +
     expect(seen).toEqual({ x: PAIR_X, y: PAIR_Y });
   });
 
-  it('lets a subscriber read mergedFrom off a live tile (L73-L80)', () => {
-    const events = createEngineEvents();
-    const board = createBoard();
-    const { source, target, merged } = createMergedTriple(PAIR_VALUE);
+  it('lets a subscriber read mergedFrom off a projected tile (L73-L80)',
+    () => {
+      const events = createEngineEvents();
+      const board = createBoard();
+      const { source, target, merged } = createMergedTriple(PAIR_VALUE);
 
-    board.cells[PAIR_X] ??= [];
-    board.cells[PAIR_X]![PAIR_Y] = merged;
+      board.cells[PAIR_X] ??= [];
+      board.cells[PAIR_X]![PAIR_Y] = merged;
 
-    let seen: [Tile, Tile] | null | undefined;
+      let seen:
+        | readonly [TileProjection, TileProjection]
+        | null
+        | undefined;
 
-    events.on('state:commit', (commit) => {
-      seen = commit.board.cells[PAIR_X]?.[PAIR_Y]?.mergedFrom;
+      events.on('state:commit', (commit) => {
+        seen = commit.board.cells[PAIR_X]?.[PAIR_Y]?.mergedFrom;
+      });
+      events.emit('state:commit', createStateCommit({ board }));
+
+      // The pair carries the same four coordinates and two values the two
+      // live tiles carry, projected rather than aliased.
+      expect(seen).toHaveLength(2);
+      expect(seen?.[0]).not.toBe(source);
+      expect(seen?.[1]).not.toBe(target);
+      expect(seen?.[0]?.value).toBe(source.value);
+      expect(seen?.[1]?.value).toBe(target.value);
+      expect(seen?.[0]?.x).toBe(source.x);
+      expect(seen?.[1]?.x).toBe(target.x);
     });
-    events.emit('state:commit', createStateCommit({ board }));
 
-    expect(seen).toEqual([source, target]);
-    expect(seen?.[0]).toBe(source);
-    expect(seen?.[1]).toBe(target);
-  });
-
-  it('shows a subscriber a board written after registration (L16-L22)', () => {
+  it('projects the board as it stands at the emission, including a tile ' +
+    'written after registration (L16-L22)', () => {
     const events = createEngineEvents();
     const board = createBoard();
     const drawn: number[] = [];
 
     events.on('state:commit', (commit) => {
-      commit.board.eachCell((_x, _y, cell) => {
-        if (cell) {
-          drawn.push(cell.value);
+      for (const column of commit.board.cells) {
+        for (const cell of column) {
+          if (cell) {
+            drawn.push(cell.value);
+          }
         }
-      });
+      }
     });
 
     board.insertTile(createTile(SPAWN_CELL.x, SPAWN_CELL.y, SPAWN_VALUE));
@@ -1276,17 +1400,41 @@ describe('state:commit passes the board by reference (js/html_actuator.js ' +
     expect(drawn).toHaveLength(3);
   });
 
-  it('copies, clones and freezes no payload it carries (L91)', () => {
+  it('freezes the projection it carries, to its leaves (F1)', () => {
     const events = createEngineEvents();
     const commit = createStateCommit();
     const received = recordEmissions(events, 'state:commit');
 
     events.emit('state:commit', commit);
 
-    expect(received[0]).toBe(commit);
-    expect(Object.isFrozen(received[0])).toBe(false);
-    expect(received[0]?.board).toBe(commit.board);
+    const seen = received[0];
+
+    expect(seen).not.toBe(commit);
+    expect(Object.isFrozen(seen)).toBe(true);
+    expect(seen?.board).not.toBe(commit.board);
+    expect(Object.isFrozen(seen?.board)).toBe(true);
+    expect(Object.isFrozen(seen?.board.cells)).toBe(true);
+    expect(Object.isFrozen(seen?.board.cells[PAIR_X])).toBe(true);
+    expect(Object.isFrozen(seen?.board.cells[PAIR_X]?.[PAIR_Y])).toBe(true);
+    expect(Object.isFrozen(seen?.stage)).toBe(true);
+    expect(Object.isFrozen(seen?.stage.goal)).toBe(true);
+    expect(Object.isFrozen(seen?.relics)).toBe(true);
   });
+
+  it('carries the score, best score and three flags verbatim (L91-L97)',
+    () => {
+      const events = createEngineEvents();
+      const commit = createStateCommit();
+      const received = recordEmissions(events, 'state:commit');
+
+      events.emit('state:commit', commit);
+
+      expect(received[0]?.score).toBe(commit.score);
+      expect(received[0]?.bestScore).toBe(STORED_BEST_SCORE);
+      expect(received[0]?.over).toBe(false);
+      expect(received[0]?.won).toBe(false);
+      expect(received[0]?.terminated).toBe(false);
+    });
 });
 
 describe('tile:merge is emitted once per merge (js/game_manager.js ' +
@@ -1301,8 +1449,8 @@ describe('tile:merge is emitted once per merge (js/game_manager.js ' +
     expect(received).toHaveLength(2);
   });
 
-  it('carries the source and target tiles of each merge separately ' +
-    '(L158)', () => {
+  it('carries a projection of the source and target tile of each merge ' +
+    'separately (L158)', () => {
     const events = createEngineEvents();
     const first = createTileMerge(PAIR_VALUE);
     const second = createTileMerge(SECOND_PAIR_VALUE);
@@ -1311,11 +1459,14 @@ describe('tile:merge is emitted once per merge (js/game_manager.js ' +
     events.emit('tile:merge', first);
     events.emit('tile:merge', second);
 
-    expect(received[0]?.source).toBe(first.source);
-    expect(received[0]?.target).toBe(first.target);
-    expect(received[1]?.source).toBe(second.source);
-    expect(received[1]?.target).toBe(second.target);
+    expect(received[0]?.source).not.toBe(first.source);
+    expect(received[0]?.source).toEqual(first.source);
+    expect(received[0]?.target).toEqual(first.target);
+    expect(received[1]?.source).toEqual(second.source);
+    expect(received[1]?.target).toEqual(second.target);
     expect(received[0]?.source).not.toBe(received[1]?.source);
+    expect(received[0]?.source.value).toBe(PAIR_VALUE);
+    expect(received[1]?.source.value).toBe(SECOND_PAIR_VALUE);
   });
 
   it('carries the result value each merge produced, and not an aggregate ' +
@@ -1363,24 +1514,31 @@ describe('tile:merge is emitted once per merge (js/game_manager.js ' +
     expect(received[0]?.scoreDelta).toBe(0);
   });
 
-  it('carries the pair js/game_manager.js L158 recorded, both out of the ' +
-    'lattice (L160-L161)', () => {
+  it('carries projections of the pair js/game_manager.js L158 recorded, ' +
+    'neither of them a cell of the lattice (L160-L161)', () => {
     const events = createEngineEvents();
     const board = createBoard();
-    const merge = createTileMerge(PAIR_VALUE);
+    const { source, target, merged } = createMergedTriple(PAIR_VALUE);
     let sourceOnBoard = true;
 
     events.on('tile:merge', (payload) => {
       sourceOnBoard = board.cells.some((column) =>
-        column.some((cell) => cell === payload.source),
+        column.some(
+          (cell): boolean => (cell as unknown) === (payload.source as unknown),
+        ),
       );
     });
-    board.removeTile(merge.target);
-    events.emit('tile:merge', merge);
+    board.removeTile(target);
+    events.emit('tile:merge', {
+      source,
+      target,
+      resultValue: merged.value,
+      scoreDelta: merged.value,
+    });
 
     expect(sourceOnBoard).toBe(false);
-    expect(merge.source.value).toBe(PAIR_VALUE);
-    expect(merge.target.value).toBe(PAIR_VALUE);
+    expect(source.value).toBe(PAIR_VALUE);
+    expect(target.value).toBe(PAIR_VALUE);
   });
 
   it('carries only the four members the merge branch produced ' +
@@ -1394,8 +1552,8 @@ describe('tile:merge is emitted once per merge (js/game_manager.js ' +
   });
 });
 
-describe('move:before is cancellable (js/game_manager.js L130-L143)', () => {
-  it('carries direction and the live board (L131, L138)', () => {
+describe('move:before reports the veto and does not gather it (F1)', () => {
+  it('carries direction and a projection of the board (L131, L138)', () => {
     const events = createEngineEvents();
     const board = createBoard();
     const received = recordEmissions(events, 'move:before');
@@ -1403,102 +1561,214 @@ describe('move:before is cancellable (js/game_manager.js L130-L143)', () => {
     events.emit('move:before', createMoveBefore({ board }));
 
     expect(received[0]?.direction).toBe(DIRECTION_LEFT);
-    expect(received[0]?.board).toBe(board);
+    expect(received[0]?.board).not.toBe(board);
+    expect(received[0]?.board.size).toBe(board.size);
   });
 
-  it('is dispatched with cancelled false', () => {
+  it('reports the cancelled flag the emitter supplied', () => {
     const events = createEngineEvents();
     const received = recordEmissions(events, 'move:before');
 
     events.emit('move:before', createMoveBefore());
+    events.emit('move:before', createMoveBefore({ cancelled: true }));
 
     expect(received[0]?.cancelled).toBe(false);
+    expect(received[1]?.cancelled).toBe(true);
   });
 
-  it('lets a listener set cancelled', () => {
-    const events = createEngineEvents();
+  it('refuses a listener that writes cancelled, and contains the refusal',
+    () => {
+      const events = createEngineEvents();
+      const errors: unknown[] = [];
+      const events2 = createEngineEvents({
+        reporter: {
+          onListenerError: (report): void => {
+            errors.push(report.error);
+          },
+        },
+      });
 
-    events.on('move:before', (payload) => {
-      payload.cancelled = true;
+      // Both emitters behave the same way; the second carries a sink so the
+      // refusal is observable.
+      for (const emitter of [events, events2]) {
+        emitter.on('move:before', (payload) => {
+          // The write is what an ordinary listener used to veto a move with.
+          (payload as { cancelled: boolean }).cancelled = true;
+        });
+      }
+
+      const payload = createMoveBefore();
+
+      expect(() => {
+        events.emit('move:before', payload);
+      }).not.toThrow();
+      events2.emit('move:before', payload);
+
+      // The caller's own payload is untouched, so the engine reads the flag
+      // it resolved on the hook path and nothing else.
+      expect(payload.cancelled).toBe(false);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(TypeError);
     });
 
-    const payload = createMoveBefore();
-
-    events.emit('move:before', payload);
-
-    expect(payload.cancelled).toBe(true);
-  });
-
-  it('shows the caller that emitted the flag a listener set', () => {
+  it('shows the caller that emitted no flag a listener tried to set', () => {
     const events = createEngineEvents();
     const payload = createMoveBefore();
 
     events.on('move:before', (received) => {
-      received.cancelled = true;
+      (received as { cancelled: boolean }).cancelled = true;
     });
 
     expect(payload.cancelled).toBe(false);
 
     events.emit('move:before', payload);
 
-    expect(payload.cancelled).toBe(true);
+    expect(payload.cancelled).toBe(false);
   });
 
-  it('does not act on cancelled itself (L134)', () => {
+  it('walks every listener after one that tried to veto (L134)', () => {
     const events = createEngineEvents();
     const order: string[] = [];
 
     events.on('move:before', (payload) => {
-      payload.cancelled = true;
-      order.push('vetoed');
+      order.push('tried');
+
+      (payload as { cancelled: boolean }).cancelled = true;
     });
     events.on('move:before', () => {
       order.push('after');
     });
     events.emit('move:before', createMoveBefore());
 
-    expect(order).toEqual(['vetoed', 'after']);
+    expect(order).toEqual(['tried', 'after']);
   });
 
-  it('lets the last of several listeners set cancelled', () => {
-    const events = createEngineEvents();
-    const payload = createMoveBefore();
-
-    events.on('move:before', () => undefined);
-    events.on('move:before', () => undefined);
-    events.on('move:before', (received) => {
-      received.cancelled = true;
-    });
-    events.emit('move:before', payload);
-
-    expect(payload.cancelled).toBe(true);
-  });
-
-  it('leaves cancelled false where no listener sets it', () => {
-    const events = createEngineEvents();
-    const payload = createMoveBefore();
-
-    events.on('move:before', (received) => {
-      expect(received.direction).toBe(DIRECTION_LEFT);
-    });
-    events.emit('move:before', payload);
-
-    expect(payload.cancelled).toBe(false);
-  });
-
-  it('lets a later listener read the flag an earlier one set', () => {
+  it('shows a later listener the flag the emitter supplied, not one an ' +
+    'earlier listener tried to set', () => {
     const events = createEngineEvents();
     let seenByLater: boolean | undefined;
 
     events.on('move:before', (payload) => {
-      payload.cancelled = true;
+      (payload as { cancelled: boolean }).cancelled = true;
     });
     events.on('move:before', (payload) => {
       seenByLater = payload.cancelled;
     });
     events.emit('move:before', createMoveBefore());
 
-    expect(seenByLater).toBe(true);
+    expect(seenByLater).toBe(false);
+  });
+
+  it('freezes the projection, board, columns and tiles it carries', () => {
+    const events = createEngineEvents();
+    const received = recordEmissions(events, 'move:before');
+
+    events.emit('move:before', createMoveBefore());
+
+    const seen = received[0];
+
+    expect(Object.isFrozen(seen)).toBe(true);
+    expect(Object.isFrozen(seen?.board)).toBe(true);
+    expect(Object.isFrozen(seen?.board.cells)).toBe(true);
+    expect(Object.isFrozen(seen?.board.cells[PAIR_X])).toBe(true);
+    expect(Object.isFrozen(seen?.board.cells[PAIR_X]?.[PAIR_Y])).toBe(true);
+  });
+});
+
+describe('an ordinary listener cannot change an engine result (F1)', () => {
+  it('leaves the live board unchanged when a listener writes a tile value',
+    () => {
+      const events = createEngineEvents();
+      const board = createBoard();
+
+      events.on('state:commit', (commit) => {
+        const tile = commit.board.cells[PAIR_X]?.[PAIR_Y];
+
+        if (tile) {
+          (tile as { value: number }).value = 9999;
+        }
+      });
+      events.emit('state:commit', createStateCommit({ board }));
+
+      expect(board.cells[PAIR_X]?.[PAIR_Y]?.value).toBe(PAIR_VALUE);
+    });
+
+  it('leaves the live board unchanged when a listener writes a cell', () => {
+    const events = createEngineEvents();
+    const board = createBoard();
+
+    events.on('state:commit', (commit) => {
+      const column = commit.board.cells[PAIR_X];
+
+      if (column) {
+        (column as (TileProjection | null)[])[PAIR_Y] = null;
+      }
+    });
+    events.emit('state:commit', createStateCommit({ board }));
+
+    expect(board.cells[PAIR_X]?.[PAIR_Y]).toBeInstanceOf(Tile);
+  });
+
+  it('leaves the live tiles unchanged when a listener writes a merge ' +
+    'payload tile', () => {
+    const events = createEngineEvents();
+    const { source, target } = createMergedTriple(PAIR_VALUE);
+
+    events.on('tile:merge', (merge) => {
+      (merge.source as { value: number }).value = 9999;
+      (merge.target as { value: number }).value = 9999;
+    });
+    events.emit('tile:merge', {
+      source,
+      target,
+      resultValue: PAIR_MERGED_VALUE,
+      scoreDelta: PAIR_MERGED_VALUE,
+    });
+
+    expect(source.value).toBe(PAIR_VALUE);
+    expect(target.value).toBe(PAIR_VALUE);
+  });
+
+  it('gives every listener of one emission the identical projection, so no ' +
+    'listener can carry a change to the next', () => {
+    const events = createEngineEvents();
+    const seen: StateCommitEvent[] = [];
+
+    events.on('state:commit', (commit) => {
+      seen.push(commit);
+    });
+    events.on('state:commit', (commit) => {
+      seen.push(commit);
+    });
+    events.emit('state:commit', createStateCommit());
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBe(seen[1]);
+    expect(Object.isFrozen(seen[0])).toBe(true);
+  });
+
+  it('produces the same projection for a listener whatever the number and ' +
+    'order of the other listeners', () => {
+    const board = createBoard();
+    const withOne = createEngineEvents();
+    const withThree = createEngineEvents();
+    let alone: unknown;
+    let among: unknown;
+
+    withOne.on('move:after', (payload) => {
+      alone = payload;
+    });
+
+    withThree.on('move:after', () => undefined);
+    withThree.on('move:after', (payload) => {
+      among = payload;
+    });
+    withThree.on('move:after', () => undefined);
+
+    withOne.emit('move:after', createMoveAfter({ board }));
+    withThree.emit('move:after', createMoveAfter({ board }));
+
+    expect(among).toEqual(alone);
   });
 });
 
@@ -1557,15 +1827,41 @@ describe('tile:spawn carries an absent position on a full board (js/grid.js ' +
     expect(placed).toEqual([SPAWN_CELL]);
   });
 
-  it('emits once per spawn attempt, position or not (js/game_manager.js ' +
-    'L69-L76)', () => {
+  it('emits once per RESOLVED spawn and is not the attempt boundary ' +
+    '(F7)', () => {
     const events = createEngineEvents();
     const received = recordEmissions(events, 'tile:spawn');
 
+    // Two resolutions: one that inserted a tile, and one an onSpawn handler
+    // suppressed by returning the payload without a position. The full-board
+    // case reaches neither, because the engine returns before it emits — see
+    // the boundary suite in tests/unit/engine/engine-spawn.test.ts.
     events.emit('tile:spawn', createTileSpawn());
     events.emit('tile:spawn', { value: SPAWN_VALUE });
 
     expect(received).toHaveLength(2);
+    expect(received[0]?.position).toEqual(SPAWN_CELL);
+    expect(received[1]?.position).toBeUndefined();
+  });
+
+  it('omits the position member rather than carrying it as null (F7)', () => {
+    const events = createEngineEvents();
+    const received = recordEmissions(events, 'tile:spawn');
+
+    events.emit('tile:spawn', { value: SPAWN_VALUE });
+
+    expect(Object.keys(received[0] ?? {})).toEqual(['value']);
+  });
+
+  it('freezes the position it carries', () => {
+    const events = createEngineEvents();
+    const cell: Position = { x: SPAWN_CELL.x, y: SPAWN_CELL.y };
+    const received = recordEmissions(events, 'tile:spawn');
+
+    events.emit('tile:spawn', { position: cell, value: SPAWN_VALUE });
+
+    expect(received[0]?.position).not.toBe(cell);
+    expect(Object.isFrozen(received[0]?.position)).toBe(true);
   });
 });
 
@@ -1594,13 +1890,15 @@ describe('stage:start (js/game_manager.js L35-L59)', () => {
     ]);
   });
 
-  it('carries the goal verbatim', () => {
+  it('carries the goal by value, as a frozen copy', () => {
     const events = createEngineEvents();
     const received = recordEmissions(events, 'stage:start');
 
     events.emit('stage:start', createStageStart({ goal: STAGE_GOAL }));
 
-    expect(received[0]?.goal).toBe(STAGE_GOAL);
+    expect(received[0]?.goal).not.toBe(STAGE_GOAL);
+    expect(received[0]?.goal).toEqual(STAGE_GOAL);
+    expect(Object.isFrozen(received[0]?.goal)).toBe(true);
   });
 
   it('carries the size the stage grid was built at (L40-L41, L47)', () => {
@@ -1679,7 +1977,8 @@ describe('move:after mirrors the vanilla post-move branch ' +
 
     expect(after).toBeDefined();
     expect(after?.moved).toBe(true);
-    expect(after?.board).toBe(board);
+    expect(after?.board).not.toBe(board);
+    expect(after?.board.size).toBe(board.size);
     expect(after?.score).toBe(COMMIT_SCORE);
     expect(after?.over).toBe(false);
     expect(after?.won).toBe(false);
@@ -1720,18 +2019,19 @@ describe('move:after mirrors the vanilla post-move branch ' +
     expect(received[0]?.terminated).toBe(true);
   });
 
-  it('passes the board by reference, as the actuation it precedes does ' +
-    '(L189)', () => {
+  it('projects the board, as the actuation it precedes does (L189)', () => {
     const events = createEngineEvents();
     const board = createBoard();
-    let seen: Grid | null = null;
+    const seen: BoardProjection[] = [];
 
     events.on('move:after', (payload) => {
-      seen = payload.board;
+      seen.push(payload.board);
     });
     events.emit('move:after', createMoveAfter({ board }));
 
-    expect(seen).toBe(board);
+    expect(seen[0]).not.toBe(board);
+    expect(seen[0]?.size).toBe(board.size);
+    expect(seen[0]?.cells[PAIR_X]?.[PAIR_Y]?.value).toBe(PAIR_VALUE);
   });
 });
 

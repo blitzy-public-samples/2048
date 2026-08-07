@@ -44,13 +44,18 @@
 //      js/classlist_polyfill.js. That file is deleted.
 //   4. The fill, the numeral colour and the numeral size of each tile are
 //      resolved through `resolveTileTheme` of src/theme/themes.ts and
-//      `tileFontSize` of src/theme/tokens.ts and published as custom
+//      `tileNumeralSize` of src/theme/tokens.ts and published as custom
 //      properties, where the actuator emitted a value class alone.
 //
 // This module consumes no randomness, touches no storage, reads no clock,
 // imports no rendering library and holds no engine reference. It reads the
 // `state:commit` event, and it retains no part of a payload after the event
 // that carried it.
+//
+// Decisions behind this file: DL-NUMBER-01, the number-only mode being a
+// DL-NUMBER-02, `classList` as the class-mutation surface; and
+// DL-NUMBER-03, the tile appearance published as custom properties. All
+// Traceability rows: TR-NUMBER-01 through TR-NUMBER-04, one per numbered
 
 import {
   MAX_BOARD_SIZE,
@@ -62,6 +67,7 @@ import type {
   EngineEventSubscription,
   StateCommitEvent,
 } from '../engine/engine-events';
+import type { BestScoreValue } from '../engine/types';
 import type { TileTheme } from '../theme/tile-ramp';
 import { tileRampConstants } from '../theme/tile-ramp';
 import type { Theme, ThemeId } from '../theme/themes';
@@ -77,7 +83,7 @@ import {
   desktopGeometry,
   mobileGeometry,
   mobileThreshold,
-  tileFontSize,
+  tileNumeralSize,
   tilePositionStep,
 } from '../theme/tokens';
 import type { RenderReporter } from './webgl-support';
@@ -113,13 +119,6 @@ const MERGED_TILE_CLASS = 'tile-merged';
 
 const NEW_TILE_CLASS = 'tile-new';
 
-const SCORE_ADDITION_CLASS = 'score-addition';
-
-const WON_MESSAGE_CLASS = 'game-won';
-
-const OVER_MESSAGE_CLASS = 'game-over';
-
-const MESSAGE_VERDICT_TAG = 'p';
 
 const ELEMENT_TAG = 'div';
 
@@ -147,13 +146,12 @@ const TRANSFORM_PROPERTY = 'transform';
 /**
  * Names the guarded lookups are reported under: the selector index.html
  * declares each surface with.
+ *
+ * BOARD SURFACES ONLY. The score outlets and the terminal overlay are owned by
+ * src/ui/screens/hud.ts, so this module neither looks them up nor reports them.
  */
 const ELEMENT_NAMES = Object.freeze({
   host: '#board-number-only',
-  score: '.score-container',
-  best: '.best-container',
-  message: '.game-message',
-  verdict: '.game-message > p',
   document: 'document',
 });
 
@@ -196,15 +194,15 @@ const NOT_A_TAB_STOP = '-1';
 /**
  * The copy this module writes.
  *
- * Every string is a caller-overridable default. The two verdicts are ported
- * verbatim from js/html_actuator.js L129.
+ * Every string is a caller-overridable default. The two terminal verdicts are
+ * NOT here: they belong to src/ui/screens/hud.ts, which owns the overlay they
+ * are written into.
  */
 export interface NumberOnlyRendererCopy {
   readonly boardLabel: string;
   readonly cellLabel: (row: number, column: number, value: number) => string;
   readonly emptyCellLabel: (row: number, column: number) => string;
-  readonly wonMessage: string;
-  readonly overMessage: string;
+
 }
 
 /**
@@ -220,9 +218,6 @@ export const numberOnlyRendererCopy: NumberOnlyRendererCopy = Object.freeze({
 
   emptyCellLabel: (row: number, column: number): string =>
     `Row ${row}, column ${column}, empty`,
-
-  wonMessage: 'You win!',
-  overMessage: 'Game over!',
 });
 
 const DIAGNOSTIC_SOURCE = 'render/number-only-renderer';
@@ -300,14 +295,36 @@ export interface RenderedBoard {
   readonly cells: readonly RenderedCell[];
   readonly score: number;
   readonly scoreDelta: number;
-  readonly bestScore: string | number;
+  readonly bestScore: BestScoreValue;
   readonly won: boolean;
   readonly over: boolean;
   readonly terminated: boolean;
 
-  /** The verdict written into the overlay, or `null` where none was. */
-  readonly verdict: string | null;
   readonly themeId: ThemeId;
+}
+
+/**
+ * The part of `ParallelBoardLayer` this renderer drives.
+ *
+ * Declared structurally, by the three members called, so the render layer needs
+ * no import from the accessibility layer: `ParallelBoardLayer` of
+ * src/ui/a11y/focus-manager.ts satisfies it as written.
+ */
+export interface ParallelBoardLifecycle {
+  /** Whether the layer holds a resolved host and built cells. */
+  isMounted(): boolean;
+
+  /**
+   * Resolves the host and builds the cell counterparts.
+   *
+   * @param host Host the cells are built inside.
+   * @param boardSize Cells per row.
+   * @returns Whether the layer mounted.
+   */
+  mount(host: Element | string | null | undefined, boardSize: number): boolean;
+
+  /** Removes the cell counterparts and every listener the layer added. */
+  unmount(): void;
 }
 
 /** Construction parameters. Every member is optional. */
@@ -322,24 +339,36 @@ export interface NumberOnlyRendererOptions {
    * to `mount(host)`.
    */
   readonly host?: Element | null;
-  readonly scoreContainer?: Element | null;
-  readonly bestContainer?: Element | null;
-  readonly messageContainer?: Element | null;
   readonly canvas?: Element | null;
 
   /**
    * The parallel accessibility board, `#board-a11y` of index.html.
    *
    * SEMANTIC EXCLUSIVITY. This renderer publishes its own complete semantic
-   * lattice — a `role="grid"` carrying one labelled `role="gridcell"` per
-   * cell —
-   * so the parallel board would be a second `role="grid"` beside it, labelled
-   * the same and empty. It is emptied, marked `aria-hidden` and hidden for as
-   * long as this renderer is mounted, and every attribute it carried is
-   * restored on unmount, so the surface is available again to whichever
-   * renderer takes over.
+   * lattice — a `role="grid"` carrying one labelled `role="gridcell"` per cell
+   * — so the parallel board would be a second `role="grid"` beside it, labelled
+   * the same. It is marked `aria-hidden` and `hidden` for as long as this
+   * renderer is mounted, which takes it out of both the rendering tree and the
+   * accessibility tree, and every attribute it carried is restored on unmount,
+   * so the surface is available again to whichever renderer takes over.
+   *
+   * ITS CHILDREN ARE NEVER TOUCHED. They belong to `ParallelBoardLayer`, which
+   * holds a reference to each of them; a caller that wants them removed hands
+   * in `parallelBoardLayer` below so the layer is unmounted through its own api.
    */
   readonly parallelBoard?: Element | null;
+
+  /**
+   * The layer that owns the parallel board's cells, where the caller holds one.
+   *
+   * Supplying it lets this renderer take the OTHER lattice down properly:
+   * `unmount()` on claim and `mount()` on release, so the layer's own
+   * `isMounted()` and `boardSize()` stay truthful and its cell references are
+   * never left pointing at detached nodes. Omitting it leaves the element
+   * hidden with its children intact, which is equally safe and simply keeps
+   * them in the document.
+   */
+  readonly parallelBoardLayer?: ParallelBoardLifecycle | null;
 
   /** Document elements are created in. Defaults to the ambient `document`. */
   readonly ownerDocument?: Document;
@@ -406,7 +435,7 @@ export interface NumberOnlyRenderer {
    */
   render(commit: StateCommitEvent): void;
   frame(): boolean;
-  continueGame(): void;
+
 
   /**
    * Everything the last paint put on screen, as plain data, or `null` before
@@ -438,7 +467,7 @@ interface PaintPlan {
   /** The value of each cell in row-major order, `null` where empty. */
   readonly values: readonly (number | null)[];
   readonly score: number;
-  readonly bestScore: string | number;
+  readonly bestScore: BestScoreValue;
   readonly over: boolean;
   readonly won: boolean;
   readonly terminated: boolean;
@@ -479,7 +508,6 @@ interface RetainedTile {
   index: number;
 }
 
-/** A tile value's resolved presentation. */
 interface TilePresentation {
   readonly isSuper: boolean;
 
@@ -747,8 +775,32 @@ function planCommit(commit: StateCommitEvent): PaintPlan {
   });
 }
 
-function readNumeralSize(value: number, scale: ScaleName): number {
-  return tileFontSize(value, scale);
+/**
+ * The numeral size one value is drawn at, at one scale, for the board size in
+ * force.
+ *
+ * `tileFontSize` alone answers what style/main.scss DECLARES for a value, which
+ * was authored against the four-cell board. Cell size falls as the board grows,
+ * so at any larger size the declared numeral no longer fits inside its own cell
+ * — a sixteen-cell desktop cell resolves to roughly 15.31px and carried the 55px
+ * base numeral. `tileNumeralSize` clamps the declared size to the resolved cell,
+ * and is identical to it at four cells.
+ *
+ * @param value Face value the numeral is drawn for.
+ * @param scale Which of the two scales to resolve at.
+ * @param boardSize Cells per row in force.
+ * @returns The size to draw at, in px.
+ */
+function readNumeralSize(
+  value: number,
+  scale: ScaleName,
+  boardSize: number,
+): number {
+  return tileNumeralSize(
+    value,
+    scale,
+    geometryForBoard(scale, boardSize).tileSize,
+  );
 }
 
 function writeProperty(
@@ -777,8 +829,6 @@ function mergeCopy(
     cellLabel: overrides.cellLabel ?? numberOnlyRendererCopy.cellLabel,
     emptyCellLabel:
       overrides.emptyCellLabel ?? numberOnlyRendererCopy.emptyCellLabel,
-    wonMessage: overrides.wonMessage ?? numberOnlyRendererCopy.wonMessage,
-    overMessage: overrides.overMessage ?? numberOnlyRendererCopy.overMessage,
   });
 }
 
@@ -804,9 +854,6 @@ export function createNumberOnlyRenderer(
   );
   const owner = options.ownerDocument ?? readAmbientDocument();
   const copy = mergeCopy(options.copy);
-  const scoreContainer = options.scoreContainer ?? null;
-  const bestContainer = options.bestContainer ?? null;
-  const messageContainer = options.messageContainer ?? null;
 
   /** Names already reported absent, so each is reported once. */
   const reportedAbsent = new Set<string>();
@@ -961,6 +1008,7 @@ export function createNumberOnlyRenderer(
   let scaleListener: (() => void) | null = null;
 
   /** The parallel accessibility board, while this renderer holds it. */
+  const parallelBoardLayer = options.parallelBoardLayer ?? null;
   let parallelBoard: Element | null = null;
 
   /** The attributes the parallel board carried before this renderer hid it. */
@@ -1002,8 +1050,10 @@ export function createNumberOnlyRenderer(
       // style/main.scss steps the numeral down as the value gains digits, and
       // steps it again above the ramp. `tileFontSize` carries those
       // thresholds.
-      desktopSize = readNumeralSize(value, 'desktop');
-      mobileSize = readNumeralSize(value, 'mobile');
+      const sized = latticeSize > 0 ? latticeSize : readConfiguredSize();
+
+      desktopSize = readNumeralSize(value, 'desktop', sized);
+      mobileSize = readNumeralSize(value, 'mobile', sized);
     } catch (error: unknown) {
       if (!reportedValues.has(value)) {
         reportedValues.add(value);
@@ -1429,9 +1479,11 @@ export function createNumberOnlyRenderer(
    * Moves a retained node to a cell, rewriting its position class and its
    * transform.
    *
-   * The 100ms `transform` transition style/main.scss L536-L539 declares runs
-   * off this rewrite, which is what the deferred class swap of L67-L72 existed
-   * to trigger on a freshly built node.
+   * The 100ms `transform` transition style/main.scss declares on `.tile`, as
+   * `transition($transition-speed ease-in-out)` with
+   * `transition-property: transform`, runs off this rewrite, which is what the
+   * deferred class swap of js/html_actuator.js L67-L72 existed to trigger on a
+   * freshly built node.
    *
    * @param held Node to move.
    * @param x Destination column.
@@ -1620,79 +1672,12 @@ export function createNumberOnlyRenderer(
    *
    * @returns The delta, which is `0` or negative where none was appended.
    */
-  const updateScore = (score: number): number => {
+  const trackScoreDelta = (score: number): number => {
     const difference = score - shownScore;
 
     shownScore = score;
 
-    if (scoreContainer === null || owner === null) {
-      return difference;
-    }
-
-    // The clear is what the vanilla actuator did before writing.
-    clearElement(scoreContainer);
-    scoreContainer.textContent = String(score);
-
-    if (difference > 0) {
-      const addition = owner.createElement(ELEMENT_TAG);
-
-      addition.classList.add(SCORE_ADDITION_CLASS);
-      addition.textContent = `+${difference}`;
-      scoreContainer.appendChild(addition);
-    }
-
     return difference;
-  };
-
-  /**
-   * Writes the best score.
-   *
-   * Ported from js/html_actuator.js L123-L125. The value arrives exactly as
-   * the storage layer returned it — the raw stored STRING where one is stored
-   * and the number `0` where none is — and is written as text, which is the
-   * assignment L124 made. `String` is the conversion that assignment performed
-   * itself, so a stored string is written unchanged.
-   */
-  const updateBestScore = (bestScore: string | number): void => {
-    if (bestContainer === null) {
-      return;
-    }
-
-    bestContainer.textContent = String(bestScore);
-  };
-
-  const showMessage = (won: boolean): string | null => {
-    if (messageContainer === null) {
-      return null;
-    }
-
-    messageContainer.classList.add(
-      won ? WON_MESSAGE_CLASS : OVER_MESSAGE_CLASS,
-    );
-
-    const verdict = won ? copy.wonMessage : copy.overMessage;
-    const paragraph = messageContainer
-      .getElementsByTagName(MESSAGE_VERDICT_TAG)
-      .item(0);
-
-    if (paragraph === null) {
-      reportAbsent(ELEMENT_NAMES.verdict, false);
-
-      return verdict;
-    }
-
-    paragraph.textContent = verdict;
-
-    return verdict;
-  };
-
-  const clearMessage = (): void => {
-    if (messageContainer === null) {
-      return;
-    }
-
-    messageContainer.classList.remove(WON_MESSAGE_CLASS);
-    messageContainer.classList.remove(OVER_MESSAGE_CLASS);
   };
 
   const paintCells = (plan: PaintPlan, theme: Theme): RenderedCell[] => {
@@ -1797,24 +1782,11 @@ export function createNumberOnlyRenderer(
 
     const cells = paintCells(plan, theme);
 
-    const scoreDelta = updateScore(plan.score);
-
-    updateBestScore(plan.bestScore);
-
-    let verdict: string | null = null;
-
-    if (plan.terminated) {
-      if (plan.over) {
-        verdict = showMessage(false);
-      } else if (plan.won) {
-        verdict = showMessage(true);
-      }
-    } else {
-      // The vanilla `continueGame()`, which the manager called on restart and
-      // on keep-playing. Both reach this module as a commit carrying
-      // `terminated` as `false`.
-      clearMessage();
-    }
+    // Tracked, not written: the score outlets and the terminal overlay belong
+    // to src/ui/screens/hud.ts, which subscribes to the same commit
+    // independently of which renderer draws the board. The delta is still
+    // computed here because `RenderedBoard` carries it for the announcer.
+    const scoreDelta = trackScoreDelta(plan.score);
 
     host.setAttribute(THEME_ATTRIBUTE_NAME, theme.id);
 
@@ -1827,7 +1799,6 @@ export function createNumberOnlyRenderer(
       won: plan.won,
       over: plan.over,
       terminated: plan.terminated,
-      verdict,
       themeId: theme.id,
     });
 
@@ -1897,36 +1868,14 @@ export function createNumberOnlyRenderer(
       : null;
 
   /**
-   * Reports the absence of each optional surface, once.
-   *
-   * The three outlets are looked up by the caller and handed in, which is what
-   * js/html_actuator.js L3-L5 looked up for itself. An absent outlet is
-   * reported and skipped; L107, L124, L131 and L137 dereferenced theirs
-   * unchecked.
-   */
-  const reportAbsentSurfaces = (): void => {
-    if (scoreContainer === null) {
-      reportAbsent(ELEMENT_NAMES.score, false);
-    }
-
-    if (bestContainer === null) {
-      reportAbsent(ELEMENT_NAMES.best, false);
-    }
-
-    if (messageContainer === null) {
-      reportAbsent(ELEMENT_NAMES.message, false);
-    }
-  };
-
-  /**
    * Takes the parallel accessibility board out of the accessibility tree for
    * as long as this renderer holds a semantic lattice of its own.
    *
    * The number-only lattice carries `role="grid"` and a labelled cell per
-   * position, and src/ui/a11y/parallel-board.ts builds a second lattice
-   * carrying the same roles over the same board. Exactly one of the two is
-   * exposed at a time; this renderer's own lattice is the one, because it is
-   * the surface that is drawn.
+   * position. src/ui/a11y/parallel-board.ts, PLANNED AND NOT PRESENT AT THIS
+   * COMMIT, is to build a second lattice carrying the same roles over the same
+   * board. Exactly one of the two is exposed at a time; this renderer's own
+   * lattice is the one, because it is the surface that is drawn.
    *
    * Called once this renderer HAS a lattice, never merely once it is mounted:
    * a mount with no configured size defers the lattice to the first commit,
@@ -1954,16 +1903,24 @@ export function createNumberOnlyRenderer(
       ariaBusy: board.getAttribute('aria-busy'),
     };
 
-    // Emptied as well as hidden: an `aria-hidden` subtree is out of the
-    // accessibility tree, and an emptied one cannot be reached by a rotor
-    // that ignores it either.
-    clearElement(board);
+    // HIDDEN, NEVER EMPTIED. The children of this element belong to
+    // `ParallelBoardLayer` in src/ui/a11y/focus-manager.ts, which holds a
+    // reference to every cell it built: removing them left that layer holding
+    // detached nodes while `isMounted()` still reported `true`, and restoring
+    // attributes alone never gave them back. The `hidden` attribute already
+    // takes the subtree out of both the rendering tree and the accessibility
+    // tree, so nothing has to be removed to take it out of a rotor's reach; a
+    // caller that wants the layer torn down calls its own `unmount()`.
     board.setAttribute('aria-hidden', 'true');
     board.removeAttribute('aria-busy');
 
     if (element !== null) {
       element.hidden = true;
     }
+
+    // Where the caller handed in the layer itself, it is unmounted through its
+    // OWN api, so its state stays truthful and a later `mount()` rebuilds.
+    parallelBoardLayer?.unmount();
 
     reporter.onCount({
       name: PARALLEL_BOARD_METRIC,
@@ -2002,6 +1959,16 @@ export function createNumberOnlyRenderer(
       element.hidden = state.hidden;
     }
 
+    // Remounted through the layer's own api where the caller supplied it, at
+    // the size this renderer was last drawing, so the surface the next renderer
+    // takes over is populated rather than an empty `role="grid"`.
+    if (parallelBoardLayer !== null && !parallelBoardLayer.isMounted()) {
+      parallelBoardLayer.mount(
+        board,
+        latticeSize > 0 ? latticeSize : readConfiguredSize(),
+      );
+    }
+
     reporter.onCount({
       name: PARALLEL_BOARD_METRIC,
       value: 1,
@@ -2009,10 +1976,6 @@ export function createNumberOnlyRenderer(
     });
   };
 
-  /**
-   * Removes everything this renderer put in the document, and restores the
-   * two `hidden` states it changed.
-   */
   const unmount = (): void => {
     const mountedHost = host;
 
@@ -2066,10 +2029,6 @@ export function createNumberOnlyRenderer(
     const next = requested ?? options.host ?? null;
 
     unmount();
-
-    // Reported before the fatal checks below, so a mount attempt with every
-    // surface absent reports every one of them and not only the first.
-    reportAbsentSurfaces();
 
     if (owner === null) {
       reportAbsent(ELEMENT_NAMES.document, true);
@@ -2318,7 +2277,7 @@ export function createNumberOnlyRenderer(
     render,
     frame,
 
-    continueGame: clearMessage,
+
     readRenderedBoard: (): RenderedBoard | null => rendered,
 
     dispose,

@@ -299,6 +299,8 @@ hr {
 // BLITZY [A11Y]: the label text in this mixin sits below the WCAG AA 4.5:1 text
 // threshold. It applies to `.restart-button`, `.settings-button` and the two
 // `.game-message` controls.
+//
+// `.game-message` controls. Decision DL-A11Y-01.
 @mixin button {
   display: inline-block;
   background: color.adjust($game-container-background, $lightness: -20%);
@@ -519,6 +521,24 @@ hr {
         width: var(--board-cell-size);
         height: var(--board-cell-size);
         line-height: var(--board-cell-size);
+      }
+
+      // Numeral clamped to the resolved cell, the CSS form of
+      // `tileNumeralSize` of src/theme/tokens.ts. The four declared sizes were
+      // authored against $grid-row-cells, so at every other edge length the
+      // declared numeral was taller than the cell holding it - a sixteen-cell
+      // desktop cell resolves to roughly 15.31px and carried the 55px base
+      // numeral. This is the fallback path: the renderer writes the clamped
+      // value into `--tile-numeral-size` itself, and this covers the tile it
+      // wrote no property for.
+      .tile-inner {
+        font-size: max(
+          $tile-numeral-min-size,
+          min(
+            var(--tile-numeral-size, var(--tile-numeral-size-compiled, 55px)),
+            calc(var(--board-cell-size) * #{$tile-numeral-cell-ratio})
+          )
+        );
       }
     }
   }

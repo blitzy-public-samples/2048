@@ -442,6 +442,149 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
 }
 
 // -----------------------------------------------------------------------------
+// 8b. THE SETTINGS BODY
+//
+// The vocabulary src/ui/components/settings-panel.ts renders inside the modal:
+// one `<form>` carrying `.settings-body`, a `<fieldset>` per group, and a row
+// per setting. Section 8 already resolves that form to the bounded reading
+// surface and `screen-content` already dresses its `h2`, its `p`, its `label`
+// and every `button` inside it, so the rules below add only what the grouping
+// and row elements need — the user-agent `fieldset` chrome removed, and the two
+// layouts.
+//
+// Every length resolves to a token or a token derivative, and no colour is
+// declared: the surface, the text colour and the control treatment all arrive
+// from section 8.
+// -----------------------------------------------------------------------------
+
+.settings-group {
+  // The user-agent fieldset border and inline padding, which would draw a second
+  // boundary inside the panel's own.
+  margin: 0;
+  padding: 0;
+  border: none;
+
+  display: flex;
+  flex-direction: column;
+  gap: $screen-control-gap;
+
+  // `legend` inside a border-less fieldset needs its own inline padding cleared
+  // to align with the rows below it.
+  > legend {
+    padding: 0;
+    font-weight: bold;
+  }
+}
+
+// One setting: its name, its current value, and the control that changes it.
+// Wraps rather than overflowing, because a rebinding row carries a key
+// description of unbounded length.
+.settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $screen-control-gap;
+}
+
+// The keys bound to one action, as spoken text. `1 1 auto` lets the description
+// take the space between the action's name and its control, so the controls of
+// the fourteen rows line up.
+.settings-binding {
+  flex: 1 1 auto;
+  overflow-wrap: break-word;
+}
+
+// -----------------------------------------------------------------------------
+// 8c. THE DIAGNOSTICS SURFACE, INNER STRUCTURE ONLY
+//
+// The surface's own box is NOT declared here. style/main.scss already owns
+// `.diagnostics-overlay:not([hidden])` in full — its corner placement, the
+// $z-index-diagnostics slot, its inline size and viewport bounds, its overflow
+// and overscroll behaviour, its flex column, padding, radius, monospace stack
+// and accent outline, and its mobile strip — and style/_themes.scss owns its
+// two colours on its own `.diagnostics-overlay` rule.
+//
+// This section adds only what the consumer renders INSIDE it, which had no
+// styling of its own. A second geometry block here would over-constrain the box:
+// main.scss pins the block-end inline-start corner, so also declaring the
+// opposite two insets leaves all four active, which stretches the surface across
+// the viewport and anchors it to the wrong edge.
+// -----------------------------------------------------------------------------
+
+.diagnostics-overlay {
+  .diagnostics-heading {
+    margin: 0;
+    color: var(--theme-diagnostics-accent, #{$tile-gold-color});
+    font-size: inherit;
+    font-weight: bold;
+  }
+
+  // The parent is a flex column with its own `gap`, so a heading needs no
+  // margin of its own and declares none.
+  .diagnostics-table {
+    inline-size: 100%;
+    border-collapse: collapse;
+
+    // FIXED, not auto. Under automatic layout a table is at least as wide as
+    // the sum of its columns' min-content widths, and `overflow-wrap` does not
+    // reduce a cell's min-content contribution — so `inline-size: 100%` loses
+    // to a long metric name and the table grows past the surface, taking every
+    // value column out of view. Fixed layout makes the declared width binding
+    // and distributes the columns within it.
+    table-layout: fixed;
+
+    td {
+      padding: 0 $screen-field-padding-inline 0 0;
+
+      // `anywhere` rather than `break-word`, because only `anywhere` shrinks the
+      // min-content width. A metric name is one unbroken token — no space and no
+      // hyphen to break at — so `break-word` leaves it contributing its full
+      // length even under fixed layout, which overflows the cell instead of the
+      // table.
+      overflow-wrap: anywhere;
+      vertical-align: top;
+    }
+
+    // The first column carries the metric name or the probe name, which is the
+    // longest text in every panel, so it takes the larger share of the fixed
+    // width rather than an equal one.
+    td:first-child {
+      inline-size: 45%;
+    }
+
+    // The value columns read as figures, so they align right.
+    td:not(:first-child) {
+      text-align: end;
+    }
+  }
+
+  // Kept in reach without scrolling.
+  //
+  // The surface scrolls its own overflow, and a readout long enough to need
+  // scrolling would otherwise push the controls below its fold — leaving Close
+  // unreachable until the reader scrolls to find it. Sticky to the block end
+  // rather than fixed, so it stays inside the surface's own padding box.
+  .diagnostics-controls {
+    position: sticky;
+    inset-block-end: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: $screen-control-gap;
+
+    // Its own surface, so the readout scrolling underneath does not show
+    // through the row.
+    //
+    // The negative end margin pulls the row over the surface's own end padding
+    // and the equal padding gives the space back. In a scroll container the
+    // padding is part of the scrollport, so without this a sliver of scrolled
+    // content shows through the gap below a row stuck to the content-box end.
+    margin-block-end: -$grid-spacing;
+    padding-block: $screen-control-gap $grid-spacing;
+    background: var(--theme-diagnostics-surface, #{$text-color});
+  }
+}
+
+// -----------------------------------------------------------------------------
 // 9. REDUCED MOTION
 //
 // The screens take their fade from `fade-in` and declare no opacity of their

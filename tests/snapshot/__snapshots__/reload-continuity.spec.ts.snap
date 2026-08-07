@@ -1,0 +1,113 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`a run interrupted and resumed from storage > reaches the state the uninterrupted run reached 1`] = `
+"board as played
+size 4  score 60  over false  won false  keepPlaying false
+     .     .     .     .
+     4     .     .     .
+     2    16     .     2
+     8     .     .     .
+
+run envelope as persisted
+schemaVersion  1
+runId          run-instance-1
+seed           snapshot-run-seed
+stageIndex     1
+stageGoal      highest-tile 32
+goalProgress   0.5
+rngCursor
+  spawn-value     14
+  spawn-position  14
+  relic-draw      0
+  rarity-weight   0
+relics (pickup order)
+  (none)
+board
+size 4  score 60  over false  won false  keepPlaying false
+     .     .     .     .
+     4     .     .     .
+     2    16     .     2
+     8     .     .     ."
+`;
+
+exports[`an uninterrupted run > reproduces its recorded board and envelope 1`] = `
+"board as played
+size 4  score 60  over false  won false  keepPlaying false
+     .     .     .     .
+     4     .     .     .
+     2    16     .     2
+     8     .     .     .
+
+run envelope as persisted
+schemaVersion  1
+runId          run-instance-1
+seed           snapshot-run-seed
+stageIndex     1
+stageGoal      highest-tile 32
+goalProgress   0.5
+rngCursor
+  spawn-value     14
+  spawn-position  14
+  relic-draw      0
+  rarity-weight   0
+relics (pickup order)
+  (none)
+board
+size 4  score 60  over false  won false  keepPlaying false
+     .     .     .     .
+     4     .     .     .
+     2    16     .     2
+     8     .     .     ."
+`;
+
+exports[`an uninterrupted run > reproduces its recorded state at the interruption point 1`] = `
+"board as played
+size 4  score 12  over false  won false  keepPlaying false
+     8     2     .     2
+     4     2     .     .
+     .     .     .     .
+     .     .     .     .
+
+run envelope as persisted
+schemaVersion  1
+runId          run-instance-1
+seed           snapshot-run-seed
+stageIndex     0
+stageGoal      highest-tile 16
+goalProgress   0.5
+rngCursor
+  spawn-value     7
+  spawn-position  7
+  relic-draw      0
+  rarity-weight   0
+relics (pickup order)
+  (none)
+board
+size 4  score 12  over false  won false  keepPlaying false
+     8     2     .     2
+     4     2     .     .
+     .     .     .     .
+     .     .     .     ."
+`;
+
+exports[`resuming > reproduces its recorded envelope after a resume 1`] = `
+"schemaVersion  1
+runId          run-instance-1
+seed           snapshot-run-seed
+stageIndex     1
+stageGoal      highest-tile 32
+goalProgress   0.5
+rngCursor
+  spawn-value     14
+  spawn-position  14
+  relic-draw      0
+  rarity-weight   0
+relics (pickup order)
+  (none)
+board
+size 4  score 60  over false  won false  keepPlaying false
+     .     .     .     .
+     4     .     .     .
+     2    16     .     2
+     8     .     .     ."
+`;

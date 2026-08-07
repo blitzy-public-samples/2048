@@ -48,15 +48,30 @@
 // Invariants of this module: it reads no DOM, opens no timer, reads no
 // clock and touches no storage key of its own — every persistence call
 // goes through the injected port.
+//
+// Decisions behind this file: DL-ENGINE-01, the push call becoming the
+// `state:commit` event; DL-ENGINE-02, the two `Math.random()` sites
+// becoming named substream draws; DL-ENGINE-03, the four rule literals
+// moving into `RulesConfig`; DL-ENGINE-04, the forced `keepPlaying`
+// DL-ENGINE-05, the run identifier and the correlation identifier being
 
+import {
+  DEFAULT_BOARD_SIZE,
+  isSupportedBoardSize,
+} from '../config/default-config';
 import type { RulesConfig } from '../config/rules-config';
+import type { StageGoal } from '../config/stage-config';
 import type { RngStreams } from '../rng/rng-streams';
 import type { EngineEvents, MoveBeforeEvent } from './engine-events';
 import { createEngineEvents } from './engine-events';
 import { Grid } from './grid';
 import type { HookBus } from './hook-bus';
 import { createHookBus } from './hook-bus';
-import type { HookEnvironment, MergePayload } from './hooks';
+import type {
+  HookEnvironment,
+  MergeDispatchPayload,
+  MergePayload,
+} from './hooks';
 import { resolveMove } from './move-resolver';
 import {
   isGameTerminated as isTerminated,
@@ -105,6 +120,27 @@ const MOVE_CANCELLED_METRIC = 'engine.move.cancelled';
 
 /** Counter name for a move that changed no cell. */
 const MOVE_IDLE_METRIC = 'engine.move.idle';
+
+/**
+ * Counter name for one spawn attempt.
+ *
+ * THE AUTHORITATIVE SPAWN-ATTEMPT BOUNDARY. Raised on entry to the spawn,
+ * which is js/game_manager.js L69, so it counts every attempt whether or not
+ * a cell was available. The `tile:spawn` event is NOT that boundary: the
+ * spawn returns before dispatching `onSpawn` and before emitting when the
+ * board is full, which is what keeps a full board free of draws, so an
+ * emission count measures resolved spawns instead. Attempts are accounted
+ * here and nowhere else.
+ */
+export const SPAWN_ATTEMPT_METRIC = 'engine.spawn.attempt';
+
+/**
+ * Counter name for one spawn attempt that inserted no tile: the board was
+ * full, or an `onSpawn` handler returned the payload without a usable cell.
+ * The difference between this and `SPAWN_ATTEMPT_METRIC` is the number of
+ * tiles inserted.
+ */
+export const SPAWN_SUPPRESSED_METRIC = 'engine.spawn.suppressed';
 
 /** Counter name for a resolved move. */
 const MOVE_RESOLVED_METRIC = 'engine.move.resolved';
@@ -222,36 +258,62 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Narrows an unknown value to a serialised tile.
+ * Reads one persisted cell, reduced to a tile the grid can restore safely.
  *
- * @param value Value to test.
- * @returns `true` when it carries a numeric position and value.
+ * THE POSITION IS NORMALISED TO THE CELL THAT HOLDS IT. `Grid.fromState`
+ * builds each tile from the recorded `position` while placing it at the matrix
+ * coordinate it was found at, so a snapshot whose two disagree produced a tile
+ * that believed it was somewhere it was not — and the first move then indexed
+ * `grid.cells[tile.x]` at a column outside the lattice and threw. The recorded
+ * position is therefore accepted only as far as it is usable and the cell
+ * coordinate is authoritative.
+ *
+ * The value is also bounded: a tile value that is not a finite number above
+ * zero is not a tile. `Tile` coerces a falsy value to 2, which would silently
+ * turn a corrupted entry into a playable tile of a value the snapshot never
+ * held.
+ *
+ * @param value Value read from the matrix.
+ * @param x Column the value was found at.
+ * @param y Row the value was found at.
+ * @returns The tile to restore, or `null` where the cell holds no usable tile.
  */
-function isSerializedTile(value: unknown): value is SerializedTile {
+function readSerializedTile(
+  value: unknown,
+  x: number,
+  y: number,
+): SerializedTile | null {
   if (!isRecord(value)) {
-    return false;
+    return null;
   }
 
-  const position = value.position;
+  const face = value.value;
 
-  return (
-    isRecord(position) &&
-    typeof position.x === 'number' &&
-    typeof position.y === 'number' &&
-    typeof value.value === 'number'
-  );
+  if (typeof face !== 'number' || !Number.isFinite(face) || face <= 0) {
+    return null;
+  }
+
+  return { position: { x, y }, value: face };
 }
 
 /**
  * Reduces an unknown cell matrix to one the grid can restore from.
  *
- * Anything that is not a serialised tile becomes an empty cell, so a
- * partially corrupted matrix loses tiles rather than failing the load.
+ * Anything that is not a usable serialised tile becomes an empty cell, so a
+ * partially corrupted matrix loses tiles rather than failing the load. The
+ * matrix is walked to the SIZE THE SNAPSHOT DECLARED rather than to the length
+ * the stored arrays happen to have, so a matrix wider or taller than the
+ * declared board contributes nothing outside it, and every tile that survives
+ * carries the coordinate of the cell it occupies.
  *
  * @param value Value read from the snapshot.
+ * @param size Declared edge length, already bounded by `isSupportedBoardSize`.
  * @returns The matrix, or `null` when the value is not a matrix at all.
  */
-function readCellMatrix(value: unknown): CellMatrix<SerializedTile> | null {
+function readCellMatrix(
+  value: unknown,
+  size: number,
+): CellMatrix<SerializedTile> | null {
   if (!Array.isArray(value)) {
     return null;
   }
@@ -262,12 +324,19 @@ function readCellMatrix(value: unknown): CellMatrix<SerializedTile> | null {
     if (!Array.isArray(column)) {
       return null;
     }
+  }
 
-    columns.push(
-      column.map((cell: unknown): SerializedTile | null =>
-        isSerializedTile(cell) ? cell : null,
-      ),
-    );
+  for (let x = 0; x < size; x += 1) {
+    const stored: unknown = value[x];
+    const column: (SerializedTile | null)[] = [];
+
+    for (let y = 0; y < size; y += 1) {
+      const cell: unknown = Array.isArray(stored) ? stored[y] : null;
+
+      column.push(readSerializedTile(cell, x, y));
+    }
+
+    columns.push(column);
   }
 
   return columns;
@@ -292,15 +361,22 @@ function readSnapshot(value: unknown): SerializedGameState | null {
 
   const grid = value.grid;
 
-  if (!isRecord(grid) || typeof grid.size !== 'number') {
+  if (!isRecord(grid)) {
     return null;
   }
 
-  if (!Number.isSafeInteger(grid.size) || grid.size <= 0) {
+  // BOUNDED BY THE PRODUCT-WIDE CEILING, not merely by being a positive
+  // integer. This size drives a `size` by `size` allocation in `Grid` and the
+  // two loops of every traversal, so a stored value of 2**40 froze startup on
+  // every load until the entry was cleared by hand. `isSupportedBoardSize` of
+  // src/config/default-config.ts is the one predicate src/run/ and src/render/
+  // already measure an edge against; the engine now measures against it too,
+  // and does so BEFORE any grid is constructed.
+  if (!isSupportedBoardSize(grid.size)) {
     return null;
   }
 
-  const cells = readCellMatrix(grid.cells);
+  const cells = readCellMatrix(grid.cells, grid.size);
 
   if (cells === null) {
     return null;
@@ -390,6 +466,18 @@ export class Engine {
   private readonly relicContext: RelicCommitContextProvider;
 
   /**
+   * The stage goal an `onStageStart` handler returned, and `null` while the
+   * goal in force is the one the provider supplies.
+   *
+   * `goal` is the transformable member of `onStageStart`, so the goal a
+   * handler returns has to reach the stage rather than being reported and
+   * dropped. Assigned by `setup()` from the resolved dispatch and read by
+   * `resolveStage()`, which is the one path a commit's stage slice is built
+   * through.
+   */
+  private stageGoalOverride: StageGoal | null;
+
+  /**
    * @param options Rules, substreams, persistence port and the optional
    *   emitter, bus, reporter, run identifier, correlation identifier and
    *   context providers.
@@ -412,6 +500,7 @@ export class Engine {
       options.hooks ??
       createHookBus({
         correlationId: this.correlationId,
+
         reporter: this.reporter,
       });
     this.stageContext =
@@ -423,11 +512,44 @@ export class Engine {
     // decides whether the board is restored or fresh. js/game_manager.js
     // L13 called `setup()` from its constructor; here the caller does,
     // so a subscriber can attach before the first commit is emitted.
-    this.grid = new Grid(this.config.boardSize);
+    // Bounded here for the same reason `setup()` bounds it: this is an
+    // allocation of `size` by `size` cells, and the configured value reaches it
+    // before any snapshot has been read.
+    this.grid = new Grid(
+      isSupportedBoardSize(this.config.boardSize)
+        ? this.config.boardSize
+        : DEFAULT_BOARD_SIZE,
+    );
     this.score = 0;
     this.over = false;
     this.won = false;
     this.continuedPlay = false;
+    this.stageGoalOverride = null;
+  }
+
+  /**
+   * Assembles the stage slice of a commit.
+   *
+   * The provider is authoritative for `stageIndex` and `goalProgress`; `goal`
+   * is the one an `onStageStart` handler returned where one did, so every
+   * stage-carrying payload — `stage:start`, `stage:end` and `state:commit` —
+   * reports the goal the stage is actually running against.
+   *
+   * @returns The stage slice.
+   */
+  private resolveStage(): StageCommitContext {
+    const context = this.stageContext();
+    const adopted = this.stageGoalOverride;
+
+    if (adopted === null || adopted === context.goal) {
+      return context;
+    }
+
+    return Object.freeze({
+      stageIndex: context.stageIndex,
+      goal: adopted,
+      goalProgress: context.goalProgress,
+    });
   }
 
   /**
@@ -446,12 +568,14 @@ export class Engine {
     if (snapshot === null) {
       this.reporter.onCount?.({
         correlationId: this.correlationId,
+
         metric: SNAPSHOT_REJECTED_METRIC,
         value: 1,
       });
     } else {
       this.reporter.onCount?.({
         correlationId: this.correlationId,
+
         metric: SNAPSHOT_RESTORED_METRIC,
         value: 1,
       });
@@ -463,11 +587,21 @@ export class Engine {
     // reconciled value is written back to the configuration, so every
     // later read — including the win and loss checks — sees the size the
     // lattice actually has rather than a captured constant.
-    const size = snapshot === null ? this.config.boardSize : snapshot.grid.size;
+    //
+    // Both candidates are measured against the product-wide ceiling before
+    // either reaches `new Grid()`: a snapshot's size was bounded as it was
+    // read, and the configured size is bounded here because a board-mutating
+    // relic writes it during a run. An unsupported configured size falls back
+    // to the default edge length rather than allocating from it.
+    const configured = isSupportedBoardSize(this.config.boardSize)
+      ? this.config.boardSize
+      : DEFAULT_BOARD_SIZE;
+    const size = snapshot === null ? configured : snapshot.grid.size;
 
     if (size !== this.config.boardSize) {
       this.reporter.onCount?.({
         correlationId: this.correlationId,
+
         metric: SIZE_RECONCILED_METRIC,
         value: 1,
       });
@@ -488,9 +622,18 @@ export class Engine {
       this.continuedPlay = snapshot.keepPlaying;
     }
 
+    // A new stage starts from the provider's own goal, so a goal adopted for
+    // the stage before this one is not carried into the dispatch below.
+    this.stageGoalOverride = null;
+
     const stage = this.stageContext();
 
-    this.hooks.dispatch(
+    // The dispatch's resolved payload is ADOPTED rather than discarded:
+    // `goal` is the one transformable member of `onStageStart`, so the goal a
+    // handler returned is the goal this stage runs against and is the goal
+    // `stage:start` carries. The three invariant members cannot have changed —
+    // the bus refuses a return that changes any of them.
+    const started = this.hooks.dispatch(
       'onStageStart',
       {
         stageIndex: stage.stageIndex,
@@ -499,18 +642,15 @@ export class Engine {
         boardSize: this.grid.size,
       },
       this.hookEnvironment(),
-    );
+    ).payload;
+
+    this.stageGoalOverride = started.goal;
 
     if (!restored) {
       this.addStartTiles();
     }
 
-    this.events.emit('stage:start', {
-      stageIndex: stage.stageIndex,
-      goal: stage.goal,
-      seed: this.streams.seed,
-      boardSize: this.grid.size,
-    });
+    this.events.emit('stage:start', started);
 
     this.commit();
   }
@@ -609,6 +749,7 @@ export class Engine {
     if (this.isGameTerminated()) {
       this.reporter.onCount?.({
         correlationId: this.correlationId,
+
         metric: MOVE_BLOCKED_METRIC,
         value: 1,
       });
@@ -616,6 +757,9 @@ export class Engine {
       return false;
     }
 
+    // The board reaches the handler as its read-only facade rather than as
+    // the lattice, so a handler cannot rewrite the board through the payload
+    // and then throw. Reads through it are live.
     const before = this.hooks.dispatch(
       'onBeforeMove',
       {
@@ -626,22 +770,31 @@ export class Engine {
       this.hookEnvironment(),
     );
 
-    // The accumulated hook payload is emitted as it stands rather than
-    // rebuilt: src/engine/engine-events.ts aliases `MoveBeforeEvent` to
-    // `BeforeMovePayload`, so the hook contract and the event contract are
-    // one type and cannot diverge. The board inside it travels by
-    // reference, which is what js/game_manager.js L91 passed to the view,
-    // and `cancelled` stays the same mutable member the handlers saw.
-    const requested: MoveBeforeEvent = before.payload;
+    // THE VETO IS DECIDED ON THE HOOK PATH ALONE. `cancelled` is read off
+    // the resolved hook payload, which only an `onBeforeMove` handler can
+    // have written, and the decision is taken here — before anything is
+    // emitted. The emission below therefore REPORTS the decision to
+    // observers; it does not gather it. An event listener consequently
+    // cannot withdraw a move, cannot cause one to proceed, and cannot
+    // become gameplay-relevant through its registration order.
+    const cancelled = before.payload.cancelled;
+
+    // Emitted for every requested move, vetoed or not, so a subscriber sees
+    // the attempt and its outcome. src/engine/engine-events.ts projects the
+    // payload before any listener is reached, so the board inside it is a
+    // frozen copy rather than the live lattice.
+    const requested: MoveBeforeEvent = {
+      direction: before.payload.direction,
+      board: this.grid,
+      cancelled,
+    };
 
     this.events.emit('move:before', requested);
 
-    // `cancelled` is read back after the emission, so a veto raised by a
-    // hook handler and a veto raised by a subscriber withdraw the move
-    // through the one check below.
-    if (requested.cancelled) {
+    if (cancelled) {
       this.reporter.onCount?.({
         correlationId: this.correlationId,
+
         metric: MOVE_CANCELLED_METRIC,
         value: 1,
       });
@@ -649,14 +802,21 @@ export class Engine {
       return false;
     }
 
+    // The direction the move RESOLVES in is the one the payload carries, not
+    // the one the caller asked for: `direction` is a transformable member of
+    // `onBeforeMove`, so a handler that returned another direction redirects
+    // the move, and the direction emitted above is therefore the direction
+    // executed below.
+    const resolved = requested.direction;
+
     // Ported from L138-L143 and L146-L180, which
     // src/engine/move-resolver.ts owns: the vector, the two traversal
     // orders, the tile preparation, the walk, the merge branch and the
     // change signal. The board is mutated in place, as those lines did.
     // The `onMerge` dispatch reaches the merge branch as a callback, and
     // a handler's `resultValue` is the value written to the board.
-    const outcome = resolveMove(this.grid, direction, this.config, {
-      dispatchMerge: (payload: MergePayload): MergePayload =>
+    const outcome = resolveMove(this.grid, resolved, this.config, {
+      dispatchMerge: (payload: MergeDispatchPayload): MergePayload =>
         this.hooks.dispatch('onMerge', payload, this.hookEnvironment())
           .payload,
     });
@@ -686,6 +846,7 @@ export class Engine {
     if (!outcome.moved) {
       this.reporter.onCount?.({
         correlationId: this.correlationId,
+
         metric: MOVE_IDLE_METRIC,
         value: 1,
       });
@@ -716,14 +877,20 @@ export class Engine {
       this.hookEnvironment(),
     );
 
-    // Two members are read back from the resolved payload: a handler may
-    // declare the game lost or won, which is how a cursed relic ends a
-    // run and how an alternative win condition is expressed. Every other
-    // member is reported and is not read back — the score is changed
-    // through `onMerge`, whose `scoreDelta` the engine applies.
+    // Every transformable member of `onAfterMove` is applied, and only those:
+    // `score`, `over` and `won` are adopted from the resolved payload — a
+    // handler may rescore the turn, declare the game lost, or declare it won,
+    // which is how a cursed relic ends a run and how an alternative win
+    // condition is expressed. `board` and `moved` are invariant and the bus
+    // refuses a return that changes either. `terminated` is DERIVED from the
+    // adopted `over` and `won` rather than read back, so a handler cannot
+    // leave a flag that contradicts them.
+    this.score = after.payload.score;
     this.over = after.payload.over;
     this.won = after.payload.won;
 
+    // Emitted from what was applied, member for member, so `move:after` and
+    // the `state:commit` below it cannot disagree.
     this.events.emit('move:after', {
       moved: after.payload.moved,
       board: this.grid,
@@ -735,6 +902,7 @@ export class Engine {
 
     this.reporter.onCount?.({
       correlationId: this.correlationId,
+
       metric: MOVE_RESOLVED_METRIC,
       value: 1,
     });
@@ -755,7 +923,7 @@ export class Engine {
    * @param cleared Whether the stage's goal was met.
    */
   endStage(cleared: boolean): void {
-    const stage = this.stageContext();
+    const stage = this.resolveStage();
 
     const resolved = this.hooks.dispatch(
       'onStageEnd',
@@ -765,9 +933,27 @@ export class Engine {
         score: this.score,
       },
       this.hookEnvironment(),
-    );
+    ).payload;
 
-    this.events.emit('stage:end', resolved.payload);
+    // `score` is a transformable member of `onStageEnd`, so the score a
+    // handler returned is ADOPTED before the commit below reads it. Without
+    // this the emitted stage result and the commit that immediately follows it
+    // reported two different scores.
+    this.score = resolved.score;
+
+    this.events.emit('stage:end', resolved);
+
+    // The adopted goal belonged to the stage that has just ended, so it is
+    // released here rather than surviving into the commit below.
+    //
+    // `resolveStage()` prefers the adopted goal over the provider's whenever
+    // the two are not the same object. A subscriber to the emission above
+    // advances the stage, which replaces the provider's goal with the next
+    // stage's — a different object — so an override left in place would make
+    // this commit report the new stage index beside the old stage's goal. The
+    // next `setup()` dispatches `onStageStart` and adopts afresh.
+    this.stageGoalOverride = null;
+
     this.commit();
   }
 
@@ -800,9 +986,27 @@ export class Engine {
    * A full board spawns nothing and consumes no draw from either
    * substream, which is the boundary js/grid.js L37-L43 expressed by
    * returning no cell.
+   *
+   * THE ATTEMPT IS COUNTED HERE, on entry, so `SPAWN_ATTEMPT_METRIC`
+   * measures every attempt including the full-board one that emits no
+   * event. `SPAWN_SUPPRESSED_METRIC` counts the attempts that inserted
+   * nothing, so attempts minus suppressions is the number of tiles
+   * inserted.
    */
   private addRandomTile(): void {
+    this.reporter.onCount?.({
+      correlationId: this.correlationId,
+      metric: SPAWN_ATTEMPT_METRIC,
+      value: 1,
+    });
+
     if (!this.grid.cellsAvailable()) {
+      this.reporter.onCount?.({
+        correlationId: this.correlationId,
+        metric: SPAWN_SUPPRESSED_METRIC,
+        value: 1,
+      });
+
       return;
     }
 
@@ -824,20 +1028,38 @@ export class Engine {
     );
 
     const payload = spawned.payload;
-    const position = payload.position;
+
+    // A handler is typed to return a cell or nothing; `?? undefined` also
+    // folds a `null` a handler returned in spite of the type into the
+    // no-cell case, so the bounds check below is never handed one.
+    const position = payload.position ?? undefined;
 
     // An absent position spawns nothing, which is the boundary
     // js/grid.js L37-L43 produced on a full board, and a handler
-    // reaches the same state by returning the payload without one.
-    if (position !== undefined && this.grid.withinBounds(position)) {
+    // reaches the same state by returning the payload without one. A
+    // position outside the lattice reaches the same state, because
+    // `withinBounds` refuses it.
+    const inserted =
+      position !== undefined && this.grid.withinBounds(position);
+
+    if (inserted) {
       this.grid.insertTile(new Tile(position, payload.value));
+    } else {
+      this.reporter.onCount?.({
+        correlationId: this.correlationId,
+        metric: SPAWN_SUPPRESSED_METRIC,
+        value: 1,
+      });
     }
 
-    // The hook carries no cell as `null` and the event carries none by
-    // omitting the member, which is the boundary js/grid.js L37-L43
-    // expressed by returning nothing on a full board.
+    // THE EMITTED POSITION IS THE INSERTED CELL OR NOTHING. Carrying a
+    // position a suppressed spawn never used would let a subscriber count
+    // an insertion that did not happen and draw a tile the board does not
+    // hold, so the member is omitted for every suppressed spawn: the full
+    // board of js/grid.js L37-L43, a handler that returned no cell, and a
+    // handler that returned one outside the lattice.
     this.events.emit('tile:spawn', {
-      position: position === null ? undefined : position,
+      position: inserted ? position : undefined,
       value: payload.value,
     });
   }
@@ -885,7 +1107,7 @@ export class Engine {
       over: this.over,
       won: this.won,
       terminated: this.isGameTerminated(),
-      stage: this.stageContext(),
+      stage: this.resolveStage(),
       relics: this.relicContext(),
     });
   }

@@ -30,7 +30,9 @@ import {
   createDefaultRulesConfig,
 } from '../../../src/config/default-config';
 import type { RulesConfig } from '../../../src/config/rules-config';
-import { createHookBus } from '../../../src/engine/hook-bus';
+import {
+  createHookBus,
+} from '../../../src/engine/hook-bus';
 import type {
   ChargeConsumption,
   HookBus,
@@ -44,9 +46,13 @@ import type {
 import { Grid } from '../../../src/engine/grid';
 import { HOOK_NAMES } from '../../../src/engine/hooks';
 import type {
+  AfterMoveDispatchPayload,
   AfterMovePayload,
+  BeforeMoveDispatchPayload,
   BeforeMovePayload,
   HookContext,
+  HookDispatchPayloadMap,
+  MergeDispatchPayload,
   HookEnvironment,
   HookHandler,
   HookHandlerTable,
@@ -68,6 +74,7 @@ import type {
   EngineCountReport,
   EngineHookErrorReport,
   EngineReporter,
+  Position,
 } from '../../../src/engine/types';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import { createMergePairBoard } from '../../fixtures/boards';
@@ -160,11 +167,11 @@ function createStageStartPayload(): StageStartPayload {
   };
 }
 
-function createBeforeMovePayload(board: Grid): BeforeMovePayload {
+function createBeforeMovePayload(board: Grid): BeforeMoveDispatchPayload {
   return { direction: DIRECTION_UP, board, cancelled: false };
 }
 
-function createMergePayload(): MergePayload {
+function createMergePayload(): MergeDispatchPayload {
   const source = new Tile({ x: PAIR_NEXT_X, y: PAIR_Y }, PAIR_VALUE);
   const target = new Tile({ x: PAIR_X, y: PAIR_Y }, PAIR_VALUE);
 
@@ -184,7 +191,7 @@ function createSpawnPayload(): SpawnPayload {
   return { position: { x: PAIR_NEXT_X, y: PAIR_NEXT_X }, value: SPAWN_VALUE };
 }
 
-function createAfterMovePayload(board: Grid): AfterMovePayload {
+function createAfterMovePayload(board: Grid): AfterMoveDispatchPayload {
   return {
     moved: true,
     board,
@@ -203,7 +210,7 @@ function createStageEndPayload(): StageEndPayload {
   };
 }
 
-function createPayloadsByHook(board: Grid): HookPayloadMap {
+function createPayloadsByHook(board: Grid): HookDispatchPayloadMap {
   return {
     onStageStart: createStageStartPayload(),
     onBeforeMove: createBeforeMovePayload(board),
@@ -212,6 +219,41 @@ function createPayloadsByHook(board: Grid): HookPayloadMap {
     onAfterMove: createAfterMovePayload(board),
     onStageEnd: createStageEndPayload(),
   };
+}
+
+/**
+ * The three hooks whose dispatch-input payload carries a live engine object and
+ * whose handler-visible payload therefore carries a frozen view of it instead.
+ */
+const PROJECTED_HOOKS: ReadonlySet<HookName> = new Set<HookName>([
+  'onBeforeMove',
+  'onMerge',
+  'onAfterMove',
+]);
+
+/**
+ * A board view that is not the one the bus built for a dispatch, used to prove
+ * a return substituting the board is refused.
+ */
+function createForeignGridView(): BeforeMovePayload['board'] {
+  const grid = createBoard();
+
+  return Object.freeze({
+    get size(): number {
+      return grid.size;
+    },
+    withinBounds: (position: Position) => grid.withinBounds(position),
+    cellAvailable: (cell: Position) => grid.cellAvailable(cell),
+    cellOccupied: (cell: Position) => grid.cellOccupied(cell),
+    cellValue: (cell: Position) => {
+      const tile = grid.cellContent(cell);
+
+      return tile === null ? null : tile.value;
+    },
+    availableCells: () => grid.availableCells(),
+    cellsAvailable: () => grid.cellsAvailable(),
+    serialize: () => grid.serialize(),
+  });
 }
 
 interface RecordingReporter {
@@ -402,7 +444,17 @@ describe('dispatch accepts every one of the six names (AAP Contract 2)', () => {
     for (const hook of HOOK_NAMES) {
       const result = bus.dispatch(hook, payloads[hook], environment);
 
-      expect(result.payload).toBe(payloads[hook]);
+      // A dispatch with no subscriber returns the payload it projected. The
+      // three plain-data hooks project to the very object the caller passed;
+      // the three carrying a live engine object project to a payload whose
+      // board or tile pair is the frozen view of it, so identity with the
+      // caller's object is deliberately NOT preserved for those.
+      if (PROJECTED_HOOKS.has(hook)) {
+        expect(result.payload).not.toBe(payloads[hook]);
+      } else {
+        expect(result.payload).toBe(payloads[hook]);
+      }
+
       expect(result.invoked).toBe(0);
     }
 
@@ -567,9 +619,20 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
       environment.config.merge.canMerge,
     );
     expect(context.rng.seed).toBe(environment.rng.seed);
-    expect(context.rng.stream(SPAWN_VALUE_STREAM)).toBe(
-      environment.rng.stream(SPAWN_VALUE_STREAM),
+
+    // Never the live substream either: the facade hands back a fork standing
+    // where the substream stands, so the draws a handler takes are the
+    // handler's own until they are committed. The fork is memoised, so one
+    // name resolves to one fork within a dispatch.
+    const fork = context.rng.stream(SPAWN_VALUE_STREAM);
+
+    expect(fork).not.toBe(environment.rng.stream(SPAWN_VALUE_STREAM));
+    expect(fork).toBe(context.rng.stream(SPAWN_VALUE_STREAM));
+    expect(fork.name).toBe(SPAWN_VALUE_STREAM);
+    expect(fork.cursor).toBe(
+      environment.rng.stream(SPAWN_VALUE_STREAM).cursor,
     );
+
     expect(context.grid.size).toBe(environment.grid.size);
     expect(context.grid.cellValue({ x: PAIR_X, y: PAIR_Y })).toBe(PAIR_VALUE);
     expect(context.grid.serialize()).toEqual(environment.grid.serialize());
@@ -2253,9 +2316,11 @@ describe(
       expect(result.payload).not.toBe(original);
       expect(original.cancelled).toBe(false);
 
-      // The live board still travels by reference, so a subscriber of the
-      // event the engine emits from this payload reads the same board.
-      expect(result.payload.board).toBe(board);
+      // The board is the frozen view rather than the live board: the live
+      // board reaches a renderer through the event the engine emits, never
+      // through a hook payload.
+      expect(result.payload.board).not.toBe(board);
+      expect(result.payload.board.size).toBe(board.size);
     });
 
     it('carries a freshly returned object through to the caller', () => {
@@ -2282,7 +2347,8 @@ describe(
       expect(result.payload).not.toBe(original);
       expect(result.payload.cancelled).toBe(true);
       expect(original.cancelled).toBe(false);
-      expect(result.payload.board).toBe(board);
+      expect(result.payload.board).not.toBe(board);
+      expect(result.payload.board.size).toBe(board.size);
       expect(result.payload.direction).toBe(DIRECTION_UP);
     });
 
@@ -2432,7 +2498,7 @@ describe(
       const original = createAfterMovePayload(board);
       const result = bus.dispatch('onAfterMove', original, createEnvironment());
 
-      expect(result.payload).toBe(original);
+      expect(result.payload.moved).toBe(original.moved);
       expect(result.payload.score).toBe(STAGE_SCORE);
       expect(result.rejected).toBe(1);
     });
@@ -2471,10 +2537,11 @@ describe(
       // The stage-end payload is discarded, so the merge payload's own
       // members survive the foreign return. Compared by value rather than
       // by identity for the same reason as the empty-object case above.
-      expect(result.payload).toEqual(original);
       expect(result.payload.resultValue).toBe(MERGED_VALUE);
       expect(result.payload.scoreDelta).toBe(MERGE_SCORE_DELTA);
-      expect(observed[0]).toEqual(original);
+      expect(result.payload.source.value).toBe(original.source.value);
+      expect(result.payload.target.value).toBe(original.target.value);
+      expect(observed[0]).toEqual(result.payload);
       expect(result.rejected).toBe(1);
     });
 
@@ -2724,71 +2791,135 @@ describe(
 
     it('rejects a substituted board on onBeforeMove and onAfterMove', () => {
       const board = createBoard();
-      const foreign = createBoard();
+      const foreign = createForeignGridView();
 
       const before = createHookBus({ correlationId: CORRELATION_ID });
+      const beforeSeen: { board: BeforeMovePayload['board'] | null } = {
+        board: null,
+      };
 
       register(
         before,
         createSubscriber('swaps-the-board', {
-          onBeforeMove: (payload): BeforeMovePayload => ({
-            ...payload,
-            board: foreign,
-          }),
+          onBeforeMove: (payload): BeforeMovePayload => {
+            beforeSeen.board = payload.board;
+
+            return { ...payload, board: foreign };
+          },
         }),
       );
 
+      const beforePayload = createBeforeMovePayload(board);
       const beforeResult = before.dispatch(
         'onBeforeMove',
-        createBeforeMovePayload(board),
+        beforePayload,
         createEnvironment(),
       );
 
       expect(beforeResult.rejected).toBe(1);
-      expect(beforeResult.payload.board).toBe(board);
+      expect(beforeResult.payload.board).not.toBe(foreign);
+      expect(beforeResult.payload.board).toBe(beforeSeen.board);
 
       const after = createHookBus({ correlationId: CORRELATION_ID });
+      const afterSeen: { board: AfterMovePayload['board'] | null } = {
+        board: null,
+      };
 
       register(
         after,
         createSubscriber('swaps-the-board', {
-          onAfterMove: (payload): AfterMovePayload => ({
-            ...payload,
-            board: foreign,
-          }),
+          onAfterMove: (payload): AfterMovePayload => {
+            afterSeen.board = payload.board;
+
+            return { ...payload, board: foreign };
+          },
         }),
       );
 
+      const afterPayload = createAfterMovePayload(board);
       const afterResult = after.dispatch(
         'onAfterMove',
-        createAfterMovePayload(board),
+        afterPayload,
         createEnvironment(),
       );
 
       expect(afterResult.rejected).toBe(1);
-      expect(afterResult.payload.board).toBe(board);
+      expect(afterResult.payload.board).not.toBe(foreign);
+      expect(afterResult.payload.board).toBe(afterSeen.board);
     });
 
     it('rejects a substituted tile on onMerge', () => {
       const bus = createHookBus({ correlationId: CORRELATION_ID });
       const foreign = new Tile({ x: PAIR_X, y: PAIR_Y }, PAIR_VALUE);
       const original = createMergePayload();
+      const seen: { payload: MergePayload | null } = { payload: null };
 
       register(
         bus,
         createSubscriber('swaps-the-source', {
-          onMerge: (payload): MergePayload => ({
-            ...payload,
-            source: foreign,
-          }),
+          onMerge: (payload): MergePayload => {
+            seen.payload = payload;
+
+            return { ...payload, source: foreign };
+          },
         }),
       );
 
       const result = bus.dispatch('onMerge', original, createEnvironment());
 
       expect(result.rejected).toBe(1);
-      expect(result.payload.source).toBe(original.source);
-      expect(result.payload.target).toBe(original.target);
+      expect(seen.payload).not.toBeNull();
+      expect(result.payload.source).toBe(seen.payload?.source);
+      expect(result.payload.target).toBe(seen.payload?.target);
+    });
+
+    it('hands handlers views of the board and the merged tiles, never the live objects', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const board = createBoard();
+      const original = createMergePayload();
+      const seen: {
+        merge: MergePayload | null;
+        board: BeforeMovePayload['board'] | null;
+      } = { merge: null, board: null };
+
+      register(
+        bus,
+        createSubscriber('reads-only', {
+          onMerge: (payload): void => {
+            seen.merge = payload;
+          },
+          onBeforeMove: (payload): void => {
+            seen.board = payload.board;
+          },
+        }),
+      );
+
+      bus.dispatch('onMerge', original, createEnvironment());
+      bus.dispatch(
+        'onBeforeMove',
+        createBeforeMovePayload(board),
+        createEnvironment(),
+      );
+
+      const merge = seen.merge;
+      const seenBoard = seen.board;
+
+      // The live tiles and the live board never reach a handler, so a handler
+      // that mutates and then throws has nothing to leave behind.
+      expect(merge?.source).not.toBe(original.source);
+      expect(merge?.target).not.toBe(original.target);
+      expect(Object.isFrozen(merge?.source)).toBe(true);
+      expect(Object.isFrozen(merge?.target)).toBe(true);
+      expect(merge?.source).toEqual({
+        x: PAIR_X,
+        y: PAIR_Y,
+        value: PAIR_VALUE,
+        previousPosition: { x: PAIR_NEXT_X, y: PAIR_Y },
+      });
+      expect(seenBoard).not.toBe(board);
+      expect(Object.isFrozen(seenBoard)).toBe(true);
+      expect(seenBoard).not.toHaveProperty('cells');
+      expect(seenBoard).not.toHaveProperty('insertTile');
     });
 
     it('rejects a stage start that misreports the board it began on', () => {
@@ -2859,6 +2990,78 @@ describe(
         expect(result.payload.cancelled).toBe(false);
         expect(original.cancelled).toBe(false);
       });
+
+    it('leaves no board mutation behind when a handler writes through the ' +
+      'payload and then throws', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const board = createBoard();
+      const before = JSON.stringify(board.serialize());
+
+      register(
+        bus,
+        createSubscriber('mutates-the-board-then-throws', {
+          onBeforeMove: (payload): BeforeMovePayload => {
+            // Every write a handler could reach the board through is absent
+            // from the view, so each of these is a no-op or a throw, and the
+            // handler ends by throwing either way.
+            const reachable = payload.board as unknown as Record<
+              string,
+              unknown
+            >;
+
+            reachable.cells = [];
+            reachable.size = HUGE_BOARD_SIZE;
+
+            throw new Error('relic handler failed after writing');
+          },
+        }),
+      );
+
+      const result = bus.dispatch(
+        'onBeforeMove',
+        createBeforeMovePayload(board),
+        createEnvironment(),
+      );
+
+      expect(result.failed).toBe(1);
+      expect(board.size).toBe(BOARD_SIZE);
+      expect(JSON.stringify(board.serialize())).toBe(before);
+    });
+
+    it('leaves no tile mutation behind when a handler writes through the ' +
+      'merge payload and then throws', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const original = createMergePayload();
+      const sourceValue = original.source.value;
+      const targetX = original.target.x;
+
+      register(
+        bus,
+        createSubscriber('mutates-a-tile-then-throws', {
+          onMerge: (payload): MergePayload => {
+            const reachable = payload.source as unknown as Record<
+              string,
+              unknown
+            >;
+
+            reachable.value = sourceValue * 4;
+            (payload.target as unknown as Record<string, unknown>).x =
+              targetX + 1;
+
+            throw new Error('relic handler failed after writing');
+          },
+        }),
+      );
+
+      const result = bus.dispatch('onMerge', original, createEnvironment());
+
+      expect(result.failed).toBe(1);
+      // The live tiles the caller still holds are untouched, and neither
+      // carries a write path a handler could have reached them through.
+      expect(original.source.value).toBe(sourceValue);
+      expect(original.target.x).toBe(targetX);
+      expect(original.source.mergedFrom).toBeNull();
+    });
 
     it('adopts a successful in-place mutation, compounds it and still ' +
       'leaves the caller\'s payload untouched', () => {
@@ -2973,15 +3176,17 @@ describe(
         }),
       );
 
+      const original = createBeforeMovePayload(board);
       const result = bus.dispatch(
         'onBeforeMove',
-        createBeforeMovePayload(board),
+        original,
         createEnvironment(),
       );
 
       expect(result.payload.cancelled).toBe(true);
       expect(result.payload.direction).toBe(DIRECTION_UP);
-      expect(result.payload.board).toBe(board);
+      expect(result.payload.board).not.toBe(board);
+      expect(result.payload.board.size).toBe(board.size);
     });
 
     it('keeps a veto set by an early subscriber past later ones that do ' +
@@ -4638,5 +4843,624 @@ describe('a reporter that throws while counting is contained', () => {
     expect(faultyMetrics.totals).toStrictEqual(silentMetrics.totals);
     expect(faultyMetrics.chargesConsumed).toBe(silentMetrics.chargesConsumed);
     expect(faultyMetrics.degraded).toStrictEqual(silentMetrics.degraded);
+  });
+});
+
+/* ===== 20. The failure transaction, at every crossing (F2) ===== */
+
+// The four crossings a failed handler could previously leave a change behind
+// at: the payload, the state slot at depth, the board's tiles, and the run's
+// randomness. Each is asserted in both directions — rolled back on a throw or
+// a refusal, adopted on success — because a rollback that also discarded a
+// successful handler's work would satisfy the first half alone.
+
+describe('a handler that throws leaves no nested state behind (F2)', () => {
+  /** A state slot with something to write at depth. */
+  const nestedState = (): unknown => ({
+    counters: { merges: 0 },
+    history: ['start'],
+  });
+
+  it('rolls back a write into a nested object', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+    register(
+      bus,
+      createSubscriber(
+        'writes-deep-then-throws',
+        {
+          onStageEnd: (_payload, context): StageEndPayload => {
+            const slot = context.state as { counters: { merges: number } };
+
+            slot.counters.merges = 99;
+
+            throw new Error('relic handler failed');
+          },
+        },
+        { state: nestedState() },
+      ),
+    );
+
+    const result = dispatchStageEnd(bus);
+
+    expect(result.failed).toBe(1);
+    expect(bus.subscriptions('onStageEnd')[0].state).toEqual(nestedState());
+  });
+
+  it('rolls back a write into a nested array', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+    register(
+      bus,
+      createSubscriber(
+        'pushes-then-throws',
+        {
+          onStageEnd: (): StageEndPayload => {
+            throw new Error('relic handler failed');
+          },
+        },
+        { state: nestedState() },
+      ),
+    );
+    register(
+      bus,
+      createSubscriber(
+        'appends-then-throws',
+        {
+          onStageEnd: (_payload, context): StageEndPayload => {
+            const slot = context.state as { history: string[] };
+
+            slot.history.push('written-before-the-throw');
+
+            throw new Error('relic handler failed');
+          },
+        },
+        { state: nestedState() },
+      ),
+    );
+
+    const result = dispatchStageEnd(bus);
+
+    expect(result.failed).toBe(2);
+
+    for (const subscription of bus.subscriptions('onStageEnd')) {
+      expect(subscription.state).toEqual(nestedState());
+    }
+  });
+
+  it('rolls back a nested write when the return is refused rather than ' +
+    'thrown', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+    register(
+      bus,
+      createSubscriber(
+        'writes-deep-then-returns-rubbish',
+        {
+          onStageEnd: (_payload, context): StageEndPayload => {
+            const slot = context.state as { counters: { merges: number } };
+
+            slot.counters.merges = 99;
+
+            return { stageIndex: -1 } as unknown as StageEndPayload;
+          },
+        },
+        { state: nestedState() },
+      ),
+    );
+
+    const result = dispatchStageEnd(bus);
+
+    expect(result.rejected).toBe(1);
+    expect(bus.subscriptions('onStageEnd')[0].state).toEqual(nestedState());
+  });
+
+  it('adopts a nested write the handler returned from normally', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+    register(
+      bus,
+      createSubscriber(
+        'writes-deep',
+        {
+          onStageEnd: (_payload, context): void => {
+            const slot = context.state as {
+              counters: { merges: number };
+              history: string[];
+            };
+
+            slot.counters.merges += 1;
+            slot.history.push('kept');
+          },
+        },
+        { state: nestedState() },
+      ),
+    );
+
+    dispatchStageEnd(bus);
+
+    expect(bus.subscriptions('onStageEnd')[0].state).toEqual({
+      counters: { merges: 1 },
+      history: ['start', 'kept'],
+    });
+
+    dispatchStageEnd(bus);
+
+    expect(bus.subscriptions('onStageEnd')[0].state).toEqual({
+      counters: { merges: 2 },
+      history: ['start', 'kept', 'kept'],
+    });
+  });
+
+  it('does not hand two dispatches the same state object', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const seen: unknown[] = [];
+
+    register(
+      bus,
+      createSubscriber(
+        'keeps-its-reference',
+        {
+          onStageEnd: (_payload, context): void => {
+            seen.push(context.state);
+          },
+        },
+        { state: nestedState() },
+      ),
+    );
+
+    dispatchStageEnd(bus);
+    dispatchStageEnd(bus);
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    expect(seen[0]).toEqual(seen[1]);
+  });
+
+  it('does not let a handler write into the run through a reference it ' +
+    'kept from an earlier dispatch', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    let kept: { counters: { merges: number } } | null = null;
+
+    register(
+      bus,
+      createSubscriber(
+        'keeps-a-reference',
+        {
+          onStageEnd: (_payload, context): void => {
+            if (kept === null) {
+              kept = context.state as { counters: { merges: number } };
+
+              return;
+            }
+
+            // The reference from the first dispatch, written to during the
+            // second. It is a copy the bus discarded, so nothing follows.
+            kept.counters.merges = 99;
+          },
+        },
+        { state: nestedState() },
+      ),
+    );
+
+    dispatchStageEnd(bus);
+    dispatchStageEnd(bus);
+
+    expect(bus.subscriptions('onStageEnd')[0].state).toEqual(nestedState());
+  });
+
+  it('does not read the caller\'s object after registration, at depth', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const state = nestedState() as { counters: { merges: number } };
+    const seen: unknown[] = [];
+
+    register(
+      bus,
+      createSubscriber(
+        'registered-with-an-object',
+        {
+          onStageEnd: (_payload, context): void => {
+            seen.push(context.state);
+          },
+        },
+        { state },
+      ),
+    );
+
+    // A write into the object the caller registered, after registration.
+    state.counters.merges = 99;
+
+    dispatchStageEnd(bus);
+
+    expect(seen[0]).toEqual(nestedState());
+  });
+});
+
+describe('a handler cannot reach a live tile through onMerge (F2)', () => {
+  it('carries frozen projections and refuses a write to either', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const payload = createMergePayload();
+    const thrown: string[] = [];
+
+    register(
+      bus,
+      createSubscriber('tries-to-write-a-tile', {
+        onMerge: (merge): MergePayload => {
+          for (const view of [merge.source, merge.target]) {
+            try {
+              (view as { value: number }).value = HUGE_BOARD_SIZE;
+            } catch (error: unknown) {
+              thrown.push(String((error as Error).name));
+            }
+          }
+
+          return merge;
+        },
+      }),
+    );
+
+    // The bus substitutes the frozen projections before the first handler is
+    // invoked, so the live payload the resolver assembles is what is
+    // dispatched and the write is refused on the view the handler was given.
+    const result = bus.dispatch('onMerge', payload, createEnvironment());
+
+    expect(thrown).toEqual(['TypeError', 'TypeError']);
+    expect(result.payload.source.value).toBe(PAIR_VALUE);
+    expect(result.payload.target.value).toBe(PAIR_VALUE);
+  });
+
+  it('exposes no tile method through the payload it carries', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const members: string[] = [];
+
+    register(
+      bus,
+      createSubscriber('reads-the-projection', {
+        onMerge: (merge): void => {
+          members.push(...Object.keys(merge.source).sort());
+        },
+      }),
+    );
+
+    bus.dispatch('onMerge', createMergePayload(), createEnvironment());
+
+    // The four data members of the projection, and no tile method: neither
+    // `savePosition`, `updatePosition` nor `serialize` is reachable.
+    expect(members).toEqual(['previousPosition', 'value', 'x', 'y']);
+  });
+});
+
+describe('a handler that throws consumes no randomness (F2)', () => {
+  /**
+   * Builds an environment whose substreams are held, so a test can read their
+   * cursors before and after a dispatch.
+   *
+   * @returns The environment and its substreams.
+   */
+  function createHeldEnvironment(): {
+    readonly environment: HookEnvironment;
+    readonly streams: ReturnType<typeof createRngStreams>;
+  } {
+    const streams = createRngStreams(RUN_SEED);
+
+    return {
+      streams,
+      environment: {
+        config: createDefaultRulesConfig(),
+        rng: streams,
+        grid: createBoard(),
+      },
+    };
+  }
+
+  it('leaves every substream cursor where it stood', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const { environment, streams } = createHeldEnvironment();
+
+    register(
+      bus,
+      createSubscriber('draws-then-throws', {
+        onStageEnd: (_payload, context): StageEndPayload => {
+          context.rng.stream(SPAWN_VALUE_STREAM).next();
+          context.rng.stream(SPAWN_VALUE_STREAM).next();
+          context.rng.stream('spawn-position').nextInt(4);
+
+          throw new Error('relic handler failed');
+        },
+      }),
+    );
+
+    const before = streams.snapshotCursors();
+    const result = bus.dispatch(
+      'onStageEnd',
+      createStageEndPayload(),
+      environment,
+    );
+
+    expect(result.failed).toBe(1);
+    expect(streams.snapshotCursors()).toEqual(before);
+  });
+
+  it('leaves the next value the engine draws unchanged', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const { environment, streams } = createHeldEnvironment();
+    const reference = createRngStreams(RUN_SEED);
+
+    register(
+      bus,
+      createSubscriber('draws-then-throws', {
+        onStageEnd: (_payload, context): StageEndPayload => {
+          context.rng.stream(SPAWN_VALUE_STREAM).next();
+
+          throw new Error('relic handler failed');
+        },
+      }),
+    );
+
+    bus.dispatch('onStageEnd', createStageEndPayload(), environment);
+
+    expect(streams.stream(SPAWN_VALUE_STREAM).next()).toBe(
+      reference.stream(SPAWN_VALUE_STREAM).next(),
+    );
+  });
+
+  it('leaves the cursors where they stood when the return is refused', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const { environment, streams } = createHeldEnvironment();
+
+    register(
+      bus,
+      createSubscriber('draws-then-returns-rubbish', {
+        onStageEnd: (_payload, context): StageEndPayload => {
+          context.rng.stream(SPAWN_VALUE_STREAM).next();
+
+          return { cleared: false } as unknown as StageEndPayload;
+        },
+      }),
+    );
+
+    const before = streams.snapshotCursors();
+    const result = bus.dispatch(
+      'onStageEnd',
+      createStageEndPayload(),
+      environment,
+    );
+
+    expect(result.rejected).toBe(1);
+    expect(streams.snapshotCursors()).toEqual(before);
+  });
+
+  it('adopts the draws of a handler that returned normally, exactly once ' +
+    'each', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const { environment, streams } = createHeldEnvironment();
+    const drawn: number[] = [];
+
+    register(
+      bus,
+      createSubscriber('draws-three', {
+        onStageEnd: (_payload, context): void => {
+          const stream = context.rng.stream(SPAWN_VALUE_STREAM);
+
+          drawn.push(stream.next(), stream.next(), stream.next());
+        },
+      }),
+    );
+
+    bus.dispatch('onStageEnd', createStageEndPayload(), environment);
+
+    const reference = createRngStreams(RUN_SEED);
+    const referenceStream = reference.stream(SPAWN_VALUE_STREAM);
+    const expected = [
+      referenceStream.next(),
+      referenceStream.next(),
+      referenceStream.next(),
+    ];
+
+    // The values the handler saw are the values the substream would have
+    // produced, and the substream now stands past exactly those three.
+    expect(drawn).toEqual(expected);
+    expect(streams.snapshotCursors()[SPAWN_VALUE_STREAM]).toBe(3);
+    expect(streams.stream(SPAWN_VALUE_STREAM).next()).toBe(
+      referenceStream.next(),
+    );
+  });
+
+  it('keeps one handler\'s abandoned draws out of the next handler\'s ' +
+    'sequence', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const { environment } = createHeldEnvironment();
+    const seen: number[] = [];
+
+    register(
+      bus,
+      createSubscriber(
+        'draws-then-throws',
+        {
+          onStageEnd: (_payload, context): StageEndPayload => {
+            context.rng.stream(SPAWN_VALUE_STREAM).next();
+
+            throw new Error('relic handler failed');
+          },
+        },
+        { pickupOrder: 0 },
+      ),
+    );
+    register(
+      bus,
+      createSubscriber(
+        'draws-after',
+        {
+          onStageEnd: (_payload, context): void => {
+            seen.push(context.rng.stream(SPAWN_VALUE_STREAM).next());
+          },
+        },
+        { pickupOrder: 1 },
+      ),
+    );
+
+    bus.dispatch('onStageEnd', createStageEndPayload(), environment);
+
+    const reference = createRngStreams(RUN_SEED);
+
+    expect(seen).toEqual([reference.stream(SPAWN_VALUE_STREAM).next()]);
+  });
+
+  it('reports a handler its own consumption through snapshotCursors', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const { environment } = createHeldEnvironment();
+    const seen: number[] = [];
+
+    register(
+      bus,
+      createSubscriber('reads-its-own-cursor', {
+        onStageEnd: (_payload, context): void => {
+          seen.push(context.rng.snapshotCursors()[SPAWN_VALUE_STREAM]);
+          context.rng.stream(SPAWN_VALUE_STREAM).next();
+          seen.push(context.rng.snapshotCursors()[SPAWN_VALUE_STREAM]);
+        },
+      }),
+    );
+
+    bus.dispatch('onStageEnd', createStageEndPayload(), environment);
+
+    expect(seen).toEqual([0, 1]);
+  });
+});
+
+describe('a handler cannot reach the lattice through a payload (F2)', () => {
+  it('carries the read-only facade on onBeforeMove, not the live board', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const board = createBoard();
+    const seen: unknown[] = [];
+
+    register(
+      bus,
+      createSubscriber('reads-the-payload-board', {
+        onBeforeMove: (payload): void => {
+          seen.push(payload.board);
+        },
+      }),
+    );
+
+    bus.dispatch(
+      'onBeforeMove',
+      createBeforeMovePayload(board),
+      createEnvironment(),
+    );
+
+    const carried = seen[0] as Record<string, unknown>;
+
+    expect(carried).not.toBe(board);
+    expect(Object.isFrozen(carried)).toBe(true);
+    expect(carried['insertTile']).toBeUndefined();
+    expect(carried['removeTile']).toBeUndefined();
+    expect(carried['cells']).toBeUndefined();
+    expect(carried['cellContent']).toBeUndefined();
+  });
+
+  it('carries the read-only facade on onAfterMove, not the live board', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const board = createBoard();
+    const seen: unknown[] = [];
+
+    register(
+      bus,
+      createSubscriber('reads-the-payload-board', {
+        onAfterMove: (payload): void => {
+          seen.push(payload.board);
+        },
+      }),
+    );
+
+    bus.dispatch(
+      'onAfterMove',
+      createAfterMovePayload(board),
+      createEnvironment(),
+    );
+
+    const carried = seen[0] as Record<string, unknown>;
+
+    expect(carried).not.toBe(board);
+    expect(Object.isFrozen(carried)).toBe(true);
+    expect(carried['insertTile']).toBeUndefined();
+    expect(carried['cells']).toBeUndefined();
+  });
+
+  it('reads live through the facade, so the board it reports is the board ' +
+    'as it stands', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const board = createBoard();
+    const seen: (number | null)[] = [];
+
+    register(
+      bus,
+      createSubscriber('reads-a-cell', {
+        onBeforeMove: (payload): void => {
+          seen.push(payload.board.cellValue({ x: PAIR_X, y: PAIR_Y }));
+        },
+      }),
+    );
+
+    const payload = createBeforeMovePayload(board);
+
+    // One environment across both dispatches, holding the board the removal
+    // below is made on: the facade the bus hands a handler is built over
+    // `environment.grid`, so that is the board a live read has to observe.
+    const environment: HookEnvironment = {
+      config: createDefaultRulesConfig(),
+      rng: createRngStreams(RUN_SEED),
+      grid: board,
+    };
+
+    bus.dispatch('onBeforeMove', payload, environment);
+    board.removeTile(new Tile({ x: PAIR_X, y: PAIR_Y }, PAIR_VALUE));
+    bus.dispatch('onBeforeMove', payload, environment);
+
+    expect(seen).toEqual([PAIR_VALUE, null]);
+  });
+
+  it('leaves the lattice unchanged when a handler writes through the ' +
+    'facade and then throws', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const board = createBoard();
+    const thrown: string[] = [];
+    const before = board.serialize();
+
+    register(
+      bus,
+      createSubscriber('tries-to-write-then-throws', {
+        onBeforeMove: (payload): BeforeMovePayload => {
+          const writable = payload.board as unknown as {
+            size: number;
+            cellValue: unknown;
+          };
+
+          try {
+            writable.size = HUGE_BOARD_SIZE;
+          } catch (error: unknown) {
+            thrown.push(String((error as Error).name));
+          }
+
+          try {
+            writable.cellValue = (): null => null;
+          } catch (error: unknown) {
+            thrown.push(String((error as Error).name));
+          }
+
+          throw new Error('relic handler failed');
+        },
+      }),
+    );
+
+    const result = bus.dispatch(
+      'onBeforeMove',
+      createBeforeMovePayload(board),
+      createEnvironment(),
+    );
+
+    expect(result.failed).toBe(1);
+    expect(thrown).toEqual(['TypeError', 'TypeError']);
+    expect(board.serialize()).toEqual(before);
   });
 });

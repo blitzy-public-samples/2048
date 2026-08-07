@@ -17,6 +17,8 @@
  * js/html_actuator.js's, and the cell geometry comes from style/main.scss
  * through ../../theme/tokens.
  *
+ * TR-FOCUS-01 through TR-FOCUS-07 in the order of the table.
+ *
  * The three controls the trap cycles were `<a>` elements with no `href` in the
  * retired markup, so none was a tab stop; index.html now declares them as
  * `<button>` elements and src/input/on-screen-controls.ts owns their bindings.
@@ -42,6 +44,11 @@
  * layer, and to style/_reward.scss, which owns the dialog surface. The only
  * style properties written here are the position and size of a cell
  * counterpart, and every one of their values comes from ../../theme/tokens.
+ //
+ * Decisions behind this file, all in docs/DECISION_LOG.md: DL-FOCUS-01, the
+ * single-tab-stop grid; DL-FOCUS-02, the explicit per-cell geometry;
+ * DL-FOCUS-03, `aria-disabled` elements retained in the focus cycle; and
+ * DL-A11Y-08, the parallel DOM beside an `aria-hidden` canvas, which
  */
 
 import {

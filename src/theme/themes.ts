@@ -19,6 +19,10 @@
  * module stays importable by the DOM-free unit and snapshot suites. The module
  * reads no storage, queries no media feature, emits no log and performs no work
  * at import time beyond freezing its own declarations.
+ *
+ * Decisions behind this file: DL-THEME-01, the high-contrast palette;
+ * DL-THEME-02, the colourblind-safe palette; DL-THEME-03, the attribute the
+ * activation contract is carried on; and DL-THEME-04, the derivation the
  */
 
 import {
@@ -286,6 +290,8 @@ const highContrastTileAccents: readonly (string | null)[] = Object.freeze(
  * style/_themes.scss key for key. Its ramp runs from a mid-tone low anchor to a
  * near-black high anchor and declares no accent band, so every step differs
  * from its neighbours in luminance.
+ *
+ * DL-THEME-01.
  */
 export const highContrastThemePalette: ThemePalette = Object.freeze({
   pageBackground: WHITE,
@@ -347,6 +353,8 @@ const colorblindSafeTileAccents: readonly (string | null)[] = Object.freeze([
  * ramp separates by lightness as well as by hue and its axis runs yellow to
  * blue rather than orange to red. Its page background and board field are the
  * default palette's, carried through the same two tokens.
+ *
+ * DL-THEME-02.
  */
 export const colorblindSafeThemePalette: ThemePalette = Object.freeze({
   pageBackground,

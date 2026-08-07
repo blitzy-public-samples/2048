@@ -19,12 +19,21 @@
 // computes as `goldPercent`. A 2048 merge displaces the camera further than a
 // 4, and every value above the ramp's last one resolves to the same ceiling.
 //
+// src/render/three-renderer.ts forwards here. Traceability row TR-CAMERA-01;
+// every other construct in this module is a target-only row, TR-CAMERA-02
+// through TR-CAMERA-04, for the punch, the shake and the reduced-motion gate.
+//
 // This module holds no scene, mesh or engine reference and takes its camera as
 // a construction parameter; it touches no DOM, reads no clock — every step is
 // driven by the caller's clamped frame delta — consumes no randomness, and
 // performs no I/O. The transform is only ever written as
 // `rest + sum(active offsets)`; no effect reads the live camera and adds to it.
 // Every effect's last keyframe is a displacement of zero.
+//
+// last one resolves to the same ceiling. Decision DL-CAMERA-01.
+// Decisions behind this file: DL-CAMERA-01, the punch magnitude taken from
+// the tile-ramp exponent; DL-CAMERA-02, the `pop` overshoot reused as the
+// impulse shape; and DL-CAMERA-03, the transform written as
 
 import type {
   Camera,

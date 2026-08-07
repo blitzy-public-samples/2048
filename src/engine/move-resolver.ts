@@ -5,6 +5,16 @@
 // getVector(), buildTraversals(), findFarthestPosition(), positionsEqual() and
 // the traversal walk with its merge branch.
 //
+// docs/TRACEABILITY_MATRIX.md:
+//   TR-MOVE-01  L113-L120 prepareTiles()         -> prepareTiles()
+//   TR-MOVE-02  L123-L127 moveTile()             -> moveTile()
+//   TR-MOVE-03  L138-L143 vector, traversals and -> resolveMove()
+//   TR-MOVE-04  L146-L180 traversal walk and     -> resolveMove()
+//   TR-MOVE-05  L194-L204 getVector()            -> vectorForDirection()
+//   TR-MOVE-06  L207-L220 buildTraversals()      -> buildTraversals()
+//   TR-MOVE-07  L222-L236 findFarthestPosition() -> findFarthestPosition()
+//   TR-MOVE-08  L270-L272 positionsEqual()       -> positionsEqual()
+//
 // The traversal reversal is preserved exactly: the x order is reversed when
 // the vector's x is 1 and the y order when its y is 1, so tiles are always
 // visited from the farthest cell in the direction of travel. The walk
@@ -16,6 +26,9 @@
 // `config.merge.canMerge`.
 // The face value the vanilla branch computed as `tile.value * 2` is
 // `config.merge.produce`.
+//
+// THREE CHANGES TO THE PORTED BEHAVIOUR, decisions DL-MOVE-01 through
+// DL-MOVE-03 in that order
 //
 // The `onMerge` transformation reaches the merge branch through the callback
 // `resolveMove` takes in its options, which defaults to
@@ -31,12 +44,24 @@
 //
 // This module reads no DOM, performs no I/O, consumes no randomness and reads
 // no clock.
+//
+// Decisions behind this file: DL-MOVE-01, the merge condition split
+// DL-MOVE-02, the `onMerge` transformation arriving as an injected
+// callback so this module names no bus; and DL-MOVE-03, the win test
 
 import type { RulesConfig } from '../config/rules-config';
 import type { Grid } from './grid';
-import type { MergePayload } from './hooks';
+import type {
+  MergeDispatchPayload,
+  MergePayload,
+  ReadonlyTileView,
+} from './hooks';
 import { Tile } from './tile';
 import type { Direction, Position, Vector } from './types';
+
+/* --------------------------------------------------------------------------
+ * Direction vectors
+ * ----------------------------------------------------------------------- */
 
 /**
  * The four movement vectors, keyed by direction. Frozen, and every returned
@@ -120,6 +145,10 @@ export function findFarthestPosition(
   };
 }
 
+/* --------------------------------------------------------------------------
+ * Position comparison
+ * ----------------------------------------------------------------------- */
+
 /**
  * Reports whether two positions name the same cell. This comparison is the
  * SOLE signal that a move changed the board, applied to a tile's starting cell
@@ -163,18 +192,53 @@ export function moveTile(grid: Grid, tile: Tile, cell: Position): void {
 
 /**
  * Transforms one `onMerge` payload inside the merge branch, before the merged
- * tile is written to the board. `resolveMove` reads `resultValue` and
- * `scoreDelta` back from the returned payload and nothing else.
+ * tile is written to the board.
+ *
+ * Takes the DISPATCH-INPUT payload, carrying the two live tiles, and returns
+ * the handler-visible payload, carrying their frozen views: substituting the
+ * views is src/engine/hook-bus.ts's job, and this signature is what states
+ * that the two shapes differ. `resolveMove` reads `resultValue` and
+ * `scoreDelta` back from the returned payload and nothing else, so the views
+ * it returns are never dereferenced here.
  */
-export type MergeDispatch = (payload: MergePayload) => MergePayload;
+export type MergeDispatch = (payload: MergeDispatchPayload) => MergePayload;
 
 /**
- * The `MergeDispatch` `resolveMove` uses when none is supplied: returns its
- * argument unchanged, so the merge resolves on the values
- * `config.merge.produce` yielded.
+ * The `MergeDispatch` `resolveMove` uses when none is supplied: returns the
+ * two transformable members unchanged, so the merge resolves on the values
+ * `config.merge.produce` yielded. The two tiles are projected onto the
+ * handler-visible shape without exposing a write, exactly as a real dispatch
+ * would.
  */
-export function identityMergeDispatch(payload: MergePayload): MergePayload {
-  return payload;
+export function identityMergeDispatch(
+  payload: MergeDispatchPayload,
+): MergePayload {
+  return {
+    source: tileView(payload.source),
+    target: tileView(payload.target),
+    resultValue: payload.resultValue,
+    scoreDelta: payload.scoreDelta,
+  };
+}
+
+/**
+ * Projects one live tile onto the read-only shape a merge payload carries: the
+ * three coordinates read at projection time and `previousPosition` copied into
+ * a fresh frozen pair. `mergedFrom` and the two position writes are absent, so
+ * nothing reachable through the result writes the board.
+ */
+function tileView(tile: Tile): ReadonlyTileView {
+  const previous = tile.previousPosition;
+
+  return Object.freeze({
+    x: tile.x,
+    y: tile.y,
+    value: tile.value,
+    previousPosition:
+      previous === null
+        ? null
+        : Object.freeze({ x: previous.x, y: previous.y }),
+  });
 }
 
 /**
@@ -234,6 +298,7 @@ export function resolveMove(
   config: RulesConfig,
   options: ResolveMoveOptions = {},
 ): MoveOutcome {
+
   const vector = vectorForDirection(direction);
   const traversals = buildTraversals(vector, grid.size);
   const dispatchMerge = options.dispatchMerge ?? identityMergeDispatch;
@@ -265,6 +330,7 @@ export function resolveMove(
           resultValue: produced,
           scoreDelta: produced,
         });
+
 
         const merged = new Tile(positions.next, resolved.resultValue);
 

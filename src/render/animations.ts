@@ -24,10 +24,22 @@
 // tween, the `.tile-merged` class carrying `pop`, the `.tile-new` class
 // carrying `appear`, and the `.score-addition` element carrying `move-up`.
 //
+// Each row is one traceability row of docs/TRACEABILITY_MATRIX.md:
+//   TR-ANIM-01  js/html_actuator.js L54, L67-L72  previousPosition and
+//   TR-ANIM-02  js/html_actuator.js L73-L80       the .tile-merged class
+//   TR-ANIM-03  js/html_actuator.js L82           the .tile-new class
+//   TR-ANIM-04  js/html_actuator.js L114-L120     the .score-addition
+//   TR-ANIM-05  style/main.scss `.game-message`, with `&.game-won` and
+//               `&.game-over`  the terminal overlay's
+//
 // This module holds no mesh, element or engine reference, touches no DOM, reads
 // no clock — every step is driven by a caller-supplied delta — consumes no
 // randomness and performs no I/O. It interpolates numbers, and the renderer
 // applies them.
+//
+// Decisions behind this file: DL-ANIM-01, the five CSS timings reproduced in
+// JavaScript; DL-ANIM-02, a delay yielding the 0% keyframe to match
+// `animation-fill-mode: backwards`; and DL-ANIM-03, the three-stop `pop`
 
 import type { Position } from '../engine/types';
 import type { MotionEasing } from '../theme/tokens';
@@ -875,6 +887,7 @@ export interface TweenGroup {
 
   /** Takes a tween back out, complete or not. */
   readonly remove: (tween: TweenBase) => boolean;
+
   readonly clear: () => number;
   readonly advance: (deltaMs: number) => boolean;
   readonly hasOutstandingWork: () => boolean;
@@ -889,6 +902,7 @@ export interface TweenGroup {
    * live subscription in the render layer's store for as long as the store
    * lives.
    */
+
   readonly dispose: () => void;
 }
 

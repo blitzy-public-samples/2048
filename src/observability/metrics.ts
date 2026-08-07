@@ -7,11 +7,40 @@
 // call and no `console.*` call existed in the retired sources, so it carries no
 // ported construct.
 //
+// target-only rows TR-METRIC-01 through TR-METRIC-06 of
+//
 // Boundaries the turn-boundary counters come from in the retired control flow:
 // `turnsTotal` from `move()` entry through the actuation push, `mergesTotal`
 // from the merge branch, which is entered once per merge inside the traversal
 // so a move resolving two merges enters it twice, and `spawnsTotal` from
 // `addRandomTile()`.
+//
+// WHICH FEED EACH FAMILY HAS. An engine EVENT feeds `engineEventsTotal`,
+// `turnsTotal`, `mergesTotal` and `spawnsTotal`, through `recordEngineEvent`
+// or `recordEngineEventCount`; an engine COUNTER feeds `spawnAttemptsTotal`
+// and `spawnSuppressedTotal`, through `recordSpawnAttempt` and
+// `recordSpawnSuppressed`. The two are not interchangeable: the engine
+// returns before emitting `tile:spawn` on a full board — the boundary that
+// keeps a full board free of draws — so an emission count measures resolved
+// spawns and attempts are only observable at the engine's own
+// `engine.spawn.attempt` counter, raised on entry to the spawn. Feeding an
+// attempt family from an emission under-reports it by exactly the full-board
+// attempts, and that is the one substitution this module refuses to make.
+//
+// Emission counts do not vary with observers. The emitter counts an emission
+// before it looks a listener up, so an event with no subscriber is counted
+// like one with three and `engineEventsTotal` measures the engine rather than
+// the run's subscriptions. An emission is reported on the `event` dimension
+// of `EngineCountReport` and a hook dispatch on its `hook` dimension; the two
+// are disjoint, and `recordEngineEventCount` refuses a report that names an
+// event in the hook dimension rather than folding it under that hook.
+//
+// single source of truth for why each was taken:
+//   DL-METRIC-01  the `DEFAULT_DURATION_BUCKETS` boundaries
+//   DL-METRIC-02  the attempt and insertion spawn families being counted
+//   DL-METRIC-03  the pull-snapshot model for the hook bus's dispatch counts
+//   DL-METRIC-04  label-dimension series over name concatenation for the
+//   DL-METRIC-05  the substitution of this in-page registry, its Prometheus
 //
 // The default duration buckets take each boundary from a timing the product
 // already holds: 16 ms is the frame budget of js/animframe_polyfill.js, and
@@ -118,6 +147,13 @@ export interface Histogram {
    * its accuracy is bounded by the bucket widths. A rank that falls in the
    * overflow slot resolves to the highest bound.
    *
+   * An EMPTY BUCKET IS NEVER SELECTED: it holds no observation, so no rank
+   * falls inside it. The lower edge of the first bucket, which the bounds
+   * leave unbounded below, is the smallest observation recorded, so an
+   * estimate never falls outside the observed range — including for a layout
+   * whose first bound is negative.
+   *
+   * @param q Quantile to estimate, from 0 to 1 inclusive.
    * @returns The estimate, or `NaN` when nothing has been observed or `q` is
    *   outside [0, 1].
    */
@@ -131,6 +167,8 @@ export interface Histogram {
  * 16 is the frame budget, 32 and 64 are two and four budgets, and the rest are
  * the animation timings the product already holds, out past the 1200 ms
  * overlay delay.
+ *
+ * Decision DL-METRIC-01.
  */
 export const DEFAULT_DURATION_BUCKETS: readonly number[] = Object.freeze([
   1, 2, 4, 8, 16, 32, 64, 100, 200, 400, 600, 800, 1200, 2000,
@@ -192,17 +230,31 @@ export const METRIC_NAMES = Object.freeze({
   /**
    * Tiles actually inserted into the lattice. Boundary:
    * js/game_manager.js L69-L76, whose L72-L75 body ran only when
-   * js/grid.js L37-L43 returned a cell.
+   * js/grid.js L37-L43 returned a cell. Fed by `recordEngineEvent` from the
+   * `tile:spawn` emissions that carry a position, which the engine emits
+   * only for a spawn that reached the lattice.
    */
   spawnsTotal: `${METRIC_PREFIX}spawns_total`,
 
   /**
    * Spawn attempts, whether or not a cell was available. Boundary:
-   * js/game_manager.js L69-L76 on entry. Always at least
-   * `spawns_total`; the difference is the attempts that found a full
-   * board.
+   * js/game_manager.js L69-L76 on entry, which is the engine's
+   * `engine.spawn.attempt` counter and NOT the `tile:spawn` event: the
+   * engine returns before emitting when the board is full, so an emission
+   * count measures resolved spawns and would under-report attempts. Fed by
+   * `recordSpawnAttempt` alone.
+   *
+   * Always at least `spawns_total`, and exactly `spawns_total` plus
+   * `spawn_suppressed_total`.
    */
   spawnAttemptsTotal: `${METRIC_PREFIX}spawn_attempts_total`,
+
+  /**
+   * Spawn attempts that inserted no tile: the board was full, or an
+   * `onSpawn` handler returned no usable cell. The engine's
+   * `engine.spawn.suppressed` counter, fed by `recordSpawnSuppressed`.
+   */
+  spawnSuppressedTotal: `${METRIC_PREFIX}spawn_suppressed_total`,
 
   /** Engine events emitted, one series per `ENGINE_EVENT_NAMES` member. */
   engineEventsTotal: `${METRIC_PREFIX}engine_events_total`,
@@ -230,6 +282,8 @@ export const METRIC_NAMES = Object.freeze({
  * Frozen. The per-hook, per-event, per-reason, per-stream, per-check and
  * per-span families are label dimensions on one family each, not concatenated
  * names.
+ *
+ * Decision DL-METRIC-04.
  */
 export const METRIC_LABELS = Object.freeze({
   hook: 'hook',
@@ -247,8 +301,14 @@ const METRIC_HELP: Readonly<Record<keyof typeof METRIC_NAMES, string>> =
     spawnsTotal:
       'Tiles inserted, one per tile:spawn emission carrying a position.',
     spawnAttemptsTotal:
-      'Spawn attempts, one per tile:spawn emission.',
-    engineEventsTotal: 'Engine events emitted, by event name.',
+      'Spawn attempts, one per engine spawn entry whether or not a cell ' +
+      'was available.',
+    spawnSuppressedTotal:
+      'Spawn attempts that inserted no tile, on a full board or after a ' +
+      'handler returned no usable cell.',
+    engineEventsTotal:
+      'Engine events emitted, by event name, counted per emission and not ' +
+      'per listener.',
     hookDispatchesTotal: 'Hook dispatches, by hook name.',
     hookHandlerInvocationsTotal:
       'Hook handlers invoked, by hook name.',
@@ -276,6 +336,7 @@ const METRIC_KINDS: Readonly<Record<keyof typeof METRIC_NAMES, MetricKind>> =
     mergesTotal: 'counter',
     spawnsTotal: 'counter',
     spawnAttemptsTotal: 'counter',
+    spawnSuppressedTotal: 'counter',
     engineEventsTotal: 'counter',
     hookDispatchesTotal: 'counter',
     hookHandlerInvocationsTotal: 'counter',
@@ -390,13 +451,42 @@ export interface MetricsSnapshot {
  *
  * A structural view rather than an import of the event type, so the registry
  * still names no engine payload interface: a `SpawnPayload` from
- * src/engine/hooks.ts, and the `TileSpawnEvent` src/engine/engine-events.ts
- * aliases to it, both satisfy it. `position` is absent — or `undefined` —
- * when no cell was available and no tile was inserted.
+ * src/engine/hooks.ts and a `TileSpawnEvent` from
+ * src/engine/engine-events.ts both satisfy it.
+ *
+ * `position` present means a tile entered the lattice, and absent — or
+ * `undefined` — means the spawn was suppressed and inserted nothing. It is
+ * therefore the insertion signal and NOT the attempt signal: a full board
+ * emits no `tile:spawn` at all, because the engine returns before the
+ * emission, which is what keeps a full board free of draws. Attempts come
+ * from `recordSpawnAttempt`.
  */
 export interface SpawnDetail {
-  /** Cell the tile was inserted in, absent when none was available. */
+  /** Cell the tile was inserted in, absent when none was. */
   readonly position?: unknown;
+}
+
+/**
+ * The dimensions of an engine count report `recordEngineEventCount` reads.
+ *
+ * A structural view rather than an import, matching `SpawnDetail` above: an
+ * `EngineCountReport` from src/engine/types.ts satisfies it as it stands, and
+ * a fabricated value is validated at runtime.
+ *
+ * `hook` is declared here only so it can be REFUSED. The two dimensions are
+ * disjoint and a report carries at most one; a report that names an engine
+ * event in `hook` is a caller mistaking the hook dimension for the event
+ * dimension, and folding it would attribute an emission to a hook.
+ */
+export interface EngineEventCountView {
+  /** Event the count is attributed to, one of `ENGINE_EVENT_NAMES`. */
+  readonly event?: unknown;
+
+  /** Hook dimension, which this entry point reads only to reject. */
+  readonly hook?: unknown;
+
+  /** Emissions the report stands for. Absent is read as one. */
+  readonly value?: unknown;
 }
 
 /* --------------------------------------------------------------------------
@@ -713,11 +803,12 @@ function readCorrelationId(logger: Logger | undefined): string {
 /**
  * Reports whether a `tile:spawn` payload placed a tile.
  *
- * `SpawnPayload.position` in src/engine/hooks.ts is optional: the engine
- * emits the event for every spawn attempt and omits the position when no
- * cell was available, which js/grid.js L37-L43 signalled by returning
- * `undefined` from `randomAvailableCell()`. A cell is a `{x, y}` pair of
- * finite numbers.
+ * `SpawnPayload.position` in src/engine/hooks.ts is optional, and the engine
+ * carries it on the event only for a spawn that reached the lattice: a spawn
+ * suppressed on a full board is not emitted at all, and one suppressed by a
+ * handler is emitted with the member omitted, which is the state
+ * js/grid.js L37-L43 signalled by returning `undefined` from
+ * `randomAvailableCell()`. A cell is a `{x, y}` pair of finite numbers.
  *
  * @param payload Payload the event carried.
  * @returns `true` when the payload carries a usable cell.
@@ -754,6 +845,29 @@ function readCount(source: unknown, member: string): number | null {
   const value: unknown = (source as Record<string, unknown>)[member];
 
   return isFiniteNumber(value) && value >= 0 ? value : null;
+}
+
+/**
+ * Reduces a value of unknown type to a bounded string fit for a rejection
+ * field.
+ *
+ * Only a string is carried, and only as many characters as a label value
+ * holds: a rejection reports what it refused without letting the refused
+ * value set the size of the record. Anything else reduces to the empty
+ * string rather than being stringified, so a hostile `toString` is never
+ * called.
+ *
+ * @param value Value being reported.
+ * @returns The bounded string, or `''`.
+ */
+function boundedLabel(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value.length > MAX_LABEL_VALUE_LENGTH
+    ? value.slice(0, MAX_LABEL_VALUE_LENGTH)
+    : value;
 }
 
 class MetricSeries implements Counter, Gauge, Histogram {
@@ -1097,6 +1211,8 @@ interface MetricFamily {
  * Holds every series and exports them three ways: `snapshot()` as JSON,
  * `toPrometheusText()` as text exposition, and `download()` as a file. Those
  * three members are what stands in for a network-served metrics endpoint here.
+ //
+ * The substitution is decision DL-METRIC-05.
  *
  * Every member is safe to call from inside an engine-event listener: a rejected
  * call is reported through the injected logger, counted, and otherwise ignored
@@ -1108,6 +1224,11 @@ export class MetricsRegistry {
   /** The families, in registration order. */
   private readonly families = new Map<string, MetricFamily>();
 
+  /**
+   * Absolute values the last fold read, keyed by `foldKey` — family, source
+   * correlation identifier and label dimension — so a repeated fold of the
+   * same snapshot adds nothing and two sources keep separate baselines.
+   */
   private readonly foldedAbsolutes = new Map<string, number>();
 
   private readonly eventCounters = new Map<string, MetricSeries>();
@@ -1192,6 +1313,9 @@ export class MetricsRegistry {
   /** Cached series for the spawn-attempt counter. */
   private readonly spawnAttemptsCounter: MetricSeries;
 
+  /** Cached series for the attempts that inserted nothing. */
+  private readonly spawnSuppressedCounter: MetricSeries;
+
   /** Cached series for the composited-frame counter. */
   private readonly framesCounter: MetricSeries;
 
@@ -1211,8 +1335,23 @@ export class MetricsRegistry {
     this.mergesCounter = this.declareSeries('mergesTotal', {});
     this.spawnsCounter = this.declareSeries('spawnsTotal', {});
     this.spawnAttemptsCounter = this.declareSeries('spawnAttemptsTotal', {});
+    this.spawnSuppressedCounter = this.declareSeries(
+      'spawnSuppressedTotal',
+      {},
+    );
     this.framesCounter = this.declareSeries('framesRenderedTotal', {});
 
+    // THE THREE CANONICAL TUPLES DRIVE CONSTRUCTION, AND ARE STILL
+    // VALIDATED. `ENGINE_EVENT_NAMES`, `HOOK_NAMES` and `RNG_STREAM_NAMES`
+    // are each `Object.freeze`d at their declaration, so no consumer can
+    // reorder or extend one at runtime and change which series this registry
+    // holds. The bounded checks below are kept regardless of that freeze:
+    // every name and label goes through `declareSeries`, which validates the
+    // name and label pattern, charges the metadata budget, and refuses a
+    // family beyond `MAX_FAMILIES` or a series beyond
+    // `MAX_SERIES_PER_FAMILY`. The freeze is the source's guarantee; the
+    // validation is this module's, and it holds for a fabricated tuple a
+    // bundled or test consumer substitutes.
     for (const event of ENGINE_EVENT_NAMES) {
       this.eventCounters.set(
         event,
@@ -1370,13 +1509,25 @@ export class MetricsRegistry {
   }
 
   /**
-   * Counts one engine-event emission, and the turn, merge or spawn that
+   * Counts one engine-event emission, and the turn, merge or insertion that
    * emission also stands for.
+   *
+   * ONE CALL PER EMISSION, NOT PER LISTENER. The emitter counts an emission
+   * before it looks a listener up, so an event with no subscriber is emitted
+   * and counted exactly like one with three, and nothing here varies with how
+   * many listeners a run happens to have registered.
    *
    * `tile:merge` is emitted once per merge — js/game_manager.js L156-L170 was
    * entered once per merge inside the traversal — so a move that resolves two
    * merges calls this twice and the merge counter rises by two. `move:after`
-   * closes one turn and `tile:spawn` stands for one spawn.
+   * closes one turn.
+   *
+   * `tile:spawn` stands for one tile INSERTED, and only when its payload
+   * carries a position. It is not the spawn-attempt boundary and it does not
+   * touch `spawn_attempts_total`: the engine returns before emitting on a full
+   * board, so counting emissions would under-report attempts. Attempts arrive
+   * through `recordSpawnAttempt` and suppressions through
+   * `recordSpawnSuppressed`.
    */
   recordEngineEvent(event: EngineEventName, detail?: SpawnDetail): void {
     try {
@@ -1385,7 +1536,7 @@ export class MetricsRegistry {
       if (counter === undefined) {
         this.reportRejection('engine event rejected', {
           reason: 'unknownEvent',
-          event: typeof event === 'string' ? event : '',
+          event: boundedLabel(event),
         });
 
         return;
@@ -1397,16 +1548,146 @@ export class MetricsRegistry {
         this.turnsCounter.inc(1);
       } else if (event === 'tile:merge') {
         this.mergesCounter.inc(1);
-      } else if (event === 'tile:spawn') {
-        this.spawnAttemptsCounter.inc(1);
-
-        if (carriesSpawnPosition(detail)) {
-          this.spawnsCounter.inc(1);
-        }
+      } else if (event === 'tile:spawn' && carriesSpawnPosition(detail)) {
+        this.spawnsCounter.inc(1);
       }
     } catch {
       this.reporterFaults += 1;
     }
+  }
+
+  /**
+   * Counts one engine-event emission from an emitter count report.
+   *
+   * THE EVENT DIMENSION IS THE ONLY ONE READ. `EngineCountReport` carries a
+   * `hook` dimension and an `event` dimension and at most one of them; event
+   * names were once reported under `hook`, which made an emission and a hook
+   * dispatch indistinguishable to a consumer. So this reads `event`, and a
+   * report that carries no `event` but names an engine event in `hook` is
+   * refused and reported rather than folded under that hook.
+   *
+   * Equivalent to `recordEngineEvent` for the per-event, turn and merge
+   * families, and the path a wiring layer uses when it is handed reports
+   * rather than events. It records no insertion, because a count report
+   * carries no payload: insertions arrive with the event through
+   * `recordEngineEvent`.
+   *
+   * @param report One count report. `value` is the number of emissions it
+   *   stands for, read as one when absent.
+   */
+  recordEngineEventCount(report: EngineEventCountView): void {
+    try {
+      if (typeof report !== 'object' || report === null) {
+        this.reportRejection('engine event count rejected', {
+          reason: 'notAnObject',
+        });
+
+        return;
+      }
+
+      const named: unknown = report.event;
+
+      if (typeof named !== 'string' || named.length === 0) {
+        this.reportRejection('engine event count rejected', {
+          reason: this.namesAnEventInHookDimension(report)
+            ? 'eventNameInHookDimension'
+            : 'noEventDimension',
+          hook: boundedLabel(report.hook),
+        });
+
+        return;
+      }
+
+      const counter = this.eventCounters.get(named);
+
+      if (counter === undefined) {
+        this.reportRejection('engine event count rejected', {
+          reason: 'unknownEvent',
+          event: boundedLabel(named),
+        });
+
+        return;
+      }
+
+      const value: unknown = report.value;
+      const emissions = value === undefined ? 1 : value;
+
+      if (
+        !isFiniteNumber(emissions) ||
+        emissions < 0 ||
+        !Number.isInteger(emissions)
+      ) {
+        this.reportRejection('engine event count rejected', {
+          reason: 'notANonNegativeInteger',
+          event: boundedLabel(named),
+        });
+
+        return;
+      }
+
+      if (emissions === 0) {
+        return;
+      }
+
+      counter.inc(emissions);
+
+      if (named === 'move:after') {
+        this.turnsCounter.inc(emissions);
+      } else if (named === 'tile:merge') {
+        this.mergesCounter.inc(emissions);
+      }
+    } catch {
+      this.reporterFaults += 1;
+    }
+  }
+
+  /**
+   * Counts one spawn attempt.
+   *
+   * THE AUTHORITATIVE ATTEMPT BOUNDARY, which is the engine's
+   * `engine.spawn.attempt` counter raised on entry to the spawn —
+   * js/game_manager.js L69 — and therefore the only feed
+   * `spawn_attempts_total` has. Every attempt reaches it, including the
+   * full-board one that emits no event.
+   */
+  recordSpawnAttempt(): void {
+    try {
+      this.spawnAttemptsCounter.inc(1);
+    } catch {
+      this.reporterFaults += 1;
+    }
+  }
+
+  /**
+   * Counts one spawn attempt that inserted no tile.
+   *
+   * The engine's `engine.spawn.suppressed` counter: a full board, or an
+   * `onSpawn` handler that returned no usable cell. Attempts minus
+   * suppressions is the number of tiles inserted, so this family and
+   * `spawns_total` are two readings of one quantity and disagreeing is a
+   * wiring fault rather than a game state.
+   */
+  recordSpawnSuppressed(): void {
+    try {
+      this.spawnSuppressedCounter.inc(1);
+    } catch {
+      this.reporterFaults += 1;
+    }
+  }
+
+  /**
+   * Whether a report with no `event` dimension names an engine event in its
+   * `hook` dimension, which is the confusion this registry refuses.
+   *
+   * @param report Report being recorded.
+   * @returns True when `hook` holds an `ENGINE_EVENT_NAMES` member.
+   */
+  private namesAnEventInHookDimension(report: EngineEventCountView): boolean {
+    const carried: unknown = report.hook;
+
+    return (
+      typeof carried === 'string' && this.eventCounters.has(carried)
+    );
   }
 
   recordFrame(frameTimeMs?: number): void {
@@ -1501,6 +1782,19 @@ export class MetricsRegistry {
     }
   }
 
+  /**
+   * Folds the draw cursors of the named RNG substreams into the per-stream
+   * draw counter.
+   *
+   * ABSOLUTE RECONCILIATION, as `foldHookDispatchCounts` uses: each cursor is
+   * a lifetime total, so the counter rises by the increase since the previous
+   * fold and folding one set of cursors twice adds nothing the second time.
+   *
+   * @param cursors Draw cursor of each substream, keyed by substream name.
+   *   Only the four members of `RNG_STREAM_NAMES` are folded; any other key
+   *   is reported and folded nowhere, and an absent member is reported by
+   *   the fold itself.
+   */
   recordRngCursors(cursors: Readonly<Record<string, number>>): void {
     try {
       if (typeof cursors !== 'object' || cursors === null) {
@@ -1554,11 +1848,23 @@ export class MetricsRegistry {
    * PULL, not push: the caller reads `HookBus.metrics()` and hands the result
    * here. src/engine imports nothing from this module.
    *
+   * DL-METRIC-03.
+   *
    * ABSOLUTE RECONCILIATION: the bus reports lifetime totals, so each counter
    * rises by the increase since the previous fold. Folding one snapshot twice
    * therefore adds nothing the second time, and a total that has fallen below
    * the previous reading — a fresh bus under the same registry — is read as
    * the whole of a new lifetime.
+   *
+   * REJECTED BEFORE FOLDED, NOT REPORTED AND FOLDED ANYWAY. A snapshot must
+   * carry a correlation identifier, and where this registry holds one of its
+   * own the two must agree. A snapshot carrying none cannot be reconciled at
+   * all: the reconciliation keys are namespaced by the source, so an absent
+   * identifier collapses every bus onto one key and the second bus's lifetime
+   * total is read as a delta against the first's. A snapshot carrying a
+   * FOREIGN identifier is another run's counts, and folding it would make
+   * this run's per-hook totals the sum of two runs. Both are reported and
+   * neither is folded, so nothing this registry exports mixes runs.
    */
   foldHookDispatchCounts(view: HookDispatchCountsView): void {
     try {
@@ -1581,6 +1887,11 @@ export class MetricsRegistry {
       }
 
       const source = this.resolveFoldSource(view);
+
+      if (source === undefined) {
+        return;
+      }
+
       const hooks = table as Record<string, unknown>;
 
       for (const hook of HOOK_NAMES) {
@@ -2303,31 +2614,42 @@ export class MetricsRegistry {
   }
 
   /**
-   * Reads the correlation identifier a fold's source carries, reporting a
-   * value that disagrees with this registry's own.
+   * Reads the correlation identifier a fold's source carries, deciding
+   * whether the snapshot may be folded at all.
+   *
+   * THE CORRELATION POLICY, in one place. A snapshot passes only when it
+   * carries a non-empty identifier and, where this registry holds one of its
+   * own, that identifier is the same. Everything else is reported and
+   * refused. A registry constructed with no logger holds no identifier of its
+   * own and cannot judge foreignness, so it accepts whichever identifier the
+   * snapshot carries and namespaces the reconciliation by it.
    *
    * @param view Snapshot being folded.
-   * @returns The source identifier, or the empty string when the snapshot
-   *   carries none usable.
+   * @returns The source identifier, or `undefined` when the snapshot must not
+   *   be folded.
    */
-  private resolveFoldSource(view: HookDispatchCountsView): CorrelationId {
+  private resolveFoldSource(
+    view: HookDispatchCountsView,
+  ): CorrelationId | undefined {
     const carried: unknown = view.correlationId;
 
     if (typeof carried !== 'string' || carried.length === 0) {
-      this.reportRejection('hook dispatch fold source missing', {
+      this.reportRejection('hook dispatch fold rejected', {
         reason: 'noCorrelationId',
         registry: this.correlationId,
       });
 
-      return '';
+      return undefined;
     }
 
     if (this.correlationId.length > 0 && carried !== this.correlationId) {
-      this.reportRejection('hook dispatch fold source mismatch', {
+      this.reportRejection('hook dispatch fold rejected', {
         reason: 'foreignCorrelationId',
         registry: this.correlationId,
-        source: carried,
+        source: boundedLabel(carried),
       });
+
+      return undefined;
     }
 
     return carried;

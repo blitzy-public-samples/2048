@@ -18,6 +18,14 @@
  * platform's own randomness keeps its stock behaviour for the lifetime of the
  * process.
  *
+ * lifetime of the process. Decision DL-RNG-01.
+ * Decisions behind this file: DL-RNG-01, the generator always a local
+ * instance and never installed onto `Math.random`; DL-RNG-02, the
+ * replaceable; and DL-RNG-03, the bounded seed length and resume cursor.
+ * All three are in docs/DECISION_LOG.md. Traceability rows: TR-RNG-01,
+ * js/game_manager.js L71's `Math.random()`, and TR-RNG-02, js/grid.js
+ * TR-RNG-03 through TR-RNG-05.
+ *
  * Both inputs are bounded. A seed longer than `MAX_RNG_SEED_LENGTH` and a
  * resume cursor outside `[0, MAX_RNG_CURSOR]` are rejected before a generator
  * is built and before a single draw is discarded, so neither a persisted
@@ -35,6 +43,13 @@ import seedrandom from 'seedrandom';
  * splits back into exactly one run seed and one label.
  */
 const STREAM_SEED_DELIMITER = '::' as const;
+
+/**
+ * The generator this module builds: the underlying ARC4 generator with its
+ * internal state exportable, which is the one capability `SeededRng.fork()`
+ * needs and the only reason the `state` option is used.
+ */
+type StatefulGenerator = seedrandom.StatefulPRNG<seedrandom.State.Arc4>;
 
 /**
  * Longest seed, in characters, a generator is built from. The underlying
@@ -137,9 +152,9 @@ export function isAcceptableRngCursor(cursor: unknown): boolean {
 
 /**
  * A seeded generator positioned at a known point in its own sequence: the
- * seed, the number of draws consumed, and one draw primitive. `next()` is the
- * only source of randomness in this module; every higher-level helper is
- * defined in src/rng/rng-streams.ts in terms of it.
+ * seed, the number of draws consumed, one draw primitive, and one detach
+ * primitive. `next()` is the only source of randomness in this module; every
+ * higher-level helper is defined in src/rng/rng-streams.ts in terms of it.
  */
 export interface SeededRng {
   readonly seed: string;
@@ -152,6 +167,27 @@ export interface SeededRng {
    */
   readonly cursor: number;
   next(): number;
+
+  /**
+   * Creates a DETACHED generator standing exactly where this one stands: the
+   * same seed, the same cursor, and the same next draw. Draws taken from the
+   * fork advance the fork alone, and draws taken from this instance advance
+   * this instance alone.
+   *
+   * This is the checkpoint primitive a transactional caller needs. A caller
+   * that must be able to abandon the draws it takes — src/engine/hook-bus.ts,
+   * around a hook handler that may throw — draws from a fork, and then either
+   * discards the fork, leaving this instance where it was, or advances this
+   * instance by the fork's own consumption to adopt them. Because both share a
+   * seed and a position, replaying that many draws here yields the values the
+   * fork already produced, so adoption leaves the sequence exactly where
+   * drawing directly would have.
+   *
+   * CONSTANT COST. The fork copies the generator's internal state rather than
+   * replaying the sequence, so forking a generator at cursor 100,000 costs the
+   * same as forking a fresh one.
+   */
+  fork(): SeededRng;
 }
 
 /**
@@ -240,12 +276,38 @@ export function createSeededRng(
   }
 
   const cursorLimit = normaliseStartCursor(startCursor, reporter);
-  const generator = seedrandom(seed);
+
+  // `{ state: true }` asks the generator to keep its internal state
+  // exportable, which is what `fork()` copies. It changes no draw: a generator
+  // built with it produces the sequence a generator built without it produces,
+  // value for value.
+  const generator = seedrandom(seed, { state: true });
   let cursor = cursorLimit;
 
   for (let discarded = 0; discarded < cursor; discarded += 1) {
     generator();
   }
+
+  return buildRng(seed, generator, cursor);
+}
+
+/**
+ * Wraps one live generator as a `SeededRng` positioned at `startCursor`.
+ *
+ * Shared by `createSeededRng()` and `fork()`, so a fork carries the same
+ * three members and the same accounting as the instance it was taken from.
+ *
+ * @param seed Seed the generator was built from.
+ * @param generator The live generator, built with exportable state.
+ * @param startCursor Draws consumed before this wrapper took it over.
+ * @returns The wrapper.
+ */
+function buildRng(
+  seed: string,
+  generator: StatefulGenerator,
+  startCursor: number
+): SeededRng {
+  let cursor = startCursor;
 
   return {
     seed,
@@ -258,6 +320,18 @@ export function createSeededRng(
       const draw = generator();
       cursor += 1;
       return draw;
+    },
+
+    fork(): SeededRng {
+      // The state copy is what makes the fork constant-cost: the new
+      // generator resumes from this one's position instead of replaying the
+      // sequence up to it. `state()` returns a fresh object each call, so the
+      // fork holds no reference into this generator.
+      return buildRng(
+        seed,
+        seedrandom('', { state: generator.state() }),
+        cursor
+      );
     },
   };
 }

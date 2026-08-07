@@ -1,4 +1,12 @@
 /**
+ //
+ * member. Decisions behind this file: DL-CONFIG-01, the merge rule expressed
+ * as a replaceable predicate and producer pair, and DL-CONFIG-02, every
+ * Traceability rows: TR-CONFIG-01, js/application.js L3's board-size literal
+ * -> `boardSize`; TR-CONFIG-02, js/game_manager.js L170's `2048`
+ * -> `winValue`; TR-CONFIG-03, js/game_manager.js L7's `2` -> `startTiles`;
+ * TR-CONFIG-04, js/game_manager.js L71's `Math.random() < 0.9 ? 2 : 4`
+ * -> `spawn`; and TR-CONFIG-05, js/game_manager.js L156-L157's merge
  * Structural view of a tile as the merge rules see it. A tile declaring
  * `value: number` and `mergedFrom: Tile[] | null` satisfies it structurally and
  * needs no adapter. Both members are readonly: a predicate and a producer read

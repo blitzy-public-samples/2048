@@ -173,9 +173,80 @@ describe('emit contains each subscriber individually', () => {
     );
 
     expect(logged.length).toBe(1);
-    expect(logged[0]?.fields?.['error']).toBe('boom');
     expect(logged[0]?.fields?.['event']).toBe('move');
     expect(logged[0]?.fields?.['listener']).toBe(1);
+
+    // This sink implements no `failure` member, so the guarded wrapper of
+    // src/input/keymap.ts applies its one documented reduction, which reports
+    // the name and the message as separate fields. The manager itself no
+    // longer flattens the caught value onto a field of its own (F4).
+    expect(logged[0]?.fields?.['errorName']).toBe('Error');
+    expect(logged[0]?.fields?.['errorMessage']).toBe('boom');
+    expect(logged[0]?.fields?.['error']).toBeUndefined();
+  });
+
+  it('hands a sink that implements failure the caught value unconverted ' +
+    '(F4)', () => {
+    const failures: {
+      level: string;
+      message: string;
+      thrown: unknown;
+      fields?: InputReportFields;
+    }[] = [];
+    const thrown = new Error('boom', { cause: new Error('root cause') });
+    const manager = createInputManager({
+      reporter: {
+        log: (): void => undefined,
+        count: (): void => undefined,
+        failure: (level, message, caught, fields): void => {
+          failures.push({ level, message, thrown: caught, fields });
+        },
+      },
+    });
+
+    manager.on('move', () => {
+      throw thrown;
+    });
+    manager.emit('move', 3);
+
+    const listenerFailures = failures.filter((entry) =>
+      entry.message.startsWith('An input listener'),
+    );
+
+    expect(listenerFailures).toHaveLength(1);
+    expect(listenerFailures[0]?.level).toBe('error');
+
+    // The value itself, so its subclass, its stack and its cause chain are all
+    // still reachable by the sink.
+    expect(listenerFailures[0]?.thrown).toBe(thrown);
+    expect((listenerFailures[0]?.thrown as Error).cause).toBe(thrown.cause);
+    expect(listenerFailures[0]?.fields?.['event']).toBe('move');
+    expect(listenerFailures[0]?.fields?.['listener']).toBe(0);
+  });
+
+  it('hands a sink that implements failure a non-Error throwable whole ' +
+    '(F4)', () => {
+    const caught: unknown[] = [];
+    const thrown = { code: 'not-an-error', detail: { nested: true } };
+    const manager = createInputManager({
+      reporter: {
+        log: (): void => undefined,
+        count: (): void => undefined,
+        failure: (_level, message, value): void => {
+          if (message.startsWith('An input listener')) {
+            caught.push(value);
+          }
+        },
+      },
+    });
+
+    manager.on('restart', () => {
+      throw thrown;
+    });
+    manager.emit('restart', undefined);
+
+    expect(caught).toEqual([thrown]);
+    expect(caught[0]).toBe(thrown);
   });
 
   it('reports nothing when no subscriber throws', () => {
@@ -361,24 +432,45 @@ describe('indexed actions resolve their payload from the binding', () => {
   it('keeps the index after a remap onto keys carrying no digit', () => {
     // The defect: the index was read out of the digit text, so this remap
     // collapsed all three offers onto index 0.
+    //
+    // X, Y and Z rather than A, B and C: `keepPlaying` is bound to C in
+    // `'overlay'` and stands earlier in `INPUT_ACTIONS` than `selectReward`, so
+    // C resolves to that action and would make this a conflict test rather than
+    // an index test. The conflict itself is asserted separately below.
     const remapped = remapAction(DEFAULT_KEY_BINDINGS, 'selectReward', {
-      keys: ['a', 'b', 'c'],
-      codes: ['KeyA', 'KeyB', 'KeyC'],
+      keys: ['x', 'y', 'z'],
+      codes: ['KeyX', 'KeyY', 'KeyZ'],
       slots: [
-        { index: 0, keys: ['a'], codes: ['KeyA'] },
-        { index: 1, keys: ['b'], codes: ['KeyB'] },
-        { index: 2, keys: ['c'], codes: ['KeyC'] },
+        { index: 0, keys: ['x'], codes: ['KeyX'] },
+        { index: 1, keys: ['y'], codes: ['KeyY'] },
+        { index: 2, keys: ['z'], codes: ['KeyZ'] },
       ],
     });
 
-    expect(resolveInput(keyEvent('a'), remapped, 'overlay')?.payloadIndex).toBe(
+    expect(resolveInput(keyEvent('x'), remapped, 'overlay')?.payloadIndex).toBe(
       0,
     );
-    expect(resolveInput(keyEvent('b'), remapped, 'overlay')?.payloadIndex).toBe(
+    expect(resolveInput(keyEvent('y'), remapped, 'overlay')?.payloadIndex).toBe(
       1,
     );
-    expect(resolveInput(keyEvent('c'), remapped, 'overlay')?.payloadIndex).toBe(
+    expect(resolveInput(keyEvent('z'), remapped, 'overlay')?.payloadIndex).toBe(
       2,
+    );
+  });
+
+  it('lets the earlier action win where a remap collides with it', () => {
+    // `keepPlaying` is bound to C in `'overlay'` and stands earlier in
+    // `INPUT_ACTIONS`, so a remap of a later action onto C is shadowed. The
+    // resolution order is the contract; the settings surface is what refuses a
+    // colliding rebind, so the collision cannot be made from the UI.
+    const remapped = remapAction(DEFAULT_KEY_BINDINGS, 'selectReward', {
+      keys: ['c'],
+      codes: ['KeyC'],
+      slots: [{ index: 2, keys: ['c'], codes: ['KeyC'] }],
+    });
+
+    expect(resolveInput(keyEvent('c'), remapped, 'overlay')?.action).toBe(
+      'keepPlaying',
     );
   });
 

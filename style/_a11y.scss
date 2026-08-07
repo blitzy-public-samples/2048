@@ -158,6 +158,8 @@ $a11y-motion-attribute: "data-reduced-motion" !default;
 // measures. WCAG 1.4.3 exempts an inactive component from the contrast minimum,
 // and the state is also carried by the HTML `disabled` attribute and by
 // `aria-disabled`, so it does not rest on colour alone.
+//
+// attribute and by `aria-disabled`. Decision DL-A11Y-05.
 
 @mixin interactive-states {
   @media (hover: hover) {

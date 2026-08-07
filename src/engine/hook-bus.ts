@@ -6,6 +6,9 @@
 // inline with one argument, returning nothing. That append-and-invoke-inline
 // shape is carried forward, with four properties added:
 //
+// row TR-HOOKBUS-01 of docs/TRACEABILITY_MATRIX.md. Four properties are
+// row, TR-HOOKBUS-02 through TR-HOOKBUS-05, in the order below:
+//
 //   pickup order      every subscriber carries a pickup-order index and
 //                     dispatch walks the subscribers bound to a hook in
 //                     that index's order. The backing array is held in
@@ -24,9 +27,10 @@
 //                     it returned, and a handler that returns nothing
 //                     leaves that payload as it stands.
 //   defensive records `register` copies the identifier and the handler
-//                     table out of the subscriber and takes over its
-//                     charge budget and state slot, and every object the
-//                     bus hands back is a frozen snapshot, so the object
+//                     table out of the subscriber, takes over its charge
+//                     budget, and copies its state slot all the way down,
+//                     and every object the bus hands back is a frozen
+//                     snapshot carrying a copy of that slot, so the object
 //                     a caller registered is never the object a dispatch
 //                     reads.
 //   payload validation a return is measured against the exact payload the
@@ -36,17 +40,46 @@
 //                     not that payload is discarded.
 //   per-handler
 //   transaction       each handler is handed a copy of the accumulated
-//                     payload and reads its own state slot; the copy and
-//                     the slot are adopted together once the handler has
-//                     returned and its return has validated, and are
-//                     discarded together when it throws.
+//                     payload, a full copy of its own state slot, and a
+//                     fork of every substream it draws from. The three
+//                     are adopted together once the handler has returned
+//                     and its return has validated, and are discarded
+//                     together when it throws or its return is refused.
 //
-// This module reads no DOM, performs no I/O, consumes no randomness, reads no
-// clock, and is synchronous throughout. Nothing it hands a handler re-enters
-// dispatch, and it branches on no subscriber identity.
+// WHAT A THROWING HANDLER LEAVES BEHIND: NOTHING. That claim is enforced
+// rather than asserted, at four crossings, because each was a way for a failed
+// handler to change a run:
+//
+//   the payload      `copyPayload` gives the handler its own object, so an
+//                    in-place write reaches that copy alone.
+//   the state slot   `copyState` copies the slot at registration, into the
+//                    context, and back out again, so a write at ANY DEPTH
+//                    reaches a copy. A slot taken over by reference — as it
+//                    was — left nested writes behind even though the
+//                    reassignment was rolled back.
+//   the board and
+//   its tiles        the board reaches a handler as a query-only facade, and
+//                    the two merging tiles of `onMerge` reach it as frozen
+//                    projections built by src/engine/move-resolver.ts, so
+//                    neither the lattice nor a `Tile` is ever in a handler's
+//                    hands.
+//   randomness       `openRngTransaction` hands the handler forks and
+//                    advances the run's substreams only on commit, so a
+//                    handler that draws and then throws consumes nothing and
+//                    perturbs no later spawn.
+//
+// This module reads no DOM, performs no I/O, consumes no randomness of its own,
+// reads no clock, and is synchronous throughout. Nothing it hands a handler
+// re-enters dispatch, and it branches on no subscriber identity.
+//
+// Decisions behind this file: DL-HOOKBUS-01, the charge guard living in
+// the bus; DL-HOOKBUS-02, the pickup-order index deciding dispatch order;
+// DL-HOOKBUS-03, the compounding return protocol in which a handler that
+// returns nothing leaves the payload as it stands; and DL-HOOKBUS-04, the
 
 import type {
   HookContext,
+  HookDispatchPayloadMap,
   HookEnvironment,
   HookHandler,
   HookHandlerTable,
@@ -56,6 +89,7 @@ import type {
   ReadonlyGridView,
   ReadonlyRngView,
   ReadonlyRulesView,
+  ReadonlyTileView,
 } from './hooks';
 import { HOOK_NAMES } from './hooks';
 import type {
@@ -71,6 +105,7 @@ import {
   DIRECTION_UP,
   NOOP_ENGINE_REPORTER,
 } from './types';
+
 
 /* --------------------------------------------------------------------------
  * Collaborator types, derived rather than imported
@@ -107,6 +142,7 @@ const EXHAUSTED_METRIC = 'engine.hook.exhausted';
 const DEGRADED_METRIC = 'engine.hook.degraded';
 
 const DETACHED_METRIC = 'engine.hook.detached';
+
 
 const REJECTED_PAYLOAD_METRIC = 'engine.hook.payload.rejected';
 
@@ -163,6 +199,7 @@ export interface HookDispatchResult<K extends HookName> {
   readonly invoked: number;
   readonly skipped: number;
   readonly failed: number;
+
   readonly rejected: number;
 }
 
@@ -193,6 +230,7 @@ export interface HookHandlerCounters {
   readonly skippedExhausted: number;
   readonly skippedDegraded: number;
   readonly skippedDetached: number;
+
   readonly rejected: number;
   readonly failed: number;
 }
@@ -274,12 +312,19 @@ export interface HookBus {
   /**
    * Dispatches one hook to every subscriber bound to it, in pickup order.
    *
-   * @returns The accumulated payload and the dispatch's counts. Throws
-   *   nothing that a handler or the reporter threw.
+   * @param payload The dispatch-input payload, carrying the live `Grid` on
+   *   `onBeforeMove` and `onAfterMove` and the two live `Tile`s on `onMerge`.
+   *   Handlers never see those objects: the bus substitutes the frozen
+   *   capability views of `HookPayloadMap` for them before the first handler
+   *   is invoked, so a handler that throws cannot leave the board or a tile
+   *   mutated behind it.
+   * @returns The accumulated payload — carrying the views, not the live
+   *   objects — and the dispatch's counts. Throws nothing that a handler or
+   *   the reporter threw.
    */
   dispatch<K extends HookName>(
     hook: K,
-    payload: HookPayloadMap[K],
+    payload: HookDispatchPayloadMap[K],
     environment: HookEnvironment,
   ): HookDispatchResult<K>;
 
@@ -410,6 +455,93 @@ interface Registration {
 
 function isHandler(value: unknown): boolean {
   return typeof value === 'function';
+}
+
+/* --------------------------------------------------------------------------
+ * State ownership
+ * ----------------------------------------------------------------------- */
+
+/**
+ * Nesting depth a state slot is copied to. A slot is JSON data that the run
+ * envelope persists, so it has a finite depth by contract; the bound is what
+ * makes the copy terminate on any input, a cycle included. A branch deeper
+ * than this is dropped rather than aliased.
+ */
+const MAX_STATE_DEPTH = 8;
+
+/** Members one level of a state slot will carry. */
+const MAX_STATE_MEMBERS = 256;
+
+/**
+ * Copies one state slot, all the way down.
+ *
+ * THE STATE-OWNERSHIP BOUNDARY. A slot is JSON data — the run envelope
+ * persists it — so a copy of it is a copy in full, and the bus holds a slot no
+ * caller and no handler shares an object with. Previously the slot was taken
+ * over BY REFERENCE at registration and handed to the context by reference, so
+ * a handler that wrote into a nested member and then threw left that write
+ * behind: the reassignment was rolled back, the mutation was not. Copying at
+ * every crossing is what makes the rollback total.
+ *
+ * A value JSON cannot carry — a function, a symbol, `undefined` inside an
+ * object — is dropped exactly as `JSON.stringify` would drop it, so a slot
+ * that survives a copy is a slot that survives persistence. `NaN` and the
+ * infinities are kept as they are, because the slot is not serialised here.
+ *
+ * @param value Slot to copy.
+ * @param depth Levels already descended.
+ * @returns A copy sharing no object with `value`.
+ */
+function copyState(value: unknown, depth = 0): unknown {
+  if (value === null) {
+    return null;
+  }
+
+  const kind = typeof value;
+
+  if (kind === 'string' || kind === 'number' || kind === 'boolean') {
+    return value;
+  }
+
+  if (kind !== 'object') {
+    // A function, a symbol, `undefined` and a bigint are all values JSON
+    // cannot carry, so none of them can be a persisted state slot.
+    return undefined;
+  }
+
+  if (depth >= MAX_STATE_DEPTH) {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    const copied: unknown[] = [];
+    const length = Math.min(value.length, MAX_STATE_MEMBERS);
+
+    for (let index = 0; index < length; index += 1) {
+      // JSON writes `null` for an entry it cannot carry, and so does this.
+      copied.push(copyState(value[index], depth + 1) ?? null);
+    }
+
+    return copied;
+  }
+
+  const copied: Record<string, unknown> = {};
+  let kept = 0;
+
+  for (const [name, member] of Object.entries(value as object)) {
+    if (kept >= MAX_STATE_MEMBERS) {
+      break;
+    }
+
+    const copiedMember = copyState(member, depth + 1);
+
+    if (copiedMember !== undefined) {
+      copied[name] = copiedMember;
+      kept += 1;
+    }
+  }
+
+  return copied;
 }
 
 /**
@@ -714,11 +846,54 @@ function isValidPayload<K extends HookName>(
 }
 
 /**
+ * Projects one dispatch-input payload onto the payload handlers see.
+ *
+ * Extension with no vanilla source. The live `Grid` of `onBeforeMove` and
+ * `onAfterMove` is replaced by `readonlyGridView`, and the two live `Tile`s of
+ * `onMerge` by `readonlyTileView`; every other member is carried across
+ * unchanged. Called ONCE per dispatch, before the first handler, so all
+ * handlers of one dispatch share one view object per member and the identity
+ * checks of `isValidPayload` compare against that shared object rather than a
+ * per-handler rebuild.
+ *
+ * @param hook Hook being dispatched.
+ * @param payload Payload the caller supplied, carrying live engine objects.
+ * @param board The board view built for this dispatch, reused as the payload's
+ *   `board` so a handler reads the same view through the payload and through
+ *   its context.
+ * @returns The payload handlers receive.
+ */
+function viewedPayload<K extends HookName>(
+  hook: K,
+  payload: HookDispatchPayloadMap[K],
+  board: ReadonlyGridView,
+): HookPayloadMap[K] {
+  if (hook === 'onBeforeMove' || hook === 'onAfterMove') {
+    return {
+      ...(payload as object),
+      board,
+    } as unknown as HookPayloadMap[K];
+  }
+
+  if (hook === 'onMerge') {
+    const merge = payload as HookDispatchPayloadMap['onMerge'];
+
+    return {
+      ...(merge as object),
+      source: projectTile(merge.source),
+      target: projectTile(merge.target),
+    } as unknown as HookPayloadMap[K];
+  }
+
+  return payload as unknown as HookPayloadMap[K];
+}
+
+/**
  * Copies one payload for one handler.
  *
- * Extension with no vanilla source. Shallow over the declared members, so
- * the live board and the two live tiles travel by reference exactly as
- * js/game_manager.js L91 passed the grid to the view, while the plain-data
+ * Extension with no vanilla source. Shallow over the declared members, so the
+ * frozen board view and the two frozen tile views `viewedPayload` substituted
+ * travel by reference — they carry no write of any kind — while the plain-data
  * members a handler might rewrite in place — `goal` and `position` — are
  * rebuilt. The handler therefore writes into a payload of its own, and the
  * bus decides whether that payload is adopted.
@@ -814,9 +989,21 @@ function readonlyRulesView(config: EnvironmentRules): ReadonlyRulesView {
  * matrix and the live `Tile` objects are absent, and `cellValue` returns a
  * face value where `Grid.cellContent` returns the tile itself.
  *
+ * EXPORTED because the same facade is what `BeforeMovePayload.board` and
+ * `AfterMovePayload.board` carry: src/engine/engine.ts builds one when it
+ * assembles those two payloads, so a handler reaches the board through this
+ * surface whether it reads the payload or the context, and through the live
+ * lattice through neither.
+ *
  * @param grid Live board.
  * @returns The frozen facade.
  */
+export function createReadonlyGridView(
+  grid: EnvironmentGrid,
+): ReadonlyGridView {
+  return readonlyGridView(grid);
+}
+
 function readonlyGridView(grid: EnvironmentGrid): ReadonlyGridView {
   const view: ReadonlyGridView = {
     get size(): number {
@@ -846,23 +1033,162 @@ function readonlyGridView(grid: EnvironmentGrid): ReadonlyGridView {
 }
 
 /**
- * Builds the frozen draw facade a handler takes randomness through.
+ * One live tile, as the merge dispatch payload declares it.
  *
- * Extension with no vanilla source. `stream` delegates to the run's
- * substream table, so a draw a handler takes advances the same cursor the
- * engine's draws advance and stays inside the run's seeded sequence; the
- * table itself cannot be replaced through the facade.
+ * Named through `HookDispatchPayloadMap` rather than by importing `Tile`, for
+ * the same reason the three collaborator types above are derived: this module
+ * declares no engine class of its own.
+ */
+type DispatchTile = HookDispatchPayloadMap['onMerge']['source'];
+
+/**
+ * Builds the frozen projection a handler reads one tile through.
+ *
+ * Extension with no vanilla source. The three coordinates are READ AT
+ * PROJECTION TIME, not delegated: a merge's two tiles are already out of
+ * `grid.cells` when `onMerge` dispatches, so their values are settled and a
+ * snapshot of them cannot go stale within the dispatch. `previousPosition` is
+ * copied into a fresh frozen pair, so writing through it reaches nothing, and
+ * `savePosition`, `updatePosition` and `mergedFrom` are absent.
+ *
+ * @param tile Live tile.
+ * @returns The frozen projection.
+ */
+function readonlyTileView(tile: DispatchTile): ReadonlyTileView {
+  const previous = tile.previousPosition;
+
+  return Object.freeze({
+    x: tile.x,
+    y: tile.y,
+    value: tile.value,
+    previousPosition:
+      previous === null || previous === undefined
+        ? null
+        : Object.freeze({ x: previous.x, y: previous.y }),
+  });
+}
+
+/**
+ * Projects a merge payload's tile member where it is a tile, and carries the
+ * member across untouched where it is not.
+ *
+ * The bus reports rather than throws, and a caller can force a mistyped
+ * dispatch input past the type system. A member that is not an object is
+ * therefore left as it is and refused later by `isValidPayload`, exactly as it
+ * was before the views were introduced.
+ *
+ * @param candidate Value the payload carried.
+ * @returns The frozen projection, or `candidate` unchanged.
+ */
+function projectTile(candidate: DispatchTile): ReadonlyTileView {
+  if (!isRecord(candidate)) {
+    return candidate;
+  }
+
+  return readonlyTileView(candidate);
+}
+
+/**
+ * One handler's randomness transaction: the frozen facade it draws through,
+ * and the two operations the bus resolves it with.
+ */
+interface RngTransaction {
+  /** The facade handed to the handler on its context. */
+  readonly view: ReadonlyRngView;
+
+  /**
+   * Adopts the draws the handler took, advancing each real substream by the
+   * number of draws its fork consumed. Because a fork shares its substream's
+   * seed and position, replaying that many draws reproduces the values the
+   * handler already received, so the run's sequence lands exactly where a
+   * direct draw would have left it.
+   */
+  commit(): void;
+
+  /**
+   * Abandons the draws the handler took. The forks are dropped and no real
+   * substream has moved, so a handler that drew and then threw has consumed
+   * no randomness and the sequences the engine and every later handler read
+   * are unchanged.
+   */
+  rollback(): void;
+}
+
+/**
+ * Opens one handler's randomness transaction over the run's substreams.
+ *
+ * THE RANDOMNESS BOUNDARY. `stream` hands back a FORK of the named substream
+ * rather than the substream itself, memoised so the instance-stability
+ * contract holds within one dispatch: a handler that addresses one name twice
+ * draws from one fork. The real substreams are advanced only by `commit()`.
+ * Previously the facade returned the live substream, so a draw taken before a
+ * throw stayed consumed and shifted every later spawn — which is what made a
+ * failed handler able to change a seeded run.
+ *
+ * `snapshotCursors` reports the fork's position for a substream the handler
+ * has drawn from and the real position for the rest, so a handler observes its
+ * own consumption.
  *
  * @param rng The run's substreams.
- * @returns The frozen facade.
+ * @returns The transaction.
  */
-function readonlyRngView(rng: EnvironmentRng): ReadonlyRngView {
-  return Object.freeze({
+function openRngTransaction(rng: EnvironmentRng): RngTransaction {
+  // One fork per substream name the handler addresses, with the position the
+  // real substream stood at when the fork was taken.
+  const forks = new Map<
+    EnvironmentStreamName,
+    { readonly fork: EnvironmentStream; readonly from: number }
+  >();
+
+  const view: ReadonlyRngView = Object.freeze({
     seed: rng.seed,
-    stream: (name: EnvironmentStreamName): EnvironmentStream =>
-      rng.stream(name),
-    snapshotCursors: (): EnvironmentCursors => rng.snapshotCursors(),
+
+    stream: (name: EnvironmentStreamName): EnvironmentStream => {
+      const held = forks.get(name);
+
+      if (held !== undefined) {
+        return held.fork;
+      }
+
+      const live = rng.stream(name);
+      const opened = { fork: live.fork(), from: live.cursor };
+
+      forks.set(name, opened);
+
+      return opened.fork;
+    },
+
+    snapshotCursors: (): EnvironmentCursors => {
+      const cursors = rng.snapshotCursors();
+
+      for (const [name, opened] of forks) {
+        cursors[name] = opened.fork.cursor;
+      }
+
+      return cursors;
+    },
   });
+
+  return {
+    view,
+
+    commit(): void {
+      for (const [name, opened] of forks) {
+        const live = rng.stream(name);
+        const taken = opened.fork.cursor - opened.from;
+
+        for (let replayed = 0; replayed < taken; replayed += 1) {
+          live.next();
+        }
+      }
+
+      forks.clear();
+    },
+
+    rollback(): void {
+      forks.clear();
+    },
+  };
 }
 
 /**
@@ -1165,6 +1491,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       deliver((): void => {
         reporter.onHookError?.({
           correlationId,
+
           hook,
           subscriberId: id,
           error,
@@ -1263,7 +1590,9 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   /**
    * Builds the subscription a registration presents for one hook, or `null`
    * where the subscriber binds no callable handler for that hook. `charges`
-   * and `state` are read from the subscriber at call time.
+   * and `state` are read from the subscriber at call time, and `state` is
+   * COPIED, so a caller reading a subscription holds no object the bus
+   * dispatches from.
    */
   const subscriptionFor = <K extends HookName>(
     registration: Registration,
@@ -1280,7 +1609,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       pickupOrder: registration.pickupIndex,
       handler: handler as HookHandler<K>,
       charges: registration.charges,
-      state: registration.state,
+      state: copyState(registration.state),
     });
   };
 
@@ -1289,9 +1618,9 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
    * returns.
    *
    * Extension with no vanilla source. Frozen, and carrying the bus's own
-   * `charges` and `state` values as at the call, so a caller reads the
-   * registration it made rather than reaching the object the bus
-   * dispatches from.
+   * `charges` and a COPY of its `state` as at the call, so a caller reads
+   * the registration it made rather than reaching the object the bus
+   * dispatches from — and writing into what it reads reaches neither.
    *
    * @param registration Registration to read.
    * @returns The frozen snapshot.
@@ -1302,7 +1631,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       hooks: registration.hooks,
       pickupOrder: registration.pickupIndex,
       charges: registration.charges,
-      state: registration.state,
+      state: copyState(registration.state),
     });
 
   return Object.freeze({
@@ -1328,16 +1657,17 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
 
       // The record is built from the subscriber rather than holding it:
       // the identifier and the handler table are copied out and the table
-      // is frozen, and the charge budget and the state slot are taken over
-      // by the bus, so a later edit to the caller's object changes neither
-      // what a dispatch invokes nor what a report names.
+      // is frozen, the charge budget is taken over by the bus, and the
+      // state slot is COPIED all the way down, so a later edit to the
+      // caller's object — at any depth — changes neither what a dispatch
+      // invokes, what a report names, nor what a rollback restores.
       const registration: Registration = {
         id,
         hooks: copyHandlerTable(subscriber.hooks),
         pickupIndex,
         sequence: nextSequence,
         charges: subscriber.charges,
-        state: subscriber.state,
+        state: copyState(subscriber.state),
         degraded: false,
         removed: false,
       };
@@ -1387,28 +1717,36 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
 
     dispatch<K extends HookName>(
       hook: K,
-      payload: HookPayloadMap[K],
+      payload: HookDispatchPayloadMap[K],
       environment: HookEnvironment,
     ): HookDispatchResult<K> {
+
       hookRow(hook).dispatched += 1;
       totals.dispatched += 1;
       count(DISPATCH_METRIC, hook);
 
+      // The rules and the board are projected once per dispatch and frozen,
+      // so each handler of one dispatch reads the same values and none can
+      // write through them. Randomness is per HANDLER rather than per
+      // dispatch, because it is transactional: each handler draws through
+      // its own forks and the run's substreams move only when that
+      // handler's return has been adopted.
+      const rules = readonlyRulesView(environment.config);
+      const board = readonlyGridView(environment.grid);
+
       // The payload as the last handler that returned and validated left
       // it. A handler that throws, or returns something that is not this
       // hook's payload, leaves it where it stood.
-      let accumulated = payload;
+      //
+      // The live board and the live merge tiles are replaced by the frozen
+      // views here, once, before any handler runs: from this point on nothing
+      // reachable through the payload can write engine state, so a handler
+      // that mutates and then throws has nothing left behind to roll back.
+      let accumulated = viewedPayload(hook, payload, board);
       let invoked = 0;
       let skipped = 0;
       let failed = 0;
       let rejected = 0;
-
-      // The three collaborators are projected once per dispatch and frozen,
-      // so each handler of one dispatch reads the same values and none can
-      // write through them.
-      const rules = readonlyRulesView(environment.config);
-      const board = readonlyGridView(environment.grid);
-      const draws = readonlyRngView(environment.rng);
 
       // Order and membership are read once, ahead of the walk. A
       // registration added during the walk is reached by the next dispatch;
@@ -1451,16 +1789,24 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
             continue;
           }
 
+          // The handler's randomness transaction. Draws it takes go to forks
+          // and reach the run's substreams only if its return is adopted.
+          const draws = openRngTransaction(environment.rng);
+
           const context: HookContext = {
             config: rules,
-            rng: draws,
+            rng: draws.view,
             grid: board,
             correlationId,
             hook,
             subscriberId: id,
             pickupOrder: subscription.pickupOrder,
             charges,
-            state: registration.state,
+
+            // A COPY of the slot, so a handler that writes into a nested
+            // member writes into its own copy. The bus's slot is replaced
+            // only by the commit below.
+            state: copyState(registration.state),
           };
 
           // The handler writes into a payload of its own. An in-place
@@ -1479,18 +1825,24 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
             if (isValidPayload(hook, candidate, accumulated, environment)) {
               accumulated = candidate as HookPayloadMap[K];
 
-              // The state slot is committed with the payload, so a handler's
-              // carried-over state and the effect it produced are adopted
-              // together or not at all.
-              registration.state = context.state;
+              // The state slot and the draws are committed with the payload,
+              // so a handler's carried-over state, the randomness it
+              // consumed and the effect it produced are adopted together or
+              // not at all. The slot is copied again on the way in, so the
+              // bus keeps no object the handler still holds.
+              registration.state = copyState(context.state);
+              draws.commit();
             } else {
               rejected += 1;
               note(hook, id, 'rejected');
+              draws.rollback();
             }
           } catch (error: unknown) {
-            // Nothing the handler wrote is kept: `accumulated` still holds
-            // the payload it was handed a copy of, and `registration.state`
-            // still holds the slot it entered with.
+            // Nothing the handler wrote or drew is kept: `accumulated` still
+            // holds the payload it was handed a copy of,
+            // `registration.state` still holds the slot it entered with, and
+            // the run's substreams still stand where they stood.
+            draws.rollback();
             failed += 1;
             noteThrow(registration, hook, error);
           }
@@ -1591,6 +1943,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
 
       return Object.freeze({
         correlationId,
+
         registered: registrations.length,
         acceptedRegistrations,
         rejectedRegistrations,

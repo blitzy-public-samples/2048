@@ -5,22 +5,44 @@
 // contracts src/engine, src/input and src/storage each declare for
 // themselves.
 //
+// Two properties of the emission path, both load-bearing:
+//   a throwable is identified by the ARGUMENT POSITION it arrives in, or by
+//   its presence on a `LogFailure`, never by its type — the type test that
+//   used to choose between two positions read a thrown plain object as
+//   fields and dropped it from the record;
+//   a field bag is DEEP-SANITISED rather than shallow-copied, so nothing a
+//   caller retains a reference to can change a buffered record, and no
+//   record carries a value that `JSON.stringify` would alter.
+//
 // `serializeError` is the target of the discarded-error `catch` in
 // js/local_storage_manager.js, which bound `error` and returned `false` without
 // reporting it. Two further silent-failure sites in that same file — an
 // unguarded `setItem` and an unguarded `JSON.parse` — report through
 // `createStorageReporter`.
 //
+// docs/TRACEABILITY_MATRIX.md:
+//   TR-LOG-01  js/local_storage_manager.js L37-L39  the discarded-error
+//   TR-LOG-02  js/local_storage_manager.js L47-L49  the unguarded `setItem`
+//   TR-LOG-03  js/local_storage_manager.js L54      the unguarded
+// Everything else in this module is a target-only row, TR-LOG-04 through
+// TR-LOG-08: the correlation identifier, the log record, the level filter,
+//
 // The module's only imports are the three reporter contracts, imported as types
 // and therefore erased at build time. It names no package, no sibling
 // observability module and no DOM node: `console` and `performance` are reached
 // through `globalThis`, and every access to them is guarded. Exported members
 // report rather than throw.
+//
+// Decisions behind this file: DL-LOG-01, the correlation identifier being a
+// deterministic hash of the run seed and run identifier; DL-LOG-02, the
+// two-hash rendering of that identifier; DL-LOG-03, the bounded
+// backend; and DL-LOG-04, the three reporter adapters living in this
 
 import type {
   CorrelationId,
   EngineCountReport,
   EngineHookErrorReport,
+  EngineListenerErrorReport,
   EngineReporter,
 } from '../engine/types';
 import type {
@@ -37,6 +59,15 @@ import type {
 } from '../storage/local-storage-manager';
 
 const CORRELATION_ID_PREFIX = 'run-';
+
+/**
+ * Separates the seed-derived prefix from the run-instance segment.
+ *
+ * A hyphen, so the seed-grouping prefix of an instance identifier is readable
+ * at a glance and a log stream can be grouped by seed with a prefix match while
+ * still distinguishing the runs within it.
+ */
+const CORRELATION_ID_INSTANCE_SEPARATOR = '-';
 
 const FNV_OFFSET_BASIS = 0x811c9dc5;
 
@@ -76,7 +107,7 @@ function renderHash(hash: number): string {
 }
 
 /**
- * Derives the SEED-GROUPING correlation identifier every log record carries.
+ * Derives the correlation identifier every log record carries.
  *
  * THE SINGLE AUTHORITY. This is the only function in src/ that derives a
  * `CorrelationId`. src/engine/, src/run/, src/input/, src/render/ and
@@ -85,43 +116,97 @@ function renderHash(hash: number): string {
  * reports and metric snapshots under one identifier. src/main.ts calls it
  * once per run and injects the result.
  *
- * The identifier is derived from the run seed ALONE, so a run replayed from
- * the same seed carries the same identifier and its records correlate with
- * the original run's. It is `run-` followed by two fixed-width base36
- * hashes of the seed, FNV-1a then djb2. The derivation reads no clock and
- * no randomness: one seed yields one identifier, in this process and in any
- * later one.
+ * TWO IDENTIFIERS, ONE DERIVATION. What the identifier identifies depends on
+ * whether a run instance is named:
  *
- * The identifier is not a secret and not reversible, and it is what a
- * report carries in place of the seed: a player-entered seed can hold
- * personal data, this value cannot be read back into one.
+ * - `deriveCorrelationId(seed)` groups a SEED. Every run replaying that seed
+ *   receives the same identifier, which is what correlates a replay's records
+ *   with the original's. It is `run-` followed by two fixed-width base36
+ *   hashes of the seed, FNV-1a then djb2.
+ * - `deriveCorrelationId(seed, runId)` identifies a RUN INSTANCE. It appends a
+ *   third hyphen-separated hash over the run instance, so two runs of one seed
+ *   are distinguishable while the seed-derived prefix still groups them. This
+ *   is the form src/main.ts uses.
+ *
+ * The second form exists because a correlation identifier's job is to let one
+ * session's records be followed end to end. Seed-grouping alone cannot do that:
+ * a seed replayed — which this product invites, since the seed is displayed and
+ * copyable — puts two runs' records under one identifier with nothing in the
+ * stream to separate them. `runId` is therefore the UNIQUENESS component, and
+ * the seed is retained in the derivation only so the grouping property survives
+ * beside the instance identity. Determinism of gameplay depends on the seed and
+ * is untouched by either form: no engine behaviour reads this value.
+ *
+ * PSEUDONYMOUS, NOT ANONYMOUS. The identifier is not a secret, and it is what
+ * a report carries in place of the seed, but it must not be described as
+ * anonymising the seed. The derivation is unsalted and deterministic, so it can
+ * be computed by anyone: a party holding a list of candidate seeds can hash
+ * each one and match it against an identifier, which recovers a low-entropy or
+ * guessable seed — a word, a date, a short phrase — by dictionary search. What
+ * the derivation does guarantee is that the seed TEXT is not carried in the
+ * record and cannot be read back out of the identifier by inversion; it does
+ * not guarantee the seed cannot be identified by search.
+ *
+ * A SEED IS THEREFORE TREATED AS DATA THAT MAY BE PUBLISHED. Nothing in the
+ * product may put personal data in a run seed, and no caller may treat this
+ * identifier as a way to carry a sensitive seed into a log or an export
+ * safely.
  *
  * It identifies a SEED, not a run instance. Every run replaying one seed
- * receives the same identifier, so it groups replays of a seed rather than
- * distinguishing runs. There is no second, run-instance identifier: a
- * consumer that has to tell two runs of one seed apart reads
- * `RunState.runId`, which src/run/run-state.ts persists with the envelope
- * and a report carries as an ordinary field beside this identifier.
+ * receives the same identifier, so records from different runs of one seed are
+ * LINKABLE to each other: the identifier groups replays of a seed rather than
+ * distinguishing runs, which is what makes it useful for comparing a replay
+ * against the original. A consumer that has to tell two runs of one seed apart
+ * reads `RunState.runId`, which src/run/run-state.ts persists with the envelope
+ * and a report carries as an ordinary field beside this identifier; `runId` is
+ * the per-instance identity, and this value is never a substitute for it.
  *
- * The identifier is not unique by construction — it concatenates two 32-bit
- * hashes of one input — so distinct seeds can collide, and a consumer that
- * needs an exact identity compares the seeds themselves.
+ * The derivation reads no clock and no randomness in either form: the same
+ * inputs yield the same identifier, in this process and in any later one, which
+ * is what makes a record's identifier reproducible from a persisted run.
+ *
+ * The identifier is not a secret and not reversible, and it is what a report
+ * carries in place of the seed: a player-entered seed can hold personal data,
+ * this value cannot be read back into one. The same applies to `runId`.
+ *
+ * Neither form is unique by construction — each concatenates 32-bit hashes — so
+ * distinct inputs can collide, and a consumer that needs an exact identity
+ * compares the seed and `runId` themselves.
  *
  * A caller holding an identifier already derived supplies it as
  * `LoggerOptions.correlationId`, which is carried verbatim and takes
  * precedence over `runSeed`.
  *
- * @returns An 18-character identifier, non-empty for every input, the empty
- *   string included.
+ * @param runSeed Seed of the run. Coerced with `String`, so any value is
+ *   accepted and none throws.
+ * @param runId Run instance identifier. Omit it, or pass an empty value, for
+ *   the seed-grouping form.
+ * @returns An 18-character identifier for the seed-grouping form and a
+ *   26-character one for the run-instance form, non-empty for every input, the
+ *   empty string included.
  */
-export function deriveCorrelationId(runSeed: string): CorrelationId {
+export function deriveCorrelationId(
+  runSeed: string,
+  runId?: string,
+): CorrelationId {
   const seed = String(runSeed);
-
-  return (
+  const grouped =
     CORRELATION_ID_PREFIX +
     renderHash(fnv1a32(seed)) +
-    renderHash(djb2Hash32(seed))
-  );
+    renderHash(djb2Hash32(seed));
+
+  if (runId === undefined || String(runId) === '') {
+    return grouped;
+  }
+
+  // Hashed over the run instance AND the seed rather than the run instance
+  // alone, so the segment cannot be read back as a bare hash of `runId` and
+  // two seeds sharing a run identifier still differ here.
+  const instance = `${String(runId)}\u0000${seed}`;
+
+  return `${grouped}${CORRELATION_ID_INSTANCE_SEPARATOR}${renderHash(
+    fnv1a32(instance) ^ djb2Hash32(instance),
+  )}`;
 }
 
 const CIRCULAR_PLACEHOLDER = '[circular]';
@@ -413,6 +498,18 @@ const FALLBACK_SERIALIZED_ERROR: SerializedError = Object.freeze({
 
 
 /**
+ * Shortens text to a byte-bounded length.
+ *
+ * A thrown value carries text of any size — a message built from a whole
+ * payload, a stack from a deep recursion — and a record is buffered, so
+ * both are bounded here rather than retained whole.
+ *
+ * @param text Text to bound.
+ * @param limit Characters to keep.
+ * @returns `text` when it is within the limit, otherwise its prefix with
+ *   `TRUNCATION_SUFFIX` appended.
+ */
+/**
  * Reads one string-valued member off an object, without throwing.
  *
  * @param holder Object to read from.
@@ -433,6 +530,7 @@ function readStringMember(
     return undefined;
   }
 }
+
 
 function readCause(
   holder: object,
@@ -455,6 +553,7 @@ function readCause(
     return undefined;
   }
 }
+
 
 function buildSerializedError(
   name: string,
@@ -1004,6 +1103,7 @@ interface LoggerState {
   readonly stackDetail: StackDetail;
 }
 
+/** What one emission carries besides its level, message and subsystem. */
 interface EmissionArgs {
   readonly fields: LogFields | undefined;
 
@@ -1237,6 +1337,7 @@ function normalizeFieldRecord(
     } catch {
       member = UNREADABLE_VALUE;
     }
+
 
     Object.defineProperty(copy, clamp(key, MAX_FIELD_KEY_LENGTH), {
       value: normalizeFieldValue(member, depth + 1, budget, seen),
@@ -1911,9 +2012,20 @@ function toLogLevel(level: InputReportLevel): LogLevel {
 /**
  * Builds the engine's reporter.
  *
- * Records every contained hook-handler throw at `'error'`, with the thrown
- * value serialised onto `LogRecord.error`, and every engine counter at
- * `'debug'`. Both members of `EngineReporter` are implemented.
+ * Records every contained hook-handler throw and every contained event-listener
+ * throw at `'error'`, with the thrown value serialised onto `LogRecord.error`,
+ * and every engine counter at `'debug'`. ALL THREE members of `EngineReporter`
+ * are implemented: `onListenerError` was previously omitted, so every error a
+ * listener raised was contained by the emitter and then reported nowhere.
+ *
+ * `reportedCorrelationId` carries the identifier the engine was injected
+ * with, beside the record's own `correlationId`, so a mismatch between the
+ * two is visible in the log stream rather than silent.
+ *
+ * Each record carries both identifiers of its report: `correlationId`, which
+ * is the same value `LogRecord.correlationId` holds when the logger was built
+ * with the run's canonical identifier, and `runId`, which is the run-instance
+ * identifier the two are distinguished by.
  *
  * @returns A frozen reporter tagged `'engine'`.
  */
@@ -1935,12 +2047,37 @@ export function createEngineReporter(logger: Logger): EngineReporter {
       });
     },
 
+    onListenerError(report: EngineListenerErrorReport): void {
+      // `failure` for the same reason as `onHookError`: the caught value
+      // arrives unconverted, so a listener that threw a non-`Error` — or an
+      // `Error` carrying a cause chain — reaches `LogRecord.error` whole.
+      // The listener's position in registration order is the only identity an
+      // event listener has, so it is the identity recorded.
+      scoped.failure(
+        'error',
+        'An event listener threw and was contained; the emission continued.',
+        {
+          thrown: report.error,
+          fields: {
+            reportedCorrelationId: report.correlationId,
+            event: report.event,
+            listenerIndex: report.listenerIndex,
+          },
+        },
+      );
+    },
+
     onCount(report: EngineCountReport): void {
+      // `hook` and `event` are separate dimensions and a report carries at
+      // most one, so both are recorded and the absent one is `null`. Event
+      // names previously arrived under `hook`; recording only that field
+      // would now drop the event name from every event count.
       scoped.debug('Engine counter incremented.', {
         reportedCorrelationId: report.correlationId,
         metric: report.metric,
         value: report.value,
         hook: report.hook ?? null,
+        event: report.event ?? null,
       });
     },
   });
@@ -2013,6 +2150,11 @@ function createLoggedSpan(logger: Logger, name: string): InputSpan {
  * `'debug'` with the elapsed `durationMs`. All three members of
  * `InputReporter` are implemented, the optional `startSpan` included.
  *
+ * Every field a report carries passes through `copyInputFields`, which
+ * drops the raw-keystroke names of `REJECTED_INPUT_FIELDS` and bounds what
+ * remains, so no record carries a character a player typed.
+ *
+ * @param logger Logger the reports are recorded through.
  * @returns A frozen reporter tagged `'input'`.
  */
 export function createInputReporter(logger: Logger): InputReporter {
@@ -2078,12 +2220,28 @@ export function createInputReporter(logger: Logger): InputReporter {
 /**
  * Builds the storage layer's reporter.
  *
- * Records the writability probe at `'info'` when it succeeds and `'warn'` when
- * it does not, a failed operation at `'error'` when the quota is exhausted and
- * `'warn'` otherwise, and a write at `'debug'` when it completed and `'warn'`
- * when it did not. The `StorageErrorInfo` each report carries is serialised
- * onto `LogRecord.error`. All three members of `StorageReporter` are
- * implemented.
+ * All three members of `StorageReporter` are implemented, and the three carry
+ * DIFFERENT WEIGHTS, because the adapter is where the storage layer's two
+ * report channels are deduplicated.
+ *
+ * ONE FAILURE, ONE ERROR-LEVEL RECORD. The storage layer reports a failed probe
+ * on both `onProbe` and `onFailure`, and a failed write on both `onWrite` and
+ * `onFailure`, which is deliberate: each channel answers a different
+ * question. But reporting both at warning level or above produced two records
+ * per failure. `onFailure` is therefore the ONE channel that records a failure
+ * at `'warn'` or `'error'`; `onProbe` and `onWrite` are outcome-and-state
+ * channels that record at `'debug'` whatever the outcome, except for a probe
+ * that failed without anything being thrown, which reaches no failure channel
+ * at all and so keeps its own `'warn'`.
+ *
+ * THE PUBLIC-MESSAGE POLICY. Every message and every field a record leads with
+ * comes from this module or from the bounded `StorageErrorInfo` the storage
+ * layer authored: neither carries text supplied by the platform, an extension
+ * or whatever threw, and neither carries an excerpt of a stored value. The
+ * value that WAS thrown reaches `LogRecord.error` through
+ * `StorageFailure.thrown`, unconverted, so its stack, its cause chain and its
+ * non-`Error` structure survive for diagnosis — which a reduction to a name and
+ * a message could not carry.
  *
  * Sink for the two silent-failure sites at js/local_storage_manager.js L47-L49
  * and L54.
@@ -2110,37 +2268,19 @@ export function createStorageReporter(logger: Logger): StorageReporter {
       const message = 'Web Storage probe failed; the in-memory store is in use.';
 
       if (result.error === undefined) {
-        // No value was caught — the origin exposes no store at all — so no
-        // `LogRecord.error` is invented for one.
+        // No value was caught — the origin exposes no store at all — so the
+        // storage layer raises no failure for it. This is the one probe
+        // outcome with no second channel, so it keeps the warning, and no
+        // `LogRecord.error` is invented for a value that does not exist.
         scoped.warn(message, fields);
 
         return;
       }
 
-      scoped.failure('warn', message, { thrown: result.error, fields });
-    },
-
-    onFailure(failure: StorageFailure): void {
-      const fields: LogFields = {
-        operation: failure.operation,
-        key: failure.key,
-        strategy: failure.strategy,
-        quota: failure.error.quota,
-      };
-
-      if (failure.error.quota) {
-        scoped.failure('error', 'A storage operation exhausted the quota.', {
-          thrown: failure.error,
-          fields,
-        });
-
-        return;
-      }
-
-      scoped.failure('warn', 'A storage operation failed.', {
-        thrown: failure.error,
-        fields,
-      });
+      // A probe that caught something is also delivered to `onFailure`, which
+      // records it at warning level with the thrown value. This record is
+      // therefore the outcome and the strategy alone, at `'debug'`.
+      scoped.debug(message, fields);
     },
 
     onWrite(info: StorageWriteInfo): void {
@@ -2150,13 +2290,54 @@ export function createStorageReporter(logger: Logger): StorageReporter {
         ok: info.ok,
       };
 
-      if (info.ok) {
-        scoped.debug('A storage write completed.', fields);
+      // Both outcomes at `'debug'`: a write that did not complete has already
+      // been delivered to `onFailure`, which records it at warning level with
+      // the thrown value, so raising this one would duplicate it. `ok` is what
+      // distinguishes the two records.
+      scoped.debug(
+        info.ok
+          ? 'A storage write completed.'
+          : 'A storage write did not complete.',
+        fields,
+      );
+    },
+
+    onFailure(failure: StorageFailure): void {
+      const fields: LogFields = {
+        operation: failure.operation,
+        key: failure.key,
+        strategy: failure.strategy,
+        quota: failure.error.quota,
+
+        // The bounded description the storage layer authored. Recorded as a
+        // field so a consumer that publishes rather than diagnoses has a
+        // scrubbed string without reading `LogRecord.error`.
+        publicMessage: failure.error.message,
+        errorName: failure.error.name,
+      };
+
+      // The ORIGINAL caught value, not the reduction of it: a `StorageFailure`
+      // carries both, and the reduction is already in the fields above. A
+      // refused key throws nothing, so `thrown` is absent there and the
+      // description stands in for it.
+      const thrown: unknown =
+        'thrown' in failure && failure.thrown !== undefined
+          ? failure.thrown
+          : failure.error;
+
+      if (failure.error.quota) {
+        scoped.failure('error', 'A storage operation exhausted the quota.', {
+          thrown,
+          fields,
+        });
 
         return;
       }
 
-      scoped.warn('A storage write did not complete.', fields);
+      scoped.failure('warn', 'A storage operation failed.', {
+        thrown,
+        fields,
+      });
     },
   });
 

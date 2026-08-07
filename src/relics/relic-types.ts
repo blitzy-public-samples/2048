@@ -8,6 +8,11 @@
 //
 // This module reads no DOM, performs no I/O, consumes no randomness, reads no
 // clock and reports nothing.
+//
+// target-only row of docs/TRACEABILITY_MATRIX.md, TR-RELIC-01 through
+// TR-RELIC-05 in declaration order: the rarity ladder, the family ladder,
+// Decisions behind this file: DL-RELIC-01, behaviour living in hook-bound
+// handler functions, and DL-RELIC-02, the persisted relic being the
 
 import type { HookHandlerTable } from '../engine/hooks';
 
@@ -154,9 +159,25 @@ export interface ActiveRelic {
 
   /**
    * The relic's own state slot for this run, initialised from
-   * `definition.state`. It is the value `HookContext.state` carries to this
-   * relic's handlers, and the value written back once a handler returns. JSON
-   * data only, as `Relic.state` is.
+   * `definition.state`. JSON data only, as `Relic.state` is.
+   *
+   * OWNED BY THE BUS, NOT SHARED WITH IT. src/engine/hook-bus.ts COPIES the
+   * slot in full when the relic is registered, copies it again into
+   * `HookContext.state` on every dispatch, and copies what the handler left
+   * back onto its own record only once that handler has returned and its
+   * return has been accepted. Three consequences follow, and each is why the
+   * copying exists:
+   *
+   *   Writing this member after registration does not reach the value a
+   *   dispatch reads. A run that has to change a live relic's state does it
+   *   through the relic's own handler, which is the one path the bus commits.
+   *
+   *   Reading it back — here, or from a bus snapshot — never yields an object
+   *   a handler still holds, so a stale reference cannot write into the run.
+   *
+   *   A handler that writes into a nested member and then throws changes
+   *   nothing at all: the copy it wrote into is discarded with the rest of its
+   *   transaction, including any randomness it drew.
    */
   state: unknown;
 }

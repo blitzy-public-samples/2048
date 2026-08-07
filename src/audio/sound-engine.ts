@@ -25,6 +25,12 @@
 //
 // Every duration in a descriptor is in milliseconds and every time handed
 // to the Web Audio API is in seconds.
+//
+// Decisions behind this file: DL-AUDIO-02, every voice synthesised from an
+// oscillator or a generated noise buffer; DL-AUDIO-03, the context created
+// and resumed on a user gesture; and DL-AUDIO-04, `getState()` as this
+// DL-AUDIO-01 for the descriptor timings.
+// are target-only rows TR-AUDIO-01 through TR-AUDIO-04 of
 
 import {
   DEFAULT_MUTED,
@@ -33,6 +39,10 @@ import {
   MIN_VOLUME,
 } from './sound-map';
 import type { SoundEffect, SoundEffectName } from './sound-map';
+import type {
+  EngineEventName,
+  EngineEvents,
+} from '../engine/engine-events';
 import {
   effectForMerge,
   effectNameForEvent,
@@ -419,36 +429,24 @@ function createDiagnostics(
 export type EngineEventHandler = (payload: unknown) => void;
 
 /**
- * The event source this module attaches to, declared by the one member it
- * calls.
+ * The event source this module attaches to: the engine's own `on`, with its
+ * `off` optional.
  *
- * `on` is the whole contract: nothing here emits, removes another
- * subscriber's listener, or reads the source's own state. A source whose
- * `on` appends is what lets this module attach alongside every subscriber
- * already attached.
+ * TAKEN FROM `EngineEvents` RATHER THAN RESTATED. The previous declaration was
+ * this module's own paraphrase — `on(eventName: string, handler: (payload:
+ * unknown) => void)` — which accepted event names the engine never emits and
+ * payload types the engine never carries, so a name or payload drifting apart
+ * from the engine's contract compiled here and simply never fired. Naming the
+ * engine's members through `Pick` makes the five names below check against the
+ * contract that emits them.
+ *
+ * The import is TYPE-ONLY, so this module still pulls no engine code into the
+ * audio bundle and the two layers stay decoupled at runtime; `off` stays
+ * optional because a source that returns a release handle from `on` needs no
+ * `off` at all.
  */
-export interface EngineEventSource {
-  /**
-   * Registers a listener for one event name.
-   *
-   * @param eventName Event to listen for.
-   * @param handler Called with the event's payload.
-   * @returns Whatever the source returns. `src/engine/engine-events.ts` returns
-   *   a function that removes the listener; a source that returns nothing is
-   *   equally acceptable and is then released through `off` instead. Typed
-   *   `unknown` rather than `void` so the handle is not discarded at the type
-   *   level before it can be stored.
-   */
-  on(eventName: string, handler: EngineEventHandler): unknown;
-
-  /**
-   * Removes a listener, for a source that returns no release handle from `on`.
-   *
-   * @param eventName Event the handler was registered for.
-   * @param handler The exact function that was registered.
-   */
-  off?(eventName: string, handler: EngineEventHandler): unknown;
-}
+export type EngineEventSource = Pick<EngineEvents, 'on'> &
+  Partial<Pick<EngineEvents, 'off'>>;
 
 /**
  * The mute and volume preferences, as this module reads them.
@@ -1004,6 +1002,37 @@ function readFiniteNumber(payload: unknown, field: string): number | null {
   const value = payload[field];
 
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Reports whether a `tile:spawn` payload names a cell a tile was inserted at.
+ *
+ * `SpawnPayload.position` in src/engine/hooks.ts is optional, and its absence
+ * means NO TILE WAS INSERTED: the engine emits the event either way, so the
+ * member is what separates a spawn from a suppressed one. Total over any
+ * payload shape, including one whose accessors throw.
+ *
+ * @param payload The event's payload.
+ * @returns `true` when the payload carries a position with two finite
+ *   coordinates.
+ */
+function hasSpawnPosition(payload: unknown): boolean {
+  if (!isReadableRecord(payload)) {
+    return false;
+  }
+
+  const position = payload.position;
+
+  if (!isReadableRecord(position)) {
+    return false;
+  }
+
+  return (
+    typeof position.x === 'number' &&
+    Number.isFinite(position.x) &&
+    typeof position.y === 'number' &&
+    Number.isFinite(position.y)
+  );
 }
 
 /* ==========================================================================
@@ -2023,8 +2052,20 @@ export function createSoundEngine(
     playEffect(effectForMerge(resultValue));
   });
 
-  /** Sounds the spawn effect. The payload's position is never read. */
-  const handleSpawn = contained('tile:spawn', (): void => {
+  /**
+   * Sounds the spawn effect, for an actual spawn alone.
+   *
+   * `tile:spawn` carries no position where the spawn was SUPPRESSED — an
+   * `onSpawn` handler returned the payload without one — and no tile was
+   * inserted in that case, so there is nothing to sound. The position is read
+   * for that reason: sounding unconditionally announced a tile that never
+   * appeared.
+   */
+  const handleSpawn = contained('tile:spawn', (payload: unknown): void => {
+    if (!hasSpawnPosition(payload)) {
+      return;
+    }
+
     playForEvent('tile:spawn');
   });
 
@@ -2069,6 +2110,7 @@ export function createSoundEngine(
     play(terminal);
   });
 
+
   /**
    * Registers one handler on one source.
    *
@@ -2078,7 +2120,7 @@ export function createSoundEngine(
    */
   const register = (
     events: EngineEventSource,
-    eventName: string,
+    eventName: EngineEventName,
     handler: EngineEventHandler,
   ): (() => void) | null => {
     let result: unknown;
@@ -2191,7 +2233,7 @@ export function createSoundEngine(
     // Every name registered for is one the engine's own contract declares and
     // emits. `move:before` and `stage:start` are deliberately not registered
     // for; nothing is registered for a name no emitter produces.
-    const names: readonly [string, EngineEventHandler][] = [
+    const names: readonly [EngineEventName, EngineEventHandler][] = [
       ['tile:merge', handleMerge],
       ['tile:spawn', handleSpawn],
       ['move:after', handleMoveAfter],

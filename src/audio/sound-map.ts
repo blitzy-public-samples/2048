@@ -6,6 +6,8 @@
  * `stageClear` and `relicAcquired` accompany no single animation. The merge
  * pitch ramp follows the exponent shape of the tile colour ramp.
  *
+ * tile colour ramp. Decision DL-AUDIO-01.
+ *
  * Declarations and pure functions only: this module reads no platform state,
  * holds no mutable state, and does no work on load beyond freezing its two
  * tables. Nothing here is ported: js/ plays no sound, so both tables are

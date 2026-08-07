@@ -31,6 +31,12 @@
 // directions are a pure function of a mote's slot, so one burst replays
 // identically. Reporting leaves through the injected reporter and nothing here
 // imports src/observability/.
+//
+// Decisions behind this file: DL-PARTICLE-01, the fixed-capacity mote pool
+// allocated once; DL-PARTICLE-02, additive blending with depth writing off and
+// frustum culling off; and DL-PARTICLE-03, emission directions as a pure
+// particle. Its constructs are target-only rows TR-PARTICLE-01 through
+// TR-PARTICLE-03 of docs/TRACEABILITY_MATRIX.md — the pool, the burst and the
 
 import type { Object3D, Vector3Like } from 'three';
 import {
@@ -206,10 +212,6 @@ export const particleLimits = Object.freeze({
   maxMaskResolution: 512,
 } as const);
 
-/* ==========================================================================
- * 3. The construction and reading contracts
- * ========================================================================== */
-
 /**
  * Construction parameters. All are optional, and every length defaults to a
  * value derived from `depthScale` of src/theme/tokens.ts.
@@ -309,7 +311,8 @@ export interface ParticleSystem {
  * The halo colour of the DEFAULT palette, read from `tileGoldGlowColor` of
  * src/theme/tokens.ts once.
  *
- * The colour style/main.scss L380 draws the outer halo of the merge glow in.
+ * The colour style/main.scss draws the outer halo of the merge glow in, the
+ * `rgba($tile-gold-glow-color, ...)` term of its tile-value `box-shadow`.
  * It is the fallback `readHaloColor` returns where a palette states a glow
  * entry this module cannot read, and is not itself the colour a burst is
  * tinted with: every additive palette states its own glow, so a burst reads
@@ -799,6 +802,8 @@ export function createParticleSystem(
   // attribute supplies its tint and its alpha. Additive blending is the
   // compositing style/main.scss draws the halo of the merge glow with, and
   // with depth writing off every mote composites whatever the draw order.
+  //
+  // Decision DL-PARTICLE-02.
   const material = new PointsMaterial({
     size,
     sizeAttenuation: options.sizeAttenuation ?? true,

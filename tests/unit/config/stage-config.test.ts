@@ -11,10 +11,16 @@
 // A stage goal has NO vanilla analogue, so the goal comparison pinned below is
 // the stage layer's own and not the win check's strict equality.
 //
+
 // This file imports four helpers from vitest, four values and five types from
 // the module under test, and one copy helper plus two board constants from
 // tests/fixtures/boards.ts. It reads no DOM and no storage, performs no I/O,
-// consumes no randomness, reads no clock and writes no log.
+// consumes no randomness, reads no clock and writes no log. It installs no spy
+// and replaces no global: the invariant that the product never patches
+// Math.random is asserted solely by tests/unit/rng/math-random-guard.test.ts,
+// and section 8 evidences this layer's purity by repeating a whole sweep.
+//
+// Decisions this suite is the evidence for: DL-STAGE-01 and DL-STAGE-02 in
 
 import { describe, expect, expectTypeOf, it } from 'vitest';
 

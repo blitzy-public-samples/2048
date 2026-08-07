@@ -29,6 +29,8 @@
 // differs from `color` by one unit on the four accented values, is reachable
 // through the `fillPrecision` option.
 //
+// roughness scaled by `insetAlpha`. Decision DL-MATERIAL-01.
+//
 // The empty-cell plate is declared in the stylesheet as the tile colour at 35%
 // alpha. It is pre-composited over the board field and delivered as an opaque
 // material; the `emptyCellCompositing` option delivers it as a transparent
@@ -41,6 +43,14 @@
 // no-op sink. One material is created per distinct tile value and shared across
 // every mesh that carries it, and every material this module creates is
 // released by `dispose()`.
+//
+// reachable through the `fillPrecision` option. Decisions DL-RAMP-02 and
+// DL-RAMP-04 own that pair.
+// `emptyCellCompositing` option. Decision DL-MATERIAL-02.
+// Decisions behind this file: DL-MATERIAL-01 through DL-MATERIAL-03, and
+// DL-RAMP-02 and DL-RAMP-04 for the two fill precisions, in
+// docs/DECISION_LOG.md. Traceability rows: TR-MATERIAL-01 through
+// TR-MATERIAL-08, one per row of the table above.
 
 import { Color, MeshStandardMaterial, SRGBColorSpace } from 'three';
 
@@ -472,6 +482,7 @@ export interface TileMaterialStats {
  * same instance rather than a second one.
  */
 export interface TileMaterialCache {
+
   getTileMaterial(value: number): MeshStandardMaterial;
 
   /**
@@ -489,6 +500,7 @@ export interface TileMaterialCache {
   getBoardFieldMaterial(): MeshStandardMaterial;
   getEmptyCellMaterial(): MeshStandardMaterial;
   getTheme(): Theme;
+
   setTheme(theme: Theme | ThemeId): Theme;
 
   /**
@@ -501,6 +513,7 @@ export interface TileMaterialCache {
    * request constructs a fresh material.
    */
   dispose(): void;
+
   destroy(): void;
   readStats(): TileMaterialStats;
   resetStats(): void;
@@ -688,11 +701,14 @@ function readTileRoughness(
 /**
  * Builds the material for one tile value.
  *
- * The fill of style/main.scss L560-L570 becomes the material colour. The outer
- * halo of L581 becomes the emissive colour and the emissive intensity, taken
- * from the palette's halo entry and the ramp's halo alpha. The inset ring of
- * L582 becomes a roughness reduction; the ring is drawn in white and its colour
- * is not transferred separately. Where L580 suppresses the declaration the
+ * The fill style/main.scss mixes as `$mixed-background`, from
+ * `color.mix($tile-gold-color, $tile-color, $gold-percent)`, becomes the
+ * material colour. The outer `box-shadow` term of that loop, drawn in
+ * `$tile-gold-glow-color`, becomes the emissive colour and the emissive
+ * intensity, taken from the palette's halo entry and the ramp's halo alpha. Its
+ * `inset` ring term becomes a roughness reduction; the ring is drawn in white
+ * and its colour is not transferred separately. Where the loop's
+ * `@if not $special-background` suppresses the declaration the
  * material is left flat: its emissive stays at the Three.js default and its
  * intensity is set to zero, so the emissive term contributes nothing under
  * either reading. Decision DL-MATERIAL-01.
@@ -1056,6 +1072,7 @@ export function createTileMaterialCache(
     return readThemeColor(fallback);
   };
 
+
   const resolveValue = (value: number): TileTheme => {
     try {
       return resolveTileTheme(value, theme);
@@ -1166,6 +1183,7 @@ export function createTileMaterialCache(
 
     return released;
   };
+
 
   const adoptTheme = (next: Theme): Theme => {
     if (next === theme) {

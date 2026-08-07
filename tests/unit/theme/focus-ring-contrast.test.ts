@@ -25,7 +25,17 @@ import {
   highContrastTheme,
 } from '../../../src/theme/themes';
 import { computeTileTheme, rampValue } from '../../../src/theme/tile-ramp';
-import { derivedColors, pageBackground } from '../../../src/theme/tokens';
+import {
+  derivedColors,
+  geometryScales,
+  minTileNumeralSize,
+  pageBackground,
+  tileFontSize,
+  tileNumeralCellRatio,
+  tileNumeralSize,
+} from '../../../src/theme/tokens';
+import { MAX_BOARD_SIZE } from '../../../src/config/default-config';
+import { resolveBoardGeometry } from '../../../src/render/tile-mesh-factory';
 
 /** The WCAG 2.1 AA minimum for a non-text boundary such as a focus ring. */
 const NON_TEXT_MINIMUM = 3;
@@ -257,5 +267,79 @@ describe('the default focus ring is derived from the frozen text token', () => {
         pageBackground,
       ),
     ).toBeLessThan(NON_TEXT_MINIMUM);
+  });
+});
+
+describe('a tile numeral is clamped to the cell that holds it', () => {
+  it('is identical to the declared size at the four-cell board', () => {
+    // The four declared sizes were authored against this edge length, so the
+    // clamp must never be the binding constraint here.
+    for (const scale of ['desktop', 'mobile'] as const) {
+      const cell = geometryScales[scale].tileSize;
+
+      for (const value of [2, 4, 128, 1024, 4096]) {
+        expect(tileNumeralSize(value, scale, cell)).toBe(
+          tileFontSize(value, scale),
+        );
+      }
+    }
+  });
+
+  it('never exceeds the cell at any supported board size', () => {
+    for (const scale of ['desktop', 'mobile'] as const) {
+      for (let size = 1; size <= MAX_BOARD_SIZE; size += 1) {
+        const cell = resolveBoardGeometry(size, scale).tileSize;
+
+        for (const value of [2, 128, 1024, 4096]) {
+          const numeral = tileNumeralSize(value, scale, cell);
+
+          // At or below the declared size, and at or below the cell it is drawn
+          // in — except where the floor is what keeps it legible at all.
+          expect(numeral).toBeLessThanOrEqual(tileFontSize(value, scale));
+          expect(numeral).toBeLessThanOrEqual(
+            Math.max(cell, minTileNumeralSize),
+          );
+        }
+      }
+    }
+  });
+
+  it('shrinks the sixteen-cell desktop numeral from 55px into its cell', () => {
+    const cell = resolveBoardGeometry(MAX_BOARD_SIZE, 'desktop').tileSize;
+
+    // The defect this closes: a ~15.31px cell carried the 55px base numeral.
+    expect(cell).toBeLessThan(16);
+    expect(tileFontSize(2, 'desktop')).toBe(55);
+    expect(tileNumeralSize(2, 'desktop', cell)).toBeLessThan(cell);
+  });
+
+  it('holds the declared size where no geometry is available', () => {
+    for (const unusable of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(tileNumeralSize(2, 'desktop', unusable)).toBe(
+        tileFontSize(2, 'desktop'),
+      );
+    }
+  });
+
+  it('never draws below the legibility floor for a declared size above it', () => {
+    // A one-pixel cell would otherwise demand a numeral of half a pixel.
+    expect(tileNumeralSize(2, 'desktop', 1)).toBe(minTileNumeralSize);
+    expect(tileNumeralSize(4096, 'mobile', 1)).toBe(minTileNumeralSize);
+  });
+
+  it('mirrors the ratio the stylesheet clamps with', () => {
+    // style/_tokens.scss declares $tile-numeral-cell-ratio and
+    // $tile-numeral-min-size; both must be these values or the two layers clamp
+    // differently. The ratio is the largest fraction of its cell any declared
+    // numeral occupies at the compiled board size: 35 / 57.5 at the mobile
+    // scale, rounded up to two places.
+    expect(tileNumeralCellRatio).toBeCloseTo(0.61, 5);
+    expect(minTileNumeralSize).toBe(6);
+    expect(tileNumeralCellRatio).toBeGreaterThanOrEqual(
+      tileFontSize(2, 'mobile') / geometryScales.mobile.tileSize,
+    );
+    expect(tileNumeralCellRatio).toBeGreaterThanOrEqual(
+      tileFontSize(2, 'desktop') / geometryScales.desktop.tileSize,
+    );
   });
 });

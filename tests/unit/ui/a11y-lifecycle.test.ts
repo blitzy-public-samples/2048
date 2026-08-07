@@ -23,6 +23,8 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { createDefaultRulesConfig } from '../../../src/config/default-config';
+import { createNumberOnlyRenderer } from '../../../src/render/number-only-renderer';
 import type { UiReportFields } from '../../../src/ui/a11y/settings';
 import {
   createFocusManager,
@@ -673,5 +675,86 @@ describe('an assertive request is not silently made polite', () => {
     expect(counted.length).toBeGreaterThan(1);
 
     announcer.destroy();
+  });
+});
+
+describe('a board renderer hands the parallel layer over rather than emptying it', () => {
+  it('unmounts the layer through its own api and remounts it on release', () => {
+    document.body.innerHTML = `
+      <div class="board-host">
+        <div class="board-number-only" hidden></div>
+        <div class="board-a11y" id="board-a11y" role="grid" aria-busy="true"></div>
+      </div>
+    `;
+
+    const host = document.querySelector<HTMLElement>('.board-number-only')!;
+    const parallelHost = document.querySelector<HTMLElement>('#board-a11y')!;
+    const layer = createParallelBoardLayer({
+      host: parallelHost,
+      document,
+    });
+
+    expect(layer.mount(parallelHost, 4)).toBe(true);
+    expect(layer.isMounted()).toBe(true);
+    expect(layer.cellAt(0, 0)).not.toBeNull();
+
+    const renderer = createNumberOnlyRenderer({
+      host,
+      config: createDefaultRulesConfig(),
+      parallelBoard: parallelHost,
+      parallelBoardLayer: layer,
+    });
+
+    // Claimed: the element is out of the accessibility tree, and the layer knows
+    // it is no longer mounted rather than holding detached cells while
+    // `isMounted()` still reports `true`.
+    expect(parallelHost.getAttribute('aria-hidden')).toBe('true');
+    expect(parallelHost.hidden).toBe(true);
+    expect(layer.isMounted()).toBe(false);
+    expect(layer.cellAt(0, 0)).toBeNull();
+
+    renderer.unmount();
+
+    // Released: the attributes are restored AND the layer is mounted again, so
+    // the surface the next renderer takes over is a populated lattice.
+    expect(parallelHost.getAttribute('aria-hidden')).toBeNull();
+    expect(parallelHost.hidden).toBe(false);
+    expect(layer.isMounted()).toBe(true);
+    expect(layer.boardSize()).toBe(4);
+    expect(layer.cellAt(0, 0)).not.toBeNull();
+
+    renderer.dispose();
+    layer.unmount();
+    document.body.innerHTML = '';
+  });
+
+  it('leaves foreign children in place when no layer is supplied', () => {
+    document.body.innerHTML = `
+      <div class="board-host">
+        <div class="board-number-only" hidden></div>
+        <div class="board-a11y" id="board-a11y" role="grid"></div>
+      </div>
+    `;
+
+    const host = document.querySelector<HTMLElement>('.board-number-only')!;
+    const parallelHost = document.querySelector<HTMLElement>('#board-a11y')!;
+    const owned = document.createElement('div');
+
+    owned.setAttribute('role', 'gridcell');
+    parallelHost.appendChild(owned);
+
+    const renderer = createNumberOnlyRenderer({
+      host,
+      config: createDefaultRulesConfig(),
+      parallelBoard: parallelHost,
+    });
+
+    // Hiding is what takes the subtree out of the accessibility tree; nothing
+    // has to be removed, and removing it destroyed another component's state.
+    expect(parallelHost.hidden).toBe(true);
+    expect(parallelHost.contains(owned)).toBe(true);
+
+    renderer.dispose();
+    document.body.innerHTML = '';
   });
 });

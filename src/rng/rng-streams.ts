@@ -20,6 +20,10 @@
  *
  * This module introduces no source of randomness of its own: a seed reaches it
  * only as an argument, and nothing here reads, wraps or assigns to
+ *
+ * Decisions behind this file: DL-RNG-04, the seed fanned into four named
+ * substreams, and DL-RNG-05, each substream reporting its own cursor. Both
+ * target-only rows TR-RNG-06 through TR-RNG-09 of
  * `Math.random`.
  */
 
@@ -41,19 +45,29 @@ export { MAX_RNG_CURSOR } from './seeded-rng';
  * them.
  *
  * ORDER IS PART OF THE CONTRACT: eager stream construction, cursor
- * snapshotting and cursor restore all iterate this tuple. No code path in this
- * module takes an order from `Object.keys`, `for...in`, a `Set` or a `Map`.
+ * snapshotting and cursor restore all iterate this tuple, as do run-state
+ * normalisation in src/run/run-state.ts and per-substream metric registration
+ * in src/observability/metrics.ts. No code path in this module takes an order
+ * from `Object.keys`, `for...in`, a `Set` or a `Map`.
+ *
+ * FROZEN AT RUNTIME as well as readonly at compile time, matching `HOOK_NAMES`
+ * of src/engine/hooks.ts and `ENGINE_EVENT_NAMES` of
+ * src/engine/engine-events.ts. Compile-time readonly alone left the tuple
+ * writable to any caller reaching it through a widened type, and every
+ * consumer above treats it as a closed enumeration: a reordered or extended
+ * tuple would change which seed a substream is derived from, and so the
+ * sequence a seeded run reproduces.
  *
  * The entries are consumed as literal types by `StreamName` and as property
  * keys by `RngCursorMap`, which the run state persists, so each name is also a
  * stored value.
  */
-export const RNG_STREAM_NAMES = [
+export const RNG_STREAM_NAMES = Object.freeze([
   'spawn-value',
   'spawn-position',
   'relic-draw',
   'rarity-weight',
-] as const;
+] as const);
 
 export type StreamName = (typeof RNG_STREAM_NAMES)[number];
 
@@ -174,6 +188,23 @@ export interface RngStream {
     items: readonly T[],
     weights: readonly number[]
   ): T | undefined;
+
+  /**
+   * Creates a DETACHED substream of the same name standing exactly where this
+   * one stands: the same seed, the same cursor, and the same next draw. Draws
+   * taken from the fork advance the fork alone.
+   *
+   * The checkpoint primitive of the substream layer, wrapping
+   * `SeededRng.fork()`. A caller that must be able to abandon the draws it
+   * takes draws from a fork, then either discards it — leaving this substream
+   * untouched — or advances this substream by the fork's own consumption to
+   * adopt them, which reproduces the values the fork produced because both
+   * share a seed and a position. src/engine/hook-bus.ts uses it to keep a hook
+   * handler that throws from consuming randomness.
+   *
+   * Constant cost, whatever this substream's cursor.
+   */
+  fork(): RngStream;
 }
 
 /**
@@ -360,6 +391,10 @@ function createStream(name: StreamName, rng: SeededRng): RngStream {
     nextInt,
     pick,
     pickWeighted,
+
+    // The fork carries the same name and the same helpers, so a caller
+    // drawing through it takes the draws it would have taken here.
+    fork: (): RngStream => createStream(name, rng.fork()),
   };
 }
 

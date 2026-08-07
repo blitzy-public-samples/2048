@@ -176,3 +176,22 @@ $rarity-tiers: common, uncommon, rare, legendary !default;
 
 $diagnostics-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
   "Liberation Mono", monospace !default;
+
+// -----------------------------------------------------------------------------
+// Tile numeral clamp.
+//
+// Fraction of a cell's edge a tile numeral may occupy, and the smallest numeral
+// either scale will draw. Mirrored by `tileNumeralCellRatio` and
+// `minTileNumeralSize` of src/theme/tokens.ts, which is what
+// src/render/number-only-renderer.ts writes `--tile-numeral-size` from.
+//
+// The four declared numeral sizes of style/main.scss were authored against the
+// four-cell board and cell size falls as the board grows while they do not. The
+// ratio is DERIVED: the largest fraction of its cell any declared numeral
+// occupies at $grid-row-cells, which is the mobile base numeral at 35 / 57.5 =
+// 0.6087 ahead of the desktop base at 55 / 106.25 = 0.5176. Rounding up to two
+// places keeps the clamp non-binding at four cells for both scales.
+// -----------------------------------------------------------------------------
+
+$tile-numeral-cell-ratio: 0.61 !default;
+$tile-numeral-min-size: 6px !default;

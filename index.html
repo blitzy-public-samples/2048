@@ -21,11 +21,17 @@
   <div class="container">
     <header class="heading">
       <h1 class="title">2048</h1>
-      <!-- Score outlets. The visible captions are stylesheet `:after` content, so
-           accessible names are carried as attributes. -->
+      <!-- Score outlets. The visible captions are stylesheet `:after` content and
+           are invisible to assistive technology, so each outlet declares a real
+           visually-hidden label that ScorePanel adopts and re-appends ahead of
+           the value on every write.
+           These are NOT live regions: `role="status"` here made each outlet
+           announce itself on every change, so three regions raced the one
+           announcer and suppressed one another. Narration belongs to
+           `#live-region` alone; these are labelled values it talks about. -->
       <div class="scores-container" role="group" aria-label="Scores">
-        <div class="score-container" role="status" aria-label="Score">0</div>
-        <div class="best-container" role="status" aria-label="Best score">0</div>
+        <div class="score-container"><span class="visually-hidden">Score</span>0</div>
+        <div class="best-container"><span class="visually-hidden">Best score</span>0</div>
       </div>
     </header>
 

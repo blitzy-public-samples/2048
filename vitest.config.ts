@@ -38,6 +38,10 @@
 //
 // `resolve.alias` is absent, matching vite.config.ts, so a test resolves a
 // module by the same relative specifier the application uses.
+//
+// DL-TEST-03.
+// Decisions behind this file: DL-TEST-01 through DL-TEST-03 above, in
+// TR-TEST-01 through TR-TEST-03 of docs/TRACEABILITY_MATRIX.md — the two
 
 import { defineConfig } from 'vitest/config';
 

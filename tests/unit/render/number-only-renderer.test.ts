@@ -16,8 +16,9 @@
 //               node is retained across a paint instead, so the 100ms transform
 //               transition runs; a merged or spawned tile still gets a fresh
 //               node, because `pop` and `appear` retrigger only on one.
-//   exclusivity the number-only lattice and src/ui/a11y/parallel-board.ts both
-//               carry `role="grid"` over the same board, and two grids in the
+//   exclusivity the number-only lattice and src/ui/a11y/parallel-board.ts (the
+//               latter PLANNED, NOT PRESENT AT THIS COMMIT) both carry
+//               `role="grid"` over the same board, and two grids in the
 //               accessibility tree is one board announced twice. Exactly one is
 //               exposed, and the renderer that draws the board owns which.
 //   lifecycle   `subscribe()` registers a listener on an emitter that outlives
@@ -134,8 +135,17 @@ const tilesOf = (host: HTMLElement): HTMLElement[] =>
 /* ===== F-30: exactly one semantic board grid ===== */
 
 describe('F-30 semantic-surface exclusivity', () => {
-  it('hides and empties the parallel board once it has a lattice', () => {
+  it('hides the parallel board once it has a lattice, without emptying it', () => {
     const { host, parallel } = hostFixture();
+
+    // A cell the OTHER layer owns. Removing it left that layer holding a
+    // detached node while its own `isMounted()` still reported `true`, and
+    // restoring attributes alone never gave it back.
+    const foreignCell = document.createElement('div');
+
+    foreignCell.setAttribute('role', 'gridcell');
+    parallel.appendChild(foreignCell);
+
     const renderer = createNumberOnlyRenderer({
       host,
       parallelBoard: parallel,
@@ -148,8 +158,12 @@ describe('F-30 semantic-surface exclusivity', () => {
 
     expect(parallel.getAttribute('aria-hidden')).toBe('true');
     expect(parallel.hidden).toBe(true);
-    expect(parallel.children.length).toBe(0);
     expect(parallel.hasAttribute('aria-busy')).toBe(false);
+
+    // `hidden` takes the subtree out of the rendering tree and the
+    // accessibility tree, so nothing has to be removed to take it out of a
+    // rotor's reach.
+    expect(parallel.contains(foreignCell)).toBe(true);
 
     const grids = document.querySelectorAll(
       '[role="grid"]:not([aria-hidden="true"])',

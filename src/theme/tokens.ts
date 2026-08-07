@@ -281,6 +281,69 @@ export function tileFontSize(
   return tileFontSizes.default[scale];
 }
 
+/**
+ * Fraction of a cell's edge a numeral may occupy.
+ *
+ * The four declared sizes were authored against the FOUR-CELL board and cell
+ * size falls as the board grows — a sixteen-cell desktop cell resolves to
+ * roughly 15.31px — while the declared sizes do not, so a numeral three times
+ * the height of its own cell was drawn at every board size above four.
+ *
+ * DERIVED, NOT INVENTED: the largest fraction of its cell any declared numeral
+ * occupies at the compiled board size, which is the mobile base numeral at
+ * 35 / 57.5 = 0.6087, ahead of the desktop base at 55 / 106.25 = 0.5176.
+ * Rounding up to two places keeps the clamp non-binding at four cells for BOTH
+ * scales, so the compiled design is reproduced exactly there and the clamp only
+ * takes effect at an edge length the design was never authored for.
+ */
+export const tileNumeralCellRatio = 0.61;
+
+/**
+ * Smallest numeral this scale is willing to draw, in px.
+ *
+ * Below this a numeral is not legible at all, so a board size that would demand
+ * it is served this instead: the cell is then smaller than its numeral, which is
+ * visible and reportable, where an unbounded ratio silently produced a numeral
+ * of a fraction of a pixel.
+ */
+export const minTileNumeralSize = 6;
+
+/**
+ * Numeral size for a tile value at one scale, CLAMPED to the resolved cell size.
+ *
+ * `tileFontSize` answers what the stylesheet declares for a value; this answers
+ * what fits. The two agree exactly at the four-cell board, where the clamp is
+ * never the binding constraint, and diverge as the board grows.
+ *
+ * @param tileValue Face value the numeral is drawn for.
+ * @param scale Which of the two scales to resolve at.
+ * @param cellSize Resolved edge length of one cell, in px. A value that is not
+ *   a finite number above zero leaves the declared size unclamped, which is the
+ *   geometry-unavailable case.
+ * @returns The size to draw at, in px, never above the declared size and never
+ *   below `minTileNumeralSize` unless the declared size itself is below it.
+ * @throws RangeError when `tileValue` is not a finite positive number.
+ */
+export function tileNumeralSize(
+  tileValue: number,
+  scale: ScaleName,
+  cellSize: number,
+): number {
+  const declared = tileFontSize(tileValue, scale);
+
+  if (!Number.isFinite(cellSize) || cellSize <= 0) {
+    return declared;
+  }
+
+  const fitted = cellSize * tileNumeralCellRatio;
+
+  if (fitted >= declared) {
+    return declared;
+  }
+
+  return Math.max(Math.min(declared, minTileNumeralSize), fitted);
+}
+
 /* ===== 5. Motion ===== */
 
 /** The easing keywords style/main.scss uses. */

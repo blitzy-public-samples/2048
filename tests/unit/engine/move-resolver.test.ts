@@ -22,6 +22,10 @@
 // injected callback. No mocking library is installed — the recorders below are
 // hand-written and the injected callbacks are vitest spies. It runs in the
 // `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
+//
+// Decisions this suite is the evidence for: DL-MOVE-01 through DL-MOVE-03
+// in docs/DECISION_LOG.md. Traceability rows: TR-MOVE-01 through
+// TR-MOVE-08 of docs/TRACEABILITY_MATRIX.md.
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -38,7 +42,10 @@ import type {
   RulesConfig,
 } from '../../../src/config/rules-config';
 import { Grid } from '../../../src/engine/grid';
-import type { MergePayload } from '../../../src/engine/hooks';
+import type {
+  MergeDispatchPayload,
+  MergePayload,
+} from '../../../src/engine/hooks';
 import {
   buildTraversals,
   findFarthestPosition,
@@ -77,6 +84,7 @@ import {
   createNearWinBoard,
 } from '../../fixtures/boards';
 
+
 const EVERY_DIRECTION: readonly Direction[] = [
   DIRECTION_UP,
   DIRECTION_RIGHT,
@@ -93,6 +101,9 @@ const ROW_ZERO = 0;
 const LONE_CELL: Position = { x: 1, y: 1 };
 
 const LONE_VALUE = 2;
+
+/** A value no rule produces, written by a dispatch that tries to interfere. */
+const HUGE_VALUE = 999_999;
 
 const BLOCKER_VALUE = 8;
 
@@ -112,9 +123,11 @@ function ascendingIndices(size: number): number[] {
   return indices;
 }
 
+
 function descendingIndices(size: number): number[] {
   return ascendingIndices(size).reverse();
 }
+
 
 function buildRowGrid(
   values: readonly (number | null)[],
@@ -131,6 +144,7 @@ function buildRowGrid(
   return grid;
 }
 
+
 function buildLoneTileGrid(size: number = DEFAULT_BOARD_SIZE): Grid {
   const grid = new Grid(size);
 
@@ -139,9 +153,11 @@ function buildLoneTileGrid(size: number = DEFAULT_BOARD_SIZE): Grid {
   return grid;
 }
 
+
 function rehydrate(board: SerializedGameState): Grid {
   return new Grid(board.grid.size, board.grid.cells);
 }
+
 
 function tileAt(grid: Grid, cell: Position): Tile {
   const tile = grid.cellContent(cell);
@@ -152,6 +168,7 @@ function tileAt(grid: Grid, cell: Position): Tile {
 
   return tile;
 }
+
 
 function latticeValues(grid: Grid): (number | null)[][] {
   const values: (number | null)[][] = [];
@@ -171,6 +188,7 @@ function latticeValues(grid: Grid): (number | null)[][] {
   return values;
 }
 
+
 function countOccurrences(grid: Grid, tile: Tile): number {
   let count = 0;
 
@@ -182,6 +200,7 @@ function countOccurrences(grid: Grid, tile: Tile): number {
 
   return count;
 }
+
 
 function occupiedTiles(grid: Grid): Tile[] {
   const tiles: Tile[] = [];
@@ -212,9 +231,11 @@ function originsOf(grid: Grid): TileOrigin[] {
   return origins;
 }
 
+
 function anyTileLeftItsCell(origins: readonly TileOrigin[]): boolean {
   return origins.some((origin) => !positionsEqual(origin.cell, origin.tile));
 }
+
 
 function configWithMerge(
   canMerge: MergePredicate,
@@ -227,9 +248,11 @@ function configWithMerge(
   return config;
 }
 
+
 function resolveDefault(grid: Grid, direction: Direction): MoveOutcome {
   return resolveMove(grid, direction, createDefaultRulesConfig());
 }
+
 
 function recordMergeWrites(grid: Grid, source: Tile): string[] {
   const calls: string[] = [];
@@ -255,6 +278,7 @@ function recordMergeWrites(grid: Grid, source: Tile): string[] {
   return calls;
 }
 
+
 function recordInsertions(grid: Grid, calls: string[]): void {
   const insertTile = grid.insertTile.bind(grid);
 
@@ -263,6 +287,7 @@ function recordInsertions(grid: Grid, calls: string[]): void {
     insertTile(tile);
   };
 }
+
 
 function recordPrepareWrites(tile: Tile): string[] {
   const writes: string[] = [];
@@ -287,10 +312,12 @@ function recordPrepareWrites(tile: Tile): string[] {
   return writes;
 }
 
+
 function markMergedLastTurn(tile: Tile, stale: Position): void {
   tile.mergedFrom = [tile, tile];
   tile.previousPosition = { x: stale.x, y: stale.y };
 }
+
 
 describe('vectorForDirection (js/game_manager.js L196-L201)', () => {
   it('resolves direction 0 to the up vector (L197)', () => {
@@ -349,6 +376,7 @@ describe('vectorForDirection (js/game_manager.js L196-L201)', () => {
     }
   });
 });
+
 
 describe('buildTraversals (js/game_manager.js L207-L220)', () => {
   it('pushes 0 to size - 1 onto both axes (L210-L213)', () => {
@@ -471,6 +499,7 @@ describe('buildTraversals (js/game_manager.js L207-L220)', () => {
     expect(traversals.y).toEqual([]);
   });
 });
+
 
 describe('findFarthestPosition (js/game_manager.js L222-L236)', () => {
   it('walks an unobstructed tile to the wall (L226-L233)', () => {
@@ -652,6 +681,7 @@ describe('findFarthestPosition (js/game_manager.js L222-L236)', () => {
   });
 });
 
+
 describe('positionsEqual (js/game_manager.js L270-L272)', () => {
   it('reports two equal coordinate pairs as equal (L271)', () => {
     expect(positionsEqual({ x: 0, y: 0 }, { x: 0, y: 0 })).toBe(true);
@@ -713,6 +743,7 @@ describe('positionsEqual (js/game_manager.js L270-L272)', () => {
     expect(positionsEqual(first, first)).toBe(true);
   });
 });
+
 
 describe('prepareTiles (js/game_manager.js L113-L120)', () => {
   it('clears mergedFrom on every occupied cell (L116)', () => {
@@ -853,6 +884,7 @@ describe('prepareTiles (js/game_manager.js L113-L120)', () => {
   });
 });
 
+
 describe('moveTile (js/game_manager.js L123-L127)', () => {
   it('clears the cell the tile is leaving (L124)', () => {
     const grid = buildRowGrid([LONE_VALUE]);
@@ -942,6 +974,7 @@ describe('moveTile (js/game_manager.js L123-L127)', () => {
     expect(grid.cells[2][ROW_ZERO]).toBe(tile);
   });
 });
+
 
 describe('resolveMove merge branch (js/game_manager.js L156-L170)', () => {
   it('reads config.merge.canMerge for the merge test (L156)', () => {
@@ -1223,6 +1256,7 @@ describe('resolveMove merge branch (js/game_manager.js L156-L170)', () => {
   });
 });
 
+
 describe('resolveMove reposition branch (js/game_manager.js L172)', () => {
   it('slides a tile to the farthest empty cell (L172)', () => {
     const grid = buildLoneTileGrid();
@@ -1293,6 +1327,7 @@ describe('resolveMove reposition branch (js/game_manager.js L172)', () => {
     }
   });
 });
+
 
 describe('positionsEqual call site (js/game_manager.js L175-L177)', () => {
   it('reads the live coordinates of the tile to report a move (L175)', () => {
@@ -1379,17 +1414,48 @@ describe('positionsEqual call site (js/game_manager.js L175-L177)', () => {
 });
 
 describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
-  it('returns its argument unchanged (identityMergeDispatch)', () => {
+  it('carries both transformable members through unchanged', () => {
     const source = new Tile({ x: 1, y: ROW_ZERO }, LONE_VALUE);
     const target = new Tile({ x: 0, y: ROW_ZERO }, LONE_VALUE);
-    const payload: MergePayload = {
+    const payload: MergeDispatchPayload = {
       source,
       target,
       resultValue: LONE_VALUE * 2,
       scoreDelta: LONE_VALUE * 2,
     };
 
-    expect(identityMergeDispatch(payload)).toBe(payload);
+    const resolved = identityMergeDispatch(payload);
+
+    expect(resolved.resultValue).toBe(LONE_VALUE * 2);
+    expect(resolved.scoreDelta).toBe(LONE_VALUE * 2);
+  });
+
+  it('projects the two tiles onto read-only views rather than passing them', () => {
+    const source = new Tile({ x: 1, y: ROW_ZERO }, LONE_VALUE);
+    const target = new Tile({ x: 0, y: ROW_ZERO }, LONE_VALUE);
+
+    source.savePosition();
+
+    const resolved = identityMergeDispatch({
+      source,
+      target,
+      resultValue: LONE_VALUE * 2,
+      scoreDelta: LONE_VALUE * 2,
+    });
+
+    // The live tiles are NOT handed back: a handler receiving this payload
+    // cannot reach `savePosition`, `updatePosition` or `mergedFrom` through it.
+    expect(resolved.source).not.toBe(source);
+    expect(resolved.target).not.toBe(target);
+    expect(Object.isFrozen(resolved.source)).toBe(true);
+    expect(Object.isFrozen(resolved.target)).toBe(true);
+    expect(resolved.source).toEqual({
+      x: 1,
+      y: ROW_ZERO,
+      value: LONE_VALUE,
+      previousPosition: { x: 1, y: ROW_ZERO },
+    });
+    expect(resolved.target.previousPosition).toBeNull();
   });
 
   it('defaults to the identity dispatch when none is given (L157)', () => {
@@ -1414,7 +1480,10 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
   });
 
   it('is invoked once for a move with one merge (L156-L167)', () => {
-    const dispatchMerge = vi.fn((payload: MergePayload) => payload);
+    const dispatchMerge = vi.fn(
+      (payload: MergeDispatchPayload): MergePayload =>
+        identityMergeDispatch(payload),
+    );
     const grid = rehydrate(createMergePairBoard());
 
     resolveMove(grid, DIRECTION_LEFT, createDefaultRulesConfig(), {
@@ -1425,7 +1494,10 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
   });
 
   it('is invoked twice for a move with two merges (L156-L167)', () => {
-    const dispatchMerge = vi.fn((payload: MergePayload) => payload);
+    const dispatchMerge = vi.fn(
+      (payload: MergeDispatchPayload): MergePayload =>
+        identityMergeDispatch(payload),
+    );
     const grid = buildRowGrid([
       LONE_VALUE,
       LONE_VALUE,
@@ -1441,7 +1513,10 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
   });
 
   it('is not invoked when no merge resolves (L156)', () => {
-    const dispatchMerge = vi.fn((payload: MergePayload) => payload);
+    const dispatchMerge = vi.fn(
+      (payload: MergeDispatchPayload): MergePayload =>
+        identityMergeDispatch(payload),
+    );
     const config = createDefaultRulesConfig();
 
     resolveMove(rehydrate(createBlockedBoard()), DIRECTION_LEFT, config, {
@@ -1455,7 +1530,10 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
   });
 
   it('is handed the assembled merge payload (L157-L158, L167)', () => {
-    const dispatchMerge = vi.fn((payload: MergePayload) => payload);
+    const dispatchMerge = vi.fn(
+      (payload: MergeDispatchPayload): MergePayload =>
+        identityMergeDispatch(payload),
+    );
     const grid = rehydrate(createMergePairBoard());
     const target = tileAt(grid, { x: 0, y: ROW_ZERO });
     const source = tileAt(grid, { x: 1, y: ROW_ZERO });
@@ -1467,10 +1545,87 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
 
     const payload = dispatchMerge.mock.calls[0][0];
 
+    // The two live tiles of the merge branch, and the produced value twice.
+    // Substituting the read-only views is src/engine/hook-bus.ts's job, which
+    // is why this seam carries the tiles themselves.
     expect(payload.source).toBe(source);
     expect(payload.target).toBe(target);
     expect(payload.resultValue).toBe(produced);
     expect(payload.scoreDelta).toBe(produced);
+  });
+
+  it('reads back only the result value and the score delta (F2)', () => {
+    const grid = rehydrate(createMergePairBoard());
+    const target = tileAt(grid, { x: 0, y: ROW_ZERO });
+    const source = tileAt(grid, { x: 1, y: ROW_ZERO });
+
+    // A dispatch that returns foreign tile members changes nothing: the two
+    // views are never dereferenced by the resolver, so a handler cannot reach
+    // the board through them even by substitution.
+    const outcome = resolveMove(
+      grid,
+      DIRECTION_LEFT,
+      createDefaultRulesConfig(),
+      {
+        dispatchMerge: (payload): MergePayload => ({
+          ...identityMergeDispatch(payload),
+          source: Object.freeze({
+            x: HUGE_VALUE,
+            y: HUGE_VALUE,
+            value: HUGE_VALUE,
+            previousPosition: null,
+          }),
+          target: Object.freeze({
+            x: HUGE_VALUE,
+            y: HUGE_VALUE,
+            value: HUGE_VALUE,
+            previousPosition: null,
+          }),
+        }),
+      },
+    );
+
+    expect(source.value).toBe(LONE_VALUE);
+    expect(target.value).toBe(LONE_VALUE);
+    expect(outcome.merges[0].merged.value).toBe(LONE_VALUE * 2);
+    expect(outcome.scoreDelta).toBe(LONE_VALUE * 2);
+  });
+
+  it('leaves the two merging tiles unchanged when a dispatch writes to the ' +
+    'projections it was handed (F2)', () => {
+    const grid = rehydrate(createMergePairBoard());
+    const target = tileAt(grid, { x: 0, y: ROW_ZERO });
+    const source = tileAt(grid, { x: 1, y: ROW_ZERO });
+    const thrown: string[] = [];
+
+    const outcome = resolveMove(
+      grid,
+      DIRECTION_LEFT,
+      createDefaultRulesConfig(),
+      {
+        dispatchMerge: (payload): MergePayload => {
+          // Projected exactly as src/engine/hook-bus.ts projects before it
+          // invokes a handler, so the write below meets the same boundary a
+          // relic handler meets.
+          const projected = identityMergeDispatch(payload);
+
+          for (const view of [projected.source, projected.target]) {
+            try {
+              (view as { value: number }).value = HUGE_VALUE;
+            } catch (error: unknown) {
+              thrown.push(String((error as Error).name));
+            }
+          }
+
+          return projected;
+        },
+      },
+    );
+
+    expect(thrown).toEqual(['TypeError', 'TypeError']);
+    expect(source.value).toBe(LONE_VALUE);
+    expect(target.value).toBe(LONE_VALUE);
+    expect(outcome.merges[0].merged.value).toBe(LONE_VALUE * 2);
   });
 
   it('writes the returned result value onto the merged tile (L157)', () => {
@@ -1576,6 +1731,7 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
     expect(outcome.merges[0].merged.mergedFrom?.[1]).toBe(target);
   });
 });
+
 
 describe('resolveMove traversal walk (js/game_manager.js L146-L180)', () => {
   it('merges the pair of the merge-pair board (L156-L167)', () => {

@@ -13,6 +13,10 @@
 // exports is imported below with `import type`. The type-level assertions are
 // enforced by `tsc --noEmit`, whose file set covers tests/**/*.ts, rather than
 // by the runner. Every test below also carries at least one runtime assertion.
+//
+// Decisions this suite is the evidence for: DL-CONFIG-01 and DL-CONFIG-02
+// in docs/DECISION_LOG.md. Traceability rows: TR-CONFIG-01 through
+// TR-CONFIG-05 of docs/TRACEABILITY_MATRIX.md.
 
 import { describe, expect, expectTypeOf, it } from 'vitest';
 

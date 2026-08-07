@@ -28,7 +28,10 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createDefaultRulesConfig } from '../../../src/config/default-config';
+import {
+  MAX_BOARD_SIZE,
+  createDefaultRulesConfig,
+} from '../../../src/config/default-config';
 import {
   particleLimits,
   createParticleSystem,
@@ -36,8 +39,10 @@ import {
 } from '../../../src/render/particles';
 import { createTileMaterialCache } from '../../../src/render/tile-materials';
 import {
+  cellArrayIndex,
   cellToWorld,
   createTileMeshFactory,
+  resolveBoardGeometry,
 } from '../../../src/render/tile-mesh-factory';
 import { applyTheme, getActiveTheme } from '../../../src/theme/themes';
 import { rampValue, tileRampConstants } from '../../../src/theme/tile-ramp';
@@ -341,11 +346,46 @@ describe('cellToWorld is continuous across every cell boundary', () => {
   });
 
   it('lands each integer on the floored Sass step', () => {
-    // The step style/main.scss L492-L493 compiles: floor((106.25 + 15) * n).
+    // The step style/main.scss compiles in its tile-position loop, as
+    // math.floor(($tile-size + $grid-spacing) * (n - 1)): floor((106.25 + 15) * n).
     const step = (index: number): number => Math.floor(121.25 * index);
 
     for (const cell of [1, 2, 3]) {
       expect(worldX(cell) - worldX(0)).toBeCloseTo(step(cell), 6);
     }
+  });
+});
+
+describe('the mesh factory measures a board size against the product ceiling', () => {
+  it('refuses a geometry beyond MAX_BOARD_SIZE', () => {
+    // Persistence, the number-only renderer and the parallel accessibility
+    // board all refuse a size above the ceiling. This module accepted any
+    // positive integer, so a size the rest of the product refuses reached
+    // geometry construction and a `size` by `size` plate allocation here.
+    expect(() => resolveBoardGeometry(MAX_BOARD_SIZE + 1)).toThrow(RangeError);
+    expect(() => resolveBoardGeometry(2 ** 20)).toThrow(RangeError);
+    expect(() => resolveBoardGeometry(MAX_BOARD_SIZE)).not.toThrow();
+  });
+
+  it('refuses a cell index computed against an unsupported size', () => {
+    expect(() =>
+      cellArrayIndex({ x: 0, y: 0 }, MAX_BOARD_SIZE + 1),
+    ).toThrow(RangeError);
+    expect(() => cellArrayIndex({ x: 0, y: 0 }, MAX_BOARD_SIZE)).not.toThrow();
+  });
+
+  it('refuses a board build beyond MAX_BOARD_SIZE', () => {
+    const materials = createTileMaterialCache();
+    const factory = createTileMeshFactory({
+      config: createDefaultRulesConfig(),
+      materials,
+    });
+
+    expect(() => factory.buildBoard(MAX_BOARD_SIZE + 1)).toThrow(RangeError);
+    expect(() => factory.buildBoard(0)).toThrow(RangeError);
+    expect(() => factory.buildBoard(4.5)).toThrow(RangeError);
+
+    factory.dispose();
+    materials.destroy();
   });
 });

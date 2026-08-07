@@ -118,6 +118,8 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 // BLITZY [A11Y]: the control label sits below the WCAG AA 4.5:1 text threshold
 // under the default palette, the same figure style/main.scss flags for this
 // surface.
+//
+// treatment. Decision DL-A11Y-06.
 @mixin summary-control {
   display: inline-block;
   box-sizing: border-box;
@@ -267,6 +269,8 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 // BLITZY [A11Y]: under the default palette the readout numerals and caption sit
 // below the WCAG AA text thresholds. These are the colours style/main.scss
 // already compiles for `.score-container`.
+//
+// for `.score-container`. Decision DL-A11Y-07.
 .run-summary-score {
   flex: 1 1 0;
   min-inline-size: 0;

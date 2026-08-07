@@ -20,6 +20,10 @@
 // src/storage/storage-keys.ts and board snapshots from
 // tests/fixtures/boards.ts; this file declares neither a key literal nor a
 // board literal of its own.
+//
+// Decisions this suite is the evidence for: DL-STORE-02 through DL-STORE-04
+// in docs/DECISION_LOG.md. Traceability rows: TR-STORE-01 through
+// TR-STORE-08 of docs/TRACEABILITY_MATRIX.md.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -631,8 +635,16 @@ describe('probeWebStorage() — the reused capability probe (L29-L40)', () => {
 
     expect(error).toBeDefined();
     expect(error?.name).toBe(quota.name);
-    expect(error?.message).toBe(quota.message);
     expect(error?.quota).toBe(true);
+
+    // The public message is authored by the module, not carried from the
+    // caught value: it is a field an export publishes (F12).
+    expect(error?.message).not.toBe(quota.message);
+    expect(error?.message).toBe('Storage is full; the operation was refused.');
+
+    // The value that was thrown travels beside the description, unconverted,
+    // so its stack and its subclass survive for a logger (F5).
+    expect(result.thrown).toBe(quota);
   });
 
   it('flags denied access as non-quota, a distinction L38 lost', () => {
@@ -644,8 +656,10 @@ describe('probeWebStorage() — the reused capability probe (L29-L40)', () => {
 
     expect(result.supported).toBe(false);
     expect(result.error?.name).toBe(denied.name);
-    expect(result.error?.message).toBe(denied.message);
     expect(result.error?.quota).toBe(false);
+    expect(result.error?.message).not.toBe(denied.message);
+    expect(result.error?.message).toBe('Storage refused the operation.');
+    expect(result.thrown).toBe(denied);
   });
 
   it('carries no error when no store exists, unlike L33', () => {
@@ -700,7 +714,16 @@ describe('probeWebStorage() — the reused capability probe (L29-L40)', () => {
       operation: 'probe',
       key: STORAGE_PROBE_KEY,
       strategy: 'memory',
-      error: { name: quota.name, message: quota.message, quota: true },
+      error: {
+        name: quota.name,
+        message: 'Storage is full; the operation was refused.',
+        quota: true,
+      },
+
+      // The failure channel carries the original alongside the description,
+      // so the logger adapter records the thrown value and not a summary of
+      // it (F5).
+      thrown: quota,
     });
   });
 });
@@ -769,9 +792,18 @@ describe('getGameState() — guarded parse (L52-L55)', () => {
     expect(failure.operation).toBe('read');
     expect(failure.key).toBe(GAME_STATE_KEY);
     expect(failure.strategy).toBe('injected');
-    expect(failure.error.name).toBe('SyntaxError');
-    expect(failure.error.message.length).toBeGreaterThan(0);
+
+    // `SyntaxError` is not one of the names this module reports, so the
+    // allowlist substitutes its own and the parser's text — which can quote
+    // the stored value — never reaches the description (F12).
+    expect(failure.error.name).toBe('StorageError');
+    expect(failure.error.message).toBe('Unknown storage error.');
+    expect(failure.error.message).not.toContain(corrupt.text);
     expect(failure.error.quota).toBe(false);
+
+    // The parse error itself is still delivered, so the logger records what
+    // was thrown (F5).
+    expect(failure.thrown).toBeInstanceOf(SyntaxError);
   });
 
   it('reports nothing for an absent snapshot, unparsed at L54', () => {
@@ -879,8 +911,11 @@ describe('write failure paths (L47-L49, L57-L59)', () => {
     expect(failure.key).toBe(GAME_STATE_KEY);
     expect(failure.strategy).toBe('injected');
     expect(failure.error.name).toBe(quota.name);
-    expect(failure.error.message).toBe(quota.message);
+    expect(failure.error.message).toBe(
+      'Storage is full; the operation was refused.',
+    );
     expect(failure.error.quota).toBe(true);
+    expect(failure.thrown).toBe(quota);
   });
 
   it('reports a failed setBestScore, unreported by L47-L49', () => {
@@ -897,7 +932,12 @@ describe('write failure paths (L47-L49, L57-L59)', () => {
       operation: 'write',
       key: BEST_SCORE_KEY,
       strategy: 'injected',
-      error: { name: quota.name, message: quota.message, quota: true },
+      error: {
+        name: quota.name,
+        message: 'Storage is full; the operation was refused.',
+        quota: true,
+      },
+      thrown: quota,
     });
   });
 
@@ -1024,7 +1064,12 @@ describe('clearGameState() (L61-L63)', () => {
       operation: 'remove',
       key: GAME_STATE_KEY,
       strategy: 'injected',
-      error: { name: denied.name, message: denied.message, quota: false },
+      error: {
+        name: denied.name,
+        message: 'Storage refused the operation.',
+        quota: false,
+      },
+      thrown: denied,
     });
   });
 });
@@ -1084,7 +1129,9 @@ describe('generic namespaced API — the run-state persistence port', () => {
     expect(collector.failures).toHaveLength(1);
     expect(collector.failures[0].operation).toBe('read');
     expect(collector.failures[0].key).toBe(RUN_STATE_KEY);
-    expect(collector.failures[0].error.name).toBe('SyntaxError');
+    expect(collector.failures[0].error.name).toBe('StorageError');
+    expect(collector.failures[0].error.message).not.toContain(corrupt.text);
+    expect(collector.failures[0].thrown).toBeInstanceOf(SyntaxError);
     expect(readEntry(store, RUN_STATE_KEY)).toBe(corrupt.text);
   });
 
@@ -1160,7 +1207,12 @@ describe('generic namespaced API — the run-state persistence port', () => {
       operation: 'write',
       key: RUN_STATE_KEY,
       strategy: 'injected',
-      error: { name: quota.name, message: quota.message, quota: true },
+      error: {
+        name: quota.name,
+        message: 'Storage is full; the operation was refused.',
+        quota: true,
+      },
+      thrown: quota,
     });
     expect(collector.writes).toHaveLength(1);
     expect(collector.writes[0].ok).toBe(false);
@@ -1180,7 +1232,12 @@ describe('generic namespaced API — the run-state persistence port', () => {
       operation: 'read',
       key: RUN_STATE_KEY,
       strategy: 'injected',
-      error: { name: denied.name, message: denied.message, quota: false },
+      error: {
+        name: denied.name,
+        message: 'Storage refused the operation.',
+        quota: false,
+      },
+      thrown: denied,
     });
   });
 });
@@ -1200,11 +1257,15 @@ describe('reporter fault containment (reporterFaults)', () => {
     expect(manager.strategy).toBe('injected');
     expect(manager.reporterFaults).toBe(1);
     expect(manager.reporterFailures).toBe(1);
+    // A contained reporter fault is described by the same allowlist: a plain
+    // `Error` is not one of the names this module reports, and the sink's own
+    // text is not carried into a field an export publishes (F12).
     expect(manager.lastReporterFault).toStrictEqual({
-      name: fault.name,
-      message: fault.message,
+      name: 'StorageError',
+      message: 'Unknown storage error.',
       quota: false,
     });
+    expect(manager.lastReporterFault?.message).not.toBe(fault.message);
   });
 
   it('contains a throwing onFailure sink and keeps the L58 false', () => {
@@ -1218,7 +1279,8 @@ describe('reporter fault containment (reporterFaults)', () => {
     expect(expectNoThrow(() => manager.setGameState(createEmptyBoard())))
       .toBe(false);
     expect(manager.reporterFaults).toBeGreaterThan(faultsBefore);
-    expect(manager.lastReporterFault?.message).toBe(fault.message);
+    expect(manager.lastReporterFault?.name).toBe('StorageError');
+    expect(manager.lastReporterFault?.message).not.toBe(fault.message);
   });
 
   it('contains a throwing onWrite sink; the L58 write returns true', () => {
@@ -1384,14 +1446,23 @@ describe('the ownership guard refuses an unowned key before the store', () => {
     }
   );
 
-  it('reports the refusal message naming the key it refused', () => {
+  it('reports the refusal without naming the refused key in the message ' +
+    '(F12)', () => {
     const { manager, collector } = createGuardedManager();
 
     expect(manager.readRaw('theme' as OwnedStorageKey)).toBeNull();
+
+    // The key travels on its own bounded field; interpolating it into the
+    // message would publish caller-supplied text twice.
     expect(collector.failures[0].error.message).toBe(
-      'Key "theme" is not owned by this product; the operation was refused ' +
+      'The key is not owned by this product; the operation was refused ' +
         'and no storage was touched.'
     );
+    expect(collector.failures[0].error.message).not.toContain('theme');
+    expect(collector.failures[0].key).toBe('theme');
+
+    // Nothing was thrown, so no original travels with it.
+    expect(collector.failures[0].thrown).toBeUndefined();
   });
 
   it('truncates an overlong refused key to the reporting limit', () => {
@@ -1411,7 +1482,7 @@ describe('the ownership guard refuses an unowned key before the store', () => {
         KEY_TRUNCATION_SUFFIX
     );
     expect(reported).toHaveLength(MAX_REPORTED_KEY_LENGTH + 1);
-    expect(collector.failures[0].error.message).toContain(reported);
+    expect(collector.failures[0].error.message).not.toContain(reported);
     expect(store.operations).toStrictEqual([]);
   });
 

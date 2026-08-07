@@ -48,6 +48,7 @@ import {
   DEFAULT_BOARD_SIZE,
   createDefaultRulesConfig,
 } from '../../../src/config/default-config';
+import { createEngineEvents } from '../../../src/engine/engine-events';
 import { Grid } from '../../../src/engine/grid';
 import { createHookBus } from '../../../src/engine/hook-bus';
 import type { HookContext, StageEndPayload } from '../../../src/engine/hooks';
@@ -55,6 +56,7 @@ import { NOOP_ENGINE_REPORTER } from '../../../src/engine/types';
 import type {
   EngineCountReport,
   EngineHookErrorReport,
+  EngineListenerErrorReport,
   EngineReporter,
 } from '../../../src/engine/types';
 
@@ -71,6 +73,11 @@ import type {
   StorageReporter,
   StorageWriteInfo,
 } from '../../../src/storage/local-storage-manager';
+import {
+  LocalStorageManager,
+} from '../../../src/storage/local-storage-manager';
+import { MemoryStorage } from '../../../src/storage/memory-storage';
+import type { StorageLike } from '../../../src/storage/memory-storage';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import * as runStateModule from '../../../src/run/run-state';
 import {
@@ -232,11 +239,29 @@ const PARSE_ERROR_INFO: StorageErrorInfo = {
   quota: false,
 };
 
+/**
+ * The value the platform threw for the quota failure below.
+ *
+ * A `DOMException` subclass carrying a stack, which is exactly what a
+ * reduction to `StorageErrorInfo` cannot express — so the assertions on the
+ * failure channel measure whether this object survives to the record (F5).
+ */
+const QUOTA_THROWN = new DOMException(
+  'The storage quota has been exceeded.',
+  'QuotaExceededError',
+);
+
+/** The value thrown for the parse failure: an `Error` with a cause chain. */
+const PARSE_THROWN = new SyntaxError('Unexpected end of JSON input', {
+  cause: new Error('the stored value was truncated'),
+});
+
 const QUOTA_FAILURE: StorageFailure = {
   operation: 'write',
   key: RUN_STATE_KEY,
   strategy: 'localStorage',
   error: QUOTA_ERROR_INFO,
+  thrown: QUOTA_THROWN,
 };
 
 const PARSE_FAILURE: StorageFailure = {
@@ -244,6 +269,21 @@ const PARSE_FAILURE: StorageFailure = {
   key: GAME_STATE_KEY,
   strategy: 'memory',
   error: PARSE_ERROR_INFO,
+  thrown: PARSE_THROWN,
+};
+
+/** A failure no value was thrown for: a key this product does not own. */
+const REFUSED_KEY_FAILURE: StorageFailure = {
+  operation: 'read',
+  key: 'theme',
+  strategy: 'memory',
+  error: {
+    name: 'StorageKeyError',
+    message:
+      'The key is not owned by this product; the operation was refused ' +
+      'and no storage was touched.',
+    quota: false,
+  },
 };
 
 beforeEach(() => {
@@ -334,6 +374,7 @@ describe('deriveCorrelationId', () => {
     }
   });
 
+
   it('neither mutates its argument nor depends on call order', () => {
     const first = 'purity-seed-one';
     const second = 'purity-seed-two';
@@ -348,16 +389,79 @@ describe('deriveCorrelationId', () => {
     expect(second).toBe('purity-seed-two');
   });
 
-  it('reads the run seed and nothing else, so a replay correlates', () => {
-    // The authority takes one argument. A second input — a run instance
-    // identifier, a counter, a clock reading — would make the identifier
-    // of one seed vary between runs, which is what a second derivation
-    // elsewhere in src/ used to do.
-    expect(deriveCorrelationId).toHaveLength(1);
-
+  it('groups a replay when it is given the seed alone', () => {
+    // The seed-grouping form. This case previously also asserted the function
+    // took exactly ONE argument, to keep the identifier of a seed from varying
+    // between runs. That constraint was wrong: it made the value unable to
+    // identify a run instance at all, so two runs of one seed — which this
+    // product invites, since the seed is displayed and copyable — landed in a
+    // log stream under one identifier with nothing to separate them. The
+    // grouping property is kept as this form; instance identity is the second
+    // form, below.
     const replayed = 'run-seed-replayed';
 
     expect(deriveCorrelationId(replayed)).toBe(deriveCorrelationId(replayed));
+    expect(deriveCorrelationId(replayed)).toHaveLength(18);
+  });
+
+  it('distinguishes two runs of one seed when given a run instance', () => {
+    const seed = 'run-seed-shared';
+    const first = deriveCorrelationId(seed, 'instance-one');
+    const second = deriveCorrelationId(seed, 'instance-two');
+
+    // The whole point of the correction: same seed, different run, different
+    // identifier.
+    expect(first).not.toBe(second);
+
+    // And still deterministic, so a record's identifier is reproducible from a
+    // persisted run rather than being a fresh value each process.
+    expect(deriveCorrelationId(seed, 'instance-one')).toBe(first);
+  });
+
+  it('keeps the seed-grouping prefix inside the instance identifier', () => {
+    const seed = 'run-seed-prefixed';
+    const grouped = deriveCorrelationId(seed);
+    const instance = deriveCorrelationId(seed, 'instance');
+
+    // A stream can still be grouped by seed with a prefix match, which is what
+    // retaining the seed in the derivation buys.
+    expect(instance.startsWith(grouped)).toBe(true);
+    expect(instance).toHaveLength(26);
+  });
+
+  it('treats an absent and an empty run instance as the grouping form', () => {
+    const seed = 'run-seed-empty-instance';
+
+    expect(deriveCorrelationId(seed, '')).toBe(deriveCorrelationId(seed));
+    expect(deriveCorrelationId(seed, undefined)).toBe(
+      deriveCorrelationId(seed),
+    );
+  });
+
+  it('separates two seeds sharing one run instance', () => {
+    // The instance segment is hashed over the run identifier AND the seed, so
+    // it cannot be read back as a bare hash of the run identifier and two
+    // seeds sharing one do not collide on that segment.
+    const first = deriveCorrelationId('seed-alpha', 'shared-instance');
+    const second = deriveCorrelationId('seed-beta', 'shared-instance');
+
+    expect(first).not.toBe(second);
+    expect(first.slice(-7)).not.toBe(second.slice(-7));
+  });
+
+  it('separates two run instances sharing one seed', () => {
+    // The run identifier is the uniqueness component: two runs replaying one
+    // seed are one GROUP but two INSTANCES, so the grouped value they share
+    // must not be the value either instance carries.
+    const seed = 'run-seed-shared-group';
+    const grouped = deriveCorrelationId(seed);
+    const first = deriveCorrelationId(seed, 'replay-one');
+    const second = deriveCorrelationId(seed, 'replay-two');
+
+    expect(first).not.toBe(second);
+    expect(first).not.toBe(grouped);
+    expect(second).not.toBe(grouped);
+    expect(deriveCorrelationId(seed, 'replay-one')).toBe(first);
   });
 
   it('is the identifier every injected reporter reports under', () => {
@@ -1597,12 +1701,98 @@ describe('emitted records are bounded and carry no source location', () => {
 });
 
 describe('createEngineReporter', () => {
-  it('satisfies the EngineReporter contract src/engine declares', () => {
+  it('satisfies the EngineReporter contract src/engine declares, every ' +
+    'member of it (F3)', () => {
     const { logger } = createCapturingLogger();
     const reporter: EngineReporter = createEngineReporter(logger);
 
-    expect(typeof reporter.onHookError).toBe('function');
-    expect(typeof reporter.onCount).toBe('function');
+    // Enumerated from the contract rather than listed by hand, so a member
+    // added to `EngineReporter` and omitted here fails this test instead of
+    // passing unnoticed — which is how `onListenerError` came to be missing.
+    const contract: readonly (keyof EngineReporter)[] = [
+      'onHookError',
+      'onListenerError',
+      'onCount',
+    ];
+
+    for (const member of contract) {
+      expect(typeof reporter[member]).toBe('function');
+    }
+
+    expect(Object.keys(reporter).sort()).toEqual([...contract].sort());
+  });
+
+  it('records a contained event-listener throw at error', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: EngineReporter = createEngineReporter(logger);
+    const report: EngineListenerErrorReport = {
+      correlationId: SUITE_CORRELATION_ID,
+      event: 'state:commit',
+      listenerIndex: 2,
+      error: new TypeError('the renderer subscriber threw'),
+    };
+
+    reporter.onListenerError?.(report);
+
+    expect(records).toHaveLength(1);
+
+    const record = records[0];
+
+    expect(record.level).toBe('error');
+    expect(record.subsystem).toBe('engine');
+    expect(record.correlationId).toBe(SUITE_CORRELATION_ID);
+
+    // The event name and the listener's position are the only identity an
+    // event listener has, so both have to survive into the record.
+    expect(record.fields).toEqual({
+      reportedCorrelationId: report.correlationId,
+      event: 'state:commit',
+      listenerIndex: 2,
+    });
+    expect(record.error).toEqual(serializeError(report.error));
+  });
+
+  it('records a listener throw that is not an Error', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: EngineReporter = createEngineReporter(logger);
+
+    reporter.onListenerError?.({
+      correlationId: SUITE_CORRELATION_ID,
+      event: 'tile:merge',
+      listenerIndex: 0,
+      error: { code: 'not-an-error' },
+    });
+
+    expect(records).toHaveLength(1);
+    expect(records[0].error).toEqual(serializeError({ code: 'not-an-error' }));
+  });
+
+  it('reaches the log from the real emitter, end to end', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: EngineReporter = createEngineReporter(logger);
+    const events = createEngineEvents({
+      correlationId: SUITE_CORRELATION_ID,
+      reporter,
+    });
+
+    events.on('stage:end', (): void => {
+      throw new Error('a stage-end subscriber threw');
+    });
+
+    // The emitter contains the throw; the log is the only place it becomes
+    // visible, which is what makes this wiring load-bearing.
+    expect(() => {
+      events.emit('stage:end', { stageIndex: 0, cleared: true, score: 0 });
+    }).not.toThrow();
+
+    const failures = records.filter((record) => record.level === 'error');
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0].fields).toEqual({
+      reportedCorrelationId: SUITE_CORRELATION_ID,
+      event: 'stage:end',
+      listenerIndex: 0,
+    });
   });
 
   it('records a contained hook-handler throw at error', () => {
@@ -1632,6 +1822,68 @@ describe('createEngineReporter', () => {
     expect(record.error).toEqual(serializeError(report.error));
   });
 
+  it('records a contained event-listener throw at error, with the thrown ' +
+    'value serialised (F3)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: EngineReporter = createEngineReporter(logger);
+    const thrown = new TypeError('Cannot assign to read only property', {
+      cause: new Error('the projection is frozen'),
+    });
+    const report: EngineListenerErrorReport = {
+      correlationId: deriveCorrelationId(SUITE_SEED),
+      event: 'move:before',
+      listenerIndex: 2,
+      error: thrown,
+    };
+
+    reporter.onListenerError?.(report);
+
+    expect(records).toHaveLength(1);
+
+    const record = records[0];
+
+    expect(record.level).toBe('error');
+    expect(record.subsystem).toBe('engine');
+    expect(record.correlationId).toBe(SUITE_CORRELATION_ID);
+    expect(record.fields).toEqual({
+      reportedCorrelationId: report.correlationId,
+      event: 'move:before',
+      listenerIndex: 2,
+    });
+
+    // The value itself, so the subclass, the stack and the cause chain all
+    // survive; a name-and-message reduction would have carried none of them.
+    expect(record.error).toEqual(serializeError(thrown));
+    expect(record.error?.name).toBe('TypeError');
+    expect(record.error?.cause?.message).toBe('the projection is frozen');
+    expect(record.error?.stack).toBeDefined();
+  });
+
+  it('records a non-Error listener throwable whole (F3)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: EngineReporter = createEngineReporter(logger);
+
+    for (const thrown of [
+      'a thrown string',
+      { code: 'not-an-error' },
+      null,
+      undefined,
+    ]) {
+      reporter.onListenerError?.({
+        correlationId: deriveCorrelationId(SUITE_SEED),
+        event: 'state:commit',
+        listenerIndex: 0,
+        error: thrown,
+      });
+    }
+
+    expect(records).toHaveLength(4);
+    expect(records[0].error).toEqual(serializeError('a thrown string'));
+    expect(records[1].error).toEqual(serializeError({ code: 'not-an-error' }));
+    expect(records[2].error).toEqual(serializeError(null));
+    expect(records[3].error).toEqual(serializeError(undefined));
+  });
+
   it('records an engine counter at debug', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: EngineReporter = createEngineReporter(logger);
@@ -1658,12 +1910,37 @@ describe('createEngineReporter', () => {
       metric: 'hook.dispatch',
       value: 1,
       hook: 'onAfterMove',
+      event: null,
     });
     expect(records[1].fields).toEqual({
       reportedCorrelationId: withoutHook.correlationId,
       metric: 'move.committed',
       value: 2,
       hook: null,
+      event: null,
+    });
+  });
+
+  it('records the event dimension of an event count, leaving hook absent ' +
+    '(F8)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: EngineReporter = createEngineReporter(logger);
+    const report: EngineCountReport = {
+      correlationId: deriveCorrelationId(SUITE_SEED),
+      metric: 'engine.event.emit',
+      value: 1,
+      event: 'state:commit',
+    };
+
+    reporter.onCount?.(report);
+
+    expect(records).toHaveLength(1);
+    expect(records[0].fields).toEqual({
+      reportedCorrelationId: report.correlationId,
+      metric: 'engine.event.emit',
+      value: 1,
+      hook: null,
+      event: 'state:commit',
     });
   });
 });
@@ -1675,6 +1952,7 @@ describe('createInputReporter', () => {
 
     expect(typeof reporter.log).toBe('function');
     expect(typeof reporter.count).toBe('function');
+    expect(typeof reporter.failure).toBe('function');
     expect(typeof reporter.startSpan).toBe('function');
   });
 
@@ -1720,6 +1998,85 @@ describe('createInputReporter', () => {
       metric: 'input.key.unrecognised',
       value: 1,
     });
+  });
+
+  it('carries a caught Error through the failure channel unconverted (F4)',
+    () => {
+      const { logger, records } = createCapturingLogger();
+      const reporter: InputReporter = createInputReporter(logger);
+      const thrown = new RangeError('the index is out of range', {
+        cause: new Error('the slot list is empty'),
+      });
+
+      reporter.failure?.('error', 'An input listener threw.', thrown, {
+        event: 'move',
+        listener: 1,
+      });
+
+      expect(records).toHaveLength(1);
+      expect(records[0].level).toBe('error');
+      expect(records[0].subsystem).toBe('input');
+      expect(records[0].fields).toEqual({ event: 'move', listener: 1 });
+      expect(records[0].error).toEqual(serializeError(thrown));
+      expect(records[0].error?.name).toBe('RangeError');
+      expect(records[0].error?.cause?.message).toBe('the slot list is empty');
+      expect(records[0].error?.stack).toBeDefined();
+    });
+
+  it('carries a caught non-Error through the failure channel whole (F4)',
+    () => {
+      const { logger, records } = createCapturingLogger();
+      const reporter: InputReporter = createInputReporter(logger);
+
+      for (const thrown of [
+        'a thrown string',
+        { code: 'not-an-error', detail: { nested: true } },
+        [1, 2, 3],
+        null,
+        undefined,
+      ]) {
+        reporter.failure?.('warn', 'An input listener threw.', thrown);
+      }
+
+      expect(records).toHaveLength(5);
+      expect(records[0].error).toEqual(serializeError('a thrown string'));
+      expect(records[1].error).toEqual(
+        serializeError({ code: 'not-an-error', detail: { nested: true } }),
+      );
+      expect(records[2].error).toEqual(serializeError([1, 2, 3]));
+      expect(records[3].error).toEqual(serializeError(null));
+      expect(records[4].error).toEqual(serializeError(undefined));
+    });
+
+  it('records a failure at the level the input layer reports (F4)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: InputReporter = createInputReporter(logger);
+
+    for (const level of LOG_LEVELS) {
+      reporter.failure?.(level, `failed at ${level}`, new Error('boom'));
+    }
+
+    expect(records).toHaveLength(LOG_LEVELS.length);
+    records.forEach((record: LogRecord, index: number): void => {
+      expect(record.level).toBe(LOG_LEVELS[index]);
+      expect(record.error?.message).toBe('boom');
+    });
+  });
+
+  it('drops raw keystroke fields from a failure as it does from a message ' +
+    '(F4)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: InputReporter = createInputReporter(logger);
+
+    reporter.failure?.('error', 'An input listener threw.', new Error('boom'), {
+      key: 'p',
+      code: 'KeyP',
+      text: 'a typed password',
+      value: 'a typed password',
+      context: 'textEntry',
+    });
+
+    expect(records[0].fields).toEqual({ context: 'textEntry' });
   });
 
   it('bounds a string field so no free text survives a report', () => {
@@ -1811,7 +2168,8 @@ describe('createStorageReporter', () => {
     expect(typeof reporter.onWrite).toBe('function');
   });
 
-  it('records the writability probe outcome', () => {
+  it('records the writability probe outcome, without duplicating the ' +
+    'failure channel (F11)', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: StorageReporter = createStorageReporter(logger);
     const supported: StorageProbeResult = {
@@ -1822,6 +2180,7 @@ describe('createStorageReporter', () => {
       supported: false,
       strategy: 'memory',
       error: PARSE_ERROR_INFO,
+      thrown: PARSE_THROWN,
     };
 
     reporter.onProbe?.(supported);
@@ -1834,8 +2193,60 @@ describe('createStorageReporter', () => {
       strategy: 'localStorage',
       quota: false,
     });
-    expect(records[1].level).toBe('warn');
-    expect(records[1].error).toEqual(serializeError(PARSE_ERROR_INFO));
+
+    // A probe that caught something also reaches `onFailure`, which records
+    // it at warning level with the thrown value. This channel therefore
+    // records the outcome and the strategy at `'debug'` so one failure yields
+    // one warning and not two.
+    expect(records[1].level).toBe('debug');
+    expect(records[1].fields).toEqual({
+      supported: false,
+      strategy: 'memory',
+      quota: false,
+    });
+  });
+
+  it('keeps the warning for a probe that caught nothing, which reaches no ' +
+    'failure channel (F11)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: StorageReporter = createStorageReporter(logger);
+
+    reporter.onProbe?.({ supported: false, strategy: 'memory' });
+
+    expect(records).toHaveLength(1);
+    expect(records[0].level).toBe('warn');
+    expect(records[0].error).toBeUndefined();
+  });
+
+  it('emits exactly one error-level record per failed probe across both ' +
+    'channels (F11)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: StorageReporter = createStorageReporter(logger);
+    const refused: StorageProbeResult = {
+      supported: false,
+      strategy: 'memory',
+      error: PARSE_ERROR_INFO,
+      thrown: PARSE_THROWN,
+    };
+
+    // Both channels, in the order LocalStorageManager delivers them.
+    reporter.onProbe?.(refused);
+    reporter.onFailure?.({
+      operation: 'probe',
+      key: GAME_STATE_KEY,
+      strategy: 'memory',
+      error: PARSE_ERROR_INFO,
+      thrown: PARSE_THROWN,
+    });
+
+    const raised = records.filter(
+      (record: LogRecord): boolean =>
+        record.level === 'warn' || record.level === 'error',
+    );
+
+    expect(records).toHaveLength(2);
+    expect(raised).toHaveLength(1);
+    expect(raised[0].error?.name).toBe('SyntaxError');
   });
 
   it('serialises a quota rejection instead of discarding it', () => {
@@ -1851,16 +2262,72 @@ describe('createStorageReporter', () => {
     expect(record.level).toBe('error');
     expect(record.subsystem).toBe('storage');
     expect(record.correlationId).toBe(SUITE_CORRELATION_ID);
+    // The bounded description travels as fields, so a consumer that
+    // publishes rather than diagnoses has a scrubbed string (F12).
     expect(record.fields).toEqual({
       operation: 'write',
       key: RUN_STATE_KEY,
       strategy: 'localStorage',
       quota: true,
+      publicMessage: QUOTA_ERROR_INFO.message,
+      errorName: QUOTA_ERROR_INFO.name,
     });
+
+    // The ORIGINAL throwable reaches `LogRecord.error`, not the reduction of
+    // it: the reduction has no stack, so serialising it would have discarded
+    // one (F5).
     expect(record.error).toBeDefined();
     expect(record.error?.name).toBe('QuotaExceededError');
-    expect(record.error?.message).toBe(QUOTA_ERROR_INFO.message);
-    expect(record.error).toEqual(serializeError(QUOTA_ERROR_INFO));
+    expect(record.error).toEqual(serializeError(QUOTA_THROWN));
+    expect(record.error).not.toEqual(serializeError(QUOTA_ERROR_INFO));
+    expect(record.error?.stack).toBeDefined();
+  });
+
+  it('carries the original throwable\'s cause chain through to the record ' +
+    '(F5)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: StorageReporter = createStorageReporter(logger);
+
+    reporter.onFailure?.(PARSE_FAILURE);
+
+    expect(records[0].error?.name).toBe('SyntaxError');
+    expect(records[0].error?.cause).toBeDefined();
+    expect(records[0].error?.cause?.message).toBe(
+      'the stored value was truncated',
+    );
+    expect(records[0].error).toEqual(serializeError(PARSE_THROWN));
+  });
+
+  it('carries a non-Error throwable\'s structure through to the record ' +
+    '(F5)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: StorageReporter = createStorageReporter(logger);
+    const thrown = { code: 'not-an-error' };
+
+    reporter.onFailure?.({
+      operation: 'write',
+      key: RUN_STATE_KEY,
+      strategy: 'memory',
+      error: PARSE_ERROR_INFO,
+      thrown,
+    });
+
+    expect(records[0].error).toEqual(serializeError(thrown));
+  });
+
+  it('falls back to the bounded description for a failure nothing was ' +
+    'thrown for (F5)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: StorageReporter = createStorageReporter(logger);
+
+    reporter.onFailure?.(REFUSED_KEY_FAILURE);
+
+    expect(records).toHaveLength(1);
+    expect(records[0].level).toBe('warn');
+    expect(records[0].error).toEqual(
+      serializeError(REFUSED_KEY_FAILURE.error),
+    );
+    expect(records[0].fields?.['key']).toBe('theme');
   });
 
   it('records a non-quota failure at warn with its error serialised', () => {
@@ -1875,6 +2342,8 @@ describe('createStorageReporter', () => {
       key: GAME_STATE_KEY,
       strategy: 'memory',
       quota: false,
+      publicMessage: PARSE_ERROR_INFO.message,
+      errorName: PARSE_ERROR_INFO.name,
     });
     expect(records[0].error?.name).toBe('SyntaxError');
   });
@@ -1896,18 +2365,41 @@ describe('createStorageReporter', () => {
     reporter.onWrite?.(completed);
     reporter.onWrite?.(refused);
 
+    // Both at `'debug'`: a write that did not complete has already reached
+    // `onFailure`, so raising this one would be the second record for one
+    // failure. `ok` is what tells the two apart (F11).
     expect(records[0].level).toBe('debug');
     expect(records[0].fields).toEqual({
       key: BEST_SCORE_KEY,
       byteLength: 12,
       ok: true,
     });
-    expect(records[1].level).toBe('warn');
+    expect(records[1].level).toBe('debug');
     expect(records[1].fields).toEqual({
       key: RUN_STATE_KEY,
       byteLength: 0,
       ok: false,
     });
+    expect(records[0].message).not.toBe(records[1].message);
+  });
+
+  it('emits exactly one error-level record per failed write across both ' +
+    'channels (F11)', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: StorageReporter = createStorageReporter(logger);
+
+    // Both channels, in the order LocalStorageManager delivers them.
+    reporter.onFailure?.(QUOTA_FAILURE);
+    reporter.onWrite?.({ key: RUN_STATE_KEY, byteLength: 0, ok: false });
+
+    const raised = records.filter(
+      (record: LogRecord): boolean =>
+        record.level === 'warn' || record.level === 'error',
+    );
+
+    expect(records).toHaveLength(2);
+    expect(raised).toHaveLength(1);
+    expect(raised[0].level).toBe('error');
   });
 });
 
@@ -1926,12 +2418,20 @@ describe('no-op reporters', () => {
         subscriberId: 'relic:cursed-shrink',
         error: new Error('handler threw'),
       });
+      NOOP_ENGINE_REPORTER.onListenerError?.({
+        correlationId: deriveCorrelationId(SUITE_SEED),
+        event: 'state:commit',
+        listenerIndex: 0,
+        error: new Error('listener threw'),
+      });
       NOOP_ENGINE_REPORTER.onCount?.({
         correlationId: deriveCorrelationId(SUITE_SEED),
         metric: 'hook.dispatch',
         value: 1,
       });
     }).not.toThrow();
+
+    expect(typeof NOOP_ENGINE_REPORTER.onListenerError).toBe('function');
 
     expect(records).toHaveLength(0);
   });
@@ -2576,5 +3076,110 @@ describe('a filtered level costs nothing to report at', () => {
     span?.end();
 
     expect(records).toHaveLength(0);
+  });
+});
+
+/* ===== End-to-end reporter deduplication (F11) ===== */
+
+// The two sections above measure the adapter with hand-built reports. This one
+// drives the real `LocalStorageManager` through the real adapter into a real
+// logger, because the duplication F11 named was only visible once all three
+// were connected: the manager delivers a failed write on two channels, and an
+// adapter that raised both produced two error-level records for one failure.
+
+/** A store whose `setItem` always reports an exhausted quota. */
+class FullStore implements StorageLike {
+  private readonly held = new Map<string, string>();
+
+  getItem(key: string): string | null {
+    return this.held.get(key) ?? null;
+  }
+
+  setItem(): void {
+    throw new DOMException(
+      'The quota has been exceeded.',
+      'QuotaExceededError',
+    );
+  }
+
+  removeItem(key: string): void {
+    this.held.delete(key);
+  }
+
+  clear(): void {
+    this.held.clear();
+  }
+}
+
+describe('LocalStorageManager through createStorageReporter (F11)', () => {
+  it('emits exactly one error-level record for one failed write', () => {
+    const { logger, records } = createCapturingLogger();
+    const manager = new LocalStorageManager({
+      storage: new FullStore(),
+      reporter: createStorageReporter(logger),
+    });
+
+    expect(manager.setBestScore(2048)).toBe(false);
+
+    const raised = records.filter(
+      (record: LogRecord): boolean =>
+        record.level === 'warn' || record.level === 'error',
+    );
+
+    // Three records — the construction-time probe, the failure and the write
+    // outcome — but ONE of them raised, which is the deduplication.
+    expect(records).toHaveLength(3);
+    expect(raised).toHaveLength(1);
+    expect(raised[0].level).toBe('error');
+    expect(raised[0].fields?.['operation']).toBe('write');
+    expect(raised[0].fields?.['key']).toBe(BEST_SCORE_KEY);
+
+    // And the raised record carries the original throwable, not a summary.
+    expect(raised[0].error?.name).toBe('QuotaExceededError');
+    expect(raised[0].error?.stack).toBeDefined();
+
+    // No reporter callback threw, so no report was lost.
+    expect(manager.reporterFaults).toBe(0);
+  });
+
+  it('emits exactly one error-level record for one refused key', () => {
+    const { logger, records } = createCapturingLogger();
+    const manager = new LocalStorageManager({
+      storage: new MemoryStorage(),
+      reporter: createStorageReporter(logger),
+    });
+
+    expect(manager.readRaw('theme' as never)).toBeNull();
+
+    const raised = records.filter(
+      (record: LogRecord): boolean =>
+        record.level === 'warn' || record.level === 'error',
+    );
+
+    expect(raised).toHaveLength(1);
+    expect(raised[0].fields?.['errorName']).toBe('StorageKeyError');
+
+    // The refused key is a field of its own and is not in the message a
+    // record leads with, nor in the scrubbed public description (F12).
+    expect(raised[0].fields?.['key']).toBe('theme');
+    expect(raised[0].message).not.toContain('theme');
+    expect(String(raised[0].fields?.['publicMessage'])).not.toContain('theme');
+  });
+
+  it('emits no raised record at all for a write that completed', () => {
+    const { logger, records } = createCapturingLogger();
+    const manager = new LocalStorageManager({
+      storage: new MemoryStorage(),
+      reporter: createStorageReporter(logger),
+    });
+
+    expect(manager.setBestScore(2048)).toBe(true);
+
+    const raised = records.filter(
+      (record: LogRecord): boolean =>
+        record.level === 'warn' || record.level === 'error',
+    );
+
+    expect(raised).toHaveLength(0);
   });
 });

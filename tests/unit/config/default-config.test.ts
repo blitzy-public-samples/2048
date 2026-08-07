@@ -17,6 +17,10 @@
 // vitest.config.ts collects this file into the unit:dom-free project, so it
 // runs without a DOM. It reads no DOM node, no persisted state and no
 // environment value, opens no network call and needs no external fixture.
+//
+// Decisions this suite is the evidence for: DL-CONFIG-01 and DL-CONFIG-02
+// in docs/DECISION_LOG.md. Traceability rows: TR-CONFIG-01 through
+// TR-CONFIG-05 of docs/TRACEABILITY_MATRIX.md, the four extracted rule
 
 import { describe, expect, it, vi } from 'vitest';
 

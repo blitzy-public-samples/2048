@@ -49,6 +49,28 @@ export default defineConfig({
 
     target: 'es2022',
 
+    // Ceiling on one emitted chunk before the build advises splitting it, in kB.
+    //
+    // Raised from the 500 default because `three` is a runtime dependency of
+    // this bundle and is roughly 600 kB minified on its own: the whole bundle
+    // measures about 803 kB minified and 218 kB gzipped, which is the transfer
+    // size a static host actually serves. It is raised to just above the
+    // measured figure rather than switched off, so a chunk growing beyond what
+    // the renderer needs still trips the advisory.
+    //
+    // The measured figure moved from 734 kB when the observability layer was
+    // wired in: the structured logger, the metrics registry and the diagnostics
+    // surface were all present in the tree but unreachable, so none of them was
+    // reaching the bundle. They are reachable now, which is the point of that
+    // work, and the ceiling follows the measurement rather than the reverse.
+    //
+    // ONE CHUNK, deliberately. Splitting `three` into a vendor chunk would gain
+    // cross-deploy caching and cost a second request, and it would not silence
+    // the advisory either, because the vendor chunk alone exceeds the default.
+    // A single chunk keeps the emitted directory the copy-and-serve artifact the
+    // deployment mandate asks for.
+    chunkSizeWarningLimit: 850,
+
     // No source map is emitted. `npm run build` produces the directory that is
     // copied verbatim to a static host, so every file dist/ carries is
     // publicly reachable there; a map would publish the TypeScript sources and

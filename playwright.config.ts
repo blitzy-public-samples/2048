@@ -6,6 +6,8 @@
 // tests/e2e/ can be collected into the video gate. THAT SPEC IS NOT PRESENT
 // YET: this config is the gate's configuration, not evidence that the gate has
 // passed. Three settings carry the proof and are load-bearing:
+//
+// decision DL-PW-01:
 //   - `video.mode: 'on'` records every test, passing or failing, and
 //     `video.size` repeats the viewport, which keeps the frame out of
 //     Playwright's default 800x800 box. The 1280x960 viewport records the

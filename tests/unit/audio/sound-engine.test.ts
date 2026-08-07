@@ -23,8 +23,13 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { createEngineEvents } from '../../../src/engine/engine-events';
 import type {
-  EngineEventHandler,
+  EngineEventName,
+  EngineEventListener,
+  EngineEventSubscription,
+} from '../../../src/engine/engine-events';
+import type {
   EngineEventSource,
   SoundPreferenceSource,
 } from '../../../src/audio/sound-engine';
@@ -44,6 +49,16 @@ import {
   createPreferenceStore,
 } from '../../../src/ui/a11y/settings';
 
+/**
+ * A listener stored by a fake emitter, whatever event it was registered for.
+ *
+ * `EngineEventListener<K>` for every `K` is assignable to this, so one set
+ * holds listeners of every event without widening the fake's own `on` away
+ * from the engine's generic signature — which is the mismatch the previous
+ * broad fakes hid.
+ */
+type StoredListener = (payload: never) => void;
+
 /** An emitter that records what is registered and what is released. */
 const recordingSource = (): {
   source: EngineEventSource;
@@ -51,11 +66,14 @@ const recordingSource = (): {
   live(): number;
 } => {
   const names: string[] = [];
-  const held = new Set<EngineEventHandler>();
+  const held = new Set<StoredListener>();
 
   return {
     source: {
-      on: (eventName: string, handler: EngineEventHandler): unknown => {
+      on: <K extends EngineEventName>(
+        eventName: K,
+        handler: EngineEventListener<K>,
+      ): EngineEventSubscription => {
         names.push(eventName);
         held.add(handler);
 
@@ -73,19 +91,28 @@ const recordingSource = (): {
 const offOnlySource = (): {
   source: EngineEventSource;
   live(): number;
-  emit(eventName: string): void;
+  emit(eventName: EngineEventName): void;
 } => {
-  const held = new Map<string, Set<EngineEventHandler>>();
+  const held = new Map<string, Set<StoredListener>>();
 
   return {
     source: {
-      on: (eventName: string, handler: EngineEventHandler): void => {
-        const set = held.get(eventName) ?? new Set<EngineEventHandler>();
+      // Returns nothing, which is why this fake carries `off`. Cast at the
+      // return alone: the release handle is what this source deliberately
+      // withholds, and every parameter still matches the engine's signature.
+      on: (<K extends EngineEventName>(
+        eventName: K,
+        handler: EngineEventListener<K>,
+      ): void => {
+        const set = held.get(eventName) ?? new Set<StoredListener>();
 
         set.add(handler);
         held.set(eventName, set);
-      },
-      off: (eventName: string, handler: EngineEventHandler): void => {
+      }) as unknown as EngineEventSource['on'],
+      off: <K extends EngineEventName>(
+        eventName: K,
+        handler: EngineEventListener<K>,
+      ): void => {
         held.get(eventName)?.delete(handler);
       },
     },
@@ -98,9 +125,9 @@ const offOnlySource = (): {
 
       return total;
     },
-    emit: (eventName: string): void => {
+    emit: (eventName: EngineEventName): void => {
       for (const handler of held.get(eventName) ?? []) {
-        handler(undefined);
+        (handler as (payload: unknown) => void)(undefined);
       }
     },
   };
@@ -234,9 +261,12 @@ describe('a disposed sound engine is detached from its sources', () => {
   it('undoes a partial subscription rather than keeping half of it', () => {
     let calls = 0;
 
-    const held = new Set<EngineEventHandler>();
+    const held = new Set<StoredListener>();
     const source: EngineEventSource = {
-      on: (_eventName: string, handler: EngineEventHandler): unknown => {
+      on: <K extends EngineEventName>(
+        _eventName: K,
+        handler: EngineEventListener<K>,
+      ): EngineEventSubscription => {
         calls += 1;
 
         // The third registration fails, after two have succeeded.
@@ -265,9 +295,12 @@ describe('a disposed sound engine is detached from its sources', () => {
   it('accepts a fresh subscription after a partial failure', () => {
     let refuse = true;
 
-    const held = new Set<EngineEventHandler>();
+    const held = new Set<StoredListener>();
     const source: EngineEventSource = {
-      on: (_eventName: string, handler: EngineEventHandler): unknown => {
+      on: <K extends EngineEventName>(
+        _eventName: K,
+        handler: EngineEventListener<K>,
+      ): EngineEventSubscription => {
         if (refuse) {
           throw new Error('registration refused');
         }
@@ -569,5 +602,63 @@ describe('the store satisfies the audio preference contract', () => {
 
     engine.dispose();
     store.destroy();
+  });
+});
+
+describe('the audio port is the engine event contract, not a paraphrase', () => {
+  it('accepts the real emitter of src/engine/engine-events.ts', () => {
+    // A COMPILE-TIME assertion first: the assignment below is the check, and it
+    // is what the previous broad fakes stopped the suite from making. It is
+    // exercised at runtime too, so the engine's `on` really is called.
+    const events = createEngineEvents();
+    const source: EngineEventSource = events;
+    const engine = createSoundEngine({});
+
+    engine.subscribe(source);
+
+    // Every one of the five names it registers for is emitted by the same
+    // emitter, so an event renamed on one side no longer compiles on the other.
+    expect(() => {
+      events.emit('tile:spawn', { position: { x: 0, y: 0 }, value: 2 });
+    }).not.toThrow();
+
+    engine.dispose();
+  });
+
+  it('sounds a spawn that inserted a tile and stays silent for one that did not', () => {
+    const events = createEngineEvents();
+    const counted: string[] = [];
+    const engine = createSoundEngine({
+      // `audio.play.requested` is raised by the one path an effect reaches the
+      // context through, so counting it distinguishes a sounded spawn from a
+      // silent one with no AudioContext present at all.
+      metrics: {
+        increment: (name: string): void => {
+          counted.push(name);
+        },
+      },
+    });
+
+    engine.subscribe(events);
+
+    // A spawn with no position means NO TILE WAS INSERTED: the engine emits the
+    // event either way, and announcing the second case announced a tile the
+    // player never saw appear.
+    events.emit('tile:spawn', { value: 2 });
+
+    const afterSuppressed = counted.filter(
+      (name) => name === 'audio.play.requested',
+    ).length;
+
+    events.emit('tile:spawn', { position: { x: 1, y: 2 }, value: 4 });
+
+    const afterRealSpawn = counted.filter(
+      (name) => name === 'audio.play.requested',
+    ).length;
+
+    expect(afterSuppressed).toBe(0);
+    expect(afterRealSpawn).toBe(1);
+
+    engine.dispose();
   });
 });

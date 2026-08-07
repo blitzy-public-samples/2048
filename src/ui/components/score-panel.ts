@@ -27,6 +27,8 @@
 // - the two text assignments are appends, and any accessible name is
 // inserted ahead of the value on the same write
 //
+// Changed against that port, decisions DL-SCORE-01 through DL-SCORE-03 in
+//
 // The best score arrives as the storage layer returns it — a string where one
 // is stored and the number `0` where none is — and reaches the DOM as text.
 // No member below converts it, retains it or compares it: js/game_manager.js
@@ -37,7 +39,11 @@
 // reached through the class names below. It names no observability module: the
 // report sink is injected. It reads no storage, holds no timer, registers no
 // listener and announces nothing.
+//
+// Decisions behind this file: DL-SCORE-01 through DL-SCORE-03 above, in
+// docs/DECISION_LOG.md. Traceability rows: TR-SCORE-01 through TR-SCORE-06,
 
+import type { BestScoreValue } from '../../engine/types';
 import type { UiReporter } from '../a11y/settings';
 import {
   NOOP_UI_REPORTER,
@@ -141,12 +147,12 @@ export interface ScoreSnapshot {
   readonly score: number;
 
   /**
-   * Best score as the storage layer returned it. The port's frozen contract is
-   * the raw stored string where one is stored and the number `0` where none is;
-   * this member is typed wider than that contract, so a consumer must handle
-   * any number and must not assume a string. Nothing here converts it.
+   * Best score as the storage layer returned it, typed as `BestScoreValue` —
+   * the best-score port's OWN return type, aliased rather than restated. The
+   * frozen contract is the raw stored string where one is stored and the
+   * number `0` where none is. Nothing here converts it.
    */
-  readonly bestScore: string | number;
+  readonly bestScore: BestScoreValue;
 }
 
 /**
@@ -195,7 +201,7 @@ export interface ScorePanel {
    *
    * @param bestScore Best score to show, exactly as it arrives.
    */
-  updateBestScore(bestScore: string | number): void;
+  updateBestScore(bestScore: BestScoreValue): void;
 
   /**
    * Whether both outlets resolved.
@@ -587,6 +593,7 @@ function mountSurface(
  * @param options Pre-resolved outlets, document and report sink. Every member
  *   is optional.
  * @returns The mounted panel, whether or not both outlets resolved.
+
  */
 export function createScorePanel(
   options: ScorePanelOptions = {},
@@ -724,7 +731,7 @@ export function createScorePanel(
    *
    * @param bestScore Best score to show, exactly as it arrives.
    */
-  const updateBestScore = (bestScore: string | number): void => {
+  const updateBestScore = (bestScore: BestScoreValue): void => {
     if (destroyed) {
       reportAfterDestroy('updateBestScore');
 

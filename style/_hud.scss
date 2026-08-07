@@ -299,6 +299,8 @@ button.relic-tray-control {
 // BLITZY [A11Y]: the four accent colours sit below the WCAG 1.4.11 non-text
 // threshold of 3:1 against the page background, which is why the thickness
 // carries the ordinal as well.
+//
+// threshold of 3:1 against the page background. Decision DL-A11Y-02.
 
 $hud-rarity-tier-count: list.length($hud-rarity-tiers);
 

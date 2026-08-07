@@ -16,6 +16,7 @@
 //   3  isRunStateShape()         the predicate the store gates writes on
 //   4  cloneRunState()           detachment, and the JSON projection
 //   5  RunStateStore             the boundary the two above compose into
+//   6  RunStateStore reports     every channel is attributable to one run
 //
 // Every hostile input below is one a stored envelope can actually carry:
 // `JSON.parse` produces `__proto__` as an ordinary own data property, and a
@@ -32,6 +33,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { EMPTY_BOARD, copyBoard } from '../../fixtures/boards';
+import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import {
   RUN_STATE_SCHEMA_VERSION,
   cloneRunState,
@@ -40,7 +42,16 @@ import {
   isPersistedRelicState,
   isRunStateShape,
 } from '../../../src/run/run-state';
-import type { PersistedRelic, RunState } from '../../../src/run/run-state';
+import type {
+  PersistedRelic,
+  RunReporter,
+  RunState,
+} from '../../../src/run/run-state';
+import {
+  MAX_RUN_SEED_LENGTH,
+  createRngStreams,
+  isAcceptableRunSeed,
+} from '../../../src/rng/rng-streams';
 import { RunStateStore } from '../../../src/run/run-state-store';
 import type { RunStatePersistencePort } from '../../../src/run/run-state-store';
 import { RUN_STATE_KEY } from '../../../src/storage/storage-keys';
@@ -653,5 +664,320 @@ describe('RunStateStore refuses an envelope it could not read back', () => {
     expect(result.state).toBeNull();
     expect(result.outcome).toBe('fresh-fallback');
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+});
+
+/* ===== 6. Every report a store raises is attributable (F10) ===== */
+
+/** Correlation identifier the store under test is constructed with. */
+const STORE_CORRELATION_ID = 'run-correlation-9f2c';
+
+/** What a throwing port threw, so the report can be matched against it. */
+const READ_FAULT = new Error('The origin refused the read.');
+
+/**
+ * Collects every report a store raises, whichever channel raises it.
+ *
+ * @param collected List each report is appended to, in the order raised.
+ * @returns A fully implemented reporter.
+ */
+function createCollectingReporter(collected: unknown[]): RunReporter {
+  return {
+    onLoadCorrupted: (report): void => {
+      collected.push(report);
+    },
+    onVersionMigrated: (report): void => {
+      collected.push(report);
+    },
+    onBoardSizeReconciled: (report): void => {
+      collected.push(report);
+    },
+    onWriteFailed: (report): void => {
+      collected.push(report);
+    },
+  };
+}
+
+/**
+ * Reads the correlation identifier off every collected report.
+ *
+ * @param collected Reports to read.
+ * @returns One entry per report, `undefined` where it carried none.
+ */
+function carriedIds(collected: readonly unknown[]): readonly unknown[] {
+  return collected.map(
+    (report: unknown): unknown =>
+      (report as { correlationId?: unknown }).correlationId,
+  );
+}
+
+/**
+ * Builds a port whose raw read throws and whose other members behave.
+ *
+ * @returns The port.
+ */
+function createUnreadablePort(): RunStatePersistencePort {
+  const port = createPort();
+
+  return {
+    ...port,
+
+    readRaw(): string | null {
+      throw READ_FAULT;
+    },
+  };
+}
+
+describe('every report a RunStateStore raises is attributable', () => {
+  it('carries the injected identifier on a failed presence check', () => {
+    const collected: unknown[] = [];
+    const store = new RunStateStore({
+      storage: createUnreadablePort(),
+      reporter: createCollectingReporter(collected),
+      correlationId: STORE_CORRELATION_ID,
+    });
+
+    expect(store.exists()).toBe(false);
+    expect(collected).toHaveLength(1);
+    expect(carriedIds(collected)).toEqual([STORE_CORRELATION_ID]);
+  });
+
+  it('reports the presence check with its verdict, problem and throwable',
+    () => {
+      const collected: unknown[] = [];
+      const store = new RunStateStore({
+        storage: createUnreadablePort(),
+        reporter: createCollectingReporter(collected),
+        correlationId: STORE_CORRELATION_ID,
+      });
+
+      store.exists();
+
+      const report = collected[0] as {
+        readonly key: string;
+        readonly verdict: string;
+        readonly problems: readonly string[];
+        readonly error: unknown;
+      };
+
+      expect(report.key).toBe(RUN_STATE_KEY);
+      expect(report.verdict).toBe('malformed');
+      expect(report.problems).toHaveLength(1);
+      expect(report.problems[0]).toContain('presence check');
+
+      // The value the port threw, by identity rather than by summary.
+      expect(report.error).toBe(READ_FAULT);
+    });
+
+  it('reports no identifier rather than an empty one when none was ' +
+    'injected', () => {
+    const collected: unknown[] = [];
+    const store = new RunStateStore({
+      storage: createUnreadablePort(),
+      reporter: createCollectingReporter(collected),
+    });
+
+    expect(store.exists()).toBe(false);
+    expect(carriedIds(collected)).toEqual([undefined]);
+    expect(collected[0]).not.toHaveProperty('correlationId', '');
+  });
+
+  it('never throws out of exists() whatever the port does', () => {
+    const store = new RunStateStore({
+      storage: createUnreadablePort(),
+      correlationId: STORE_CORRELATION_ID,
+    });
+
+    expect(() => store.exists()).not.toThrow();
+  });
+
+  it('carries the identifier on every channel the store raises', () => {
+    const collected: unknown[] = [];
+    const reporter = createCollectingReporter(collected);
+
+    // A refused load, through the same corruption channel as the presence
+    // check but a different path into it.
+    const corrupt = createPort();
+
+    corrupt.written.set(RUN_STATE_KEY, '{"schemaVersion":1}');
+    new RunStateStore({
+      storage: corrupt,
+      reporter,
+      correlationId: STORE_CORRELATION_ID,
+    }).load();
+
+    // A refused write.
+    const refusing = createPort();
+    const refusingStore = new RunStateStore({
+      storage: {
+        ...refusing,
+
+        writeJson(): boolean {
+          return false;
+        },
+      },
+      reporter,
+      correlationId: STORE_CORRELATION_ID,
+    });
+
+    expect(refusingStore.save(envelope())).toBe(false);
+
+    // A refused removal.
+    const unremovable = createPort();
+    const unremovableStore = new RunStateStore({
+      storage: {
+        ...unremovable,
+
+        removeRaw(): boolean {
+          return false;
+        },
+      },
+      reporter,
+      correlationId: STORE_CORRELATION_ID,
+    });
+
+    expect(unremovableStore.clear()).toBe(false);
+
+    // A failed presence check.
+    new RunStateStore({
+      storage: createUnreadablePort(),
+      reporter,
+      correlationId: STORE_CORRELATION_ID,
+    }).exists();
+
+    expect(collected).toHaveLength(4);
+    expect(carriedIds(collected)).toEqual([
+      STORE_CORRELATION_ID,
+      STORE_CORRELATION_ID,
+      STORE_CORRELATION_ID,
+      STORE_CORRELATION_ID,
+    ]);
+  });
+
+  it('never reads a stored seed for the identifier it reports', () => {
+    const collected: unknown[] = [];
+    const port = createPort();
+
+    port.written.set(
+      RUN_STATE_KEY,
+      '{"schemaVersion":1,"seed":"a-seed-that-must-not-be-reported"}',
+    );
+
+    const store = new RunStateStore({
+      storage: port,
+      reporter: createCollectingReporter(collected),
+      correlationId: STORE_CORRELATION_ID,
+    });
+
+    expect(store.load().state).toBeNull();
+    expect(carriedIds(collected)).toEqual([STORE_CORRELATION_ID]);
+    expect(JSON.stringify(collected)).not.toContain(
+      'a-seed-that-must-not-be-reported',
+    );
+  });
+});
+
+describe('the run seed is bounded by what the RNG layer can derive from', () => {
+  it('accepts a seed at the RNG layer\'s own limit', () => {
+    const seed = 'a'.repeat(MAX_RUN_SEED_LENGTH);
+    const state = { ...envelope(), seed };
+
+    expect(describeRunStateProblems(state)).toEqual([]);
+    expect(isRunStateShape(state)).toBe(true);
+    expect(isAcceptableRunSeed(seed)).toBe(true);
+  });
+
+  it('refuses a seed the RNG layer would refuse to derive streams from', () => {
+    const seed = 'a'.repeat(MAX_RUN_SEED_LENGTH + 1);
+    const state = { ...envelope(), seed };
+
+    // Validating the member as a string alone let this envelope load
+    // successfully and then fail restoration a moment later, at a point with no
+    // fallback: the load reported success and the run had no substreams.
+    expect(isAcceptableRunSeed(seed)).toBe(false);
+    expect(isRunStateShape(state)).toBe(false);
+    expect(describeRunStateProblems(state)).toContain(
+      `seed is longer than ${MAX_RUN_SEED_LENGTH} characters`
+    );
+    expect(() => createRngStreams(seed)).toThrow();
+  });
+
+  it('still refuses a seed that is not a string at all', () => {
+    const state = { ...envelope(), seed: 42 } as unknown;
+
+    expect(describeRunStateProblems(state)).toContain('seed is not a string');
+  });
+
+  it('falls back to fresh rather than loading an overlong seed', () => {
+    const port = createPort();
+    const store = new RunStateStore({ storage: port });
+    const stored = JSON.stringify({
+      ...envelope(),
+      seed: 'a'.repeat(MAX_RUN_SEED_LENGTH + 1),
+    });
+
+    port.written.set(RUN_STATE_KEY, stored);
+
+    const result = store.load();
+
+    expect(result.state).toBeNull();
+    expect(result.outcome).toBe('fresh-fallback');
+  });
+});
+
+describe('a board-size precedence decision is reported even when it changes nothing', () => {
+  it('reports and labels a decision whose action is none', () => {
+    const port = createPort();
+    const reconciliations: unknown[] = [];
+    const store = new RunStateStore({
+      storage: port,
+      // The configured size disagrees with the saved one, and a relic implies
+      // the saved one, so the saved size wins and the matrix needs no change at
+      // all: `action` stays `'none'` while a real precedence decision resolved.
+      config: { ...createDefaultRulesConfig(), boardSize: 5 },
+      reporter: {
+        onBoardSizeReconciled: (report): void => {
+          reconciliations.push(report);
+        },
+      },
+    });
+
+    expect(store.save(envelope())).toBe(true);
+
+    // The relic-implied size is a load option, and it names the size the saved
+    // board already has, so nothing about the matrix changes.
+    const result = store.load({ relicBoardSize: 4 });
+
+    expect(result.state).not.toBeNull();
+    expect(result.reconciliation?.action).toBe('none');
+    expect(result.reconciliation?.reportable).toBe(true);
+
+    // Both halves used to be keyed on `action`, so the one decision a reader
+    // needs to see was the one decision that was hidden.
+    expect(result.outcome).toBe('reconciled');
+    expect(reconciliations).toHaveLength(1);
+  });
+
+  it('leaves an undisputed load labelled loaded and unreported', () => {
+    const port = createPort();
+    const reconciliations: unknown[] = [];
+    const store = new RunStateStore({
+      storage: port,
+      config: { ...createDefaultRulesConfig(), boardSize: 4 },
+      reporter: {
+        onBoardSizeReconciled: (report): void => {
+          reconciliations.push(report);
+        },
+      },
+    });
+
+    expect(store.save(envelope())).toBe(true);
+
+    const result = store.load();
+
+    expect(result.reconciliation?.action).toBe('none');
+    expect(result.reconciliation?.reportable).toBe(false);
+    expect(result.outcome).toBe('loaded');
+    expect(reconciliations).toHaveLength(0);
   });
 });

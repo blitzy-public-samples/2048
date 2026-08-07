@@ -27,6 +27,9 @@
 // or removed here, which is the boundary
 // src/storage/local-storage-manager.ts enforces on the product itself. This
 // module holds no state between tests.
+//
+// Decisions behind this file: DL-FIXTURE-03, the teardown removing the best
+// DL-FIXTURE-04, fixtures written to the store before the subject is
 
 import { afterEach } from 'vitest';
 

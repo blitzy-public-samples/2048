@@ -123,7 +123,18 @@ export interface EngineListenerErrorReport {
   readonly error: unknown;
 }
 
-/** One countable engine occurrence, such as a hook dispatch. */
+/**
+ * One countable engine occurrence, such as a hook dispatch or an event
+ * emission.
+ *
+ * TWO SEPARATE DIMENSIONS. `hook` names one of the six hooks of
+ * src/engine/hooks.ts and `event` one of the seven events of
+ * src/engine/engine-events.ts. The two name sets are disjoint and a report
+ * carries at most one of them: a hook dispatch carries `hook`, an event
+ * emission carries `event`, and a count attributed to neither carries
+ * neither. `event` was added because event names were previously reported
+ * under `hook`, which made the two indistinguishable to a consumer.
+ */
 export interface EngineCountReport {
   /**
    * Correlation identifier of the run in progress, injected into the
@@ -134,7 +145,18 @@ export interface EngineCountReport {
   /** Counter name. */
   readonly metric: string;
   readonly value: number;
+
+  /**
+   * Hook the count is attributed to, one of `HOOK_NAMES`. Absent on a count
+   * that is not hook-scoped.
+   */
   readonly hook?: string;
+
+  /**
+   * Event the count is attributed to, one of `ENGINE_EVENT_NAMES`. Absent on
+   * a count that is not event-scoped.
+   */
+  readonly event?: string;
 }
 
 export interface EngineReporter {
@@ -168,6 +190,18 @@ export interface BestScorePort {
   getBestScore(): string | 0;
   setBestScore(score: number): unknown;
 }
+
+/**
+ * The best score exactly as `BestScorePort.getBestScore` returns it.
+ *
+ * THE ONE DECLARATION OF THAT TYPE. Every contract carrying a best score
+ * onwards from the port — the `state:commit` payload, the score panel's
+ * snapshot and the rendered-board projection — aliases this rather than
+ * restating it, so none of them can widen the frozen contract to
+ * `string | number` and invite a consumer to handle a number that the port
+ * never produces other than `0`.
+ */
+export type BestScoreValue = ReturnType<BestScorePort['getBestScore']>;
 
 /**
  * The stage-facing slice of a state commit. Plain data throughout, so a context
