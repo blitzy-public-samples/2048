@@ -1,19 +1,10 @@
 /**
- * Rules schema for the configuration-driven game rules. Type declarations only:
- * this module imports nothing, declares no runtime binding and contributes
- * nothing to the bundle. The vanilla-equivalent values that populate a
- * `RulesConfig` live in src/config/default-config.ts, and stage goals in
- * src/config/stage-config.ts.
- */
-
-/**
  * Structural view of a tile as the merge rules see it. A tile declaring
  * `value: number` and `mergedFrom: Tile[] | null` satisfies it structurally and
  * needs no adapter. Both members are readonly: a predicate and a producer read
  * their operands and mutate neither.
  */
 export interface MergeTileView {
-  /** Face value of the tile. */
   readonly value: number;
 
   /**
@@ -51,12 +42,8 @@ export interface SpawnDistribution {
 /**
  * Decides whether a moving tile merges into the tile it has run into. An
  * implementation is pure with respect to its operands: it returns a verdict and
- * mutates neither tile.
- *
- * @param moving Tile being moved into the target's cell.
- * @param target Tile already occupying the destination cell. Non-nullable.
- * @returns `true` when the pair merges, `false` when the moving tile stops
- *   short of the target.
+ * mutates neither tile. `target` is non-nullable — its presence is established
+ * by the move resolver.
  */
 export type MergePredicate = (
   moving: MergeTileView,
@@ -64,16 +51,12 @@ export type MergePredicate = (
 ) => boolean;
 
 /**
- * Produces the face value of the tile a merge yields. The engine constructs the
+ * Produces the face value of the tile a merge yields, and is called only for a
+ * pair a `MergePredicate` has already accepted. The engine constructs the
  * resulting tile; an implementation constructs nothing and mutates neither
  * operand. The schema carries no separate score rule, so a replaced producer
  * changes scoring with it; a score adjustment independent of the produced value
  * is made through the `scoreDelta` field of the `onMerge` hook payload.
- *
- * @param moving Tile being moved into the target's cell.
- * @param target Tile already occupying the destination cell.
- * @returns Face value of the tile the merge yields. Called only for a pair a
- *   `MergePredicate` has already accepted.
  */
 export type MergeProducer = (
   moving: MergeTileView,
@@ -86,10 +69,7 @@ export type MergeProducer = (
  * directly from this object.
  */
 export interface MergeRules {
-  /** Whether a given pair of tiles merges. */
   canMerge: MergePredicate;
-
-  /** Face value the merge of a given pair yields. */
   produce: MergeProducer;
 }
 
@@ -97,29 +77,19 @@ export interface MergeRules {
  * The effective rules of a run: the single object the base game and every relic
  * read their rules from.
  *
- * Every member is mutable and is read afresh at each use — a consumer neither
+ * Every member is mutable and is READ AFRESH AT EACH USE — a consumer neither
  * hoists a member into a module-scope constant nor captures one in a closure
  * that outlives the call. `boardSize` in particular is reconciled against a
  * persisted board size and any active board-mutating relic, so it changes
  * during a run.
+ *
+ * Numeric domains the types do not express: `boardSize` and `winValue` are
+ * positive integers and `startTiles` is a non-negative integer.
  */
 export interface RulesConfig {
-  /** Edge length of the square board, in cells. A positive integer. */
   boardSize: number;
-
-  /**
-   * Tile value that wins the game. A positive integer. How a tile value is
-   * compared against it belongs to src/engine/terminal-state.ts, and the visual
-   * band above it to src/theme/tile-ramp.ts.
-   */
   winValue: number;
-
-  /** How many tiles are inserted when a stage begins. A non-negative integer. */
   startTiles: number;
-
-  /** Distribution a newly spawned tile's value is drawn from. */
   spawn: SpawnDistribution;
-
-  /** Rule deciding which tiles merge and what value the merge yields. */
   merge: MergeRules;
 }

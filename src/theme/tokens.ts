@@ -2,7 +2,7 @@
  * Design tokens for the TypeScript layer, mirroring style/_tokens.scss: the two
  * files carry the same token names and the same values, so the stylesheet and
  * the Three.js materials cannot drift. Colours the stylesheet computes with a
- * Sass function are carried here in their compiled form. Decision DL-TOKEN-01.
+ * Sass function are carried here in their compiled form.
  *
  * Declarations and pure functions only: this module reads no DOM and carries
  * exactly one import, `DEFAULT_BOARD_SIZE` from src/config/default-config.ts,
@@ -153,6 +153,13 @@ export const derivedColors = {
 
   /** The uppercase SCORE and BEST labels. */
   scoreLabelColor: tileColor,
+
+  /**
+   * The outer band of the focus ring under the default palette:
+   * `color.adjust($text-color, $lightness: -22%)`, the same derivation
+   * `$diagnostics-surface` is written from.
+   */
+  focusRingColor: '#3a3631',
 } as const;
 
 /** Corner radius of the board itself, in px. Resolves to 6. */
@@ -545,7 +552,6 @@ export function tilePositionStep(
 /**
  * Extrusion depths for the WebGL board, in px, each an arithmetic expression on
  * `gridSpacing`. Lengths only: camera and lighting values live in src/render.
- * Decision DL-TOKEN-02.
  */
 export const depthScale = {
   /** `$depth-bevel`, style/_tokens.scss. Resolves to 3. */

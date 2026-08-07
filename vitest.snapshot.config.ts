@@ -2,68 +2,44 @@
 // --config vitest.snapshot.config.ts`, and it is a gate of its own, separate
 // from the unit gate `npm test` drives through vitest.config.ts.
 //
-// What the two projects collect, and how they stay disjoint:
+// What the three projects collect, and how they stay disjoint:
 //
 //   this project      tests/snapshot/*.spec.ts   environment 'node'
 //   vitest.config.ts  tests/unit/**/*.test.ts    environments 'node' + 'jsdom'
 //   playwright        tests/e2e/*.spec.ts        driven by playwright.config.ts
 //
-// The two trees carry different file suffixes — `.spec.ts` here, `.test.ts`
-// there — and each project also names the other's directory in `exclude`, so
-// the separation holds on directory and on suffix independently.
+// The trees carry different file suffixes — `.spec.ts` here, `.test.ts` there —
+// and each project also names the other's directory in `exclude`, so the
+// separation holds on directory and on suffix independently.
 //
-// Snapshot writes: `update` is not set below, and package.json's
-// `test:snapshot` script passes no update flag. Vitest resolves the mode from
-// those two facts — `none` when it detects CI, `new` otherwise — so a snapshot
-// that already exists is never rewritten by either invocation, and a
-// mismatched or missing one fails the run under CI. Re-recording is the
-// separate opt-in `vitest run --config vitest.snapshot.config.ts -u`.
+// SNAPSHOT WRITES: `update` is not set below and package.json's `test:snapshot`
+// script passes no update flag, so Vitest resolves the mode from those two
+// facts — `none` when it detects CI, `new` otherwise. An existing snapshot is
+// never rewritten by either invocation, and a mismatched or missing one fails
+// the run under CI. Re-recording is the separate opt-in `vitest run --config
+// vitest.snapshot.config.ts -u`.
 //
-// Globals: no option below installs, replaces or unstubs one, and none
-// installs a fake clock. `update`, `fakeTimers`, `unstubGlobals` and
-// `unstubEnvs` are absent from the project. `silent` is `false`, so a log
-// record a spec asserts on reaches the reporter.
+// No option below installs, replaces or unstubs a global, and none installs a
+// fake clock. `silent` is `false`, so a log record a spec asserts on reaches
+// the reporter.
 //
-// Provenance of the behaviour the setup file compensates for, from the deleted
-// vanilla sources:
-//   js/local_storage_manager.js L61-L63  clearGameState() removes the board
-//                                       snapshot; no member of the vanilla
-//                                       manager removes the best score
-//   js/local_storage_manager.js L25-L26  the writability probe runs once, at
-//                                       construction
-//   js/game_manager.js L36               setup() reads the snapshot once
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+// The behaviour the setup file compensates for, from the deleted vanilla
+// sources: `clearGameState()` removed the board snapshot and no vanilla member
+// removed the best score; the writability probe ran once at construction; and
+// `setup()` read the snapshot once.
 
 import { defineConfig } from 'vitest/config';
 
 /* ===== 1. Snapshot file placement ===== */
 
-/** Directory name Vitest writes a `.snap` file into. */
 const SNAPSHOT_DIR_NAME = '__snapshots__';
 
-/** Last segment of the directory holding the seeded specs. */
 const SUITE_DIR_NAME = 'snapshot';
 
-/** Segment preceding `SUITE_DIR_NAME`, which disambiguates it. */
 const SUITE_PARENT_DIR_NAME = 'tests';
 
-/** Matches either path separator, so a split covers POSIX and Windows. */
 const PATH_SEPARATOR_PATTERN = /[/\\]/;
 
-/**
- * Places every `.snap` file in `tests/snapshot/__snapshots__/`.
- *
- * Reproduces Vitest's own resolution — the `__snapshots__` directory beside
- * the spec, holding `<spec file name><extension>` — for a spec sitting
- * directly in `tests/snapshot/`, and collapses a spec found in a
- * subdirectory onto the same directory. Built from string operations only: no
- * Node built-in is imported and no Node global is read.
- *
- * @param testPath Absolute path of the spec file being snapshotted.
- * @param snapExtension Extension Vitest appends, including the leading dot.
- * @returns Absolute path of the spec's snapshot file.
- */
 function resolveSnapshotPath(testPath: string, snapExtension: string): string {
   const separator = testPath.includes('/') ? '/' : '\\';
   const segments = testPath.split(PATH_SEPARATOR_PATTERN);
@@ -99,18 +75,8 @@ function resolveSnapshotPath(testPath: string, snapExtension: string): string {
 
 /* ===== 2. Collected and excluded paths ===== */
 
-/**
- * The seeded specs, and nothing else. A single directory level, matching the
- * one directory `resolveSnapshotPath` writes snapshots to.
- */
 const SNAPSHOT_INCLUDE: string[] = ['tests/snapshot/*.spec.ts'];
 
-/**
- * Paths this project never collects from. Vitest's built-in exclusions are
- * replaced wholesale by this list, so node_modules and the build output are
- * repeated here alongside the two sibling test trees, the artifact
- * directories .gitignore covers, and the two blitzy directories.
- */
 const SNAPSHOT_EXCLUDE: string[] = [
   '**/node_modules/**',
   '**/dist/**',
@@ -123,15 +89,6 @@ const SNAPSHOT_EXCLUDE: string[] = [
   'tests/e2e/**',
 ];
 
-/**
- * Setup file loaded before each spec file is collected. It registers the
- * `afterEach` that removes every storage key the product owns, the best score
- * included, and exports the helpers that seed a fixture before the subject
- * under test is constructed. Its teardown is total in a DOM-free environment:
- * it returns without doing anything when the environment offers no Web
- * Storage, which is the case in this project. A spec that seeds storage
- * declares `// @vitest-environment jsdom` on its first line.
- */
 const SNAPSHOT_SETUP_FILES: string[] = ['./tests/fixtures/storage.ts'];
 
 /* ===== 3. Project ===== */
@@ -143,7 +100,6 @@ export default defineConfig({
     // No document is created. A spec needing one overrides this for itself
     // with a `@vitest-environment jsdom` docblock on its first line.
     environment: 'node',
-
     include: SNAPSHOT_INCLUDE,
     exclude: SNAPSHOT_EXCLUDE,
     setupFiles: SNAPSHOT_SETUP_FILES,

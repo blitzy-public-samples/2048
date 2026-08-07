@@ -1,21 +1,14 @@
 // Unit suite for src/storage/memory-storage.ts: the `StorageLike` contract and
 // the `MemoryStorage` in-memory store that satisfies it.
 //
-// Provenance of every behaviour pinned here, from the deleted vanilla source
-// js/local_storage_manager.js:
-//   L1-L2    `window.fakeStorage = { _data: {},` — one object literal, one
-//            shared `_data`, reached through a global
-//   L4-L6    setItem: `return this._data[id] = String(val);`
-//   L8-L10   getItem: `this._data.hasOwnProperty(id) ? this._data[id]
-//            : undefined`
-//   L12-L14  removeItem: `return delete this._data[id];`
-//   L16-L18  clear: `return this._data = {};`
-//   L22-L23  the two frozen unprefixed keys `bestScore` and `gameState`
-//   L26      `this.storage = supported ? window.localStorage
-//            : window.fakeStorage;`
-//   L44      getBestScore(): `this.storage.getItem(this.bestScoreKey) || 0`
-//   L48      setBestScore(score) forwarded its argument unconverted, and
-//            js/game_manager.js L81 called it with a number
+// Provenance, from the deleted js/local_storage_manager.js: the in-memory
+// fallback was one object literal with a single shared `_data` reached through
+// a global; `setItem` returned the assigned `String(val)`; `getItem` returned
+// `undefined` for an absent key rather than `null`; `removeItem` returned the
+// result of `delete`; `clear` reassigned `_data`; the two frozen unprefixed
+// keys were `bestScore` and `gameState`; the store was chosen once at
+// construction; the best-score reader coerced an absent value with `|| 0`; and
+// the best-score writer forwarded a number unconverted.
 //
 // Every test constructs the instance it reads. No instance, key or value
 // crosses an `it()` boundary, and this file registers no `beforeEach`.
@@ -24,61 +17,31 @@
 // mocking library, no spy, no storage package. It reads no DOM, no storage
 // global and no clock, consumes no randomness and installs nothing. It runs
 // unchanged in a DOM-free environment.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { describe, expect, it } from 'vitest';
 
 import { MemoryStorage } from '../../../src/storage/memory-storage';
 import type { StorageLike } from '../../../src/storage/memory-storage';
 
-/* ===== 1. Keys ===== */
-
-/** Frozen unprefixed best-score key of js/local_storage_manager.js L22. */
 const BEST_SCORE_KEY = 'bestScore';
 
-/** Frozen unprefixed snapshot key of js/local_storage_manager.js L23. */
 const GAME_STATE_KEY = 'gameState';
 
-/** Key no test writes, read to observe the outcome for an absent key. */
 const UNWRITTEN_KEY = 'neverWritten';
 
-/**
- * Keys that name a member of `Object.prototype` or that prototype's
- * constructor. Web Storage accepts each as an ordinary key.
- */
 const PROTOTYPE_NAMED_KEYS: readonly string[] = [
   '__proto__',
   'constructor',
   'hasOwnProperty',
 ];
 
-/* ===== 2. The untyped write path ===== */
-
-/**
- * `setItem` as an untyped JavaScript caller reached it.
- *
- * js/game_manager.js L81 passed a number to `setBestScore`, which forwarded it
- * to js/local_storage_manager.js L48 unconverted. `MemoryStorage.setItem`
- * declares `value` as a `string`. Every call below that passes a non-string is
- * made through this view.
- */
 interface UntypedWriter {
   setItem(key: string, value: unknown): void;
 }
 
-/**
- * Views `storage` as the untyped write path.
- *
- * @param storage Instance to write through. It is returned unchanged: a write
- *   through the returned view reaches that instance's own store.
- * @returns The same instance, typed to accept a non-string value.
- */
 function untypedWriter(storage: MemoryStorage): UntypedWriter {
   return storage;
 }
-
-/* ===== 3. setItem ===== */
 
 describe('MemoryStorage.setItem — String() coercion (vanilla L4-L6)', () => {
   it('setItem (L4-L6) stores the number 1234 as the string "1234"', () => {
@@ -145,8 +108,6 @@ describe('MemoryStorage.setItem — String() coercion (vanilla L4-L6)', () => {
   });
 });
 
-/* ===== 4. getItem ===== */
-
 describe('MemoryStorage.getItem — presence test (vanilla L8-L10)', () => {
   it('getItem (L8-L10) yields undefined, not null, for an absent key', () => {
     const storage = new MemoryStorage();
@@ -186,8 +147,6 @@ describe('MemoryStorage.getItem — presence test (vanilla L8-L10)', () => {
   });
 });
 
-/* ===== 5. removeItem ===== */
-
 describe('MemoryStorage.removeItem (vanilla L12-L14)', () => {
   it('removeItem (L12-L14) leaves the key absent for getItem', () => {
     const storage = new MemoryStorage();
@@ -223,8 +182,6 @@ describe('MemoryStorage.removeItem (vanilla L12-L14)', () => {
     expect(storage.getItem(BEST_SCORE_KEY)).toBe('2048');
   });
 });
-
-/* ===== 6. clear ===== */
 
 describe('MemoryStorage.clear (vanilla L16-L18)', () => {
   it('clear (L16-L18) leaves every written key reading undefined', () => {
@@ -263,8 +220,6 @@ describe('MemoryStorage.clear (vanilla L16-L18)', () => {
     expect(storage.getItem(BEST_SCORE_KEY)).toBeUndefined();
   });
 });
-
-/* ===== 7. Per-instance isolation ===== */
 
 describe(
   'MemoryStorage per-instance isolation — vanilla L1-L2 was a global ' +
@@ -312,8 +267,6 @@ describe(
     });
   }
 );
-
-/* ===== 8. StorageLike structural conformance ===== */
 
 describe('StorageLike structural conformance', () => {
   it('accepts MemoryStorage through all four members (L4-L18)', () => {
@@ -397,4 +350,3 @@ describe('StorageLike structural conformance', () => {
     expect(storage.getItem(BEST_SCORE_KEY)).toBeNull();
   });
 });
-

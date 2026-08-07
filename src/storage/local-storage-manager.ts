@@ -6,6 +6,26 @@
  * member throws on a storage failure, and `getBestScore()` keeps the frozen
  * `string | 0` contract. The two unprefixed legacy keys live in
  * ./storage-keys, and the in-memory fallback store in ./memory-storage.
+ *
+ * Ported from js/local_storage_manager.js, which is deleted. Each row is one
+ * traceability row of docs/TRACEABILITY_MATRIX.md:
+ *   TR-STORE-01  L22-L23  the two unprefixed key literals
+ *   TR-STORE-02  L25-L26  the construction-time strategy selection
+ *   TR-STORE-03  L29-L40  the writability probe
+ *   TR-STORE-04  L43-L45  getBestScore(), the frozen `string | 0` contract
+ *   TR-STORE-05  L47-L49  setBestScore()
+ *   TR-STORE-06  L52-L55  getGameState(), whose unguarded `JSON.parse` is now
+ *                         guarded
+ *   TR-STORE-07  L57-L59  setGameState()
+ *   TR-STORE-08  L61-L63  clearGameState()
+ *
+ * Decisions behind this file: DL-STORE-02, the best-score accessor keeping
+ * the raw stored string so the relational promotion comparison of
+ * js/game_manager.js L80-L82 behaves identically; DL-STORE-03, every
+ * operation reporting failure by return value through an injected sink; and
+ * DL-STORE-04, the probe running once at construction as L25-L26 did. All
+ * three are in docs/DECISION_LOG.md, alongside DL-STORE-01 for the
+ * key-minting validation.
  */
 
 import {
@@ -182,39 +202,65 @@ function readGlobalStorage(): StorageLike | undefined {
   return isStorageLike(candidate) ? candidate : undefined;
 }
 
-function errorName(error: unknown): string {
-  if (error instanceof Error && error.name.length > 0) {
-    return error.name;
+/**
+ * Reads one string property off a caught value without trusting the value.
+ *
+ * The membership test, the read and the value itself are all contained: a
+ * `Proxy` throws from its `has` or `get` trap, and an `Error` subclass can
+ * define `name` or `message` as a getter that throws. Either throw is read
+ * as an absent property, so describing a storage failure — which happens
+ * inside the `catch` that contains it — cannot raise a second one.
+ *
+ * @param error Caught value to read from.
+ * @param field Property name to read.
+ * @returns The non-empty string value, or `undefined`.
+ */
+function readErrorText(error: unknown, field: string): string | undefined {
+  if (typeof error !== 'object' && typeof error !== 'function') {
+    return undefined;
   }
 
-  if (typeof error === 'object' && error !== null && 'name' in error) {
-    const candidate: unknown = error.name;
+  if (error === null) {
+    return undefined;
+  }
 
-    if (typeof candidate === 'string' && candidate.length > 0) {
-      return candidate;
+  let candidate: unknown;
+
+  try {
+    if (!(field in error)) {
+      return undefined;
     }
+
+    candidate = Reflect.get(error, field);
+  } catch {
+    return undefined;
   }
 
-  return UNKNOWN_ERROR_NAME;
+  return typeof candidate === 'string' && candidate.length > 0
+    ? candidate
+    : undefined;
+}
+
+function errorName(error: unknown): string {
+  return readErrorText(error, 'name') ?? UNKNOWN_ERROR_NAME;
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.length > 0) {
-    return error.message;
-  }
+  const carried = readErrorText(error, 'message');
 
-  if (typeof error === 'object' && error !== null && 'message' in error) {
-    const candidate: unknown = error.message;
-
-    if (typeof candidate === 'string' && candidate.length > 0) {
-      return candidate;
-    }
+  if (carried !== undefined) {
+    return carried;
   }
 
   if (typeof error === 'object' || typeof error === 'function') {
     return UNKNOWN_ERROR_MESSAGE;
   }
 
+  if (typeof error === 'symbol') {
+    return UNKNOWN_ERROR_MESSAGE;
+  }
+
+  // A primitive's conversion cannot throw, and a symbol is excluded above.
   return String(error);
 }
 
@@ -227,10 +273,15 @@ function isQuotaError(error: unknown, name: string): boolean {
     return false;
   }
 
-  return (
-    error instanceof DOMException &&
-    error.code === LEGACY_QUOTA_EXCEEDED_CODE
-  );
+  if (!(error instanceof DOMException)) {
+    return false;
+  }
+
+  try {
+    return error.code === LEGACY_QUOTA_EXCEEDED_CODE;
+  } catch {
+    return false;
+  }
 }
 
 /** Reduces any thrown value, error or not, to `StorageErrorInfo`. Never throws. */

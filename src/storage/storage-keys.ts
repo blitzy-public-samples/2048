@@ -62,8 +62,7 @@ export type OwnedStorageKey =
  *   the result splits into exactly one namespace and one name.
  * @returns `name` prefixed with `STORAGE_NAMESPACE` and the delimiter.
  * @throws {TypeError} If `name` is empty, contains whitespace, or contains the
- *   delimiter. This validation and its throwing behaviour are decision
- *   DL-STORE-01.
+ *   delimiter.
  */
 export function namespacedKey(name: string): NamespacedStorageKey {
   if (name.length === 0) {

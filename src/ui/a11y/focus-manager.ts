@@ -12,25 +12,16 @@
  * src/input/, src/engine/, src/relics/, src/observability/, or any sibling
  * module under src/ui/.
  *
- * Origin, one row per construct group. Nothing here ports a construct from
- * js/: the retired sources carry no focus management, no ARIA and no parallel
- * board, so every row is target-only in docs/TRACEABILITY_MATRIX.md.
+ * Nothing here ports a construct from js/: the retired sources carry no focus
+ * management, no ARIA and no parallel board. The 1-based grid indices are
+ * js/html_actuator.js's, and the cell geometry comes from style/main.scss
+ * through ../../theme/tokens.
  *
- * | Construct group                        | Origin                        |
- * |----------------------------------------|-------------------------------|
- * | `FOCUSABLE_SELECTORS`, `collectFocus…` | R9, gate V7                   |
- * | `focusInitial`                         | R9, gate V7                   |
- * | `trap`, `createFocusManager`           | R9, gate V7                   |
- * | `createParallelBoardLayer`             | R9, AAP 0.2.3.4               |
- * | 1-based grid indices                   | js/html_actuator.js L97-L104  |
- * | Guarded lookups                        | I12                           |
- * | Cell geometry                          | style/main.scss L290-L307     |
- *
- * The three controls the trap cycles were `<a>` elements with no `href` at
- * index.html L31, L38 and L39, so none was a tab stop; index.html now declares
- * them as `<button>` elements and src/input/on-screen-controls.ts owns their
- * bindings. This module manages focus order, containment and restoration over
- * them and binds none of them.
+ * The three controls the trap cycles were `<a>` elements with no `href` in the
+ * retired markup, so none was a tab stop; index.html now declares them as
+ * `<button>` elements and src/input/on-screen-controls.ts owns their bindings.
+ * This module manages focus order, containment and restoration over them and
+ * binds none of them.
  *
  * Arrow keys are not read anywhere in this file. The grid host is a single tab
  * stop and its cells are programmatic focus targets, reached through
@@ -41,21 +32,16 @@
  * HTML focusability pattern, evaluated only inside a container the caller
  * supplies.
  *
- * No exported function throws. A missing host, a missing container, an empty
- * focusable set, a detached restore target, a rebuild during an active trap
- * and a `focus()` on a disconnected node are each reported through the
- * injected sink and the call continues.
+ * Exported functions report rather than throw: a missing host, a missing
+ * container, an empty focusable set, a detached restore target, a rebuild
+ * during an active trap and a `focus()` on a disconnected node are each
+ * reported through the injected sink and the call continues.
  *
  * Presentation belongs to style/_a11y.scss, which owns the focus ring, the
  * visually-hidden utility, the parallel layer's grid and the reduced-motion
  * layer, and to style/_reward.scss, which owns the dialog surface. The only
  * style properties written here are the position and size of a cell
  * counterpart, and every one of their values comes from ../../theme/tokens.
- *
- * Rationale for the decisions behind this file — the single-tab-stop grid in
- * place of roving-tabindex arrow navigation, the explicit per-cell geometry,
- * the parallel DOM in place of ARIA on the canvas, and the retention of
- * `aria-disabled` elements in the focus cycle — is in docs/DECISION_LOG.md.
  */
 
 import {
@@ -67,6 +53,7 @@ import {
   resolveMount,
 } from './settings';
 import type { MotionSetting, UiReportFields, UiReporter } from './settings';
+import { isSupportedBoardSize } from '../../config/default-config';
 import {
   createGeometryScale,
   geometryScales,
@@ -153,11 +140,10 @@ const METRIC_BOARD_NOT_MOUNTED = 'ui.a11yBoard.not_mounted';
 const METRIC_BOARD_SCALE_FALLBACK = 'ui.a11yBoard.scale.fallback';
 
 /**
- * The seven states src/ui/screen-router.ts drives.
+ * The seven screen states.
  *
  * Declared locally. This module's import list names no sibling under src/ui/.
- * The router's union carries the same seven names, and `SCREEN_NAMES` below is
- * the runtime list a caller validates against.
+ * `SCREEN_NAMES` below is the runtime list a caller validates against.
  */
 export type ScreenName =
   | 'runStart'
@@ -389,7 +375,7 @@ function describeElement(element: unknown): string {
  * and each of those goes through the guarded resolver.
  *
  * `[aria-disabled="true"]` is absent from the exclusions the filter below
- * applies. style/_reward.scss L454-L459 withdraws pointer interaction from
+ * applies. style/_reward.scss withdraws pointer interaction from
  * such a card and keeps it focusable and announceable, so it stays in the
  * cycle.
  */
@@ -831,8 +817,8 @@ export const FOCUS_INITIAL_SELECTOR = `[${FOCUS_INITIAL_ATTRIBUTE}]`;
  * The designated target per screen, tried inside the container in order.
  *
  * Only two screens carry one, and each is a selector another artifact
- * declares: `#board-a11y` at index.html L65, and `.relic-card` in the DOM
- * contract at style/_reward.scss L3-L20. The remaining five resolve through
+ * declares: `#board-a11y` at index.html, and `.relic-card` in the DOM
+ * contract at style/_reward.scss. The remaining five resolve through
  * the marker attribute and then the first focusable element, which for `won`
  * and `gameOver` is the first control inside `.game-message`; the selectors
  * for those two controls belong to src/input/on-screen-controls.ts and are not
@@ -1584,8 +1570,7 @@ export interface FocusManagerOptions extends ReducedMotionOptions {
 }
 
 /**
- * The focus surface src/ui/screen-router.ts receives through
- * `ScreenRouterOptions`.
+ * The focus surface a caller holds and drives.
  *
  * Traps nest last-in first-out, so a settings dialog opened from the reward
  * screen releases before the reward screen's own trap does, and only the top
@@ -1712,6 +1697,34 @@ export function createFocusManager(
     }
   };
 
+  /**
+   * Releases every engaged trap, innermost first.
+   *
+   * Declared as a closure over `stack` rather than as a method, so both the
+   * public member and `destroy()` reach the same function without either
+   * depending on a receiver.
+   */
+  const releaseAll = (): void => {
+    // Innermost first, so each trap restores to the target recorded before it
+    // engaged and the outermost restores last.
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1];
+
+      if (top === undefined) {
+        stack.pop();
+        continue;
+      }
+
+      top.handle?.release();
+
+      if (stack[stack.length - 1] === top) {
+        // An entry that did not remove itself is dropped, so the loop cannot
+        // spin.
+        stack.pop();
+      }
+    }
+  };
+
   return Object.freeze({
     collectFocusable(
       root: FocusRoot | null | undefined,
@@ -1735,7 +1748,7 @@ export function createFocusManager(
           screen: String(screen),
         });
 
-        return Object.freeze({
+          return Object.freeze({
           screen,
           element: null,
           source: 'none',
@@ -1809,33 +1822,17 @@ export function createFocusManager(
 
     trapDepth: (): number => stack.length,
 
-    releaseAll(): void {
-      // Innermost first, so each trap restores to the target recorded before
-      // it engaged and the outermost restores last.
-      while (stack.length > 0) {
-        const top = stack[stack.length - 1];
-
-        if (top === undefined) {
-          stack.pop();
-          continue;
-        }
-
-        top.handle?.release();
-
-        if (stack[stack.length - 1] === top) {
-          // An entry that did not remove itself is dropped, so the loop cannot
-          // spin.
-          stack.pop();
-        }
-      }
-    },
+    releaseAll,
 
     destroy(): void {
       if (destroyed) {
         return;
       }
 
-      this.releaseAll();
+      // The closure, not `this.releaseAll()`: a destructured or detached
+      // `destroy` carries no receiver, and one re-bound to another object would
+      // release that object's stack instead of this manager's.
+      releaseAll();
       stack.length = 0;
       destroyed = true;
       reporter.log('debug', 'focus manager destroyed', { context });
@@ -1896,7 +1893,7 @@ export function trap(
  * ----------------------------------------------------------------------- */
 
 /**
- * Selector index.html L65 declares the parallel board host at.
+ * Selector index.html declares the parallel board host at.
  *
  * The element already carries `role="grid"`, an `aria-label` and
  * `aria-busy="true"`; each is honoured rather than rewritten.
@@ -1996,7 +1993,9 @@ export interface ParallelBoardLayer {
    * @param host Host element or selector. A nullish value falls back to the
    *   host given at construction, then to
    *   `PARALLEL_BOARD_HOST_SELECTOR`.
-   * @param boardSize Cells per row.
+   * @param boardSize Cells per row. An integer from 1 through
+   *   MAX_BOARD_SIZE of src/config/default-config.ts; any other value is
+   *   reported and refused before any element is created.
    * @returns Whether the layer mounted. A miss is reported and leaves every
    *   other method a working no-op.
    */
@@ -2009,7 +2008,7 @@ export interface ParallelBoardLayer {
    * `cellAt` is consistent afterwards, and focus that was inside the layer is
    * re-placed deterministically rather than left on an orphaned node.
    *
-   * @param boardSize Cells per row.
+   * @param boardSize Cells per row, bounded exactly as `mount` bounds it.
    * @returns Whether the rebuild completed.
    */
   rebuild(boardSize: number): boolean;
@@ -2232,11 +2231,19 @@ function geometryForBoard(
 /**
  * Whether a value is a usable board dimension.
  *
+ * The ceiling is read from MAX_BOARD_SIZE of src/config/default-config.ts
+ * rather than restated, so this layer, the run-state loader and the number-only
+ * renderer measure a candidate dimension against one value. `mount` and
+ * `rebuild` both test through here before any geometry is resolved and before
+ * any element is created, so a dimension above the ceiling produces neither the
+ * `boardSize` by `boardSize` cell counterparts nor the two arrays of that
+ * length.
+ *
  * @param value Candidate size.
- * @returns Whether it is a positive integer.
+ * @returns Whether it is an integer from 1 through MAX_BOARD_SIZE.
  */
 function isBoardSize(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+  return isSupportedBoardSize(value);
 }
 
 /**
@@ -2271,9 +2278,8 @@ function cellLabel(
  * Creates the parallel board layer that stands beside the WebGL canvas.
  *
  * The canvas is one opaque node to assistive technology and carries its own
- * `aria-hidden`, set by src/render/three-renderer.ts; this layer is the
- * semantic counterpart, and nothing here reads or writes any attribute of the
- * canvas.
+ * `aria-hidden`; this layer is the semantic counterpart, and nothing here reads
+ * or writes any attribute of the canvas.
  *
  * It is not the number-only renderer. That is a rendering mode over its own
  * host, and neither module imports the other.
@@ -2354,7 +2360,7 @@ export function createParallelBoardLayer(
    *
    * The only style properties this module sets. Both lengths come from
    * ../../theme/tokens: the box is `tileBoxSize` and the offsets are
-   * `tilePositionStep`, the pair style/main.scss L293-L303 lays the visual
+   * `tilePositionStep`, the pair style/main.scss lays the visual
    * tiles out with. Logical properties throughout.
    */
   const applyCellGeometry = (
@@ -2502,9 +2508,7 @@ export function createParallelBoardLayer(
     pending = [];
   };
 
-  /**
-   * Builds the rows and cells for a size, and returns whether it completed.
-   */
+  /** Builds the rows and cells for a size, and returns whether it completed. */
   const buildCells = (nextSize: number): boolean => {
     if (host === null || doc === null) {
       return false;
@@ -2570,13 +2574,71 @@ export function createParallelBoardLayer(
     }
   };
 
+  /**
+   * Returns the layer to its unmounted state.
+   *
+   * Every listener this layer installed is removed, every attribute it added is
+   * removed from the host it was added to, and every piece of host state is
+   * reset. Idempotent and safe with no host, because `mount()` calls it both on
+   * entry — a remount must not leave the previous host's listeners attached,
+   * nor carry that host's attribute-ownership flags onto a different element —
+   * and on each of its own failure paths.
+   */
+  const teardown = (): void => {
+    const previous = host;
+
+    if (previous !== null && activationListener !== null) {
+      previous.removeEventListener('keydown', activationListener);
+    }
+
+    activationListener = null;
+
+    if (scaleQuery !== null && scaleListener !== null) {
+      if (typeof scaleQuery.removeEventListener === 'function') {
+        scaleQuery.removeEventListener('change', scaleListener);
+      } else if (typeof scaleQuery.removeListener === 'function') {
+        scaleQuery.removeListener(scaleListener);
+      }
+    }
+
+    scaleQuery = null;
+    scaleListener = null;
+    clearCells();
+
+    if (previous !== null) {
+      // The layer no longer carries cells, so the host returns to the
+      // unpopulated state index.html L65 declares.
+      setBusy(true);
+
+      // Removed from the element they were added to, and only where THIS layer
+      // added them: an attribute the host declared for itself is left alone.
+      if (hostAdded.role) {
+        previous.removeAttribute('role');
+      }
+
+      if (hostAdded.tabIndex) {
+        previous.removeAttribute('tabindex');
+      }
+    }
+
+    // Cleared unconditionally, so a flag set against one host can never be read
+    // against the next one.
+    hostAdded.role = false;
+    hostAdded.tabIndex = false;
+
+    host = null;
+    doc = null;
+    size = 0;
+  };
+
   const mount = (
     requestedHost: Element | string | null | undefined,
     boardSize: number,
   ): boolean => {
-    if (host !== null) {
-      clearCells();
-    }
+    // The COMPLETE unmount path, before a new host is resolved: clearing the
+    // cells alone left the previous host's keydown and media-query listeners
+    // attached and carried its attribute-ownership flags onto the next element.
+    teardown();
 
     const candidate = requestedHost ?? options.host ?? null;
     const root = options.document ?? null;
@@ -2607,7 +2669,7 @@ export function createParallelBoardLayer(
     }
 
     if (host === null) {
-      size = 0;
+      teardown();
 
       return false;
     }
@@ -2617,7 +2679,7 @@ export function createParallelBoardLayer(
     if (doc === null) {
       reporter.log('warn', 'board host belongs to no document', { context });
       reporter.count(METRIC_BOARD_NO_HOST, { context, cause: 'no-document' });
-      host = null;
+      teardown();
 
       return false;
     }
@@ -2628,13 +2690,12 @@ export function createParallelBoardLayer(
         boardSize: String(boardSize),
       });
       reporter.count(METRIC_BOARD_SIZE_REJECTED, { context, cause: 'mount' });
-      host = null;
-      doc = null;
+      teardown();
 
       return false;
     }
 
-    // index.html L65 already declares the role; it is honoured rather than
+    // index.html already declares the role; it is honoured rather than
     // rewritten, and only an absent one is supplied.
     if (host.getAttribute('role') === null) {
       host.setAttribute('role', 'grid');
@@ -2667,8 +2728,9 @@ export function createParallelBoardLayer(
     setBusy(true);
 
     if (!buildCells(boardSize)) {
-      clearCells();
-      size = 0;
+      // The role, the tabindex and the scale listener were all installed above,
+      // so the whole path is undone rather than only the cells.
+      teardown();
 
       return false;
     }
@@ -2903,40 +2965,7 @@ export function createParallelBoardLayer(
       return;
     }
 
-    if (activationListener !== null) {
-      host.removeEventListener('keydown', activationListener);
-      activationListener = null;
-    }
-
-    if (scaleQuery !== null && scaleListener !== null) {
-      if (typeof scaleQuery.removeEventListener === 'function') {
-        scaleQuery.removeEventListener('change', scaleListener);
-      } else if (typeof scaleQuery.removeListener === 'function') {
-        scaleQuery.removeListener(scaleListener);
-      }
-    }
-
-    scaleQuery = null;
-    scaleListener = null;
-    clearCells();
-
-    // The layer no longer carries cells, so the host returns to the
-    // unpopulated state index.html L65 declares.
-    setBusy(true);
-
-    if (hostAdded.role) {
-      host.removeAttribute('role');
-      hostAdded.role = false;
-    }
-
-    if (hostAdded.tabIndex) {
-      host.removeAttribute('tabindex');
-      hostAdded.tabIndex = false;
-    }
-
-    host = null;
-    doc = null;
-    size = 0;
+    teardown();
     reporter.log('debug', 'parallel board layer unmounted', { context });
   };
 

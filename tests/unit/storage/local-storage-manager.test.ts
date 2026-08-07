@@ -4,42 +4,22 @@
 // writability probe, and the generic namespaced API the run-state envelope
 // rides on.
 //
-// Provenance of every construct exercised here, from the deleted vanilla
-// source:
-//   js/local_storage_manager.js L1-L19    window.fakeStorage, the in-memory
-//                                         fallback store
-//   js/local_storage_manager.js L21-L27   LocalStorageManager, with the store
-//                                         chosen once at L25-L26
-//   js/local_storage_manager.js L29-L40   localStorageSupported, whose
-//                                         `catch (error) { return false; }` at
-//                                         L37-L39 discarded its error
-//   js/local_storage_manager.js L34-L35   the probe's setItem then removeItem
-//   js/local_storage_manager.js L43-L45   getBestScore
-//   js/local_storage_manager.js L47-L49   setBestScore, setItem at L48 with no
-//                                         handler
-//   js/local_storage_manager.js L52-L55   getGameState, JSON.parse unguarded at
-//                                         L54
-//   js/local_storage_manager.js L57-L59   setGameState, setItem at L58 with no
-//                                         handler
-//   js/local_storage_manager.js L61-L63   clearGameState, removeItem at L62
-//   js/application.js L3                  the constructor-injection seam
-//   js/game_manager.js L36                getGameState() called from setup()
-//   js/game_manager.js L85-L89            clearGameState() on loss only
-//   js/game_manager.js L102-L110          serialize(), the persisted shape
+// The vanilla constructs exercised here, from the deleted
+// js/local_storage_manager.js: the in-memory fallback store, the manager with
+// its store chosen once at construction, the writability probe whose `catch`
+// discarded its error, the probe's setItem-then-removeItem pair, the
+// unguarded `setItem` of both writers, the unguarded `JSON.parse` of the
+// snapshot reader, and `clearGameState`.
 //
-// Scope split across tests/unit/storage/: the frozen best-score contract of
-// L43-L49 is asserted in ./best-score.test.ts, and run-state schema
-// versioning, migration and board-size reconciliation in tests/unit/run/.
-// Nothing here imports from src/run/ or src/observability/.
+// Scope split across tests/unit/storage/: the frozen best-score contract is
+// asserted in ./best-score.test.ts. Nothing here imports from src/run/ or
+// src/observability/.
 //
 // Every construction injects a store, so no assertion below depends on the
-// ambient Web Storage of the vitest environment. Sections 1 to 6 hold the
-// in-suite harness; the assertions begin at section 7. Storage keys come from
+// ambient Web Storage of the vitest environment. Storage keys come from
 // src/storage/storage-keys.ts and board snapshots from
 // tests/fixtures/boards.ts; this file declares neither a key literal nor a
 // board literal of its own.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -72,35 +52,24 @@ import {
   createEmptyBoard,
 } from '../../fixtures/boards';
 
-/* ===== 1. Constants ===== */
-
-/** The three members of `StorageStrategy`, as the adapter declares them. */
 const STORAGE_STRATEGIES: readonly StorageStrategy[] = [
   'localStorage',
   'memory',
   'injected',
 ];
 
-/**
- * Bytes the adapter charges per UTF-16 code unit when it reports
- * `StorageWriteInfo.byteLength`.
- */
 const BYTES_PER_UTF16_UNIT = 2;
 
-/** Namespaced key the raw round-trip assertions write under. */
 const SCRATCH_KEY = namespacedKey('unitStorageScratch');
 
-/** Every key this suite may leave behind, swept before and after each test. */
 const SWEPT_KEYS: readonly OwnedStorageKey[] = [
   ...OWNED_STORAGE_KEYS,
   STORAGE_PROBE_KEY,
   SCRATCH_KEY,
 ];
 
-/** Best score seeded before construction by the key-isolation assertions. */
 const SEEDED_BEST_SCORE = '4096';
 
-/** Snapshot text that is not valid JSON. Four distinct corruption shapes. */
 const CORRUPT_TEXTS: readonly { label: string; text: string }[] = [
   { label: 'an unquoted object body', text: '{not json' },
   { label: 'the bare word undefined', text: 'undefined' },
@@ -108,7 +77,6 @@ const CORRUPT_TEXTS: readonly { label: string; text: string }[] = [
   { label: 'a truncated array', text: '[2,4,' },
 ];
 
-/** Valid JSON that is not a board snapshot, with the value it parses to. */
 const NON_BOARD_TEXTS: readonly {
   label: string;
   text: string;
@@ -117,6 +85,103 @@ const NON_BOARD_TEXTS: readonly {
   { label: 'a number', text: '42', parsed: 42 },
   { label: 'a string', text: '"text"', parsed: 'text' },
   { label: 'the JSON null literal', text: 'null', parsed: null },
+];
+
+/**
+ * Name the adapter reports a refused key under, in place of an error it never
+ * constructs.
+ */
+const REJECTED_KEY_ERROR_NAME = 'StorageKeyError';
+
+/** Characters of a refused key the adapter reports before truncating. */
+const MAX_REPORTED_KEY_LENGTH = 64;
+
+/** The ellipsis a truncated key is reported with. */
+const KEY_TRUNCATION_SUFFIX = '…';
+
+/**
+ * Keys the product does not own, each with the label its test title quotes.
+ *
+ * `OwnedStorageKey` excludes all of them, so each is cast at the call site: the
+ * adapter's ownership check is a runtime guard as well as a type-level one,
+ * because a key can reach a call site out of persisted or parsed data where the
+ * type no longer holds.
+ */
+const UNOWNED_KEYS: readonly { label: string; key: string }[] = [
+  { label: "another application's key", key: 'theme' },
+  { label: 'a foreign key carrying a delimiter', key: 'user:token' },
+  { label: 'the best-score literal in lower case', key: 'bestscore' },
+  { label: 'the best-score literal with a trailing space', key: 'bestScore ' },
+  { label: 'the snapshot literal pluralised', key: 'gameStates' },
+  { label: 'a misspelled namespace', key: 'roguelike2049:runState' },
+  { label: 'the namespace with an empty name', key: 'roguelike2048:' },
+  { label: 'a doubled delimiter', key: 'roguelike2048::runState' },
+  { label: 'a name holding a space', key: 'roguelike2048:run State' },
+  { label: 'the empty string', key: '' },
+];
+
+/** A refused key longer than the adapter reports in full. */
+const OVERLONG_UNOWNED_KEY = `unowned-${'k'.repeat(120)}`;
+
+/**
+ * Values `JSON.stringify` cannot reduce to text, each with the label its test
+ * title quotes and the name of the error the adapter reports. A circular
+ * structure and a `BigInt` make `JSON.stringify` throw; `undefined`, a function
+ * and a symbol make it return no string at all, which the adapter reports as a
+ * `TypeError` of its own.
+ */
+const UNSERIALISABLE_VALUES: readonly {
+  label: string;
+  build: () => unknown;
+  errorName: string;
+}[] = [
+  {
+    label: 'a circular object',
+    build: (): unknown => {
+      const circular: Record<string, unknown> = { id: 'run' };
+
+      circular['self'] = circular;
+
+      return circular;
+    },
+    errorName: 'TypeError',
+  },
+  {
+    label: 'a circular array',
+    build: (): unknown => {
+      const cells: unknown[] = [];
+
+      cells.push(cells);
+
+      return { grid: { size: 1, cells } };
+    },
+    errorName: 'TypeError',
+  },
+  {
+    label: 'a BigInt',
+    build: (): unknown => BigInt(2048),
+    errorName: 'TypeError',
+  },
+  {
+    label: 'an object holding a BigInt',
+    build: (): unknown => ({ score: BigInt(2048) }),
+    errorName: 'TypeError',
+  },
+  {
+    label: 'undefined',
+    build: (): unknown => undefined,
+    errorName: 'TypeError',
+  },
+  {
+    label: 'a function',
+    build: (): unknown => (): number => 2048,
+    errorName: 'TypeError',
+  },
+  {
+    label: 'a symbol',
+    build: (): unknown => Symbol('run'),
+    errorName: 'TypeError',
+  },
 ];
 
 /* ===== 2. Report collector ===== */
@@ -128,17 +193,10 @@ const NON_BOARD_TEXTS: readonly {
  */
 interface ReportCollector extends StorageReporter {
   readonly probes: StorageProbeResult[];
-
   readonly failures: StorageFailure[];
-
   readonly writes: StorageWriteInfo[];
 }
 
-/**
- * Builds a fresh collector.
- *
- * @returns A collector whose three arrays start empty.
- */
 function createReportCollector(): ReportCollector {
   const probes: StorageProbeResult[] = [];
   const failures: StorageFailure[] = [];
@@ -160,12 +218,6 @@ function createReportCollector(): ReportCollector {
   };
 }
 
-/**
- * Builds a reporter whose every member throws `fault`.
- *
- * @param fault Value each member throws.
- * @returns The reporter.
- */
 function createThrowingReporter(fault: unknown): StorageReporter {
   const raise = (): never => {
     throw fault;
@@ -174,30 +226,13 @@ function createThrowingReporter(fault: unknown): StorageReporter {
   return { onProbe: raise, onFailure: raise, onWrite: raise };
 }
 
-/* ===== 3. Storage stand-ins ===== */
-
-/**
- * Members of `InstrumentedStorage` that throw, each carrying the value it
- * throws.
- */
 interface StorageFaults {
   readonly getItem?: unknown;
-
   readonly setItem?: unknown;
-
   readonly removeItem?: unknown;
 }
 
-/**
- * A `StorageLike` store that records the operations it receives and can be
- * configured to throw from any of them. Backed by a `Map`, as
- * src/storage/memory-storage.ts is.
- *
- * It declares no `length` and no `key()`, so it is not the enumerable surface
- * the suite-wide teardown in tests/fixtures/storage.ts sweeps.
- */
 class InstrumentedStorage implements StorageLike {
-  /** Every operation received, as `member:key`, in call order. */
   readonly operations: string[] = [];
 
   private readonly entries = new Map<string, string>();
@@ -232,11 +267,6 @@ class InstrumentedStorage implements StorageLike {
     this.entries.clear();
   }
 
-  /**
-   * Throws `fault` when one was configured for the calling member.
-   *
-   * @param fault Configured fault, or `undefined` when the member behaves.
-   */
   private raise(fault: unknown): void {
     if (fault !== undefined) {
       throw fault;
@@ -244,42 +274,20 @@ class InstrumentedStorage implements StorageLike {
   }
 }
 
-/**
- * Builds the quota error a browser raises once Web Storage is full: the shape
- * `StorageErrorInfo.quota` reports on, which L37-L39 discarded.
- *
- * @returns A `QuotaExceededError`, legacy exception code 22.
- */
 function createQuotaError(): DOMException {
   return new DOMException('The quota has been exceeded.', 'QuotaExceededError');
 }
 
-/**
- * Builds the error a browser raises where storage access is denied.
- *
- * @returns A `SecurityError`.
- */
 function createAccessError(): DOMException {
   return new DOMException('Access to storage is denied.', 'SecurityError');
 }
 
-/* ===== 4. Ambient Web Storage ===== */
-
-/** Property `probeWebStorage()` reads the global store from. */
 const WEB_STORAGE_PROPERTY = 'localStorage';
 
-/** Descriptor of the environment's own store, held while one stands in. */
 let originalWebStorage: PropertyDescriptor | undefined;
 
-/** Whether `originalWebStorage` holds a descriptor to put back. */
 let webStorageReplaced = false;
 
-/**
- * Reports whether `value` offers the `StorageLike` members the adapter calls.
- *
- * @param value Value to test, typically the global store.
- * @returns `true` when every member is present as a function.
- */
 function isStorageLikeValue(value: unknown): value is StorageLike {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -297,11 +305,6 @@ function isStorageLikeValue(value: unknown): value is StorageLike {
   );
 }
 
-/**
- * The environment's Web Storage, when it offers a usable one.
- *
- * @returns The global store, or `undefined` outside a DOM environment.
- */
 function ambientStorage(): StorageLike | undefined {
   let candidate: unknown;
 
@@ -314,14 +317,6 @@ function ambientStorage(): StorageLike | undefined {
   return isStorageLikeValue(candidate) ? candidate : undefined;
 }
 
-/**
- * Puts `replacement` in place of the environment's Web Storage for the rest of
- * the current test. The first call of a test records the descriptor
- * `restoreWebStorage()` puts back.
- *
- * @param replacement Store to install, or `undefined` to leave the property
- *   holding no store at all.
- */
 function replaceWebStorage(replacement: StorageLike | undefined): void {
   if (!webStorageReplaced) {
     originalWebStorage = Object.getOwnPropertyDescriptor(
@@ -339,10 +334,6 @@ function replaceWebStorage(replacement: StorageLike | undefined): void {
   });
 }
 
-/**
- * Puts the environment's own Web Storage back. Idempotent: it returns without
- * doing anything when nothing stands in.
- */
 function restoreWebStorage(): void {
   if (!webStorageReplaced) {
     return;
@@ -362,16 +353,6 @@ function restoreWebStorage(): void {
   webStorageReplaced = false;
 }
 
-/**
- * Removes every key this suite writes from `store`.
- *
- * Idempotent: removing a key that was never written is a no-op, and the
- * suite-wide setup file sweeps the same keys again. The list opens with
- * `OWNED_STORAGE_KEYS`, so `BEST_SCORE_KEY` is removed explicitly — L61-L63
- * removed the snapshot and never the best score.
- *
- * @param store Store to sweep, or `undefined` to sweep nothing.
- */
 function sweepKeys(store: StorageLike | undefined): void {
   if (store === undefined) {
     return;
@@ -382,15 +363,6 @@ function sweepKeys(store: StorageLike | undefined): void {
   }
 }
 
-/* ===== 5. Assertion helpers ===== */
-
-/**
- * Runs `operation` and asserts that nothing escaped it, then hands back what it
- * returned, so both halves of a no-throw guarantee are asserted from one call.
- *
- * @param operation Call under test.
- * @returns The value `operation` returned.
- */
 function expectNoThrow<T>(operation: () => T): T {
   const outcomes: T[] = [];
 
@@ -402,32 +374,14 @@ function expectNoThrow<T>(operation: () => T): T {
   return outcomes[0];
 }
 
-/**
- * Reads `key` straight out of `store`, normalising an absent value to `null`.
- *
- * @param store Store to read.
- * @param key Key to read.
- * @returns The stored string, or `null` when the key is absent.
- */
 function readEntry(store: StorageLike, key: OwnedStorageKey): string | null {
   return store.getItem(key) ?? null;
 }
 
-/* ===== 6. Snapshot narrowing ===== */
-
-/** The persisted board shape, taken from the fixture module's own return. */
 type PersistedBoard = ReturnType<typeof createEmptyBoard>;
 
-/** The grid member of a persisted board. */
 type PersistedGrid = PersistedBoard['grid'];
 
-/**
- * Reports whether `value` is a `{ x, y }` position, as js/tile.js L19-L27
- * serialised one.
- *
- * @param value Value to test.
- * @returns `true` when both coordinates are numbers.
- */
 function isPosition(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -440,13 +394,6 @@ function isPosition(value: unknown): boolean {
   return typeof value.x === 'number' && typeof value.y === 'number';
 }
 
-/**
- * Reports whether `value` is a serialised cell: a tile, or the `null`
- * js/grid.js L109 wrote for an empty one.
- *
- * @param value Value to test.
- * @returns `true` when the cell is `null` or a well-formed tile.
- */
 function isCell(value: unknown): boolean {
   if (value === null) {
     return true;
@@ -463,23 +410,10 @@ function isCell(value: unknown): boolean {
   return typeof value.value === 'number' && isPosition(value.position);
 }
 
-/**
- * Reports whether `value` is a column of serialised cells.
- *
- * @param value Value to test.
- * @returns `true` when every member is a serialised cell.
- */
 function isColumn(value: unknown): boolean {
   return Array.isArray(value) && value.every(isCell);
 }
 
-/**
- * Reports whether `value` is a serialised grid, as js/grid.js L102-L117
- * produced one.
- *
- * @param value Value to test.
- * @returns `true` when `size` is a number and `cells` a matrix of cells.
- */
 function isGrid(value: unknown): value is PersistedGrid {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -496,14 +430,6 @@ function isGrid(value: unknown): value is PersistedGrid {
   );
 }
 
-/**
- * Reports whether `value` is a persisted board snapshot, as
- * js/game_manager.js L102-L110 produced one. Narrows the `unknown` that
- * `getGameState()` returns without a cast.
- *
- * @param value Value to test.
- * @returns `true` when every persisted member is present with its own type.
- */
 function isPersistedBoard(value: unknown): value is PersistedBoard {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -528,13 +454,6 @@ function isPersistedBoard(value: unknown): value is PersistedBoard {
   );
 }
 
-/**
- * Narrows a value the adapter returned as `unknown` to a persisted board,
- * failing the test when it is not one.
- *
- * @param value Value `getGameState()` or `readJson()` returned.
- * @returns The same value, typed.
- */
 function expectPersistedBoard(value: unknown): PersistedBoard {
   expect(isPersistedBoard(value)).toBe(true);
 
@@ -545,13 +464,6 @@ function expectPersistedBoard(value: unknown): PersistedBoard {
   return value;
 }
 
-/**
- * Counts the empty cells of a board, which js/grid.js L109 serialised as
- * `null`.
- *
- * @param board Board to walk.
- * @returns How many cells are `null`.
- */
 function countEmptyCells(board: PersistedBoard): number {
   let empty = 0;
 
@@ -576,8 +488,6 @@ afterEach(() => {
   sweepKeys(ambientStorage());
 });
 
-/* ===== 7. Construction and storage strategy ===== */
-
 describe('LocalStorageManager construction (L21-L27, L25-L26)', () => {
   it('constructs with no arguments, keeping the L21-L27 ctor seam', () => {
     const manager = expectNoThrow(() => new LocalStorageManager());
@@ -593,7 +503,6 @@ describe('LocalStorageManager construction (L21-L27, L25-L26)', () => {
     const manager = new LocalStorageManager(options);
 
     expect(manager.setGameState(createEmptyBoard())).toBe(true);
-
     expect(readEntry(store, GAME_STATE_KEY)).not.toBeNull();
     expect(readEntry(store, BEST_SCORE_KEY)).toBeNull();
     expect(readEntry(store, RUN_STATE_KEY)).toBeNull();
@@ -621,12 +530,10 @@ describe('LocalStorageManager construction (L21-L27, L25-L26)', () => {
     const global = new InstrumentedStorage({ setItem: createQuotaError() });
 
     replaceWebStorage(global);
-
     expect(manager.setGameState(createEmptyBoard())).toBe(true);
     expect(manager.getGameState()).not.toBeNull();
     expect(manager.setBestScore(0)).toBe(true);
     expect(manager.clearGameState()).toBe(true);
-
     expect(manager.strategy).toBe(strategy);
     expect(manager.probe).toBe(probe);
     expect(global.operations).toStrictEqual([]);
@@ -674,8 +581,6 @@ describe('LocalStorageManager construction (L21-L27, L25-L26)', () => {
     expect(expectNoThrow(() => manager.setBestScore(8))).toBe(false);
   });
 });
-
-/* ===== 8. The reused capability probe ===== */
 
 describe('probeWebStorage() — the reused capability probe (L29-L40)', () => {
   it('returns a structured result where L36 and L38 returned a bool', () => {
@@ -800,9 +705,6 @@ describe('probeWebStorage() — the reused capability probe (L29-L40)', () => {
   });
 });
 
-
-/* ===== 9. The guarded snapshot parse ===== */
-
 describe('getGameState() — guarded parse (L52-L55)', () => {
   it('returns null for an absent snapshot, as L54 branched', () => {
     const manager = new LocalStorageManager({ storage: new MemoryStorage() });
@@ -925,8 +827,6 @@ describe('getGameState() — guarded parse (L52-L55)', () => {
     expect(countEmptyCells(restored)).toBe(countEmptyCells(board));
   });
 });
-
-/* ===== 10. Write failure paths ===== */
 
 describe('write failure paths (L47-L49, L57-L59)', () => {
   it('returns true and stores under GAME_STATE_KEY alone, per L58', () => {
@@ -1060,9 +960,6 @@ describe('write failure paths (L47-L49, L57-L59)', () => {
   });
 });
 
-
-/* ===== 11. Clearing the board snapshot ===== */
-
 describe('clearGameState() (L61-L63)', () => {
   it('removes GAME_STATE_KEY and returns true, replacing L62', () => {
     const store = new MemoryStorage();
@@ -1070,9 +967,7 @@ describe('clearGameState() (L61-L63)', () => {
 
     expect(manager.setGameState(createBlockedBoard())).toBe(true);
     expect(readEntry(store, GAME_STATE_KEY)).not.toBeNull();
-
     expect(expectNoThrow(() => manager.clearGameState())).toBe(true);
-
     expect(readEntry(store, GAME_STATE_KEY)).toBeNull();
     expect(manager.getGameState()).toBeNull();
   });
@@ -1086,7 +981,6 @@ describe('clearGameState() (L61-L63)', () => {
 
     expect(manager.setGameState(createEmptyBoard())).toBe(true);
     expect(manager.clearGameState()).toBe(true);
-
     expect(readEntry(store, GAME_STATE_KEY)).toBeNull();
     expect(readEntry(store, BEST_SCORE_KEY)).toBe(SEEDED_BEST_SCORE);
   });
@@ -1102,7 +996,6 @@ describe('clearGameState() (L61-L63)', () => {
 
     expect(runState).not.toBeNull();
     expect(manager.clearGameState()).toBe(true);
-
     expect(readEntry(store, GAME_STATE_KEY)).toBeNull();
     expect(readEntry(store, RUN_STATE_KEY)).toBe(runState);
   });
@@ -1136,17 +1029,9 @@ describe('clearGameState() (L61-L63)', () => {
   });
 });
 
-/* ===== 12. The generic namespaced API ===== */
-
-/**
- * The persistence surface src/run/run-state-store.ts binds to, declared
- * locally. This suite imports nothing from src/run/.
- */
 interface RunStatePersistencePort {
   readJson(key: OwnedStorageKey): unknown;
-
   writeJson(key: OwnedStorageKey, value: unknown): boolean;
-
   removeRaw(key: OwnedStorageKey): boolean;
 }
 
@@ -1166,7 +1051,6 @@ describe('generic namespaced API — the run-state persistence port', () => {
 
     expect(manager.writeRaw(SCRATCH_KEY, SEEDED_BEST_SCORE)).toBe(true);
     expect(expectNoThrow(() => manager.removeRaw(SCRATCH_KEY))).toBe(true);
-
     expect(manager.readRaw(SCRATCH_KEY)).toBeNull();
     expect(readEntry(store, SCRATCH_KEY)).toBeNull();
   });
@@ -1218,9 +1102,7 @@ describe('generic namespaced API — the run-state persistence port', () => {
 
     expect(bestScore).toBe(SEEDED_BEST_SCORE);
     expect(gameState).not.toBeNull();
-
     expect(manager.writeJson(RUN_STATE_KEY, createEmptyBoard())).toBe(true);
-
     expect(readEntry(store, BEST_SCORE_KEY)).toBe(bestScore);
     expect(readEntry(store, GAME_STATE_KEY)).toBe(gameState);
     expect(readEntry(store, RUN_STATE_KEY)).not.toBeNull();
@@ -1303,8 +1185,6 @@ describe('generic namespaced API — the run-state persistence port', () => {
   });
 });
 
-/* ===== 13. Reporter fault containment ===== */
-
 describe('reporter fault containment (reporterFaults)', () => {
   it('contains a throwing onProbe sink; construction clears L25', () => {
     const fault = new Error('The probe sink is broken.');
@@ -1372,3 +1252,286 @@ describe('reporter fault containment (reporterFaults)', () => {
   });
 });
 
+/* ===== 14. The ownership guard: a refused key reaches no store ===== */
+
+// `acceptKey()` runs before any store operation, so a key the product does not
+// own is refused, reported and never handed to the store. The static
+// `OwnedStorageKey` type already excludes such a key at a call site; the
+// assertions below defeat the type deliberately, because a key can arrive out
+// of persisted or parsed data where nothing enforces it.
+describe('the ownership guard refuses an unowned key before the store', () => {
+  /**
+   * Builds a manager over a store that records every operation it receives.
+   *
+   * @returns The manager, the recording store and the report collector.
+   */
+  function createGuardedManager(): {
+    manager: LocalStorageManager;
+    store: InstrumentedStorage;
+    collector: ReportCollector;
+  } {
+    const store = new InstrumentedStorage();
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: store,
+      reporter: collector,
+    });
+
+    // Construction touches the global store through the probe, never the
+    // injected one, so the record starts empty for the operation under test.
+    expect(store.operations).toStrictEqual([]);
+
+    return { manager, store, collector };
+  }
+
+  it('records no operation on the injected store during construction', () => {
+    const { store, manager } = createGuardedManager();
+
+    expect(manager.strategy).toBe('injected');
+    expect(store.operations).toStrictEqual([]);
+  });
+
+  it.each(UNOWNED_KEYS)(
+    'refuses a readRaw of $label without touching the store',
+    ({ key }: { key: string }) => {
+      const { manager, store, collector } = createGuardedManager();
+
+      expect(
+        expectNoThrow(() => manager.readRaw(key as OwnedStorageKey))
+      ).toBeNull();
+      expect(store.operations).toStrictEqual([]);
+      expect(collector.failures).toHaveLength(1);
+      expect(collector.failures[0].operation).toBe('read');
+      expect(collector.failures[0].key).toBe(key);
+      expect(collector.failures[0].error.name).toBe(REJECTED_KEY_ERROR_NAME);
+      expect(collector.failures[0].error.quota).toBe(false);
+    }
+  );
+
+  it.each(UNOWNED_KEYS)(
+    'refuses a writeRaw of $label without touching the store',
+    ({ key }: { key: string }) => {
+      const { manager, store, collector } = createGuardedManager();
+
+      expect(
+        expectNoThrow(() => manager.writeRaw(key as OwnedStorageKey, 'value'))
+      ).toBe(false);
+      expect(store.operations).toStrictEqual([]);
+      expect(collector.failures).toHaveLength(1);
+      expect(collector.failures[0].operation).toBe('write');
+      expect(collector.failures[0].key).toBe(key);
+      expect(collector.failures[0].error.name).toBe(REJECTED_KEY_ERROR_NAME);
+
+      // The write is refused before the value is measured, so no write report
+      // is produced for it at all.
+      expect(collector.writes).toStrictEqual([]);
+    }
+  );
+
+  it.each(UNOWNED_KEYS)(
+    'refuses a removeRaw of $label without touching the store',
+    ({ key }: { key: string }) => {
+      const { manager, store, collector } = createGuardedManager();
+
+      expect(
+        expectNoThrow(() => manager.removeRaw(key as OwnedStorageKey))
+      ).toBe(false);
+      expect(store.operations).toStrictEqual([]);
+      expect(collector.failures).toHaveLength(1);
+      expect(collector.failures[0].operation).toBe('remove');
+      expect(collector.failures[0].key).toBe(key);
+      expect(collector.failures[0].error.name).toBe(REJECTED_KEY_ERROR_NAME);
+    }
+  );
+
+  it.each(UNOWNED_KEYS)(
+    'refuses a readJson of $label without touching the store',
+    ({ key }: { key: string }) => {
+      const { manager, store, collector } = createGuardedManager();
+
+      expect(
+        expectNoThrow(() => manager.readJson(key as OwnedStorageKey))
+      ).toBeNull();
+      expect(store.operations).toStrictEqual([]);
+      expect(collector.failures).toHaveLength(1);
+      expect(collector.failures[0].operation).toBe('read');
+      expect(collector.failures[0].error.name).toBe(REJECTED_KEY_ERROR_NAME);
+    }
+  );
+
+  it.each(UNOWNED_KEYS)(
+    'refuses a writeJson of $label and serialises nothing for it',
+    ({ key }: { key: string }) => {
+      const { manager, store, collector } = createGuardedManager();
+      let serialised = false;
+      const value = {
+        get score(): number {
+          serialised = true;
+
+          return 1;
+        },
+      };
+
+      expect(
+        expectNoThrow(() => manager.writeJson(key as OwnedStorageKey, value))
+      ).toBe(false);
+      expect(serialised).toBe(false);
+      expect(store.operations).toStrictEqual([]);
+      expect(collector.writes).toStrictEqual([]);
+      expect(collector.failures).toHaveLength(1);
+      expect(collector.failures[0].operation).toBe('write');
+      expect(collector.failures[0].error.name).toBe(REJECTED_KEY_ERROR_NAME);
+    }
+  );
+
+  it('reports the refusal message naming the key it refused', () => {
+    const { manager, collector } = createGuardedManager();
+
+    expect(manager.readRaw('theme' as OwnedStorageKey)).toBeNull();
+    expect(collector.failures[0].error.message).toBe(
+      'Key "theme" is not owned by this product; the operation was refused ' +
+        'and no storage was touched.'
+    );
+  });
+
+  it('truncates an overlong refused key to the reporting limit', () => {
+    const { manager, store, collector } = createGuardedManager();
+
+    expect(OVERLONG_UNOWNED_KEY.length).toBeGreaterThan(
+      MAX_REPORTED_KEY_LENGTH
+    );
+    expect(
+      manager.writeRaw(OVERLONG_UNOWNED_KEY as OwnedStorageKey, 'value')
+    ).toBe(false);
+
+    const reported = collector.failures[0].key;
+
+    expect(reported).toBe(
+      `${OVERLONG_UNOWNED_KEY.slice(0, MAX_REPORTED_KEY_LENGTH)}` +
+        KEY_TRUNCATION_SUFFIX
+    );
+    expect(reported).toHaveLength(MAX_REPORTED_KEY_LENGTH + 1);
+    expect(collector.failures[0].error.message).toContain(reported);
+    expect(store.operations).toStrictEqual([]);
+  });
+
+  it('reports a refused key at exactly the limit in full', () => {
+    const { manager, collector } = createGuardedManager();
+    const exact = 'u'.repeat(MAX_REPORTED_KEY_LENGTH);
+
+    expect(manager.removeRaw(exact as OwnedStorageKey)).toBe(false);
+    expect(collector.failures[0].key).toBe(exact);
+    expect(collector.failures[0].key).not.toContain(KEY_TRUNCATION_SUFFIX);
+  });
+
+  it('carries the strategy in use on the refusal it reports', () => {
+    const { manager, collector } = createGuardedManager();
+
+    expect(manager.removeRaw('theme' as OwnedStorageKey)).toBe(false);
+    expect(collector.failures[0].strategy).toBe(manager.strategy);
+    expect(collector.failures[0].strategy).toBe('injected');
+  });
+
+  it('keeps serving owned keys after a refusal', () => {
+    const { manager, store, collector } = createGuardedManager();
+
+    expect(manager.writeRaw('theme' as OwnedStorageKey, 'value')).toBe(false);
+    expect(manager.writeRaw(SCRATCH_KEY, SEEDED_BEST_SCORE)).toBe(true);
+    expect(manager.readRaw(SCRATCH_KEY)).toBe(SEEDED_BEST_SCORE);
+    expect(store.operations).toStrictEqual([
+      `setItem:${SCRATCH_KEY}`,
+      `getItem:${SCRATCH_KEY}`,
+    ]);
+    expect(collector.failures).toHaveLength(1);
+  });
+});
+
+/* ===== 15. writeJson over a value that reduces to no JSON text ===== */
+
+// `serialiseJson()` reports and returns null for both failure shapes: a
+// `JSON.stringify` that throws, and one that returns no string. Neither reaches
+// the store, and each is reported as a zero-length failed write.
+describe('writeJson refuses a value that cannot be serialised', () => {
+  it.each(UNSERIALISABLE_VALUES)(
+    'returns false for $label and stores nothing',
+    ({ build }: { build: () => unknown }) => {
+      const store = new InstrumentedStorage();
+      const manager = new LocalStorageManager({ storage: store });
+
+      expect(
+        expectNoThrow(() => manager.writeJson(RUN_STATE_KEY, build()))
+      ).toBe(false);
+      expect(store.operations).toStrictEqual([]);
+    }
+  );
+
+  it.each(UNSERIALISABLE_VALUES)(
+    'reports $label as a failed write of zero bytes',
+    ({ build, errorName }: { build: () => unknown; errorName: string }) => {
+      const collector = createReportCollector();
+      const manager = new LocalStorageManager({
+        storage: new InstrumentedStorage(),
+        reporter: collector,
+      });
+
+      expect(manager.writeJson(RUN_STATE_KEY, build())).toBe(false);
+      expect(collector.writes).toStrictEqual([
+        { key: RUN_STATE_KEY, byteLength: 0, ok: false },
+      ]);
+      expect(collector.failures).toHaveLength(1);
+      expect(collector.failures[0].operation).toBe('write');
+      expect(collector.failures[0].key).toBe(RUN_STATE_KEY);
+      expect(collector.failures[0].error.name).toBe(errorName);
+      expect(collector.failures[0].error.quota).toBe(false);
+    }
+  );
+
+  it('leaves an earlier value under the key in place', () => {
+    const store = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: store });
+    const board = createEmptyBoard();
+
+    expect(manager.writeJson(RUN_STATE_KEY, board)).toBe(true);
+
+    const persisted = readEntry(store, RUN_STATE_KEY);
+
+    expect(manager.writeJson(RUN_STATE_KEY, undefined)).toBe(false);
+    expect(readEntry(store, RUN_STATE_KEY)).toBe(persisted);
+  });
+
+  it('keeps writing after a serialisation failure', () => {
+    const store = new MemoryStorage();
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: store,
+      reporter: collector,
+    });
+
+    expect(manager.writeJson(RUN_STATE_KEY, Symbol('run'))).toBe(false);
+    expect(manager.writeJson(RUN_STATE_KEY, createEmptyBoard())).toBe(true);
+    expect(readEntry(store, RUN_STATE_KEY)).not.toBeNull();
+    expect(collector.writes).toHaveLength(2);
+    expect(collector.writes[0].ok).toBe(false);
+    expect(collector.writes[0].byteLength).toBe(0);
+    expect(collector.writes[1].ok).toBe(true);
+    expect(collector.writes[1].byteLength).toBeGreaterThan(0);
+  });
+
+  it('measures a successful write in UTF-16 code units', () => {
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: new MemoryStorage(),
+      reporter: collector,
+    });
+    const board = createEmptyBoard();
+
+    expect(manager.writeJson(RUN_STATE_KEY, board)).toBe(true);
+    expect(collector.writes).toStrictEqual([
+      {
+        key: RUN_STATE_KEY,
+        byteLength: JSON.stringify(board).length * BYTES_PER_UTF16_UNIT,
+        ok: true,
+      },
+    ]);
+  });
+});

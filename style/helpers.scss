@@ -1,6 +1,26 @@
 // Dart Sass migration: exponent() divides with math.div(), and the keyframes
 // mixin interpolates the at-rule name.
+@use "sass:color";
 @use "sass:math";
+
+// Serialises a colour the way a `background` or `color` declaration serialises
+// it, so a colour published into a custom property carries the same channels as
+// one declared directly.
+//
+// Dart Sass writes a declared colour as hex, flooring each channel; a colour
+// interpolated into a custom property keeps its fractional channels and is
+// written as percentages instead. src/theme/tile-ramp.ts floors, which is the
+// parity the compiled ramp is verified against, so each channel is floored here
+// before `rgb()` rebuilds the colour. Declared here rather than in
+// style/main.scss because style/_themes.scss interpolates its palettes' ramps
+// into the same custom properties.
+@function quantised($color) {
+  @return rgb(
+    math.floor(color.channel($color, "red", $space: rgb)),
+    math.floor(color.channel($color, "green", $space: rgb)),
+    math.floor(color.channel($color, "blue", $space: rgb))
+  );
+}
 
 // Exponent
 // From: https://github.com/Team-Sass/Sassy-math/blob/master/sass/math.scss#L36

@@ -111,8 +111,8 @@ $transition-speed: _resolve-token(transition-speed) !default;
 // The three lengths style/main.scss's `smaller($mobile-threshold)` block needs,
 // named here so that block reads them instead of declaring its own. The board
 // dimension and the corner radius are not rescaled there, so the block reads
-// $grid-row-cells and $tile-border-radius above. Mirrored by `mobileFieldWidth`,
-// `mobileGridSpacing` and `mobileGameContainerMarginTop` of
+// $grid-row-cells and $tile-border-radius above. Mirrored by
+// `mobileFieldWidth`, `mobileGridSpacing` and `mobileGameContainerMarginTop` of
 // src/theme/tokens.ts.
 // -----------------------------------------------------------------------------
 
@@ -170,8 +170,8 @@ $rarity-tiers: common, uncommon, rare, legendary !default;
 // -----------------------------------------------------------------------------
 // Diagnostics overlay monospace stack.
 //
-// Consumed by src/observability/diagnostics-overlay.ts. Independent of the
-// Clear Sans stack that style/main.scss applies to the rest of the interface.
+// Independent of the Clear Sans stack that style/main.scss applies to the rest
+// of the interface.
 // -----------------------------------------------------------------------------
 
 $diagnostics-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,

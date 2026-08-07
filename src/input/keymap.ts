@@ -8,10 +8,7 @@
 //
 // This module is the root of the src/input import graph: it imports nothing,
 // reads no DOM and touches no storage. Its functions are pure, except that the
-// deserialising helpers call into the injected `InputReporter`. The input
-// layer's place among the modules is drawn as Figure 3, "Component Interaction:
-// Input, Engine, Hook Bus, Relics, Renderer, Persistence", in
-// docs/architecture/component-interaction.md.
+// deserialising helpers call into the injected `InputReporter`.
 //
 // The persisted-keymap limits are declared here as well: the byte limit the
 // persistence layer applies before parsing, and the property-count,
@@ -171,6 +168,29 @@ function toInputContext(value: string): InputContext | null {
  * ----------------------------------------------------------------------- */
 
 /** One action and the keys that trigger it. */
+export interface InputBindingSlot {
+  /**
+   * Zero-based payload index this slot publishes.
+   *
+   * Carried on the slot rather than derived from `keys` or `codes`, so an
+   * action whose payload addresses one of several targets keeps addressing the
+   * right one after a remap to keys that carry no ordinal at all.
+   */
+  readonly index: number;
+
+  /**
+   * `KeyboardEvent.key` values that select this slot. Matched
+   * case-insensitively, as `InputBinding.keys` is.
+   */
+  readonly keys: readonly string[];
+
+  /**
+   * `KeyboardEvent.code` values that select this slot. Matched exactly, as
+   * `InputBinding.codes` is.
+   */
+  readonly codes: readonly string[];
+}
+
 export interface InputBinding {
   /** Action this binding triggers. */
   readonly action: InputAction;
@@ -201,6 +221,17 @@ export interface InputBinding {
    * Whether a held Alt, Control, Meta or Shift key suppresses the binding.
    */
   readonly modifierSuppressed?: boolean;
+
+  /**
+   * Per-slot payload indices, for an action whose payload is an index.
+   *
+   * `selectReward` and `activateRelic` publish a zero-based index naming which
+   * offer or relic the press addresses. A slot states that index explicitly
+   * alongside the keys that select it, so the index survives a remap onto keys
+   * that carry no digit. Absent, or matching no slot, the action publishes
+   * index 0.
+   */
+  readonly slots?: readonly InputBindingSlot[];
 }
 
 /** A partial binding, as the settings panel supplies one. */
@@ -235,6 +266,12 @@ export interface SerializedBinding {
 
   /** Value of `InputBinding.modifierSuppressed`, always explicit. */
   readonly modifierSuppressed: boolean;
+
+  /**
+   * Value of `InputBinding.slots`, always explicit. An action that addresses
+   * no index carries an empty list.
+   */
+  readonly slots: readonly InputBindingSlot[];
 }
 
 /** A keymap as `serializeKeymap` emits it. */
@@ -258,7 +295,7 @@ export interface InputSpan {
   end(): void;
 }
 
-/** Sink for the input layer's logs, counters and boundary timings. */
+/** Sink for the input layer's logs, counters, failures and timings. */
 export interface InputReporter {
   /**
    * Records a structured message.
@@ -280,6 +317,35 @@ export interface InputReporter {
    * @param fields Optional structured fields.
    */
   count(metric: string, fields?: InputReportFields): void;
+
+  /**
+   * Records a caught value, carried UNCONVERTED.
+   *
+   * The channel that exists so no module under src/input/ has to reduce a
+   * caught value to text of its own. `thrown` is `unknown` and is passed
+   * through verbatim, so whatever the sink is — the logger-backed adapter,
+   * a test double, a console — decides how much of the value to keep, and
+   * an `Error`'s `stack`, its `cause` chain and a non-`Error` throwable's
+   * own structure all survive the boundary instead of being flattened to a
+   * name and a message here.
+   *
+   * Optional, so a sink written before this channel existed still
+   * satisfies the contract; `createSafeInputReporter` fills it in and
+   * every caller reaches it through that wrapper.
+   *
+   * @param level Severity.
+   * @param message Human-readable message.
+   * @param thrown The caught value, exactly as it was caught. `null` and
+   *   `undefined` are values a throw can carry and are passed on as such.
+   * @param fields Optional structured fields describing where it was
+   *   caught. Categorical values only; no keystroke and no free text.
+   */
+  failure?(
+    level: InputReportLevel,
+    message: string,
+    thrown: unknown,
+    fields?: InputReportFields
+  ): void;
 
   /**
    * Opens a timing span.
@@ -308,18 +374,110 @@ export const NOOP_REPORTER: InputReporter = Object.freeze({
   count(): void {
     return;
   },
+  failure(): void {
+    return;
+  },
   startSpan(): InputSpan {
     return NOOP_SPAN;
   },
 });
 
+/** `errorName` reported for a caught value that carries no usable name. */
+const UNKNOWN_THROWN_NAME = 'InputError';
+
+/** `errorMessage` reported for a caught value that carries none. */
+const UNKNOWN_THROWN_MESSAGE = 'Unknown input error.';
+
+/** Characters either described field of a caught value keeps. */
+const MAX_THROWN_TEXT_LENGTH = 200;
+
+/**
+ * Reads one string property off a value without trusting the value.
+ *
+ * Total: the membership test and the read are both contained, because a
+ * `Proxy` can throw from its `has` or `get` trap and an accessor — including
+ * an `Error` subclass's own `name` or `message` — can throw from its getter.
+ * Either throw is read as an absent property.
+ *
+ * @param source Value to read from.
+ * @param field Property name to read.
+ * @returns The property value, capped in length, or `undefined` where it is
+ *   absent, unreadable, not a string or empty.
+ */
+function readThrownString(
+  source: object,
+  field: string
+): string | undefined {
+  let candidate: unknown;
+
+  try {
+    if (!(field in source)) {
+      return undefined;
+    }
+
+    candidate = Reflect.get(source, field);
+  } catch {
+    return undefined;
+  }
+
+  return typeof candidate === 'string' && candidate.length > 0
+    ? candidate.slice(0, MAX_THROWN_TEXT_LENGTH)
+    : undefined;
+}
+
+/**
+ * Reduces a caught value to two report fields, for the one path that needs
+ * text: a sink that implements no `failure` channel.
+ *
+ * THE INPUT LAYER'S ONLY SUCH REDUCTION. It is total — it accepts any value,
+ * including a `Proxy` whose traps throw, an object whose `toString` throws
+ * and a symbol, returns on every path and throws on none — and both fields
+ * are capped. Every other path carries the caught value unconverted through
+ * `InputReporter.failure`, so nothing else in src/input/ converts one.
+ *
+ * @param thrown The caught value, of any type.
+ * @returns `errorName` and `errorMessage`, both populated.
+ */
+function describeThrownForFields(thrown: unknown): InputReportFields {
+  if (typeof thrown === 'object' && thrown !== null) {
+    return {
+      errorName: readThrownString(thrown, 'name') ?? UNKNOWN_THROWN_NAME,
+      errorMessage:
+        readThrownString(thrown, 'message') ?? UNKNOWN_THROWN_MESSAGE,
+    };
+  }
+
+  if (
+    typeof thrown === 'string' ||
+    typeof thrown === 'number' ||
+    typeof thrown === 'boolean'
+  ) {
+    return {
+      errorName: UNKNOWN_THROWN_NAME,
+      errorMessage: String(thrown).slice(0, MAX_THROWN_TEXT_LENGTH),
+    };
+  }
+
+  return {
+    errorName: UNKNOWN_THROWN_NAME,
+    errorMessage: UNKNOWN_THROWN_MESSAGE,
+  };
+}
+
 /**
  * Wraps a reporter so no member of it can throw into its caller.
  *
- * A `log`, `count`, `startSpan` or span `end` that throws is swallowed at
- * this boundary: the throw does not reach the input path that reported, and
- * it is not reported back through the same sink. A `startSpan` that throws
- * yields the no-op span instead.
+ * A `log`, `count`, `failure`, `startSpan` or span `end` that throws is
+ * swallowed at this boundary: the throw does not reach the input path that
+ * reported, and it is not reported back through the same sink. A
+ * `startSpan` that throws yields the no-op span instead.
+ *
+ * `failure` is also COMPLETED here: the returned reporter always implements
+ * the channel, and a wrapped sink that implements none of its own still
+ * receives the report — through its `log` channel, with the caught value's
+ * own name and message added as fields by the one total reduction in this
+ * module. A module under src/input/ therefore reports a caught value
+ * through `failure` and never flattens one itself.
  *
  * Every function in this module that accepts a reporter, and
  * `attachTouchInput` in src/input/touch-input.ts, wraps its reporter here
@@ -348,6 +506,34 @@ export function createSafeInputReporter(
     count(metric: string, fields?: InputReportFields): void {
       try {
         reporter.count(metric, fields);
+      } catch {
+        return;
+      }
+    },
+
+    failure(
+      level: InputReportLevel,
+      message: string,
+      thrown: unknown,
+      fields?: InputReportFields
+    ): void {
+      const report = reporter.failure;
+
+      if (report !== undefined) {
+        try {
+          report.call(reporter, level, message, thrown, fields);
+        } catch {
+          return;
+        }
+
+        return;
+      }
+
+      try {
+        reporter.log(level, message, {
+          ...(fields ?? {}),
+          ...describeThrownForFields(thrown),
+        });
       } catch {
         return;
       }
@@ -412,6 +598,51 @@ function mapActions<T>(
   };
 }
 
+/** Prefix `KeyboardEvent.code` gives a digit key. */
+const DIGIT_CODE_PREFIX = 'Digit';
+
+/** The slot list a binding whose payload addresses no index carries. */
+const EMPTY_SLOTS: readonly InputBindingSlot[] = Object.freeze([]);
+
+/** How many reward offers one draw presents. From AAP R8: one of three. */
+export const REWARD_SLOT_COUNT = 3;
+
+/** How many relic slots a keyboard press can address. */
+export const RELIC_SLOT_COUNT = 9;
+
+/**
+ * Builds one indexed slot per digit, from `1` up.
+ *
+ * The digits are the DEFAULT keys, and each slot states its index alongside
+ * them; a remap replaces the keys and keeps the index.
+ *
+ * @param count How many slots to build.
+ * @returns The frozen slot list, index 0 first.
+ */
+function digitSlots(count: number): readonly InputBindingSlot[] {
+  const slots: InputBindingSlot[] = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const digit = String(index + 1);
+
+    slots.push(
+      Object.freeze({
+        index,
+        keys: Object.freeze([digit]),
+        codes: Object.freeze([`${DIGIT_CODE_PREFIX}${digit}`]),
+      }),
+    );
+  }
+
+  return Object.freeze(slots);
+}
+
+/** The three reward offers, addressed by the digits 1 to 3 by default. */
+const REWARD_SLOTS = digitSlots(REWARD_SLOT_COUNT);
+
+/** The nine relic slots, unbound by default. */
+const RELIC_SLOTS = digitSlots(RELIC_SLOT_COUNT);
+
 /**
  * Returns a deeply frozen copy of `binding`, with `modifierSuppressed` resolved
  * to an explicit boolean and each array copied before freezing.
@@ -427,7 +658,33 @@ function freezeBinding(binding: InputBinding): InputBinding {
     contexts: Object.freeze(binding.contexts.slice()),
     preventDefault: binding.preventDefault,
     modifierSuppressed: binding.modifierSuppressed !== false,
+    slots: freezeSlots(binding.slots),
   });
+}
+
+/**
+ * Returns a deeply frozen copy of a slot list, with each slot's key and code
+ * lists copied before freezing.
+ *
+ * @param slots Slots to copy. Absent yields the shared empty list.
+ * @returns The frozen copy.
+ */
+function freezeSlots(
+  slots: readonly InputBindingSlot[] | undefined,
+): readonly InputBindingSlot[] {
+  if (slots === undefined || slots.length === 0) {
+    return EMPTY_SLOTS;
+  }
+
+  return Object.freeze(
+    slots.map((slot) =>
+      Object.freeze({
+        index: slot.index,
+        keys: Object.freeze(slot.keys.slice()),
+        codes: Object.freeze(slot.codes.slice()),
+      }),
+    ),
+  );
 }
 
 /**
@@ -506,7 +763,8 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // The three digits address the three reward offers.
+  // The three digits address the three reward offers, and `slots` states which
+  // offer each digit addresses.
   selectReward: {
     action: 'selectReward',
     keys: ['1', '2', '3'],
@@ -514,6 +772,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     contexts: ['overlay'],
     preventDefault: true,
     modifierSuppressed: true,
+    slots: REWARD_SLOTS,
   },
 
   // Activated through the stage progress screen's own control.
@@ -536,7 +795,9 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Activated through the relic tray's own controls.
+  // Activated through the relic tray's own controls, and by a key bound to one
+  // of the indexed slots below. No key is bound by default, so the slots carry
+  // the indices a remap will address.
   activateRelic: {
     action: 'activateRelic',
     keys: [],
@@ -544,6 +805,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     contexts: ['game'],
     preventDefault: true,
     modifierSuppressed: true,
+    slots: RELIC_SLOTS,
   },
 
   // Activated through the settings control.
@@ -598,6 +860,15 @@ export interface ResolvedInput {
    * matched `InputBinding.preventDefault`.
    */
   readonly preventDefault: boolean;
+
+  /**
+   * Zero-based payload index the press addresses, read off the matched
+   * `InputBindingSlot`.
+   *
+   * `0` where the binding declares no slots, or where none of them matched, so
+   * an action whose payload is not an index always carries `0`.
+   */
+  readonly payloadIndex: number;
 }
 
 /**
@@ -711,10 +982,54 @@ export function resolveInput(
     return Object.freeze({
       action,
       preventDefault: binding.preventDefault,
+      payloadIndex: resolveSlotIndex(binding, lowerCasedKey, code),
     });
   }
 
   return null;
+}
+
+/**
+ * Reads the payload index a press addresses off the binding's slots.
+ *
+ * The index comes off the slot, never off the text of the key: a slot remapped
+ * from `1` to `F1` still addresses the offer it always addressed.
+ *
+ * @param binding Binding that matched.
+ * @param lowerCasedKey Lower-cased `KeyboardEvent.key`.
+ * @param code `KeyboardEvent.code`.
+ * @returns The matched slot's index, or `0` when none matches.
+ */
+function resolveSlotIndex(
+  binding: InputBinding,
+  lowerCasedKey: string,
+  code: string,
+): number {
+  const slots = binding.slots;
+
+  if (slots === undefined || slots.length === 0) {
+    return 0;
+  }
+
+  for (const slot of slots) {
+    if (lowerCasedKey.length > 0) {
+      for (const bound of slot.keys) {
+        if (bound.toLowerCase() === lowerCasedKey) {
+          return slot.index;
+        }
+      }
+    }
+
+    if (code.length > 0) {
+      for (const bound of slot.codes) {
+        if (bound === code) {
+          return slot.index;
+        }
+      }
+    }
+  }
+
+  return 0;
 }
 
 /**
@@ -762,6 +1077,7 @@ function mergeBinding(
     preventDefault: override.preventDefault ?? base.preventDefault,
     modifierSuppressed:
       override.modifierSuppressed ?? base.modifierSuppressed,
+    slots: override.slots ?? base.slots,
   });
 }
 
@@ -865,9 +1181,6 @@ const UNBOUND_LABEL = 'Not bound';
 
 /** Prefix `KeyboardEvent.code` gives a letter key. */
 const LETTER_CODE_PREFIX = 'Key';
-
-/** Prefix `KeyboardEvent.code` gives a digit key. */
-const DIGIT_CODE_PREFIX = 'Digit';
 
 /**
  * Spoken label for each named key, indexed by its lower-cased
@@ -1023,6 +1336,11 @@ export function serializeKeymap(keymap: Keymap): SerializedKeymap {
       contexts: binding.contexts.slice(),
       preventDefault: binding.preventDefault,
       modifierSuppressed: binding.modifierSuppressed !== false,
+      slots: (binding.slots ?? EMPTY_SLOTS).map((slot) => ({
+        index: slot.index,
+        keys: slot.keys.slice(),
+        codes: slot.codes.slice(),
+      })),
     };
   });
 }
@@ -1116,6 +1434,16 @@ export const MAX_KEYMAP_ENTRIES_PER_LIST = 8;
 export const MAX_KEYMAP_STRING_LENGTH = 32;
 
 /**
+ * Most slots one persisted binding may declare.
+ *
+ * Bounds the indexed-payload lists the same way
+ * `MAX_KEYMAP_ENTRIES_PER_LIST` bounds the key and code lists, and admits the
+ * widest binding the defaults declare, `activateRelic` at
+ * `RELIC_SLOT_COUNT`.
+ */
+export const MAX_KEYMAP_SLOTS = 16;
+
+/**
  * Largest number of individual unknown-action reports one payload
  * produces. Past this count the names are no longer reported one by one
  * and a single total is reported instead.
@@ -1149,7 +1477,8 @@ function truncateForReport(value: string): string {
 export type KeymapLimitName =
   | 'propertyCount'
   | 'entriesPerList'
-  | 'stringLength';
+  | 'stringLength'
+  | 'slotCount';
 
 /**
  * One broken limit, as a report carries it.
@@ -1179,6 +1508,12 @@ export interface KeymapLimitViolation {
 
 /** Fields of a persisted binding whose entries are strings. */
 const BOUNDED_LIST_FIELDS: readonly string[] = ['keys', 'codes', 'contexts'];
+
+/** Property a persisted binding carries its indexed slots under. */
+const SLOTS_FIELD = 'slots';
+
+/** Fields of a persisted slot whose entries are strings. */
+const SLOT_LIST_FIELDS: readonly string[] = ['keys', 'codes'];
 
 /**
  * Measures a persisted keymap text the way Web Storage charges for it.
@@ -1267,6 +1602,82 @@ function findKeymapLimitViolation(
             maximum: MAX_KEYMAP_STRING_LENGTH,
             action: name,
             field,
+          };
+        }
+      }
+    }
+
+    const slotViolation = findSlotLimitViolation(entry, name);
+
+    if (slotViolation !== null) {
+      return slotViolation;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Measures one persisted binding's `slots` list against the slot, entry and
+ * string-length limits.
+ *
+ * @param entry Persisted binding to measure.
+ * @param action Action the binding describes, for reporting.
+ * @returns The first violation found, or `null`.
+ */
+function findSlotLimitViolation(
+  entry: Record<string, unknown>,
+  action: string,
+): KeymapLimitViolation | null {
+  const slots = entry[SLOTS_FIELD];
+
+  if (!isUnknownArray(slots)) {
+    return null;
+  }
+
+  if (slots.length > MAX_KEYMAP_SLOTS) {
+    return {
+      limit: 'slotCount',
+      observed: slots.length,
+      maximum: MAX_KEYMAP_SLOTS,
+      action,
+      field: SLOTS_FIELD,
+    };
+  }
+
+  for (const slot of slots) {
+    if (!isPlainRecord(slot)) {
+      continue;
+    }
+
+    for (const field of SLOT_LIST_FIELDS) {
+      const value = slot[field];
+
+      if (!isUnknownArray(value)) {
+        continue;
+      }
+
+      if (value.length > MAX_KEYMAP_ENTRIES_PER_LIST) {
+        return {
+          limit: 'entriesPerList',
+          observed: value.length,
+          maximum: MAX_KEYMAP_ENTRIES_PER_LIST,
+          action,
+          field: `${SLOTS_FIELD}.${field}`,
+        };
+      }
+
+      for (const item of value) {
+        if (
+          typeof item === 'string' &&
+          item.length > MAX_KEYMAP_STRING_LENGTH
+        ) {
+          return {
+            limit: 'stringLength',
+            observed: item.length,
+            maximum: MAX_KEYMAP_STRING_LENGTH,
+            action,
+            field: `${SLOTS_FIELD}.${field}`,
           };
         }
       }
@@ -1460,6 +1871,8 @@ function readBinding(
     reporter
   );
 
+  const slots = readSlotList(entry, action, reporter);
+
   return freezeBinding({
     action,
     keys: keys ?? fallback.keys,
@@ -1467,7 +1880,139 @@ function readBinding(
     contexts: contexts ?? fallback.contexts,
     preventDefault: preventDefault ?? fallback.preventDefault,
     modifierSuppressed: modifierSuppressed ?? fallback.modifierSuppressed,
+    slots: slots ?? fallback.slots,
   });
+}
+
+/**
+ * Reads a persisted binding's indexed slots.
+ *
+ * A slot is accepted only with a finite, non-negative integer `index` and at
+ * least one usable key or code; anything else is reported and dropped, so a
+ * malformed slot cannot publish a payload naming a target that does not exist.
+ *
+ * @param source Persisted binding to read from.
+ * @param action Action the binding describes, for reporting.
+ * @param reporter Sink for rejected values.
+ * @returns The accepted slots, or `null` when the property is absent or not an
+ *   array. An explicitly empty array is returned as such.
+ */
+function readSlotList(
+  source: Record<string, unknown>,
+  action: InputAction,
+  reporter: InputReporter,
+): readonly InputBindingSlot[] | null {
+  if (!Object.prototype.hasOwnProperty.call(source, SLOTS_FIELD)) {
+    return null;
+  }
+
+  const raw = source[SLOTS_FIELD];
+
+  if (!isUnknownArray(raw)) {
+    reporter.log('warn', 'Keymap slot list is not an array; using default.', {
+      action,
+      received: describeRawType(raw),
+    });
+    reporter.count('input.keymap.deserialize.invalidSlots', { action });
+
+    return null;
+  }
+
+  const accepted: InputBindingSlot[] = [];
+  const seen = new Set<number>();
+
+  let rejected = 0;
+
+  for (const candidate of raw) {
+    const slot = readSlot(candidate);
+
+    if (slot === null || seen.has(slot.index)) {
+      rejected += 1;
+
+      continue;
+    }
+
+    seen.add(slot.index);
+    accepted.push(slot);
+  }
+
+  if (rejected > 0) {
+    reporter.log('warn', 'Keymap slot entries were rejected.', {
+      action,
+      rejected,
+      accepted: accepted.length,
+    });
+    reporter.count('input.keymap.deserialize.rejectedSlot', {
+      action,
+      rejected,
+    });
+  }
+
+  return Object.freeze(accepted);
+}
+
+/**
+ * Reads one persisted slot.
+ *
+ * @param candidate Value to read.
+ * @returns The slot, or `null` when it is unusable.
+ */
+function readSlot(candidate: unknown): InputBindingSlot | null {
+  if (!isPlainRecord(candidate)) {
+    return null;
+  }
+
+  const index = candidate['index'];
+
+  if (
+    typeof index !== 'number' ||
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index >= MAX_KEYMAP_SLOTS
+  ) {
+    return null;
+  }
+
+  const keys = readSlotStrings(candidate['keys']);
+  const codes = readSlotStrings(candidate['codes']);
+
+  if (keys.length === 0 && codes.length === 0) {
+    return null;
+  }
+
+  return Object.freeze({
+    index,
+    keys: Object.freeze(keys),
+    codes: Object.freeze(codes),
+  });
+}
+
+/**
+ * Reads a slot's key or code list, keeping only usable strings.
+ *
+ * @param value Value to read.
+ * @returns The accepted strings, possibly empty.
+ */
+function readSlotStrings(value: unknown): string[] {
+  if (!isUnknownArray(value)) {
+    return [];
+  }
+
+  const accepted: string[] = [];
+
+  for (const item of value) {
+    if (
+      typeof item !== 'string' ||
+      item.length === 0 ||
+      item.length > MAX_KEYMAP_STRING_LENGTH
+    ) {
+      continue;
+    }
+
+    accepted.push(item);
+  }
+
+  return accepted;
 }
 
 /**

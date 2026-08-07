@@ -14,8 +14,6 @@
  * imports nothing, reads no DOM, consumes no randomness and performs no I/O.
  */
 
-/* ===== 1. Stage goals, the persisted data ===== */
-
 /**
  * The measurable quantities a stage goal can target: `'highest-tile'` measures
  * the highest tile value on the board, `'score-threshold'` the run score. These
@@ -23,15 +21,11 @@
  */
 export type StageGoalKind = 'highest-tile' | 'score-threshold';
 
-/**
- * A stage cleared once the highest tile value on the board reaches `target`.
- */
 interface HighestTileStageGoal {
   readonly kind: 'highest-tile';
   readonly target: number;
 }
 
-/** A stage cleared once the run score reaches `target`. */
 interface ScoreThresholdStageGoal {
   readonly kind: 'score-threshold';
   readonly target: number;
@@ -46,11 +40,7 @@ interface ScoreThresholdStageGoal {
  */
 export type StageGoal = HighestTileStageGoal | ScoreThresholdStageGoal;
 
-/* ===== 2. Progress evaluation types ===== */
-
-/** The engine facts a stage goal is evaluated against. */
 export interface StageProgressInput {
-  /** The run score. */
   readonly score: number;
   /**
    * The highest tile value present on the board, and 0 for a board holding no
@@ -59,18 +49,17 @@ export interface StageProgressInput {
   readonly highestTileValue: number;
 }
 
-/** The result of evaluating one stage goal against one board state. */
 export interface StageGoalProgress {
   /**
    * The measured quantity: the highest tile value for a `'highest-tile'` goal,
-   * the run score for a `'score-threshold'` goal. A HUD renders it against
-   * `StageGoal.target` without re-deriving either number.
+   * the run score for a `'score-threshold'` goal, so a consumer renders it
+   * against `StageGoal.target` without re-deriving either number.
    */
   readonly achieved: number;
   /**
    * `achieved / target`, clamped to the closed interval [0, 1] and always
-   * finite. Persisted as the run-state envelope's `goalProgress` field; its unit
-   * is a fraction of the target, not a count and not a percentage.
+   * finite. Persisted as the run-state envelope's `goalProgress` field; its
+   * unit is a fraction of the target, not a count and not a percentage.
    */
   readonly progress: number;
   /**
@@ -80,21 +69,12 @@ export interface StageGoalProgress {
   readonly cleared: boolean;
 }
 
-/* ===== 3. Guards and construction ===== */
-
 /**
  * Hard ceiling applied to every derived stage target, in tile-value or score
- * units. `Number.MAX_SAFE_INTEGER`.
+ * units.
  */
 const ABSOLUTE_TARGET_CEILING = Number.MAX_SAFE_INTEGER;
 
-/**
- * Rejects an argument that is not a finite number.
- *
- * @param name the argument name quoted in the message.
- * @param value the argument to check.
- * @throws RangeError when `value` is `NaN`, `Infinity` or `-Infinity`.
- */
 function assertFinite(name: string, value: number): void {
   if (!Number.isFinite(value)) {
     throw new RangeError(
@@ -104,12 +84,6 @@ function assertFinite(name: string, value: number): void {
   }
 }
 
-/**
- * Rejects a stage index outside the domain of `stageGoalForIndex()`.
- *
- * @param stageIndex the zero-based index to check.
- * @throws RangeError when `stageIndex` is not a non-negative integer.
- */
 function assertStageIndex(stageIndex: number): void {
   if (!Number.isInteger(stageIndex) || stageIndex < 0) {
     throw new RangeError(
@@ -134,14 +108,6 @@ function clampUnitInterval(value: number): number {
   return value;
 }
 
-/**
- * Bounds a computed target to a finite, non-negative integer.
- *
- * @param raw the computed, possibly non-finite target.
- * @param maxTarget the configured upper bound, itself clamped into
- *   [0, `ABSOLUTE_TARGET_CEILING`]; a non-finite bound resolves to the ceiling.
- * @returns a finite integer in [0, min(`maxTarget`, `ABSOLUTE_TARGET_CEILING`)].
- */
 function boundedTarget(raw: number, maxTarget: number): number {
   const ceiling = Number.isFinite(maxTarget)
     ? Math.min(Math.max(0, maxTarget), ABSOLUTE_TARGET_CEILING)
@@ -150,15 +116,6 @@ function boundedTarget(raw: number, maxTarget: number): number {
   return Math.round(Math.max(0, bounded));
 }
 
-/**
- * Builds a `StageGoal` from a kind and a target — the single construction site
- * in this module. The returned object is freshly allocated, unfrozen and plain.
- *
- * @param kind the quantity the goal measures.
- * @param target the value that quantity must reach; carried through unchanged.
- * @returns a new stage goal.
- * @throws RangeError when `kind` is outside `StageGoalKind`.
- */
 function createStageGoal(kind: StageGoalKind, target: number): StageGoal {
   switch (kind) {
     case 'highest-tile':
@@ -175,21 +132,14 @@ function createStageGoal(kind: StageGoalKind, target: number): StageGoal {
   }
 }
 
-/* ===== 4. Goal evaluation ===== */
-
 /**
- * Evaluates one stage goal against one board state, at the `onAfterMove` hook
- * to track progress and at `onStageEnd` to resolve whether the stage cleared.
- * Pure: identical arguments always produce a deep-equal result.
+ * Evaluates one stage goal against one board state. Pure: identical arguments
+ * always produce a deep-equal result.
  *
  * In the returned value, `achieved` is the measured quantity for the goal's
  * kind, `cleared` is `achieved >= goal.target`, and `progress` is finite within
  * [0, 1] — a target of 0 or below yields 1 when cleared and 0 otherwise.
  *
- * @param goal the stage's clear condition.
- * @param input the measured engine facts.
- * @returns the measured quantity, the clamped fraction of the target reached,
- *   and whether the goal is met.
  * @throws RangeError when `goal.target`, `input.score` or
  *   `input.highestTileValue` is not a finite number, or when `goal` carries a
  *   `kind` outside `StageGoalKind`.
@@ -233,17 +183,10 @@ export function evaluateStageGoal(
   return { achieved, progress, cleared };
 }
 
-/* ===== 5. The progression curve ===== */
-
-/** The parameters that extend a ladder past its last explicit entry. */
 interface StageLadderExtension {
-  /** The kind every extended stage goal carries. */
   readonly kind: StageGoalKind;
-  /** The target of the first extended stage. */
   readonly baseTarget: number;
-  /** The factor applied once per extended stage after the first. */
   readonly growthFactor: number;
-  /** The upper bound applied to every extended target. */
   readonly maxTarget: number;
 }
 
@@ -252,8 +195,7 @@ interface StageLadderExtension {
  * indices 0 through `ladder.length - 1`, in stage order, and `extension`
  * supplies every index at or beyond that length, so `stageGoalForIndex()` is
  * total over every non-negative integer index, for any ladder length including
- * zero. Plain JSON data throughout, on the serialisation contract in the module
- * header.
+ * zero.
  */
 export interface StageConfig {
   readonly ladder: readonly StageGoal[];
@@ -261,28 +203,25 @@ export interface StageConfig {
 }
 
 /**
- * Derives the goal for one stage. `stageIndex` is ZERO-BASED: index 0 is a run's
- * first stage, matching the run-state envelope and the `stage:start` payload.
+ * Derives the goal for one stage. `stageIndex` is ZERO-BASED: index 0 is a
+ * run's first stage, matching the run-state envelope and the `stage:start`
+ * payload.
  *
- * An index below `stageConfig.ladder.length` returns a copy of the corresponding
- * explicit ladder entry, whose `kind` is carried through unchanged and whose
- * `target` is rounded to an integer and bounded into
+ * An index below `stageConfig.ladder.length` returns a copy of the
+ * corresponding explicit ladder entry, whose `kind` is carried through
+ * unchanged and whose `target` is rounded to an integer and bounded into
  * [0, `Number.MAX_SAFE_INTEGER`]. Every index at or beyond that length is
  * derived as `baseTarget * growthFactor ** (stageIndex - ladder.length)`,
  * rounded and bounded into
  * [0, min(`extension.maxTarget`, `Number.MAX_SAFE_INTEGER`)]. Both branches
  * bound their target the same way, so the returned `target` is always a finite
- * non-negative integer at every index and for every ladder — including one that
- * came back out of `JSON.parse`, where the type system no longer guarantees
- * anything about its numbers, and including a product that overflows to
- * `Infinity` or a non-finite extension parameter.
+ * non-negative integer at every index and for every ladder — including one
+ * that came back out of `JSON.parse`, and including a product that overflows
+ * to `Infinity` or a non-finite extension parameter.
  *
  * Deterministic: consumes no randomness and reads no clock. Returns a freshly
  * allocated goal on every call, never a reference into `stageConfig`.
  *
- * @param stageIndex the zero-based stage index.
- * @param stageConfig the progression curve to read.
- * @returns the goal for that stage.
  * @throws RangeError when `stageIndex` is not a non-negative integer, or when
  *   the resolved entry carries a `kind` outside `StageGoalKind`.
  */
@@ -297,7 +236,9 @@ export function stageGoalForIndex(
   if (stageIndex < ladder.length) {
     const entry = ladder[stageIndex];
     if (entry !== undefined) {
-      // Explicit entries are bounded on the same terms as derived ones:
+      // Explicit entries are bounded on the same terms as derived ones: a
+      // `StageConfig` can arrive from JSON, where `target` is only a number,
+      // so the produced goal is normalised rather than copied.
       // a `StageConfig` can arrive from JSON, where `target` is only a
       // number, so the produced goal is normalised rather than copied.
       return createStageGoal(
@@ -317,36 +258,38 @@ export function stageGoalForIndex(
   );
 }
 
-/* ===== 6. Default curve ===== */
-
-/** The kind carried by every explicit entry of the default ladder. */
 const DEFAULT_LADDER_KIND: StageGoalKind = 'highest-tile';
 
 /**
  * The targets of the default ladder, in stage order: eight strictly increasing
- * values of the tile ladder, ending at 2048. Decision DL-STAGE-01.
+ * values of the tile ladder, ending at 2048.
  */
 const DEFAULT_LADDER_TARGETS: readonly number[] = Object.freeze([
   16, 32, 64, 128, 256, 512, 1024, 2048,
 ]);
 
-/** The kind carried by every extended stage of the default curve. */
 const DEFAULT_EXTENSION_KIND: StageGoalKind = 'highest-tile';
 
-const DEFAULT_EXTENSION_BASE_TARGET = 4096; // Decision DL-STAGE-02.
+/**
+ * The target of the default curve's first extended stage: the tile ladder's
+ * next value above 2048.
+ */
+const DEFAULT_EXTENSION_BASE_TARGET = 4096;
 
 /**
- * The target of the default curve's first extended stage: the tile ladder's next
- * value above 2048.
+ * The growth applied per extended stage: one further step of the tile ladder.
  */
-const DEFAULT_EXTENSION_GROWTH_FACTOR = 2; // Decision DL-STAGE-02.
-
-/** The growth applied per extended stage: one further step of the tile ladder. */
-const DEFAULT_EXTENSION_MAX_TARGET = 2 ** 52; // Decision DL-STAGE-02.
+const DEFAULT_EXTENSION_GROWTH_FACTOR = 2;
 
 /**
  * The upper bound on a default extended target: 2^52, the largest power of two
  * below `Number.MAX_SAFE_INTEGER`.
+ */
+const DEFAULT_EXTENSION_MAX_TARGET = 2 ** 52;
+
+/**
+ * Freezes a curve at every level: the object, its `ladder`, each ladder entry
+ * and its `extension`.
  */
 function deepFreezeStageConfig(config: StageConfig): StageConfig {
   for (const goal of config.ladder) {
@@ -358,11 +301,8 @@ function deepFreezeStageConfig(config: StageConfig): StageConfig {
 }
 
 /**
- * Freezes a curve at every level: the object, its `ladder`, each ladder entry
- * and its `extension`.
- *
- * @param config the curve to freeze in place.
- * @returns the same object, frozen.
+ * Builds the default progression curve, freshly allocated and unfrozen on every
+ * call, sharing no object with `DEFAULT_STAGE_CONFIG` or an earlier return.
  */
 export function createDefaultStageConfig(): StageConfig {
   return {
@@ -378,12 +318,7 @@ export function createDefaultStageConfig(): StageConfig {
   };
 }
 
-/**
- * Builds the default progression curve, freshly allocated and unfrozen on every
- * call, sharing no object with `DEFAULT_STAGE_CONFIG` or an earlier return.
- *
- * @returns a new default curve.
- */
+/** The default progression curve, frozen at every level. */
 export const DEFAULT_STAGE_CONFIG: StageConfig = deepFreezeStageConfig(
   /* @__PURE__ */ createDefaultStageConfig(),
 );

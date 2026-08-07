@@ -1,48 +1,28 @@
-// Contract suite for src/engine/engine-events.ts, AAP Contract 1: the typed
-// engine event contract and its emitter. Figure 1, As-Is Architecture, records
-// the controller pushing to the actuator; Figure 2, To-Be Architecture, records
-// the engine emitting and holding no view reference. The assertions below are
-// the executable evidence that the second replaced the first.
+// Contract suite for src/engine/engine-events.ts: the typed engine event
+// contract and its emitter. The engine emits and holds no view reference, where
+// the retired controller pushed to an actuator; the assertions below are the
+// executable evidence that the second replaced the first.
 //
-// Constructs pinned, with the vanilla line range of each:
-//   js/keyboard_input_manager.js L2      the listener table
-//   js/keyboard_input_manager.js L18-L23 on()
-//   js/keyboard_input_manager.js L25-L32 emit()
-//   js/game_manager.js L35-L59           setup(), now stage:start
-//   js/game_manager.js L130-L143         move() entry, now move:before
-//   js/game_manager.js L156-L170         merge branch, now tile:merge
-//   js/game_manager.js L69-L76           addRandomTile(), now tile:spawn
-//   js/grid.js L37-L43                   randomAvailableCell(), the absent
-//                                        spawn position
-//   js/game_manager.js L185-L189         post-move branch, now move:after
-//   js/game_manager.js L91-L97           actuate(), now state:commit
-//   AAP Contract 1                       ENGINE_EVENT_NAMES, no vanilla
-//                                        analogue
-//   AAP Contract 1                       EngineEventPayloadMap, no vanilla
-//                                        analogue
-//   AAP Contract 1                       stage:end, no vanilla analogue
-//   AAP Contract 1                       off(), no vanilla analogue
+// Constructs pinned, and the vanilla construct each came from: the listener
+// table, `on()` and `emit()` of js/keyboard_input_manager.js; `setup()`, now
+// stage:start; the `move()` entry, now move:before; the merge branch, now
+// tile:merge; `addRandomTile()`, now tile:spawn, together with
+// `randomAvailableCell()` and the absent spawn position; the post-move branch,
+// now move:after; and `actuate()`, now state:commit. `ENGINE_EVENT_NAMES`,
+// `EngineEventPayloadMap`, stage:end and `off()` have no vanilla analogue.
 //
-// Consumers the assertions below hold those constructs to:
-//   js/html_actuator.js L10             actuate(grid, metadata)
-//   js/html_actuator.js L16-L22         grid.cells walked by reference
-//   js/html_actuator.js L54, L58        previousPosition, value
-//   js/html_actuator.js L67-L80         previousPosition, mergedFrom
-//   js/local_storage_manager.js L43-L45 bestScore as a string or 0
-//   js/game_manager.js L80-L82          the relational bestScore comparison
+// The assertions hold those constructs to the consumers the retired view was:
+// `actuate(grid, metadata)`, `grid.cells` walked by reference,
+// `previousPosition` and `value` read off a tile, `mergedFrom` read off a
+// merged tile, `bestScore` arriving as a string or 0, and the relational
+// `bestScore` comparison.
 //
-// Not pinned here, and pinned by the sibling suite named:
-//   pickup order, charge guard, error isolation, payload compounding
-//     -> tests/unit/engine/hook-bus.test.ts
-//   which events one turn emits, and in what order
-//     -> tests/unit/engine/engine.test.ts
-//   js/tile.js L1-L27  -> tests/unit/engine/tile.test.ts
-//   js/grid.js L1-L117 -> tests/unit/engine/grid.test.ts
+// Not pinned here: pickup order, the charge guard, error isolation and payload
+// compounding, which belong to tests/unit/engine/hook-bus.test.ts, and the
+// per-construct suites for tile and grid.
 //
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock library and writes no snapshot.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -79,12 +59,6 @@ import type {
 } from '../../../src/engine/types';
 import { createMergePairBoard } from '../../fixtures/boards';
 
-/* ===== 1. Names, values and cells the assertions use ===== */
-
-/**
- * Every event name AAP Contract 1 declares, in the order one turn reaches
- * them, written out independently of the tuple under test.
- */
 const EXPECTED_EVENT_NAMES: readonly string[] = [
   'stage:start',
   'move:before',
@@ -95,113 +69,61 @@ const EXPECTED_EVENT_NAMES: readonly string[] = [
   'state:commit',
 ];
 
-/** How many event names AAP Contract 1 declares. */
 const EXPECTED_EVENT_NAME_COUNT = 7;
 
-/** The three members `EngineEvents` exposes. */
 const EMITTER_MEMBERS: readonly string[] = ['emit', 'off', 'on'];
 
-/** Run seed `stage:start` carries. */
 const RUN_SEED = 'engine-events-seed';
 
-/** Edge length in cells of the boards these assertions build. */
 const BOARD_SIZE = 4;
 
-/** Zero-based index of the stage these assertions run in. */
 const STAGE_INDEX = 2;
 
-/** Score `state:commit` and `move:after` carry. */
 const COMMIT_SCORE = 128;
 
-/**
- * Best score `state:commit` carries. js/local_storage_manager.js L43-L45
- * returns the raw stored string, and js/game_manager.js L95 placed it here
- * unconverted.
- */
 const STORED_BEST_SCORE = '4096';
 
-/** Column index of the first merge-pair fixture tile. */
 const PAIR_X = 0;
 
-/** Column index of the second merge-pair fixture tile. */
 const PAIR_NEXT_X = 1;
 
-/** Row index of both merge-pair fixture tiles. */
 const PAIR_Y = 0;
 
-/** Face value of both merge-pair fixture tiles. */
 const PAIR_VALUE = 2;
 
-/** Value js/game_manager.js L157 produces from two PAIR_VALUE tiles. */
 const PAIR_MERGED_VALUE = 4;
 
-/** Face value of the second pair these assertions merge. */
 const SECOND_PAIR_VALUE = 8;
 
-/** Value js/game_manager.js L157 produces from two SECOND_PAIR_VALUE tiles. */
 const SECOND_PAIR_MERGED_VALUE = 16;
 
-/** Cell a spawned tile occupies. */
 const SPAWN_CELL: Position = { x: 3, y: 2 };
 
-/** Face value js/game_manager.js L71 spawns nine times in ten. */
 const SPAWN_VALUE = 2;
 
-/** Goal `stage:start` and the stage slice carry. */
 const STAGE_GOAL: StageGoal = {
   kind: 'score-threshold',
   target: 500,
 };
 
-/** How many listeners the append-only assertions register on one event. */
 const APPEND_LISTENER_COUNT = 3;
 
-/* ===== 2. Type-level assertion helper ===== */
-
-/**
- * Resolves to `true` where `Left` and `Right` are mutually assignable, and to
- * `false` otherwise. Assigning `true` to a binding of this type compiles only
- * where the two types match, so the assignment itself is the assertion.
- */
 type Exact<Left, Right> = [Left] extends [Right]
   ? [Right] extends [Left]
     ? true
     : false
   : false;
 
-/* ===== 3. Board and tile builders ===== */
-
-/**
- * Builds a live board from the merge-pair fixture.
- *
- * @returns A grid holding the fixture's two equal tiles in row 0.
- */
 function createBoard(): Grid {
   const board = createMergePairBoard(BOARD_SIZE);
 
   return new Grid(board.grid.size, board.grid.cells);
 }
 
-/**
- * Builds a tile at a cell.
- *
- * @param x Zero-based column index.
- * @param y Zero-based row index.
- * @param value Face value.
- * @returns A tile carrying no animation state.
- */
 function createTile(x: number, y: number, value: number): Tile {
   return new Tile({ x, y }, value);
 }
 
-/**
- * Builds the merged pair js/game_manager.js L156-L158 recorded as
- * `mergedFrom = [tile, next]`, with both tiles out of the lattice as
- * js/game_manager.js L160-L161 left them.
- *
- * @param value Face value of both source tiles.
- * @returns The source tile, the target tile and the tile they produce.
- */
 function createMergedTriple(value: number): {
   source: Tile;
   target: Tile;
@@ -219,14 +141,6 @@ function createMergedTriple(value: number): {
   return { source, target, merged };
 }
 
-/* ===== 4. Payload builders ===== */
-
-/**
- * Builds a `stage:start` payload.
- *
- * @param overrides Members to replace on the default payload.
- * @returns A complete payload.
- */
 function createStageStart(
   overrides: Partial<StageStartEvent> = {},
 ): StageStartEvent {
@@ -239,12 +153,6 @@ function createStageStart(
   };
 }
 
-/**
- * Builds a `move:before` payload, whose `cancelled` member is mutable.
- *
- * @param overrides Members to replace on the default payload.
- * @returns A complete payload dispatched with `cancelled` false.
- */
 function createMoveBefore(
   overrides: Partial<MoveBeforeEvent> = {},
 ): MoveBeforeEvent {
@@ -256,12 +164,6 @@ function createMoveBefore(
   };
 }
 
-/**
- * Builds a `tile:merge` payload.
- *
- * @param value Face value of both tiles the merge consumes.
- * @returns A complete payload whose tiles are the live pair.
- */
 function createTileMerge(value: number = PAIR_VALUE): TileMergeEvent {
   const { source, target, merged } = createMergedTriple(value);
 
@@ -273,12 +175,6 @@ function createTileMerge(value: number = PAIR_VALUE): TileMergeEvent {
   };
 }
 
-/**
- * Builds a `tile:spawn` payload.
- *
- * @param overrides Members to replace on the default payload.
- * @returns A complete payload.
- */
 function createTileSpawn(
   overrides: Partial<TileSpawnEvent> = {},
 ): TileSpawnEvent {
@@ -289,12 +185,6 @@ function createTileSpawn(
   };
 }
 
-/**
- * Builds a `move:after` payload.
- *
- * @param overrides Members to replace on the default payload.
- * @returns A complete payload.
- */
 function createMoveAfter(
   overrides: Partial<MoveAfterEvent> = {},
 ): MoveAfterEvent {
@@ -309,12 +199,6 @@ function createMoveAfter(
   };
 }
 
-/**
- * Builds a `stage:end` payload.
- *
- * @param overrides Members to replace on the default payload.
- * @returns A complete payload.
- */
 function createStageEnd(
   overrides: Partial<StageEndEvent> = {},
 ): StageEndEvent {
@@ -326,13 +210,6 @@ function createStageEnd(
   };
 }
 
-/**
- * Builds a `state:commit` payload, the successor to the payload
- * js/game_manager.js L91-L97 pushed.
- *
- * @param overrides Members to replace on the default payload.
- * @returns A complete payload carrying the neutral stage and relic slices.
- */
 function createStateCommit(
   overrides: Partial<StateCommitEvent> = {},
 ): StateCommitEvent {
@@ -349,15 +226,6 @@ function createStateCommit(
   };
 }
 
-/* ===== 5. Emission recorders ===== */
-
-/**
- * Registers a listener that records every payload it is handed.
- *
- * @param events Emitter to register on.
- * @param event Event to listen for.
- * @returns The array the listener appends to, in emission order.
- */
 function recordEmissions<K extends EngineEventName>(
   events: EngineEvents,
   event: K,
@@ -371,14 +239,6 @@ function recordEmissions<K extends EngineEventName>(
   return received;
 }
 
-/**
- * Registers a listener that appends `label` to `order` when it runs.
- *
- * @param events Emitter to register on.
- * @param order Array every registered listener appends to.
- * @param label Label this listener appends.
- * @returns The handle that detaches this listener.
- */
 function recordOrder(
   events: EngineEvents,
   order: string[],
@@ -388,8 +248,6 @@ function recordOrder(
     order.push(label);
   });
 }
-
-/* ===== 6. The seven event names ===== */
 
 describe('ENGINE_EVENT_NAMES (AAP Contract 1)', () => {
   it('declares exactly the seven event names, in turn order', () => {
@@ -483,8 +341,6 @@ describe('ENGINE_EVENT_NAMES (AAP Contract 1)', () => {
   });
 });
 
-/* ===== 7. Construction ===== */
-
 describe('createEngineEvents (js/keyboard_input_manager.js L1-L16)', () => {
   it('exposes on, off and emit and nothing else (L18-L32)', () => {
     const events = createEngineEvents();
@@ -526,12 +382,9 @@ describe('createEngineEvents (js/keyboard_input_manager.js L1-L16)', () => {
       seen = payload.stageIndex;
     });
     emit('stage:end', createStageEnd({ stageIndex: STAGE_INDEX }));
-
     expect(seen).toBe(STAGE_INDEX);
   });
 });
-
-/* ===== 8. on() appends and never replaces ===== */
 
 describe('EngineEvents.on appends and never replaces ' +
   '(js/keyboard_input_manager.js L18-L23)', () => {
@@ -631,20 +484,16 @@ describe('EngineEvents.on appends and never replaces ' +
     const second = events.on('stage:end', listener);
 
     expect(first).not.toBe(second);
-
     first();
     events.emit('stage:end', createStageEnd());
 
     expect(listener).toHaveBeenCalledTimes(1);
-
     second();
     events.emit('stage:end', createStageEnd());
 
     expect(listener).toHaveBeenCalledTimes(1);
   });
 });
-
-/* ===== 9. emit() is synchronous with a single argument ===== */
 
 describe('EngineEvents.emit is synchronous (js/keyboard_input_manager.js ' +
   'L25-L32)', () => {
@@ -758,8 +607,6 @@ describe('EngineEvents.emit is synchronous (js/keyboard_input_manager.js ' +
   });
 });
 
-/* ===== 10. emit() walks the listeners it began with ===== */
-
 describe('EngineEvents.emit walks the listeners it began with ' +
   '(js/keyboard_input_manager.js L28)', () => {
   it('does not invoke a listener registered during the emission (L28)', () => {
@@ -778,48 +625,110 @@ describe('EngineEvents.emit walks the listeners it began with ' +
     expect(late).toHaveBeenCalledTimes(1);
   });
 
+  // The remover is registered FIRST and the listener it removes SECOND, so the
+  // removal happens while the walk is still short of its target. A walk over
+  // the live array would skip that target; the copy taken before the walk
+  // reaches it anyway. Registered the other way round the target would have run
+  // before the removal and the case would pass either way.
   it('invokes a listener removed during the emission (L28)', () => {
     const events = createEngineEvents();
     const order: string[] = [];
-    const second = recordOrder(events, order, 'second');
+    let removeSecond: (() => void) | null = null;
 
     events.on('stage:end', () => {
       order.push('first');
-      second();
+      removeSecond?.();
     });
+
+    removeSecond = recordOrder(events, order, 'second');
+
     events.emit('stage:end', createStageEnd());
 
-    expect(order).toEqual(['second', 'first']);
+    expect(order).toEqual(['first', 'second']);
 
     order.length = 0;
     events.emit('stage:end', createStageEnd());
 
     expect(order).toEqual(['first']);
   });
+
+  it('invokes a later listener removed by an earlier one, off() too (L28)',
+    () => {
+      const events = createEngineEvents();
+      const order: string[] = [];
+      const second = (): void => {
+        order.push('second');
+      };
+
+      events.on('stage:end', () => {
+        order.push('first');
+        events.off('stage:end', second);
+      });
+      events.on('stage:end', second);
+      events.emit('stage:end', createStageEnd());
+
+      expect(order).toEqual(['first', 'second']);
+
+      order.length = 0;
+      events.emit('stage:end', createStageEnd());
+
+      expect(order).toEqual(['first']);
+    });
+
+  it('invokes every later listener when the first removes them all (L28)',
+    () => {
+      const events = createEngineEvents();
+      const order: string[] = [];
+      const stops: (() => void)[] = [];
+
+      events.on('stage:end', () => {
+        order.push('first');
+
+        for (const stop of stops) {
+          stop();
+        }
+      });
+
+      stops.push(
+        recordOrder(events, order, 'second'),
+        recordOrder(events, order, 'third'),
+      );
+
+      events.emit('stage:end', createStageEnd());
+
+      expect(order).toEqual(['first', 'second', 'third']);
+
+      order.length = 0;
+      events.emit('stage:end', createStageEnd());
+
+      expect(order).toEqual(['first']);
+    });
 });
 
-/* ===== 11. emit() does not isolate a throwing listener ===== */
+/* ===== 11. emit() contains a throwing listener ===== */
 
-// Error isolation, the charge guard, pickup-order dispatch and payload
-// compounding are src/engine/hook-bus.ts, pinned by
-// tests/unit/engine/hook-bus.test.ts. js/keyboard_input_manager.js L28-L30
-// iterated with no try/catch, and this emitter is that iteration.
-describe('EngineEvents.emit does not isolate a throwing listener ' +
+// The charge guard, pickup-order dispatch and payload compounding are
+// src/engine/hook-bus.ts, pinned by tests/unit/engine/hook-bus.test.ts.
+// js/keyboard_input_manager.js L28-L30 iterated with no try/catch, so a
+// throwing view aborted the manager after it had already mutated the board.
+// The emitter contains each listener instead: the emission reaches every
+// listener in the snapshot, and the caught value is reported rather than
+// thrown.
+describe('EngineEvents.emit contains a throwing listener ' +
   '(js/keyboard_input_manager.js L25-L32)', () => {
-  it('propagates a listener error to the caller that emitted (L28-L30)', () => {
+  it('does not propagate a listener error to the caller that emitted', () => {
     const events = createEngineEvents();
-    const failure = new Error('listener failed');
 
     events.on('stage:end', () => {
-      throw failure;
+      throw new Error('listener failed');
     });
 
     expect(() => {
       events.emit('stage:end', createStageEnd());
-    }).toThrow(failure);
+    }).not.toThrow();
   });
 
-  it('does not invoke the listeners after the one that threw (L28-L30)', () => {
+  it('invokes the listeners after the one that threw', () => {
     const events = createEngineEvents();
     const before = vi.fn();
     const after = vi.fn();
@@ -830,14 +739,13 @@ describe('EngineEvents.emit does not isolate a throwing listener ' +
     });
     events.on('stage:end', after);
 
-    expect(() => {
-      events.emit('stage:end', createStageEnd());
-    }).toThrow();
+    events.emit('stage:end', createStageEnd());
+
     expect(before).toHaveBeenCalledTimes(1);
-    expect(after).not.toHaveBeenCalled();
+    expect(after).toHaveBeenCalledTimes(1);
   });
 
-  it('leaves the throwing listener registered (L28-L30)', () => {
+  it('leaves the throwing listener registered', () => {
     const events = createEngineEvents();
     let calls = 0;
 
@@ -846,36 +754,139 @@ describe('EngineEvents.emit does not isolate a throwing listener ' +
       throw new Error('listener failed');
     });
 
-    expect(() => {
-      events.emit('stage:end', createStageEnd());
-    }).toThrow();
-    expect(() => {
-      events.emit('stage:end', createStageEnd());
-    }).toThrow();
+    events.emit('stage:end', createStageEnd());
+    events.emit('stage:end', createStageEnd());
+
     expect(calls).toBe(2);
   });
 
-  it('reports nothing and swallows nothing of its own (L25-L32)', () => {
-    const events = createEngineEvents();
+  it('reports the caught value, its event and its listener index', () => {
+    const reports: {
+      correlationId: string;
+      event: string;
+      listenerIndex: number;
+      error: unknown;
+    }[] = [];
     const thrown = { code: 'not-an-error' };
+    const events = createEngineEvents({
+      correlationId: 'run-42',
+      reporter: {
+        onListenerError: (report): void => {
+          reports.push({
+            correlationId: report.correlationId,
+            event: report.event,
+            listenerIndex: report.listenerIndex,
+            error: report.error,
+          });
+        },
+      },
+    });
 
+    events.on('tile:spawn', vi.fn());
     events.on('tile:spawn', () => {
       throw thrown;
     });
 
-    let caught: unknown;
+    events.emit('tile:spawn', createTileSpawn());
 
-    try {
-      events.emit('tile:spawn', createTileSpawn());
-    } catch (error: unknown) {
-      caught = error;
-    }
+    expect(reports).toEqual([
+      {
+        correlationId: 'run-42',
+        event: 'tile:spawn',
+        listenerIndex: 1,
+        error: thrown,
+      },
+    ]);
+  });
 
-    expect(caught).toBe(thrown);
+  it('contains every listener of one emission independently', () => {
+    const caught: unknown[] = [];
+    const events = createEngineEvents({
+      reporter: {
+        onListenerError: (report): void => {
+          caught.push(report.error);
+        },
+      },
+    });
+
+    events.on('stage:end', () => {
+      throw 'first';
+    });
+    events.on('stage:end', () => {
+      throw 'second';
+    });
+
+    events.emit('stage:end', createStageEnd());
+
+    expect(caught).toEqual(['first', 'second']);
+  });
+
+  it('counts one emission and one contained listener error', () => {
+    const counts: { metric: string; value: number; hook?: string }[] = [];
+    const events = createEngineEvents({
+      reporter: {
+        onCount: (report): void => {
+          counts.push({
+            metric: report.metric,
+            value: report.value,
+            ...(report.hook === undefined ? {} : { hook: report.hook }),
+          });
+        },
+      },
+    });
+
+    events.on('stage:end', () => {
+      throw new Error('listener failed');
+    });
+
+    events.emit('stage:end', createStageEnd());
+
+    expect(counts).toEqual([
+      { metric: 'engine.event.emit', value: 1, hook: 'stage:end' },
+      { metric: 'engine.event.listener.error', value: 1, hook: 'stage:end' },
+    ]);
+  });
+
+  it('contains a report sink that throws', () => {
+    const events = createEngineEvents({
+      reporter: {
+        onListenerError: (): void => {
+          throw new Error('sink failed');
+        },
+        onCount: (): void => {
+          throw new Error('sink failed');
+        },
+      },
+    });
+    const after = vi.fn();
+
+    events.on('stage:end', () => {
+      throw new Error('listener failed');
+    });
+    events.on('stage:end', after);
+
+    expect(() => {
+      events.emit('stage:end', createStageEnd());
+    }).not.toThrow();
+    expect(after).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports nothing for an emission every listener returned from', () => {
+    const errors: unknown[] = [];
+    const events = createEngineEvents({
+      reporter: {
+        onListenerError: (report): void => {
+          errors.push(report.error);
+        },
+      },
+    });
+
+    events.on('tile:spawn', vi.fn());
+    events.emit('tile:spawn', createTileSpawn());
+
+    expect(errors).toEqual([]);
   });
 });
-
-/* ===== 12. off() and the subscription handle ===== */
 
 describe('EngineEvents.off and the subscription handle (AAP Contract 1, no ' +
   'vanilla analogue)', () => {
@@ -970,8 +981,6 @@ describe('EngineEvents.off and the subscription handle (AAP Contract 1, no ' +
     expect(mergeListener).toHaveBeenCalledTimes(1);
   });
 });
-
-/* ===== 13. state:commit, successor to the vanilla actuation payload ===== */
 
 describe('state:commit carries the vanilla actuation payload ' +
   '(js/game_manager.js L91-L97)', () => {
@@ -1159,8 +1168,6 @@ describe('state:commit carries the vanilla actuation payload ' +
   });
 });
 
-/* ===== 14. state:commit passes the board by reference ===== */
-
 describe('state:commit passes the board by reference (js/html_actuator.js ' +
   'L16-L22)', () => {
   it('hands a subscriber the same Grid instance the emitter was given ' +
@@ -1282,8 +1289,6 @@ describe('state:commit passes the board by reference (js/html_actuator.js ' +
   });
 });
 
-/* ===== 15. tile:merge is emitted once per merge ===== */
-
 describe('tile:merge is emitted once per merge (js/game_manager.js ' +
   'L156-L170)', () => {
   it('emits twice for a move that resolves two merges (L156)', () => {
@@ -1388,8 +1393,6 @@ describe('tile:merge is emitted once per merge (js/game_manager.js ' +
     ]);
   });
 });
-
-/* ===== 16. move:before is cancellable ===== */
 
 describe('move:before is cancellable (js/game_manager.js L130-L143)', () => {
   it('carries direction and the live board (L131, L138)', () => {
@@ -1499,8 +1502,6 @@ describe('move:before is cancellable (js/game_manager.js L130-L143)', () => {
   });
 });
 
-/* ===== 17. tile:spawn carries an absent position ===== */
-
 describe('tile:spawn carries an absent position on a full board (js/grid.js ' +
   'L37-L43)', () => {
   it('carries the position and value of a spawn (js/game_manager.js ' +
@@ -1568,8 +1569,6 @@ describe('tile:spawn carries an absent position on a full board (js/grid.js ' +
   });
 });
 
-/* ===== 18. stage:start ===== */
-
 describe('stage:start (js/game_manager.js L35-L59)', () => {
   it('carries stageIndex, goal, seed and boardSize', () => {
     const events = createEngineEvents();
@@ -1629,8 +1628,6 @@ describe('stage:start (js/game_manager.js L35-L59)', () => {
   });
 });
 
-/* ===== 19. stage:end ===== */
-
 describe('stage:end has no vanilla analogue (AAP Contract 1)', () => {
   it('carries stageIndex, cleared and score', () => {
     const events = createEngineEvents();
@@ -1668,8 +1665,6 @@ describe('stage:end has no vanilla analogue (AAP Contract 1)', () => {
     expect([...ENGINE_EVENT_NAMES]).toContain('stage:end');
   });
 });
-
-/* ===== 20. move:after ===== */
 
 describe('move:after mirrors the vanilla post-move branch ' +
   '(js/game_manager.js L185-L189)', () => {
@@ -1739,8 +1734,6 @@ describe('move:after mirrors the vanilla post-move branch ' +
     expect(seen).toBe(board);
   });
 });
-
-/* ===== 21. Type-level payload mapping ===== */
 
 describe('EngineEventPayloadMap types each listener to its own payload (AAP ' +
   'Contract 1)', () => {

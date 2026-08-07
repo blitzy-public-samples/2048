@@ -1,5 +1,11 @@
 // In-memory Web Storage double: no persistence, no DOM reference and no
 // imports. Exported as a class; it installs no global.
+//
+// Ported from js/local_storage_manager.js L1-L19, the `window.fakeStorage`
+// object literal that file already shipped: traceability row TR-STORE-09 of
+// docs/TRACEABILITY_MATRIX.md. Decision DL-STORE-05, the double exported as a
+// class that installs no global where L1 assigned onto `window`, is in
+// docs/DECISION_LOG.md.
 
 /**
  * The persistence surface storage consumers type against. Both the browser's

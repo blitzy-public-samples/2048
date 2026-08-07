@@ -1,26 +1,31 @@
-// Playwright configuration for the recorded-gameplay proof (AAP R11 / V9).
+// Playwright configuration for the recorded-gameplay proof.
 //
-// The single project `gameplay-recording` drives the one recorded-gameplay
-// spec, tests/e2e/gameplay-recording.spec.ts, in headless Chromium against the
-// built static bundle. That spec covers run start, at least one stage clear,
-// one reward-screen relic selection, then stage end or game over. `testMatch`
-// names that file alone, so no other spec placed under tests/e2e/ can be
-// collected into the video gate. Three settings carry the proof and are
-// load-bearing:
+// The single project `gameplay-recording` runs in headless Chromium against the
+// built static bundle. `testMatch` names one path,
+// tests/e2e/gameplay-recording.spec.ts, so no other spec placed under
+// tests/e2e/ can be collected into the video gate. THAT SPEC IS NOT PRESENT
+// YET: this config is the gate's configuration, not evidence that the gate has
+// passed. Three settings carry the proof and are load-bearing:
 //   - `video.mode: 'on'` records every test, passing or failing, and
-//     `video.size` repeats the viewport so the frame is not scaled into
+//     `video.size` repeats the viewport, which keeps the frame out of
 //     Playwright's default 800x800 box. The 1280x960 viewport records the
 //     desktop layout unscaled: style/_tokens.scss declares $field-width as
 //     500px and $mobile-threshold as 520px, and style/main.scss consumes both
 //     through @use.
-//   - the WebM is only written when the browser context closes, so nothing
-//     here creates a context of its own; the built-in `page` fixture owns and
+//   - the WebM is written when the browser context closes, and nothing here
+//     creates a context of its own; the built-in `page` fixture owns and
 //     closes it.
-//   - the ANGLE/SwiftShader launch arguments below are what make WebGL 2.0
-//     available with no GPU present. Without them the recording is a black
-//     rectangle of non-zero duration.
+//   - the ANGLE/SwiftShader launch arguments below make WebGL 2.0 available
+//     with no GPU present.
 // The unit suite and the seeded snapshot gate run under their own Vitest
 // configs and are ignored here.
+//
+// Decisions behind this file: DL-PW-01, the recording settings that carry the
+// proof, and DL-PW-02, the loopback-origin assertion evaluated at config load.
+// Both are in docs/DECISION_LOG.md. This file carries no ported construct: the
+// repository held no automation of any kind, so its constructs are target-only
+// rows TR-PW-01 through TR-PW-03 of docs/TRACEABILITY_MATRIX.md — the
+// project, the recording settings and the preview web server.
 //
 import { defineConfig, devices } from '@playwright/test';
 
@@ -62,11 +67,9 @@ function assertPreviewPort(port: number): number {
  * Asserts that `origin` is an HTTP or HTTPS URL on a loopback host, and returns
  * it in parsed form.
  *
- * Runs when this config is loaded, before any browser is launched and before any
- * server is started, so a target that is not this machine's own preview server
- * stops the run instead of being recorded. The project launches Chromium with
- * its sandbox relaxed and with software GL, which is the right tool for driving
- * a known-good local build and the wrong one for visiting an arbitrary origin.
+ * Runs when this config is loaded, before any browser is launched and before
+ * any server is started, so a target that is not this machine's own preview
+ * server stops the run instead of being recorded. Decision DL-PW-02.
  *
  * @param origin Origin to check.
  * @returns The parsed form of `origin`.
@@ -137,8 +140,7 @@ export default defineConfig({
   testIgnore: ['**/tests/unit/**', '**/tests/snapshot/**'],
 
   // Videos, screenshots and traces land here, one directory per test.
-  // `preserveOutput: 'always'` keeps a passing test's directory (decision
-  // DL-PW-01).
+  // `preserveOutput: 'always'` keeps a passing test's directory.
   outputDir: 'test-results',
   preserveOutput: 'always',
 
@@ -177,8 +179,7 @@ export default defineConfig({
     },
 
     // An end-of-test screenshot for every test, and a trace carrying the
-    // action log, DOM snapshots and sources with no screencast frames
-    // (decision DL-PW-01).
+    // action log, DOM snapshots and sources with no screencast frames.
     screenshot: 'on',
     trace: {
       mode: 'on',

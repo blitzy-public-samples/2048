@@ -3,18 +3,8 @@
 // reduced-motion overrides. Every length and duration derives from a token in
 // style/_tokens.scss. Sass `@use` is not transitive, so each sibling partial
 // that needs these mixins loads this file for itself.
-//
-// EXPORTS
-//   @mixin focus-ring          the two-tone ring declarations on their own
-//   @mixin focusable           binds focus-ring to `:focus-visible`, and to
-//                              `:focus` on engines without that selector
-//   @mixin interactive-states  the hover, activation and disabled treatment a
-//                              control carries alongside the focus ring
-//   @mixin visually-hidden     clip-based hiding that keeps the element in the
-//                              accessibility tree with a non-zero box
-//   @mixin dialog-boundary     the container edge for the modal surfaces
-//   .visually-hidden           the utility-class form of the mixin
 
+@use "sass:color";
 @use "sass:math";
 @use "tokens" as *;
 @use "helpers" as *;
@@ -30,11 +20,8 @@ $a11y-ring-extent: $tile-border-radius * 2 !default;
 $a11y-board-extent:
   $grid-row-cells * $tile-size + ($grid-row-cells - 1) * $grid-spacing !default;
 
-// Mobile board box: the two lengths read the mobile-scale tokens
-// style/_tokens.scss declares. The tile size and the extent below are still
-// computed with the same expressions used above.
-$a11y-mobile-field-width: $mobile-field-width !default; // 280px
-$a11y-mobile-grid-spacing: $mobile-grid-spacing !default; // 10px
+$a11y-mobile-field-width: $mobile-field-width !default;
+$a11y-mobile-grid-spacing: $mobile-grid-spacing !default;
 $a11y-mobile-tile-size: math.div(
   $a11y-mobile-field-width - $a11y-mobile-grid-spacing * ($grid-row-cells + 1),
   $grid-row-cells
@@ -50,6 +37,12 @@ $a11y-instant: math.div($transition-speed, 10000) !default;
 // Clip inset that collapses an element's paint region while keeping its box.
 $a11y-clip-away: 50% !default;
 
+// Outer band of the focus ring where no palette has published
+// `--theme-focus-ring` yet. The same derivation style/_themes.scss states for
+// the default palette's entry, so the fallback and the published value agree.
+$a11y-focus-ring-fallback:
+  color.adjust($text-color, $lightness: -22%) !default;
+
 // The opacity a disabled control carries. It is the alpha style/main.scss gives
 // both `.game-message` washes; a ratio, not a length.
 $a11y-disabled-alpha: 0.5 !default;
@@ -63,11 +56,74 @@ $a11y-disabled-alpha: 0.5 !default;
 // the `--theme-*` custom properties style/_themes.scss publishes, with the
 // token each palette's default entry is written from as the fallback, so the
 // ring follows the active palette and is unchanged under the default one.
+// The attribute src/ui/a11y/settings.ts reflects the EFFECTIVE reduced-motion
+// value into, on the document element. `prefers-reduced-motion` answers only
+// the operating system, so without this attribute the explicit `reduce` and
+// `allow` settings the accessibility surface offers would reach the render
+// layer and never the style layer.
+$a11y-motion-attribute: "data-reduced-motion" !default;
+
+// Emits its content for every state in which motion is to be reduced:
+//
+//   1. the setting is explicitly `reduce`, whatever the operating system says
+//   2. the operating system asks for reduced motion and the setting has not
+//      explicitly asked to keep it
+//
+// The second block is scoped by `:not([… ="false"])` rather than left bare, so
+// an explicit `allow` is not overridden by the operating system.
+@mixin reduced-motion {
+  :root[#{$a11y-motion-attribute}="true"] & {
+    @content;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :root:not([#{$a11y-motion-attribute}="false"]) & {
+      @content;
+    }
+  }
+}
+
+// The unnested form of `reduced-motion`, for a layer whose own selectors are
+// written inside the block rather than around it.
+@mixin reduced-motion-root {
+  :root[#{$a11y-motion-attribute}="true"] {
+    @content;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :root:not([#{$a11y-motion-attribute}="false"]) {
+      @content;
+    }
+  }
+}
+
+// Emits its content for every state in which motion is permitted, the exact
+// complement of `reduced-motion`:
+//
+//   1. the setting is explicitly `allow`, whatever the operating system says
+//   2. the operating system expresses no preference and the setting has not
+//      explicitly asked to reduce
+//
+// Declaring motion here rather than unconditionally is what leaves nothing for
+// the reduced-motion layer to suppress.
+@mixin motion-allowed {
+  :root[#{$a11y-motion-attribute}="false"] & {
+    @content;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    :root:not([#{$a11y-motion-attribute}="true"]) & {
+      @content;
+    }
+  }
+}
+
 @mixin focus-ring {
   outline: $a11y-ring-width solid
     var(--theme-focus-ring-contrast, #{$bright-text-color});
   outline-offset: 0;
-  box-shadow: 0 0 0 $a11y-ring-extent var(--theme-focus-ring, #{$text-color});
+  box-shadow: 0 0 0 $a11y-ring-extent
+    var(--theme-focus-ring, #{$a11y-focus-ring-fallback});
 }
 
 // Binds the ring to keyboard focus: `:focus-visible` where the engine
@@ -84,10 +140,8 @@ $a11y-disabled-alpha: 0.5 !default;
   }
 }
 
-// Interaction states: the three states a control carries besides focus.
-// style/main.scss declares none of them, so before this mixin every control
-// looked identical whether it was being pointed at, being pressed, or inert.
-// One declaration serves every control, so the states cannot drift between
+// Interaction states: the three states a control carries besides focus. One
+// declaration serves every control, so the states cannot drift between
 // surfaces.
 //
 // Hover and activation are inset `box-shadow` rings in `currentColor`, which is
@@ -96,16 +150,14 @@ $a11y-disabled-alpha: 0.5 !default;
 // rules are written `:not(:focus-visible)`, so a control hovered or pressed
 // while it holds keyboard focus keeps the focus ring. Precedence, highest
 // first: disabled, activation, focus, hover, default. Neither state declaration
-// takes part in layout. The hover rule sits inside `@media (hover: hover)`, so a
-// touch pointer that emulates hover does not leave a control looking
-// pointed-at after a tap. `opacity` is applied to the control itself, which is a
-// leaf, so it creates no containing block.
-//
-// BLITZY [A11Y]: at $a11y-disabled-alpha the label falls below the contrast the
-// enabled control measures. WCAG 1.4.3 exempts an inactive component from the
-// contrast minimum, and the state is also carried by the HTML `disabled`
-// attribute and by `aria-disabled`, so it does not rest on colour alone.
-// Recorded as decision DL-A11Y-05.
+// takes part in layout. The hover rule sits inside `@media (hover: hover)`, so
+// a touch pointer that emulates hover does not leave a control looking
+// pointed-at after a tap. `opacity` is applied to the control itself, which is
+// a leaf, so it creates no containing block. BLITZY [A11Y]: at
+// $a11y-disabled-alpha the label falls below the contrast the enabled control
+// measures. WCAG 1.4.3 exempts an inactive component from the contrast minimum,
+// and the state is also carried by the HTML `disabled` attribute and by
+// `aria-disabled`, so it does not rest on colour alone.
 
 @mixin interactive-states {
   @media (hover: hover) {
@@ -126,18 +178,19 @@ $a11y-disabled-alpha: 0.5 !default;
     opacity: $a11y-disabled-alpha;
   }
 
-  // Declared only where the user expresses no reduced-motion preference, so
-  // under `reduce` the control carries no transition at all and the overrides
-  // in the reduced-motion layer below have nothing to suppress.
-  @media (prefers-reduced-motion: no-preference) {
+  // Declared only where motion is permitted, so under `reduce` the control
+  // carries no transition at all and the overrides in the reduced-motion layer
+  // below have nothing to suppress. `motion-allowed` covers the explicit
+  // `allow` setting as well as the operating system's `no-preference`.
+  @include motion-allowed {
     @include transition(box-shadow $transition-speed ease-in-out);
   }
 }
 
-// The controls index.html declares directly, together with those src/ui/,
-// src/input/on-screen-controls.ts and src/observability/ render into these
-// three roots at runtime. `[tabindex="-1"]` is excluded: those elements are
-// programmatic focus targets, not tab stops.
+// The controls index.html declares directly, together with whatever src/ui/ and
+// src/input/on-screen-controls.ts render into these three roots at runtime.
+// `[tabindex="-1"]` is excluded: those elements are programmatic focus targets,
+// not tab stops.
 .container,
 .screen-layer,
 .diagnostics-overlay {
@@ -185,7 +238,7 @@ $a11y-disabled-alpha: 0.5 !default;
   position: absolute;
   inset: 0;
 
-  // Floor that applies for the frames before the renderer has measured the host.
+  // Floor that applies until a renderer has measured the host.
   min-inline-size: $a11y-board-extent;
   min-block-size: $a11y-board-extent;
 
@@ -231,11 +284,11 @@ $a11y-disabled-alpha: 0.5 !default;
   outline-offset: 0;
 }
 
-// index.html declares six of these inside `.screen-layer`: the five
-// screen-router overlays and `#settings-panel`. The boundary is the
-// accessibility half of a modal surface, not the whole of it: each of the six
-// also carries a shown state that gives it modal geometry, a stacking slot, a
-// scrim and scrolling, declared in style/_screens.scss, style/_reward.scss and
+// index.html declares six of these inside `.screen-layer`: the five overlay
+// screens and `#settings-panel`. The boundary is the accessibility half of a
+// modal surface, not the whole of it: each of the six also carries a shown
+// state that gives it modal geometry, a stacking slot, a scrim and scrolling,
+// declared in style/_screens.scss, style/_reward.scss and
 // style/_summary.scss. The rule below adds no layout box, so it composes with
 // all of them.
 .screen-layer [role="dialog"][aria-modal="true"] {
@@ -248,11 +301,11 @@ $a11y-disabled-alpha: 0.5 !default;
 // inside the canvas. The focus ring above uses neither animation nor
 // transition, so nothing here suppresses it.
 
-@media (prefers-reduced-motion: reduce) {
+@include reduced-motion-root {
   // Rooted at the two elements that hold the animated interface, so
-  // `#diagnostics-overlay` outside them keeps updating. style/main.scss sets the
-  // same longhands through shorthands at higher specificity and later in the
-  // emitted stylesheet, so these declarations carry `!important`.
+  // `#diagnostics-overlay` outside them keeps updating. style/main.scss sets
+  // the same longhands through shorthands at higher specificity and later in
+  // the emitted stylesheet, so these declarations carry `!important`.
   .container,
   .container *,
   .screen-layer,

@@ -1,17 +1,12 @@
 // Pins the Web Storage key registry src/storage/storage-keys.ts declares: the
-// two frozen unprefixed literals ported from js/local_storage_manager.js L22
-// and L23, the namespace and the keys minted from it, and the membership,
-// order and freezing of OWNED_STORAGE_KEYS.
+// two frozen unprefixed literals ported from js/local_storage_manager.js, the
+// namespace and the keys minted from it, and the membership, order and freezing
+// of OWNED_STORAGE_KEYS.
 //
 // The unit under test imports nothing and touches no storage. This suite reads
 // no `window`, no `document` and no `localStorage`, declares no mock and no
 // spy, and holds no state between tests. It passes in the `unit:dom` project
 // vitest.config.ts collects it into and under a DOM-free environment alike.
-//
-// Every it() title names the construct it pins and, for a ported construct,
-// the js/local_storage_manager.js line that declared it.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { describe, expect, it } from 'vitest';
 
@@ -30,28 +25,157 @@ import type {
   OwnedStorageKey,
 } from '../../../src/storage/storage-keys';
 
-/* ===== 1. Fixtures ===== */
-
-/**
- * The delimiter `namespacedKey()` places between the namespace and the name.
- * src/storage/storage-keys.ts holds it privately; it is restated here.
- */
 const NAMESPACE_DELIMITER = ':';
 
-/** `STORAGE_NAMESPACE` and the delimiter, as one string. */
 const NAMESPACE_PREFIX = `${STORAGE_NAMESPACE}${NAMESPACE_DELIMITER}`;
 
-/**
- * Unqualified name passed to `namespacedKey()` on its own. It names no key the
- * product persists.
- */
 const SAMPLE_KEY_NAME = 'sample';
 
-/** Unqualified names `namespacedKey()` rejects. */
 const REJECTED_KEY_NAMES: readonly string[] = [
   '',
   'run State',
   `run${NAMESPACE_DELIMITER}State`,
+];
+
+/**
+ * Unqualified names `namespacedKey()` accepts, each non-empty and carrying
+ * neither whitespace nor the delimiter. `'__proto__'` is included because a Web
+ * Storage key of that name is legal and a store must treat it as an ordinary
+ * string.
+ */
+const ACCEPTED_KEY_NAMES: readonly string[] = [
+  'a',
+  '0',
+  'runState',
+  '__proto__',
+  'constructor',
+  'état',
+  'run-state_2',
+  'x'.repeat(200),
+];
+
+/** One rejected name paired with the exact message it is rejected with. */
+interface RejectedName {
+  /** Name handed to `namespacedKey()`. */
+  readonly name: string;
+
+  /** Label quoted in the test title, since a raw name may be invisible. */
+  readonly label: string;
+
+  /** The exact `TypeError` message the rejection carries. */
+  readonly message: string;
+}
+
+/**
+ * The empty, whitespace-bearing and delimiter-bearing names, each with the
+ * message `namespacedKey()` rejects it with. The guards run in that order, so
+ * the last entry — carrying both a space and a delimiter — is reported as
+ * whitespace.
+ */
+const REJECTED_NAME_REPORTS: readonly RejectedName[] = [
+  {
+    name: '',
+    label: 'an empty name',
+    message: 'Storage key name must not be empty.',
+  },
+  {
+    name: 'run State',
+    label: 'a name holding a space',
+    message: 'Storage key name must not contain whitespace: "run State".',
+  },
+  {
+    name: 'run\tState',
+    label: 'a name holding a tab',
+    message: 'Storage key name must not contain whitespace: "run\tState".',
+  },
+  {
+    name: 'run\nState',
+    label: 'a name holding a newline',
+    message: 'Storage key name must not contain whitespace: "run\nState".',
+  },
+  {
+    name: 'run\u00a0State',
+    label: 'a name holding a no-break space',
+    message:
+      'Storage key name must not contain whitespace: "run\u00a0State".',
+  },
+  {
+    name: ' runState',
+    label: 'a name with a leading space',
+    message: 'Storage key name must not contain whitespace: " runState".',
+  },
+  {
+    name: 'runState ',
+    label: 'a name with a trailing space',
+    message: 'Storage key name must not contain whitespace: "runState ".',
+  },
+  {
+    name: `run${NAMESPACE_DELIMITER}State`,
+    label: 'a name holding the delimiter',
+    message:
+      `Storage key name must not contain the "${NAMESPACE_DELIMITER}" ` +
+      `delimiter: "run${NAMESPACE_DELIMITER}State".`,
+  },
+  {
+    name: NAMESPACE_DELIMITER,
+    label: 'a name that is only the delimiter',
+    message:
+      `Storage key name must not contain the "${NAMESPACE_DELIMITER}" ` +
+      `delimiter: "${NAMESPACE_DELIMITER}".`,
+  },
+  {
+    name: `a${NAMESPACE_DELIMITER}b${NAMESPACE_DELIMITER}c`,
+    label: 'a name holding two delimiters',
+    message:
+      `Storage key name must not contain the "${NAMESPACE_DELIMITER}" ` +
+      `delimiter: "a${NAMESPACE_DELIMITER}b${NAMESPACE_DELIMITER}c".`,
+  },
+  {
+    name: `run ${NAMESPACE_DELIMITER}State`,
+    label: 'a name holding both a space and the delimiter',
+    message:
+      `Storage key name must not contain whitespace: "run ` +
+      `${NAMESPACE_DELIMITER}State".`,
+  },
+];
+
+/**
+ * Keys the product does not own, each with the label its test title quotes.
+ * Every entry is a string `isOwnedStorageKey()` must reject: another
+ * application's key, a near-match of a frozen literal, a near-match of the
+ * namespace, a namespace with no name, and a namespaced key whose name breaks
+ * one of the three conditions `namespacedKey()` enforces.
+ */
+const UNOWNED_KEYS: readonly { key: string; label: string }[] = [
+  { key: '', label: 'the empty string' },
+  { key: 'theme', label: "another application's key" },
+  { key: 'analytics.sessionId', label: 'a dotted foreign key' },
+  { key: 'user:token', label: 'a foreign key carrying a delimiter' },
+  { key: '2048', label: 'a bare numeric key' },
+  { key: 'bestscore', label: 'the best-score literal in lower case' },
+  { key: 'BestScore', label: 'the best-score literal in title case' },
+  { key: 'bestScore2', label: 'the best-score literal with a suffix' },
+  { key: 'bestScore ', label: 'the best-score literal with a trailing space' },
+  { key: ' bestScore', label: 'the best-score literal with a leading space' },
+  { key: 'gamestate', label: 'the snapshot literal in lower case' },
+  { key: 'gameStates', label: 'the snapshot literal pluralised' },
+  { key: 'roguelike2049:runState', label: 'a misspelled namespace' },
+  { key: 'Roguelike2048:runState', label: 'the namespace in title case' },
+  { key: 'roguelike2048x:runState', label: 'the namespace with a suffix' },
+  { key: 'roguelike204:8runState', label: 'the namespace cut short' },
+  { key: 'xroguelike2048:runState', label: 'the namespace with a prefix' },
+  { key: ' roguelike2048:runState', label: 'a space before the namespace' },
+  { key: 'roguelike2048 :runState', label: 'a space before the delimiter' },
+  { key: 'roguelike2048:', label: 'the namespace with an empty name' },
+  { key: 'roguelike2048::runState', label: 'a doubled delimiter' },
+  { key: 'roguelike2048:run:State', label: 'a name holding a delimiter' },
+  { key: 'roguelike2048:runState:', label: 'a trailing delimiter' },
+  { key: 'roguelike2048:run State', label: 'a name holding a space' },
+  { key: 'roguelike2048:run\tState', label: 'a name holding a tab' },
+  { key: 'roguelike2048:run\nState', label: 'a name holding a newline' },
+  { key: 'roguelike2048:runState ', label: 'a name with a trailing space' },
+  { key: 'roguelike2048: runState', label: 'a name with a leading space' },
+  { key: 'roguelike2048:run\u00a0State', label: 'a no-break space' },
 ];
 
 /**
@@ -64,25 +188,16 @@ const MINTED_KEYS: readonly NamespacedStorageKey[] = [
   STORAGE_PROBE_KEY,
 ];
 
-/**
- * The members of OWNED_STORAGE_KEYS, in the order that list declares them.
- */
 const EXPECTED_OWNED_KEYS: readonly OwnedStorageKey[] = [
   BEST_SCORE_KEY,
   GAME_STATE_KEY,
   RUN_STATE_KEY,
 ];
 
-/**
- * Every key src/storage/storage-keys.ts declares: the OWNED_STORAGE_KEYS
- * members, and STORAGE_PROBE_KEY, which that list omits.
- */
 const DECLARED_KEYS: readonly OwnedStorageKey[] = [
   ...EXPECTED_OWNED_KEYS,
   STORAGE_PROBE_KEY,
 ];
-
-/* ===== 2. Frozen legacy keys ===== */
 
 describe('frozen legacy keys ported from js/local_storage_manager.js', () => {
   it(
@@ -133,8 +248,6 @@ describe('frozen legacy keys ported from js/local_storage_manager.js', () => {
     }
   );
 });
-
-/* ===== 3. Namespace and key minting ===== */
 
 describe('namespace and key minting', () => {
   it('STORAGE_NAMESPACE is the prefix every minted key carries', () => {
@@ -225,8 +338,6 @@ describe('namespace and key minting', () => {
   );
 });
 
-/* ===== 4. OWNED_STORAGE_KEYS registry completeness ===== */
-
 describe('OWNED_STORAGE_KEYS registry completeness', () => {
   it(
     'OWNED_STORAGE_KEYS names the durable keys test teardown iterates, in ' +
@@ -293,4 +404,94 @@ describe('OWNED_STORAGE_KEYS registry completeness', () => {
       expect(isOwnedStorageKey(NAMESPACE_PREFIX)).toBe(false);
     }
   );
+});
+
+/* ===== 5. The access boundary: every key the product does not own ===== */
+
+// src/storage/local-storage-manager.ts admits a key only when
+// isOwnedStorageKey() accepts it, so every entry rejected here is a key the
+// adapter refuses to read, write or remove. The two frozen literals are global
+// to the origin, which is why a near-match of either must not be accepted.
+describe('isOwnedStorageKey() rejects every key outside the product', () => {
+  it.each(UNOWNED_KEYS)('rejects $label', ({ key }: { key: string }) => {
+    expect(isOwnedStorageKey(key)).toBe(false);
+  });
+
+  it('rejects every unowned key without throwing for any of them', () => {
+    expect(UNOWNED_KEYS.length).toBeGreaterThan(0);
+
+    for (const { key } of UNOWNED_KEYS) {
+      expect(() => isOwnedStorageKey(key)).not.toThrow();
+      expect(isOwnedStorageKey(key)).toBe(false);
+    }
+  });
+
+  it('accepts the two frozen literals only as their exact spellings', () => {
+    expect(isOwnedStorageKey(BEST_SCORE_KEY)).toBe(true);
+    expect(isOwnedStorageKey(GAME_STATE_KEY)).toBe(true);
+
+    for (const key of [BEST_SCORE_KEY, GAME_STATE_KEY]) {
+      expect(isOwnedStorageKey(key.toUpperCase())).toBe(false);
+      expect(isOwnedStorageKey(key.toLowerCase())).toBe(
+        key === key.toLowerCase()
+      );
+      expect(isOwnedStorageKey(`${key}${NAMESPACE_DELIMITER}`)).toBe(false);
+      expect(isOwnedStorageKey(`${NAMESPACE_PREFIX}${key}`)).toBe(true);
+    }
+  });
+
+  it('accepts a namespaced key for every name namespacedKey() admits', () => {
+    for (const name of ACCEPTED_KEY_NAMES) {
+      const minted = namespacedKey(name);
+
+      expect(minted).toBe(`${NAMESPACE_PREFIX}${name}`);
+      expect(isOwnedStorageKey(minted)).toBe(true);
+    }
+  });
+
+  it('rejects the same name it accepts once whitespace is added', () => {
+    for (const name of ACCEPTED_KEY_NAMES) {
+      expect(isOwnedStorageKey(`${NAMESPACE_PREFIX}${name}`)).toBe(true);
+      expect(isOwnedStorageKey(`${NAMESPACE_PREFIX}${name} `)).toBe(false);
+      expect(isOwnedStorageKey(`${NAMESPACE_PREFIX} ${name}`)).toBe(false);
+      expect(
+        isOwnedStorageKey(
+          `${NAMESPACE_PREFIX}${name}${NAMESPACE_DELIMITER}x`
+        )
+      ).toBe(false);
+    }
+  });
+});
+
+// The predicate and the minting function enforce the same three conditions, so
+// a name one rejects is a name the other cannot produce a key for.
+describe('namespacedKey() refuses exactly the names the predicate does', () => {
+  it.each(REJECTED_NAME_REPORTS)(
+    'throws TypeError for $label',
+    ({ name }: RejectedName) => {
+      expect(() => namespacedKey(name)).toThrow(TypeError);
+    }
+  );
+
+  it.each(REJECTED_NAME_REPORTS)(
+    'reports $label with the reason it was refused for',
+    ({ name, message }: RejectedName) => {
+      expect(() => namespacedKey(name)).toThrow(message);
+    }
+  );
+
+  it('would mint a key the predicate rejects, were the guard not there', () => {
+    for (const { name } of REJECTED_NAME_REPORTS) {
+      // The key the function would have produced for a refused name is one
+      // isOwnedStorageKey() does not accept, which is why the guard throws
+      // instead of minting it.
+      expect(isOwnedStorageKey(`${NAMESPACE_PREFIX}${name}`)).toBe(false);
+    }
+  });
+
+  it('accepts every name in the accepted table without throwing', () => {
+    for (const name of ACCEPTED_KEY_NAMES) {
+      expect(() => namespacedKey(name)).not.toThrow();
+    }
+  });
 });

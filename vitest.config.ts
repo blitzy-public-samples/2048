@@ -1,7 +1,5 @@
 // Unit test project. `npm test` runs it as `vitest run --config
-// vitest.config.ts`, and it is the first automated quality gate the repository
-// has: before this configuration existed there was no test runner, no fixture
-// and no assertion library in the tree.
+// vitest.config.ts`.
 //
 // It collects tests/unit/ and nothing else. The seeded snapshot suite under
 // tests/snapshot/ is configured separately by vitest.snapshot.config.ts and run
@@ -11,33 +9,35 @@
 //
 // The suite is split into two projects by the environment a test needs:
 //
-//   unit:dom-free  environment 'node'    tests/unit/{engine,config,rng,relics}
+//   unit:dom-free  environment 'node'    tests/unit/{engine,config,rng,relics,
+//                                        run}
 //   unit:dom       environment 'jsdom'   every other tests/unit directory
 //
 // The second project's `include` is the whole unit tree with the first
 // project's globs subtracted, so the two partition tests/unit/ between them and
 // a directory named in neither list is collected by unit:dom rather than
-// skipped. A single file inside unit:dom-free that needs a document declares
+// skipped. Decision DL-TEST-01.
+//
+// A single file inside unit:dom-free that needs a document declares
 // `// @vitest-environment jsdom` on its first line, which overrides the
 // project's environment for that file alone.
 //
 // Both projects load tests/fixtures/storage.ts as a setup file. That module
 // registers the `afterEach` that removes every storage key the product owns —
-// the vanilla manager removed the board snapshot but never the best score —
-// and exports the helpers that seed a fixture before the subject under test is
-// constructed, which is the order the vanilla manager's construction-time
-// probe and single snapshot read require.
+// js/local_storage_manager.js L61-L63 removed the board snapshot and never the
+// best score — and exports the helpers that seed a fixture before the subject
+// under test is constructed, which is the order js/local_storage_manager.js
+// L25-L26's construction-time probe and js/game_manager.js L36's single
+// snapshot read require. Decisions DL-FIXTURE-03 and DL-FIXTURE-04.
 //
 // Nothing here installs fake timers, and no option below replaces or removes a
 // global. A suite that needs either calls `vi.useFakeTimers()` or
 // `vi.stubGlobal()` for itself and owns the matching restore, which leaves the
 // assertion that `Math.random` is never patched measuring the product rather
-// than this configuration.
+// than this configuration. Decision DL-TEST-02.
 //
 // `resolve.alias` is absent, matching vite.config.ts, so a test resolves a
 // module by the same relative specifier the application uses.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { defineConfig } from 'vitest/config';
 
@@ -68,14 +68,18 @@ const SHARED_EXCLUDE: string[] = [
 /**
  * Suites that run with no document. The engine is DOM-free as a requirement;
  * a test of it that reaches for a document fails in this project instead of
- * passing unnoticed. The configuration, RNG and relic layers are data and
- * algorithms carrying the same property.
+ * passing unnoticed. The configuration, RNG, relic and run layers are data and
+ * algorithms carrying the same property: src/run/* reaches persistence through
+ * an injected port and names no Web Storage global, so its suites belong here
+ * and not in the catch-all jsdom project, where a module reaching for
+ * `localStorage`, `window` or `document` would pass unnoticed.
  */
 const DOM_FREE_INCLUDE: string[] = [
   'tests/unit/engine/**/*.test.ts',
   'tests/unit/config/**/*.test.ts',
   'tests/unit/rng/**/*.test.ts',
   'tests/unit/relics/**/*.test.ts',
+  'tests/unit/run/**/*.test.ts',
 ];
 
 /** Every unit suite, whatever environment it needs. */
@@ -90,11 +94,8 @@ const UNIT_INCLUDE: string[] = ['tests/unit/**/*.test.ts'];
  * tests that read it, and the suite performs its own restore.
  */
 const SHARED_TEST_OPTIONS = {
-  // Test functions and assertions are imported from 'vitest' explicitly.
   globals: false,
   setupFiles: SETUP_FILES,
-  // Call history is dropped, then a spy's original implementation is put back,
-  // before each test.
   clearMocks: true,
   restoreMocks: true,
 };
@@ -122,14 +123,8 @@ export default defineConfig({
       },
     ],
 
-    // The built-in reporter. No reporter package is added.
     reporters: ['default'],
 
-    // Coverage is off. Vitest bundles no coverage provider and the dependency
-    // set adds none, so `--coverage` reports a missing dependency and exits
-    // non-zero until a provider package is installed. The directory named
-    // here is the one .gitignore already covers, so a provider added later
-    // writes where the repository expects it.
     coverage: {
       enabled: false,
       reportsDirectory: 'coverage',

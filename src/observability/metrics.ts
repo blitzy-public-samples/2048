@@ -4,48 +4,29 @@
 // client-side snapshot download.
 //
 // This module is a pure addition. No counter, no histogram, no `performance.*`
-// call and no `console.*` call existed in the retired sources: a search for
-// them across all ten files of js/ matched nothing. It therefore carries no
-// ported construct and no source row of its own; it is a target row alone in
-// docs/TRACEABILITY_MATRIX.md.
+// call and no `console.*` call existed in the retired sources, so it carries no
+// ported construct.
 //
-// Provenance of the turn-boundary counters, which are the only members whose
-// boundaries come from the retired control flow:
-//   turnsTotal    js/game_manager.js L130      move() entry
-//                 js/game_manager.js L91-L97   actuation push
-//   mergesTotal   js/game_manager.js L156-L170 merge branch, entered once per
-//                                              merge inside the traversal, so
-//                                              a move resolving two merges
-//                                              enters it twice
-//   spawnsTotal   js/game_manager.js L69-L76   addRandomTile()
+// Boundaries the turn-boundary counters come from in the retired control flow:
+// `turnsTotal` from `move()` entry through the actuation push, `mergesTotal`
+// from the merge branch, which is entered once per merge inside the traversal
+// so a move resolving two merges enters it twice, and `spawnsTotal` from
+// `addRandomTile()`.
 //
-// Provenance of the default duration buckets, each boundary taken from a
-// timing the product already holds:
-//   16 ms    js/animframe_polyfill.js L13, `Math.max(0, 16 - elapsed)`
-//   100 ms   style/_tokens.scss L43, `transition-speed`
-//   200 ms   style/main.scss L630 `appear` and L650 `pop`
-//   600 ms   style/main.scss L127 `move-up`
-//   800 ms   style/main.scss L401 `fade-in`
-//   1200 ms  style/main.scss L401, `$transition-speed * 12`, the fade's delay
+// The default duration buckets take each boundary from a timing the product
+// already holds: 16 ms is the frame budget of js/animframe_polyfill.js, and
+// 100, 200, 600, 800 and 1200 ms are the transition speed and the `appear`,
+// `pop`, `move-up` and `fade-in` timings of the stylesheet, the last being the
+// fade's delay.
 //
-// Decisions surfaced for docs/DECISION_LOG.md, which is the single source of
-// truth for why each was taken:
-//   1. the `DEFAULT_DURATION_BUCKETS` boundaries;
-//   2. the pull-snapshot model for the hook bus's dispatch counts, over a
-//      push model;
-//   3. label-dimension series over name concatenation for the per-hook and
-//      per-event families;
-//   4. the substitution of this in-page registry, its Prometheus text export
-//      and its file download for a network-served metrics endpoint.
-//
-// Invariants of this module. It names no package: its four imports are
-// relative paths into src/, and three of the four are erased at build time.
-// No exported member throws, for any input. Memory is bounded: a histogram
-// holds bucket counts, a sum and a count and retains no observation, and the
-// registry caps the families and the series per family it will hold. The one
-// member that reaches a document is `download`, which feature-detects every
-// global it uses; `performance` and the wall clock are read through guarded
-// helpers, so the module is importable and usable with no DOM.
+// Invariants of this module. It names no package: its four imports are relative
+// paths into src/, and three of the four are erased at build time. Exported
+// members report rather than throw. Memory is bounded: a histogram holds bucket
+// counts, a sum and a count and retains no observation, and the registry caps
+// the families and the series per family it will hold. The one member that
+// reaches a document is `download`, which feature-detects every global it uses;
+// `performance` and the wall clock are read through guarded helpers, so the
+// module is importable and usable with no DOM.
 
 import type { EngineEventName } from '../engine/engine-events';
 import { ENGINE_EVENT_NAMES } from '../engine/engine-events';
@@ -57,17 +38,15 @@ import type {
 } from '../engine/hook-bus';
 import type { HookName } from '../engine/hooks';
 import { HOOK_NAMES } from '../engine/hooks';
+import type { CorrelationId } from '../engine/types';
+import { RNG_STREAM_NAMES } from '../rng/rng-streams';
 import type { LogFields, Logger } from './logger';
-
-/* --------------------------------------------------------------------------
- * Metric primitives
- * ----------------------------------------------------------------------- */
 
 /**
  * The label bag one series carries.
  *
- * Flat text to text. The exposition format has no nested label value, and
- * none is accepted here.
+ * Flat text to text. The exposition format has no nested label value, and none
+ * is accepted here.
  */
 export type LabelSet = Readonly<Record<string, string>>;
 
@@ -82,59 +61,25 @@ export type MetricKind = 'counter' | 'gauge' | 'histogram';
  * reported through the logger; none of them throws and none changes `value`.
  */
 export interface Counter {
-  /** Family name of the series. */
   readonly name: string;
-
-  /** Labels that identify the series within its family. */
   readonly labels: LabelSet;
-
-  /** The count now. */
   readonly value: number;
-
-  /**
-   * Adds to the count.
-   *
-   * @param delta Amount to add. Defaults to `1`.
-   */
   inc(delta?: number): void;
 }
 
 /**
  * A value that rises and falls.
  *
- * `set`, `inc` and `dec` each accept a finite number; a non-finite value and
- * a value that is not a number are ignored and reported, and neither throws
- * nor changes `value`.
+ * `set`, `inc` and `dec` each accept a finite number; a non-finite value and a
+ * value that is not a number are ignored and reported, and neither throws nor
+ * changes `value`.
  */
 export interface Gauge {
-  /** Family name of the series. */
   readonly name: string;
-
-  /** Labels that identify the series within its family. */
   readonly labels: LabelSet;
-
-  /** The value now. */
   readonly value: number;
-
-  /**
-   * Replaces the value.
-   *
-   * @param value Value to hold.
-   */
   set(value: number): void;
-
-  /**
-   * Adds to the value.
-   *
-   * @param delta Amount to add. Defaults to `1`.
-   */
   inc(delta?: number): void;
-
-  /**
-   * Subtracts from the value.
-   *
-   * @param delta Amount to subtract. Defaults to `1`.
-   */
   dec(delta?: number): void;
 }
 
@@ -151,19 +96,10 @@ export interface Gauge {
  * member.
  */
 export interface Histogram {
-  /** Family name of the series. */
   readonly name: string;
-
-  /** Labels that identify the series within its family. */
   readonly labels: LabelSet;
-
-  /** Observations recorded. */
   readonly count: number;
-
-  /** Sum of the observations recorded. */
   readonly sum: number;
-
-  /** The inclusive upper bounds, ascending. */
   readonly buckets: readonly number[];
 
   /**
@@ -172,12 +108,6 @@ export interface Histogram {
    * overflow slot is not an element here; it equals `count`.
    */
   readonly bucketCounts: readonly number[];
-
-  /**
-   * Records one observation.
-   *
-   * @param value Value to record.
-   */
   observe(value: number): void;
 
   /**
@@ -188,63 +118,43 @@ export interface Histogram {
    * its accuracy is bounded by the bucket widths. A rank that falls in the
    * overflow slot resolves to the highest bound.
    *
-   * @param q Quantile to estimate, from 0 to 1 inclusive.
    * @returns The estimate, or `NaN` when nothing has been observed or `q` is
    *   outside [0, 1].
    */
   quantile(q: number): number;
 }
 
-/* --------------------------------------------------------------------------
- * Default bucket layout
- * ----------------------------------------------------------------------- */
-
 /**
  * Inclusive upper bounds, in milliseconds, of the duration histograms.
  *
  * Ascending and deduplicated. Boundaries below 16 give sub-frame resolution,
- * 16 is the frame budget, 32 and 64 are two and four budgets, and the rest
- * are the animation timings the product already holds, out past the 1200 ms
- * overlay delay. Each is cited in this file's header.
- *
- * Decision surfaced for docs/DECISION_LOG.md.
+ * 16 is the frame budget, 32 and 64 are two and four budgets, and the rest are
+ * the animation timings the product already holds, out past the 1200 ms
+ * overlay delay.
  */
 export const DEFAULT_DURATION_BUCKETS: readonly number[] = Object.freeze([
   1, 2, 4, 8, 16, 32, 64, 100, 200, 400, 600, 800, 1200, 2000,
 ]);
 
-/* --------------------------------------------------------------------------
- * Name grammar
- * ----------------------------------------------------------------------- */
-
-/** Metric names the exposition format accepts. */
 const METRIC_NAME_PATTERN = /^[a-zA-Z_:][a-zA-Z0-9_:]*$/;
 
-/** Label names the exposition format accepts. */
 const LABEL_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
-/** Prefix the exposition format reserves for its own label names. */
 const RESERVED_LABEL_PREFIX = '__';
 
-/** Label name a histogram family reserves for its bucket bounds. */
 const BUCKET_LABEL = 'le';
 
-/** Suffix the cumulative bucket series of a histogram family carries. */
 const BUCKET_SUFFIX = '_bucket';
 
-/** Suffix the sum series of a histogram family carries. */
 const SUM_SUFFIX = '_sum';
 
-/** Suffix the count series of a histogram family carries. */
 const COUNT_SUFFIX = '_count';
 
-/** Bound the overflow bucket is labelled with. */
 const POSITIVE_INFINITY_LABEL = '+Inf';
 
 /**
  * Tests a metric family name against the exposition format's grammar.
  *
- * @param name Name to test.
  * @returns `true` when the name is usable as a metric name.
  */
 export function isValidMetricName(name: string): boolean {
@@ -255,7 +165,6 @@ export function isValidMetricName(name: string): boolean {
  * Tests a label name against the exposition format's grammar. The reserved
  * `__` prefix is rejected.
  *
- * @param name Name to test.
  * @returns `true` when the name is usable as a label name.
  */
 export function isValidLabelName(name: string): boolean {
@@ -266,69 +175,52 @@ export function isValidLabelName(name: string): boolean {
   );
 }
 
-/* --------------------------------------------------------------------------
- * Canonical names
- * ----------------------------------------------------------------------- */
-
 /** Prefix every canonical metric name carries. */
 export const METRIC_PREFIX = 'game2048_';
 
 /**
  * Every canonical metric family name.
  *
- * Frozen, and the single declaration of each name: no other module writes
- * one of its own. Counters carry `_total` and duration histograms carry
+ * Frozen, and the single declaration of each name: no other module writes one
+ * of its own. Counters carry `_total` and duration histograms carry
  * `_milliseconds`.
  */
 export const METRIC_NAMES = Object.freeze({
-  /** Turns resolved. Boundary: js/game_manager.js L130 to L91-L97. */
   turnsTotal: `${METRIC_PREFIX}turns_total`,
-
-  /** Merges resolved. Boundary: js/game_manager.js L156-L170. */
   mergesTotal: `${METRIC_PREFIX}merges_total`,
 
-  /** Tiles spawned. Boundary: js/game_manager.js L69-L76. */
+  /**
+   * Tiles actually inserted into the lattice. Boundary:
+   * js/game_manager.js L69-L76, whose L72-L75 body ran only when
+   * js/grid.js L37-L43 returned a cell.
+   */
   spawnsTotal: `${METRIC_PREFIX}spawns_total`,
+
+  /**
+   * Spawn attempts, whether or not a cell was available. Boundary:
+   * js/game_manager.js L69-L76 on entry. Always at least
+   * `spawns_total`; the difference is the attempts that found a full
+   * board.
+   */
+  spawnAttemptsTotal: `${METRIC_PREFIX}spawn_attempts_total`,
 
   /** Engine events emitted, one series per `ENGINE_EVENT_NAMES` member. */
   engineEventsTotal: `${METRIC_PREFIX}engine_events_total`,
-
-  /** Hook dispatches, one series per `HOOK_NAMES` member. */
   hookDispatchesTotal: `${METRIC_PREFIX}hook_dispatches_total`,
-
-  /** Hook handler invocations, one series per `HOOK_NAMES` member. */
   hookHandlerInvocationsTotal:
     `${METRIC_PREFIX}hook_handler_invocations_total`,
 
-  /** Hook handlers the bus skipped, by hook and by skip reason. */
   hookHandlerSkippedTotal: `${METRIC_PREFIX}hook_handler_skipped_total`,
-
-  /** Handler returns the bus discarded as non-payloads, by hook. */
   hookPayloadRejectionsTotal:
     `${METRIC_PREFIX}hook_payload_rejections_total`,
 
-  /** Relic handler throws the bus isolated, by hook. */
   relicHandlerErrorsTotal: `${METRIC_PREFIX}relic_handler_errors_total`,
-
-  /** Frames the render loop composited. */
   framesRenderedTotal: `${METRIC_PREFIX}frames_rendered_total`,
-
-  /** Draws consumed, one series per named RNG substream. */
   rngDrawsTotal: `${METRIC_PREFIX}rng_draws_total`,
-
-  /** Calls this registry rejected and reported. */
   metricsRejectedTotal: `${METRIC_PREFIX}metrics_rejected_total`,
-
-  /** Result of one health check: 1 healthy, 0 unhealthy. */
   healthCheckStatus: `${METRIC_PREFIX}health_check_status`,
-
-  /** Frame durations. */
   frameTimeMilliseconds: `${METRIC_PREFIX}frame_time_milliseconds`,
-
-  /** Turn latencies, input dispatch through commit. */
   turnLatencyMilliseconds: `${METRIC_PREFIX}turn_latency_milliseconds`,
-
-  /** Span durations, one series per span name. */
   spanDurationMilliseconds: `${METRIC_PREFIX}span_duration_milliseconds`,
 } as const);
 
@@ -336,42 +228,26 @@ export const METRIC_NAMES = Object.freeze({
  * Every canonical label name.
  *
  * Frozen. The per-hook, per-event, per-reason, per-stream, per-check and
- * per-span families are label dimensions on one family each, not
- * concatenated names.
- *
- * Decision surfaced for docs/DECISION_LOG.md.
+ * per-span families are label dimensions on one family each, not concatenated
+ * names.
  */
 export const METRIC_LABELS = Object.freeze({
-  /** Carries a member of `HOOK_NAMES`. */
   hook: 'hook',
-
-  /** Carries a member of `ENGINE_EVENT_NAMES`. */
   event: 'event',
-
-  /** Carries a `HookSkipReason`. */
   reason: 'reason',
-
-  /** Carries a named RNG substream. */
   stream: 'stream',
-
-  /** Carries a health check name. */
   check: 'check',
-
-  /** Carries a trace span name. */
   span: 'span',
 } as const);
 
-/**
- * Help text of each canonical family, as the `# HELP` line reports it.
- *
- * Keyed by the same keys as `METRIC_NAMES`; a name added there without a
- * help text here does not compile.
- */
 const METRIC_HELP: Readonly<Record<keyof typeof METRIC_NAMES, string>> =
   Object.freeze({
     turnsTotal: 'Turns resolved, one per move:after emission.',
     mergesTotal: 'Tile merges resolved, one per tile:merge emission.',
-    spawnsTotal: 'Tiles spawned, one per tile:spawn emission.',
+    spawnsTotal:
+      'Tiles inserted, one per tile:spawn emission carrying a position.',
+    spawnAttemptsTotal:
+      'Spawn attempts, one per tile:spawn emission.',
     engineEventsTotal: 'Engine events emitted, by event name.',
     hookDispatchesTotal: 'Hook dispatches, by hook name.',
     hookHandlerInvocationsTotal:
@@ -394,14 +270,12 @@ const METRIC_HELP: Readonly<Record<keyof typeof METRIC_NAMES, string>> =
       'Span duration in milliseconds, by span name.',
   });
 
-/**
- * Kind of each canonical family, keyed as `METRIC_NAMES` is.
- */
 const METRIC_KINDS: Readonly<Record<keyof typeof METRIC_NAMES, MetricKind>> =
   Object.freeze({
     turnsTotal: 'counter',
     mergesTotal: 'counter',
     spawnsTotal: 'counter',
+    spawnAttemptsTotal: 'counter',
     engineEventsTotal: 'counter',
     hookDispatchesTotal: 'counter',
     hookHandlerInvocationsTotal: 'counter',
@@ -417,20 +291,18 @@ const METRIC_KINDS: Readonly<Record<keyof typeof METRIC_NAMES, MetricKind>> =
     spanDurationMilliseconds: 'histogram',
   });
 
-/* --------------------------------------------------------------------------
- * Hook-bus view
- * ----------------------------------------------------------------------- */
-
 /**
- * The slice of `HookBusMetrics` this module reads.
+ * The slice of `HookBusMetrics` this module reads: the per-hook counts and
+ * the correlation identifier of the bus that counted them.
  *
- * Derived from that type by `Pick`, and optional. The member name is
- * written once, here. A `HookBusMetrics` value satisfies it as it stands;
- * a fabricated or partial value is validated at runtime.
+ * Derived from that type by `Pick`, and optional. The member name is written
+ * once, here. A `HookBusMetrics` value satisfies it as it stands; a fabricated
+ * or partial value is validated at runtime.
  */
-export type HookDispatchCountsView = Partial<Pick<HookBusMetrics, 'hooks'>>;
+export type HookDispatchCountsView = Partial<
+  Pick<HookBusMetrics, 'hooks' | 'correlationId'>
+>;
 
-/** Every skip reason, exhaustive over `HookSkipReason` by construction. */
 const HOOK_SKIP_REASONS: Readonly<Record<HookSkipReason, HookSkipReason>> =
   Object.freeze({
     exhausted: 'exhausted',
@@ -438,13 +310,6 @@ const HOOK_SKIP_REASONS: Readonly<Record<HookSkipReason, HookSkipReason>> =
     detached: 'detached',
   });
 
-/**
- * The `HookHandlerCounters` member each skip reason is counted in.
- *
- * Keyed by `HookSkipReason` and valued by `keyof HookHandlerCounters`. A
- * reason added to that union, or a member renamed in it, breaks compilation
- * here.
- */
 const SKIP_REASON_MEMBER: Readonly<
   Record<HookSkipReason, keyof HookHandlerCounters>
 > = Object.freeze({
@@ -453,73 +318,42 @@ const SKIP_REASON_MEMBER: Readonly<
   detached: 'skippedDetached',
 });
 
-/** `HookCounters` member the per-hook dispatch counter reads. */
 const DISPATCHED_MEMBER: keyof HookCounters = 'dispatched';
 
-/** `HookHandlerCounters` member the per-hook invocation counter reads. */
 const INVOKED_MEMBER: keyof HookHandlerCounters = 'invoked';
 
-/** `HookHandlerCounters` member the per-hook error counter reads. */
 const FAILED_MEMBER: keyof HookHandlerCounters = 'failed';
 
-/** `HookHandlerCounters` member the per-hook rejection counter reads. */
 const REJECTED_MEMBER: keyof HookHandlerCounters = 'rejected';
-
-/* --------------------------------------------------------------------------
- * Snapshot contract
- * ----------------------------------------------------------------------- */
 
 /** Version the snapshot envelope carries. */
 export const METRICS_SNAPSHOT_SCHEMA_VERSION = 1;
 
-/** Members every series snapshot carries, whatever its kind. */
 interface SeriesSnapshotBase {
-  /** Family name. */
   readonly name: string;
-
-  /** Help text of the family. */
   readonly help: string;
-
-  /** Labels that identify the series within its family. */
   readonly labels: LabelSet;
 }
 
 /** One counter series. */
 export interface CounterSeriesSnapshot extends SeriesSnapshotBase {
-  /** Discriminant. */
   readonly kind: 'counter';
-
-  /** The count. */
   readonly value: number;
 }
 
 /** One gauge series. */
 export interface GaugeSeriesSnapshot extends SeriesSnapshotBase {
-  /** Discriminant. */
   readonly kind: 'gauge';
-
-  /** The value. */
   readonly value: number;
 }
 
 /** One histogram series. */
 export interface HistogramSeriesSnapshot extends SeriesSnapshotBase {
-  /** Discriminant. */
   readonly kind: 'histogram';
-
-  /** Observations recorded. */
   readonly count: number;
-
-  /** Sum of the observations recorded. */
   readonly sum: number;
-
-  /** The inclusive upper bounds, ascending. */
   readonly buckets: readonly number[];
-
-  /** CUMULATIVE counts aligned to `buckets`. */
   readonly bucketCounts: readonly number[];
-
-  /** The overflow bucket, equal to `count`. */
   readonly infCount: number;
 }
 
@@ -533,31 +367,15 @@ export type MetricSeriesSnapshot =
  * The registry's whole state, as `snapshot()` reports it.
  *
  * Plain JSON data throughout: the object round-trips through
- * `JSON.parse(JSON.stringify(snapshot))` unchanged, which is what
- * docs/dashboards/dashboard.html consumes so it need not parse the text form.
- * Every series in it also appears in `toPrometheusText()`, and no series
- * appears in one and not the other.
+ * `JSON.parse(JSON.stringify(snapshot))` unchanged, so a consumer need not
+ * parse the text form. Every series in it also appears in
+ * `toPrometheusText()`, and no series appears in one and not the other.
  */
 export interface MetricsSnapshot {
-  /** `METRICS_SNAPSHOT_SCHEMA_VERSION` at the time of the export. */
   readonly schemaVersion: number;
-
-  /**
-   * Correlation identifier of the run, taken from the injected logger. Empty
-   * when the registry was built without one.
-   */
   readonly correlationId: string;
-
-  /** Wall-clock time of the export, ISO 8601. Empty when unreadable. */
   readonly generatedAt: string;
-
-  /**
-   * Monotonic reading of `performance.now()` at the export, in milliseconds.
-   * `0` when no such clock is available.
-   */
   readonly elapsedMs: number;
-
-  /** Calls this registry rejected and reported over its lifetime. */
   readonly rejected: number;
 
   /** Logger calls that threw and were contained over that lifetime. */
@@ -567,6 +385,20 @@ export interface MetricsSnapshot {
   readonly series: readonly MetricSeriesSnapshot[];
 }
 
+/**
+ * The one member of a `tile:spawn` payload `recordEngineEvent` reads.
+ *
+ * A structural view rather than an import of the event type, so the registry
+ * still names no engine payload interface: a `SpawnPayload` from
+ * src/engine/hooks.ts, and the `TileSpawnEvent` src/engine/engine-events.ts
+ * aliases to it, both satisfy it. `position` is absent — or `undefined` —
+ * when no cell was available and no tile was inserted.
+ */
+export interface SpawnDetail {
+  /** Cell the tile was inserted in, absent when none was available. */
+  readonly position?: unknown;
+}
+
 /* --------------------------------------------------------------------------
  * Construction parameters
  * ----------------------------------------------------------------------- */
@@ -574,11 +406,36 @@ export interface MetricsSnapshot {
 /** Families the registry will hold before it rejects a new one. */
 const MAX_FAMILIES = 128;
 
-/** Series one family will hold before it rejects a new one. */
 const MAX_SERIES_PER_FAMILY = 256;
 
-/** Buckets one histogram family will accept. */
 const MAX_BUCKETS = 64;
+
+/** Labels one series will carry. */
+const MAX_LABELS_PER_SERIES = 8;
+
+/** Characters a family name will carry. */
+const MAX_METRIC_NAME_LENGTH = 200;
+
+/** Characters a label name will carry. */
+const MAX_LABEL_NAME_LENGTH = 64;
+
+/** Characters a label value will carry. */
+const MAX_LABEL_VALUE_LENGTH = 120;
+
+/** Characters a family's help text will carry. */
+const MAX_HELP_LENGTH = 240;
+
+/**
+ * Characters of metadata the registry will retain across every family and
+ * every series: family names, help texts, label names and label values.
+ *
+ * The per-field limits above bound one call; this bounds their sum, so no
+ * sequence of accepted calls can grow the registry without limit. The
+ * family and series caps alone did not: 128 families times 256 series times
+ * eight labels of bounded length still multiplies out, and the exposition
+ * text and the JSON snapshot are both built from all of it.
+ */
+const MAX_METADATA_CHARS = 262144;
 
 /** Subsystem tag the registry's logger is tagged with. */
 const LOGGER_SUBSYSTEM = 'metrics';
@@ -586,50 +443,20 @@ const LOGGER_SUBSYSTEM = 'metrics';
 /** Filename `download` uses when the caller supplies none. */
 export const DEFAULT_METRICS_FILENAME = 'game2048-metrics.prom';
 
-/** Extension that selects the JSON snapshot over the Prometheus text. */
 const JSON_EXTENSION = '.json';
 
-/** Media type of the Prometheus text download. */
 const TEXT_MEDIA_TYPE = 'text/plain;charset=utf-8';
 
-/** Media type of the JSON snapshot download. */
 const JSON_MEDIA_TYPE = 'application/json;charset=utf-8';
 
 /** Settings `MetricsRegistry` accepts. */
 export interface MetricsRegistryOptions {
-  /**
-   * Logger every rejection is reported through, and the source of the
-   * correlation identifier the snapshot carries. The registry tags a child of
-   * it with `'metrics'`. Omitted, nothing is reported and the correlation
-   * identifier is empty.
-   */
   readonly logger?: Logger;
-
-  /**
-   * Bounds of the frame-duration histogram. Defaults to
-   * `DEFAULT_DURATION_BUCKETS`. Supplied by the composition root so the
-   * render loop's own bounds drive the family without this module importing
-   * that module.
-   */
   readonly frameTimeBuckets?: readonly number[];
-
-  /** Bounds of the turn-latency histogram. */
   readonly turnLatencyBuckets?: readonly number[];
-
-  /** Bounds of the span-duration histogram. */
   readonly spanDurationBuckets?: readonly number[];
 }
 
-/* --------------------------------------------------------------------------
- * Guarded platform access
- * ----------------------------------------------------------------------- */
-
-/**
- * Reads `performance.now()` without throwing.
- *
- * @returns The reading in milliseconds, or `0` when no usable clock is
- *   present.
- */
 function readElapsedMs(): number {
   try {
     const clock: unknown = globalThis.performance;
@@ -654,11 +481,6 @@ function readElapsedMs(): number {
   }
 }
 
-/**
- * Reads the wall clock without throwing.
- *
- * @returns The time as ISO 8601, or the empty string when unreadable.
- */
 function readTimestamp(): string {
   try {
     return new Date().toISOString();
@@ -667,29 +489,10 @@ function readTimestamp(): string {
   }
 }
 
-/* --------------------------------------------------------------------------
- * Value guards
- * ----------------------------------------------------------------------- */
-
-/**
- * Narrows an arbitrary value to a finite number.
- *
- * @param value Value to test.
- * @returns `true` when `value` is a number that is neither `NaN` nor an
- *   infinity.
- */
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
-/**
- * Normalises a bucket-bound list: finite bounds only, ascending, with
- * duplicates removed and the length capped.
- *
- * @param bounds Bounds to normalise.
- * @returns A frozen array. Falls back to `DEFAULT_DURATION_BUCKETS` when the
- *   input yields no usable bound.
- */
 function normaliseBuckets(bounds: readonly number[] | undefined): number[] {
   if (!Array.isArray(bounds)) {
     return [...DEFAULT_DURATION_BUCKETS];
@@ -712,13 +515,6 @@ function normaliseBuckets(bounds: readonly number[] | undefined): number[] {
   return unique.slice(0, MAX_BUCKETS);
 }
 
-/**
- * Compares two bound lists element by element.
- *
- * @param left First list.
- * @param right Second list.
- * @returns `true` when both hold the same bounds in the same order.
- */
 function sameBounds(
   left: readonly number[],
   right: readonly number[],
@@ -736,15 +532,6 @@ function sameBounds(
   return true;
 }
 
-/**
- * Builds the key that identifies one series within its family.
- *
- * Label names are sorted, so `{a: '1', b: '2'}` and `{b: '2', a: '1'}` yield
- * one key and therefore resolve to one series.
- *
- * @param labels Labels to key.
- * @returns The key, `'[]'` for an empty label set.
- */
 function buildSeriesKey(labels: LabelSet): string {
   const names = Object.keys(labels).sort();
   const pairs: [string, string][] = [];
@@ -754,6 +541,80 @@ function buildSeriesKey(labels: LabelSet): string {
   }
 
   return JSON.stringify(pairs);
+}
+
+/**
+ * Names the three series a histogram family generates in the exposition.
+ *
+ * A histogram family named `x` emits `x_bucket`, `x_sum` and `x_count`. Each
+ * of those is a valid metric name in its own right, so a family registered
+ * under one of them would collide with the generated series: one name would
+ * carry two `# TYPE` declarations and two sets of samples, which a scraper
+ * reads as a single malformed family.
+ *
+ * @param name Histogram family name.
+ * @returns The three generated names.
+ */
+function generatedHistogramNames(name: string): readonly string[] {
+  return [
+    `${name}${BUCKET_SUFFIX}`,
+    `${name}${SUM_SUFFIX}`,
+    `${name}${COUNT_SUFFIX}`,
+  ];
+}
+
+/**
+ * Names the histogram family a candidate name would collide with, if any.
+ *
+ * The reciprocal of `generatedHistogramNames`: `x_bucket` resolves to `x`.
+ *
+ * @param name Candidate family name.
+ * @returns The base name, or `null` when the candidate carries none of the
+ *   three suffixes.
+ */
+function histogramBaseName(name: string): string | null {
+  for (const suffix of [BUCKET_SUFFIX, SUM_SUFFIX, COUNT_SUFFIX]) {
+    if (name.length > suffix.length && name.endsWith(suffix)) {
+      return name.slice(0, name.length - suffix.length);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Derives the help text of a family that was never described.
+ *
+ * Deterministic and stable, so one registry state always renders one
+ * exposition: the exposition format's `# HELP` line is emitted once per
+ * family, and a family with no text of its own used to emit `# TYPE` alone.
+ *
+ * @param name Family name.
+ * @param kind Kind the family was registered under.
+ * @returns The derived text.
+ */
+function deriveHelp(name: string, kind: MetricKind): string {
+  return `${name} ${kind}; no help text was supplied.`;
+}
+
+/**
+ * Builds the key one absolute reconciliation is remembered under.
+ *
+ * The source correlation identifier is part of the key, so a total read
+ * from one source is never differenced against a total read from another.
+ *
+ * @param metric Family name the fold raises.
+ * @param source Correlation identifier of the snapshot being folded.
+ * @param dimension Label dimension within the family, such as a hook name
+ *   or a substream name.
+ * @returns The key.
+ */
+function foldKey(
+  metric: string,
+  source: CorrelationId,
+  dimension: string,
+): string {
+  return `${metric}|${source}|${dimension}`;
 }
 
 /* --------------------------------------------------------------------------
@@ -776,13 +637,6 @@ function escapeLabelValue(value: string): string {
     .replace(/[\u0000-\u001f\u007f]/g, ' ');
 }
 
-/**
- * Escapes help text for the exposition format. A double quote needs no escape
- * on a `# HELP` line and is left as it stands.
- *
- * @param help Text to escape.
- * @returns The escaped text.
- */
 function escapeHelp(help: string): string {
   return help
     .replace(/\\/g, '\\\\')
@@ -790,13 +644,6 @@ function escapeHelp(help: string): string {
     .replace(/[\u0000-\u001f\u007f]/g, ' ');
 }
 
-/**
- * Renders a number as the exposition format writes it.
- *
- * @param value Number to render.
- * @returns The rendering, using the format's `NaN`, `+Inf` and `-Inf`
- *   spellings for the three non-finite values.
- */
 function formatMetricValue(value: number): string {
   if (Number.isNaN(value)) {
     return 'NaN';
@@ -813,16 +660,6 @@ function formatMetricValue(value: number): string {
   return String(value);
 }
 
-/**
- * Renders a label set as the exposition format's brace list, with an optional
- * trailing pair appended after the sorted labels.
- *
- * @param labels Labels to render, emitted in sorted name order.
- * @param extraName Name of the trailing pair, omitted when absent.
- * @param extraValue Value of the trailing pair.
- * @returns The brace list, or the empty string when there is nothing to
- *   render.
- */
 function formatLabels(
   labels: LabelSet,
   extraName?: string,
@@ -841,24 +678,10 @@ function formatLabels(
   return parts.length === 0 ? '' : `{${parts.join(',')}}`;
 }
 
-/* --------------------------------------------------------------------------
- * Series implementation
- * ----------------------------------------------------------------------- */
-
-/** How a series reports a rejected call. */
 type SeriesReporter = (message: string, fields: LogFields) => void;
 
-/** A reporter that does nothing, held by a detached series. */
 const NOOP_SERIES_REPORTER: SeriesReporter = () => undefined;
 
-/**
- * Tags a child of the supplied logger, containing a throw from a logger
- * double that does not honour the module's no-throw contract.
- *
- * @param logger Logger to tag, or `undefined`.
- * @returns The tagged child, the logger itself when tagging failed, or
- *   `undefined` when none was supplied.
- */
 function tagLogger(logger: Logger | undefined): Logger | undefined {
   if (logger === undefined) {
     return undefined;
@@ -873,12 +696,6 @@ function tagLogger(logger: Logger | undefined): Logger | undefined {
   }
 }
 
-/**
- * Reads a logger's correlation identifier, containing a throwing accessor.
- *
- * @param logger Logger to read, or `undefined`.
- * @returns The identifier, or the empty string when it cannot be read.
- */
 function readCorrelationId(logger: Logger | undefined): string {
   if (logger === undefined) {
     return '';
@@ -891,6 +708,34 @@ function readCorrelationId(logger: Logger | undefined): string {
   } catch {
     return '';
   }
+}
+
+/**
+ * Reports whether a `tile:spawn` payload placed a tile.
+ *
+ * `SpawnPayload.position` in src/engine/hooks.ts is optional: the engine
+ * emits the event for every spawn attempt and omits the position when no
+ * cell was available, which js/grid.js L37-L43 signalled by returning
+ * `undefined` from `randomAvailableCell()`. A cell is a `{x, y}` pair of
+ * finite numbers.
+ *
+ * @param payload Payload the event carried.
+ * @returns `true` when the payload carries a usable cell.
+ */
+function carriesSpawnPosition(payload: unknown): boolean {
+  if (typeof payload !== 'object' || payload === null) {
+    return false;
+  }
+
+  const position: unknown = (payload as { position?: unknown }).position;
+
+  if (typeof position !== 'object' || position === null) {
+    return false;
+  }
+
+  const cell = position as { x?: unknown; y?: unknown };
+
+  return isFiniteNumber(cell.x) && isFiniteNumber(cell.y);
 }
 
 /**
@@ -911,44 +756,19 @@ function readCount(source: unknown, member: string): number | null {
   return isFiniteNumber(value) && value >= 0 ? value : null;
 }
 
-/**
- * One series.
- *
- * Implements all three primitive contracts behind one recorded kind, so a
- * family requested under a second kind can hand back the instance it already
- * holds with no cast. A mutation that does not belong to the recorded kind is
- * reported and ignored: `set` and `dec` on a counter, `inc` on a histogram,
- * and `observe` on anything but a histogram.
- *
- * A detached instance — one this registry rejected and therefore never
- * stored — accepts every mutation silently and is exported by nothing.
- */
 class MetricSeries implements Counter, Gauge, Histogram {
-  /** Family name. */
   readonly name: string;
-
-  /** Labels that identify the series within its family. */
   readonly labels: LabelSet;
-
-  /** The kind the family was registered under. */
   readonly kind: MetricKind;
-
-  /** Inclusive upper bounds, ascending. Empty for a non-histogram. */
   readonly buckets: readonly number[];
-
-  /** Whether the registry declined to store this instance. */
   readonly detached: boolean;
 
-  /** Sink for a rejected call. */
   private readonly report: SeriesReporter;
 
-  /** Counter and gauge accumulator. */
   private scalar = 0;
 
-  /** Observations recorded. */
   private observations = 0;
 
-  /** Sum of the observations recorded. */
   private total = 0;
 
   /**
@@ -956,6 +776,19 @@ class MetricSeries implements Counter, Gauge, Histogram {
    * final element is the overflow slot for an observation above every bound.
    */
   private readonly counts: number[];
+
+  /**
+   * Smallest observation recorded, or `Number.POSITIVE_INFINITY` while none
+   * has been.
+   *
+   * One number, so the histogram still retains no observation. It is the
+   * lower edge of the first bucket, which the bucket bounds do not carry:
+   * the first bucket holds everything at or below `buckets[0]`, so its lower
+   * edge is unbounded below and interpolating from a hard-coded `0` was
+   * wrong for any layout whose first bound is negative, and wrong by the
+   * whole of the first bucket for one whose observations sit well above `0`.
+   */
+  private minObservation = Number.POSITIVE_INFINITY;
 
   /**
    * @param name Family name.
@@ -982,17 +815,14 @@ class MetricSeries implements Counter, Gauge, Histogram {
     this.counts = new Array<number>(this.buckets.length + 1).fill(0);
   }
 
-  /** The scalar for a counter or a gauge, the count for a histogram. */
   get value(): number {
     return this.kind === 'histogram' ? this.observations : this.scalar;
   }
 
-  /** Observations recorded. */
   get count(): number {
     return this.observations;
   }
 
-  /** Sum of the observations recorded. */
   get sum(): number {
     return this.total;
   }
@@ -1010,12 +840,6 @@ class MetricSeries implements Counter, Gauge, Histogram {
     return cumulative;
   }
 
-  /**
-   * Adds to a counter or a gauge.
-   *
-   * @param delta Amount to add, defaulting to `1`. A counter rejects a
-   *   negative delta; a gauge accepts one.
-   */
   inc(delta: number = 1): void {
     if (this.detached) {
       return;
@@ -1042,11 +866,6 @@ class MetricSeries implements Counter, Gauge, Histogram {
     this.scalar += delta;
   }
 
-  /**
-   * Subtracts from a gauge.
-   *
-   * @param delta Amount to subtract, defaulting to `1`.
-   */
   dec(delta: number = 1): void {
     if (this.detached) {
       return;
@@ -1067,11 +886,6 @@ class MetricSeries implements Counter, Gauge, Histogram {
     this.scalar -= delta;
   }
 
-  /**
-   * Replaces a gauge's value.
-   *
-   * @param value Value to hold.
-   */
   set(value: number): void {
     if (this.detached) {
       return;
@@ -1095,8 +909,6 @@ class MetricSeries implements Counter, Gauge, Histogram {
   /**
    * Records one observation into the first bucket whose bound it does not
    * exceed, or into the overflow slot.
-   *
-   * @param value Value to record.
    */
   observe(value: number): void {
     if (this.detached) {
@@ -1118,18 +930,15 @@ class MetricSeries implements Counter, Gauge, Histogram {
     this.observations += 1;
     this.total += value;
 
+    if (value < this.minObservation) {
+      this.minObservation = value;
+    }
+
     const slot = this.resolveSlot(value);
 
     this.counts[slot] = (this.counts[slot] ?? 0) + 1;
   }
 
-  /**
-   * Estimates a quantile by linear interpolation inside the bucket the rank
-   * falls in.
-   *
-   * @param q Quantile from 0 to 1 inclusive.
-   * @returns The estimate, or `NaN` when it is undefined.
-   */
   quantile(q: number): number {
     if (this.kind !== 'histogram' || this.observations === 0) {
       return Number.NaN;
@@ -1144,20 +953,34 @@ class MetricSeries implements Counter, Gauge, Histogram {
     }
 
     const rank = q * this.observations;
-    let lowerBound = 0;
+
+    // The lower edge of the first bucket, which is unbounded below in the
+    // bucket layout and is therefore taken from the observations
+    // themselves. Finite here, because `observations` is non-zero.
+    let lowerBound = this.minObservation;
     let cumulativeBelow = 0;
 
     for (let index = 0; index < this.buckets.length; index += 1) {
       const inBucket = this.counts[index] ?? 0;
-      const cumulative = cumulativeBelow + inBucket;
       const upperBound = this.buckets[index] ?? lowerBound;
 
-      if (cumulative >= rank) {
-        if (inBucket === 0) {
-          return upperBound;
-        }
+      // An EMPTY BUCKET HOLDS NO OBSERVATION, so no rank falls inside it and
+      // it is never the answer. `quantile(0)` used to select it, because a
+      // cumulative count of zero satisfies `>= 0`, and returned a bound
+      // nothing was ever observed at.
+      if (inBucket === 0) {
+        lowerBound = upperBound;
 
-        const share = (rank - cumulativeBelow) / inBucket;
+        continue;
+      }
+
+      const cumulative = cumulativeBelow + inBucket;
+
+      if (cumulative >= rank) {
+        const share = Math.min(
+          Math.max((rank - cumulativeBelow) / inBucket, 0),
+          1,
+        );
 
         return lowerBound + (upperBound - lowerBound) * share;
       }
@@ -1166,6 +989,7 @@ class MetricSeries implements Counter, Gauge, Histogram {
       lowerBound = upperBound;
     }
 
+    // Every bucket is empty, so every observation is above the last bound.
     return this.buckets[this.buckets.length - 1] ?? Number.NaN;
   }
 
@@ -1174,15 +998,10 @@ class MetricSeries implements Counter, Gauge, Histogram {
     this.scalar = 0;
     this.observations = 0;
     this.total = 0;
+    this.minObservation = Number.POSITIVE_INFINITY;
     this.counts.fill(0);
   }
 
-  /**
-   * Adds to the accumulator without the public guards, for the registry's own
-   * bookkeeping.
-   *
-   * @param delta Amount to add. A non-finite or negative delta adds nothing.
-   */
   addInternal(delta: number): void {
     if (this.detached || this.kind === 'histogram') {
       return;
@@ -1195,12 +1014,6 @@ class MetricSeries implements Counter, Gauge, Histogram {
     this.scalar += delta;
   }
 
-  /**
-   * Projects the series as plain JSON data.
-   *
-   * @param help Help text of the family.
-   * @returns The snapshot, discriminated by the recorded kind.
-   */
   toSnapshot(help: string): MetricSeriesSnapshot {
     if (this.kind === 'histogram') {
       const histogram: HistogramSeriesSnapshot = {
@@ -1241,12 +1054,6 @@ class MetricSeries implements Counter, Gauge, Histogram {
     return Object.freeze(counter);
   }
 
-  /**
-   * Resolves the slot an observation is counted in.
-   *
-   * @param value Observation to place.
-   * @returns The index into `counts`, `buckets.length` for the overflow slot.
-   */
   private resolveSlot(value: number): number {
     let low = 0;
     let high = this.buckets.length;
@@ -1265,12 +1072,6 @@ class MetricSeries implements Counter, Gauge, Histogram {
     return low;
   }
 
-  /**
-   * Reports a rejected call.
-   *
-   * @param operation Member the call was made through.
-   * @param fields Structured fields describing the rejection.
-   */
   private reject(operation: string, fields: LogFields): void {
     this.report('metric call rejected', {
       ...fields,
@@ -1280,31 +1081,15 @@ class MetricSeries implements Counter, Gauge, Histogram {
   }
 }
 
-/* --------------------------------------------------------------------------
- * Family
- * ----------------------------------------------------------------------- */
-
-/** One metric family: the unit `# HELP` and `# TYPE` are emitted for. */
 interface MetricFamily {
-  /** Family name. */
   readonly name: string;
-
-  /** Kind the family was first registered under. */
   readonly kind: MetricKind;
 
   /** Bucket bounds shared by every series of a histogram family. */
   readonly buckets: readonly number[];
-
-  /** Help text, empty until `describe` supplies one. */
   help: string;
-
-  /** The family's series, keyed by `buildSeriesKey`. */
   readonly series: Map<string, MetricSeries>;
 }
-
-/* --------------------------------------------------------------------------
- * Registry
- * ----------------------------------------------------------------------- */
 
 /**
  * The in-page metrics registry.
@@ -1312,42 +1097,57 @@ interface MetricFamily {
  * Holds every series and exports them three ways: `snapshot()` as JSON,
  * `toPrometheusText()` as text exposition, and `download()` as a file. Those
  * three members are what stands in for a network-served metrics endpoint here.
- * The substitution carries its own entry in docs/DECISION_LOG.md.
  *
- * Every member is safe to call from inside an engine-event listener: none of
- * them throws for any input, and a rejected call is reported through the
- * injected logger, counted, and otherwise ignored.
+ * Every member is safe to call from inside an engine-event listener: a rejected
+ * call is reported through the injected logger, counted, and otherwise ignored
+ * rather than raised.
  */
 export class MetricsRegistry {
-  /** Correlation identifier of the run, taken from the injected logger. */
   readonly correlationId: string;
 
   /** The families, in registration order. */
   private readonly families = new Map<string, MetricFamily>();
 
-  /**
-   * Absolute values the last fold read, keyed per series, so a repeated fold
-   * of the same snapshot adds nothing.
-   */
   private readonly foldedAbsolutes = new Map<string, number>();
 
-  /** Per-event emission counters, keyed by event name. */
   private readonly eventCounters = new Map<string, MetricSeries>();
 
-  /** Per-hook dispatch counters, keyed by hook name. */
   private readonly hookDispatchCounters = new Map<string, MetricSeries>();
 
-  /** Per-hook handler-invocation counters, keyed by hook name. */
   private readonly hookInvocationCounters = new Map<string, MetricSeries>();
 
   /** Per-hook contained-throw counters, keyed by hook name. */
   private readonly hookErrorCounters = new Map<string, MetricSeries>();
 
-  /** Per-hook payload-rejection counters, keyed by hook name. */
   private readonly hookRejectionCounters = new Map<string, MetricSeries>();
 
-  /** Per-hook skip counters, keyed by `hook + '|' + reason`. */
   private readonly hookSkipCounters = new Map<string, MetricSeries>();
+
+  /**
+   * Sample names the histogram families generate, each mapped to the family
+   * that owns it, so a later registration under one of them is refused.
+   */
+  private readonly reservedNames = new Map<string, string>();
+
+  /** Metadata characters retained across every family and series. */
+  private metadataChars = 0;
+
+  /**
+   * Per-span duration histograms, keyed by span name.
+   *
+   * Span, check and stream names are not known at construction the way event
+   * and hook names are, so these three caches fill on first use instead of
+   * being pre-resolved. Each is bounded by `MAX_SERIES_PER_FAMILY`, the same
+   * ceiling a family itself holds, so an unbounded stream of distinct
+   * identifiers cannot grow them without limit.
+   */
+  private readonly spanHistograms = new Map<string, MetricSeries>();
+
+  /** Per-check status gauges, keyed by check name. */
+  private readonly healthGauges = new Map<string, MetricSeries>();
+
+  /** Per-substream draw counters, keyed by substream name. */
+  private readonly rngStreamCounters = new Map<string, MetricSeries>();
 
   /** Calls rejected over the registry's lifetime. */
   private rejectedCalls = 0;
@@ -1355,7 +1155,6 @@ export class MetricsRegistry {
   /** Logger calls that threw and were contained. */
   private reporterFaults = 0;
 
-  /** Sink every rejection is reported and counted through. */
   private readonly reportRejection: SeriesReporter = (message, fields) => {
     this.rejectedCalls += 1;
 
@@ -1381,31 +1180,25 @@ export class MetricsRegistry {
   /** The tagged logger, absent when none was supplied. */
   private readonly logger: Logger | undefined;
 
-  /** Cached series for the counter every rejection is counted in. */
   private readonly rejectedCounter: MetricSeries;
 
-  /** Cached series for the resolved-turn counter. */
   private readonly turnsCounter: MetricSeries;
 
-  /** Cached series for the resolved-merge counter. */
   private readonly mergesCounter: MetricSeries;
 
-  /** Cached series for the tile-spawn counter. */
+  /** Cached series for the inserted-tile counter. */
   private readonly spawnsCounter: MetricSeries;
+
+  /** Cached series for the spawn-attempt counter. */
+  private readonly spawnAttemptsCounter: MetricSeries;
 
   /** Cached series for the composited-frame counter. */
   private readonly framesCounter: MetricSeries;
 
-  /** Cached series for the frame-duration histogram. */
   private readonly frameTimeHistogram: MetricSeries;
 
-  /** Cached series for the turn-latency histogram. */
   private readonly turnLatencyHistogram: MetricSeries;
 
-  /**
-   * @param options Logger and the three histogram bucket layouts. Every
-   *   member is optional, so the registry is constructible with no argument.
-   */
   constructor(options: MetricsRegistryOptions = {}) {
     this.logger = tagLogger(options.logger);
     this.correlationId = readCorrelationId(this.logger);
@@ -1417,6 +1210,7 @@ export class MetricsRegistry {
     this.turnsCounter = this.declareSeries('turnsTotal', {});
     this.mergesCounter = this.declareSeries('mergesTotal', {});
     this.spawnsCounter = this.declareSeries('spawnsTotal', {});
+    this.spawnAttemptsCounter = this.declareSeries('spawnAttemptsTotal', {});
     this.framesCounter = this.declareSeries('framesRenderedTotal', {});
 
     for (const event of ENGINE_EVENT_NAMES) {
@@ -1480,19 +1274,12 @@ export class MetricsRegistry {
     );
   }
 
-  /* ----------------------------------------------------------------------
-   * Public accessors
-   * ------------------------------------------------------------------- */
-
   /**
    * Resolves a counter series, creating it on first request.
    *
    * IDEMPOTENT: the same name and the same labels always return the same
    * instance, whatever order the label names were written in.
    *
-   * @param name Family name, which must match the exposition format's metric
-   *   name grammar.
-   * @param labels Labels of the series. Defaults to none.
    * @returns The series. A rejected request returns a detached instance that
    *   accepts calls and is exported by nothing.
    */
@@ -1504,13 +1291,6 @@ export class MetricsRegistry {
     }
   }
 
-  /**
-   * Resolves a gauge series, creating it on first request.
-   *
-   * @param name Family name.
-   * @param labels Labels of the series. Defaults to none.
-   * @returns The series, or a detached instance for a rejected request.
-   */
   gauge(name: string, labels: LabelSet = {}): Gauge {
     try {
       return this.resolveSeries(name, labels, 'gauge', undefined);
@@ -1527,10 +1307,6 @@ export class MetricsRegistry {
    * bounds is reported and served with the family's own layout, which every
    * series of the family shares.
    *
-   * @param name Family name.
-   * @param labels Labels of the series. Defaults to none.
-   * @param buckets Inclusive upper bounds. Normalised to an ascending,
-   *   deduplicated list; defaults to `DEFAULT_DURATION_BUCKETS`.
    * @returns The series, or a detached instance for a rejected request.
    */
   histogram(
@@ -1548,11 +1324,6 @@ export class MetricsRegistry {
   /**
    * Records the `# HELP` and `# TYPE` metadata of a family, creating the
    * family when it does not exist yet.
-   *
-   * @param name Family name.
-   * @param help Help text. A non-string is reported and ignored.
-   * @param kind Kind of the family. A kind that disagrees with a family
-   *   already registered is reported, and the registered kind stands.
    */
   describe(name: string, help: string, kind: MetricKind): void {
     try {
@@ -1571,15 +1342,32 @@ export class MetricsRegistry {
         return;
       }
 
-      family.help = help;
+      const bounded =
+        help.length > MAX_HELP_LENGTH ? help.slice(0, MAX_HELP_LENGTH) : help;
+
+      if (bounded.length !== help.length) {
+        this.reportRejection('metric help truncated', {
+          metric: family.name,
+          reason: 'helpTooLong',
+          limit: MAX_HELP_LENGTH,
+        });
+      }
+
+      if (!this.chargeMetadata(bounded.length - family.help.length)) {
+        this.reportRejection('metric help rejected', {
+          metric: family.name,
+          reason: 'metadataBudgetReached',
+          limit: MAX_METADATA_CHARS,
+        });
+
+        return;
+      }
+
+      family.help = bounded;
     } catch {
       this.reporterFaults += 1;
     }
   }
-
-  /* ----------------------------------------------------------------------
-   * Recorders
-   * ------------------------------------------------------------------- */
 
   /**
    * Counts one engine-event emission, and the turn, merge or spawn that
@@ -1589,11 +1377,8 @@ export class MetricsRegistry {
    * entered once per merge inside the traversal — so a move that resolves two
    * merges calls this twice and the merge counter rises by two. `move:after`
    * closes one turn and `tile:spawn` stands for one spawn.
-   *
-   * @param event Event that was emitted. A name outside
-   *   `ENGINE_EVENT_NAMES` is reported and counted nowhere.
    */
-  recordEngineEvent(event: EngineEventName): void {
+  recordEngineEvent(event: EngineEventName, detail?: SpawnDetail): void {
     try {
       const counter = this.eventCounters.get(event);
 
@@ -1613,21 +1398,17 @@ export class MetricsRegistry {
       } else if (event === 'tile:merge') {
         this.mergesCounter.inc(1);
       } else if (event === 'tile:spawn') {
-        this.spawnsCounter.inc(1);
+        this.spawnAttemptsCounter.inc(1);
+
+        if (carriesSpawnPosition(detail)) {
+          this.spawnsCounter.inc(1);
+        }
       }
     } catch {
       this.reporterFaults += 1;
     }
   }
 
-  /**
-   * Counts one composited frame and, when a duration is supplied, records it
-   * in the frame-duration histogram.
-   *
-   * @param frameTimeMs Duration of the frame in milliseconds. Omitted, only
-   *   the frame is counted; a negative or non-finite value is reported and
-   *   the frame is still counted.
-   */
   recordFrame(frameTimeMs?: number): void {
     try {
       this.framesCounter.inc(1);
@@ -1651,15 +1432,6 @@ export class MetricsRegistry {
     }
   }
 
-  /**
-   * Records one turn latency.
-   *
-   * The boundary is input dispatch through commit: js/game_manager.js L130,
-   * the entry of `move()`, to L91-L97, the actuation push.
-   *
-   * @param durationMs Latency in milliseconds. A negative or non-finite value
-   *   is reported and recorded nowhere.
-   */
   recordTurnLatency(durationMs: number): void {
     try {
       if (!isFiniteNumber(durationMs) || durationMs < 0) {
@@ -1677,13 +1449,6 @@ export class MetricsRegistry {
     }
   }
 
-  /**
-   * Records one span duration under its span name.
-   *
-   * @param span Span name, carried as the `span` label.
-   * @param durationMs Duration in milliseconds. A negative or non-finite
-   *   value is reported and recorded nowhere.
-   */
   recordSpanDuration(span: string, durationMs: number): void {
     try {
       if (typeof span !== 'string' || span.length === 0) {
@@ -1705,21 +1470,16 @@ export class MetricsRegistry {
         return;
       }
 
-      this.histogram(METRIC_NAMES.spanDurationMilliseconds, {
-        [METRIC_LABELS.span]: span,
-      }).observe(durationMs);
+      this.dynamicSeries(this.spanHistograms, span, () =>
+        this.histogramSeries(METRIC_NAMES.spanDurationMilliseconds, {
+          [METRIC_LABELS.span]: span,
+        }),
+      ).observe(durationMs);
     } catch {
       this.reporterFaults += 1;
     }
   }
 
-  /**
-   * Records the result of one health check as `1` or `0`.
-   *
-   * @param check Check name, carried as the `check` label.
-   * @param healthy Whether the check passed. Only the exact value `true`
-   *   records `1`.
-   */
   recordHealthCheck(check: string, healthy: boolean): void {
     try {
       if (typeof check !== 'string' || check.length === 0) {
@@ -1731,24 +1491,16 @@ export class MetricsRegistry {
         return;
       }
 
-      this.gauge(METRIC_NAMES.healthCheckStatus, {
-        [METRIC_LABELS.check]: check,
-      }).set(healthy === true ? 1 : 0);
+      this.dynamicSeries(this.healthGauges, check, () =>
+        this.gaugeSeries(METRIC_NAMES.healthCheckStatus, {
+          [METRIC_LABELS.check]: check,
+        }),
+      ).set(healthy === true ? 1 : 0);
     } catch {
       this.reporterFaults += 1;
     }
   }
 
-  /**
-   * Folds the draw cursors of the named RNG substreams into the per-stream
-   * draw counter.
-   *
-   * ABSOLUTE RECONCILIATION, as `foldHookDispatchCounts` uses: each cursor is
-   * a lifetime total, so the counter rises by the increase since the previous
-   * fold and folding one set of cursors twice adds nothing the second time.
-   *
-   * @param cursors Draw cursor of each substream, keyed by substream name.
-   */
   recordRngCursors(cursors: Readonly<Record<string, number>>): void {
     try {
       if (typeof cursors !== 'object' || cursors === null) {
@@ -1760,41 +1512,53 @@ export class MetricsRegistry {
         return;
       }
 
-      for (const stream of Object.keys(cursors)) {
-        const series = this.counterSeries(METRIC_NAMES.rngDrawsTotal, {
-          [METRIC_LABELS.stream]: stream,
-        });
+      // The CANONICAL TUPLE is iterated, not the caller's keys: the run has
+      // exactly the four named substreams, and folding whatever keys a
+      // caller happened to pass let an arbitrary name become a `stream`
+      // label and a series of its own. The series itself is resolved through
+      // the bounded per-stream cache rather than rebuilt on every fold.
+      for (const stream of RNG_STREAM_NAMES) {
+        const series = this.dynamicSeries(
+          this.rngStreamCounters,
+          stream,
+          () =>
+            this.counterSeries(METRIC_NAMES.rngDrawsTotal, {
+              [METRIC_LABELS.stream]: stream,
+            }),
+        );
 
         this.foldAbsolute(
           series,
-          `${METRIC_NAMES.rngDrawsTotal}|${stream}`,
+          foldKey(METRIC_NAMES.rngDrawsTotal, this.correlationId, stream),
           readCount(cursors, stream),
         );
+      }
+
+      for (const offered of Object.keys(cursors)) {
+        if (!(RNG_STREAM_NAMES as readonly string[]).includes(offered)) {
+          this.reportRejection('rng cursor rejected', {
+            metric: METRIC_NAMES.rngDrawsTotal,
+            reason: 'unknownStream',
+            stream: offered.slice(0, MAX_LABEL_VALUE_LENGTH),
+          });
+        }
       }
     } catch {
       this.reporterFaults += 1;
     }
   }
 
-  /* ----------------------------------------------------------------------
-   * Hook-bus integration
-   * ------------------------------------------------------------------- */
-
   /**
    * Folds the hook bus's dispatch counts into the per-hook counter families.
    *
    * PULL, not push: the caller reads `HookBus.metrics()` and hands the result
-   * here. src/engine imports nothing from this module. Decision surfaced for
-   * docs/DECISION_LOG.md.
+   * here. src/engine imports nothing from this module.
    *
    * ABSOLUTE RECONCILIATION: the bus reports lifetime totals, so each counter
    * rises by the increase since the previous fold. Folding one snapshot twice
    * therefore adds nothing the second time, and a total that has fallen below
    * the previous reading — a fresh bus under the same registry — is read as
    * the whole of a new lifetime.
-   *
-   * @param view The bus's snapshot, or any value carrying its `hooks` member.
-   *   A missing or malformed member is reported and folded nowhere.
    */
   foldHookDispatchCounts(view: HookDispatchCountsView): void {
     try {
@@ -1816,36 +1580,32 @@ export class MetricsRegistry {
         return;
       }
 
+      const source = this.resolveFoldSource(view);
       const hooks = table as Record<string, unknown>;
 
       for (const hook of HOOK_NAMES) {
-        this.foldOneHook(hooks, hook);
+        this.foldOneHook(hooks, hook, source);
       }
     } catch {
       this.reporterFaults += 1;
     }
   }
 
-  /* ----------------------------------------------------------------------
-   * Export
-   * ------------------------------------------------------------------- */
-
   /**
    * Projects the whole registry as plain JSON data.
    *
    * Every series present here is also present in `toPrometheusText()` under
    * the same name and labels, and no series appears in one and not the other.
-   *
-   * @returns The snapshot. Family order is registration order and, within a
-   *   family, series order is first-request order.
    */
   snapshot(): MetricsSnapshot {
     const series: MetricSeriesSnapshot[] = [];
 
     try {
       for (const family of this.families.values()) {
+        const help = this.helpOf(family);
+
         for (const entry of family.series.values()) {
-          series.push(entry.toSnapshot(family.help));
+          series.push(entry.toSnapshot(help));
         }
       }
     } catch {
@@ -1865,17 +1625,6 @@ export class MetricsRegistry {
     return Object.freeze(snapshot);
   }
 
-  /**
-   * Renders every family in the Prometheus text exposition format.
-   *
-   * One `# HELP` line — omitted when the family has no help text — and one
-   * `# TYPE` line precede a family's series. A histogram family emits
-   * CUMULATIVE `_bucket` series with an ascending `le`, a final `le="+Inf"`
-   * bucket equal to the observation count, then `_sum` and `_count`. The
-   * output ends with a newline.
-   *
-   * @returns The exposition text, empty when nothing is registered.
-   */
   toPrometheusText(): string {
     const lines: string[] = [];
 
@@ -1890,16 +1639,10 @@ export class MetricsRegistry {
     return lines.length === 0 ? '' : `${lines.join('\n')}\n`;
   }
 
-  /** The exposition text, as a readable property. */
   get prometheusText(): string {
     return this.toPrometheusText();
   }
 
-  /**
-   * Serialises the snapshot as JSON text.
-   *
-   * @returns The JSON text, or `'{}'` when it could not be produced.
-   */
   toJson(): string {
     try {
       const text = JSON.stringify(this.snapshot());
@@ -1923,8 +1666,6 @@ export class MetricsRegistry {
    * `URL.createObjectURL` are each feature-detected, so the call reports and
    * returns `false` where any of them is absent rather than throwing.
    *
-   * @param filename Name to save under. Defaults to
-   *   `DEFAULT_METRICS_FILENAME`.
    * @returns `true` when the download was triggered.
    */
   download(filename: string = DEFAULT_METRICS_FILENAME): boolean {
@@ -2016,8 +1757,8 @@ export class MetricsRegistry {
    * Zeroes every value and forgets every folded absolute.
    *
    * The families, their series, their kinds, their help text and their bucket
-   * layouts all survive, so the exported contract is unchanged. A fold after
-   * a reset counts from the source's current total.
+   * layouts all survive, so the exported contract is unchanged. A fold after a
+   * reset counts from the source's current total.
    */
   reset(): void {
     try {
@@ -2035,16 +1776,6 @@ export class MetricsRegistry {
     }
   }
 
-  /* ----------------------------------------------------------------------
-   * Registration internals
-   * ------------------------------------------------------------------- */
-
-  /**
-   * Registers a canonical family's metadata without any series.
-   *
-   * @param key Key into `METRIC_NAMES`.
-   * @param buckets Bounds, used only by a histogram family.
-   */
   private declareFamily(
     key: keyof typeof METRIC_NAMES,
     buckets: readonly number[] | undefined,
@@ -2060,14 +1791,6 @@ export class MetricsRegistry {
     }
   }
 
-  /**
-   * Registers a canonical family's metadata and resolves one of its series.
-   *
-   * @param key Key into `METRIC_NAMES`.
-   * @param labels Labels of the series.
-   * @param buckets Bounds, used only by a histogram family.
-   * @returns The series.
-   */
   private declareSeries(
     key: keyof typeof METRIC_NAMES,
     labels: LabelSet,
@@ -2083,14 +1806,6 @@ export class MetricsRegistry {
     );
   }
 
-  /**
-   * Resolves a family, creating it on first request.
-   *
-   * @param name Family name.
-   * @param kind Requested kind.
-   * @param buckets Requested bounds, used only by a histogram family.
-   * @returns The family, or `null` when the request was rejected.
-   */
   private ensureFamily(
     name: string,
     kind: MetricKind,
@@ -2100,6 +1815,16 @@ export class MetricsRegistry {
       this.reportRejection('metric name rejected', {
         metric: typeof name === 'string' ? name : '',
         reason: 'invalidMetricName',
+      });
+
+      return null;
+    }
+
+    if (name.length > MAX_METRIC_NAME_LENGTH) {
+      this.reportRejection('metric name rejected', {
+        metric: name.slice(0, MAX_METRIC_NAME_LENGTH),
+        reason: 'nameTooLong',
+        limit: MAX_METRIC_NAME_LENGTH,
       });
 
       return null;
@@ -2138,6 +1863,20 @@ export class MetricsRegistry {
       return null;
     }
 
+    if (!this.reserveFamilyName(name, kind)) {
+      return null;
+    }
+
+    if (!this.chargeMetadata(name.length)) {
+      this.reportRejection('metric family rejected', {
+        metric: name,
+        reason: 'metadataBudgetReached',
+        limit: MAX_METADATA_CHARS,
+      });
+
+      return null;
+    }
+
     const family: MetricFamily = {
       name,
       kind,
@@ -2151,7 +1890,104 @@ export class MetricsRegistry {
 
     this.families.set(name, family);
 
+    if (kind === 'histogram') {
+      for (const generated of generatedHistogramNames(name)) {
+        this.reservedNames.set(generated, name);
+      }
+    }
+
     return family;
+  }
+
+  /**
+   * Tests a new family's name against the sample names the histogram
+   * families generate, in both directions.
+   *
+   * @param name Name being registered.
+   * @param kind Kind being registered.
+   * @returns `true` when the name is free, `false` when it was rejected and
+   *   reported.
+   */
+  private reserveFamilyName(name: string, kind: MetricKind): boolean {
+    // Forward: the name is one a registered histogram already generates.
+    const owner = this.reservedNames.get(name);
+
+    if (owner !== undefined) {
+      this.reportRejection('metric family rejected', {
+        metric: name,
+        reason: 'nameGeneratedByHistogram',
+        histogram: owner,
+      });
+
+      return false;
+    }
+
+    if (kind !== 'histogram') {
+      // Reciprocal, for a non-histogram: a family named `x_bucket` is
+      // free unless a histogram named `x` is registered, which the check
+      // below covers for the histogram-first order and this one covers for
+      // the reverse.
+      const base = histogramBaseName(name);
+      const collides = base !== null && this.families.get(base)?.kind;
+
+      if (collides === 'histogram') {
+        this.reportRejection('metric family rejected', {
+          metric: name,
+          reason: 'nameGeneratedByHistogram',
+          histogram: base ?? '',
+        });
+
+        return false;
+      }
+
+      return true;
+    }
+
+    // Reciprocal, for a histogram: one of the names it would generate is
+    // already a family of its own.
+    for (const generated of generatedHistogramNames(name)) {
+      if (this.families.has(generated)) {
+        this.reportRejection('metric family rejected', {
+          metric: name,
+          reason: 'generatedNameCollision',
+          generated,
+        });
+
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Charges characters against the registry's metadata budget.
+   *
+   * @param chars Characters the caller wants to retain.
+   * @returns `true` when the budget covered them, `false` when it did not.
+   *   A refusal charges nothing.
+   */
+  private chargeMetadata(chars: number): boolean {
+    if (this.metadataChars + chars > MAX_METADATA_CHARS) {
+      return false;
+    }
+
+    this.metadataChars += chars;
+
+    return true;
+  }
+
+  /**
+   * Reads the help text a family is exported with.
+   *
+   * @param family Family to read.
+   * @returns Its own text, or the deterministic derivation for a family
+   *   that was never described.
+   */
+  private helpOf(family: MetricFamily): string {
+    return family.help.length > 0
+      ? family.help
+      : deriveHelp(family.name, family.kind);
   }
 
   /**
@@ -2211,16 +2047,6 @@ export class MetricsRegistry {
     return series;
   }
 
-  /**
-   * Validates and copies a label set.
-   *
-   * The label name `le` is rejected everywhere: a histogram family uses it
-   * for its bucket bounds.
-   *
-   * @param name Family name the labels were requested under, for the report.
-   * @param labels Labels to validate.
-   * @returns A frozen copy, or `null` when any name or value was rejected.
-   */
   private normaliseLabels(name: string, labels: LabelSet): LabelSet | null {
     const metric = typeof name === 'string' ? name : '';
 
@@ -2233,9 +2059,28 @@ export class MetricsRegistry {
       return null;
     }
 
-    const normalised: Record<string, string> = {};
+    // SORTED, not in the caller's insertion order. The stored object's key
+    // order is what `JSON.stringify` renders and what the snapshot carries,
+    // so two callers writing the same labels in different orders used to
+    // produce byte-different snapshots depending on which one created the
+    // series first.
+    const names = Object.keys(labels).sort();
 
-    for (const labelName of Object.keys(labels)) {
+    if (names.length > MAX_LABELS_PER_SERIES) {
+      this.reportRejection('metric labels rejected', {
+        metric,
+        reason: 'tooManyLabels',
+        limit: MAX_LABELS_PER_SERIES,
+        offered: names.length,
+      });
+
+      return null;
+    }
+
+    const normalised: Record<string, string> = {};
+    let chars = 0;
+
+    for (const labelName of names) {
       if (labelName === BUCKET_LABEL) {
         this.reportRejection('metric label rejected', {
           metric,
@@ -2256,6 +2101,17 @@ export class MetricsRegistry {
         return null;
       }
 
+      if (labelName.length > MAX_LABEL_NAME_LENGTH) {
+        this.reportRejection('metric label rejected', {
+          metric,
+          label: labelName.slice(0, MAX_LABEL_NAME_LENGTH),
+          reason: 'labelNameTooLong',
+          limit: MAX_LABEL_NAME_LENGTH,
+        });
+
+        return null;
+      }
+
       const value: unknown = labels[labelName];
 
       if (typeof value !== 'string') {
@@ -2268,7 +2124,29 @@ export class MetricsRegistry {
         return null;
       }
 
+      if (value.length > MAX_LABEL_VALUE_LENGTH) {
+        this.reportRejection('metric label rejected', {
+          metric,
+          label: labelName,
+          reason: 'labelValueTooLong',
+          limit: MAX_LABEL_VALUE_LENGTH,
+        });
+
+        return null;
+      }
+
+      chars += labelName.length + value.length;
       normalised[labelName] = value;
+    }
+
+    if (!this.chargeMetadata(chars)) {
+      this.reportRejection('metric labels rejected', {
+        metric,
+        reason: 'metadataBudgetReached',
+        limit: MAX_METADATA_CHARS,
+      });
+
+      return null;
     }
 
     return Object.freeze(normalised);
@@ -2277,10 +2155,6 @@ export class MetricsRegistry {
   /**
    * Builds an instance the registry does not store, and which every rejected
    * request returns in place of a stored one.
-   *
-   * @param name Name the request carried.
-   * @param kind Kind the request asked for.
-   * @returns The detached instance.
    */
   private detachedSeries(name: string, kind: MetricKind): MetricSeries {
     return new MetricSeries(
@@ -2293,13 +2167,6 @@ export class MetricsRegistry {
     );
   }
 
-  /**
-   * Resolves a counter series as the internal implementation type.
-   *
-   * @param name Family name.
-   * @param labels Labels of the series.
-   * @returns The series, or a detached instance.
-   */
   private counterSeries(name: string, labels: LabelSet): MetricSeries {
     try {
       return this.resolveSeries(name, labels, 'counter', undefined);
@@ -2309,14 +2176,41 @@ export class MetricsRegistry {
   }
 
   /**
+   * Resolves a gauge series as the internal implementation type.
+   *
+   * `gauge()` answers with the narrow `Gauge` view, which carries neither the
+   * `detached` flag a cache decision reads nor an identity a cache can hold.
+   *
+   * @param name Family name.
+   * @param labels Labels of the series.
+   * @returns The series, or a detached instance.
+   */
+  private gaugeSeries(name: string, labels: LabelSet): MetricSeries {
+    try {
+      return this.resolveSeries(name, labels, 'gauge', undefined);
+    } catch {
+      return this.detachedSeries(name, 'gauge');
+    }
+  }
+
+  /**
+   * Resolves a histogram series as the internal implementation type.
+   *
+   * @param name Family name.
+   * @param labels Labels of the series.
+   * @returns The series, or a detached instance.
+   */
+  private histogramSeries(name: string, labels: LabelSet): MetricSeries {
+    try {
+      return this.resolveSeries(name, labels, 'histogram', undefined);
+    } catch {
+      return this.detachedSeries(name, 'histogram');
+    }
+  }
+
+  /**
    * Reads a cached series, resolving it through the registry when the cache
    * does not hold it.
-   *
-   * @param cache Cache to read.
-   * @param cacheKey Key into the cache.
-   * @param name Family name to fall back to.
-   * @param labels Labels to fall back to.
-   * @returns The series.
    */
   private cachedCounter(
     cache: Map<string, MetricSeries>,
@@ -2325,6 +2219,46 @@ export class MetricsRegistry {
     labels: LabelSet,
   ): MetricSeries {
     return cache.get(cacheKey) ?? this.counterSeries(name, labels);
+  }
+
+  /**
+   * Reads a series for a dynamic identifier, resolving it once and holding it.
+   *
+   * `resolveSeries` validates the labels, copies and freezes them, builds a
+   * family, then sorts and stringifies the label set into a lookup key — all
+   * of it repeated on every call for a series that already exists. Holding
+   * the resolved handle against the identifier itself skips that chain from
+   * the second call onward and leaves the caller updating the handle
+   * directly.
+   *
+   * The cache is bounded: once it holds `MAX_SERIES_PER_FAMILY` identifiers a
+   * further one still resolves and records, but is not retained. Nothing is
+   * cached for a detached series, so a rejected label set does not pin a
+   * useless handle.
+   *
+   * @param cache Cache the handle is held in.
+   * @param identifier Dynamic name, used as the cache key.
+   * @param resolve Resolves the series on a miss.
+   * @returns The series.
+   */
+  private dynamicSeries(
+    cache: Map<string, MetricSeries>,
+    identifier: string,
+    resolve: () => MetricSeries,
+  ): MetricSeries {
+    const held = cache.get(identifier);
+
+    if (held !== undefined) {
+      return held;
+    }
+
+    const series = resolve();
+
+    if (cache.size < MAX_SERIES_PER_FAMILY && !series.detached) {
+      cache.set(identifier, series);
+    }
+
+    return series;
   }
 
   /* ----------------------------------------------------------------------
@@ -2369,18 +2303,56 @@ export class MetricsRegistry {
   }
 
   /**
+   * Reads the correlation identifier a fold's source carries, reporting a
+   * value that disagrees with this registry's own.
+   *
+   * @param view Snapshot being folded.
+   * @returns The source identifier, or the empty string when the snapshot
+   *   carries none usable.
+   */
+  private resolveFoldSource(view: HookDispatchCountsView): CorrelationId {
+    const carried: unknown = view.correlationId;
+
+    if (typeof carried !== 'string' || carried.length === 0) {
+      this.reportRejection('hook dispatch fold source missing', {
+        reason: 'noCorrelationId',
+        registry: this.correlationId,
+      });
+
+      return '';
+    }
+
+    if (this.correlationId.length > 0 && carried !== this.correlationId) {
+      this.reportRejection('hook dispatch fold source mismatch', {
+        reason: 'foreignCorrelationId',
+        registry: this.correlationId,
+        source: carried,
+      });
+    }
+
+    return carried;
+  }
+
+  /**
    * Folds one hook's counts out of the bus's `hooks` table.
    *
    * @param table The bus's `hooks` member.
    * @param hook Hook to fold.
+   * @param source Correlation identifier of the bus that counted them,
+   *   which namespaces every reconciliation key below.
    */
-  private foldOneHook(table: Record<string, unknown>, hook: HookName): void {
+  private foldOneHook(
+    table: Record<string, unknown>,
+    hook: HookName,
+    source: CorrelationId,
+  ): void {
     const counters: unknown = table[hook];
 
     if (typeof counters !== 'object' || counters === null) {
       this.reportRejection('hook dispatch fold rejected', {
         hook,
         reason: 'missingHookCounters',
+        source,
       });
 
       return;
@@ -2395,7 +2367,7 @@ export class MetricsRegistry {
         METRIC_NAMES.hookDispatchesTotal,
         hookLabels,
       ),
-      `${METRIC_NAMES.hookDispatchesTotal}|${hook}`,
+      foldKey(METRIC_NAMES.hookDispatchesTotal, source, hook),
       readCount(counters, DISPATCHED_MEMBER),
     );
 
@@ -2406,7 +2378,7 @@ export class MetricsRegistry {
         METRIC_NAMES.hookHandlerInvocationsTotal,
         hookLabels,
       ),
-      `${METRIC_NAMES.hookHandlerInvocationsTotal}|${hook}`,
+      foldKey(METRIC_NAMES.hookHandlerInvocationsTotal, source, hook),
       readCount(counters, INVOKED_MEMBER),
     );
 
@@ -2417,7 +2389,7 @@ export class MetricsRegistry {
         METRIC_NAMES.relicHandlerErrorsTotal,
         hookLabels,
       ),
-      `${METRIC_NAMES.relicHandlerErrorsTotal}|${hook}`,
+      foldKey(METRIC_NAMES.relicHandlerErrorsTotal, source, hook),
       readCount(counters, FAILED_MEMBER),
     );
 
@@ -2428,7 +2400,7 @@ export class MetricsRegistry {
         METRIC_NAMES.hookPayloadRejectionsTotal,
         hookLabels,
       ),
-      `${METRIC_NAMES.hookPayloadRejectionsTotal}|${hook}`,
+      foldKey(METRIC_NAMES.hookPayloadRejectionsTotal, source, hook),
       readCount(counters, REJECTED_MEMBER),
     );
 
@@ -2443,27 +2415,21 @@ export class MetricsRegistry {
             [METRIC_LABELS.reason]: reason,
           },
         ),
-        `${METRIC_NAMES.hookHandlerSkippedTotal}|${hook}|${reason}`,
+        foldKey(
+          METRIC_NAMES.hookHandlerSkippedTotal,
+          source,
+          `${hook}|${reason}`,
+        ),
         readCount(counters, SKIP_REASON_MEMBER[reason]),
       );
     }
   }
 
-  /* ----------------------------------------------------------------------
-   * Exposition internals
-   * ------------------------------------------------------------------- */
-
-  /**
-   * Appends one family's metadata and series to the exposition.
-   *
-   * @param family Family to render.
-   * @param lines Accumulator the lines are pushed onto.
-   */
   private writeFamily(family: MetricFamily, lines: string[]): void {
-    if (family.help.length > 0) {
-      lines.push(`# HELP ${family.name} ${escapeHelp(family.help)}`);
-    }
-
+    // ONE HELP LINE PER FAMILY, ALWAYS. A family that was never described
+    // used to emit `# TYPE` alone, so the snapshot's `help` and the
+    // exposition disagreed for the same series; both now read `helpOf`.
+    lines.push(`# HELP ${family.name} ${escapeHelp(this.helpOf(family))}`);
     lines.push(`# TYPE ${family.name} ${family.kind}`);
 
     for (const series of family.series.values()) {
@@ -2481,9 +2447,6 @@ export class MetricsRegistry {
   /**
    * Appends one histogram series: the cumulative bucket series in ascending
    * bound order, the `+Inf` bucket, then the sum and the count.
-   *
-   * @param series Series to render.
-   * @param lines Accumulator the lines are pushed onto.
    */
   private writeHistogram(series: MetricSeries, lines: string[]): void {
     const cumulative = series.bucketCounts;
@@ -2527,9 +2490,6 @@ export class MetricsRegistry {
 /**
  * Builds a registry, matching the construction idiom of
  * src/observability/logger.ts.
- *
- * @param options Logger and the three histogram bucket layouts.
- * @returns The registry.
  */
 export function createMetricsRegistry(
   options: MetricsRegistryOptions = {},

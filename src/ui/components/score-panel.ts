@@ -13,19 +13,19 @@
 //   L123-L125  `updateBestScore`
 //
 // Ported from the rest of the retired sources:
-//   index.html L24-L25           the two outlets, each seeded with `0`
-//   style/main.scss L95-L106     `.score-addition`, the delta node's class
-//   style/main.scss L109-L115    the `Score` and `Best` captions
+//   index.html       the two outlets, each seeded with `0`
+//   style/main.scss  `.score-addition`, the delta node's class
+//   style/main.scss  the `Score` and `Best` captions
 //   js/game_manager.js L80-L82   the best-score value shape
 //   js/game_manager.js L95       the best score re-read after the write
 //
-// Changed against that port, each recorded in docs/DECISION_LOG.md:
-//   - the L3-L4 lookups run through `resolveMount`, and a miss is reported
-//     and skipped instead of dereferenced (I12)
-//   - the `:after` captions of style/main.scss L109-L115 gain a real
-//     accessible counterpart where the markup declares no name (R9)
-//   - the L112 and L124 text assignments are appends, and any accessible name
-//     is inserted ahead of the value on the same write
+// Changed against that port:
+// - the two lookups run through `resolveMount`, and a miss is reported and
+// skipped instead of dereferenced
+// - the `:after` captions of style/main.scss gain a real accessible
+// counterpart where the markup declares no name
+// - the two text assignments are appends, and any accessible name is
+// inserted ahead of the value on the same write
 //
 // The best score arrives as the storage layer returns it — a string where one
 // is stored and the number `0` where none is — and reaches the DOM as text.
@@ -36,10 +36,7 @@
 // one it relies on is declared in style/main.scss and style/_a11y.scss and is
 // reached through the class names below. It names no observability module: the
 // report sink is injected. It reads no storage, holds no timer, registers no
-// listener and announces nothing — src/ui/a11y/live-region.ts owns every
-// announcement.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+// listener and announces nothing.
 
 import type { UiReporter } from '../a11y/settings';
 import {
@@ -58,10 +55,10 @@ const SCORE_SELECTOR = '.score-container';
 /** Selector of the best-score outlet. Read at js/html_actuator.js L4. */
 const BEST_SELECTOR = '.best-container';
 
-/** Class the delta node carries. Styled at style/main.scss L95-L106. */
+/** Class the delta node carries. Styled at style/main.scss. */
 const SCORE_ADDITION_CLASS = 'score-addition';
 
-/** Class that hides a node visually. style/_a11y.scss L157-L169. */
+/** Class that hides a node visually. style/_a11y.scss. */
 const VISUALLY_HIDDEN_CLASS = 'visually-hidden';
 
 /** Element the delta node is. js/html_actuator.js L115. */
@@ -73,10 +70,10 @@ const LABEL_TAG = 'span';
 /** Prefix the delta text carries. js/html_actuator.js L117. */
 const DELTA_PREFIX = '+';
 
-/** Accessible name of the score outlet. style/main.scss L109-L111. */
+/** Accessible name of the score outlet. style/main.scss. */
 const SCORE_LABEL = 'Score';
 
-/** Accessible name of the best-score outlet. style/main.scss L113-L115. */
+/** Accessible name of the best-score outlet. style/main.scss. */
 const BEST_LABEL = 'Best';
 
 /** Logical name of the score mount, carried into every report. */
@@ -144,8 +141,10 @@ export interface ScoreSnapshot {
   readonly score: number;
 
   /**
-   * Best score exactly as the storage layer returned it: a string where one
-   * is stored, and the number `0` where none is.
+   * Best score as the storage layer returned it. The port's frozen contract is
+   * the raw stored string where one is stored and the number `0` where none is;
+   * this member is typed wider than that contract, so a consumer must handle
+   * any number and must not assume a string. Nothing here converts it.
    */
   readonly bestScore: string | number;
 }
@@ -156,9 +155,8 @@ export interface ScoreSnapshot {
  */
 export interface ScorePanelOptions {
   /**
-   * Score outlet, already resolved. Used as given, with no lookup of its
-   * own: src/ui/screen-router.ts resolves the mount set and injects here.
-   * `null` marks an outlet the router looked for and did not find.
+   * Score outlet, already resolved. Used as given, with no lookup of its own.
+   * `null` marks an outlet the caller looked for and did not find.
    */
   readonly scoreContainer?: HTMLElement | null;
 
@@ -461,7 +459,7 @@ function resolveSurfaceElement(
 /**
  * Resolves the accessible name an outlet carries.
  *
- * The `:after` captions at style/main.scss L109-L115 are pseudo-content, so
+ * The `:after` captions at style/main.scss are pseudo-content, so
  * an outlet the markup leaves unnamed takes a visually-hidden name element
  * here (R9). Resolution stops at the first of three outcomes: a label element
  * the markup placed inside the outlet is adopted, a labelling attribute the
@@ -589,11 +587,6 @@ function mountSurface(
  * @param options Pre-resolved outlets, document and report sink. Every member
  *   is optional.
  * @returns The mounted panel, whether or not both outlets resolved.
- *
- * @example
- * const panel = createScorePanel({ reporter });
- *
- * panel.update({ score: 4, bestScore: storage.getBestScore() });
  */
 export function createScorePanel(
   options: ScorePanelOptions = {},
@@ -650,7 +643,7 @@ export function createScorePanel(
    * Appends the delta node inside the score outlet.
    *
    * Ported from js/html_actuator.js L115-L119. `.score-addition` is a
-   * descendant rule of `.score-container` at style/main.scss L95-L106. The
+   * descendant rule of `.score-container` at style/main.scss. The
    * node is appended inside the outlet and carries that class alone; every
    * length, colour and duration of the `move-up` animation is declared there.
    *
@@ -808,4 +801,3 @@ export function createScorePanel(
     destroy,
   });
 }
-

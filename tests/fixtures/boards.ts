@@ -1,39 +1,27 @@
 // The five board fixtures every suite under tests/ builds engine state from,
 // expressed in the product's own persisted vocabulary.
 //
-// Provenance of the vocabulary, from the deleted vanilla sources:
-//   js/tile.js L19-L27       tile -> { position: { x, y }, value }
-//   js/tile.js L4            `this.value = value || 2`
-//   js/grid.js L102-L117     grid -> { size, cells }
-//   js/grid.js L109          an empty cell serialises as `null`
-//   js/grid.js L58-L64       cell order is x-outer, y-inner
-//   js/grid.js L21-L34       fromState reads `state[x][y]` at L28
-//   js/game_manager.js L40   `new Grid(previousState.grid.size,
-//   js/game_manager.js L41    previousState.grid.cells)`
-//   js/game_manager.js L102-L110  manager -> { grid, score, over, won,
-//                                 keepPlaying }
-//   js/game_manager.js L170  the win comparison is strict equality
-//   js/game_manager.js L194-L204  0 up { 0, -1 }, 1 right { 1, 0 },
-//                                 2 down { 0, 1 }, 3 left { -1, 0 }; y
-//                                 increases downward
-//   js/game_manager.js L238-L240  `cellsAvailable() || tileMatchesAvailable()`
+// Provenance of that vocabulary, from the deleted vanilla sources: tile
+// serialised to `{ position: { x, y }, value }` with a falsy value coerced to
+// 2; grid serialised to `{ size, cells }` with an empty cell as `null` and cell
+// order x-outer, y-inner; rehydration reading `state[x][y]`; the manager
+// snapshot `{ grid, score, over, won, keepPlaying }`; the win comparison being
+// strict equality; the four direction vectors 0 up, 1 right, 2 down, 3 left
+// with y increasing downward; and the loss check being `cellsAvailable() ||
+// tileMatchesAvailable()`.
 //
-// The persisted member name is `keepPlaying`, unchanged from
-// js/game_manager.js L108, while the in-class flag it restores is named
-// `continuedPlay` in src/engine/engine.ts.
+// The persisted member name is `keepPlaying`, unchanged from the vanilla
+// snapshot, while the in-class flag it restores is named `continuedPlay` in
+// src/engine/engine.ts.
 //
-// Mutability contract: every builder returns a freshly allocated, unfrozen
-// board sharing no object — not the board, its grid, the cell matrix, a
-// column, a tile or a tile's position — with any earlier return value or with
-// the frozen constants in section 7. In-place mutation sites of the vanilla
-// sources: js/game_manager.js L113-L120 wrote tiles, L123-L127 wrote
-// `grid.cells`, and js/grid.js L89-L95 wrote the matrix.
+// MUTABILITY CONTRACT: every builder returns a freshly allocated, unfrozen
+// board sharing no object — not the board, its grid, the cell matrix, a column,
+// a tile or a tile's position — with any earlier return value or with the
+// frozen constants below.
 //
-// This module imports two values and three types and nothing else. It reads
-// no DOM and no storage, performs no I/O, consumes no randomness, reads no
-// clock and writes no log.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+// This module imports two values and three types and nothing else. It reads no
+// DOM and no storage, performs no I/O, consumes no randomness, reads no clock
+// and writes no log.
 
 import {
   DEFAULT_BOARD_SIZE,
@@ -47,64 +35,28 @@ import type {
 
 /* ===== 1. Cell values ===== */
 
-/**
- * Supplies the face value of one cell of a fixture.
- *
- * @param x Zero-based column index.
- * @param y Zero-based row index.
- * @returns The tile's face value, or `null` for an empty cell.
- */
 type CellValue = (x: number, y: number) => number | null;
 
-/** Smallest board a fixture with no tiles is built at. */
 const MIN_EMPTY_BOARD_SIZE = 1;
 
-/** Smallest board a fixture with tiles is built at. */
 const MIN_OCCUPIED_BOARD_SIZE = 2;
 
-/** Face value of both tiles of the merge-pair fixture. */
 const MERGE_PAIR_VALUE = 2;
 
-/** Number of tiles the merge-pair and near-win fixtures place in row 0. */
 const PAIR_TILE_COUNT = 2;
 
-/**
- * Face values the near-loss fixture cycles through, in the order it walks
- * them.
- */
 const CROWDED_CYCLE: readonly number[] = [2, 4, 8, 16, 32];
 
-/**
- * How far the near-loss fixture advances through `CROWDED_CYCLE` between one
- * row and the next. Neighbouring cells of the resulting pattern are one step
- * apart horizontally and two apart vertically, and neither step is a multiple
- * of the cycle's length of 5: no two adjacent cells carry the same value.
- */
 const CROWDED_ROW_STEP = 2;
 
-/**
- * Index into `CROWDED_CYCLE` of the value the near-loss fixture writes at cell
- * (0, 0) in place of the pattern's own. It is the value the pattern carries at
- * (1, 0), and that horizontal pair is the board's only adjacent equal pair.
- */
 const CROWDED_PAIR_INDEX = 1;
 
-/** Smallest win value `createNearWinBoard` accepts. */
 const MIN_WIN_VALUE = 2;
 
-/** Divisor applied to a win value to reach the fixture's tile value. */
 const WIN_VALUE_HALVING = 2;
 
 /* ===== 2. Argument guards ===== */
 
-/**
- * Rejects a board size that cannot carry a fixture.
- *
- * @param size Requested edge length in cells.
- * @param minimum Smallest edge length the fixture is defined at.
- * @throws {RangeError} If `size` is not a safe integer, or is below
- *   `minimum`.
- */
 function requireBoardSize(size: number, minimum: number): void {
   if (!Number.isSafeInteger(size) || size < minimum) {
     throw new RangeError(
@@ -114,17 +66,6 @@ function requireBoardSize(size: number, minimum: number): void {
   }
 }
 
-/**
- * Rejects a win value the near-win fixture cannot halve to a tile value.
- *
- * An even integer of at least `MIN_WIN_VALUE` halves to a positive integer,
- * which doubled by the default merge producer is the win value again — the
- * value js/game_manager.js L170 compared against strictly.
- *
- * @param winValue Requested win value.
- * @throws {RangeError} If `winValue` is not an even safe integer of at least
- *   `MIN_WIN_VALUE`.
- */
 function requireWinValue(winValue: number): void {
   if (
     !Number.isSafeInteger(winValue) ||
@@ -140,20 +81,6 @@ function requireWinValue(winValue: number): void {
 
 /* ===== 3. Matrix construction ===== */
 
-/**
- * Builds a square cell matrix at the requested size.
- *
- * The loops are js/grid.js L58-L64's order — x on the outer array, y on the
- * inner — so `cells[x][y]` addresses column x, row y, and a tile's `position`
- * is built from the same two indices that address its slot. An empty cell is
- * `null`, never omitted and never `0`: js/tile.js L4 coerces a falsy value to
- * 2, so a `0` would rehydrate as a value-2 tile.
- *
- * @param size Edge length in cells.
- * @param cellValue Face value of each cell, or `null` for an empty one.
- * @returns A fresh matrix whose outer and every inner array is exactly `size`
- *   long.
- */
 function buildCellMatrix(
   size: number,
   cellValue: CellValue,
@@ -175,15 +102,6 @@ function buildCellMatrix(
   return cells;
 }
 
-/**
- * Wraps a cell matrix in the persisted manager shape of
- * js/game_manager.js L102-L110: a fresh board at score 0 that is neither lost
- * nor won and has not continued past a win.
- *
- * @param size Edge length in cells.
- * @param cells Matrix to wrap, `size` by `size`.
- * @returns A fresh, unfrozen board.
- */
 function buildBoard(
   size: number,
   cells: CellMatrix<SerializedTile>,
@@ -199,12 +117,6 @@ function buildBoard(
 
 /* ===== 4. Copying ===== */
 
-/**
- * Copies one serialised tile, rebuilding its `position` as well.
- *
- * @param tile Tile to copy.
- * @returns A fresh tile sharing no object with `tile`.
- */
 function copyTile(tile: SerializedTile): SerializedTile {
   return {
     position: { x: tile.position.x, y: tile.position.y },
@@ -212,13 +124,6 @@ function copyTile(tile: SerializedTile): SerializedTile {
   };
 }
 
-/**
- * Copies a cell matrix, rebuilding the outer array, every column array and
- * every tile.
- *
- * @param cells Matrix to copy.
- * @returns A fresh matrix sharing no object with `cells`.
- */
 function copyCellMatrix(
   cells: CellMatrix<SerializedTile>,
 ): CellMatrix<SerializedTile> {
@@ -452,13 +357,6 @@ export function createNearLossBoard(
 
 /* ===== 6. Freezing ===== */
 
-/**
- * Freezes a board at every level: each tile's position, each tile, each
- * column, the cell matrix, the grid and the board itself.
- *
- * @param board Board to freeze in place.
- * @returns The same board, frozen.
- */
 function deepFreezeBoard(board: SerializedGameState): SerializedGameState {
   const cells = board.grid.cells;
 
@@ -524,4 +422,3 @@ export const NEAR_WIN_BOARD: SerializedGameState = deepFreezeBoard(
 export const NEAR_LOSS_BOARD: SerializedGameState = deepFreezeBoard(
   /* @__PURE__ */ createNearLossBoard(),
 );
-

@@ -178,17 +178,17 @@ hr {
   }
 }
 
-// Base visibility for the `hidden` attribute: index.html toggles the six
-// screen-router containers, the settings panel, the diagnostics overlay and
-// the number-only board layer by that attribute alone, with no `!important`.
-// Each selector carries (0,2,0) specificity.
+// Base visibility for the `hidden` attribute: index.html toggles the six screen
+// containers, the settings panel, the diagnostics overlay and the number-only
+// board layer by that attribute alone, with no `!important`. Each selector
+// carries (0,2,0) specificity.
 //
 // This block is the hidden half of that protocol. Every element it names has a
 // shown half of matching specificity, scoped to `:not([hidden])`, and the two
 // selectors are mutually exclusive, so neither can override the other:
-//   .settings-panel      style/_screens.scss section 8, the modal surface
+//   .settings-panel      style/_screens.scss, the modal surface
 //   .diagnostics-overlay the block below, the overlay surface
-//   .screen              style/_screens.scss section 3 and style/_reward.scss
+//   .screen              style/_screens.scss and style/_reward.scss
 //   .hud                 style/_hud.scss
 //   .board-number-only   `.board-canvas, .board-number-only` further down
 //
@@ -215,11 +215,11 @@ hr {
 }
 
 // The shown state of `#diagnostics-overlay`, the in-page surface that stands in
-// for the metrics endpoint a static bundle cannot serve.
-// src/observability/diagnostics-overlay.ts renders the health results, the
-// frame-time and turn-latency spans, the per-hook dispatch counts and the
-// snapshot export into it, and toggles the `hidden` attribute the block above
-// reads. This rule declares geometry, layering and typography only; the colours
+// for the metrics endpoint a static bundle cannot serve. Its consumer renders
+// the health results, the frame-time and turn-latency spans, the per-hook
+// dispatch counts and the snapshot export into it, and toggles the `hidden`
+// attribute the block above reads.
+// This rule declares geometry, layering and typography only; the colours
 // stay with the palettes, and the accent is the third property they publish and
 // this its first consumer. Every length resolves to a token or a token
 // derivative.
@@ -279,8 +279,7 @@ hr {
   outline-offset: 0;
 
   // Responsive placement: below the breakpoint the corner box becomes a strip
-  // across the block end, inset by the mobile gutter on both sides, because
-  // three fifths of the desktop field is most of a narrow viewport.
+  // across the block end, inset by the mobile gutter on both sides.
   @include smaller($mobile-threshold) {
     inset-block-end: a11y.$a11y-mobile-grid-spacing;
     inset-inline-start: a11y.$a11y-mobile-grid-spacing;
@@ -299,7 +298,7 @@ hr {
 //
 // BLITZY [A11Y]: the label text in this mixin sits below the WCAG AA 4.5:1 text
 // threshold. It applies to `.restart-button`, `.settings-button` and the two
-// `.game-message` controls. Recorded as decision DL-A11Y-01.
+// `.game-message` controls.
 @mixin button {
   display: inline-block;
   background: color.adjust($game-container-background, $lightness: -20%);
@@ -477,6 +476,53 @@ hr {
     }
   }
 
+  // Board geometry at an edge length other than the compiled one.
+  //
+  // The four lengths above resolve $tile-size from $grid-row-cells at compile
+  // time, which is exact at that edge length and wrong at every other, so a
+  // board built at another size overlapped. src/render/number-only-renderer.ts
+  // writes the edge length in force into `--board-size` on this layer and into
+  // its `data-board-size` attribute; the selector matches only where the two
+  // disagree, so the compiled rules stand untouched at $grid-row-cells and this
+  // block restates them as calc() at every other size. Both lengths the
+  // expression reads are the same tokens the compiled form reads, restated as
+  // custom properties so calc() can reach them, and this mixin is invoked once
+  // per scale, so each scale publishes its own pair.
+  //
+  // Tile POSITION is not restated here: the renderer writes each tile's
+  // transform directly, from the same `tilePositionStep` of src/theme/tokens.ts
+  // that the `@for` loop below is the compile-time form of.
+  .board-number-only:not([data-board-size="#{$grid-row-cells}"]) {
+    --board-size: #{$grid-row-cells};
+    --board-field-width: #{$field-width};
+    --board-grid-spacing: #{$grid-spacing};
+    --board-cell-size: calc(
+      (
+          var(--board-field-width) - var(--board-grid-spacing) *
+            (var(--board-size) + 1)
+        ) / var(--board-size)
+    );
+
+    .grid-row {
+      margin-bottom: var(--board-grid-spacing);
+    }
+
+    .grid-cell {
+      width: var(--board-cell-size);
+      height: var(--board-cell-size);
+      margin-right: var(--board-grid-spacing);
+    }
+
+    .tile {
+      &,
+      .tile-inner {
+        width: var(--board-cell-size);
+        height: var(--board-cell-size);
+        line-height: var(--board-cell-size);
+      }
+    }
+  }
+
   .tile {
     &, .tile-inner {
       width: math.ceil($tile-size);
@@ -485,7 +531,7 @@ hr {
     }
 
     // $grid-row-cells, declared once in style/_tokens.scss, is the board
-  // dimension this loop and the tile geometry above read.
+    // dimension this loop and the tile geometry above read.
   @for $x from 1 through $grid-row-cells {
       @for $y from 1 through $grid-row-cells {
         &.tile-position-#{$x}-#{$y} {
@@ -522,12 +568,30 @@ hr {
   .tile-inner {
     border-radius: $tile-border-radius;
 
-    background: $tile-color;
+    // The three presentation declarations resolve through a two-step var()
+    // chain. src/render/number-only-renderer.ts writes `--tile-fill`,
+    // `--tile-numeral` and `--tile-numeral-size` onto each tile from
+    // src/theme/tile-ramp.ts, which is the same generative ramp the @while loop
+    // below is the compile-time form of; the loop no longer declares these
+    // three properties directly and publishes its compiled value under
+    // `--tile-*-compiled` instead. A tile the renderer wrote no property for —
+    // a value off the ramp, or a paint under a stand-in that rejected the write
+    // — therefore falls back to the compiled ramp value for its own class,
+    // and a tile carrying no value class at all falls back to the value below.
+    // The
+    // cascade resolves the compiled property from the per-value rule even
+    // though this declaration is less specific: a custom property cascades on
+    // its own.
+    background: var(--tile-fill, var(--tile-fill-compiled, #{$tile-color}));
+    color: var(--tile-numeral, var(--tile-numeral-compiled, inherit));
     text-align: center;
     font-weight: bold;
     z-index: 10;
 
-    font-size: 55px;
+    font-size: var(
+      --tile-numeral-size,
+      var(--tile-numeral-size-compiled, 55px)
+    );
   }
 
   @include transition($transition-speed ease-in-out);
@@ -566,14 +630,23 @@ hr {
       $bright-color: list.nth($nth-color, 2);
 
       @if $special-background {
-        $mixed-background: color.mix($special-background, $mixed-background, 55%);
+        // The base is quantised before the accent is mixed over it, and the
+        // result quantised again by `quantised()` below. That is the two-step
+        // quantisation src/theme/tile-ramp.ts performs — `overlayBackground`
+        // under `quantiseIntermediate` — so the accent band's compiled fallback
+        // and the ramp module agree channel for channel.
+        $mixed-background: color.mix(
+          $special-background,
+          quantised($mixed-background),
+          55%
+        );
       }
 
       @if $bright-color {
-        color: $bright-text-color;
+        --tile-numeral-compiled: #{$bright-text-color};
       }
 
-      background: $mixed-background;
+      --tile-fill-compiled: #{quantised($mixed-background)};
 
       $glow-opacity: math.div(math.max($exponent - 4, 0), $limit - 4);
 
@@ -583,17 +656,18 @@ hr {
       }
 
       @if $power >= 100 and $power < 1000 {
-        font-size: 45px;
+        --tile-numeral-size-compiled: 45px;
 
-        // Media queries placed here to avoid carrying over the rest of the logic
+        // Media queries placed here to avoid carrying over the rest of the
+        // logic
         @include smaller($mobile-threshold) {
-          font-size: 25px;
+          --tile-numeral-size-compiled: 25px;
         }
       } @else if $power >= 1000 {
-        font-size: 35px;
+        --tile-numeral-size-compiled: 35px;
 
         @include smaller($mobile-threshold) {
-          font-size: 15px;
+          --tile-numeral-size-compiled: 15px;
         }
       }
     }
@@ -603,13 +677,12 @@ hr {
 
   // Super tiles (above 2048)
   &.tile-super .tile-inner {
-    color: $bright-text-color;
-    background: color.mix(#333, $tile-gold-color, 95%);
-
-    font-size: 30px;
+    --tile-numeral-compiled: #{$bright-text-color};
+    --tile-fill-compiled: #{quantised(color.mix(#333, $tile-gold-color, 95%))};
+    --tile-numeral-size-compiled: 30px;
 
     @include smaller($mobile-threshold) {
-      font-size: 10px;
+      --tile-numeral-size-compiled: 10px;
     }
   }
 }
@@ -652,18 +725,20 @@ hr {
 }
 
 // The row seats three items - the intro copy plus `.restart-button` and
-// `.settings-button` - so it is an explicit flex row at both scales. `.game-intro`
-// bases on the whole line (`flex: 1 1 100%`), which removes the free space that
-// would otherwise admit one control onto the first line, so the two controls
-// always share the second line hugged to the inline end. A flexible basis would
-// not hold that pairing: flex breaks lines against each item's hypothetical main
-// size and applies `flex-grow` only afterwards, per line.
+// `.settings-button` - so it is an explicit flex row at both scales.
+// `.game-intro` bases on the whole line (`flex: 1 1 100%`), which removes the
+// free space that would otherwise admit one control onto the first line, so the
+// two controls always share the second line hugged to the inline end. A
+// flexible basis would not hold that pairing: flex breaks lines against each
+// item's hypothetical main size and applies `flex-grow` only afterwards, per
+// line.
 //
-// `gap` is the single declaration of the space between the controls - $control-gap
-// from style/_tokens.scss at both scales, the same token separating the two
-// `.game-message` controls - so the row carries no length of its own. No clearfix
-// is included: a `:after` would become a flex item and consume one `gap`.
-// Visual order follows DOM order, so `New Game` paints to the left of `Settings`.
+// `gap` is the single declaration of the space between the controls -
+// $control-gap from style/_tokens.scss at both scales, the same token
+// separating the two `.game-message` controls - so the row carries no length of
+// its own. No clearfix is included: a `:after` would become a flex item and
+// consume one `gap`. Visual order follows DOM order, so `New Game` paints to
+// the left of `Settings`.
 .above-game {
   display: flex;
   flex-wrap: wrap;
@@ -708,8 +783,8 @@ hr {
 
 // The on-screen control region: the `#on-screen-controls` root index.html
 // declares empty, and the two `role="group"` rows and the controls
-// src/input/on-screen-controls.ts generates inside it. That module emits class
-// names and data attributes only, so this block is the whole of the layer's
+// src/input/on-screen-controls.ts emits into it. That module emits class names
+// and data attributes only, so this block is the whole of the layer's
 // layout; the control vocabulary itself is `.screen-button` of
 // style/_screens.scss, and the focus ring is the `.container button` rule of
 // style/_a11y.scss.
@@ -807,8 +882,14 @@ hr {
     $game-container-margin-top: $game-container-margin-top
   );
 
+  // The mobile numeral size, resolved through the same chain: the renderer
+  // writes `--tile-numeral-size-mobile` per tile and the compiled per-value
+  // sizes above are restated inside this breakpoint by the loop itself.
   .tile .tile-inner {
-    font-size: 35px;
+    font-size: var(
+      --tile-numeral-size-mobile,
+      var(--tile-numeral-size-compiled, 35px)
+    );
   }
 
   .game-message {

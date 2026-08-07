@@ -1,36 +1,18 @@
-// Unit suite for the rules schema declared by src/config/rules-config.ts, the
-// schema AAP Contract 4 specifies. It pins that schema's shape: the members
-// each exported type declares, the type of every member, the call signatures
-// of the two merge functions, and the structural operand type those functions
-// read.
+// Unit suite for the rules schema declared by src/config/rules-config.ts. It
+// pins that schema's shape: the members each exported type declares, the type
+// of every member, the call signatures of the two merge functions, and the
+// structural operand type those functions read.
 //
 // It pins no values. The vanilla-equivalent values that populate a
-// `RulesConfig`, and the behaviour of the two default merge functions, are
-// pinned by tests/unit/config/default-config.test.ts, and stage goals by
+// `RulesConfig` and the behaviour of the two default merge functions are pinned
+// by tests/unit/config/default-config.test.ts, and stage goals by
 // tests/unit/config/stage-config.test.ts. Neither module is imported here, and
-// the values the builders in section 2 use are not the vanilla ones.
+// the values the builders below use are not the vanilla ones.
 //
 // The module under test declares no runtime binding, and every identifier it
 // exports is imported below with `import type`. The type-level assertions are
-// enforced by `npm run typecheck` — `tsc --noEmit`, whose file set covers
-// tests/**/*.ts — rather than by the runner. Every test below also carries at
-// least one runtime assertion.
-//
-// Vanilla constructs this suite is the executable witness for, from the
-// deleted sources:
-//   js/application.js L3     the board dimension, passed as a literal
-//   js/game_manager.js L7    the starting tile count
-//   js/game_manager.js L71   one spawn value and its probability, collapsed
-//                            into a single expression
-//   js/game_manager.js L156  the merge condition, less the neighbour
-//                            existence guard, which belongs to
-//                            src/engine/move-resolver.ts
-//   js/game_manager.js L157  the face value a merge yields
-//   js/game_manager.js L158  merged.mergedFrom = [tile, next]
-//   js/game_manager.js L170  the winning tile value
-//   js/tile.js L7            mergedFrom initialised to null
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+// enforced by `tsc --noEmit`, whose file set covers tests/**/*.ts, rather than
+// by the runner. Every test below also carries at least one runtime assertion.
 
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
@@ -43,14 +25,6 @@ import type {
   SpawnDistribution,
 } from '../../../src/config/rules-config';
 
-/* ===== 1. Local shapes ===== */
-
-/**
- * Shape of a tile as the deleted vanilla constructor built one: the two
- * members `MergeTileView` declares, plus the three it does not.
- *
- * js/tile.js L1-L8.
- */
 interface VanillaTileShape {
   x: number;
   y: number;
@@ -59,30 +33,18 @@ interface VanillaTileShape {
   mergedFrom: VanillaTileShape[] | null;
 }
 
-/** `MergeTileView` with both of its readonly modifiers stripped. */
 type MutableMergeTileView = {
   -readonly [K in keyof MergeTileView]: MergeTileView[K];
 };
 
-/** `RulesConfig` mapped member by member, modifiers preserved. */
 type MappedRulesConfig = {
   [K in keyof RulesConfig]: RulesConfig[K];
 };
 
-/** `RulesConfig` with a readonly modifier added to every member. */
 type ReadonlyRulesConfig = {
   readonly [K in keyof RulesConfig]: RulesConfig[K];
 };
 
-/* ===== 2. Builders ===== */
-
-/**
- * Builds a fresh vanilla-shaped tile.
- *
- * @param value Face value.
- * @param mergedFrom Pair the tile was produced by, or `null`.
- * @returns A tile carrying every member js/tile.js gives one.
- */
 function makeVanillaTile(
   value: number,
   mergedFrom: VanillaTileShape[] | null
@@ -96,13 +58,6 @@ function makeVanillaTile(
   };
 }
 
-/**
- * Builds a fresh `SpawnDistribution`: three entries, and weights that sum to
- * 1 in exact arithmetic and to 0.9999999999999999 under IEEE-754 double
- * addition.
- *
- * @returns A distribution satisfying the schema's stated invariants.
- */
 function makeSpawnDistribution(): SpawnDistribution {
   return {
     values: [2, 4, 8],
@@ -110,12 +65,6 @@ function makeSpawnDistribution(): SpawnDistribution {
   };
 }
 
-/**
- * Builds a fresh `MergeRules` from a predicate accepting equal face values and
- * a producer summing the pair's face values.
- *
- * @returns A rule pair assembled from two locally declared functions.
- */
 function makeMergeRules(): MergeRules {
   const canMerge: MergePredicate = (moving, target) =>
     moving.value === target.value;
@@ -126,12 +75,6 @@ function makeMergeRules(): MergeRules {
   return { canMerge, produce };
 }
 
-/**
- * Builds a fresh, minimally valid `RulesConfig`. Every call returns a new
- * object graph sharing nothing with the previous one.
- *
- * @returns A configuration carrying the schema's five members.
- */
 function makeRulesConfig(): RulesConfig {
   return {
     boardSize: 5,
@@ -141,8 +84,6 @@ function makeRulesConfig(): RulesConfig {
     merge: makeMergeRules(),
   };
 }
-
-/* ===== 3. Suite ===== */
 
 describe('rules-config schema', () => {
   describe('RulesConfig', () => {
@@ -176,11 +117,8 @@ describe('rules-config schema', () => {
     it('types boardSize, winValue and startTiles as number', () => {
       const config = makeRulesConfig();
 
-      // js/application.js L3
       expectTypeOf<RulesConfig['boardSize']>().toBeNumber();
-      // js/game_manager.js L170
       expectTypeOf<RulesConfig['winValue']>().toBeNumber();
-      // js/game_manager.js L7
       expectTypeOf<RulesConfig['startTiles']>().toBeNumber();
 
       expect(typeof config.boardSize).toBe('number');
@@ -240,8 +178,6 @@ describe('rules-config schema', () => {
     });
 
     it('keeps values and weights index-aligned', () => {
-      // js/game_manager.js L71 collapses one spawn value and its probability
-      // into a single expression; the schema holds them as two arrays.
       const spawn = makeSpawnDistribution();
 
       expect(spawn.values.length).toBeGreaterThan(0);
@@ -295,7 +231,6 @@ describe('rules-config schema', () => {
 
   describe('MergePredicate', () => {
     it('takes two tile views and returns a boolean', () => {
-      // js/game_manager.js L156, less the neighbour existence guard.
       const merge = makeMergeRules();
       const moving = makeVanillaTile(8, null);
       const target = makeVanillaTile(8, null);
@@ -315,7 +250,6 @@ describe('rules-config schema', () => {
 
   describe('MergeProducer', () => {
     it('takes two tile views and returns a number', () => {
-      // js/game_manager.js L157
       const merge = makeMergeRules();
       const moving = makeVanillaTile(8, null);
       const target = makeVanillaTile(8, null);
@@ -359,13 +293,10 @@ describe('rules-config schema', () => {
     });
 
     it('is satisfied structurally by a vanilla tile', () => {
-      // js/tile.js L1-L8: a vanilla tile also carries x, y and
-      // previousPosition, none of which this type declares.
       const vanillaTile = makeVanillaTile(16, null);
       const view: MergeTileView = vanillaTile;
 
       expectTypeOf(vanillaTile).toExtend<MergeTileView>();
-
       expect(Object.keys(vanillaTile).sort()).toEqual(
         ['mergedFrom', 'previousPosition', 'value', 'x', 'y'].sort()
       );
@@ -374,7 +305,6 @@ describe('rules-config schema', () => {
     });
 
     it('admits mergedFrom null on construction', () => {
-      // js/tile.js L7
       const view: MergeTileView = makeVanillaTile(2, null);
 
       expectTypeOf<MergeTileView['mergedFrom']>().toEqualTypeOf<
@@ -385,7 +315,6 @@ describe('rules-config schema', () => {
     });
 
     it('admits a populated mergedFrom pair after a merge', () => {
-      // js/game_manager.js L158  merged.mergedFrom = [tile, next]
       const moving = makeVanillaTile(4, null);
       const target = makeVanillaTile(4, null);
       const view: MergeTileView = makeVanillaTile(8, [moving, target]);
@@ -426,4 +355,3 @@ describe('rules-config schema', () => {
     });
   });
 });
-

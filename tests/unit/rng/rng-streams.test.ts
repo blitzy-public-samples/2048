@@ -1,98 +1,70 @@
 // Unit suite over src/rng/rng-streams.ts, the named-substream layer.
 //
-// The contracts asserted here are Contract 6 — one run seed fanned into
-// four named substreams that advance independently — and the reload
-// half of validation gate V2, that a substream restored from a recorded
-// cursor continues the same sequence. `RngCursorMap` is the shape
-// Contract 5 persists as the run state's `rngCursor` field.
+// The contracts asserted here: one run seed fanned into four named substreams
+// that advance independently, and that a substream restored from a recorded
+// cursor continues the same sequence. `RngCursorMap` is the shape the run state
+// persists as its `rngCursor` field.
 //
-// The fan-out this suite covers is drawn as Figure 7, "Seeded
-// Determinism: One Run Seed Fanned into Named RNG Substreams", in
-// docs/architecture/data-flow.md.
+// The two audited randomness call sites of the deleted vanilla sources, both
+// pinned by this suite: the spawn value draw, `< 0.9 ? 2 : 4` on a strict
+// less-than, now `RngStream.pickWeighted` over the spawn distribution of the
+// rules config; and the spawn position draw, `cells[Math.floor(u *
+// cells.length)]`, now `RngStream.nextInt`, with `RngStream.pick` over the same
+// array. `randomAvailableCell()` guarded on `cells.length` and carried no else
+// branch, so a full board yielded `undefined`; `availableCells()` collected
+// `{x, y}` through `eachCell`, x-outer and y-inner.
 //
-// PROVENANCE. The two audited randomness call sites of the deleted
-// vanilla sources, both pinned by this suite:
-//   js/game_manager.js L71  the spawn value draw, `< 0.9 ? 2 : 4` on a
-//                           strict less-than. Now
-//                           `RngStream.pickWeighted` over the spawn
-//                           distribution of the rules config.
-//   js/grid.js L41          the spawn position draw,
-//                           `cells[Math.floor(u * cells.length)]` for a
-//                           draw `u`. Now `RngStream.nextInt`, and
-//                           `RngStream.pick` over the same array.
-//   js/grid.js L37-L43      `randomAvailableCell()` guards on
-//                           `cells.length` and carries no else branch,
-//                           so a full board yields `undefined`.
-//   js/grid.js L45-L60      `availableCells()` collects `{x, y}`
-//                           through `eachCell`, x-outer and y-inner.
-//
-// Every expectation below is either relational — identical seeds give
-// identical sequences, a restored substream continues in lockstep, one
-// substream's draws leave the others untouched — or a range or shape
-// check. The derived helpers are cross-checked against `next()` on
-// paired same-seed substreams. No generator output appears as a literal
-// anywhere in this file. Every seed is a literal declared here, and
-// this suite reads no clock, no environment and no document.
-//
-// Decisions behind this file: docs/DECISION_LOG.md.
+// Every expectation below is either relational — identical seeds give identical
+// sequences, a restored substream continues in lockstep, one substream's draws
+// leave the others untouched — or a range or shape check. The derived helpers
+// are cross-checked against `next()` on paired same-seed substreams. No
+// generator output appears as a literal anywhere in this file. Every seed is a
+// literal declared here, and this suite reads no clock, no environment and no
+// document.
 
 import { describe, expect, it } from 'vitest';
 
 import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import {
+  MAX_RNG_CURSOR,
+  MAX_RUN_SEED_LENGTH,
   RNG_STREAM_NAMES,
   createRngStreams,
+  isAcceptableRunSeed,
   type RngCursorMap,
+  type RngRejection,
+  type RngReporter,
   type RngStream,
   type RngStreams,
   type StreamName,
 } from '../../../src/rng/rng-streams';
+import { MAX_RNG_SEED_LENGTH } from '../../../src/rng/seeded-rng';
 
-/* ===== 1. Fixed inputs ===== */
-
-/** Run seed every scenario that needs only one seed draws from. */
 const RUN_SEED = 'blitzy-2048-run-alpha';
 
-/** Second run seed, for the scenarios that compare two runs. */
 const OTHER_RUN_SEED = 'blitzy-2048-run-beta';
 
-// The four names, bound once each. No scenario below addresses a
-// substream through a bare string, and the canonical spelling and order
-// of these four are asserted against `RNG_STREAM_NAMES` in section 3.
 const SPAWN_VALUE = 'spawn-value';
 const SPAWN_POSITION = 'spawn-position';
 const RELIC_DRAW = 'relic-draw';
 const RARITY_WEIGHT = 'rarity-weight';
 
-/** Draws compared when two sequences are checked for equality. */
 const SEQUENCE_LENGTH = 12;
 
-/** Draws compared either side of a cursor restore. */
 const CONTINUATION_LENGTH = 8;
 
-/** Draws compared in the substream-independence baseline. */
 const INDEPENDENCE_LENGTH = 20;
 
-/** Draws taken when a property is checked across a sample. */
 const SAMPLE_SIZE = 300;
 
-/** Draws taken when a selection is cross-checked against `next()`. */
 const CROSS_CHECK_SIZE = 500;
 
-/** Draws taken when the weighted distribution is counted. */
 const DISTRIBUTION_SIZE = 1000;
 
-/** Cell count of the classic board, and a `nextInt` bound. */
 const BOARD_CELL_COUNT = 16;
 
-/** Board edge length, for building an available-cell list. */
 const BOARD_SIZE = 4;
 
-/**
- * Draw counts written into every substream where a snapshot is checked.
- * Four different counts, so a snapshot that transposed two entries
- * would not match.
- */
 const DISTINCT_DRAW_COUNTS: RngCursorMap = {
   'spawn-value': 3,
   'spawn-position': 5,
@@ -100,13 +72,54 @@ const DISTINCT_DRAW_COUNTS: RngCursorMap = {
   'rarity-weight': 7,
 };
 
-/** Recorded position the partial-restore scenario resumes from. */
 const PARTIAL_RESTORE_CURSOR = 5;
 
-/** One cell of an available-cell list. */
 interface Cell {
   x: number;
   y: number;
+}
+
+/**
+ * Candidates for the weighted walk, distinct from the spawn distribution: three
+ * of them rather than two, so the walk's middle branch is reached.
+ */
+const UNEVEN_CANDIDATES: readonly string[] = ['common', 'rare', 'legendary'];
+
+/**
+ * Weights of `UNEVEN_CANDIDATES`. They total 8 rather than 1, so a selection
+ * that read the raw draw without scaling it by the total would not match.
+ */
+const UNEVEN_WEIGHTS: readonly number[] = [5, 2, 1];
+
+/**
+ * Resolves one raw draw to a candidate through the walk
+ * src/rng/rng-streams.ts performs: scale the draw by the total weight, then
+ * take the first index whose running total passes it, falling back to the last
+ * candidate.
+ *
+ * @param raw Draw in [0, 1), as `next()` returns it.
+ * @param items Candidates, in index order.
+ * @param weights Weight of each candidate, in the same order.
+ * @returns The candidate that draw selects.
+ */
+function candidateForDraw(
+  raw: number,
+  items: readonly string[],
+  weights: readonly number[]
+): string {
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const target = raw * total;
+  let running = 0;
+
+  for (let index = 0; index < weights.length; index += 1) {
+    running += weights[index];
+
+    if (running > target) {
+      return items[index];
+    }
+  }
+
+  return items[items.length - 1];
 }
 
 /* ===== 2. Local helpers ===== */
@@ -128,14 +141,6 @@ function draw(stream: RngStream, count: number): number[] {
   return drawn;
 }
 
-/**
- * Takes `count` draws from the named substream of `streams`.
- *
- * @param streams Substreams of one run.
- * @param name Substream to draw from.
- * @param count Number of draws to take.
- * @returns The draws, in order.
- */
 function drawFrom(
   streams: RngStreams,
   name: StreamName,
@@ -144,15 +149,6 @@ function drawFrom(
   return draw(streams.stream(name), count);
 }
 
-/**
- * Takes `count` draws from a fresh run and returns them, so a scenario
- * can compare against an untouched sequence.
- *
- * @param name Substream to draw from.
- * @param count Number of draws to take.
- * @param seed Run seed. Defaults to `RUN_SEED`.
- * @returns The draws, in order.
- */
 function reference(
   name: StreamName,
   count: number,
@@ -161,13 +157,6 @@ function reference(
   return drawFrom(createRngStreams(seed), name, count);
 }
 
-/**
- * Reduces one selection result to a definite value.
- *
- * @param value Result of `pick` or `pickWeighted`.
- * @returns `value` when something was selected.
- * @throws {Error} When nothing was selected.
- */
 function selected<T>(value: T | undefined): T {
   if (value === undefined) {
     throw new Error('A selection was expected but none was returned.');
@@ -176,15 +165,6 @@ function selected<T>(value: T | undefined): T {
   return value;
 }
 
-/**
- * Builds an available-cell list for an empty board.
- *
- * Collection order mirrors `availableCells()` at js/grid.js L45-L60:
- * x-outer and y-inner.
- *
- * @param size Board edge length.
- * @returns The cells, in collection order.
- */
 function availableCells(size: number): Cell[] {
   const cells: Cell[] = [];
 
@@ -197,20 +177,11 @@ function availableCells(size: number): Cell[] {
   return cells;
 }
 
-/**
- * Advances every substream of `streams` by the count `counts` records
- * for it, walking `RNG_STREAM_NAMES`.
- *
- * @param streams Substreams of one run.
- * @param counts Draws to take from each substream.
- */
 function applyDrawCounts(streams: RngStreams, counts: RngCursorMap): void {
   for (const name of RNG_STREAM_NAMES) {
     draw(streams.stream(name), counts[name]);
   }
 }
-
-/* ===== 3. RNG_STREAM_NAMES ===== */
 
 describe('RNG_STREAM_NAMES', () => {
   it('lists the four substream names in order', () => {
@@ -250,8 +221,6 @@ describe('RNG_STREAM_NAMES', () => {
   });
 });
 
-/* ===== 4. RngStreams shape and substream identity ===== */
-
 describe('createRngStreams — shape and substream identity', () => {
   it('echoes the run seed it was created from', () => {
     expect(createRngStreams(RUN_SEED).seed).toBe(RUN_SEED);
@@ -275,9 +244,13 @@ describe('createRngStreams — shape and substream identity', () => {
     ];
     const untouched = reference(SPAWN_VALUE, perLookup.length);
 
+    // Whole-sequence equality is the contract: three draws taken through three
+    // separate lookups are the first three draws of the substream. Whether two
+    // neighbouring draws happen to differ is not something the generator
+    // promises, so nothing here asserts it.
     expect(perLookup).toEqual(untouched);
-    expect(perLookup[1]).not.toBe(untouched[0]);
-    expect(perLookup[2]).not.toBe(untouched[1]);
+    expect(perLookup).toHaveLength(3);
+    expect(streams.stream(SPAWN_VALUE).cursor).toBe(perLookup.length);
   });
 
   it('reports an advance made through one reference on every other', () => {
@@ -292,8 +265,6 @@ describe('createRngStreams — shape and substream identity', () => {
     expect(streams.stream(SPAWN_POSITION).cursor).toBe(1);
   });
 });
-
-/* ===== 5. Per-substream determinism and draw shape ===== */
 
 describe('per-substream determinism', () => {
   it('repeats every substream sequence for the same run seed', () => {
@@ -335,9 +306,7 @@ describe('per-substream determinism', () => {
       const stream = streams.stream(name);
 
       expect(stream.cursor).toBe(0);
-
       draw(stream, SEQUENCE_LENGTH);
-
       expect(stream.cursor).toBe(SEQUENCE_LENGTH);
     }
   });
@@ -352,8 +321,6 @@ describe('per-substream determinism', () => {
   });
 });
 
-/* ===== 6. Substream independence ===== */
-
 describe('substream independence', () => {
   it.each([1, 3, 17])(
     'leaves the spawn substreams untouched by %i relic-side draws',
@@ -367,12 +334,8 @@ describe('substream independence', () => {
       const perturbed = createRngStreams(RUN_SEED);
       draw(perturbed.stream(RELIC_DRAW), perturbation);
       draw(perturbed.stream(RARITY_WEIGHT), perturbation);
-
-      // Cursor isolation: relic-side activity moved neither spawn
-      // substream off its start.
       expect(perturbed.stream(SPAWN_POSITION).cursor).toBe(0);
       expect(perturbed.stream(SPAWN_VALUE).cursor).toBe(0);
-
       expect(
         drawFrom(perturbed, SPAWN_POSITION, INDEPENDENCE_LENGTH)
       ).toEqual(baselinePosition);
@@ -391,10 +354,8 @@ describe('substream independence', () => {
       const perturbed = createRngStreams(RUN_SEED);
       draw(perturbed.stream(SPAWN_POSITION), perturbation);
       draw(perturbed.stream(SPAWN_VALUE), perturbation);
-
       expect(perturbed.stream(RELIC_DRAW).cursor).toBe(0);
       expect(perturbed.stream(RARITY_WEIGHT).cursor).toBe(0);
-
       expect(drawFrom(perturbed, RELIC_DRAW, INDEPENDENCE_LENGTH)).toEqual(
         baselineRelic
       );
@@ -455,16 +416,12 @@ describe('substream independence', () => {
   });
 });
 
-/* ===== 7. snapshotCursors ===== */
-
 describe('snapshotCursors', () => {
   it('carries every substream name, at 0, before any draw', () => {
     const snapshot = createRngStreams(RUN_SEED).snapshotCursors();
     const keys: string[] = Object.keys(snapshot);
     const names: string[] = [...RNG_STREAM_NAMES];
 
-    // Total by name: this is the shape the run state persists as its
-    // `rngCursor` field.
     expect(keys.slice().sort()).toEqual(names.slice().sort());
 
     for (const name of RNG_STREAM_NAMES) {
@@ -476,7 +433,6 @@ describe('snapshotCursors', () => {
     const streams = createRngStreams(RUN_SEED);
 
     applyDrawCounts(streams, DISTINCT_DRAW_COUNTS);
-
     expect(streams.snapshotCursors()).toEqual(DISTINCT_DRAW_COUNTS);
   });
 
@@ -522,8 +478,6 @@ describe('snapshotCursors', () => {
     expect(stream.cursor).toBe(SEQUENCE_LENGTH);
   });
 });
-
-/* ===== 8. Cursor restore ===== */
 
 describe('createRngStreams — restore from recorded cursors', () => {
   it('continues every substream in lockstep with the run it came from', () => {
@@ -617,11 +571,7 @@ describe('createRngStreams — restore from recorded cursors', () => {
   });
 });
 
-/* ===== 9. nextInt — the position index draw of js/grid.js L41 ===== */
-
 describe('RngStream.nextInt — replaces js/grid.js L41', () => {
-  // 16 is the cell count of the classic 4x4 board, the largest
-  // available-cell list the vanilla position draw indexed into.
   it.each([1, 2, BOARD_SIZE, BOARD_CELL_COUNT])(
     'yields an integer in [0, %i) across a deterministic sample',
     (maxExclusive) => {
@@ -659,15 +609,24 @@ describe('RngStream.nextInt — replaces js/grid.js L41', () => {
     expect(fromFirst).toEqual(fromSecond);
   });
 
-  it('selects more than one index over the classic cell count', () => {
-    const stream = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
-    const distinct = new Set<number>();
+  // The arithmetic of js/grid.js L41, asserted draw by draw: every index is
+  // the floor of that draw scaled by the bound. A paired substream of the same
+  // seed supplies the raw draws, so the whole index list is an exact
+  // expectation rather than a property of a sample.
+  it('floors each raw draw scaled by the bound, index for index', () => {
+    const indexing = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+    const raw = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+    const produced: number[] = [];
+    const expected: number[] = [];
 
-    for (let taken = 0; taken < SAMPLE_SIZE; taken += 1) {
-      distinct.add(stream.nextInt(BOARD_CELL_COUNT));
+    for (let taken = 0; taken < CROSS_CHECK_SIZE; taken += 1) {
+      produced.push(indexing.nextInt(BOARD_CELL_COUNT));
+      expected.push(Math.floor(raw.next() * BOARD_CELL_COUNT));
     }
 
-    expect(distinct.size).toBeGreaterThan(1);
+    expect(produced).toEqual(expected);
+    expect(indexing.cursor).toBe(CROSS_CHECK_SIZE);
+    expect(raw.cursor).toBe(indexing.cursor);
   });
 
   it('advances the cursor on a call inside its domain', () => {
@@ -691,8 +650,6 @@ describe('RngStream.nextInt — replaces js/grid.js L41', () => {
     expect(first.cursor).toBe(second.cursor);
   });
 
-  // src/rng/rng-streams.ts declares 0 for a bound that is not a finite
-  // number greater than 0, and declares that no draw is consumed.
   it('yields 0 and consumes nothing for an empty index domain', () => {
     const stream = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
     const before = stream.cursor;
@@ -714,8 +671,6 @@ describe('RngStream.nextInt — replaces js/grid.js L41', () => {
     );
   });
 });
-
-/* ===== 10. pick — the cell selection of js/grid.js L37-L43 ===== */
 
 describe('RngStream.pick — replaces js/grid.js L37-L43', () => {
   it('selects a member of the list it was given', () => {
@@ -744,9 +699,6 @@ describe('RngStream.pick — replaces js/grid.js L37-L43', () => {
     expect(fromFirst).toEqual(fromSecond);
   });
 
-  // `Math.floor(u * cells.length)` over the list in the order the
-  // caller supplied it, as at js/grid.js L41. Nothing is sorted or
-  // re-keyed on the way in.
   it('selects by index into the list in the order given', () => {
     const cells = availableCells(BOARD_SIZE);
     const selecting = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
@@ -760,20 +712,26 @@ describe('RngStream.pick — replaces js/grid.js L37-L43', () => {
     }
   });
 
-  it('varies the cell it selects across the classic board', () => {
+  // The selected cell list is an exact expectation: each entry is the cell the
+  // paired substream's raw draw indexes, through the same arithmetic
+  // js/grid.js L41 applied.
+  it('selects the cell each raw draw indexes, cell for cell', () => {
     const cells = availableCells(BOARD_SIZE);
-    const stream = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
-    const distinct = new Set<Cell>();
+    const selecting = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+    const raw = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+    const chosen: Cell[] = [];
+    const expected: Cell[] = [];
 
-    for (let taken = 0; taken < SAMPLE_SIZE; taken += 1) {
-      distinct.add(selected(stream.pick(cells)));
+    for (let taken = 0; taken < CROSS_CHECK_SIZE; taken += 1) {
+      chosen.push(selected(selecting.pick(cells)));
+      expected.push(cells[Math.floor(raw.next() * cells.length)]);
     }
 
-    expect(distinct.size).toBeGreaterThan(1);
+    expect(chosen).toEqual(expected);
+    expect(selecting.cursor).toBe(CROSS_CHECK_SIZE);
+    expect(raw.cursor).toBe(selecting.cursor);
   });
 
-  // js/grid.js L37-L43: randomAvailableCell() guards on cells.length
-  // and carries no else branch, so a full board yields undefined.
   it('yields nothing and consumes nothing for an empty list', () => {
     const stream = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
     const before = stream.cursor;
@@ -796,22 +754,13 @@ describe('RngStream.pick — replaces js/grid.js L37-L43', () => {
   });
 });
 
-/* ===== 11. pickWeighted — the spawn value draw of
-             js/game_manager.js L71 ===== */
-
-/** Weights that give the whole distribution to the first candidate. */
 const FIRST_CANDIDATE_ONLY: readonly number[] = [1, 0];
 
-/** Weights that give the whole distribution to the second candidate. */
 const SECOND_CANDIDATE_ONLY: readonly number[] = [0, 1];
 
-/** The only weight a single-candidate distribution needs. */
 const SOLE_CANDIDATE_WEIGHT: readonly number[] = [1];
 
 describe('RngStream.pickWeighted — replaces js/game_manager.js L71', () => {
-  // Pins the distribution the threshold is read from. At
-  // js/game_manager.js L71 the value was 2 below 0.9 and 4 at or above
-  // it.
   it('reads the vanilla spawn distribution from the rules config', () => {
     const { spawn } = createDefaultRulesConfig();
 
@@ -859,17 +808,12 @@ describe('RngStream.pickWeighted — replaces js/game_manager.js L71', () => {
         selected(selecting.pickWeighted(spawn.values, spawn.weights))
       );
 
-      // The comparison is `<`, not `<=`: at js/game_manager.js L71 a
-      // draw of exactly 0.9 fell to the second candidate.
       expected.push(
         observing.next() < spawn.weights[0] ? spawn.values[0] : spawn.values[1]
       );
     }
 
     expect(chosen).toEqual(expected);
-
-    // Both candidates occur in the cross-checked sample: neither
-    // branch of the threshold is left unexercised.
     expect(new Set(expected).size).toBe(spawn.values.length);
   });
 
@@ -910,25 +854,35 @@ describe('RngStream.pickWeighted — replaces js/game_manager.js L71', () => {
     expect([...observed]).toEqual(sole);
   });
 
-  it('applies the weights it was given across a large sample', () => {
-    const { spawn } = createDefaultRulesConfig();
-    const stream = createRngStreams(RUN_SEED).stream(SPAWN_VALUE);
-    const counts = new Map<number, number>();
+  // The accumulating walk itself, over weights that neither total 1 nor share a
+  // value: one draw is scaled by the total and the first index whose running
+  // total passes it is selected. Restating that walk here makes every selection
+  // an exact expectation, where counting how often each candidate came up would
+  // only describe the sample.
+  it('walks the running total of the weights, selection for selection', () => {
+    const selecting = createRngStreams(RUN_SEED).stream(RARITY_WEIGHT);
+    const raw = createRngStreams(RUN_SEED).stream(RARITY_WEIGHT);
+    const chosen: string[] = [];
+    const expected: string[] = [];
 
     for (let taken = 0; taken < DISTRIBUTION_SIZE; taken += 1) {
-      const value = selected(
-        stream.pickWeighted(spawn.values, spawn.weights)
+      chosen.push(
+        selected(
+          selecting.pickWeighted(UNEVEN_CANDIDATES, UNEVEN_WEIGHTS)
+        )
       );
-
-      counts.set(value, (counts.get(value) ?? 0) + 1);
+      expected.push(
+        candidateForDraw(raw.next(), UNEVEN_CANDIDATES, UNEVEN_WEIGHTS)
+      );
     }
 
-    const heavier = counts.get(spawn.values[0]) ?? 0;
-    const lighter = counts.get(spawn.values[1]) ?? 0;
+    expect(chosen).toEqual(expected);
+    expect(selecting.cursor).toBe(DISTRIBUTION_SIZE);
+    expect(raw.cursor).toBe(selecting.cursor);
 
-    expect(heavier + lighter).toBe(DISTRIBUTION_SIZE);
-    expect(heavier).toBeGreaterThan(lighter);
-    expect(lighter).toBeGreaterThan(0);
+    // The walk is only exercised through all three of its branches when each
+    // candidate is reached at least once in the pinned sequence.
+    expect(new Set(chosen)).toStrictEqual(new Set(UNEVEN_CANDIDATES));
   });
 
   it('yields nothing and consumes nothing for an empty distribution', () => {
@@ -950,5 +904,449 @@ describe('RngStream.pickWeighted — replaces js/game_manager.js L71', () => {
     expect(draw(stream, SEQUENCE_LENGTH)).toEqual(
       reference(SPAWN_VALUE, SEQUENCE_LENGTH)
     );
+  });
+});
+
+/* ===== 12. Refused run seeds and refused cursor entries ===== */
+
+/** A recorded rejection, and the sink that collected it. */
+interface RecordingRngReporter {
+  /** The sink to hand to `createRngStreams`. */
+  readonly reporter: RngReporter;
+
+  /** Every rejection received, in arrival order. */
+  readonly rejections: RngRejection[];
+}
+
+/**
+ * Builds a reporter that records every rejection it is handed.
+ *
+ * @returns The sink and the array it appends to.
+ */
+function createRecordingReporter(): RecordingRngReporter {
+  const rejections: RngRejection[] = [];
+
+  return {
+    reporter: {
+      onRejected: (rejection: RngRejection): void => {
+        rejections.push(rejection);
+      },
+    },
+    rejections,
+  };
+}
+
+/** A sink whose only member throws, for the containment assertions. */
+const THROWING_REPORTER: RngReporter = {
+  onRejected: (): never => {
+    throw new Error('the rejection sink itself failed');
+  },
+};
+
+/** A run seed of exactly the greatest permitted length. */
+const LONGEST_ACCEPTED_RUN_SEED = 'r'.repeat(MAX_RUN_SEED_LENGTH);
+
+/** A run seed one character past the greatest permitted length. */
+const OVERLONG_RUN_SEED = 'r'.repeat(MAX_RUN_SEED_LENGTH + 1);
+
+/** Cursor entries reduced to 0 because they are not a usable position. */
+const UNUSABLE_CURSOR_ENTRIES: readonly { label: string; value: number }[] = [
+  { label: 'a negative integer', value: -1 },
+  { label: 'a fractional value', value: 2.5 },
+  { label: 'NaN', value: Number.NaN },
+  { label: 'Infinity', value: Number.POSITIVE_INFINITY },
+  { label: '-Infinity', value: Number.NEGATIVE_INFINITY },
+  { label: 'a magnitude past the safe integer range', value: 2 ** 53 },
+];
+
+/** Cursor entries reduced to 0 because they exceed the fast-forward bound. */
+const OUT_OF_RANGE_CURSOR_ENTRIES: readonly {
+  label: string;
+  value: number;
+}[] = [
+  { label: 'one draw past the bound', value: MAX_RNG_CURSOR + 1 },
+  { label: 'the greatest safe integer', value: Number.MAX_SAFE_INTEGER },
+];
+
+/** Cursor entries that are not numbers, as a corrupted payload carries them. */
+const NON_NUMERIC_CURSOR_ENTRIES: readonly { label: string; value: unknown }[] =
+  [
+    { label: 'a string', value: '7' },
+    { label: 'null', value: null },
+    { label: 'a boolean', value: true },
+    { label: 'an object', value: { cursor: 7 } },
+    { label: 'an array', value: [7] },
+  ];
+
+describe('MAX_RUN_SEED_LENGTH and isAcceptableRunSeed', () => {
+  it('leaves room for the longest substream suffix', () => {
+    expect(Number.isSafeInteger(MAX_RUN_SEED_LENGTH)).toBe(true);
+    expect(MAX_RUN_SEED_LENGTH).toBeGreaterThan(0);
+    expect(MAX_RUN_SEED_LENGTH).toBeLessThan(MAX_RNG_SEED_LENGTH);
+
+    // Every derived seed of an accepted run seed is itself within the
+    // generator's own bound, which is what the smaller bound exists for.
+    for (const name of RNG_STREAM_NAMES) {
+      expect(
+        `${LONGEST_ACCEPTED_RUN_SEED}::${name}`.length
+      ).toBeLessThanOrEqual(MAX_RNG_SEED_LENGTH);
+    }
+  });
+
+  it('accepts a run seed at the bound and refuses one past it', () => {
+    expect(isAcceptableRunSeed(LONGEST_ACCEPTED_RUN_SEED)).toBe(true);
+    expect(isAcceptableRunSeed(OVERLONG_RUN_SEED)).toBe(false);
+    expect(isAcceptableRunSeed('')).toBe(true);
+    expect(isAcceptableRunSeed(RUN_SEED)).toBe(true);
+  });
+
+  it('answers the same question createRngStreams throws on', () => {
+    expect(() => createRngStreams(LONGEST_ACCEPTED_RUN_SEED)).not.toThrow();
+    expect(() => createRngStreams(OVERLONG_RUN_SEED)).toThrow(RangeError);
+  });
+
+  it('reports an overlong run seed before it throws', () => {
+    const recording = createRecordingReporter();
+
+    expect(() =>
+      createRngStreams(OVERLONG_RUN_SEED, undefined, recording.reporter)
+    ).toThrow(RangeError);
+    expect(recording.rejections).toStrictEqual([
+      {
+        kind: 'seed-too-long',
+        observed: OVERLONG_RUN_SEED.length,
+        maximum: MAX_RUN_SEED_LENGTH,
+      },
+    ]);
+  });
+
+  it('names both lengths in the error it throws', () => {
+    expect(() => createRngStreams(OVERLONG_RUN_SEED)).toThrow(
+      `A run seed may be at most ${String(MAX_RUN_SEED_LENGTH)} characters ` +
+        `long; this one is ${String(OVERLONG_RUN_SEED.length)}.`
+    );
+  });
+
+  it('still throws when the sink throws while receiving the refusal', () => {
+    expect(() =>
+      createRngStreams(OVERLONG_RUN_SEED, undefined, THROWING_REPORTER)
+    ).toThrow(RangeError);
+  });
+
+  it('derives four working substreams from a run seed at the bound', () => {
+    const streams = createRngStreams(LONGEST_ACCEPTED_RUN_SEED);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(drawFrom(streams, name, SEQUENCE_LENGTH)).toEqual(
+        reference(name, SEQUENCE_LENGTH, LONGEST_ACCEPTED_RUN_SEED)
+      );
+    }
+  });
+});
+
+describe('createRngStreams — refused cursor entries', () => {
+  it.each(UNUSABLE_CURSOR_ENTRIES)(
+    'starts a substream fresh for $label and reports it as unusable',
+    ({ value }: { value: number }) => {
+      const recording = createRecordingReporter();
+      const streams = createRngStreams(
+        RUN_SEED,
+        { [SPAWN_POSITION]: value },
+        recording.reporter
+      );
+
+      expect(streams.snapshotCursors()[SPAWN_POSITION]).toBe(0);
+      expect(recording.rejections).toStrictEqual([
+        {
+          kind: 'cursor-unusable',
+          stream: SPAWN_POSITION,
+          observed: value,
+          maximum: MAX_RNG_CURSOR,
+        },
+      ]);
+      expect(drawFrom(streams, SPAWN_POSITION, SEQUENCE_LENGTH)).toEqual(
+        reference(SPAWN_POSITION, SEQUENCE_LENGTH)
+      );
+    }
+  );
+
+  it.each(OUT_OF_RANGE_CURSOR_ENTRIES)(
+    'starts a substream fresh for $label and reports it as out of range',
+    ({ value }: { value: number }) => {
+      const recording = createRecordingReporter();
+      const streams = createRngStreams(
+        RUN_SEED,
+        { [RELIC_DRAW]: value },
+        recording.reporter
+      );
+
+      expect(streams.snapshotCursors()[RELIC_DRAW]).toBe(0);
+      expect(recording.rejections).toStrictEqual([
+        {
+          kind: 'cursor-out-of-range',
+          stream: RELIC_DRAW,
+          observed: value,
+          maximum: MAX_RNG_CURSOR,
+        },
+      ]);
+      expect(drawFrom(streams, RELIC_DRAW, SEQUENCE_LENGTH)).toEqual(
+        reference(RELIC_DRAW, SEQUENCE_LENGTH)
+      );
+    }
+  );
+
+  it.each(NON_NUMERIC_CURSOR_ENTRIES)(
+    'reports $label as unusable with no measurement to carry',
+    ({ value }: { value: unknown }) => {
+      const recording = createRecordingReporter();
+      const cursors = {
+        [RARITY_WEIGHT]: value,
+      } as unknown as Partial<RngCursorMap>;
+      const streams = createRngStreams(RUN_SEED, cursors, recording.reporter);
+
+      expect(streams.snapshotCursors()[RARITY_WEIGHT]).toBe(0);
+      expect(recording.rejections).toHaveLength(1);
+      expect(recording.rejections[0].kind).toBe('cursor-unusable');
+      expect(recording.rejections[0].stream).toBe(RARITY_WEIGHT);
+      expect(recording.rejections[0].observed).toBeNaN();
+      expect(recording.rejections[0].maximum).toBe(MAX_RNG_CURSOR);
+    }
+  );
+
+  it('reports one refusal per refused entry, naming each substream', () => {
+    const recording = createRecordingReporter();
+    const cursors = {
+      [SPAWN_VALUE]: -1,
+      [SPAWN_POSITION]: MAX_RNG_CURSOR + 1,
+      [RELIC_DRAW]: PARTIAL_RESTORE_CURSOR,
+      [RARITY_WEIGHT]: Number.NaN,
+    };
+    const streams = createRngStreams(RUN_SEED, cursors, recording.reporter);
+
+    expect(recording.rejections.map((rejection) => rejection.stream)).toEqual([
+      SPAWN_VALUE,
+      SPAWN_POSITION,
+      RARITY_WEIGHT,
+    ]);
+    expect(recording.rejections.map((rejection) => rejection.kind)).toEqual([
+      'cursor-unusable',
+      'cursor-out-of-range',
+      'cursor-unusable',
+    ]);
+    expect(streams.snapshotCursors()).toEqual({
+      [SPAWN_VALUE]: 0,
+      [SPAWN_POSITION]: 0,
+      [RELIC_DRAW]: PARTIAL_RESTORE_CURSOR,
+      [RARITY_WEIGHT]: 0,
+    });
+  });
+
+  it('leaves the other substreams unshifted by one refused entry', () => {
+    const streams = createRngStreams(RUN_SEED, {
+      [SPAWN_VALUE]: -5,
+    });
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(drawFrom(streams, name, SEQUENCE_LENGTH)).toEqual(
+        reference(name, SEQUENCE_LENGTH)
+      );
+    }
+  });
+
+  it('ignores a key that is not a substream name', () => {
+    const recording = createRecordingReporter();
+    const cursors = {
+      [SPAWN_VALUE]: PARTIAL_RESTORE_CURSOR,
+      'spawn-values': 99,
+      '': 99,
+    } as unknown as Partial<RngCursorMap>;
+    const streams = createRngStreams(RUN_SEED, cursors, recording.reporter);
+
+    expect(recording.rejections).toStrictEqual([]);
+    expect(streams.snapshotCursors()).toEqual({
+      [SPAWN_VALUE]: PARTIAL_RESTORE_CURSOR,
+      [SPAWN_POSITION]: 0,
+      [RELIC_DRAW]: 0,
+      [RARITY_WEIGHT]: 0,
+    });
+  });
+
+  it('reports nothing for a cursor map it accepted whole', () => {
+    const recording = createRecordingReporter();
+    const streams = createRngStreams(
+      RUN_SEED,
+      DISTINCT_DRAW_COUNTS,
+      recording.reporter
+    );
+
+    expect(recording.rejections).toStrictEqual([]);
+    expect(streams.snapshotCursors()).toEqual(DISTINCT_DRAW_COUNTS);
+  });
+
+  it('accepts the fast-forward bound itself as a recorded position', () => {
+    const recording = createRecordingReporter();
+    const streams = createRngStreams(
+      RUN_SEED,
+      { [RELIC_DRAW]: MAX_RNG_CURSOR },
+      recording.reporter
+    );
+
+    expect(recording.rejections).toStrictEqual([]);
+    expect(streams.snapshotCursors()[RELIC_DRAW]).toBe(MAX_RNG_CURSOR);
+  });
+
+  it('contains a sink that throws while receiving a cursor refusal', () => {
+    const streams = createRngStreams(
+      RUN_SEED,
+      { [SPAWN_VALUE]: -1 },
+      THROWING_REPORTER
+    );
+
+    expect(streams.snapshotCursors()[SPAWN_VALUE]).toBe(0);
+    expect(drawFrom(streams, SPAWN_VALUE, SEQUENCE_LENGTH)).toEqual(
+      reference(SPAWN_VALUE, SEQUENCE_LENGTH)
+    );
+  });
+
+  it('accepts a sink declaring no member at all', () => {
+    const streams = createRngStreams(RUN_SEED, { [SPAWN_VALUE]: -1 }, {});
+
+    expect(streams.snapshotCursors()[SPAWN_VALUE]).toBe(0);
+  });
+});
+
+/* ===== 13. Bounds the selecting primitives decline ===== */
+
+/** `nextInt` bounds outside its domain, each yielding 0 and no draw. */
+const EMPTY_INDEX_DOMAINS: readonly { label: string; value: number }[] = [
+  { label: 'zero', value: 0 },
+  { label: 'a negative bound', value: -1 },
+  { label: 'a negative fractional bound', value: -0.5 },
+  { label: 'NaN', value: Number.NaN },
+  { label: 'Infinity', value: Number.POSITIVE_INFINITY },
+  { label: '-Infinity', value: Number.NEGATIVE_INFINITY },
+];
+
+/** Weight lists no selection can be made from, each yielding no draw. */
+const UNUSABLE_WEIGHTS: readonly { label: string; weights: number[] }[] = [
+  { label: 'one weight too few', weights: [1] },
+  { label: 'one weight too many', weights: [1, 1, 1] },
+  { label: 'no weight at all', weights: [] },
+  { label: 'a negative weight', weights: [-1, 2] },
+  { label: 'a negative weight in second place', weights: [2, -1] },
+  { label: 'NaN', weights: [Number.NaN, 1] },
+  { label: 'Infinity', weights: [Number.POSITIVE_INFINITY, 1] },
+  { label: '-Infinity', weights: [Number.NEGATIVE_INFINITY, 1] },
+  { label: 'weights totalling zero', weights: [0, 0] },
+  { label: 'a total that overflows to Infinity', weights: [1.5e308, 1.5e308] },
+];
+
+describe('RngStream.nextInt declines a bound outside its domain', () => {
+  it.each(EMPTY_INDEX_DOMAINS)(
+    'yields 0 and consumes nothing for $label',
+    ({ value }: { value: number }) => {
+      const stream = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+
+      expect(stream.nextInt(value)).toBe(0);
+      expect(stream.cursor).toBe(0);
+    }
+  );
+
+  it('cannot shift a later draw through any declined bound', () => {
+    const stream = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+
+    for (const { value } of EMPTY_INDEX_DOMAINS) {
+      expect(stream.nextInt(value)).toBe(0);
+    }
+
+    expect(stream.cursor).toBe(0);
+    expect(draw(stream, SEQUENCE_LENGTH)).toEqual(
+      reference(SPAWN_POSITION, SEQUENCE_LENGTH)
+    );
+  });
+
+  it('draws for a fractional bound above zero, which is in its domain', () => {
+    const stream = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+    const raw = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+
+    expect(stream.nextInt(1.5)).toBe(Math.floor(raw.next() * 1.5));
+    expect(stream.cursor).toBe(1);
+  });
+});
+
+describe('RngStream.pickWeighted declines an unreadable distribution', () => {
+  it.each(UNUSABLE_WEIGHTS)(
+    'yields nothing and consumes nothing for $label',
+    ({ weights }: { weights: number[] }) => {
+      const { spawn } = createDefaultRulesConfig();
+      const stream = createRngStreams(RUN_SEED).stream(SPAWN_VALUE);
+
+      expect(stream.pickWeighted(spawn.values, weights)).toBeUndefined();
+      expect(stream.cursor).toBe(0);
+    }
+  );
+
+  it('cannot shift a later draw through any declined distribution', () => {
+    const { spawn } = createDefaultRulesConfig();
+    const stream = createRngStreams(RUN_SEED).stream(SPAWN_VALUE);
+
+    for (const { weights } of UNUSABLE_WEIGHTS) {
+      expect(stream.pickWeighted(spawn.values, weights)).toBeUndefined();
+    }
+
+    expect(stream.cursor).toBe(0);
+    expect(draw(stream, SEQUENCE_LENGTH)).toEqual(
+      reference(SPAWN_VALUE, SEQUENCE_LENGTH)
+    );
+  });
+
+  it('declines an empty candidate list however its weights read', () => {
+    const stream = createRngStreams(RUN_SEED).stream(SPAWN_VALUE);
+
+    expect(stream.pickWeighted([], [])).toBeUndefined();
+    expect(stream.pickWeighted([], [1])).toBeUndefined();
+    expect(stream.cursor).toBe(0);
+  });
+
+  it('selects from a distribution whose weights total more than one', () => {
+    const stream = createRngStreams(RUN_SEED).stream(RARITY_WEIGHT);
+
+    expect(UNEVEN_CANDIDATES).toContain(
+      selected(stream.pickWeighted(UNEVEN_CANDIDATES, UNEVEN_WEIGHTS))
+    );
+    expect(stream.cursor).toBe(1);
+  });
+
+  it('never selects a candidate whose weight is zero in a longer list', () => {
+    const stream = createRngStreams(RUN_SEED).stream(RARITY_WEIGHT);
+    const observed = new Set<string>();
+
+    for (let taken = 0; taken < SAMPLE_SIZE; taken += 1) {
+      observed.add(
+        selected(stream.pickWeighted(UNEVEN_CANDIDATES, [1, 0, 0]))
+      );
+    }
+
+    expect([...observed]).toStrictEqual([UNEVEN_CANDIDATES[0]]);
+    expect(stream.cursor).toBe(SAMPLE_SIZE);
+  });
+});
+
+describe('RngStream.pick declines a list it cannot index', () => {
+  it('yields nothing and consumes nothing for an empty list', () => {
+    const stream = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+
+    expect(stream.pick([])).toBeUndefined();
+    expect(stream.pick(availableCells(0))).toBeUndefined();
+    expect(stream.cursor).toBe(0);
+  });
+
+  it('selects the sole member of a one-entry list, consuming one draw', () => {
+    const stream = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
+    const sole = availableCells(1);
+
+    expect(sole).toHaveLength(1);
+    expect(stream.pick(sole)).toBe(sole[0]);
+    expect(stream.cursor).toBe(1);
   });
 });

@@ -8,55 +8,38 @@
  * call — and nothing from src/render/, src/observability/, src/storage/,
  * src/audio/, or any sibling module under src/ui/.
  *
- * Origin, one row per construct group. Nothing here ports a construct from
- * js/: the retired sources carry no accessibility code, no null-checked
- * lookup and no report sink, so every row is target-only in
- * docs/TRACEABILITY_MATRIX.md.
+ * `resolveMount` closes the eight unguarded lookups the retired sources
+ * performed: js/html_actuator.js read `.tile-container`, `.score-container`,
+ * `.best-container` and `.game-message`, and js/keyboard_input_manager.js read
+ * `.game-container`, `.retry-button`, `.restart-button` and
+ * `.keep-playing-button`. None of the eight was null-checked, and each result
+ * was dereferenced immediately.
  *
- * | Construct group                   | Origin                             |
- * |-----------------------------------|------------------------------------|
- * | `UiReporter`, `NOOP_UI_REPORTER`  | Rule 3, sibling of `InputReporter` |
- * | `resolveMount`, `resolveMounts`   | I12                                |
- * | Reduced motion                    | R9                                 |
- * | Theme selection                   | R9                                 |
- * | Number-only mode                  | R9 and I6                          |
- * | Mute and volume                   | R9                                 |
- *
- * The eight unguarded lookups the resolver closes: js/html_actuator.js L2-L5,
- * reading `.tile-container`, `.score-container`, `.best-container` and
- * `.game-message`; js/keyboard_input_manager.js L78, reading
- * `.game-container`; and its L141, reached from L72-L74 for `.retry-button`,
- * `.restart-button` and `.keep-playing-button`. None of the eight was
- * null-checked, and each result was dereferenced immediately.
- *
- * Subscription semantics are those of js/keyboard_input_manager.js L18-L32 —
- * an appended callback list iterated synchronously — with per-listener error
+ * Subscription semantics are those of js/keyboard_input_manager.js — an
+ * appended callback list iterated synchronously — with per-listener error
  * isolation added.
  *
- * No exported function throws. A missing document, an absent `matchMedia`, a
- * malformed selector, an unrecognised theme id, an out-of-range volume and a
- * throwing listener are each reported through the injected sink and the call
- * continues.
+ * Exported functions report rather than throw: a missing document, an absent
+ * `matchMedia`, a malformed selector, an unrecognised theme id, an
+ * out-of-range volume and a throwing listener are each reported through the
+ * injected sink and the call continues.
  *
- * Preferences are held in memory for the session: this module reads and
- * writes no storage and declares no storage key.
- *
- * Rationale for the decisions behind this file — the locally declared report
- * sink, the guarded resolver in place of non-null assertions, the additive
- * treatment of the two accessibility palettes, and the session-scoped
- * preferences — is in docs/DECISION_LOG.md.
+ * Preferences are held in memory for the session: this module reads and writes
+ * no storage and declares no storage key.
  */
 
+import {
+  DEFAULT_MUTED,
+  DEFAULT_VOLUME,
+  MAX_VOLUME,
+  MIN_VOLUME,
+} from '../../audio/sound-map';
 import type { ThemeId } from '../../theme/themes';
 import {
   DEFAULT_THEME_ID,
   isThemeId,
   setActiveTheme,
 } from '../../theme/themes';
-
-/* --------------------------------------------------------------------------
- * 1. Report sink
- * ----------------------------------------------------------------------- */
 
 /** Severity of a report. */
 export type UiReportLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -67,8 +50,8 @@ export type UiReportFields = Record<string, string | number | boolean>;
 /**
  * Sink every module under src/ui/ reports through.
  *
- * Injected, never imported: this module names no observability module, so
- * src/main.ts adapts a logger onto this shape from the outside and a test
+ * Injected, never imported: this module names no observability module, so a
+ * caller adapts a logger onto this shape from the outside and a test
  * substitutes a recording fake. `error` carries the caught value unchanged.
  *
  * Every function and factory in this module that accepts a reporter defaults
@@ -76,30 +59,8 @@ export type UiReportFields = Record<string, string | number | boolean>;
  * library.
  */
 export interface UiReporter {
-  /**
-   * Records a structured message.
-   *
-   * @param level Severity.
-   * @param message Human-readable message.
-   * @param fields Optional structured fields.
-   */
   log(level: UiReportLevel, message: string, fields?: UiReportFields): void;
-
-  /**
-   * Increments a counter.
-   *
-   * @param metric Counter name.
-   * @param fields Optional structured fields.
-   */
   count(metric: string, fields?: UiReportFields): void;
-
-  /**
-   * Records a caught value together with its context.
-   *
-   * @param message Human-readable message.
-   * @param error The caught value, exactly as it was thrown.
-   * @param fields Optional structured fields.
-   */
   error(message: string, error: unknown, fields?: UiReportFields): void;
 }
 
@@ -130,7 +91,6 @@ export const NOOP_UI_REPORTER: UiReporter = Object.freeze({
  * Every entry point in this module wraps its reporter here once before using
  * it.
  *
- * @param reporter Reporter to contain.
  * @returns A reporter delegating to `reporter` and throwing for nothing.
  */
 export function createSafeUiReporter(reporter: UiReporter): UiReporter {
@@ -165,10 +125,6 @@ export function createSafeUiReporter(reporter: UiReporter): UiReporter {
   });
 }
 
-/* --------------------------------------------------------------------------
- * 2. Guarded mount resolution
- * ----------------------------------------------------------------------- */
-
 /**
  * The minimum a value must implement to be searched for a mount.
  *
@@ -176,30 +132,17 @@ export function createSafeUiReporter(reporter: UiReporter): UiReporter {
  * hand-built stand-in in a test.
  */
 export interface MountRoot {
-  /**
-   * Returns the first descendant matching `selectors`, or `null`.
-   *
-   * @param selectors CSS selector list.
-   */
+  /** Returns the first descendant matching `selectors`, or `null`. */
   querySelector<E extends Element = Element>(selectors: string): E | null;
 }
 
 /** One mount a resolution asked for and did not obtain. */
 export interface MissingMount {
-  /** Logical name the caller asked for. */
   readonly name: string;
 
   /** Selector that matched nothing, or that could not be evaluated. */
   readonly selector: string;
-
-  /** Label naming the caller, carried into the report. */
   readonly context: string;
-
-  /**
-   * `'no-match'` where the selector evaluated and matched nothing,
-   * `'no-root'` where no searchable root was available, and `'query-failed'`
-   * where evaluating the selector threw.
-   */
   readonly cause: MissingMountCause;
 }
 
@@ -208,19 +151,9 @@ export type MissingMountCause = 'no-match' | 'no-root' | 'query-failed';
 
 /** Options shared by both resolvers. */
 export interface ResolveMountOptions {
-  /**
-   * Node the search runs against. Defaults to the ambient `document`, and
-   * resolves to no root at all where no document exists.
-   */
   readonly root?: MountRoot | null;
-
-  /** Sink the misses are reported through. */
   readonly reporter?: UiReporter;
-
-  /** Short label naming the caller, carried into every report. */
   readonly context?: string;
-
-  /** Logical name of the mount. Defaults to the selector itself. */
   readonly name?: string;
 }
 
@@ -246,8 +179,6 @@ export interface MountResolution<
 
   /** Every mount the spec asked for and the document did not supply. */
   readonly missing: readonly MissingMount[];
-
-  /** Whether every name in the spec resolved. */
   readonly complete: boolean;
 }
 
@@ -259,15 +190,8 @@ export type CompleteMountResolution<
   readonly elements: { readonly [K in keyof S]: E };
 };
 
-/** Label used where a caller supplies no context. */
 const DEFAULT_MOUNT_CONTEXT = 'ui';
 
-/**
- * Narrows a value to a searchable root.
- *
- * @param value Candidate root.
- * @returns Whether `value` carries a callable `querySelector`.
- */
 function isMountRoot(value: unknown): value is MountRoot {
   if (value === null || typeof value !== 'object') {
     return false;
@@ -278,13 +202,6 @@ function isMountRoot(value: unknown): value is MountRoot {
   return typeof candidate.querySelector === 'function';
 }
 
-/**
- * Resolves the root a search runs against.
- *
- * @param root Root the caller supplied, if any.
- * @returns The supplied root, the ambient document, or `null` where neither
- *   is searchable.
- */
 function resolveMountRoot(
   root: MountRoot | null | undefined,
 ): MountRoot | null {
@@ -299,16 +216,6 @@ function resolveMountRoot(
   return isMountRoot(document) ? document : null;
 }
 
-/**
- * Finds one element without throwing, reporting whichever way it failed.
- *
- * @param selector Selector to evaluate.
- * @param name Logical name of the mount.
- * @param context Label naming the caller.
- * @param root Searchable root, or `null` where none was available.
- * @param reporter Contained sink.
- * @returns The element, or the miss describing why there is none.
- */
 function findMount<E extends Element>(
   selector: string,
   name: string,
@@ -374,8 +281,6 @@ function findMount<E extends Element>(
  * Selectors are supplied by the caller. This module declares none of its own,
  * and index.html is the authority for every one of them.
  *
- * @param selector Selector to resolve. Comes from the caller.
- * @param options Root, sink, context label and logical name.
  * @returns The element, or `null` where the selector matched nothing, could
  *   not be evaluated, or there was no searchable root.
  */
@@ -393,15 +298,9 @@ export function resolveMount<E extends Element = HTMLElement>(
 }
 
 /**
- * Resolves a whole mount set in one pass, collecting the misses as data.
- *
- * The form src/ui/screen-router.ts calls once at boot, which then injects the
- * resolved elements downward so no screen or component performs a lookup of
- * its own.
- *
- * @param spec Logical mount name to selector.
- * @param options Root, sink and context label.
- * @returns One entry per name, the misses, and whether the set is complete.
+ * Resolves a whole mount set in one pass, collecting the misses as data, so a
+ * caller can resolve once and inject the elements downward rather than have
+ * every consumer perform a lookup of its own.
  */
 export function resolveMounts<
   S extends MountSpec,
@@ -444,12 +343,7 @@ export function resolveMounts<
   });
 }
 
-/**
- * Narrows a resolution to one whose every entry is present.
- *
- * @param resolution Resolution to test.
- * @returns Whether every name in the spec resolved.
- */
+/** Narrows a resolution to one whose every entry is present. */
 export function isMountComplete<
   S extends MountSpec,
   E extends Element = HTMLElement,
@@ -466,7 +360,6 @@ export function isMountComplete<
 /**
  * Renders a miss list as one line, for a report field.
  *
- * @param missing Misses to describe.
  * @returns `name=selector (cause)` per miss, comma-separated, or an empty
  *   string where there are none.
  */
@@ -482,27 +375,22 @@ export function formatMissingMounts(
     .join(', ');
 }
 
-/* --------------------------------------------------------------------------
- * 3. Reduced motion
- * ----------------------------------------------------------------------- */
-
 /**
  * Media query the operating-system preference is read from.
  *
- * No stylesheet in the retired sources referenced it. style/_a11y.scss L251
- * carries the CSS layer keyed on the same feature, and src/render/ queries the
- * same feature independently for the effects it gates; neither module imports
- * the other.
+ * No stylesheet in the retired sources referenced it. style/_a11y.scss carries
+ * the CSS layer keyed on the same feature, and src/render/ queries the same
+ * feature independently for the effects it gates; neither module imports the
+ * other.
  */
 export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
 /**
  * State of the reduced-motion query.
  *
- * `'absent'` is a platform offering no `matchMedia` at all, which expresses no
+ * `'absent'` is a platform offering no `matchMedia` at all, and expresses no
  * preference. `'failed'` is a `matchMedia` that threw, or a result carrying no
- * boolean `matches`; that is an unknown preference rather than an absent one,
- * and it resolves to reduced motion.
+ * boolean `matches`, and resolves to reduced motion. Decision DL-SETTINGS-04.
  */
 export type MotionQueryStatus = 'available' | 'absent' | 'failed';
 
@@ -517,25 +405,18 @@ export type MotionQueryChangeHandler = () => void;
  * Every optional member is checked before it is called.
  */
 export interface MotionQueryList {
-  /** Whether the query currently matches. */
   readonly matches: boolean;
-
-  /** Modern subscription. */
   readonly addEventListener?: (
     type: 'change',
     handler: MotionQueryChangeHandler,
   ) => void;
 
-  /** Modern teardown. */
   readonly removeEventListener?: (
     type: 'change',
     handler: MotionQueryChangeHandler,
   ) => void;
 
-  /** Deprecated subscription, present on older surfaces. */
   readonly addListener?: (handler: MotionQueryChangeHandler) => void;
-
-  /** Deprecated teardown, present on older surfaces. */
   readonly removeListener?: (handler: MotionQueryChangeHandler) => void;
 }
 
@@ -547,20 +428,12 @@ export interface MotionQueryList {
  * `isMotionQueryList` before it is read.
  */
 export interface MotionQuerySource {
-  /**
-   * Evaluates a media query.
-   *
-   * @param query Media query string.
-   */
   readonly matchMedia: (query: string) => unknown;
 }
 
 /** The reduced-motion query's answer, and whether it could be read. */
 export interface ReducedMotionQuery {
-  /** Whether motion is to be reduced according to the platform alone. */
   readonly reduced: boolean;
-
-  /** Whether the query produced a usable result. */
   readonly supported: boolean;
 
   /** Available, absent, or present and failing. */
@@ -571,8 +444,8 @@ export interface ReducedMotionQuery {
  * How the reduced-motion preference is decided.
  *
  * `'system'` follows the media query, `'reduce'` forces motion reduction on
- * and `'allow'` forces it off. A two-state control cannot express following
- * the operating system, which is the default.
+ * and `'allow'` forces it off. `'system'` is the default. Decision
+ * DL-SETTINGS-05.
  */
 export type MotionSetting = 'system' | 'reduce' | 'allow';
 
@@ -586,12 +459,7 @@ export const MOTION_SETTINGS: readonly MotionSetting[] = Object.freeze([
 /** The setting in force before anything is chosen. */
 export const DEFAULT_MOTION_SETTING: MotionSetting = 'system';
 
-/**
- * Narrows an unknown value to a `MotionSetting`.
- *
- * @param value Candidate setting.
- * @returns Whether `value` is one of the three settings.
- */
+/** Narrows an unknown value to a `MotionSetting`. */
 export function isMotionSetting(value: unknown): value is MotionSetting {
   return (
     typeof value === 'string' &&
@@ -599,12 +467,6 @@ export function isMotionSetting(value: unknown): value is MotionSetting {
   );
 }
 
-/**
- * Narrows a `matchMedia` result to a readable query list.
- *
- * @param value Candidate query list.
- * @returns Whether `value` carries a boolean `matches`.
- */
 function isMotionQueryList(value: unknown): value is MotionQueryList {
   if (value === null || typeof value !== 'object') {
     return false;
@@ -615,12 +477,6 @@ function isMotionQueryList(value: unknown): value is MotionQueryList {
   return typeof candidate.matches === 'boolean';
 }
 
-/**
- * Narrows a value to something that can evaluate a media query.
- *
- * @param value Candidate source.
- * @returns Whether `value` carries a callable `matchMedia`.
- */
 function isMotionQuerySource(value: unknown): value is MotionQuerySource {
   if (value === null || typeof value !== 'object') {
     return false;
@@ -631,13 +487,6 @@ function isMotionQuerySource(value: unknown): value is MotionQuerySource {
   return typeof candidate.matchMedia === 'function';
 }
 
-/**
- * Resolves the source the query is evaluated against.
- *
- * @param source Source the caller supplied, if any.
- * @returns The supplied source, the ambient global, or `null` where neither
- *   can evaluate a media query.
- */
 function resolveMotionSource(
   source: MotionQuerySource | null | undefined,
 ): MotionQuerySource | null {
@@ -648,37 +497,22 @@ function resolveMotionSource(
   return isMotionQuerySource(globalThis) ? globalThis : null;
 }
 
-/** The answer where no `matchMedia` exists at all. */
 const ABSENT_MOTION_QUERY: ReducedMotionQuery = Object.freeze({
   reduced: false,
   supported: false,
   status: 'absent',
 });
 
-/** The answer where the query exists and could not be read. */
 const FAILED_MOTION_QUERY: ReducedMotionQuery = Object.freeze({
   reduced: true,
   supported: false,
   status: 'failed',
 });
 
-/**
- * Builds the answer for a query that responded.
- *
- * @param reduced What the query reported.
- * @returns The frozen answer.
- */
 function availableMotionQuery(reduced: boolean): ReducedMotionQuery {
   return Object.freeze({ reduced, supported: true, status: 'available' });
 }
 
-/**
- * Reads a query list's `matches` without trusting the accessor.
- *
- * @param list Query list to read.
- * @param reporter Contained sink.
- * @returns The boolean the list reported, or `null` where the read threw.
- */
 function readMotionMatches(
   list: MotionQueryList,
   reporter: UiReporter,
@@ -695,16 +529,6 @@ function readMotionMatches(
   }
 }
 
-/**
- * Evaluates the query once, keeping the list where one was obtained.
- *
- * The single implementation behind both `queryReducedMotionPreference` and the
- * store's live subscription.
- *
- * @param source Resolved source, or `null` where none can evaluate a query.
- * @param reporter Contained sink.
- * @returns The list, where one was obtained, and the first answer.
- */
 function openMotionQuery(
   source: MotionQuerySource | null,
   reporter: UiReporter,
@@ -755,16 +579,6 @@ function openMotionQuery(
   return { list: created, query: availableMotionQuery(matches) };
 }
 
-/**
- * Subscribes to query-list changes, preferring `addEventListener` and falling
- * back to the deprecated `addListener` where only that exists.
- *
- * @param list Query list to observe.
- * @param handler Called on every change.
- * @param reporter Contained sink.
- * @returns A detach function, or `null` where the list carries neither
- *   mechanism or the subscription threw.
- */
 function attachMotionQueryListener(
   list: MotionQueryList,
   handler: MotionQueryChangeHandler,
@@ -837,11 +651,6 @@ function attachMotionQueryListener(
 export interface ReducedMotionQueryOptions {
   /** Sink the absent and failed states are reported through. */
   readonly reporter?: UiReporter;
-
-  /**
-   * Source the query is evaluated against. Defaults to the ambient global,
-   * and resolves to no source at all where that offers no `matchMedia`.
-   */
   readonly source?: MotionQuerySource | null;
 }
 
@@ -853,7 +662,6 @@ export interface ReducedMotionQueryOptions {
  * `matchMedia` that throws, or that returns a value carrying no boolean
  * `matches`, yields `status: 'failed'` and `reduced: true`. Both are reported.
  *
- * @param options Sink and query source.
  * @returns The frozen answer and how it was obtained.
  */
 export function queryReducedMotionPreference(
@@ -865,12 +673,8 @@ export function queryReducedMotionPreference(
 }
 
 /**
- * Derives the effective reduced-motion value from the setting in force and
- * the platform's answer.
- *
- * @param setting The setting in force.
- * @param query The platform's answer, consulted only for `'system'`.
- * @returns Whether motion is to be reduced.
+ * Derives the effective reduced-motion value from the setting in force and the
+ * platform's answer.
  */
 export function resolveEffectiveReducedMotion(
   setting: MotionSetting,
@@ -895,10 +699,9 @@ export function resolveEffectiveReducedMotion(
  * Maps a setting onto the tri-state override the render layer accepts, where
  * `null` means follow the media query.
  *
- * src/main.ts reads this and pushes the result into the render layer, which
- * this module does not import.
+ * A caller reads this and pushes the result into the render layer, which this
+ * module does not import.
  *
- * @param setting The setting in force.
  * @returns `true` or `false` to force the value, `null` to follow the query.
  */
 export function reducedMotionOverrideFor(
@@ -915,31 +718,105 @@ export function reducedMotionOverrideFor(
   return null;
 }
 
+/**
+ * Attribute the effective reduced-motion value is reflected onto the document
+ * element in.
+ *
+ * The stylesheet cannot read a `MotionSetting`, and `prefers-reduced-motion`
+ * alone answers only the operating system, so `'reduce'` and `'allow'` would
+ * otherwise reach the render layer and never the style layer. This attribute is
+ * the one place both layers agree on: `style/_a11y.scss` selects on it, and
+ * `src/input/on-screen-controls.ts` reads it when it holds no override of its
+ * own.
+ */
+export const REDUCED_MOTION_ATTRIBUTE = 'data-reduced-motion';
+
+/** Value `REDUCED_MOTION_ATTRIBUTE` carries while motion is reduced. */
+export const REDUCED_MOTION_TRUE = 'true';
+
+/** Value `REDUCED_MOTION_ATTRIBUTE` carries while motion is permitted. */
+export const REDUCED_MOTION_FALSE = 'false';
+
+/**
+ * Reflects an effective reduced-motion value onto an element.
+ *
+ * Always writes an explicit `'true'` or `'false'`, never removing the
+ * attribute: the stylesheet distinguishes an explicit `'false'` — the user
+ * asked to keep motion — from an absent attribute, where the operating system
+ * still decides.
+ *
+ * @param target Element to write to, or `null` to do nothing.
+ * @param reduced The effective value.
+ * @returns Whether the attribute was written.
+ */
+export function reflectReducedMotion(
+  target: Element | null,
+  reduced: boolean,
+): boolean {
+  if (target === null) {
+    return false;
+  }
+
+  try {
+    target.setAttribute(
+      REDUCED_MOTION_ATTRIBUTE,
+      reduced ? REDUCED_MOTION_TRUE : REDUCED_MOTION_FALSE,
+    );
+
+    return true;
+  } catch {
+    // A target that rejects the write is reported by the caller, which owns a
+    // sink; this function has none and never throws.
+    return false;
+  }
+}
+
+/**
+ * Reads an effective reduced-motion value back off an element.
+ *
+ * @param target Element to read from, or `null`.
+ * @returns `true` or `false` where the attribute carries one of the two
+ *   explicit values, and `null` where it is absent or carries anything else,
+ *   which is the caller's signal to fall back to its own source.
+ */
+export function readReflectedReducedMotion(
+  target: Element | null,
+): boolean | null {
+  if (target === null) {
+    return null;
+  }
+
+  const value = target.getAttribute(REDUCED_MOTION_ATTRIBUTE);
+
+  if (value === REDUCED_MOTION_TRUE) {
+    return true;
+  }
+
+  if (value === REDUCED_MOTION_FALSE) {
+    return false;
+  }
+
+  return null;
+}
+
 /* --------------------------------------------------------------------------
  * 4. Audio bounds and the number-only force
  * ----------------------------------------------------------------------- */
 
-/** Lowest accepted volume. */
-export const MIN_VOLUME = 0;
-
-/** Highest accepted volume. */
-export const MAX_VOLUME = 1;
-
-/** The volume in force before anything is chosen. */
-export const DEFAULT_VOLUME: number = MAX_VOLUME;
-
-/** Whether the audio layer is muted before anything is chosen. */
-export const DEFAULT_MUTED = false;
+// Re-exported, not redeclared: src/audio/sound-map.ts owns these four values.
+// This module published them first and keeps publishing them, so callers are
+// unaffected, but there is now exactly one declaration of each.
+export {
+  DEFAULT_MUTED,
+  DEFAULT_VOLUME,
+  MAX_VOLUME,
+  MIN_VOLUME,
+} from '../../audio/sound-map';
 
 /** Whether number-only rendering is chosen before anything is chosen. */
 export const DEFAULT_NUMBER_ONLY_MODE = false;
 
-/**
- * Whether a value is a volume that can be applied as given.
- *
- * @param value Candidate volume.
- * @returns Whether `value` is a finite number within the bounds.
- */
+/** Whether a value is a volume that can be applied as given. */
 export function isValidVolume(value: unknown): value is number {
   return (
     typeof value === 'number' &&
@@ -952,7 +829,6 @@ export function isValidVolume(value: unknown): value is number {
 /**
  * Brings a volume into range.
  *
- * @param value Candidate volume.
  * @returns `value` bounded by `MIN_VOLUME` and `MAX_VOLUME`, or
  *   `DEFAULT_VOLUME` where `value` is not a finite number.
  */
@@ -969,25 +845,17 @@ export function clampVolume(value: number): number {
  * platform imposed (I6).
  */
 export interface NumberOnlyForce {
-  /** Whether the mode is imposed rather than chosen. */
   readonly forced: boolean;
 
   /** What imposed it, or `null` where nothing has. */
   readonly reason: string | null;
 }
 
-/** Reason recorded where a caller forces the mode without supplying one. */
 const UNSTATED_FORCE_REASON = 'unstated';
 
-/** Returned in place of a real unsubscribe where a subscription was refused. */
 const NOOP_UNSUBSCRIBE = (): void => {
   return;
 };
-
-
-/* --------------------------------------------------------------------------
- * 5. The preference store
- * ----------------------------------------------------------------------- */
 
 /**
  * The five preferences a change is reported against.
@@ -1019,13 +887,10 @@ export const PREFERENCE_KEYS: readonly PreferenceKey[] = Object.freeze([
  * Handed to every listener and returned by `PreferenceStore.getPreferences`.
  */
 export interface UiPreferences {
-  /** Effective reduced-motion value, the setting and the query combined. */
   readonly reducedMotion: boolean;
 
   /** The setting in force, before the query is consulted. */
   readonly motionSetting: MotionSetting;
-
-  /** The palette in force. */
   readonly theme: ThemeId;
 
   /** Effective number-only value, the choice and the force combined. */
@@ -1036,11 +901,7 @@ export interface UiPreferences {
 
   /** Whether number-only rendering is imposed, and by what. */
   readonly numberOnlyForce: NumberOnlyForce;
-
-  /** Whether the audio layer is muted. */
   readonly muted: boolean;
-
-  /** Volume within `MIN_VOLUME` and `MAX_VOLUME`. */
   readonly volume: number;
 }
 
@@ -1058,10 +919,7 @@ export type PreferenceListener = (
 
 /** Starting values a caller may supply. Each is validated before it is held. */
 export interface InitialUiPreferences {
-  /** Motion setting to start from. Defaults to `DEFAULT_MOTION_SETTING`. */
   readonly motionSetting?: MotionSetting;
-
-  /** Palette to start from. Defaults to `DEFAULT_THEME_ID`. */
   readonly theme?: ThemeId;
 
   /**
@@ -1069,11 +927,7 @@ export interface InitialUiPreferences {
    * `DEFAULT_NUMBER_ONLY_MODE`.
    */
   readonly numberOnlyMode?: boolean;
-
-  /** Whether audio starts muted. Defaults to `DEFAULT_MUTED`. */
   readonly muted?: boolean;
-
-  /** Volume to start from. Defaults to `DEFAULT_VOLUME`. */
   readonly volume?: number;
 }
 
@@ -1081,51 +935,26 @@ export interface InitialUiPreferences {
 export interface PreferenceStoreOptions {
   /** Sink every rejection, clamp and listener failure is reported through. */
   readonly reporter?: UiReporter;
-
-  /**
-   * Source the reduced-motion query is evaluated against. Defaults to the
-   * ambient global.
-   */
   readonly motionSource?: MotionQuerySource | null;
-
-  /**
-   * Activation call a theme change is delegated to. Defaults to
-   * `setActiveTheme` of src/theme/themes.ts, which owns the activation
-   * attribute and the per-palette values style/_themes.scss selects on.
-   */
   readonly activateTheme?: (id: ThemeId) => void;
-
-  /** Starting values. */
   readonly initial?: InitialUiPreferences;
 }
 
 /**
- * The readable, settable and subscribable preference surface.
- *
- * src/ui/components/settings-panel.ts drives every setter, src/main.ts reads
- * `reducedMotionOverride()` and `isNumberOnlyMode()` to bridge them into the
- * render layer, and src/ui/a11y/live-region.ts subscribes to announce a
- * change. No member throws.
+ * The readable, settable and subscribable preference surface. Every member
+ * reports rather than throws.
  */
 export interface PreferenceStore {
   /** Every effective value as one frozen snapshot. */
   getPreferences(): UiPreferences;
-
-  /** The platform's last reduced-motion answer, and how it was obtained. */
   getMotionQuery(): ReducedMotionQuery;
-
-  /** The motion setting in force. */
   getMotionSetting(): MotionSetting;
 
   /**
    * Chooses how the reduced-motion preference is decided. An unrecognised
    * setting is reported and ignored.
-   *
-   * @param setting Setting to hold.
    */
   setMotionSetting(setting: MotionSetting): void;
-
-  /** The effective reduced-motion value. */
   isReducedMotion(): boolean;
 
   /**
@@ -1133,21 +962,17 @@ export interface PreferenceStore {
    * where `null` means follow the media query.
    */
   reducedMotionOverride(): boolean | null;
-
-  /** The palette in force. */
   getTheme(): ThemeId;
 
   /**
    * Holds a palette and delegates its activation. An unrecognised id is
    * reported and ignored, so the default palette stays in force.
-   *
-   * @param id Palette to activate.
    */
   setTheme(id: ThemeId): void;
 
   /**
    * Delegates activation of the palette already in force, without changing it
-   * and without notifying. The call src/main.ts makes at boot to establish the
+   * and without notifying. The call to make at boot to establish the
    * activation attribute on a document that does not yet carry it.
    */
   applyCurrentTheme(): void;
@@ -1156,50 +981,29 @@ export interface PreferenceStore {
   isNumberOnlyMode(): boolean;
 
   /**
-   * Chooses number-only rendering. A request to turn it off while it is
-   * forced is reported and leaves the effective value on.
-   *
-   * @param enabled Whether the mode is chosen.
+   * Chooses number-only rendering. A request to turn it off while it is forced
+   * is reported and leaves the effective value on.
    */
   setNumberOnlyMode(enabled: boolean): void;
 
   /** Whether number-only rendering is imposed rather than chosen. */
   isNumberOnlyForced(): boolean;
-
-  /** Whether the mode is imposed, and by what. */
   getNumberOnlyForce(): NumberOnlyForce;
 
   /**
    * Imposes number-only rendering irrespective of the choice, for the case
    * where WebGL is unavailable (I6).
-   *
-   * @param reason What imposed it, carried into the report and to the
-   *   settings surface.
    */
   forceNumberOnlyMode(reason: string): void;
-
-  /** Lifts the force, leaving the choice in effect. */
   releaseNumberOnlyForce(): void;
-
-  /** Whether the audio layer is muted. */
   isMuted(): boolean;
-
-  /**
-   * Holds the mute state.
-   *
-   * @param muted Whether audio is muted.
-   */
   setMuted(muted: boolean): void;
-
-  /** The volume in force. */
   getVolume(): number;
 
   /**
    * Holds a volume. A value outside the bounds is reported and the bounded
    * value is held; a value that is not a finite number is reported and
    * `DEFAULT_VOLUME` is held.
-   *
-   * @param volume Volume to hold.
    */
   setVolume(volume: number): void;
 
@@ -1211,27 +1015,17 @@ export interface PreferenceStore {
    * that throws neither stops the remaining listeners nor reaches the setter.
    * The returned function is idempotent. A listener is never called on
    * registration.
-   *
-   * @param listener Callback invoked after a change.
-   * @returns Function that removes `listener`.
    */
   subscribe(listener: PreferenceListener): () => void;
 
   /**
-   * Releases the media-query listener and clears every subscriber. Held
-   * values stay readable; every setter becomes a reported no-op. Calling it
-   * more than once is harmless.
+   * Releases the media-query listener and clears every subscriber. Held values
+   * stay readable; every setter becomes a reported no-op. Calling it more than
+   * once is harmless.
    */
   destroy(): void;
 }
 
-/**
- * Resolves the starting motion setting, reporting a rejected one.
- *
- * @param value Setting the caller supplied, if any.
- * @param reporter Contained sink.
- * @returns The supplied setting, or `DEFAULT_MOTION_SETTING`.
- */
 function resolveInitialMotionSetting(
   value: MotionSetting | undefined,
   reporter: UiReporter,
@@ -1254,13 +1048,6 @@ function resolveInitialMotionSetting(
   return DEFAULT_MOTION_SETTING;
 }
 
-/**
- * Resolves the starting palette, reporting a rejected one.
- *
- * @param value Palette the caller supplied, if any.
- * @param reporter Contained sink.
- * @returns The supplied id, or `DEFAULT_THEME_ID`.
- */
 function resolveInitialTheme(
   value: ThemeId | undefined,
   reporter: UiReporter,
@@ -1281,13 +1068,6 @@ function resolveInitialTheme(
   return DEFAULT_THEME_ID;
 }
 
-/**
- * Resolves the starting volume, reporting one that had to be bounded.
- *
- * @param value Volume the caller supplied, if any.
- * @param reporter Contained sink.
- * @returns A volume within the bounds.
- */
 function resolveInitialVolume(
   value: number | undefined,
   reporter: UiReporter,
@@ -1313,15 +1093,6 @@ function resolveInitialVolume(
   return applied;
 }
 
-/**
- * Resolves a starting boolean, reporting one of the wrong type.
- *
- * @param value Value the caller supplied, if any.
- * @param fallback Value held where none was supplied or it was rejected.
- * @param preference Name of the preference, carried into the report.
- * @param reporter Contained sink.
- * @returns The supplied value, or `fallback`.
- */
 function resolveInitialBoolean(
   value: boolean | undefined,
   fallback: boolean,
@@ -1356,9 +1127,6 @@ function resolveInitialBoolean(
  *
  * Values are held in memory for the session. This store persists nothing and
  * declares no storage key.
- *
- * @param options Sink, motion source, activation call and starting values.
- * @returns The store. Every member is safe to call with no document.
  */
 export function createPreferenceStore(
   options: PreferenceStoreOptions = {},
@@ -1399,11 +1167,6 @@ export function createPreferenceStore(
   let destroyed = false;
   let detachMotionQuery: (() => void) | null = null;
 
-  /**
-   * The effective reduced-motion value.
-   *
-   * @returns Whether motion is to be reduced.
-   */
   function effectiveReducedMotion(): boolean {
     return resolveEffectiveReducedMotion(motionSetting, motionQuery);
   }
@@ -1448,11 +1211,6 @@ export function createPreferenceStore(
     return built;
   }
 
-  /**
-   * Notifies every listener, isolating each call.
-   *
-   * @param changed Keys whose values changed.
-   */
   function notify(changed: readonly PreferenceKey[]): void {
     if (changed.length === 0 || listeners.length === 0) {
       return;
@@ -1477,22 +1235,12 @@ export function createPreferenceStore(
     }
   }
 
-  /**
-   * Discards the snapshot and notifies.
-   *
-   * @param changed Keys whose values changed.
-   */
   function commit(changed: readonly PreferenceKey[]): void {
     cached = null;
     notify(changed);
   }
 
-  /**
-   * Reports and refuses a change made after `destroy`.
-   *
-   * @param operation Name of the refused call.
-   * @returns Whether the call is refused.
-   */
+  /** Reports and refuses a change made after `destroy`. */
   function refuseAfterDestroy(operation: string): boolean {
     if (!destroyed) {
       return false;
@@ -1509,8 +1257,6 @@ export function createPreferenceStore(
   /**
    * Delegates activation, containing a throw from the activation call or from
    * any theme-change listener it notifies.
-   *
-   * @param id Palette to activate.
    */
   function delegateActivation(id: ThemeId): void {
     try {
@@ -1624,7 +1370,6 @@ export function createPreferenceStore(
       theme = id;
 
       delegateActivation(id);
-
       commit(['theme']);
     },
 
@@ -1850,4 +1595,3 @@ export function createPreferenceStore(
     },
   });
 }
-

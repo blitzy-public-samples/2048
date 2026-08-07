@@ -1,31 +1,22 @@
-// Unit suite for src/config/stage-config.ts: the stage-goal layer.
+// Unit suite for src/config/stage-config.ts: the stage-goal layer. It pins the
+// run-state envelope's `stageGoal` and `goalProgress` shapes, and a
+// config-driven target of kind 'highest-tile' or 'score-threshold' evaluated
+// after a move and resolved at stage end.
 //
-// What this suite pins, and where each pinned behaviour is defined:
-//   run-state envelope `stageGoal`     src/config/stage-config.ts L24-L47
-//   run-state envelope `goalProgress`  src/config/stage-config.ts L63-L81
-//   working assumption A3, a config-driven target of kind 'highest-tile' or
-//   'score-threshold' evaluated at onAfterMove and resolved at onStageEnd
-//                                      src/config/stage-config.ts L180-L318
+// Provenance of the board vocabulary the derived metrics read, from the deleted
+// vanilla sources: grid serialised to `{ size, cells }`, an empty cell
+// serialised as `null`, cell order x-outer and y-inner, and tile serialised to
+// `{ position: { x, y }, value }`.
 //
-// Provenance of the board vocabulary section 10's derived metric reads, from
-// the deleted vanilla sources:
-//   js/grid.js L102-L117  grid -> { size, cells }
-//   js/grid.js L109       an empty cell serialises as `null`
-//   js/grid.js L58-L64    cell order is x-outer, y-inner
-//   js/tile.js L19-L27    tile -> { position: { x, y }, value }
+// A stage goal has NO vanilla analogue, so the goal comparison pinned below is
+// the stage layer's own and not the win check's strict equality.
 //
-// The comparison pinned in section 6 is src/config/stage-config.ts L224, not
-// js/game_manager.js L170's strict equality: a stage goal has no vanilla
-// analogue.
-//
-// This file imports six helpers from vitest, four values and five types from
+// This file imports four helpers from vitest, four values and five types from
 // the module under test, and one copy helper plus two board constants from
 // tests/fixtures/boards.ts. It reads no DOM and no storage, performs no I/O,
 // consumes no randomness, reads no clock and writes no log.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
-import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
   createDefaultStageConfig,
@@ -46,32 +37,19 @@ import {
   NEAR_WIN_BOARD,
 } from '../../fixtures/boards';
 
-/* ===== 1. Sweep bounds, expected values and helpers ===== */
-
-/** Highest stage index every sweep below walks, from index 0. */
 const SWEEP_LAST_INDEX = 10;
 
-/** Index of the default curve's last explicit ladder entry. */
 const LAST_LADDER_INDEX = 7;
 
-/** Stage index far beyond the default ladder, used as the large-index case. */
 const LARGE_STAGE_INDEX = 50;
 
-/** Upper bound the default curve's extended targets saturate at. */
 const DEFAULT_MAX_TARGET = 2 ** 52;
 
-/** Every member of `StageGoalKind`, for the runtime membership check. */
 const GOAL_KINDS: readonly StageGoalKind[] = [
   'highest-tile',
   'score-threshold',
 ];
 
-/**
- * The default curve's goals at stage indices 0 through `SWEEP_LAST_INDEX`, in
- * stage order: the eight explicit ladder entries of
- * src/config/stage-config.ts L329-L331 followed by three stages derived by
- * L310-L317 from `baseTarget` 4096 and `growthFactor` 2 at L336-L342.
- */
 const EXPECTED_DEFAULT_GOALS: readonly StageGoal[] = [
   { kind: 'highest-tile', target: 16 },
   { kind: 'highest-tile', target: 32 },
@@ -86,17 +64,8 @@ const EXPECTED_DEFAULT_GOALS: readonly StageGoal[] = [
   { kind: 'highest-tile', target: 16384 },
 ];
 
-/** A board as tests/fixtures/boards.ts hands it out. */
 type FixtureBoard = ReturnType<typeof copyBoard>;
 
-/**
- * Highest tile value present on a board, and 0 for a board holding no tiles,
- * which is the quantity `StageProgressInput.highestTileValue` carries.
- *
- * @param board Board to scan, read as `cells[x][y]` per js/grid.js L58-L64,
- *   where an empty cell is `null` per js/grid.js L109.
- * @returns The greatest `value` among the board's tiles, or 0 if it has none.
- */
 function highestTileValueOf(board: FixtureBoard): number {
   let highest = 0;
 
@@ -111,13 +80,6 @@ function highestTileValueOf(board: FixtureBoard): number {
   return highest;
 }
 
-/**
- * Whether a value is 2 raised to a positive integer power, the form every
- * tile value on a 2048 board takes.
- *
- * @param value Value to test.
- * @returns `true` for 2, 4, 8 and every further power of two.
- */
 function isTileLadderValue(value: number): boolean {
   return (
     Number.isInteger(value) &&
@@ -126,32 +88,14 @@ function isTileLadderValue(value: number): boolean {
   );
 }
 
-/**
- * A progress input measuring a highest tile value, at score 0.
- *
- * @param highestTileValue Highest tile value on the board.
- * @returns The input a `'highest-tile'` goal is evaluated against.
- */
 function tileInput(highestTileValue: number): StageProgressInput {
   return { score: 0, highestTileValue };
 }
 
-/**
- * A progress input measuring a run score, on a board holding no tiles.
- *
- * @param score Run score.
- * @returns The input a `'score-threshold'` goal is evaluated against.
- */
 function scoreInput(score: number): StageProgressInput {
   return { score, highestTileValue: 0 };
 }
 
-/**
- * Every goal a curve yields at indices 0 through `SWEEP_LAST_INDEX`.
- *
- * @param stageConfig Progression curve to read.
- * @returns The goals, in stage order.
- */
 function sweepGoals(stageConfig: StageConfig): StageGoal[] {
   const goals: StageGoal[] = [];
 
@@ -162,17 +106,7 @@ function sweepGoals(stageConfig: StageConfig): StageGoal[] {
   return goals;
 }
 
-/**
- * The default curve's first stage goal, the subject of sections 5 through 7
- * and 10, each of which reads `target` from the goal itself. Section 3 pins
- * the curve that produces it.
- */
 const FIRST_STAGE_GOAL: StageGoal = stageGoalForIndex(0, DEFAULT_STAGE_CONFIG);
-
-/** Restores a spy this suite installed on a global. */
-afterEach(() => {
-  vi.restoreAllMocks();
-});
 
 /* ===== 2. The persisted stageGoal field ===== */
 
@@ -242,8 +176,6 @@ describe('StageGoal, the run-state envelope stageGoal field', () => {
   });
 });
 
-/* ===== 3. The A3 progression curve ===== */
-
 describe('stageGoalForIndex, the A3 config-driven stage target', () => {
   it('yields the default curve goals at indices 0 through 10', () => {
     for (let index = 0; index <= SWEEP_LAST_INDEX; index += 1) {
@@ -269,7 +201,6 @@ describe('stageGoalForIndex, the A3 config-driven stage target', () => {
 
     sweepGoals(stageConfig);
     stageGoalForIndex(LARGE_STAGE_INDEX, stageConfig);
-
     expect(JSON.stringify(stageConfig)).toBe(before);
   });
 
@@ -342,8 +273,6 @@ describe('stageGoalForIndex, the A3 config-driven stage target', () => {
     expect(Object.isFrozen(goal)).toBe(false);
   });
 });
-
-/* ===== 4. The default curve, frozen and freshly built ===== */
 
 describe('DEFAULT_STAGE_CONFIG and createDefaultStageConfig', () => {
   it('freezes the default curve at every level', () => {
@@ -433,8 +362,6 @@ describe('DEFAULT_STAGE_CONFIG and createDefaultStageConfig', () => {
     expect(createDefaultStageConfig()).toEqual(DEFAULT_STAGE_CONFIG);
   });
 });
-
-/* ===== 5. The persisted goalProgress field ===== */
 
 describe('evaluateStageGoal, the run-state goalProgress field', () => {
   it('returns exactly achieved, progress and cleared', () => {
@@ -558,20 +485,12 @@ describe('evaluateStageGoal, the run-state goalProgress field', () => {
   });
 });
 
-/* ===== 6. The A3 stage clear condition ===== */
-
-/** One row of the `cleared` truth table of src/config/stage-config.ts L224. */
 interface ClearedCase {
   readonly target: number;
   readonly metric: number;
   readonly cleared: boolean;
 }
 
-/**
- * The `cleared` truth table: a metric at the target clears the stage, a metric
- * one step below it does not. The last four rows exercise the non-positive
- * target branch of src/config/stage-config.ts L227-L231.
- */
 const CLEARED_TRUTH_TABLE: readonly ClearedCase[] = [
   { target: 16, metric: 0, cleared: false },
   { target: 16, metric: 15, cleared: false },
@@ -635,8 +554,6 @@ describe('evaluateStageGoal, the A3 stage clear condition', () => {
   });
 });
 
-/* ===== 7. The goal kind discriminant ===== */
-
 describe('evaluateStageGoal honours the goal kind discriminant', () => {
   it('ignores score when the goal measures the highest tile', () => {
     const baseline = evaluateStageGoal(FIRST_STAGE_GOAL, {
@@ -670,8 +587,6 @@ describe('evaluateStageGoal honours the goal kind discriminant', () => {
   });
 });
 
-/* ===== 8. Purity and the absence of randomness ===== */
-
 describe('the stage-goal layer is pure and consumes no randomness', () => {
   it('mutates neither the goal nor the input', () => {
     const goal: StageGoal = { kind: 'highest-tile', target: 128 };
@@ -696,25 +611,31 @@ describe('the stage-goal layer is pure and consumes no randomness', () => {
     expect(second).not.toBe(first);
   });
 
-  it('never calls Math.random', () => {
-    const randomSpy = vi.spyOn(Math, 'random');
+  it('answers the whole sweep identically on a second pass', () => {
+    // A layer reading randomness, a clock or any other ambient source could
+    // not reproduce a whole sweep, so agreement across passes is the static
+    // evidence that it reads none.
+    const readSweep = (): unknown =>
+      Array.from({ length: SWEEP_LAST_INDEX + 1 }, (_unused, index) => {
+        const goal = stageGoalForIndex(index, DEFAULT_STAGE_CONFIG);
 
-    for (let index = 0; index <= SWEEP_LAST_INDEX; index += 1) {
-      const goal = stageGoalForIndex(index, DEFAULT_STAGE_CONFIG);
+        return [
+          goal,
+          evaluateStageGoal(goal, tileInput(goal.target)),
+          evaluateStageGoal(goal, tileInput(0)),
+          evaluateStageGoal(goal, scoreInput(goal.target)),
+        ];
+      });
 
-      evaluateStageGoal(goal, tileInput(goal.target));
-      evaluateStageGoal(goal, tileInput(0));
-      evaluateStageGoal(goal, scoreInput(goal.target));
-    }
+    const first = readSweep();
 
-    stageGoalForIndex(LARGE_STAGE_INDEX, createDefaultStageConfig());
-
-    expect(randomSpy).not.toHaveBeenCalled();
-    expect(randomSpy).toHaveBeenCalledTimes(0);
+    expect(readSweep()).toEqual(first);
+    expect(readSweep()).toEqual(first);
+    expect(
+      stageGoalForIndex(LARGE_STAGE_INDEX, createDefaultStageConfig())
+    ).toEqual(stageGoalForIndex(LARGE_STAGE_INDEX, DEFAULT_STAGE_CONFIG));
   });
 });
-
-/* ===== 9. Non-finite argument guards ===== */
 
 describe('evaluateStageGoal rejects a non-finite quantity', () => {
   it('rejects a non-finite target', () => {
@@ -748,8 +669,6 @@ describe('evaluateStageGoal rejects a non-finite quantity', () => {
     }
   });
 });
-
-/* ===== 10. The fixture-derived highest tile metric ===== */
 
 describe('the fixture-derived highestTileValue', () => {
   it('reads 0 from the empty board and a tile value from near-win', () => {
@@ -810,3 +729,382 @@ describe('the fixture-derived highestTileValue', () => {
   });
 });
 
+/* ===== 11. stageGoalForIndex over a curve other than the default ===== */
+
+// Every case above reads DEFAULT_STAGE_CONFIG, whose ladder and extension are
+// `highest-tile` throughout. That leaves the kind discriminant, the
+// score-threshold branch, an extension of a different kind, an empty ladder and
+// the target bounds unmeasured on this function: a regression that hard-coded
+// `'highest-tile'`, read the ladder kind for an extended stage, or dropped the
+// bounding would pass. The curves below are built here for that reason, and
+// A3 requires the goal to be config-driven rather than default-driven.
+
+/** Ceiling src/config/stage-config.ts applies to every derived target. */
+const ABSOLUTE_TARGET_CEILING = Number.MAX_SAFE_INTEGER;
+
+/**
+ * A curve of the other kind: a score-threshold ladder carrying one
+ * `highest-tile` entry and one fractional target, extended by score thresholds
+ * that grow by half again per stage and saturate at 20000.
+ */
+const SCORE_CURVE: StageConfig = {
+  ladder: [
+    { kind: 'score-threshold', target: 1000 },
+    { kind: 'highest-tile', target: 64 },
+    { kind: 'score-threshold', target: 2500.4 },
+  ],
+  extension: {
+    kind: 'score-threshold',
+    baseTarget: 5000,
+    growthFactor: 1.5,
+    maxTarget: 20000,
+  },
+};
+
+/** The goals `SCORE_CURVE` resolves to at indices 0 through 8, in order. */
+const EXPECTED_SCORE_GOALS: readonly StageGoal[] = [
+  { kind: 'score-threshold', target: 1000 },
+  { kind: 'highest-tile', target: 64 },
+  { kind: 'score-threshold', target: 2500 },
+  { kind: 'score-threshold', target: 5000 },
+  { kind: 'score-threshold', target: 7500 },
+  { kind: 'score-threshold', target: 11250 },
+  { kind: 'score-threshold', target: 16875 },
+  { kind: 'score-threshold', target: 20000 },
+  { kind: 'score-threshold', target: 20000 },
+];
+
+/** A curve with no explicit ladder at all, so index 0 comes from the
+ * extension. */
+const LADDERLESS_CURVE: StageConfig = {
+  ladder: [],
+  extension: {
+    kind: 'score-threshold',
+    baseTarget: 300,
+    growthFactor: 2,
+    maxTarget: 5000,
+  },
+};
+
+/** The goals `LADDERLESS_CURVE` resolves to at indices 0 through 5. */
+const EXPECTED_LADDERLESS_GOALS: readonly StageGoal[] = [
+  { kind: 'score-threshold', target: 300 },
+  { kind: 'score-threshold', target: 600 },
+  { kind: 'score-threshold', target: 1200 },
+  { kind: 'score-threshold', target: 2400 },
+  { kind: 'score-threshold', target: 4800 },
+  { kind: 'score-threshold', target: 5000 },
+];
+
+/**
+ * Builds a curve with one explicit ladder entry and an extension the caller
+ * shapes, so the target bounds can be driven one parameter at a time.
+ *
+ * @param extension Extension parameters to apply.
+ * @param ladderTarget Target of the single ladder entry. Defaults to 10.
+ * @returns The curve.
+ */
+function buildCurve(
+  extension: {
+    kind: StageGoalKind;
+    baseTarget: number;
+    growthFactor: number;
+    maxTarget: number;
+  },
+  ladderTarget = 10,
+): StageConfig {
+  return {
+    ladder: [{ kind: 'highest-tile', target: ladderTarget }],
+    extension,
+  };
+}
+
+describe('stageGoalForIndex over a score-threshold curve', () => {
+  it('resolves every index of the curve, ladder and extension alike', () => {
+    for (const [index, expected] of EXPECTED_SCORE_GOALS.entries()) {
+      expect(stageGoalForIndex(index, SCORE_CURVE)).toStrictEqual(expected);
+    }
+  });
+
+  it('carries the kind of the ladder entry, not a fixed one', () => {
+    expect(stageGoalForIndex(0, SCORE_CURVE).kind).toBe('score-threshold');
+    expect(stageGoalForIndex(1, SCORE_CURVE).kind).toBe('highest-tile');
+    expect(stageGoalForIndex(2, SCORE_CURVE).kind).toBe('score-threshold');
+  });
+
+  it('carries the extension kind for every index past the ladder', () => {
+    for (let index = SCORE_CURVE.ladder.length; index <= 12; index += 1) {
+      expect(stageGoalForIndex(index, SCORE_CURVE).kind).toBe(
+        SCORE_CURVE.extension.kind,
+      );
+    }
+  });
+
+  it('rounds a fractional ladder target to an integer', () => {
+    const goal = stageGoalForIndex(2, SCORE_CURVE);
+
+    expect(goal.target).toBe(2500);
+    expect(Number.isInteger(goal.target)).toBe(true);
+  });
+
+  it('grows the extension by its factor and then saturates', () => {
+    const first = stageGoalForIndex(3, SCORE_CURVE).target;
+    const second = stageGoalForIndex(4, SCORE_CURVE).target;
+    const saturated = stageGoalForIndex(20, SCORE_CURVE).target;
+
+    expect(first).toBe(SCORE_CURVE.extension.baseTarget);
+    expect(second).toBe(
+      Math.round(first * SCORE_CURVE.extension.growthFactor),
+    );
+    expect(saturated).toBe(SCORE_CURVE.extension.maxTarget);
+  });
+
+  it('never lowers the target as the index rises', () => {
+    let previous = 0;
+
+    for (let index = 0; index <= 20; index += 1) {
+      const goal = stageGoalForIndex(index, SCORE_CURVE);
+
+      if (goal.kind === 'score-threshold') {
+        expect(goal.target).toBeGreaterThanOrEqual(previous);
+        previous = goal.target;
+      }
+    }
+  });
+
+  it('reads the curve it is handed and leaves it unchanged', () => {
+    const before = JSON.stringify(SCORE_CURVE);
+
+    for (let index = 0; index <= 12; index += 1) {
+      stageGoalForIndex(index, SCORE_CURVE);
+    }
+
+    expect(JSON.stringify(SCORE_CURVE)).toBe(before);
+  });
+
+  it('returns a fresh goal rather than a ladder entry of the curve', () => {
+    const goal = stageGoalForIndex(0, SCORE_CURVE);
+
+    expect(goal).not.toBe(SCORE_CURVE.ladder[0]);
+    expect(goal).toStrictEqual(SCORE_CURVE.ladder[0]);
+  });
+});
+
+describe('stageGoalForIndex over a curve with no ladder', () => {
+  it('resolves index 0 from the extension base target', () => {
+    expect(stageGoalForIndex(0, LADDERLESS_CURVE)).toStrictEqual(
+      EXPECTED_LADDERLESS_GOALS[0],
+    );
+  });
+
+  it('resolves every index of the ladderless curve', () => {
+    for (const [index, expected] of EXPECTED_LADDERLESS_GOALS.entries()) {
+      expect(stageGoalForIndex(index, LADDERLESS_CURVE)).toStrictEqual(
+        expected,
+      );
+    }
+  });
+
+  it('rejects a negative or fractional index on this curve too', () => {
+    expect(() => stageGoalForIndex(-1, LADDERLESS_CURVE)).toThrow(RangeError);
+    expect(() => stageGoalForIndex(1.5, LADDERLESS_CURVE)).toThrow(RangeError);
+    expect(() => stageGoalForIndex(Number.NaN, LADDERLESS_CURVE)).toThrow(
+      RangeError,
+    );
+  });
+});
+
+describe('stageGoalForIndex bounds every target it derives', () => {
+  it('yields 0 for a maximum target of 0', () => {
+    const curve = buildCurve({
+      kind: 'score-threshold',
+      baseTarget: 500,
+      growthFactor: 2,
+      maxTarget: 0,
+    });
+
+    expect(stageGoalForIndex(1, curve).target).toBe(0);
+    expect(stageGoalForIndex(9, curve).target).toBe(0);
+  });
+
+  it('yields 0 for a negative maximum target', () => {
+    const curve = buildCurve({
+      kind: 'score-threshold',
+      baseTarget: 500,
+      growthFactor: 2,
+      maxTarget: -1000,
+    });
+
+    expect(stageGoalForIndex(1, curve).target).toBe(0);
+  });
+
+  it('falls back to the absolute ceiling for a non-finite maximum', () => {
+    for (const maxTarget of [
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      Number.NaN,
+    ]) {
+      const curve = buildCurve({
+        kind: 'score-threshold',
+        baseTarget: 2 ** 60,
+        growthFactor: 1,
+        maxTarget,
+      });
+
+      expect(stageGoalForIndex(1, curve).target).toBe(
+        ABSOLUTE_TARGET_CEILING,
+      );
+    }
+  });
+
+  it('saturates a product that overflows to Infinity', () => {
+    const curve = buildCurve({
+      kind: 'score-threshold',
+      baseTarget: Number.MAX_VALUE,
+      growthFactor: 10,
+      maxTarget: 1_000_000,
+    });
+
+    expect(stageGoalForIndex(2, curve).target).toBe(1_000_000);
+  });
+
+  it('caps the absolute ceiling even when the maximum exceeds it', () => {
+    const curve = buildCurve({
+      kind: 'score-threshold',
+      baseTarget: Number.MAX_SAFE_INTEGER,
+      growthFactor: 4,
+      maxTarget: Number.MAX_VALUE,
+    });
+
+    expect(stageGoalForIndex(3, curve).target).toBe(ABSOLUTE_TARGET_CEILING);
+  });
+
+  it('yields 0 for a non-finite growth factor at the base stage', () => {
+    const curve = buildCurve({
+      kind: 'score-threshold',
+      baseTarget: 500,
+      growthFactor: Number.NaN,
+      maxTarget: 2000,
+    });
+
+    // At the first extended stage the exponent is 0, so NaN ** 0 is 1 and the
+    // base target survives; at every later stage the product is NaN and the
+    // bound resolves to the configured maximum.
+    expect(stageGoalForIndex(1, curve).target).toBe(500);
+    expect(stageGoalForIndex(2, curve).target).toBe(2000);
+  });
+
+  it('bounds a ladder target above the absolute ceiling', () => {
+    const curve: StageConfig = {
+      ladder: [{ kind: 'highest-tile', target: Number.MAX_VALUE }],
+      extension: {
+        kind: 'highest-tile',
+        baseTarget: 4,
+        growthFactor: 2,
+        maxTarget: 8,
+      },
+    };
+
+    expect(stageGoalForIndex(0, curve).target).toBe(ABSOLUTE_TARGET_CEILING);
+  });
+
+  it('raises a negative ladder target to 0', () => {
+    const curve: StageConfig = {
+      ladder: [
+        { kind: 'score-threshold', target: -50 },
+        { kind: 'score-threshold', target: -0.4 },
+      ],
+      extension: {
+        kind: 'score-threshold',
+        baseTarget: 100,
+        growthFactor: 2,
+        maxTarget: 400,
+      },
+    };
+
+    expect(stageGoalForIndex(0, curve).target).toBe(0);
+    expect(stageGoalForIndex(1, curve).target).toBe(0);
+  });
+
+  it('bounds a non-finite ladder target to the absolute ceiling', () => {
+    const curve: StageConfig = {
+      ladder: [{ kind: 'score-threshold', target: Number.NaN }],
+      extension: {
+        kind: 'score-threshold',
+        baseTarget: 100,
+        growthFactor: 2,
+        maxTarget: 400,
+      },
+    };
+
+    expect(stageGoalForIndex(0, curve).target).toBe(ABSOLUTE_TARGET_CEILING);
+  });
+
+  it('produces a finite non-negative integer at every index of every curve',
+    () => {
+      const curves: readonly StageConfig[] = [
+        SCORE_CURVE,
+        LADDERLESS_CURVE,
+        buildCurve({
+          kind: 'score-threshold',
+          baseTarget: Number.MAX_VALUE,
+          growthFactor: 3,
+          maxTarget: Number.POSITIVE_INFINITY,
+        }),
+      ];
+
+      for (const curve of curves) {
+        for (let index = 0; index <= 15; index += 1) {
+          const target = stageGoalForIndex(index, curve).target;
+
+          expect(Number.isSafeInteger(target)).toBe(true);
+          expect(target).toBeGreaterThanOrEqual(0);
+          expect(target).toBeLessThanOrEqual(ABSOLUTE_TARGET_CEILING);
+        }
+      }
+    });
+});
+
+describe('a custom curve drives evaluateStageGoal through its own kind', () => {
+  it('measures the score for a score-threshold stage of the curve', () => {
+    const goal = stageGoalForIndex(0, SCORE_CURVE);
+    const progress = evaluateStageGoal(goal, {
+      score: 1000,
+      highestTileValue: 2,
+    });
+
+    expect(goal.kind).toBe('score-threshold');
+    expect(progress.achieved).toBe(1000);
+    expect(progress.cleared).toBe(true);
+    expect(progress.progress).toBe(1);
+  });
+
+  it('measures the highest tile for the curve’s highest-tile stage', () => {
+    const goal = stageGoalForIndex(1, SCORE_CURVE);
+    const progress = evaluateStageGoal(goal, {
+      score: 99_999,
+      highestTileValue: 32,
+    });
+
+    expect(goal.kind).toBe('highest-tile');
+    expect(progress.achieved).toBe(32);
+    expect(progress.cleared).toBe(false);
+    expect(progress.progress).toBe(0.5);
+  });
+
+  it('clears a saturated extension stage only at its bounded target', () => {
+    const goal = stageGoalForIndex(20, SCORE_CURVE);
+
+    expect(goal.target).toBe(SCORE_CURVE.extension.maxTarget);
+    expect(
+      evaluateStageGoal(goal, {
+        score: goal.target - 1,
+        highestTileValue: 0,
+      }).cleared,
+    ).toBe(false);
+    expect(
+      evaluateStageGoal(goal, { score: goal.target, highestTileValue: 0 })
+        .cleared,
+    ).toBe(true);
+  });
+});

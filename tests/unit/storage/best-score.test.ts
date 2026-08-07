@@ -1,30 +1,16 @@
-// The frozen best-score contract, pinned assertion by assertion. This suite is
-// the measurement of validation gate V3.
+// The frozen best-score contract, pinned assertion by assertion.
 //
 // Provenance of every behaviour asserted below, from the deleted vanilla
-// sources:
-//   js/local_storage_manager.js L22      this.bestScoreKey, the frozen
-//                                       unprefixed key literal
-//   js/local_storage_manager.js L25-L26  the writability probe runs once, at
-//                                       construction, and fixes the store for
-//                                       the session
-//   js/local_storage_manager.js L43-L45  getBestScore() returns
-//                                       `getItem(bestScoreKey) || 0`
-//   js/local_storage_manager.js L47-L49  setBestScore() returns nothing and
-//                                       writes `setItem(bestScoreKey, score)`
-//   js/local_storage_manager.js L5       the store coerces with String(val)
-//   js/local_storage_manager.js L8-L10   an absent key reads back as undefined
-//   js/local_storage_manager.js L57-L59  setGameState() persists
-//                                       JSON.stringify(state)
-//   js/local_storage_manager.js L61-L63  clearGameState() removes the snapshot
-//                                       key alone; no member of the vanilla
-//                                       manager removes the best score
-//   js/game_manager.js L80-L82           the promotion guard, a relational
-//                                       comparison against the stored value
-//   js/game_manager.js L95               the best score is re-read from storage
-//                                       after the possible write
-//   js/html_actuator.js L123-L125        the value reached the DOM through
-//                                       textContent
+// sources: the frozen unprefixed best-score key literal; the writability probe
+// running once at construction and fixing the store for the session;
+// `getBestScore()` returning `getItem(bestScoreKey) || 0`; `setBestScore()`
+// returning nothing and writing `setItem(bestScoreKey, score)`; the store
+// coercing with `String(val)`; an absent key reading back as `undefined`;
+// `setGameState()` persisting `JSON.stringify(state)`; `clearGameState()`
+// removing the snapshot key alone, no vanilla member removing the best score;
+// the promotion guard being a RELATIONAL comparison against the stored value;
+// the best score being re-read from storage after the possible write; and the
+// value reaching the DOM through `textContent`.
 //
 // The subject is src/storage/local-storage-manager.ts. Every construction here
 // injects a store. The key literals are imported from
@@ -34,8 +20,6 @@
 // The Web Storage probe, the `probe` and `strategy` members and the reporter
 // failure path are covered by
 // tests/unit/storage/local-storage-manager.test.ts, not here.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -52,20 +36,13 @@ import {
   STORAGE_PROBE_KEY,
 } from '../../../src/storage/storage-keys';
 import { createMergePairBoard } from '../../fixtures/boards';
+import {
+  clearOwnedStorage,
+  readOwnedStorage,
+} from '../../fixtures/storage';
 
-/* ===== 1. Stores ===== */
-
-/**
- * Injected doubles built during the test in progress, so teardown can empty
- * the store a test actually used as well as the ambient one.
- */
 const trackedStores: StorageLike[] = [];
 
-/**
- * Builds a fresh injected double and registers it for teardown.
- *
- * @returns An empty store, shared with no other test.
- */
 function createStore(): MemoryStorage {
   const store = new MemoryStorage();
 
@@ -74,12 +51,6 @@ function createStore(): MemoryStorage {
   return store;
 }
 
-/**
- * Reports whether `value` offers the four `StorageLike` operations.
- *
- * @param value Value to test, here always `globalThis.localStorage`.
- * @returns `true` when every operation is present as a function.
- */
 function isStorageLike(value: unknown): value is StorageLike {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -97,14 +68,6 @@ function isStorageLike(value: unknown): value is StorageLike {
   );
 }
 
-/**
- * The environment's Web Storage, when it offers one. The `unit:dom` project
- * runs under jsdom and supplies it; a DOM-free environment does not, and every
- * caller below is written against that outcome.
- *
- * @returns The global store, or `null` when the environment offers none or
- *   reading it threw.
- */
 function ambientStore(): StorageLike | null {
   let candidate: unknown;
 
@@ -117,14 +80,6 @@ function ambientStore(): StorageLike | null {
   return isStorageLike(candidate) ? candidate : null;
 }
 
-/**
- * The environment's Web Storage, or a thrown error where there is none, for the
- * tests that exercise the ambient store deliberately. Teardown sweeps that
- * store unconditionally, so no registration is needed here.
- *
- * @returns The global store.
- * @throws {Error} When the environment offers no Web Storage.
- */
 function requireAmbientStore(): StorageLike {
   const ambient = ambientStore();
 
@@ -138,18 +93,6 @@ function requireAmbientStore(): StorageLike {
   return ambient;
 }
 
-/* ===== 2. Teardown ===== */
-
-/**
- * Removes every key the product owns from `store`.
- *
- * Idempotent: `OWNED_STORAGE_KEYS` is walked whether or not a key is present,
- * and removing an absent key is a no-op in both `MemoryStorage` and the DOM
- * `Storage` contract. The probe key is swept separately —
- * `OWNED_STORAGE_KEYS` omits it.
- *
- * @param store Store to empty of owned keys.
- */
 function clearOwnedKeys(store: StorageLike): void {
   for (const key of OWNED_STORAGE_KEYS) {
     store.removeItem(key);
@@ -158,11 +101,6 @@ function clearOwnedKeys(store: StorageLike): void {
   store.removeItem(STORAGE_PROBE_KEY);
 }
 
-/**
- * Empties every store this file may have written: each injected double built
- * for the test in progress, then the ambient store. Runs before and after every
- * test, and is safe to run any number of times.
- */
 function purgeOwnedKeys(): void {
   for (const store of trackedStores) {
     clearOwnedKeys(store);
@@ -180,29 +118,10 @@ function purgeOwnedKeys(): void {
 beforeEach(purgeOwnedKeys);
 afterEach(purgeOwnedKeys);
 
-/* ===== 3. The vanilla promotion guard ===== */
-
-/**
- * The relational comparison of js/game_manager.js L80, applied to the ported
- * accessor's `string | 0` return type. The narrowing assertion is confined to
- * this one line; every assertion site below reads the union as declared.
- *
- * @param stored Value `getBestScore()` returned.
- * @param score Live score to compare it against.
- * @returns `true` when the stored value is below `score`.
- */
 function isStoredBelow(stored: string | 0, score: number): boolean {
   return (stored as number) < score;
 }
 
-/**
- * The guarded promotion of js/game_manager.js L80-L82, verbatim: compare, and
- * write only when the stored value is lower.
- *
- * @param manager Manager to promote through.
- * @param score Live score to promote to.
- * @returns `true` when the comparison passed and the write was attempted.
- */
 function promoteBestScore(
   manager: LocalStorageManager,
   score: number,
@@ -215,8 +134,6 @@ function promoteBestScore(
 
   return false;
 }
-
-/* ===== 4. A value the vanilla game left behind ===== */
 
 describe("pre-existing vanilla value is honoured (the requirement's " +
   'actual purpose)', () => {
@@ -264,8 +181,6 @@ describe("pre-existing vanilla value is honoured (the requirement's " +
     },
   );
 });
-
-/* ===== 5. What the accessor returns ===== */
 
 describe('getBestScore() return type (js/local_storage_manager.js ' +
   'L43-L45)', () => {
@@ -372,8 +287,6 @@ describe('getBestScore() return type (js/local_storage_manager.js ' +
   );
 });
 
-/* ===== 6. What the setter writes ===== */
-
 describe('setBestScore() write behaviour (js/local_storage_manager.js ' +
   'L47-L49)', () => {
   it(
@@ -421,8 +334,6 @@ describe('setBestScore() write behaviour (js/local_storage_manager.js ' +
     },
   );
 });
-
-/* ===== 7. The promotion guard ===== */
 
 describe('relational promotion parity with js/game_manager.js ' +
   'L80-L82', () => {
@@ -500,8 +411,6 @@ describe('relational promotion parity with js/game_manager.js ' +
   );
 });
 
-/* ===== 8. Read-after-write ===== */
-
 describe('read-after-write, never cached (js/game_manager.js L95)', () => {
   it(
     'getBestScore() returns "1500" on a fresh call after ' +
@@ -551,8 +460,6 @@ describe('read-after-write, never cached (js/game_manager.js L95)', () => {
     },
   );
 });
-
-/* ===== 9. Key isolation ===== */
 
 describe('best-score key isolation (js/local_storage_manager.js ' +
   'L22-L23)', () => {
@@ -613,13 +520,13 @@ describe('best-score key isolation (js/local_storage_manager.js ' +
   );
 });
 
-/* ===== 10. Teardown hygiene ===== */
-
 describe('teardown hygiene (js/local_storage_manager.js calls removeItem ' +
   'at L35 and L62 only, never for the best score)', () => {
   it(
-    'writes a best score to the ambient store, which the next test looks ' +
-      'for — js/local_storage_manager.js L48',
+    'writes a best score to the ambient store and removes it again through ' +
+      'the shared teardown helper, which no member of ' +
+      'js/local_storage_manager.js ever did — L48 wrote it, and L35 and L62 ' +
+      'removed only the snapshot',
     () => {
       const storage = requireAmbientStore();
       const manager = new LocalStorageManager({ storage });
@@ -627,21 +534,46 @@ describe('teardown hygiene (js/local_storage_manager.js calls removeItem ' +
       expect(manager.setBestScore(9876)).toBe(true);
       expect(storage.getItem(BEST_SCORE_KEY)).toBe('9876');
       expect(manager.getBestScore()).toBe('9876');
+
+      // The exported helper tests/fixtures/storage.ts registers as the
+      // suite-wide `afterEach`, called here directly so this case stands
+      // alone rather than reading what a predecessor left behind.
+      clearOwnedStorage();
+
+      const afterTeardown = manager.getBestScore();
+
+      expect(storage.getItem(BEST_SCORE_KEY)).toBeNull();
+      expect(readOwnedStorage(BEST_SCORE_KEY)).toBeNull();
+      expect(typeof afterTeardown).toBe('number');
+      expect(afterTeardown).toBe(0);
     },
   );
 
   it(
-    'finds no best score in the ambient store, the preceding write having ' +
-      'been torn down by the OWNED_STORAGE_KEYS sweep that ' +
-      'js/local_storage_manager.js L35 and L62 never performed',
+    'removes every owned key from the ambient store and no other, so a best ' +
+      'score cannot survive into a later test and a foreign key cannot be ' +
+      'destroyed by the sweep',
     () => {
       const storage = requireAmbientStore();
       const manager = new LocalStorageManager({ storage });
-      const result = manager.getBestScore();
+      const foreignKey = 'analytics:sessionId';
 
-      expect(storage.getItem(BEST_SCORE_KEY)).not.toBe('9876');
-      expect(typeof result).toBe('number');
-      expect(result).toBe(0);
+      storage.setItem(foreignKey, 'untouched');
+
+      expect(manager.setBestScore(4321)).toBe(true);
+      expect(manager.setGameState(createMergePairBoard())).toBe(true);
+
+      clearOwnedStorage();
+
+      for (const key of OWNED_STORAGE_KEYS) {
+        expect(storage.getItem(key)).toBeNull();
+      }
+
+      expect(storage.getItem(foreignKey)).toBe('untouched');
+      expect(manager.getBestScore()).toBe(0);
+      expect(manager.getGameState()).toBeNull();
+
+      storage.removeItem(foreignKey);
     },
   );
 

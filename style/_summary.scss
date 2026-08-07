@@ -2,7 +2,7 @@
 // collected in pickup order, and the run seed, displayed and copyable.
 //
 // Selector contract. index.html declares the container and nothing inside it;
-// src/ui/screens/run-summary.ts renders these children, in this source order:
+// its consumer renders these children, in this source order:
 //
 //   section.run-summary                       the panel
 //     h2.run-summary-title
@@ -117,7 +117,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 //
 // BLITZY [A11Y]: the control label sits below the WCAG AA 4.5:1 text threshold
 // under the default palette, the same figure style/main.scss flags for this
-// surface. Recorded as decision DL-A11Y-06.
+// surface.
 @mixin summary-control {
   display: inline-block;
   box-sizing: border-box;
@@ -169,15 +169,15 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   background: var(--theme-overlay-loss, $summary-wash);
   @include animation(fade-in $summary-fade-duration ease $summary-fade-delay);
 
-  // `both` holds frame zero through the delay and the last frame afterwards. The
-  // reduced-motion layer collapses delay and duration, and the retained last
-  // frame is opacity 1, so the panel is never left invisible.
+  // `both` holds frame zero through the delay and the last frame afterwards.
+  // The reduced-motion layer collapses delay and duration, and the retained
+  // last frame is opacity 1, so the panel is never left invisible.
   @include animation-fill-mode(both);
 
   // A screen the router has unhidden but not yet rendered into would otherwise
-  // paint the wash and take every pointer event across the viewport; the collapse
-  // holds until the panel is appended. The two rules are independent, so an
-  // engine without `:has()` drops only its own and keeps the first.
+  // paint the wash and take every pointer event across the viewport; the
+  // collapse holds until the panel is appended. The two rules are independent,
+  // so an engine without `:has()` drops only its own and keeps the first.
   &:empty {
     display: none;
   }
@@ -191,9 +191,9 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   }
 }
 
-// Block flow, not flex: the `<hr>` dividers span the measure, and each section's
-// leading margin collapses into the divider's trailing margin, which is the
-// rhythm between sections.
+// Block flow, not flex: the `<hr>` dividers span the measure, and each
+// section's leading margin collapses into the divider's trailing margin, which
+// is the rhythm between sections.
 
 .run-summary {
   margin: auto;
@@ -250,8 +250,8 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 }
 
 // Score readouts: final score and stage reached, in the vocabulary
-// `.score-container` and `.best-container` carry. `flex: 1 1 0` gives them equal
-// measure whatever they contain, and the space between them is a `gap`.
+// `.score-container` and `.best-container` carry. `flex: 1 1 0` gives them
+// equal measure whatever they contain, and the space between them is a `gap`.
 
 .run-summary-scores {
   display: flex;
@@ -266,7 +266,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 
 // BLITZY [A11Y]: under the default palette the readout numerals and caption sit
 // below the WCAG AA text thresholds. These are the colours style/main.scss
-// already compiles for `.score-container`. Recorded as decision DL-A11Y-07.
+// already compiles for `.score-container`.
 .run-summary-score {
   flex: 1 1 0;
   min-inline-size: 0;

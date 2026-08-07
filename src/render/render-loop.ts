@@ -8,9 +8,7 @@
  *
  * `onFrameBegin` and `onFrameEnd` are the seam a tracer opens and closes a span
  * across, and `getFrameStats()` returns plain data a metrics surface reads
- * synchronously. That seam is drawn as Figure 4, "Turn Data Flow: From Keystroke
- * to Composited Frame and Persisted Run State", in
- * docs/architecture/data-flow.md. The hooks, the reporter, the scheduler and the
+ * synchronously. The hooks, the reporter, the scheduler and the
  * clock are all injected and all optional: the loop is fully functional with
  * none supplied. The injected reporter is contained once at construction, so no
  * report emitted from a frame can fail the loop.
@@ -19,6 +17,7 @@
 import {
   NOOP_RENDER_REPORTER,
   createGuardedRenderReporter,
+  describeRenderError,
   type RenderReporter,
 } from './webgl-support';
 
@@ -148,8 +147,8 @@ export interface FrameScheduler {
 }
 
 /**
- * How frame durations reach `RenderReporter.onTiming`. The three modes and the
- * `'aggregate'` default are decision DL-LOOP-01.
+ * How frame durations reach `RenderReporter.onTiming`. Defaults to
+ * `'aggregate'`.
  */
 export type FrameTimingMode = 'none' | 'aggregate' | 'frame';
 
@@ -171,8 +170,7 @@ export interface RenderLoopOptions {
   /**
    * Whether the loop parks itself once no callback reports outstanding work.
    * Defaults to `false`, in which case `start()` schedules frames until
-   * `stop()`. A parked loop resumes on `invalidate()`. The idle policy is
-   * decision DL-LOOP-02.
+   * `stop()`. A parked loop resumes on `invalidate()`.
    */
   readonly autoStopWhenIdle?: boolean;
 
@@ -432,41 +430,32 @@ const INVALID_OPTION_METRIC = 'render.loop.option.invalid';
 /** Counter name for a rejected callback registration. */
 const INVALID_CALLBACK_METRIC = 'render.loop.callback.invalid';
 
-/** Name reported for a thrown value that carries none. */
-const THROWN_NAME = 'RenderError';
-
-/** Message reported for a thrown value that carries none. */
-const THROWN_MESSAGE = 'Unknown render error.';
-
-/** Longest name or message text a reported throw carries. */
-const MAX_THROWN_TEXT_LENGTH = 200;
-
 /**
  * Nominal interval between frames of a 60 Hz display, in milliseconds. The unit
  * `DEFAULT_MAX_DELTA` is expressed in.
  */
 const NOMINAL_FRAME_INTERVAL = 1000 / 60;
 
-/** Nominal frames of time that `DEFAULT_MAX_DELTA` spans. Decision DL-LOOP-03. */
+/** Nominal frames of time that `DEFAULT_MAX_DELTA` spans. */
 const DEFAULT_MAX_DELTA_FRAMES = 4;
 
 /**
  * Default upper bound on `FrameContext.delta`, in milliseconds: four nominal 60
- * Hz frames. Decision DL-LOOP-03.
+ * Hz frames.
  */
 export const DEFAULT_MAX_DELTA =
   NOMINAL_FRAME_INTERVAL * DEFAULT_MAX_DELTA_FRAMES;
 
 /**
  * Default number of consecutive frames without outstanding work that precede an
- * idle park. Decision DL-LOOP-02.
+ * idle park.
  */
 export const DEFAULT_IDLE_FRAMES = 1;
 
 /**
  * Default inclusive upper bounds of the frame-duration histogram, in
  * milliseconds. src/observability/metrics.ts labels its buckets with these
- * values. Decision DL-LOOP-04.
+ * values.
  */
 export const DEFAULT_FRAME_DURATION_BOUNDS: readonly number[] =
   Object.freeze([1, 2, 4, 8, 16, 33, 50, 100]);
@@ -559,91 +548,6 @@ export function isFrameSchedulingAvailable(
     typeof globalThis.requestAnimationFrame === 'function' &&
     typeof globalThis.cancelAnimationFrame === 'function'
   );
-}
-
-/**
- * Reads one text field off a thrown value without trusting the value.
- *
- * `Reflect.get` invokes a getter and can be trapped by a `Proxy`, either
- * of which can throw; a throw here is read as an absent field. The
- * result is capped at `MAX_THROWN_TEXT_LENGTH`.
- *
- * @param error Thrown value, already narrowed to a non-null object.
- * @param field Field to read.
- * @returns The field's text, capped, or `undefined` where it is absent,
- *   unreadable, not a string, or empty.
- */
-function readThrownText(error: object, field: string): string | undefined {
-  let value: unknown;
-
-  try {
-    value = Reflect.get(error, field);
-  } catch {
-    return undefined;
-  }
-
-  if (typeof value !== 'string' || value.length === 0) {
-    return undefined;
-  }
-
-  return value.length <= MAX_THROWN_TEXT_LENGTH
-    ? value
-    : `${value.slice(0, MAX_THROWN_TEXT_LENGTH)}…`;
-}
-
-/**
- * Converts a non-object thrown value to capped text without trusting its
- * own conversion.
- *
- * `String()` invokes `toString` or `Symbol.toPrimitive`, either of which
- * can throw or return an unbounded string.
- *
- * @param value Value to convert.
- * @returns The converted text, capped, or the fixed fallback text.
- */
-function capThrownText(value: unknown): string {
-  let text: string;
-
-  try {
-    text = String(value);
-  } catch {
-    return THROWN_MESSAGE;
-  }
-
-  return text.length <= MAX_THROWN_TEXT_LENGTH
-    ? text
-    : `${text.slice(0, MAX_THROWN_TEXT_LENGTH)}…`;
-}
-
-/**
- * Reduces a thrown value of any type to the two serialisable fields a
- * diagnostic carries, so a contained throw is reported rather than discarded.
- *
- * Total: it accepts any value, including a `Proxy` whose traps throw, an
- * object whose `name` or `message` accessor throws, and a value whose
- * `toString` throws. It returns on every path and throws on none, and
- * both fields are capped at `MAX_THROWN_TEXT_LENGTH`.
- *
- * @param error Thrown value, of any type, including `null` and
- *   `undefined`.
- * @returns Name and message fields.
- */
-function describeThrown(error: unknown): {
-  readonly name: string;
-  readonly message: string;
-} {
-  if (typeof error === 'object' && error !== null) {
-    return {
-      name: readThrownText(error, 'name') ?? THROWN_NAME,
-      message: readThrownText(error, 'message') ?? THROWN_MESSAGE,
-    };
-  }
-
-  if (typeof error === 'function' || typeof error === 'undefined') {
-    return { name: THROWN_NAME, message: THROWN_MESSAGE };
-  }
-
-  return { name: THROWN_NAME, message: capThrownText(error) };
 }
 
 /**
@@ -900,7 +804,8 @@ export function createRenderLoop(
       source: DIAGNOSTIC_SOURCE,
       message: 'A frame callback threw and was contained.',
       detail,
-      error: describeThrown(error),
+      error: describeRenderError(error),
+      thrown: error,
     });
   };
 
@@ -921,7 +826,8 @@ export function createRenderLoop(
       source: DIAGNOSTIC_SOURCE,
       message: `The ${hook} hook threw and was contained.`,
       detail,
-      error: describeThrown(error),
+      error: describeRenderError(error),
+      thrown: error,
     });
   };
 
@@ -943,7 +849,8 @@ export function createRenderLoop(
       source: DIAGNOSTIC_SOURCE,
       message: `The frame ${operation} operation threw.`,
       detail,
-      error: describeThrown(error),
+      error: describeRenderError(error),
+      thrown: error,
     });
   };
 

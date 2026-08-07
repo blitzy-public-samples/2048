@@ -1,17 +1,17 @@
 // The hook bus: pickup-order dispatch of the six engine hooks.
 //
 // Supersedes the three-name publish/subscribe bus of
-// js/keyboard_input_manager.js L18-L32. Its `on()` at L18-L23 lazily
-// created the array keyed by event name and pushed the callback onto it,
-// and its `emit()` at L25-L32 read that array back and invoked each
-// callback inline with one argument, returning nothing.
-//
-// That append-and-invoke-inline shape is carried forward. Four properties
-// are added, and none of the four has a vanilla source:
+// js/keyboard_input_manager.js L18-L32, whose `on()` appended a callback to
+// the array keyed by event name and whose `emit()` invoked each callback
+// inline with one argument, returning nothing. That append-and-invoke-inline
+// shape is carried forward, with four properties added:
 //
 //   pickup order      every subscriber carries a pickup-order index and
 //                     dispatch walks the subscribers bound to a hook in
-//                     that index's order.
+//                     that index's order. The backing array is held in
+//                     that order by insertion, so a dispatch neither
+//                     copies nor sorts it; an edit arriving during a
+//                     dispatch is deferred until the walk returns.
 //   charge guard      a subscriber whose `charges` is present and not
 //                     above zero is skipped before its handler is
 //                     reached, and `consumeCharge` is the one path that
@@ -23,14 +23,27 @@
 //   compounding       a handler receives the payload the handler before
 //                     it returned, and a handler that returns nothing
 //                     leaves that payload as it stands.
+//   defensive records `register` copies the identifier and the handler
+//                     table out of the subscriber and takes over its
+//                     charge budget and state slot, and every object the
+//                     bus hands back is a frozen snapshot, so the object
+//                     a caller registered is never the object a dispatch
+//                     reads.
+//   payload validation a return is measured against the exact payload the
+//                     hook declares — its member set, the identity of
+//                     each live object it arrived with, and the range and
+//                     finiteness of each number — and a return that is
+//                     not that payload is discarded.
+//   per-handler
+//   transaction       each handler is handed a copy of the accumulated
+//                     payload and reads its own state slot; the copy and
+//                     the slot are adopted together once the handler has
+//                     returned and its return has validated, and are
+//                     discarded together when it throws.
 //
-// Invariants of this module: it names no engine module other than
-// ./hooks and ./types, reads no DOM, performs no I/O, consumes no
-// randomness, reads no clock, and is synchronous throughout. Nothing it
-// hands a handler re-enters dispatch, and it branches on no subscriber
-// identity.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+// This module reads no DOM, performs no I/O, consumes no randomness, reads no
+// clock, and is synchronous throughout. Nothing it hands a handler re-enters
+// dispatch, and it branches on no subscriber identity.
 
 import type {
   HookContext,
@@ -40,117 +53,116 @@ import type {
   HookName,
   HookPayloadMap,
   HookSubscription,
+  ReadonlyGridView,
+  ReadonlyRngView,
+  ReadonlyRulesView,
 } from './hooks';
 import { HOOK_NAMES } from './hooks';
-import type { EngineReporter } from './types';
-import { NOOP_ENGINE_REPORTER } from './types';
+import type {
+  CorrelationId,
+  EngineReporter,
+  Position,
+  SerializedGrid,
+} from './types';
+import {
+  DIRECTION_DOWN,
+  DIRECTION_LEFT,
+  DIRECTION_RIGHT,
+  DIRECTION_UP,
+  NOOP_ENGINE_REPORTER,
+} from './types';
 
 /* --------------------------------------------------------------------------
- * Counter names
+ * Collaborator types, derived rather than imported
  * ----------------------------------------------------------------------- */
 
-/** Counter name for one dispatch of a hook. */
+// The rules object, the board and the substream table are named through
+// `HookEnvironment` and `ReadonlyRngView` instead of through their own
+// modules, so this file's import surface stays ./hooks and ./types.
+
+/** The rules in force, as `HookEnvironment` declares them. */
+type EnvironmentRules = HookEnvironment['config'];
+
+/** The live board, as `HookEnvironment` declares it. */
+type EnvironmentGrid = HookEnvironment['grid'];
+
+/** The run's substream table, as `HookEnvironment` declares it. */
+type EnvironmentRng = HookEnvironment['rng'];
+
+/** A substream name, as `ReadonlyRngView` declares it. */
+type EnvironmentStreamName = Parameters<ReadonlyRngView['stream']>[0];
+
+/** One substream, as `ReadonlyRngView` declares it. */
+type EnvironmentStream = ReturnType<ReadonlyRngView['stream']>;
+
+/** The total cursor map, as `ReadonlyRngView` declares it. */
+type EnvironmentCursors = ReturnType<ReadonlyRngView['snapshotCursors']>;
+
 const DISPATCH_METRIC = 'engine.hook.dispatch';
 
-/** Counter name for one handler invocation. */
 const HANDLER_METRIC = 'engine.hook.handler';
 
-/** Counter name for a handler skipped by the charge guard. */
 const EXHAUSTED_METRIC = 'engine.hook.exhausted';
 
-/** Counter name for a handler skipped for a degraded subscriber. */
 const DEGRADED_METRIC = 'engine.hook.degraded';
 
-/** Counter name for a handler skipped for a removed subscriber. */
 const DETACHED_METRIC = 'engine.hook.detached';
 
-/** Counter name for a handler return that was not a payload. */
 const REJECTED_PAYLOAD_METRIC = 'engine.hook.payload.rejected';
 
-/** Counter name for a handler that threw and was contained. */
 const HANDLER_ERROR_METRIC = 'engine.hook.error';
 
-/** Counter name for a registration that was accepted. */
 const REGISTERED_METRIC = 'engine.hook.subscriber.registered';
 
-/** Counter name for a registration that was rejected. */
 const INVALID_SUBSCRIBER_METRIC = 'engine.hook.subscriber.invalid';
 
-/** Counter name for a subscriber that was removed. */
 const REMOVED_METRIC = 'engine.hook.subscriber.removed';
 
-/** Counter name for charges deducted, added by the amount deducted. */
 const CHARGE_METRIC = 'engine.hook.charge.consumed';
 
-/* --------------------------------------------------------------------------
- * Registration contract
- * ----------------------------------------------------------------------- */
-
 /**
- * What is registered on the bus.
- *
- * The behavioural slice of the relic data shape: the identifier, the
- * `hooks` handler table, the optional `charges` budget and the optional
- * `state` slot. The bus reads no member beyond these four.
+ * What is registered on the bus: the behavioural slice of the relic data
+ * shape. The bus reads no member beyond these four.
  */
 export interface HookSubscriber {
   /**
-   * Identifier, carried into every report and into every dispatch
-   * context. A second registration under an identifier already held is
-   * rejected.
+   * Identifier, carried into every report and into every dispatch context. A
+   * second registration under an identifier already held is rejected.
    */
   readonly id: string;
-
-  /** Handlers this subscriber binds, keyed by hook name. */
   readonly hooks: HookHandlerTable;
 
   /**
    * Position in pickup order, which is the ordering authority of every
-   * dispatch. Absent on a subscriber appended to the end of the order,
-   * which is the default path: the bus then assigns an index above every
-   * index it has assigned or been given. A value that is not a finite
-   * number is treated as absent.
+   * dispatch. Absent on a subscriber appended to the end of the order, which
+   * is the default path: the bus then assigns an index above every index it
+   * has assigned or been given. A value that is not a finite number is
+   * treated as absent.
    */
   readonly pickupOrder?: number;
 
   /**
    * Charges remaining. Absent on a subscriber carrying no charge budget,
-   * which is never charge-guarded; present and not above zero, every
-   * handler of the subscriber is skipped. Written by `consumeCharge` and
-   * by nothing else on the bus.
+   * which is never charge-guarded; present and not above zero, every handler
+   * of the subscriber is skipped. Written by `consumeCharge` and by nothing
+   * else on the bus.
    */
-  charges?: number;
+  readonly charges?: number;
 
   /**
-   * The subscriber's own state slot. Carried into each dispatch context
-   * and written back from that context once the handler returns.
+   * The subscriber's own state slot. Carried into each dispatch context and
+   * written back from that context once the handler returns.
    */
-  state?: unknown;
+  readonly state?: unknown;
 }
 
-/** The reason a subscriber's handler was not invoked. */
 export type HookSkipReason = 'exhausted' | 'degraded' | 'detached';
 
-/**
- * One hook's dispatch outcome.
- *
- * Returned by `dispatch` alongside the payload, so a caller reads what
- * happened without subscribing to the reporter.
- */
 export interface HookDispatchResult<K extends HookName> {
-  /** The payload after every handler that ran. */
   readonly payload: HookPayloadMap[K];
-
-  /** Handlers that were invoked. */
   readonly invoked: number;
-
-  /** Handlers skipped, for any of the three reasons. */
   readonly skipped: number;
-
-  /** Handlers that threw and were contained. */
   readonly failed: number;
-
-  /** Handler returns that were not payloads and were discarded. */
   readonly rejected: number;
 }
 
@@ -158,136 +170,75 @@ export interface HookDispatchResult<K extends HookName> {
  * The outcome of one `consumeCharge` call.
  *
  * `held` and `limited` separate the three states a caller distinguishes
- * without consulting the subscriber: an identifier that is not
- * registered reports `held: false`; a registered subscriber carrying no
- * charge budget reports `limited: false`; and a charge-carrying
- * subscriber reports both as `true` with `remaining` present.
+ * without consulting the subscriber: an identifier that is not registered
+ * reports `held: false`; a registered subscriber carrying no charge budget
+ * reports `limited: false`; and a charge-carrying subscriber reports both as
+ * `true` with `remaining` present.
  */
 export interface ChargeConsumption {
-  /** Whether the identifier is registered. */
   readonly held: boolean;
-
-  /** Whether the subscriber carries a charge budget. */
   readonly limited: boolean;
-
-  /** Charges the call deducted. Zero when it deducted none. */
   readonly consumed: number;
 
   /**
-   * Charges the subscriber holds after the call: a whole number at or
-   * above zero. Absent on an unregistered identifier and on a
-   * subscriber carrying no charge budget.
+   * Charges the subscriber holds after the call: a whole number at or above
+   * zero. Absent on an unregistered identifier and on a subscriber carrying
+   * no charge budget.
    */
   readonly remaining?: number | undefined;
 }
 
-/* --------------------------------------------------------------------------
- * Metrics
- * ----------------------------------------------------------------------- */
-
-/**
- * Handler-level counts, reported per hook, per subscriber and in total.
- *
- * Extension with no vanilla source: js/keyboard_input_manager.js counted
- * nothing.
- */
 export interface HookHandlerCounters {
-  /** Handlers invoked. */
   readonly invoked: number;
-
-  /** Handlers skipped by the charge guard. */
   readonly skippedExhausted: number;
-
-  /** Handlers skipped for a subscriber that had degraded. */
   readonly skippedDegraded: number;
-
-  /** Handlers skipped for a subscriber that had been removed. */
   readonly skippedDetached: number;
-
-  /** Handler returns that were not payloads and were discarded. */
   readonly rejected: number;
-
-  /** Handlers that threw and were contained. */
   readonly failed: number;
 }
 
-/** One hook's counts, or the totals across every hook. */
 export interface HookCounters extends HookHandlerCounters {
-  /** Dispatches of the hook. */
   readonly dispatched: number;
 }
 
-/** One subscriber's counts and its state as at the snapshot. */
 export interface HookSubscriberMetrics extends HookHandlerCounters {
-  /** Identifier the subscriber was registered under. */
   readonly id: string;
-
-  /** Position in pickup order, last known where it is not registered. */
   readonly pickupOrder: number;
-
-  /** Whether the identifier is registered now. */
   readonly registered: boolean;
-
-  /** Whether the registration is marked degraded. */
   readonly degraded: boolean;
-
-  /**
-   * Charges the subscriber holds now. Absent where it carries no charge
-   * budget or is not registered.
-   */
   readonly charges?: number | undefined;
-
-  /** Charges deducted from it by `consumeCharge`. */
   readonly chargesConsumed: number;
 }
 
 /**
- * Everything the bus counts, as `metrics()` reports it.
- *
- * Extension with no vanilla source. Read by the observability layer,
- * which the engine never imports.
+ * Everything the bus counts. Read by the observability layer, which the engine
+ * never imports.
  */
 export interface HookBusMetrics {
-  /** Correlation identifier every report from this bus carries. */
-  readonly runId: string;
+  /**
+   * Correlation identifier every report from this bus carries, injected
+   * at construction. Read by src/observability/metrics.ts, which folds a
+   * snapshot under this identifier so counts from one bus are never
+   * attributed to another.
+   */
+  readonly correlationId: CorrelationId;
 
   /** Subscribers registered at the moment of the snapshot. */
   readonly registered: number;
-
-  /** Registrations accepted over the bus's lifetime. */
   readonly acceptedRegistrations: number;
-
-  /** Registrations rejected over that lifetime. */
   readonly rejectedRegistrations: number;
-
-  /** Subscribers removed over that lifetime. */
   readonly removedSubscribers: number;
-
-  /** Charges deducted over that lifetime. */
   readonly chargesConsumed: number;
-
-  /** Reporter calls that threw and were contained. */
   readonly reporterFaults: number;
-
-  /**
-   * The most recent contained reporter throw, as text. Absent until one
-   * has occurred.
-   */
   readonly lastReporterFault?: string | undefined;
-
-  /** Identifiers marked degraded, in pickup order. */
   readonly degraded: readonly string[];
-
-  /** Counts across every hook. */
   readonly totals: HookCounters;
-
-  /** Counts per hook, keyed by the six names of `HOOK_NAMES`. */
   readonly hooks: Readonly<Record<HookName, HookCounters>>;
 
   /**
-   * Counts per subscriber, ordered by pickup order and then by
-   * registration sequence. A subscriber's row outlives its
-   * registration, with `registered` reporting `false` from then on.
+   * Counts per subscriber, ordered by pickup order and then by registration
+   * sequence. A subscriber's row outlives its registration, with `registered`
+   * reporting `false` from then on.
    */
   readonly subscribers: readonly HookSubscriberMetrics[];
 }
@@ -297,55 +248,32 @@ export interface HookBusMetrics {
  * ----------------------------------------------------------------------- */
 
 /**
- * The bus.
- *
- * Frozen: the eight members below are its whole surface. It exposes no
- * way to reach itself from a handler.
+ * The bus. Frozen: the eight members below are its whole surface, and it
+ * exposes no way to reach itself from a handler.
  */
 export interface HookBus {
   /**
-   * Registers a subscriber.
+   * Registers a subscriber. One carrying no `pickupOrder` is appended to the
+   * end of pickup order, which is the default path; one carrying a finite
+   * `pickupOrder` takes that position.
    *
-   * Ported from js/keyboard_input_manager.js L18-L23, `on()`, which
-   * pushed a callback onto the array keyed by event name. A subscriber
-   * carrying no `pickupOrder` is appended to the end of pickup order,
-   * which is that append; one carrying a finite `pickupOrder` takes
-   * that position.
-   *
-   * @param subscriber Subscriber to register.
-   * @returns `true` when it was registered, `false` when its identifier
-   *   is already held, is not a non-empty string, or its handler table
-   *   binds no callable handler or binds a value that is not callable.
+   * @returns `true` when it was registered, `false` when its identifier is
+   *   already held, is not a non-empty string, or its handler table binds no
+   *   callable handler or binds a value that is not callable.
    */
   register(subscriber: HookSubscriber): boolean;
 
   /**
-   * Removes a subscriber.
-   *
-   * Extension with no vanilla source: js/keyboard_input_manager.js
-   * offered no removal path. Removing an identifier that is not held
-   * changes nothing and reports `false`, so a repeated call is safe. A
-   * removal made while a dispatch is walking takes effect within that
-   * walk: the subscriber's remaining handlers are skipped.
-   *
-   * @param id Identifier the subscriber was registered under.
-   * @returns `true` when a registration was removed.
+   * Removes a subscriber. Removing an identifier that is not held changes
+   * nothing and reports `false`, so a repeated call is safe. A removal made
+   * while a dispatch is walking takes effect within that walk: the
+   * subscriber's remaining handlers are skipped.
    */
   unregister(id: string): boolean;
 
   /**
-   * Dispatches one hook to every subscriber bound to it, in pickup
-   * order.
+   * Dispatches one hook to every subscriber bound to it, in pickup order.
    *
-   * Ported from js/keyboard_input_manager.js L25-L32, `emit()`, which
-   * invoked each callback for the name inline and returned nothing.
-   * Order, membership and the four added properties of this module
-   * apply.
-   *
-   * @param hook Hook to dispatch.
-   * @param payload Payload the first handler receives.
-   * @param environment The rules, substreams and board in force,
-   *   supplied per dispatch.
    * @returns The accumulated payload and the dispatch's counts. Throws
    *   nothing that a handler or the reporter threw.
    */
@@ -356,91 +284,68 @@ export interface HookBus {
   ): HookDispatchResult<K>;
 
   /**
-   * Deducts charges from one subscriber, and is the only path that
-   * writes `charges`.
+   * Deducts charges from one subscriber, and is the only path that writes
+   * `charges`.
    *
-   * Extension with no vanilla source. Deducts at most the charges the
-   * subscriber holds, so the budget never falls below zero and a call
-   * against a spent budget deducts nothing. A stored budget that is not
-   * a whole number at or above zero is normalised to one as it is
-   * written.
+   * Deducts at most the charges the subscriber holds, so the budget never
+   * falls below zero and a call against a spent budget deducts nothing. A
+   * stored budget that is not a whole number at or above zero is normalised
+   * to ZERO as it is read, so an invalid budget is spent rather than
+   * replenished.
    *
-   * @param id Identifier of the subscriber to deduct from.
-   * @param amount Charges to deduct. Rounded towards zero and clamped
-   *   to zero from below; defaults to `1`.
-   * @returns What the call deducted and what remains.
+   * @param amount Charges to deduct. Rounded towards zero and clamped to
+   *   zero from below; defaults to `1`.
    */
   consumeCharge(id: string, amount?: number): ChargeConsumption;
 
   /**
-   * Reads the identifiers of the registrations marked degraded, in
-   * pickup order.
-   *
-   * Extension with no vanilla source. A registration is marked when one
-   * of its handlers throws and stays marked for the rest of its
-   * registration; registering the identifier again after removing it
-   * clears the mark.
-   *
-   * @returns A frozen array, empty when none is marked.
+   * Reads the identifiers of the registrations marked degraded, in pickup
+   * order. A registration is marked when one of its handlers throws and
+   * stays marked for the rest of its registration; registering the
+   * identifier again after removing it clears the mark.
    */
   degraded(): readonly string[];
 
   /**
-   * Reads the subscriptions bound to one hook, in pickup order.
-   *
-   * Extension with no vanilla source. Includes the subscriptions of a
-   * degraded registration, which `degraded()` reports separately.
-   *
-   * @param hook Hook to resolve.
-   * @returns A frozen array, built fresh on each call. The `charges`
-   *   and `state` members carry the subscriber's values as at the call.
+   * Reads the subscriptions bound to one hook, in pickup order, including
+   * those of a degraded registration, which `degraded()` reports separately.
+   * The array is frozen and built fresh on each call, and its `charges` and
+   * `state` members carry the subscriber's values as at the call.
    */
   subscriptions<K extends HookName>(
     hook: K,
   ): readonly HookSubscription<K>[];
 
   /**
-   * Reads the registered subscribers in pickup order.
-   *
-   * Extension with no vanilla source.
-   *
-   * @returns A frozen array, built fresh on each call. The elements are
-   *   the registered objects themselves.
+   * Reads the registered subscribers in pickup order: a frozen array built
+   * fresh on each call, whose elements are the registered objects
+   * themselves.
    */
   subscribers(): readonly HookSubscriber[];
 
   /**
-   * Reads everything the bus counts.
-   *
-   * Extension with no vanilla source.
-   *
-   * @returns A frozen snapshot, built fresh on each call.
+   * Reads everything the bus counts: a frozen snapshot built fresh on each
+   * call.
    */
   metrics(): HookBusMetrics;
 }
 
-/** Construction parameters. */
 export interface HookBusOptions {
   /**
    * Correlation identifier of the run, carried into every report and
-   * every dispatch context. Defaults to the empty string.
+   * every dispatch context. Injected, never derived here: the one
+   * authority is `deriveCorrelationId` in src/observability/logger.ts.
+   * Defaults to the empty string.
    */
-  readonly runId?: string;
+  readonly correlationId?: CorrelationId;
 
   /**
    * Sink for caught handler errors and counters. Defaults to
-   * `NOOP_ENGINE_REPORTER`, so the bus is constructible with no
-   * argument at all.
+   * `NOOP_ENGINE_REPORTER`, so the bus is constructible with no argument.
    */
   readonly reporter?: EngineReporter;
 }
 
-
-/* --------------------------------------------------------------------------
- * Internal state
- * ----------------------------------------------------------------------- */
-
-/** A handler-level outcome one dispatch records. */
 type HandlerOutcome =
   | 'invoked'
   | 'skippedExhausted'
@@ -449,7 +354,6 @@ type HandlerOutcome =
   | 'rejected'
   | 'failed';
 
-/** The counter name each handler-level outcome is reported under. */
 const OUTCOME_METRIC: Readonly<Record<HandlerOutcome, string>> =
   Object.freeze({
     invoked: HANDLER_METRIC,
@@ -460,7 +364,6 @@ const OUTCOME_METRIC: Readonly<Record<HandlerOutcome, string>> =
     failed: HANDLER_ERROR_METRIC,
   });
 
-/** The outcome each skip reason is recorded as. */
 const SKIP_OUTCOME: Readonly<Record<HookSkipReason, HandlerOutcome>> =
   Object.freeze({
     exhausted: 'skippedExhausted',
@@ -468,7 +371,6 @@ const SKIP_OUTCOME: Readonly<Record<HookSkipReason, HandlerOutcome>> =
     detached: 'skippedDetached',
   });
 
-/** Mutable counters behind `HookHandlerCounters`. */
 interface HandlerCounterRow {
   invoked: number;
   skippedExhausted: number;
@@ -478,65 +380,43 @@ interface HandlerCounterRow {
   failed: number;
 }
 
-/** Mutable counters behind `HookCounters`. */
 interface HookCounterRow extends HandlerCounterRow {
   dispatched: number;
 }
 
-/** Mutable counters behind `HookSubscriberMetrics`. */
 interface SubscriberCounterRow extends HandlerCounterRow {
-  /** Identifier the row belongs to. */
   readonly id: string;
-
-  /** Order in which the identifier was first registered. */
   readonly sequence: number;
-
-  /** Pickup index of its latest registration. */
   pickupOrder: number;
-
-  /** Charges deducted from it. */
   chargesConsumed: number;
 }
 
 /**
- * A registration as the bus holds it.
- *
- * `pickupIndex` and `sequence` are fixed at registration, so a
- * subscriber's position and tie-break survive the removal of an earlier
- * one. `degraded` and `removed` are the two flags dispatch reads.
+ * A registration as the bus holds it. `pickupIndex` and `sequence` are fixed
+ * at registration, so a subscriber's position and tie-break survive the
+ * removal of an earlier one. `degraded` and `removed` are the two flags
+ * dispatch reads.
  */
 interface Registration {
-  readonly subscriber: HookSubscriber;
+  readonly id: string;
+  readonly hooks: HookHandlerTable;
   readonly pickupIndex: number;
   readonly sequence: number;
+  charges: number | undefined;
+  state: unknown;
   degraded: boolean;
   removed: boolean;
 }
 
-/* --------------------------------------------------------------------------
- * Helpers
- * ----------------------------------------------------------------------- */
-
-/**
- * Reports whether a value can be invoked as a handler.
- *
- * @param value Value to test.
- * @returns `true` when it is callable.
- */
 function isHandler(value: unknown): boolean {
   return typeof value === 'function';
 }
 
 /**
- * Reports whether a handler table is usable.
- *
- * Only the six names of `HOOK_NAMES` are read, so a member under any
- * other key is neither required to be callable nor counted.
- *
- * @param hooks Value supplied as the handler table.
- * @returns `true` when at least one of the six names is bound to a
- *   callable value and none of them is bound to a value that is neither
- *   callable nor absent.
+ * Reports whether a handler table is usable: at least one of the six names of
+ * `HOOK_NAMES` bound to a callable value, and none of them bound to a value
+ * that is neither callable nor absent. A member under any other key is
+ * neither required to be callable nor counted.
  */
 function isUsableTable(hooks: unknown): boolean {
   if (typeof hooks !== 'object' || hooks === null) {
@@ -564,16 +444,310 @@ function isUsableTable(hooks: unknown): boolean {
 }
 
 /**
- * Reports whether a handler's return value is accepted as the payload
- * the next handler receives.
- *
- * @param value Value the handler returned.
- * @returns `true` when it is a non-null object that is not an array.
+ * Reports whether a handler's return value is accepted as the payload the
+ * next handler receives: a non-null object that is not an array.
  */
-function isPayloadLike(value: unknown): boolean {
+function copyHandlerTable(hooks: HookHandlerTable): HookHandlerTable {
+  const copy: Record<string, unknown> = {};
+
+  for (const name of HOOK_NAMES) {
+    const handler: unknown = hooks[name];
+
+    if (isHandler(handler)) {
+      copy[name] = handler;
+    }
+  }
+
+  return Object.freeze(copy) as HookHandlerTable;
+}
+
+/**
+ * Reports whether `value` is a plain object: an object that is neither
+ * `null` nor an array.
+ *
+ * @param value Value to test.
+ * @returns `true` for a plain object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Reports whether `value` is a finite number.
+ *
+ * @param value Value to test.
+ * @returns `true` for a number that is neither `NaN` nor an infinity.
+ */
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+/**
+ * Reports whether `value` is a non-negative safe integer.
+ *
+ * @param value Value to test.
+ * @returns `true` for a non-negative safe integer.
+ */
+function isNonNegativeInteger(value: unknown): boolean {
   return (
-    typeof value === 'object' && value !== null && !Array.isArray(value)
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
   );
+}
+
+/**
+ * Reports whether a candidate payload carries exactly the named members
+ * and no others.
+ *
+ * Extension with no vanilla source. Own enumerable keys are compared
+ * against the declared set, so a member the payload type does not declare
+ * refuses the return: a handler extends behaviour through its own `state`
+ * slot, never by widening a payload the engine reads back.
+ *
+ * @param value Candidate payload.
+ * @param required Members every payload of the hook carries.
+ * @param optional Members a payload of the hook may carry.
+ * @returns `true` when every required member is present and every present
+ *   member is declared.
+ */
+function hasExactMembers(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  for (const name of required) {
+    if (!Object.prototype.hasOwnProperty.call(value, name)) {
+      return false;
+    }
+  }
+
+  for (const key of Object.keys(value)) {
+    if (!required.includes(key) && !optional.includes(key)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Reports whether `value` is a cell coordinate inside the board.
+ *
+ * @param value Candidate position.
+ * @param size Edge length of the live board.
+ * @returns `true` for `{ x, y }` integers within `[0, size)`.
+ */
+function isCellPosition(value: unknown, size: number): boolean {
+  if (!isRecord(value) || !hasExactMembers(value, ['x', 'y'])) {
+    return false;
+  }
+
+  const x: unknown = value.x;
+  const y: unknown = value.y;
+
+  return (
+    isNonNegativeInteger(x) &&
+    isNonNegativeInteger(y) &&
+    (x as number) < size &&
+    (y as number) < size
+  );
+}
+
+/**
+ * Reports whether `value` is one of the four declared move directions.
+ *
+ * @param value Candidate direction.
+ * @returns `true` for `DIRECTION_UP`, `DIRECTION_RIGHT`, `DIRECTION_DOWN`
+ *   or `DIRECTION_LEFT`.
+ */
+function isDirection(value: unknown): boolean {
+  return (
+    value === DIRECTION_UP ||
+    value === DIRECTION_RIGHT ||
+    value === DIRECTION_DOWN ||
+    value === DIRECTION_LEFT
+  );
+}
+
+/**
+ * Reports whether `value` is the stage goal shape the payload declares:
+ * `{ kind, target }` with a string kind and a finite target.
+ *
+ * @param value Candidate goal.
+ * @returns `true` for that shape.
+ */
+function isStageGoalShape(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasExactMembers(value, ['kind', 'target']) &&
+    typeof value.kind === 'string' &&
+    isFiniteNumber(value.target)
+  );
+}
+
+/**
+ * Validates a handler's return against the exact payload the hook
+ * declares.
+ *
+ * Extension with no vanilla source, and the whole of it: a return the
+ * engine reads back is measured member by member. Every member the type
+ * declares must be present with the right kind and, where it is numeric,
+ * finite and in range; nothing the type does not declare may be present;
+ * and every member that arrived as a live object — the board on
+ * `onBeforeMove` and `onAfterMove`, the two tiles on `onMerge` — must be
+ * the same object it arrived as, so a handler transforms a payload's
+ * values and never substitutes what the engine is holding.
+ *
+ * @param hook Hook being dispatched.
+ * @param candidate Value the handler returned.
+ * @param dispatched Payload the handler was given, read for the
+ *   identities the return has to preserve.
+ * @param environment The collaborators in force, read for the board.
+ * @returns `true` when the candidate is that hook's payload exactly.
+ */
+function isValidPayload<K extends HookName>(
+  hook: K,
+  candidate: unknown,
+  dispatched: HookPayloadMap[K],
+  environment: HookEnvironment,
+): boolean {
+  if (!isRecord(candidate)) {
+    return false;
+  }
+
+  const size = environment.grid.size;
+
+  switch (hook) {
+    case 'onStageStart': {
+      const original = dispatched as HookPayloadMap['onStageStart'];
+
+      return (
+        hasExactMembers(candidate, [
+          'stageIndex',
+          'goal',
+          'seed',
+          'boardSize',
+        ]) &&
+        isNonNegativeInteger(candidate.stageIndex) &&
+        isStageGoalShape(candidate.goal) &&
+        typeof candidate.seed === 'string' &&
+        candidate.seed === original.seed &&
+        candidate.boardSize === size
+      );
+    }
+
+    case 'onBeforeMove': {
+      const original = dispatched as HookPayloadMap['onBeforeMove'];
+
+      return (
+        hasExactMembers(candidate, ['direction', 'board', 'cancelled']) &&
+        isDirection(candidate.direction) &&
+        candidate.board === original.board &&
+        typeof candidate.cancelled === 'boolean'
+      );
+    }
+
+    case 'onMerge': {
+      const original = dispatched as HookPayloadMap['onMerge'];
+
+      return (
+        hasExactMembers(candidate, [
+          'source',
+          'target',
+          'resultValue',
+          'scoreDelta',
+        ]) &&
+        candidate.source === original.source &&
+        candidate.target === original.target &&
+        isFiniteNumber(candidate.resultValue) &&
+        candidate.resultValue > 0 &&
+        isFiniteNumber(candidate.scoreDelta)
+      );
+    }
+
+    case 'onSpawn': {
+      const position: unknown = candidate.position;
+
+      return (
+        hasExactMembers(candidate, ['value'], ['position']) &&
+        (position === undefined || isCellPosition(position, size)) &&
+        isFiniteNumber(candidate.value) &&
+        candidate.value > 0
+      );
+    }
+
+    case 'onAfterMove': {
+      const original = dispatched as HookPayloadMap['onAfterMove'];
+
+      return (
+        hasExactMembers(candidate, [
+          'moved',
+          'board',
+          'score',
+          'over',
+          'won',
+          'terminated',
+        ]) &&
+        typeof candidate.moved === 'boolean' &&
+        candidate.board === original.board &&
+        isFiniteNumber(candidate.score) &&
+        typeof candidate.over === 'boolean' &&
+        typeof candidate.won === 'boolean' &&
+        typeof candidate.terminated === 'boolean'
+      );
+    }
+
+    case 'onStageEnd': {
+      return (
+        hasExactMembers(candidate, ['stageIndex', 'cleared', 'score']) &&
+        isNonNegativeInteger(candidate.stageIndex) &&
+        typeof candidate.cleared === 'boolean' &&
+        isFiniteNumber(candidate.score)
+      );
+    }
+
+    default: {
+      const unhandled: never = hook;
+
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * Copies one payload for one handler.
+ *
+ * Extension with no vanilla source. Shallow over the declared members, so
+ * the live board and the two live tiles travel by reference exactly as
+ * js/game_manager.js L91 passed the grid to the view, while the plain-data
+ * members a handler might rewrite in place — `goal` and `position` — are
+ * rebuilt. The handler therefore writes into a payload of its own, and the
+ * bus decides whether that payload is adopted.
+ *
+ * @param hook Hook being dispatched.
+ * @param payload Payload to copy.
+ * @returns A fresh payload of the same hook.
+ */
+function copyPayload<K extends HookName>(
+  hook: K,
+  payload: HookPayloadMap[K],
+): HookPayloadMap[K] {
+  const copy: Record<string, unknown> = { ...(payload as object) };
+
+  if (hook === 'onStageStart') {
+    const goal = (payload as HookPayloadMap['onStageStart']).goal;
+
+    copy.goal = { ...goal };
+  }
+
+  if (hook === 'onSpawn') {
+    const position = (payload as HookPayloadMap['onSpawn']).position;
+
+    if (position !== undefined) {
+      copy.position = { x: position.x, y: position.y };
+    }
+  }
+
+  return copy as unknown as HookPayloadMap[K];
 }
 
 /**
@@ -591,11 +765,9 @@ function isChargeSpent(charges: number | undefined): boolean {
 }
 
 /**
- * Normalises a charge count to a whole number at or above zero.
- *
- * @param value Count to normalise.
- * @returns The count rounded towards zero, with anything below zero and
- *   anything not finite becoming zero.
+ * Normalises a charge count to a whole number at or above zero: rounded
+ * towards zero, with anything below zero and anything not finite becoming
+ * zero.
  */
 function normaliseCharges(value: number): number {
   if (!Number.isFinite(value)) {
@@ -603,6 +775,94 @@ function normaliseCharges(value: number): number {
   }
 
   return Math.max(0, Math.trunc(value));
+}
+
+/**
+ * Projects the rules in force to the frozen view a handler reads.
+ *
+ * Extension with no vanilla source. Built once per dispatch, so each
+ * dispatch reads the rule values in force at that moment — `boardSize`
+ * included, which is the value a board-mutating relic may have changed
+ * during the run. The two merge members are the configured functions
+ * themselves: calling one reads its operands and mutates neither.
+ *
+ * @param config Rules in force.
+ * @returns The frozen view.
+ */
+function readonlyRulesView(config: EnvironmentRules): ReadonlyRulesView {
+  return Object.freeze({
+    boardSize: config.boardSize,
+    winValue: config.winValue,
+    startTiles: config.startTiles,
+    spawn: Object.freeze({
+      values: Object.freeze(config.spawn.values.slice()),
+      weights: Object.freeze(config.spawn.weights.slice()),
+    }),
+    merge: Object.freeze({
+      canMerge: config.merge.canMerge,
+      produce: config.merge.produce,
+    }),
+  });
+}
+
+/**
+ * Builds the frozen query facade a handler reads the board through.
+ *
+ * Extension with no vanilla source. Every method delegates to the live
+ * board, so a read resolves against the board as it stands; `size` is a
+ * getter for the same reason. `insertTile`, `removeTile`, the `cells`
+ * matrix and the live `Tile` objects are absent, and `cellValue` returns a
+ * face value where `Grid.cellContent` returns the tile itself.
+ *
+ * @param grid Live board.
+ * @returns The frozen facade.
+ */
+function readonlyGridView(grid: EnvironmentGrid): ReadonlyGridView {
+  const view: ReadonlyGridView = {
+    get size(): number {
+      return grid.size;
+    },
+
+    withinBounds: (position: Position): boolean => grid.withinBounds(position),
+
+    cellAvailable: (cell: Position): boolean => grid.cellAvailable(cell),
+
+    cellOccupied: (cell: Position): boolean => grid.cellOccupied(cell),
+
+    cellValue: (cell: Position): number | null => {
+      const tile = grid.cellContent(cell);
+
+      return tile === null ? null : tile.value;
+    },
+
+    availableCells: (): Position[] => grid.availableCells(),
+
+    cellsAvailable: (): boolean => grid.cellsAvailable(),
+
+    serialize: (): SerializedGrid => grid.serialize(),
+  };
+
+  return Object.freeze(view);
+}
+
+/**
+ * Builds the frozen draw facade a handler takes randomness through.
+ *
+ * Extension with no vanilla source. `stream` delegates to the run's
+ * substream table, so a draw a handler takes advances the same cursor the
+ * engine's draws advance and stays inside the run's seeded sequence; the
+ * table itself cannot be replaced through the facade.
+ *
+ * @param rng The run's substreams.
+ * @returns The frozen facade.
+ */
+function readonlyRngView(rng: EnvironmentRng): ReadonlyRngView {
+  return Object.freeze({
+    seed: rng.seed,
+    stream: (name: EnvironmentStreamName): EnvironmentStream =>
+      rng.stream(name),
+    snapshotCursors: (): EnvironmentCursors => rng.snapshotCursors(),
+  });
 }
 
 /**
@@ -623,15 +883,9 @@ function resolvePickupIndex(
 }
 
 /**
- * Orders two registrations by pickup index, then by registration
- * sequence.
- *
- * Both keys are finite numbers assigned by the bus, and the sequence is
+ * Orders two registrations by pickup index, then by registration sequence.
+ * Both keys are finite numbers assigned by the bus and the sequence is
  * unique, so the order this produces is total.
- *
- * @param left First registration.
- * @param right Second registration.
- * @returns A negative number, zero or a positive number.
  */
 function byPickupOrder(left: Registration, right: Registration): number {
   return left.pickupIndex === right.pickupIndex
@@ -639,14 +893,6 @@ function byPickupOrder(left: Registration, right: Registration): number {
     : left.pickupIndex - right.pickupIndex;
 }
 
-/**
- * Orders two subscriber counter rows by pickup index, then by first
- * registration.
- *
- * @param left First row.
- * @param right Second row.
- * @returns A negative number, zero or a positive number.
- */
 function bySubscriberOrder(
   left: SubscriberCounterRow,
   right: SubscriberCounterRow,
@@ -656,11 +902,6 @@ function bySubscriberOrder(
     : left.pickupOrder - right.pickupOrder;
 }
 
-/**
- * Builds a zeroed hook counter row.
- *
- * @returns The row.
- */
 function createHookRow(): HookCounterRow {
   return {
     dispatched: 0,
@@ -673,14 +914,6 @@ function createHookRow(): HookCounterRow {
   };
 }
 
-/**
- * Builds a zeroed subscriber counter row.
- *
- * @param id Identifier the row belongs to.
- * @param pickupOrder Pickup index of the registration that created it.
- * @param sequence Order in which the identifier was first registered.
- * @returns The row.
- */
 function createSubscriberRow(
   id: string,
   pickupOrder: number,
@@ -700,12 +933,6 @@ function createSubscriberRow(
   };
 }
 
-/**
- * Projects a hook counter row to its frozen reported form.
- *
- * @param row Row to read.
- * @returns The frozen counts.
- */
 function freezeHookCounters(row: HookCounterRow): HookCounters {
   return Object.freeze({
     dispatched: row.dispatched,
@@ -718,14 +945,6 @@ function freezeHookCounters(row: HookCounterRow): HookCounters {
   });
 }
 
-/**
- * Projects a subscriber counter row and its registration to the frozen
- * reported form.
- *
- * @param row Row to read.
- * @param registration Its registration, absent once removed.
- * @returns The frozen counts and state.
- */
 function freezeSubscriberMetrics(
   row: SubscriberCounterRow,
   registration: Registration | undefined,
@@ -735,7 +954,7 @@ function freezeSubscriberMetrics(
     pickupOrder: row.pickupOrder,
     registered: registration !== undefined,
     degraded: registration !== undefined && registration.degraded,
-    charges: registration?.subscriber.charges,
+    charges: registration?.charges,
     chargesConsumed: row.chargesConsumed,
     invoked: row.invoked,
     skippedExhausted: row.skippedExhausted,
@@ -746,43 +965,56 @@ function freezeSubscriberMetrics(
   });
 }
 
+/** Text reported for a caught value that offered nothing readable. */
+const UNREADABLE_THROWN = 'unreadable thrown value';
+
 /**
- * Reads text from a caught value.
- *
- * @param value Value that was thrown.
- * @returns Its message where it is an `Error`, the value itself where it
- *   is a string, its string form where it has one, and a fixed
- *   placeholder otherwise.
+ * Reads text from a caught value: its message where it is an `Error`, the
+ * value itself where it is a string, its string form where it has one, and a
+ * fixed placeholder otherwise.
  */
 function describeError(value: unknown): string {
-  if (value instanceof Error) {
-    return value.message;
-  }
-
   if (typeof value === 'string') {
     return value;
+  }
+
+  if (typeof value === 'object' || typeof value === 'function') {
+    if (value === null) {
+      return 'null';
+    }
+
+    try {
+      if ('message' in value) {
+        const carried: unknown = Reflect.get(value, 'message');
+
+        if (typeof carried === 'string' && carried.length > 0) {
+          return carried;
+        }
+      }
+    } catch {
+      return UNREADABLE_THROWN;
+    }
+
+    return UNREADABLE_THROWN;
+  }
+
+  if (typeof value === 'symbol') {
+    return UNREADABLE_THROWN;
   }
 
   try {
     return String(value);
   } catch {
-    return 'unreadable thrown value';
+    return UNREADABLE_THROWN;
   }
 }
 
-
-/* --------------------------------------------------------------------------
- * Construction
- * ----------------------------------------------------------------------- */
-
-/** What `consumeCharge` reports for an identifier that is not held. */
 const UNHELD_CONSUMPTION: ChargeConsumption = Object.freeze({
   held: false,
   limited: false,
   consumed: 0,
 });
 
-/** What it reports for a subscriber carrying no charge budget. */
 const UNLIMITED_CONSUMPTION: ChargeConsumption = Object.freeze({
   held: true,
   limited: false,
@@ -790,79 +1022,59 @@ const UNLIMITED_CONSUMPTION: ChargeConsumption = Object.freeze({
 });
 
 /**
- * Creates a hook bus.
- *
- * @param options Correlation identifier and report sink. Both optional,
- *   and so is the argument itself.
- * @returns A frozen bus.
- *
- * @example
- * ```ts
- * const bus = createHookBus({ runId, reporter });
- *
- * bus.register({
- *   id: 'twin-spawn',
- *   charges: 3,
- *   hooks: {
- *     onSpawn: (payload) => ({ ...payload, value: payload.value * 2 }),
- *   },
- * });
- *
- * const { payload } = bus.dispatch(
- *   'onSpawn',
- *   { position: { x: 0, y: 0 }, value: 2 },
- *   { config, rng, grid },
- * );
- * ```
+ * Creates a frozen hook bus. Both options, and the argument itself, are
+ * optional.
  */
 export function createHookBus(options: HookBusOptions = {}): HookBus {
-  const runId = options.runId ?? '';
+  const correlationId = options.correlationId ?? '';
   const reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
 
-  /** Registrations held now, in the order they were registered. */
+  /**
+   * Registrations held now, kept in pickup order by `byPickupOrder`.
+   *
+   * `register` inserts at the position that order gives rather than appending,
+   * so every walk reads this array as it stands and no walk sorts.
+   */
   const registrations: Registration[] = [];
+
+  /**
+   * How many dispatches are on the stack. Above zero, `register` and
+   * `unregister` defer their edit to `pending` so a walk in progress sees a
+   * stable array.
+   */
+  let dispatchDepth = 0;
+
+  /** Edits deferred while a dispatch walks `registrations`. */
+  const pending: (() => void)[] = [];
 
   /** Counter rows keyed by hook name, created on first use. */
   const hookRows = new Map<HookName, HookCounterRow>();
 
   /**
-   * Counter rows keyed by subscriber identifier, created on first use
-   * and kept after the subscriber is removed.
+   * Counter rows keyed by subscriber identifier, created on first use and
+   * kept after the subscriber is removed.
    */
   const subscriberRows = new Map<string, SubscriberCounterRow>();
 
-  /** Counts summed across every hook. */
   const totals = createHookRow();
 
-  /** Pickup index the next appended subscriber takes. */
   let nextPickupIndex = 0;
 
-  /** Registration sequence the next registration takes. */
   let nextSequence = 0;
 
-  /** Registrations accepted. */
   let acceptedRegistrations = 0;
 
-  /** Registrations rejected. */
   let rejectedRegistrations = 0;
 
-  /** Subscribers removed. */
   let removedSubscribers = 0;
 
-  /** Charges deducted. */
   let chargesConsumed = 0;
 
-  /** Reporter calls that threw and were contained. */
   let reporterFaults = 0;
 
-  /** The most recent contained reporter throw, as text. */
   let lastReporterFault: string | undefined;
 
-  /**
-   * Runs one report, containing a throw from the reporter itself.
-   *
-   * @param report Call to run.
-   */
+  /** Runs one report, containing a throw from the reporter itself. */
   const deliver = (report: () => void): void => {
     try {
       report();
@@ -872,29 +1084,16 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     }
   };
 
-  /**
-   * Adds to a counter through the injected reporter.
-   *
-   * @param metric Counter name.
-   * @param hook Hook the count belongs to, where it belongs to one.
-   * @param value Amount to add. Defaults to `1`.
-   */
   const count = (metric: string, hook?: HookName, value = 1): void => {
     if (reporter.onCount === undefined) {
       return;
     }
 
     deliver((): void => {
-      reporter.onCount?.({ runId, metric, value, hook });
+      reporter.onCount?.({ correlationId, metric, value, hook });
     });
   };
 
-  /**
-   * Reads one hook's counter row, creating it on first use.
-   *
-   * @param hook Hook to read.
-   * @returns Its row.
-   */
   const hookRow = (hook: HookName): HookCounterRow => {
     const existing = hookRows.get(hook);
 
@@ -909,13 +1108,6 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     return created;
   };
 
-  /**
-   * Reads one subscriber's counter row, creating it on first use.
-   *
-   * @param id Identifier to read.
-   * @param pickupOrder Pickup index a newly created row records.
-   * @returns Its row.
-   */
   const subscriberRow = (
     id: string,
     pickupOrder = 0,
@@ -937,14 +1129,6 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     return created;
   };
 
-  /**
-   * Records one handler-level outcome against the hook's row, the
-   * totals, the subscriber's row and the reporter.
-   *
-   * @param hook Hook being dispatched.
-   * @param id Identifier of the subscriber the outcome belongs to.
-   * @param outcome Outcome to record.
-   */
   const note = (
     hook: HookName,
     id: string,
@@ -956,13 +1140,6 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     count(OUTCOME_METRIC[outcome], hook);
   };
 
-  /**
-   * Records one skipped handler.
-   *
-   * @param hook Hook being dispatched.
-   * @param id Identifier of the subscriber that was skipped.
-   * @param reason The reason recorded for the skip.
-   */
   const noteSkip = (
     hook: HookName,
     id: string,
@@ -972,16 +1149,8 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   };
 
   /**
-   * Marks a registration degraded and hands the caught value to the
-   * reporter.
-   *
-   * The only `catch` in the retired sources,
-   * js/local_storage_manager.js L32-L39, discarded its error; the value
-   * caught here is carried into the report as it was thrown.
-   *
-   * @param registration Registration whose handler threw.
-   * @param hook Hook being dispatched.
-   * @param error The caught value.
+   * Marks a registration degraded and hands the caught value to the reporter
+   * exactly as it was thrown.
    */
   const noteThrow = (
     registration: Registration,
@@ -990,51 +1159,101 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   ): void => {
     registration.degraded = true;
 
-    const id = registration.subscriber.id;
+    const id = registration.id;
 
     if (reporter.onHookError !== undefined) {
       deliver((): void => {
-        reporter.onHookError?.({ runId, hook, subscriberId: id, error });
+        reporter.onHookError?.({
+          correlationId,
+          hook,
+          subscriberId: id,
+          error,
+        });
       });
     }
 
     note(hook, id, 'failed');
   };
 
-  /**
-   * Finds the registration held under one identifier.
-   *
-   * @param id Identifier to find.
-   * @returns Its registration, or `undefined` when none is held.
-   */
   const findRegistration = (id: string): Registration | undefined =>
     registrations.find(
-      (registration): boolean => registration.subscriber.id === id,
+      // A record already marked removed is not held any more, even while its
+      // array edit waits for the dispatch in progress to return, so the
+      // identifier is free to be registered again at once.
+      (registration): boolean => !registration.removed && registration.id === id,
     );
+
+  /**
+   * Reads the registrations still held, skipping any whose removal is
+   * deferred behind a dispatch in progress.
+   *
+   * @returns A fresh array on each call, in pickup order.
+   */
+  const held = (): Registration[] =>
+    registrations.filter((registration): boolean => !registration.removed);
+
+  /**
+   * Inserts one registration at the position pickup order gives it.
+   *
+   * @param registration Registration to hold.
+   */
+  const insertOrdered = (registration: Registration): void => {
+    let index = registrations.length;
+
+    while (
+      index > 0 &&
+      byPickupOrder(registrations[index - 1], registration) > 0
+    ) {
+      index -= 1;
+    }
+
+    registrations.splice(index, 0, registration);
+  };
+
+  /**
+   * Applies an edit to `registrations` now, or defers it until the dispatch
+   * walking the array returns.
+   *
+   * @param edit Edit to apply.
+   */
+  const applyOrDefer = (edit: () => void): void => {
+    if (dispatchDepth > 0) {
+      pending.push(edit);
+
+      return;
+    }
+
+    edit();
+  };
+
+  /** Applies every deferred edit, oldest first. */
+  const drainPending = (): void => {
+    while (pending.length > 0) {
+      const edit = pending.shift();
+
+      edit?.();
+    }
+  };
 
   /**
    * Reads the registrations in pickup order.
    *
-   * The pickup index is the ordering authority; the position a
-   * registration holds in the backing array is not.
+   * The array itself: `insertOrdered` keeps it in the order `byPickupOrder`
+   * gives, and `applyOrDefer` keeps it stable for the length of a dispatch, so
+   * neither a copy nor a sort is taken per walk. The pickup index remains the
+   * ordering authority; the position a registration holds in the array is the
+   * expression of it rather than a second source.
    *
-   * @returns A fresh array on each call.
+   * @returns The live array, in pickup order.
    */
-  const ordered = (): Registration[] =>
-    registrations.slice().sort(byPickupOrder);
+  const ordered = (): readonly Registration[] => registrations;
 
-  /**
-   * Collects the identifiers of the registrations marked degraded, in
-   * pickup order.
-   *
-   * @returns A fresh array on each call.
-   */
   const collectDegraded = (): string[] => {
     const ids: string[] = [];
 
-    for (const registration of ordered()) {
+    for (const registration of held()) {
       if (registration.degraded) {
-        ids.push(registration.subscriber.id);
+        ids.push(registration.id);
       }
     }
 
@@ -1042,41 +1261,54 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   };
 
   /**
-   * Builds the subscription a registration presents for one hook.
-   *
-   * `charges` and `state` are read from the subscriber at call time.
-   *
-   * @param registration Registration to read.
-   * @param hook Hook to resolve.
-   * @returns The subscription, or `null` where the subscriber binds no
-   *   callable handler for that hook.
+   * Builds the subscription a registration presents for one hook, or `null`
+   * where the subscriber binds no callable handler for that hook. `charges`
+   * and `state` are read from the subscriber at call time.
    */
   const subscriptionFor = <K extends HookName>(
     registration: Registration,
     hook: K,
   ): HookSubscription<K> | null => {
-    const handler: unknown = registration.subscriber.hooks[hook];
+    const handler: unknown = registration.hooks[hook];
 
     if (!isHandler(handler)) {
       return null;
     }
 
-    return {
-      subscriberId: registration.subscriber.id,
+    return Object.freeze({
+      subscriberId: registration.id,
       pickupOrder: registration.pickupIndex,
       handler: handler as HookHandler<K>,
-      charges: registration.subscriber.charges,
-      state: registration.subscriber.state,
-    };
+      charges: registration.charges,
+      state: registration.state,
+    });
   };
+
+  /**
+   * Builds the read-only snapshot of one registration `subscribers()`
+   * returns.
+   *
+   * Extension with no vanilla source. Frozen, and carrying the bus's own
+   * `charges` and `state` values as at the call, so a caller reads the
+   * registration it made rather than reaching the object the bus
+   * dispatches from.
+   *
+   * @param registration Registration to read.
+   * @returns The frozen snapshot.
+   */
+  const snapshotOf = (registration: Registration): HookSubscriber =>
+    Object.freeze({
+      id: registration.id,
+      hooks: registration.hooks,
+      pickupOrder: registration.pickupIndex,
+      charges: registration.charges,
+      state: registration.state,
+    });
 
   return Object.freeze({
     register(subscriber: HookSubscriber): boolean {
       const id: unknown = subscriber.id;
 
-      // Ported from js/keyboard_input_manager.js L18-L23, which pushed
-      // onto the array keyed by event name. The four checks below, the
-      // pickup index and the counters have no vanilla source.
       if (
         typeof id !== 'string' ||
         id.length === 0 ||
@@ -1094,12 +1326,26 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
         nextPickupIndex,
       );
 
-      registrations.push({
-        subscriber,
+      // The record is built from the subscriber rather than holding it:
+      // the identifier and the handler table are copied out and the table
+      // is frozen, and the charge budget and the state slot are taken over
+      // by the bus, so a later edit to the caller's object changes neither
+      // what a dispatch invokes nor what a report names.
+      const registration: Registration = {
+        id,
+        hooks: copyHandlerTable(subscriber.hooks),
         pickupIndex,
         sequence: nextSequence,
+        charges: subscriber.charges,
+        state: subscriber.state,
         degraded: false,
         removed: false,
+      };
+
+      // Inserted in pickup order, and deferred behind a dispatch in progress
+      // so the walk sees a stable membership.
+      applyOrDefer((): void => {
+        insertOrdered(registration);
       });
 
       nextSequence += 1;
@@ -1114,18 +1360,25 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
 
     unregister(id: string): boolean {
       // Extension with no vanilla source.
-      const index = registrations.findIndex(
-        (registration): boolean => registration.subscriber.id === id,
-      );
+      const registration = findRegistration(id);
 
-      if (index < 0) {
+      if (registration === undefined) {
         return false;
       }
 
-      const registration = registrations[index];
-
-      registrations.splice(index, 1);
+      // Marked immediately, so a dispatch already walking the array skips the
+      // subscriber as detached on this dispatch; the array edit itself waits
+      // until that walk returns.
       registration.removed = true;
+
+      applyOrDefer((): void => {
+        const index = registrations.indexOf(registration);
+
+        if (index >= 0) {
+          registrations.splice(index, 1);
+        }
+      });
+
       removedSubscribers += 1;
       count(REMOVED_METRIC);
 
@@ -1137,95 +1390,119 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       payload: HookPayloadMap[K],
       environment: HookEnvironment,
     ): HookDispatchResult<K> {
-      // Ported from js/keyboard_input_manager.js L25-L32, which read the
-      // callbacks for the name and invoked each one inline with a single
-      // argument. The pickup ordering, the charge guard, the error
-      // isolation, the compounding return and the counters below have no
-      // vanilla source.
       hookRow(hook).dispatched += 1;
       totals.dispatched += 1;
       count(DISPATCH_METRIC, hook);
 
+      // The payload as the last handler that returned and validated left
+      // it. A handler that throws, or returns something that is not this
+      // hook's payload, leaves it where it stood.
       let accumulated = payload;
       let invoked = 0;
       let skipped = 0;
       let failed = 0;
       let rejected = 0;
 
+      // The three collaborators are projected once per dispatch and frozen,
+      // so each handler of one dispatch reads the same values and none can
+      // write through them.
+      const rules = readonlyRulesView(environment.config);
+      const board = readonlyGridView(environment.grid);
+      const draws = readonlyRngView(environment.rng);
+
       // Order and membership are read once, ahead of the walk. A
-      // registration added during the walk is reached by the next
-      // dispatch; one removed during it is skipped by this one.
+      // registration added during the walk is reached by the next dispatch;
+      // one removed during it is skipped by this one.
       const walking = ordered();
 
-      for (const registration of walking) {
-        const subscription = subscriptionFor(registration, hook);
+      dispatchDepth += 1;
 
-        if (subscription === null) {
-          continue;
-        }
+      try {
+        for (const registration of walking) {
+          const subscription = subscriptionFor(registration, hook);
 
-        const id = subscription.subscriberId;
+          if (subscription === null) {
+            continue;
+          }
 
-        if (registration.removed) {
-          skipped += 1;
-          noteSkip(hook, id, 'detached');
+          const id = subscription.subscriberId;
 
-          continue;
-        }
+          if (registration.removed) {
+            skipped += 1;
+            noteSkip(hook, id, 'detached');
 
-        if (registration.degraded) {
-          skipped += 1;
-          noteSkip(hook, id, 'degraded');
+            continue;
+          }
 
-          continue;
-        }
+          if (registration.degraded) {
+            skipped += 1;
+            noteSkip(hook, id, 'degraded');
 
-        const charges = subscription.charges;
+            continue;
+          }
 
-        // The charge guard.
-        if (isChargeSpent(charges)) {
-          skipped += 1;
-          noteSkip(hook, id, 'exhausted');
+          const charges = subscription.charges;
 
-          continue;
-        }
+          // The charge guard.
+          if (isChargeSpent(charges)) {
+            skipped += 1;
+            noteSkip(hook, id, 'exhausted');
 
-        const context: HookContext = {
-          config: environment.config,
-          rng: environment.rng,
-          grid: environment.grid,
-          runId,
-          hook,
-          subscriberId: id,
-          pickupOrder: subscription.pickupOrder,
-          charges,
-          state: subscription.state,
-        };
+            continue;
+          }
 
-        invoked += 1;
-        note(hook, id, 'invoked');
+          const context: HookContext = {
+            config: rules,
+            rng: draws,
+            grid: board,
+            correlationId,
+            hook,
+            subscriberId: id,
+            pickupOrder: subscription.pickupOrder,
+            charges,
+            state: registration.state,
+          };
 
-        try {
-          const returned: unknown = subscription.handler(
-            accumulated,
-            context,
-          );
+          // The handler writes into a payload of its own. An in-place
+          // assignment therefore reaches this copy and not the payload the
+          // caller passed or the one the handler before it produced.
+          const working = copyPayload(hook, accumulated);
 
-          if (returned !== undefined && returned !== null) {
-            if (isPayloadLike(returned)) {
-              accumulated = returned as HookPayloadMap[K];
+          invoked += 1;
+          note(hook, id, 'invoked');
+
+          try {
+            const returned: unknown = subscription.handler(working, context);
+            const candidate: unknown =
+              returned === undefined || returned === null ? working : returned;
+
+            if (isValidPayload(hook, candidate, accumulated, environment)) {
+              accumulated = candidate as HookPayloadMap[K];
+
+              // The state slot is committed with the payload, so a handler's
+              // carried-over state and the effect it produced are adopted
+              // together or not at all.
+              registration.state = context.state;
             } else {
               rejected += 1;
               note(hook, id, 'rejected');
             }
+          } catch (error: unknown) {
+            // Nothing the handler wrote is kept: `accumulated` still holds
+            // the payload it was handed a copy of, and `registration.state`
+            // still holds the slot it entered with.
+            failed += 1;
+            noteThrow(registration, hook, error);
           }
-        } catch (error: unknown) {
-          failed += 1;
-          noteThrow(registration, hook, error);
         }
+      } finally {
+        dispatchDepth -= 1;
 
-        // The context's state slot is written back onto the subscriber.
-        registration.subscriber.state = context.state;
+        // The edits a handler made to the registration array were deferred
+        // for the length of the walk; they are applied here, oldest first.
+        if (dispatchDepth === 0) {
+          drainPending();
+        }
       }
 
       return Object.freeze({
@@ -1238,25 +1515,21 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     },
 
     consumeCharge(id: string, amount = 1): ChargeConsumption {
-      // Extension with no vanilla source, and the one path that writes
-      // `charges`.
       const registration = findRegistration(id);
 
       if (registration === undefined) {
         return UNHELD_CONSUMPTION;
       }
 
-      const subscriber = registration.subscriber;
-
-      if (subscriber.charges === undefined) {
+      if (registration.charges === undefined) {
         return UNLIMITED_CONSUMPTION;
       }
 
-      const available = normaliseCharges(subscriber.charges);
+      const available = normaliseCharges(registration.charges);
       const taken = Math.min(available, normaliseCharges(amount));
       const remaining = available - taken;
 
-      subscriber.charges = remaining;
+      registration.charges = remaining;
 
       if (taken > 0) {
         chargesConsumed += taken;
@@ -1274,17 +1547,15 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     },
 
     degraded(): readonly string[] {
-      // Extension with no vanilla source.
       return Object.freeze(collectDegraded());
     },
 
     subscriptions<K extends HookName>(
       hook: K,
     ): readonly HookSubscription<K>[] {
-      // Extension with no vanilla source.
       const resolved: HookSubscription<K>[] = [];
 
-      for (const registration of ordered()) {
+      for (const registration of held()) {
         const subscription = subscriptionFor(registration, hook);
 
         if (subscription !== null) {
@@ -1296,18 +1567,13 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     },
 
     subscribers(): readonly HookSubscriber[] {
-      // Extension with no vanilla source.
-      return Object.freeze(
-        ordered().map(
-          (registration): HookSubscriber => registration.subscriber,
-        ),
-      );
+      // Extension with no vanilla source. Each element is a frozen
+      // snapshot built by `snapshotOf`, never the object the caller
+      // registered.
+      return Object.freeze(ordered().map(snapshotOf));
     },
 
     metrics(): HookBusMetrics {
-      // Extension with no vanilla source. The per-hook record is built
-      // from HOOK_NAMES, and the subscriber rows are ordered by pickup
-      // index and then by first registration.
       const hooks = {} as Record<HookName, HookCounters>;
 
       for (const name of HOOK_NAMES) {
@@ -1324,7 +1590,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       );
 
       return Object.freeze({
-        runId,
+        correlationId,
         registered: registrations.length,
         acceptedRegistrations,
         rejectedRegistrations,
@@ -1340,4 +1606,3 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     },
   });
 }
-

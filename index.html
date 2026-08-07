@@ -21,9 +21,8 @@
   <div class="container">
     <header class="heading">
       <h1 class="title">2048</h1>
-      <!-- Score outlets: the renderer rewrites both textContents on every commit
-           and appends `.score-addition` here. The visible captions are stylesheet
-           `:after` content, so accessible names are carried as attributes. -->
+      <!-- Score outlets. The visible captions are stylesheet `:after` content, so
+           accessible names are carried as attributes. -->
       <div class="scores-container" role="group" aria-label="Scores">
         <div class="score-container" role="status" aria-label="Score">0</div>
         <div class="best-container" role="status" aria-label="Best score">0</div>
@@ -37,7 +36,7 @@
         <button type="button" class="settings-button" id="settings-button" aria-haspopup="dialog" aria-controls="settings-panel">Settings</button>
       </div>
 
-      <!-- In-run HUD: in-flow router state, hidden until the router activates it.
+      <!-- In-run HUD: an in-flow screen state, hidden until a consumer unhides it.
            The relic tray lists active relics in pickup order. -->
       <div class="hud" id="screen-hud" data-screen="hud" role="group" aria-label="Run status" hidden>
         <div class="hud-stage" id="hud-stage"></div>
@@ -53,12 +52,12 @@
           </div>
         </div>
 
-        <!-- Board host: no cell elements in markup, the board is generated from the
-             configured size. `#board-host` is the region the renderer measures,
-             `#board-canvas` the WebGL surface whose backing store the renderer sets,
-             `#board-number-only` the number-only mode and non-WebGL fallback, and
-             `#board-a11y` the parallel board of focusable per-cell counterparts
-             whose `aria-busy` clears once populated. -->
+        <!-- Board host: no cell elements in markup, so the board is generated from
+             the configured size. `#board-host` is the region a renderer measures,
+             `#board-canvas` the WebGL surface, `#board-number-only` the number-only
+             mode and non-WebGL fallback, and `#board-a11y` the parallel board of
+             focusable per-cell counterparts whose `aria-busy` clears once
+             populated. -->
         <div class="board-host" id="board-host">
           <canvas class="board-canvas" id="board-canvas" aria-hidden="true"></canvas>
           <div class="board-number-only" id="board-number-only" hidden></div>
@@ -66,7 +65,6 @@
         </div>
       </div>
 
-      <!-- One focusable, tappable control per keyboard action, populated at runtime. -->
       <div class="on-screen-controls" id="on-screen-controls"></div>
 
       <p class="game-explanation">
@@ -87,8 +85,8 @@
     </footer>
   </div>
 
-  <!-- Overlay screen roots. The router addresses each by its `data-screen` value
-       and unhides exactly one at a time. `#settings-panel` is not a router state. -->
+  <!-- Overlay screen roots, addressed by their `data-screen` value; exactly one
+       is unhidden at a time. `#settings-panel` is not a screen state. -->
   <div class="screen-layer" id="screen-layer">
     <div class="screen" id="screen-run-start" data-screen="run-start" role="dialog" aria-modal="true" aria-label="Start a run" hidden></div>
     <div class="screen" id="screen-stage-progress" data-screen="stage-progress" role="dialog" aria-modal="true" aria-label="Stage progress" hidden></div>

@@ -2,22 +2,22 @@
 // the log record, the level filter, the sink registry, the bounded
 // recent-record buffer, error serialisation, and the three reporter adapters.
 //
-// Source construct this suite is the executable evidence for, carried as a
-// source row in docs/TRACEABILITY_MATRIX.md: the discarded-error `catch` at
-// js/local_storage_manager.js L37-L39, which bound `error` and returned
-// `false` without reporting it. The `serializeError` describe block below is
-// its coverage, and the storage-adapter block covers the two silent-failure
-// sites in that same file at L47-L49 and L54.
+// The source construct this suite is the executable evidence for is the
+// discarded-error `catch` of js/local_storage_manager.js, which bound `error`
+// and returned `false` without reporting it. The `serializeError` describe
+// block below is its coverage, and the storage-adapter block covers the two
+// silent-failure sites in that same file: an unguarded `setItem` and an
+// unguarded `JSON.parse`.
 //
-// Validation gate: AAP 0.8.8 V8, first bullet — structured logs carry the run
-// correlation identifier.
+// `deriveCorrelationId` is the tree's single derivation. The final describe
+// block is the end-to-end identity evidence: the logger, the engine reporter
+// adapter, the hook bus and the run layer all carry one
+// identical value for one run.
 //
 // Collected by the unit:dom project in vitest.config.ts, which supplies a
 // document. No test below reads or writes storage. tests/fixtures/storage.ts is
 // loaded as a setup file for every unit suite and removes every owned key after
 // each test.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,9 +31,11 @@ import {
   createStorageReporter,
   deriveCorrelationId,
   isLogLevel,
+  logRecordBounds,
   serializeError,
 } from '../../../src/observability/logger';
 import type {
+  LogFieldValue,
   LogFields,
   LogLevel,
   LogRecord,
@@ -42,6 +44,13 @@ import type {
   LoggerOptions,
 } from '../../../src/observability/logger';
 
+import {
+  DEFAULT_BOARD_SIZE,
+  createDefaultRulesConfig,
+} from '../../../src/config/default-config';
+import { Grid } from '../../../src/engine/grid';
+import { createHookBus } from '../../../src/engine/hook-bus';
+import type { HookContext, StageEndPayload } from '../../../src/engine/hooks';
 import { NOOP_ENGINE_REPORTER } from '../../../src/engine/types';
 import type {
   EngineCountReport,
@@ -62,56 +71,64 @@ import type {
   StorageReporter,
   StorageWriteInfo,
 } from '../../../src/storage/local-storage-manager';
+import { createRngStreams } from '../../../src/rng/rng-streams';
+import * as runStateModule from '../../../src/run/run-state';
 import {
   BEST_SCORE_KEY,
   GAME_STATE_KEY,
   RUN_STATE_KEY,
 } from '../../../src/storage/storage-keys';
 
-/* --------------------------------------------------------------------------
- * Fixtures and helpers
- * ----------------------------------------------------------------------- */
-
-/**
- * Shape `deriveCorrelationId` renders: the `run-` prefix followed by two
- * fixed-width base36 hashes of the seed.
- */
 const CORRELATION_ID_PATTERN = /^run-[0-9a-z]{14}$/;
 
-/** Characters a derived correlation identifier occupies. */
 const CORRELATION_ID_LENGTH = 18;
 
-/** Run seed the suite's loggers use unless a test overrides it. */
 const SUITE_SEED = 'run-seed-2048';
+
+/** The identifier the canonical derivation renders for the suite's pair. */
+const SUITE_CORRELATION_ID = deriveCorrelationId(SUITE_SEED);
 
 /** Subsystem tag the suite's own loggers carry. */
 const SUITE_SUBSYSTEM = 'suite';
 
 /**
+ * A source location in any of the three forms a stack frame writes one: a
+ * URL, a Windows absolute path, or a POSIX absolute path of two segments or
+ * more. No record this suite reads may still match it.
+ */
+const SOURCE_LOCATION_PATTERN =
+  /[a-z][a-z0-9+.-]*:\/\/|[a-z]:\\|(?:\/[\w.@~+-]+){2,}/i;
+
+/**
+ * Identifier `deriveCorrelationId` returns for each of these seeds. A fixed
+ * value per seed is the static evidence that the derivation reads no
+ * randomness, no clock and no platform entropy: a derivation that read any of
+ * them could not reproduce these across processes.
+ */
+const CORRELATION_ID_GOLDEN: ReadonlyArray<readonly [string, string]> = [
+  ['', 'run-0ztntfp000045h'],
+  ['run-seed-2048', 'run-1davmkd1yax7kz'],
+  ['forbidden-source-seed', 'run-1x9wnx61hzlegu'],
+];
+
+/**
  * `Math.random` as it stood when this suite's module graph finished loading.
- * Read by the assertion that no module under test replaces it.
+ * Read by the isolation cases, which install and then restore a spy on it.
  */
 const PRISTINE_MATH_RANDOM = Math.random;
 
+/**
+ * `Date.now` as it stood when this suite's module graph finished loading. Read
+ * by the isolation cases, which install and then restore a spy on it.
+ */
+const PRISTINE_DATE_NOW = Date.now;
+
 /** A logger paired with the records its subscribed sink has captured. */
 interface CapturedLogger {
-  /** The logger under test. */
   readonly logger: Logger;
-
-  /** Records the sink has received, in the order they were emitted. */
   readonly records: LogRecord[];
 }
 
-/**
- * Builds a logger with a sink already subscribed.
- *
- * The suite defaults are the run seed `SUITE_SEED`, the subsystem tag
- * `SUITE_SUBSYSTEM`, the level `'debug'` and console output off. Each is
- * overridden by the matching member of `options`.
- *
- * @param options Settings merged over the suite defaults.
- * @returns The logger and the array its sink appends to.
- */
 function createCapturingLogger(options: LoggerOptions = {}): CapturedLogger {
   const records: LogRecord[] = [];
   const logger = createLogger({
@@ -129,30 +146,15 @@ function createCapturingLogger(options: LoggerOptions = {}): CapturedLogger {
   return { logger, records };
 }
 
-/** One record a level-coverage test emits. */
 interface EmittedRecord {
-  /** Level the record is emitted at. */
   readonly level: LogLevel;
-
-  /** Message the record carries. */
   readonly message: string;
 }
 
-/**
- * Splits JSON Lines text into its non-empty lines.
- *
- * @param text JSON Lines text, as `Logger.toJsonLines` returns it.
- * @returns One entry per line, empty entries removed.
- */
 function splitJsonLines(text: string): readonly string[] {
   return text.split('\n').filter((line: string): boolean => line.length > 0);
 }
 
-/**
- * Resolves the host's UUID source when the environment exposes one.
- *
- * @returns The source, or `null` when there is none to spy on.
- */
 function resolveUuidSource(): Crypto | null {
   const host: unknown = globalThis.crypto;
 
@@ -165,20 +167,11 @@ function resolveUuidSource(): Crypto | null {
   return typeof source.randomUUID === 'function' ? source : null;
 }
 
-/** One thrown value the `serializeError` enumeration covers. */
 interface ThrowableCase {
-  /** Name the case is reported under when an assertion fails. */
   readonly label: string;
-
-  /** The value, typed as it reaches `serializeError`. */
   readonly thrown: unknown;
 }
 
-/**
- * Builds an object whose `toString` throws.
- *
- * @returns The object, typed as it reaches `serializeError`.
- */
 function createThrowingToString(): unknown {
   return {
     code: 7,
@@ -188,11 +181,6 @@ function createThrowingToString(): unknown {
   };
 }
 
-/**
- * Builds an object whose `message` accessor throws.
- *
- * @returns The object, typed as it reaches `serializeError`.
- */
 function createThrowingMessageAccessor(): unknown {
   return {
     get message(): string {
@@ -201,20 +189,11 @@ function createThrowingMessageAccessor(): unknown {
   };
 }
 
-/** A thrown object that holds a reference to itself. */
 interface CircularThrowable {
-  /** Name the serialiser reads off the object. */
   name: string;
-
-  /** The object itself. */
   self?: CircularThrowable;
 }
 
-/**
- * Builds a thrown object that holds a reference to itself.
- *
- * @returns The object, typed as it reaches `serializeError`.
- */
 function createCircularThrowable(): unknown {
   const circular: CircularThrowable = { name: 'CircularError' };
 
@@ -223,12 +202,6 @@ function createCircularThrowable(): unknown {
   return circular;
 }
 
-/**
- * Enumerates every throwable the suite covers, `Error` instances and the
- * non-`Error` values a `catch` may equally bind.
- *
- * @returns The cases, each labelled.
- */
 function enumerateThrowables(): readonly ThrowableCase[] {
   return [
     { label: 'Error', thrown: new Error('boom') },
@@ -247,21 +220,18 @@ function enumerateThrowables(): readonly ThrowableCase[] {
   ];
 }
 
-/** A quota rejection as the storage layer reduces one. */
 const QUOTA_ERROR_INFO: StorageErrorInfo = {
   name: 'QuotaExceededError',
   message: 'The storage quota has been exceeded.',
   quota: true,
 };
 
-/** A parse failure as the storage layer reduces one. */
 const PARSE_ERROR_INFO: StorageErrorInfo = {
   name: 'SyntaxError',
   message: 'Unexpected end of JSON input',
   quota: false,
 };
 
-/** A failed write under the namespaced run-state key, quota exhausted. */
 const QUOTA_FAILURE: StorageFailure = {
   operation: 'write',
   key: RUN_STATE_KEY,
@@ -269,7 +239,6 @@ const QUOTA_FAILURE: StorageFailure = {
   error: QUOTA_ERROR_INFO,
 };
 
-/** A failed read of the board snapshot, quota intact. */
 const PARSE_FAILURE: StorageFailure = {
   operation: 'read',
   key: GAME_STATE_KEY,
@@ -285,16 +254,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/* --------------------------------------------------------------------------
- * Correlation identifier
- * ----------------------------------------------------------------------- */
-
 describe('deriveCorrelationId', () => {
   it('derives the same identifier across independent calls', () => {
     expect(deriveCorrelationId('run-seed-2048')).toBe(
       deriveCorrelationId('run-seed-2048')
     );
-    expect(deriveCorrelationId('seed-42')).toBe(deriveCorrelationId('seed-42'));
+    expect(deriveCorrelationId('seed-42')).toBe(
+      deriveCorrelationId('seed-42')
+    );
     expect(deriveCorrelationId('')).toBe(deriveCorrelationId(''));
   });
 
@@ -308,13 +275,25 @@ describe('deriveCorrelationId', () => {
       'seed-42 ',
       '0',
     ];
-    const derived = new Set(seeds.map(deriveCorrelationId));
+    const derived = new Set(
+      seeds.map((seed: string): string =>
+        deriveCorrelationId(seed)
+      )
+    );
 
     expect(derived.size).toBe(seeds.length);
   });
 
   it('derives a non-empty identifier of a stable shape for every seed', () => {
-    for (const seed of ['', 'run-seed-2048', '0', 'a'.repeat(512), '𝟚𝟘𝟜𝟠']) {
+    const seeds = [
+      '',
+      'run-seed-2048',
+      '0',
+      'a'.repeat(512),
+      '𝟚𝟘𝟜𝟠',
+    ];
+
+    for (const seed of seeds) {
       const derived = deriveCorrelationId(seed);
 
       expect(derived.length).toBeGreaterThan(0);
@@ -323,8 +302,23 @@ describe('deriveCorrelationId', () => {
     }
   });
 
-  it('reads no randomness, no wall clock and no UUID source', () => {
-    const randomSpy = vi.spyOn(Math, 'random');
+  it('derives the one recorded identifier for each recorded seed', () => {
+    for (const [seed, expected] of CORRELATION_ID_GOLDEN) {
+      expect(deriveCorrelationId(seed)).toBe(expected);
+    }
+  });
+
+  it('derives that identifier again after a logger has emitted', () => {
+    const [seed, expected] = CORRELATION_ID_GOLDEN[1];
+    const { logger } = createCapturingLogger({ runSeed: seed });
+
+    logger.info('emitted');
+    logger.warn('emitted again', { key: 'ArrowUp' });
+
+    expect(deriveCorrelationId(seed)).toBe(expected);
+  });
+
+  it('reads no wall clock and no UUID source', () => {
     const nowSpy = vi.spyOn(Date, 'now');
     const uuidSource = resolveUuidSource();
     const uuidSpy =
@@ -333,23 +327,11 @@ describe('deriveCorrelationId', () => {
     deriveCorrelationId('forbidden-source-seed');
     deriveCorrelationId('');
 
-    expect(randomSpy).not.toHaveBeenCalled();
     expect(nowSpy).not.toHaveBeenCalled();
 
     if (uuidSpy !== null) {
       expect(uuidSpy).not.toHaveBeenCalled();
     }
-  });
-
-  it('leaves Math.random unpatched', () => {
-    expect(Math.random).toBe(PRISTINE_MATH_RANDOM);
-    expect(Math.random.toString()).toContain('native code');
-
-    deriveCorrelationId('unpatched-seed');
-    createCapturingLogger({ runSeed: 'unpatched-seed' }).logger.info('emitted');
-
-    expect(Math.random).toBe(PRISTINE_MATH_RANDOM);
-    expect(Math.random.toString()).toContain('native code');
   });
 
   it('neither mutates its argument nor depends on call order', () => {
@@ -362,15 +344,42 @@ describe('deriveCorrelationId', () => {
     expect(deriveCorrelationId(first)).toBe(firstBaseline);
     expect(deriveCorrelationId(second)).toBe(secondBaseline);
     expect(deriveCorrelationId(first)).toBe(firstBaseline);
-
     expect(first).toBe('purity-seed-one');
     expect(second).toBe('purity-seed-two');
   });
-});
 
-/* --------------------------------------------------------------------------
- * Record structure
- * ----------------------------------------------------------------------- */
+  it('reads the run seed and nothing else, so a replay correlates', () => {
+    // The authority takes one argument. A second input — a run instance
+    // identifier, a counter, a clock reading — would make the identifier
+    // of one seed vary between runs, which is what a second derivation
+    // elsewhere in src/ used to do.
+    expect(deriveCorrelationId).toHaveLength(1);
+
+    const replayed = 'run-seed-replayed';
+
+    expect(deriveCorrelationId(replayed)).toBe(deriveCorrelationId(replayed));
+  });
+
+  it('is the identifier every injected reporter reports under', () => {
+    // One derivation, injected into the engine and into the logger, puts
+    // the report's identifier and the record's own identifier in
+    // agreement. Both sides below read the same call.
+    const seed = 'run-seed-single-authority';
+    const injected = deriveCorrelationId(seed);
+    const { logger, records } = createCapturingLogger({ runSeed: seed });
+    const reporter: EngineReporter = createEngineReporter(logger);
+
+    reporter.onCount?.({
+      correlationId: injected,
+      metric: 'hook.dispatch',
+      value: 1,
+    });
+
+    expect(records).toHaveLength(1);
+    expect(records[0].correlationId).toBe(injected);
+    expect(records[0].fields?.['reportedCorrelationId']).toBe(injected);
+  });
+});
 
 describe('LogRecord structure', () => {
   it('carries the correlation id, level, subsystem and message', () => {
@@ -392,21 +401,25 @@ describe('LogRecord structure', () => {
     records.forEach((record: LogRecord, index: number): void => {
       expect(record.level).toBe(emitted[index].level);
       expect(record.message).toBe(emitted[index].message);
-      expect(record.correlationId).toBe(deriveCorrelationId(SUITE_SEED));
+      expect(record.correlationId).toBe(SUITE_CORRELATION_ID);
       expect(record.subsystem).toBe(SUITE_SUBSYSTEM);
     });
   });
 
-  it('carries the correlation identifier derived from the run seed', () => {
+  it('carries the identifier derived from the run seed', () => {
     const { logger, records } = createCapturingLogger({ runSeed: 'seed-42' });
 
     logger.info('seeded');
 
-    expect(logger.correlationId).toBe(deriveCorrelationId('seed-42'));
-    expect(records[0].correlationId).toBe(deriveCorrelationId('seed-42'));
+    expect(logger.correlationId).toBe(
+      deriveCorrelationId('seed-42')
+    );
+    expect(records[0].correlationId).toBe(
+      deriveCorrelationId('seed-42')
+    );
   });
 
-  it('carries an explicit correlation id ahead of the seed', () => {
+  it('carries an explicit correlation id ahead of the derived seed', () => {
     const { logger, records } = createCapturingLogger({
       correlationId: 'run-supplied-verbatim',
       runSeed: 'seed-42',
@@ -539,10 +552,6 @@ describe('Logger.child', () => {
   });
 });
 
-/* --------------------------------------------------------------------------
- * Level filter
- * ----------------------------------------------------------------------- */
-
 describe('log levels', () => {
   it('exposes the four levels in ascending severity order', () => {
     expect(LOG_LEVELS).toEqual(['debug', 'info', 'warn', 'error']);
@@ -663,10 +672,6 @@ describe('Logger level filtering', () => {
   });
 });
 
-/* --------------------------------------------------------------------------
- * Recent-record buffer
- * ----------------------------------------------------------------------- */
-
 describe('Logger recent-record buffer', () => {
   it('returns at most the requested number of records, oldest first', () => {
     const { logger } = createCapturingLogger({ capacity: 8 });
@@ -779,13 +784,12 @@ describe('Logger recent-record buffer', () => {
   });
 });
 
-/* --------------------------------------------------------------------------
- * Sink registry
- * ----------------------------------------------------------------------- */
-
 describe('Logger.subscribe', () => {
   it('returns a handle that stops delivery to the removed sink', () => {
-    const logger = createLogger({ runSeed: SUITE_SEED, consoleOutput: false });
+    const logger = createLogger({
+      runSeed: SUITE_SEED,
+      consoleOutput: false,
+    });
     const received: string[] = [];
     const unsubscribe = logger.subscribe((record: LogRecord): void => {
       received.push(record.message);
@@ -804,7 +808,10 @@ describe('Logger.subscribe', () => {
   });
 
   it('tolerates an unsubscribe handle invoked more than once', () => {
-    const logger = createLogger({ runSeed: SUITE_SEED, consoleOutput: false });
+    const logger = createLogger({
+      runSeed: SUITE_SEED,
+      consoleOutput: false,
+    });
     const unsubscribe = logger.subscribe((): void => {
       return;
     });
@@ -819,7 +826,10 @@ describe('Logger.subscribe', () => {
   });
 
   it('removes only its own registration for a twice-added sink', () => {
-    const logger = createLogger({ runSeed: SUITE_SEED, consoleOutput: false });
+    const logger = createLogger({
+      runSeed: SUITE_SEED,
+      consoleOutput: false,
+    });
     let calls = 0;
     const sink: LogSink = (): void => {
       calls += 1;
@@ -830,7 +840,6 @@ describe('Logger.subscribe', () => {
     logger.info('two registrations');
 
     expect(calls).toBe(2);
-
     first();
     logger.info('one registration');
 
@@ -839,7 +848,10 @@ describe('Logger.subscribe', () => {
   });
 
   it('returns a callable handle for a sink that is not callable', () => {
-    const logger = createLogger({ runSeed: SUITE_SEED, consoleOutput: false });
+    const logger = createLogger({
+      runSeed: SUITE_SEED,
+      consoleOutput: false,
+    });
     const unsubscribe = logger.subscribe(undefined as unknown as LogSink);
 
     expect(typeof unsubscribe).toBe('function');
@@ -849,7 +861,10 @@ describe('Logger.subscribe', () => {
   });
 
   it('contains a throwing sink and delivers to the sinks after it', () => {
-    const logger = createLogger({ runSeed: SUITE_SEED, consoleOutput: false });
+    const logger = createLogger({
+      runSeed: SUITE_SEED,
+      consoleOutput: false,
+    });
     let laterSinkCalls = 0;
 
     logger.subscribe((): void => {
@@ -881,7 +896,9 @@ describe('Logger console output', () => {
     const writer = vi
       .spyOn(console, 'info')
       .mockImplementation((): void => undefined);
-    const logger = createLogger({ runSeed: SUITE_SEED });
+    const logger = createLogger({
+      runSeed: SUITE_SEED,
+    });
 
     logger.info('written to the console', { stage: 1 });
 
@@ -894,7 +911,7 @@ describe('Logger console output', () => {
     const parsed: unknown = JSON.parse(typeof line === 'string' ? line : '');
 
     expect(parsed).toMatchObject({
-      correlationId: deriveCorrelationId(SUITE_SEED),
+      correlationId: SUITE_CORRELATION_ID,
       level: 'info',
       message: 'written to the console',
     });
@@ -921,21 +938,77 @@ describe('Logger console output', () => {
   });
 });
 
-/* --------------------------------------------------------------------------
- * Error serialisation
- *
- * Coverage of the discarded-error `catch` at js/local_storage_manager.js
- * L37-L39, which bound `error` and returned `false` without reporting it.
- * ----------------------------------------------------------------------- */
-
 describe('serializeError', () => {
-  it('round-trips an Error with its name, message and stack', () => {
+  it('carries an Error name and message and a stack with no source ' +
+    'location', () => {
     const serialized = serializeError(new Error('boom'));
 
     expect(serialized.name).toBe('Error');
     expect(serialized.message).toBe('boom');
+
+    // The stack is still reported — the frame names are what make it
+    // diagnosable — but no path and no URL survives in it.
     expect(typeof serialized.stack).toBe('string');
     expect(serialized.stack?.length).toBeGreaterThan(0);
+    expect(serialized.stack).toContain(logRecordBounds.redactedLocation);
+    expect(serialized.stack).not.toMatch(SOURCE_LOCATION_PATTERN);
+  });
+
+  it('redacts a location a thrown value carries in any of the three forms',
+    () => {
+      const stacked = {
+        name: 'PlantedError',
+        message: 'planted',
+        stack: [
+          'PlantedError: planted',
+          '    at handler (/srv/app/src/engine/hook-bus.ts:1234:9)',
+          '    at frame (https://example.test/assets/index-abc123.js:7:1)',
+          '    at boot (C:\\\\Users\\\\dev\\\\app\\\\src\\\\main.ts:3:2)',
+        ].join('\n'),
+      };
+
+      const serialized = serializeError(stacked);
+
+      expect(serialized.stack).not.toMatch(SOURCE_LOCATION_PATTERN);
+      expect(serialized.stack).toContain('handler');
+      expect(serialized.stack).toContain('frame');
+      expect(serialized.stack).toContain('boot');
+    });
+
+  it('reserves the unredacted stack for a caller that asks for it', () => {
+    const stacked = {
+      name: 'PlantedError',
+      message: 'planted',
+      stack: 'at handler (/srv/app/src/engine/hook-bus.ts:1234:9)',
+    };
+
+    const detailed = serializeError(stacked, 'full');
+
+    expect(detailed.stack).toContain('/srv/app/src/engine/hook-bus.ts');
+    expect(serializeError(stacked).stack).not.toMatch(
+      SOURCE_LOCATION_PATTERN
+    );
+  });
+
+  it('bounds the name, the message and the stack it carries', () => {
+    const oversized = {
+      name: 'N'.repeat(4_000),
+      message: 'M'.repeat(40_000),
+      stack: 'S'.repeat(400_000),
+    };
+
+    const serialized = serializeError(oversized);
+
+    expect(serialized.name.length).toBeLessThanOrEqual(
+      logRecordBounds.errorName + 1
+    );
+    expect(serialized.message.length).toBeLessThanOrEqual(
+      logRecordBounds.errorMessage + 1
+    );
+    expect(serialized.stack?.length ?? 0).toBeLessThanOrEqual(
+      logRecordBounds.errorStack + 1
+    );
+    expect(serialized.stack).toContain(logRecordBounds.truncationSuffix);
   });
 
   it('retains the distinguishing name of an Error subclass', () => {
@@ -1109,7 +1182,9 @@ describe('serializeError', () => {
     const thrownString: unknown = 'localStorage is disabled';
     const thrownObject: unknown = { message: 'no room left', quota: true };
 
-    logger.error('a storage write failed', thrownString);
+    logger.failure('error', 'a storage write failed', {
+      thrown: thrownString,
+    });
     logger.error(
       'a storage write failed',
       { key: BEST_SCORE_KEY },
@@ -1118,10 +1193,10 @@ describe('serializeError', () => {
 
     expect(records).toHaveLength(2);
     expect(records[0].error).toEqual(serializeError(thrownString));
-    expect(records[0].correlationId).toBe(deriveCorrelationId(SUITE_SEED));
+    expect(records[0].correlationId).toBe(SUITE_CORRELATION_ID);
     expect(records[1].error).toEqual(serializeError(thrownObject));
     expect(records[1].fields).toEqual({ key: BEST_SCORE_KEY });
-    expect(records[1].correlationId).toBe(deriveCorrelationId(SUITE_SEED));
+    expect(records[1].correlationId).toBe(SUITE_CORRELATION_ID);
   });
 
   it('keeps a record with a circular thrown value JSON-exportable', () => {
@@ -1134,17 +1209,392 @@ describe('serializeError', () => {
 
     expect(() => JSON.parse(text.trimEnd())).not.toThrow();
   });
+
+  it('carries a thrown plain object as the error, never as fields', () => {
+    const { logger, records } = createCapturingLogger();
+    const thrown: unknown = { code: 'QuotaExceededError', bytes: 5_242_880 };
+
+    logger.failure('error', 'a storage write failed', {
+      thrown,
+      fields: { key: BEST_SCORE_KEY },
+    });
+
+    expect(records).toHaveLength(1);
+    expect(records[0].error).toEqual(serializeError(thrown));
+    expect(records[0].fields).toEqual({ key: BEST_SCORE_KEY });
+  });
+
+  it('reports a thrown undefined and a thrown null as failures', () => {
+    const { logger, records } = createCapturingLogger();
+
+    logger.failure('error', 'a handler threw undefined', {
+      thrown: undefined,
+    });
+    logger.failure('error', 'a handler threw null', { thrown: null });
+    logger.error('an undefined thrown value, positionally', undefined, undefined);
+
+    expect(records).toHaveLength(3);
+    expect(records[0].error).toEqual(serializeError(undefined));
+    expect(records[1].error).toEqual(serializeError(null));
+    expect(records[2].error).toEqual(serializeError(undefined));
+  });
+
+  it('records no error when a failure carries no throwable', () => {
+    const { logger, records } = createCapturingLogger();
+
+    logger.failure('warn', 'no throwable', { fields: { attempt: 1 } });
+    logger.warn('no throwable, positionally', { attempt: 2 });
+
+    expect(records).toHaveLength(2);
+    expect(records[0].error).toBeUndefined();
+    expect(records[0].fields).toEqual({ attempt: 1 });
+    expect(records[1].error).toBeUndefined();
+  });
+
+  it('records a failure at the level the caller names', () => {
+    const { logger, records } = createCapturingLogger();
+
+    for (const level of LOG_LEVELS) {
+      logger.failure(level, `reported at ${level}`, { thrown: level });
+    }
+
+    expect(records.map((record: LogRecord): LogLevel => record.level)).toEqual([
+      ...LOG_LEVELS,
+    ]);
+  });
 });
 
 /* --------------------------------------------------------------------------
- * Reporter adapters
- *
- * src/engine/types.ts, src/input/keymap.ts and
- * src/storage/local-storage-manager.ts each declare their own reporter
- * contract and import nothing from src/observability. Each block below
- * annotates the adapter with the contract type imported from the declaring
- * layer, then drives the adapter through a logger.
+ * Field sanitisation
  * ----------------------------------------------------------------------- */
+
+describe('field sanitisation', () => {
+  it('deep-copies, so a later mutation cannot reach a buffered record', () => {
+    const { logger, records } = createCapturingLogger();
+    const nested = { depth: 1, tags: ['spawn'] };
+
+    logger.info('emitted', { nested });
+
+    nested.depth = 99;
+    nested.tags.push('merge');
+
+    expect(records[0].fields).toEqual({ nested: { depth: 1, tags: ['spawn'] } });
+  });
+
+  it('freezes every level of the carried tree', () => {
+    const { logger, records } = createCapturingLogger();
+
+    logger.info('emitted', { nested: { inner: { leaf: 'value' } } });
+
+    const fields = records[0].fields;
+    const nested = fields?.['nested'] as Record<string, unknown>;
+    const inner = nested['inner'] as Record<string, unknown>;
+
+    expect(Object.isFrozen(fields)).toBe(true);
+    expect(Object.isFrozen(nested)).toBe(true);
+    expect(Object.isFrozen(inner)).toBe(true);
+  });
+
+  it('builds field objects with a null prototype', () => {
+    const { logger, records } = createCapturingLogger();
+
+    logger.info('emitted', { nested: { leaf: 1 } });
+
+    const fields = records[0].fields as object;
+
+    expect(Object.getPrototypeOf(fields)).toBeNull();
+    expect(
+      Object.getPrototypeOf(
+        (records[0].fields as Record<string, unknown>)['nested'] as object
+      )
+    ).toBeNull();
+  });
+
+  it('rejects __proto__, constructor and prototype as field names', () => {
+    const { logger, records } = createCapturingLogger();
+    const hostile = JSON.parse(
+      '{"__proto__":{"polluted":true},"constructor":1,"prototype":2,"ok":3}'
+    ) as LogFields;
+
+    logger.info('emitted', hostile);
+
+    const fields = records[0].fields as Record<string, unknown>;
+
+    expect(fields['ok']).toBe(3);
+    expect(Object.prototype.hasOwnProperty.call(fields, '__proto__')).toBe(
+      false
+    );
+    expect(Object.prototype.hasOwnProperty.call(fields, 'constructor')).toBe(
+      false
+    );
+    expect(Object.prototype.hasOwnProperty.call(fields, 'prototype')).toBe(
+      false
+    );
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
+
+  it('round-trips undefined and the non-finite numbers through JSON', () => {
+    const { logger, records } = createCapturingLogger();
+
+    logger.info('emitted', {
+      absent: undefined,
+      notANumber: Number.NaN,
+      positive: Number.POSITIVE_INFINITY,
+      negative: Number.NEGATIVE_INFINITY,
+      finite: 42,
+    });
+
+    const record = records[0];
+
+    expect(record.fields).toEqual({
+      absent: null,
+      notANumber: 'NaN',
+      positive: 'Infinity',
+      negative: '-Infinity',
+      finite: 42,
+    });
+    expect(JSON.parse(JSON.stringify(record))).toEqual(
+      JSON.parse(JSON.stringify(record))
+    );
+    expect(JSON.parse(JSON.stringify(record)).fields).toEqual(record.fields);
+  });
+
+  it('bounds string length, member count, element count and depth', () => {
+    const { logger, records } = createCapturingLogger();
+    const wide: Record<string, number> = {};
+
+    for (let index = 0; index < 100; index += 1) {
+      wide[`key${index}`] = index;
+    }
+
+    logger.info('emitted', {
+      long: 'x'.repeat(4096),
+      wide,
+      many: Array.from({ length: 200 }, (_unused, index): number => index),
+      deep: { a: { b: { c: { d: { e: 'too deep' } } } } },
+    });
+
+    const fields = records[0].fields as Record<string, unknown>;
+
+    expect((fields['long'] as string).length).toBeLessThanOrEqual(513);
+    expect(Object.keys(fields['wide'] as object).length).toBeLessThanOrEqual(33);
+    expect((fields['many'] as unknown[]).length).toBeLessThanOrEqual(65);
+
+    const a = (fields['deep'] as Record<string, unknown>)['a'] as Record<
+      string,
+      unknown
+    >;
+    const b = a['b'] as Record<string, unknown>;
+
+    expect(b['c']).toBe('[depth limit]');
+  });
+
+  it('records an accessor that throws rather than dropping the bag', () => {
+    const { logger, records } = createCapturingLogger();
+    const hostile = {} as LogFields;
+
+    Object.defineProperty(hostile, 'explodes', {
+      enumerable: true,
+      get(): never {
+        throw new Error('accessor refused');
+      },
+    });
+    Object.defineProperty(hostile, 'reads', {
+      enumerable: true,
+      value: 'fine',
+    });
+
+    logger.info('emitted', hostile);
+
+    expect(records[0].fields).toEqual({
+      explodes: '[unreadable value]',
+      reads: 'fine',
+    });
+  });
+
+  it('cuts a cycle inside the field bag', () => {
+    const { logger, records } = createCapturingLogger();
+    const cyclic: Record<string, unknown> = { name: 'stage' };
+
+    cyclic['self'] = cyclic;
+
+    logger.info('emitted', cyclic as LogFields);
+
+    expect(records[0].fields).toEqual({ name: 'stage', self: '[circular]' });
+    expect(() => JSON.stringify(records[0])).not.toThrow();
+  });
+
+  it('bounds a serialised error message and stack', () => {
+    const oversized = new Error('m'.repeat(4096));
+
+    oversized.stack = 's'.repeat(8192);
+
+    const serialized = serializeError(oversized);
+
+    expect(serialized.message.length).toBeLessThanOrEqual(1025);
+    expect((serialized.stack ?? '').length).toBeLessThanOrEqual(4097);
+  });
+});
+
+/* --------------------------------------------------------------------------
+ * Bounded, redacted records
+ *
+ * A record is what leaves this module — to a sink, to the console, and into
+ * the JSON-Lines download — so each bound below is asserted on the record
+ * rather than on the serialiser alone.
+ * ----------------------------------------------------------------------- */
+
+describe('emitted records are bounded and carry no source location', () => {
+  it('redacts the stack a sink receives', () => {
+    const { logger, records } = createCapturingLogger();
+
+    logger.error('a handler threw', undefined, new Error('boom'));
+
+    expect(records).toHaveLength(1);
+    expect(records[0].error?.stack).not.toMatch(SOURCE_LOCATION_PATTERN);
+    expect(records[0].error?.stack).toContain(
+      logRecordBounds.redactedLocation
+    );
+  });
+
+  it('keeps the full stack for a private development sink and redacts the ' +
+    'export anyway', () => {
+    const records: LogRecord[] = [];
+    const logger = createLogger({
+      runSeed: SUITE_SEED,
+      subsystem: SUITE_SUBSYSTEM,
+      consoleOutput: false,
+      stackDetail: 'full',
+    });
+
+    logger.subscribe((record: LogRecord): void => {
+      records.push(record);
+    });
+
+    const planted = new Error('planted');
+
+    planted.stack = 'at handler (/srv/app/src/engine/hook-bus.ts:1234:9)';
+    logger.error('a handler threw', undefined, planted);
+
+    // The sink sees the location.
+    expect(records[0].error?.stack).toContain('/srv/app/src/engine');
+
+    // The two export surfaces do not.
+    expect(logger.toJsonLines()).not.toContain('/srv/app/src/engine');
+    expect(logger.snapshot().records[0].error?.stack).not.toMatch(
+      SOURCE_LOCATION_PATTERN
+    );
+  });
+
+  it('bounds a record whose fields are wide, deep or huge', () => {
+    const { logger, records } = createCapturingLogger();
+    const wide: Record<string, number> = {};
+
+    for (let index = 0; index < logRecordBounds.fieldBreadth * 4; index += 1) {
+      wide[`k${index}`] = index;
+    }
+
+    let deep: unknown = 'bottom';
+
+    for (let index = 0; index < logRecordBounds.fieldDepth * 3; index += 1) {
+      deep = { nested: deep };
+    }
+
+    logger.info('bounded fields', {
+      wide: wide as unknown as LogFieldValue,
+      deep: deep as LogFieldValue,
+      long: 'x'.repeat(logRecordBounds.fieldString * 4),
+    });
+
+    const fields = records[0].fields as Record<string, unknown>;
+    const widened = fields.wide as Record<string, unknown>;
+    const long = fields.long as string;
+
+    expect(Object.keys(widened).length).toBeLessThanOrEqual(
+      logRecordBounds.fieldBreadth + 1
+    );
+    expect(long.length).toBeLessThanOrEqual(logRecordBounds.fieldString + 1);
+    expect(JSON.stringify(records[0].fields)).toContain(
+      logRecordBounds.truncatedValue
+    );
+  });
+
+  it('normalises fields deeply, sharing no object with the caller', () => {
+    const { logger, records } = createCapturingLogger();
+    const nested = { inner: { count: 1 } };
+
+    logger.info('deep copy', { nested: nested as unknown as LogFieldValue });
+
+    const carried = records[0].fields as unknown as {
+      nested: { inner: { count: number } };
+    };
+
+    expect(carried.nested).toEqual(nested);
+    expect(carried.nested).not.toBe(nested);
+    expect(carried.nested.inner).not.toBe(nested.inner);
+
+    nested.inner.count = 99;
+
+    expect(carried.nested.inner.count).toBe(1);
+  });
+
+  it('drops a dangerous member name out of a field bag', () => {
+    const { logger, records } = createCapturingLogger();
+    const hostile = JSON.parse('{"__proto__":{"polluted":1},"safe":2}') as
+      unknown as LogFields;
+
+    logger.info('hostile fields', hostile);
+
+    const fields = records[0].fields as Record<string, unknown>;
+
+    // Every level of the carried tree has a null prototype, so no inherited
+    // `toJSON`, `toString` or accessor of a caller's prototype chain reaches
+    // serialisation and `__proto__` cannot reassign one through it.
+    expect(Object.getPrototypeOf(fields)).toBeNull();
+    expect(
+      Object.prototype.hasOwnProperty.call(fields, '__proto__')
+    ).toBe(false);
+    expect((fields as { polluted?: unknown }).polluted).toBeUndefined();
+    expect(fields.safe).toBe(2);
+  });
+
+  it('reduces a record whose JSON form would exceed the record bound', () => {
+    const { logger, records } = createCapturingLogger();
+    const values: string[] = [];
+
+    for (let index = 0; index < logRecordBounds.fieldBreadth; index += 1) {
+      values.push('v'.repeat(logRecordBounds.fieldString));
+    }
+
+    logger.info('oversized record', {
+      bulk: values as unknown as LogFieldValue,
+    });
+
+    const text = JSON.stringify(records[0]);
+
+    expect(text.length).toBeLessThanOrEqual(logRecordBounds.record);
+    expect(text).toContain(logRecordBounds.truncatedValue);
+  });
+
+  it('describes rather than walks a value JSON cannot render', () => {
+    const { logger, records } = createCapturingLogger();
+
+    logger.info('non-json fields', {
+      when: new Date(0) as unknown as LogFieldValue,
+      count: Number.NaN,
+      big: 7n as unknown as LogFieldValue,
+      fn: ((): void => undefined) as unknown as LogFieldValue,
+    });
+
+    const fields = records[0].fields as Record<string, unknown>;
+
+    expect(typeof fields.when).toBe('string');
+    expect(typeof fields.count).toBe('string');
+    expect(typeof fields.big).toBe('string');
+    expect(typeof fields.fn).toBe('string');
+    expect(() => JSON.stringify(records[0])).not.toThrow();
+  });
+});
 
 describe('createEngineReporter', () => {
   it('satisfies the EngineReporter contract src/engine declares', () => {
@@ -1159,7 +1609,7 @@ describe('createEngineReporter', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: EngineReporter = createEngineReporter(logger);
     const report: EngineHookErrorReport = {
-      runId: deriveCorrelationId(SUITE_SEED),
+      correlationId: deriveCorrelationId(SUITE_SEED),
       hook: 'onMerge',
       subscriberId: 'relic:merge-echo',
       error: 'the relic handler threw a string',
@@ -1173,9 +1623,9 @@ describe('createEngineReporter', () => {
 
     expect(record.level).toBe('error');
     expect(record.subsystem).toBe('engine');
-    expect(record.correlationId).toBe(deriveCorrelationId(SUITE_SEED));
+    expect(record.correlationId).toBe(SUITE_CORRELATION_ID);
     expect(record.fields).toEqual({
-      runId: report.runId,
+      reportedCorrelationId: report.correlationId,
       hook: 'onMerge',
       subscriberId: 'relic:merge-echo',
     });
@@ -1186,13 +1636,13 @@ describe('createEngineReporter', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: EngineReporter = createEngineReporter(logger);
     const withHook: EngineCountReport = {
-      runId: deriveCorrelationId(SUITE_SEED),
+      correlationId: deriveCorrelationId(SUITE_SEED),
       metric: 'hook.dispatch',
       value: 1,
       hook: 'onAfterMove',
     };
     const withoutHook: EngineCountReport = {
-      runId: deriveCorrelationId(SUITE_SEED),
+      correlationId: deriveCorrelationId(SUITE_SEED),
       metric: 'move.committed',
       value: 2,
     };
@@ -1204,13 +1654,13 @@ describe('createEngineReporter', () => {
     expect(records[0].level).toBe('debug');
     expect(records[0].subsystem).toBe('engine');
     expect(records[0].fields).toEqual({
-      runId: withHook.runId,
+      reportedCorrelationId: withHook.correlationId,
       metric: 'hook.dispatch',
       value: 1,
       hook: 'onAfterMove',
     });
     expect(records[1].fields).toEqual({
-      runId: withoutHook.runId,
+      reportedCorrelationId: withoutHook.correlationId,
       metric: 'move.committed',
       value: 2,
       hook: null,
@@ -1233,7 +1683,7 @@ describe('createInputReporter', () => {
     const reporter: InputReporter = createInputReporter(logger);
 
     for (const level of LOG_LEVELS) {
-      reporter.log(level, `reported at ${level}`, { key: 'ArrowUp' });
+      reporter.log(level, `reported at ${level}`, { modality: 'arrow' });
     }
 
     expect(records).toHaveLength(LOG_LEVELS.length);
@@ -1242,9 +1692,46 @@ describe('createInputReporter', () => {
       expect(record.level).toBe(LOG_LEVELS[index]);
       expect(record.subsystem).toBe('input');
       expect(record.message).toBe(`reported at ${LOG_LEVELS[index]}`);
-      expect(record.fields).toEqual({ key: 'ArrowUp' });
+      expect(record.fields).toEqual({ modality: 'arrow' });
       expect(record.correlationId).toBe(deriveCorrelationId(SUITE_SEED));
     });
+  });
+
+  it('drops raw keystroke fields from a message and from a counter', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: InputReporter = createInputReporter(logger);
+
+    reporter.log('debug', 'a keydown resolved to nothing', {
+      key: 'p',
+      code: 'KeyP',
+      text: 'a typed password',
+      value: 'a typed password',
+      context: 'textEntry',
+    });
+    reporter.count('input.key.unrecognised', {
+      key: 'p',
+      code: 'KeyP',
+      context: 'textEntry',
+    });
+
+    expect(records[0].fields).toEqual({ context: 'textEntry' });
+    expect(records[1].fields).toEqual({
+      context: 'textEntry',
+      metric: 'input.key.unrecognised',
+      value: 1,
+    });
+  });
+
+  it('bounds a string field so no free text survives a report', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: InputReporter = createInputReporter(logger);
+
+    reporter.count('input.selector.invalid', { selector: 'x'.repeat(200) });
+
+    const selector = records[0].fields?.['selector'];
+
+    expect(typeof selector).toBe('string');
+    expect((selector as string).length).toBe(64);
   });
 
   it('records a counter with the metric merged into the caller fields', () => {
@@ -1309,7 +1796,7 @@ describe('createInputReporter', () => {
 
     for (const record of records) {
       expect(record.subsystem).toBe('input');
-      expect(record.correlationId).toBe(deriveCorrelationId(SUITE_SEED));
+      expect(record.correlationId).toBe(SUITE_CORRELATION_ID);
     }
   });
 });
@@ -1363,7 +1850,7 @@ describe('createStorageReporter', () => {
 
     expect(record.level).toBe('error');
     expect(record.subsystem).toBe('storage');
-    expect(record.correlationId).toBe(deriveCorrelationId(SUITE_SEED));
+    expect(record.correlationId).toBe(SUITE_CORRELATION_ID);
     expect(record.fields).toEqual({
       operation: 'write',
       key: RUN_STATE_KEY,
@@ -1434,13 +1921,13 @@ describe('no-op reporters', () => {
 
     expect(() => {
       NOOP_ENGINE_REPORTER.onHookError?.({
-        runId: deriveCorrelationId(SUITE_SEED),
+        correlationId: deriveCorrelationId(SUITE_SEED),
         hook: 'onSpawn',
         subscriberId: 'relic:cursed-shrink',
         error: new Error('handler threw'),
       });
       NOOP_ENGINE_REPORTER.onCount?.({
-        runId: deriveCorrelationId(SUITE_SEED),
+        correlationId: deriveCorrelationId(SUITE_SEED),
         metric: 'hook.dispatch',
         value: 1,
       });
@@ -1467,13 +1954,627 @@ describe('no-op reporters', () => {
 });
 
 /* --------------------------------------------------------------------------
+ * A hostile host
+ *
+ * The module reaches `performance`, `console` and a caller's field bag through
+ * guarded reads, and each guard has a documented fallback: no clock reads as 0,
+ * a console that cannot be written to is skipped, and a field whose accessor
+ * throws is carried as the placeholder. Every host member below is replaced
+ * through its property descriptor and put back from the saved descriptor, so a
+ * replacement cannot leak into a later case.
+ * ----------------------------------------------------------------------- */
+
+describe('Logger under a hostile host', () => {
+  /** Descriptors saved before a replacement, newest first. */
+  const savedDescriptors: {
+    target: object;
+    property: string;
+    descriptor: PropertyDescriptor | undefined;
+  }[] = [];
+
+  /**
+   * Replaces one property of a host object for the current test.
+   *
+   * @param target Object holding the property.
+   * @param property Property to replace.
+   * @param descriptor Descriptor to install, always configurable.
+   */
+  function replaceMember(
+    target: object,
+    property: string,
+    descriptor: PropertyDescriptor
+  ): void {
+    savedDescriptors.unshift({
+      target,
+      property,
+      descriptor: Object.getOwnPropertyDescriptor(target, property),
+    });
+
+    Object.defineProperty(target, property, {
+      configurable: true,
+      ...descriptor,
+    });
+  }
+
+  /**
+   * Replaces one property with a value for the current test.
+   *
+   * @param target Object holding the property.
+   * @param property Property to replace.
+   * @param value Value to install.
+   */
+  function replaceValue(
+    target: object,
+    property: string,
+    value: unknown
+  ): void {
+    replaceMember(target, property, { value, writable: true });
+  }
+
+  afterEach(() => {
+    for (const saved of savedDescriptors) {
+      if (saved.descriptor === undefined) {
+        Reflect.deleteProperty(saved.target, saved.property);
+        continue;
+      }
+
+      Object.defineProperty(saved.target, saved.property, saved.descriptor);
+    }
+
+    savedDescriptors.length = 0;
+  });
+
+  it('records a zero offset when the host exposes no performance', () => {
+    replaceValue(globalThis, 'performance', undefined);
+
+    const { logger, records } = createCapturingLogger();
+
+    logger.info('no clock at all');
+
+    expect(records).toHaveLength(1);
+    expect(records[0].elapsedMs).toBe(0);
+    expect(logger.snapshot().stored).toBe(1);
+  });
+
+  it('records a zero offset when performance carries no now()', () => {
+    replaceValue(globalThis, 'performance', {});
+
+    const { logger, records } = createCapturingLogger();
+
+    logger.warn('no clock reader');
+
+    expect(records).toHaveLength(1);
+    expect(records[0].elapsedMs).toBe(0);
+  });
+
+  it('records a zero offset when reading the clock throws', () => {
+    replaceValue(globalThis, 'performance', {
+      now: (): number => {
+        throw new Error('the clock is unavailable');
+      },
+    });
+
+    const { logger, records } = createCapturingLogger();
+
+    expect(() => logger.error('the clock threw')).not.toThrow();
+    expect(records).toHaveLength(1);
+    expect(records[0].elapsedMs).toBe(0);
+  });
+
+  it('records a zero offset when the clock answers with no number', () => {
+    for (const reading of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      replaceValue(globalThis, 'performance', {
+        now: (): number => reading,
+      });
+
+      const { logger, records } = createCapturingLogger();
+
+      logger.info('the clock answered oddly');
+
+      expect(records[0].elapsedMs).toBe(0);
+    }
+  });
+
+  it('records a zero offset when now() is not a function at all', () => {
+    replaceValue(globalThis, 'performance', { now: 'not callable' });
+
+    const { logger, records } = createCapturingLogger();
+
+    logger.info('the clock reader is not callable');
+
+    expect(records[0].elapsedMs).toBe(0);
+  });
+
+  it('keeps every other member of the record while the clock is broken', () => {
+    replaceValue(globalThis, 'performance', undefined);
+
+    const { logger, records } = createCapturingLogger();
+
+    logger.error('reported', { stage: 4 }, new TypeError('bad type'));
+
+    const record = records[0];
+
+    expect(record.level).toBe('error');
+    expect(record.message).toBe('reported');
+    expect(record.correlationId).toBe(deriveCorrelationId(SUITE_SEED));
+    expect(record.subsystem).toBe(SUITE_SUBSYSTEM);
+    expect(record.fields?.['stage']).toBe(4);
+    expect(record.error?.name).toBe('TypeError');
+    expect(Number.isNaN(Date.parse(record.timestamp))).toBe(false);
+  });
+
+  it('contains a console writer that throws, and still stores', () => {
+    const writer = vi.spyOn(console, 'info').mockImplementation((): void => {
+      throw new Error('the console is unavailable');
+    });
+    const records: LogRecord[] = [];
+    const logger = createLogger({ runSeed: SUITE_SEED, level: 'debug' });
+
+    logger.subscribe((record: LogRecord): void => {
+      records.push(record);
+    });
+
+    expect(() => logger.info('written through a broken console')).not.toThrow();
+    expect(writer).toHaveBeenCalledTimes(1);
+    expect(records).toHaveLength(1);
+    expect(logger.snapshot().stored).toBe(1);
+
+    // The console is not a sink: a throw there is not counted as a sink fault.
+    expect(logger.snapshot().sinkFaults).toBe(0);
+  });
+
+  it('contains a throwing console writer at every level', () => {
+    const raise = (): void => {
+      throw new Error('the console is unavailable');
+    };
+    const spies = [
+      vi.spyOn(console, 'debug').mockImplementation(raise),
+      vi.spyOn(console, 'info').mockImplementation(raise),
+      vi.spyOn(console, 'warn').mockImplementation(raise),
+      vi.spyOn(console, 'error').mockImplementation(raise),
+      vi.spyOn(console, 'log').mockImplementation(raise),
+    ];
+    const logger = createLogger({ runSeed: SUITE_SEED, level: 'debug' });
+
+    expect(() => {
+      logger.debug('debug');
+      logger.info('info');
+      logger.warn('warn');
+      logger.error('error');
+    }).not.toThrow();
+
+    expect(logger.snapshot().stored).toBe(4);
+    expect(spies[0]).toHaveBeenCalledTimes(1);
+    expect(spies[1]).toHaveBeenCalledTimes(1);
+    expect(spies[2]).toHaveBeenCalledTimes(1);
+    expect(spies[3]).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to console.log when the level member is missing', () => {
+    const fallback = vi
+      .spyOn(console, 'log')
+      .mockImplementation((): void => undefined);
+
+    replaceValue(console, 'info', undefined);
+
+    const logger = createLogger({ runSeed: SUITE_SEED, level: 'debug' });
+
+    logger.info('written through the fallback');
+
+    expect(fallback).toHaveBeenCalledTimes(1);
+
+    const line: unknown = fallback.mock.calls[0]?.[0];
+    const parsed: unknown = JSON.parse(typeof line === 'string' ? line : '');
+
+    expect(parsed).toMatchObject({
+      level: 'info',
+      message: 'written through the fallback',
+    });
+  });
+
+  it('stores the record when the host exposes no console at all', () => {
+    replaceValue(globalThis, 'console', undefined);
+
+    const logger = createLogger({ runSeed: SUITE_SEED, level: 'debug' });
+
+    expect(() => logger.info('no console at all')).not.toThrow();
+    expect(logger.snapshot().stored).toBe(1);
+  });
+
+  it('carries a field whose accessor throws as the placeholder', () => {
+    const { logger, records } = createCapturingLogger();
+    const fields = {
+      stage: 3,
+      get broken(): number {
+        throw new Error('this accessor is broken');
+      },
+      cleared: true,
+    } as unknown as LogFields;
+
+    expect(() =>
+      logger.info('a field could not be read', fields)
+    ).not.toThrow();
+
+    const captured = records[0].fields;
+
+    expect(captured?.['stage']).toBe(3);
+    expect(captured?.['broken']).toBe('[unreadable value]');
+    expect(captured?.['cleared']).toBe(true);
+  });
+
+  it('carries every unreadable field as the placeholder', () => {
+    const { logger, records } = createCapturingLogger();
+    const fields = {
+      get first(): number {
+        throw new Error('broken');
+      },
+      get second(): number {
+        throw new Error('broken');
+      },
+    } as unknown as LogFields;
+
+    logger.warn('two fields could not be read', fields);
+
+    // `toStrictEqual` compares prototypes, and a carried field bag has a null
+    // prototype by design, so the expectation is built on one too.
+    expect(records[0].fields).toStrictEqual(
+      Object.assign(Object.create(null), {
+        first: '[unreadable value]',
+        second: '[unreadable value]',
+      })
+    );
+  });
+
+  it('serialises a record whose unreadable field is a placeholder', () => {
+    const { logger } = createCapturingLogger();
+    const fields = {
+      get broken(): number {
+        throw new Error('broken');
+      },
+    } as unknown as LogFields;
+
+    logger.info('serialised', fields);
+
+    const parsed: unknown = JSON.parse(logger.toJsonLines().trim());
+
+    expect(parsed).toMatchObject({
+      message: 'serialised',
+      fields: { broken: '[unreadable value]' },
+    });
+  });
+
+  it('still reaches its sinks while every host member is broken', () => {
+    replaceValue(globalThis, 'performance', undefined);
+    vi.spyOn(console, 'info').mockImplementation((): void => {
+      throw new Error('the console is unavailable');
+    });
+
+    const { logger, records } = createCapturingLogger({
+      consoleOutput: true,
+    });
+    const fields = {
+      get broken(): number {
+        throw new Error('broken');
+      },
+    } as unknown as LogFields;
+
+    expect(() =>
+      logger.info('every host member is broken', fields)
+    ).not.toThrow();
+    expect(records).toHaveLength(1);
+    expect(records[0].elapsedMs).toBe(0);
+    expect(records[0].fields?.['broken']).toBe('[unreadable value]');
+    expect(logger.snapshot().stored).toBe(1);
+    expect(logger.snapshot().sinkFaults).toBe(0);
+  });
+});
+
+/* --------------------------------------------------------------------------
  * Isolation
  * ----------------------------------------------------------------------- */
 
 describe('suite isolation', () => {
+  it('leaves the clock this suite spied on at the platform built-in', () => {
+    expect(Date.now.toString()).toContain('native code');
+  });
+
+  // Self-contained: this case installs the spies whose restoration it asserts.
+  // Reading the two references without having replaced either would pass
+  // whether or not restoration works, because it would only be describing the
+  // state the file started in.
+  it('restores a global this case spied on itself', () => {
+    const randomSpy = vi
+      .spyOn(Math, 'random')
+      .mockImplementation((): number => 0.5);
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation((): number => 0);
+
+    expect(Math.random).toBe(randomSpy);
+    expect(Date.now).toBe(nowSpy);
+    expect(Math.random()).toBe(0.5);
+    expect(Date.now()).toBe(0);
+
+    vi.restoreAllMocks();
+
+    expect(vi.isMockFunction(Math.random)).toBe(false);
+    expect(vi.isMockFunction(Date.now)).toBe(false);
+    expect(Math.random).toBe(PRISTINE_MATH_RANDOM);
+    expect(Date.now).toBe(PRISTINE_DATE_NOW);
+  });
+
   it('leaves the spied globals at their original references', () => {
     expect(Math.random).toBe(PRISTINE_MATH_RANDOM);
-    expect(Math.random.toString()).toContain('native code');
-    expect(Date.now.toString()).toContain('native code');
+    expect(Date.now).toBe(PRISTINE_DATE_NOW);
+  });
+});
+
+/* --------------------------------------------------------------------------
+ * One canonical correlation identifier across every adapter
+ *
+ * The logger derives it and nothing else in the tree does: src/run/ receives
+ * the value by injection, and the engine's hook bus carries the value it is
+ * constructed with into every report and every dispatch context. This block
+ * drives all three and asserts they agree on one string.
+ * ----------------------------------------------------------------------- */
+
+describe('the canonical correlation identifier', () => {
+  it('is derived in one place, and the run layer derives none', () => {
+    expect(Object.keys(runStateModule)).not.toContain('runCorrelationId');
+    expect(createCapturingLogger().logger.correlationId).toBe(
+      SUITE_CORRELATION_ID
+    );
+    expect(deriveCorrelationId(SUITE_SEED)).toBe(SUITE_CORRELATION_ID);
+  });
+
+  it('reaches a log record, an engine report and a dispatch context', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: EngineReporter = createEngineReporter(logger);
+    const bus = createHookBus({
+      correlationId: SUITE_CORRELATION_ID,
+      reporter,
+    });
+    const seen: HookContext[] = [];
+
+    bus.register({
+      id: 'identity-probe',
+      hooks: {
+        onStageEnd: (payload: StageEndPayload, context): StageEndPayload => {
+          seen.push(context);
+
+          return payload;
+        },
+      },
+    });
+
+    bus.dispatch(
+      'onStageEnd',
+      { stageIndex: 0, cleared: true, score: 0 },
+      {
+        config: createDefaultRulesConfig(),
+        rng: createRngStreams(SUITE_SEED),
+        grid: new Grid(DEFAULT_BOARD_SIZE),
+      }
+    );
+
+    logger.info('a record of the same run');
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].correlationId).toBe(SUITE_CORRELATION_ID);
+    expect(bus.metrics().correlationId).toBe(SUITE_CORRELATION_ID);
+
+    const identifiers = new Set(
+      records.map((record: LogRecord): string => record.correlationId)
+    );
+
+    expect(records.length).toBeGreaterThan(0);
+    expect(identifiers).toEqual(new Set([SUITE_CORRELATION_ID]));
+
+    const counters = records.filter(
+      (record: LogRecord): boolean => record.subsystem === 'engine'
+    );
+
+    expect(counters.length).toBeGreaterThan(0);
+
+    for (const record of counters) {
+      // The engine reporter names the injected identifier
+      // `reportedCorrelationId` in the fields bag, beside the record's own
+      // `correlationId`, so a mismatch between the two is visible.
+      expect(record.fields?.reportedCorrelationId).toBe(SUITE_CORRELATION_ID);
+      expect(record.correlationId).toBe(SUITE_CORRELATION_ID);
+    }
+  });
+
+  it('follows the run seed, so a replay of one seed correlates', () => {
+    const first = createCapturingLogger({ runSeed: 'replayed-seed' });
+    const second = createCapturingLogger({ runSeed: 'replayed-seed' });
+    const other = createCapturingLogger({ runSeed: 'a-different-seed' });
+
+    first.logger.info('first replay');
+    second.logger.info('second replay');
+    other.logger.info('another run');
+
+    expect(first.records[0].correlationId).toBe(
+      second.records[0].correlationId
+    );
+    expect(first.records[0].correlationId).toBe(
+      deriveCorrelationId('replayed-seed')
+    );
+    expect(other.records[0].correlationId).not.toBe(
+      first.records[0].correlationId
+    );
+  });
+});
+
+/* ===== Hot-path cost of a filtered level ===== */
+
+describe('a filtered level costs nothing to report at', () => {
+  it('records no counter once the level rises above debug', () => {
+    const { logger, records } = createCapturingLogger({ level: 'info' });
+    const reporter: InputReporter = createInputReporter(logger);
+
+    reporter.count('input.gesture', { source: 'keyboard' });
+
+    expect(records).toHaveLength(0);
+  });
+
+  it('does not clone the caller fields for a filtered counter', () => {
+    const { logger } = createCapturingLogger({ level: 'info' });
+    const reporter: InputReporter = createInputReporter(logger);
+
+    // Records alone cannot prove this: the logger filters at the sink too, so
+    // the count is absent either way. What the filter changes is whether the
+    // clone runs at all, and enumerating the fields is how the clone starts.
+    let enumerated = 0;
+
+    const watched = new Proxy(
+      { source: 'keyboard' },
+      {
+        ownKeys(target: Record<string, string>): ArrayLike<string | symbol> {
+          enumerated += 1;
+
+          return Reflect.ownKeys(target);
+        },
+      }
+    );
+
+    reporter.count('input.gesture', watched);
+
+    expect(enumerated).toBe(0);
+
+    // Lowering the level makes the same call clone, which is what shows the
+    // count above is the filter working and not the Proxy failing to observe.
+    logger.setLevel('debug');
+    reporter.count('input.gesture', watched);
+
+    expect(enumerated).toBe(1);
+  });
+
+  it('hands back one shared span while debug is filtered out', () => {
+    const { logger, records } = createCapturingLogger({ level: 'info' });
+    const reporter: InputReporter = createInputReporter(logger);
+
+    const first = reporter.startSpan?.('input.dispatch');
+    const second = reporter.startSpan?.('input.parse');
+
+    // Identity is the observable proof that no per-span object is allocated:
+    // a fresh object per call could not be the same reference.
+    expect(first).toBeDefined();
+    expect(first).toBe(second);
+
+    first?.end();
+    second?.end();
+
+    expect(records).toHaveLength(0);
+  });
+
+  it('allocates a distinct span once debug is emitted', () => {
+    const { logger, records } = createCapturingLogger({ level: 'debug' });
+    const reporter: InputReporter = createInputReporter(logger);
+
+    const first = reporter.startSpan?.('input.dispatch');
+    const second = reporter.startSpan?.('input.parse');
+
+    expect(first).not.toBe(second);
+
+    first?.end();
+    second?.end();
+
+    expect(records).toHaveLength(2);
+    expect(records[0].fields?.['span']).toBe('input.dispatch');
+    expect(records[1].fields?.['span']).toBe('input.parse');
+  });
+
+  it('starts recording again when the level is lowered', () => {
+    const { logger, records } = createCapturingLogger({ level: 'info' });
+    const reporter: InputReporter = createInputReporter(logger);
+
+    reporter.count('input.gesture');
+    expect(records).toHaveLength(0);
+
+    // The filter is read per call, not captured at construction, so a level
+    // changed at runtime takes effect.
+    logger.setLevel('debug');
+    reporter.count('input.gesture');
+
+    expect(records).toHaveLength(1);
+    expect(records[0].fields).toEqual({
+      metric: 'input.gesture',
+      value: 1,
+    });
+
+    const span = reporter.startSpan?.('input.dispatch');
+
+    span?.end();
+
+    expect(records).toHaveLength(2);
+    expect(records[1].fields?.['span']).toBe('input.dispatch');
+  });
+
+  it('stops recording when the level is raised', () => {
+    const { logger, records } = createCapturingLogger({ level: 'debug' });
+    const reporter: InputReporter = createInputReporter(logger);
+
+    reporter.count('input.gesture');
+    expect(records).toHaveLength(1);
+
+    logger.setLevel('warn');
+    reporter.count('input.gesture');
+    reporter.startSpan?.('input.dispatch').end();
+
+    expect(records).toHaveLength(1);
+  });
+
+  it('reads one finite elapsed time per record, however many', () => {
+    const { logger, records } = createCapturingLogger();
+
+    // The clock reader is resolved once and held, so a run of records shares
+    // one binding rather than allocating a closure each.
+    for (let index = 0; index < 12; index += 1) {
+      logger.debug('emitted');
+    }
+
+    expect(records).toHaveLength(12);
+
+    for (const record of records) {
+      expect(typeof record.elapsedMs).toBe('number');
+      expect(Number.isFinite(record.elapsedMs)).toBe(true);
+      expect(record.elapsedMs).toBeGreaterThanOrEqual(0);
+    }
+
+    // Monotonic across the run.
+    for (let index = 1; index < records.length; index += 1) {
+      expect(records[index].elapsedMs).toBeGreaterThanOrEqual(
+        records[index - 1].elapsedMs
+      );
+    }
+  });
+
+  it('still times a span that is emitted', () => {
+    const { logger, records } = createCapturingLogger();
+    const reporter: InputReporter = createInputReporter(logger);
+    const span = reporter.startSpan?.('input.dispatch');
+
+    span?.end();
+
+    const duration = records[0].fields?.['durationMs'];
+
+    expect(typeof duration).toBe('number');
+
+    if (typeof duration === 'number') {
+      expect(Number.isFinite(duration)).toBe(true);
+      expect(duration).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('is idempotent on the shared span', () => {
+    const { logger, records } = createCapturingLogger({ level: 'info' });
+    const reporter: InputReporter = createInputReporter(logger);
+    const span = reporter.startSpan?.('input.dispatch');
+
+    // The shared instance is closed by many callers; that must stay harmless.
+    span?.end();
+    span?.end();
+    span?.end();
+
+    expect(records).toHaveLength(0);
   });
 });

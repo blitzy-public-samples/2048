@@ -4,7 +4,9 @@
 // src/main.ts, which imports style/main.scss, so SCSS compiles through Dart
 // Sass into the same graph. `vite build` emits dist/ as a self-contained
 // static directory — no SSR entry, API route or serverless adapter is
-// configured, and none may be.
+// configured, and none may be. That directory is the deployed artifact: it
+// carries the bundle, the stylesheet and the referenced assets, and no source
+// map.
 //
 // The SCSS pipeline also carries the token bridge: src/theme/tokens.ts declares
 // the token values once, reading the board dimension from DEFAULT_BOARD_SIZE of
@@ -47,7 +49,12 @@ export default defineConfig({
 
     target: 'es2022',
 
-    sourcemap: true,
+    // No source map is emitted. `npm run build` produces the directory that is
+    // copied verbatim to a static host, so every file dist/ carries is
+    // publicly reachable there; a map would publish the TypeScript sources and
+    // their comments alongside the bundle, and would resolve the file paths
+    // that src/observability/logger.ts redacts out of a stack trace.
+    sourcemap: false,
   },
 
   css: {

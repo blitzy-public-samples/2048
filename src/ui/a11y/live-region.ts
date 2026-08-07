@@ -1,55 +1,26 @@
-// The announcement queue behind the `aria-live` region declared at
-// index.html L105. Announcements are enqueued, coalesced into the smallest
-// correct set of utterances, and written to that region one utterance per
-// task.
+// The announcement queue behind the `aria-live` region declared in
+// index.html: announcements are enqueued, coalesced into the smallest correct
+// set of utterances, and written to that region one utterance per task.
 //
-// Origin, one row per construct group. Nothing here ports a construct from
-// js/: no module under js/ announces anything, and a search of the retired
-// markup for `aria-`, `role=`, `lang=` and `tabindex` returns no match, so
-// every row is target-only in docs/TRACEABILITY_MATRIX.md.
+// index.html declares ONE region — `#live-region`, carrying `role="status"`,
+// `aria-live="polite"` and `aria-atomic="true"` — so both polarities are
+// written to it and its `aria-live` attribute is never mutated after
+// construction. A markup that declares a polite and an assertive region
+// instead is served by the two assertive options below.
 //
-// | Construct group                     | Origin                          |
-// |-------------------------------------|---------------------------------|
-// | Queue, coalescing, write sequence   | R9, validation gate V7          |
-// | `DIRECTION_LABELS`                  | src/engine/types.ts L42-L51     |
-// | `TERMINAL_VERDICT_LABELS`           | js/html_actuator.js L129        |
-// | `KEEP_PLAYING_LABEL`                | index.html L51                  |
-// | `HUMAN_INDEX_OFFSET`                | js/html_actuator.js L97-L99     |
-// | Host selector, region semantics     | index.html L105                 |
-// | `VISUALLY_HIDDEN_CLASS`             | style/_a11y.scss L157-L170      |
-// | Report sink, guarded host lookup    | Rule 3, I12                     |
-// | `observePreferences`                | src/ui/a11y/settings.ts L1104-8 |
+// The region's visually-hidden treatment is the `.visually-hidden` class of
+// style/_a11y.scss, which clips the paint region and keeps the box. Nothing
+// here assigns a style property, and no hiding mechanism that would take the
+// region out of the accessibility tree is used anywhere in this module.
 //
-// index.html L105 declares ONE region — `#live-region`, carrying
-// `role="status"`, `aria-live="polite"` and `aria-atomic="true"` — so both
-// polarities are written to it and its `aria-live` attribute is never
-// mutated after construction. A markup that declares a polite and an
-// assertive region instead is served by the two assertive options below.
-//
-// Imports are limited to ./settings. This module names no module under
-// src/engine/, src/render/, src/relics/, src/observability/, src/theme/ or
-// any sibling directory of src/ui/, and it reads no storage.
-//
-// It declares no visual value. The region's visually-hidden treatment is the
-// `.visually-hidden` class of style/_a11y.scss L168, which clips the paint
-// region and keeps the box. Nothing here assigns a style property, and no
-// hiding mechanism that would take the region out of the accessibility tree
-// is used anywhere in this module.
-//
-// `AnnouncedDirection` restates `Direction` of src/engine/types.ts L39 and
-// of src/input/keymap.ts L27 rather than importing either, which is how
-// those two modules already relate to one another.
+// Imports are limited to ./settings. The module reads no storage and declares
+// no visual value. `AnnouncedDirection` restates `Direction` of
+// src/engine/types.ts and of src/input/keymap.ts rather than importing either.
 //
 // No exported function throws. A missing region, an environment with no task
 // scheduler, an unrecognised announcement, a non-finite number, an absent
-// spawn position, a refused subscription, a throwing listener and a failed
-// DOM write are each reported through the injected sink and the call
-// continues.
-//
-// Rationale for the decisions behind this file — the coalescing rules, the
-// clear-then-write sequence, the polite default, the queue bound, and the
-// parallel-DOM-plus-live-region approach itself — is in
-// docs/DECISION_LOG.md.
+// spawn position, a refused subscription, a throwing listener and a failed DOM
+// write are each reported through the injected sink and the call continues.
 
 import type {
   MountRoot,
@@ -63,83 +34,75 @@ import {
   resolveMount,
 } from './settings';
 
-/* ==========================================================================
- * 1. Report names
- * ========================================================================== */
-
-/** Counter raised once per region this module resolved and prepared. */
 const MOUNTED_METRIC = 'ui.liveRegion.mounted';
 
-/** Counter raised where a region is not available. */
 const HOST_MISSING_METRIC = 'ui.liveRegion.host.missing';
 
-/** Counter raised once per attribute or class the markup left off. */
 const REMEDIATED_METRIC = 'ui.liveRegion.host.remediated';
 
-/** Counter raised where preparing a region throws. */
 const PREPARE_FAILED_METRIC = 'ui.liveRegion.host.prepareFailed';
 
-/** Counter raised once per accepted announcement. */
 const ANNOUNCED_METRIC = 'ui.liveRegion.announced';
 
-/** Counter raised where an announcement is not one this module models. */
 const REJECTED_METRIC = 'ui.liveRegion.rejected';
 
-/** Counter raised where a number that is not finite is replaced. */
 const NUMBER_REPLACED_METRIC = 'ui.liveRegion.number.replaced';
 
-/** Counter raised with the number of announcements the bound discarded. */
+/**
+ * Counter raised with the number of announcements the bound discarded, and
+ * with how many of those were a `relicAcquired` or a `terminal`.
+ */
 const DROPPED_METRIC = 'ui.liveRegion.dropped';
+
+/**
+ * Counter raised with the number of PROTECTED announcements the bound
+ * discarded, which is its last resort.
+ */
+const DROPPED_PROTECTED_METRIC = 'ui.liveRegion.dropped.protected';
+
+/** Counter raised with the number of pending utterances the bound discarded. */
+const OUTBOX_DROPPED_METRIC = 'ui.liveRegion.outbox.dropped';
+
+/** Counter raised where an assertive request is served politely instead. */
+const ASSERTIVE_DOWNGRADE_METRIC = 'ui.liveRegion.assertive.downgraded';
+
+/** Counter raised where an assertive region is created by this module. */
+const ASSERTIVE_CREATED_METRIC = 'ui.liveRegion.assertive.created';
 
 /** Counter raised with the number of items a verdict superseded. */
 const SUPERSEDED_METRIC = 'ui.liveRegion.superseded';
 
-/** Counter raised with the number of repeated utterances collapsed. */
 const COLLAPSED_METRIC = 'ui.liveRegion.collapsed';
 
-/** Counter raised where a move that changed nothing is not composed. */
 const UNCHANGED_MOVE_METRIC = 'ui.liveRegion.move.unchanged';
 
-/** Counter raised once per utterance written to a region. */
 const UTTERED_METRIC = 'ui.liveRegion.uttered';
 
-/** Counter raised where writing to a region throws. */
 const WRITE_FAILED_METRIC = 'ui.liveRegion.write.failed';
 
-/** Counter raised where an utterance had no region to be written to. */
 const DISABLED_METRIC = 'ui.liveRegion.disabled';
 
-/** Counter raised where a requested queue bound is rejected. */
 const CAPACITY_REJECTED_METRIC = 'ui.liveRegion.capacity.rejected';
 
-/** Counter raised where the environment supplies no task scheduler. */
 const SCHEDULER_ABSENT_METRIC = 'ui.liveRegion.scheduler.absent';
 
-/** Counter raised where a preference subscription cannot be established. */
 const SUBSCRIBE_REFUSED_METRIC = 'ui.liveRegion.preferences.refused';
 
-/** Counter raised where a preference notification throws. */
 const OBSERVE_FAILED_METRIC = 'ui.liveRegion.preferences.failed';
 
-/** Counter raised once per destroyed announcer. */
 const DESTROYED_METRIC = 'ui.liveRegion.destroyed';
 
-/** Counter raised where a method is called after `destroy()`. */
 const AFTER_DESTROY_METRIC = 'ui.liveRegion.afterDestroy';
 
-/** Label carried into every report where the caller supplies none. */
 const DEFAULT_CONTEXT = 'ui.liveRegion';
 
-/* ==========================================================================
- * 2. Direction, polarity and verdict vocabulary
- * ========================================================================== */
-
 /**
- * The four move directions, restating `Direction` of src/engine/types.ts L39
- * and of src/input/keymap.ts L27 so this module imports neither.
+ * The four move directions, restating `Direction` of src/engine/types.ts and
+ * the `DIRECTION_*` constants of src/input/keymap.ts so this module imports
+ * neither.
  *
- * `0` is up, `1` right, `2` down and `3` left, the order
- * src/engine/types.ts L42-L51 declares.
+ * `0` is up, `1` right, `2` down and `3` left, the order `Direction` and its
+ * `DIRECTION_*` constants declare.
  */
 export type AnnouncedDirection = 0 | 1 | 2 | 3;
 
@@ -150,8 +113,8 @@ export type AnnouncementPolarity = 'polite' | 'assertive';
 export const DEFAULT_POLARITY: AnnouncementPolarity = 'polite';
 
 /**
- * The polarity a run verdict is written with, and the one a forced
- * number-only fallback notice is written with. No other announcement uses it.
+ * The polarity a run verdict is written with, and the one a forced number-only
+ * fallback notice is written with. No other announcement uses it.
  */
 export const ASSERTIVE_POLARITY: AnnouncementPolarity = 'assertive';
 
@@ -182,11 +145,6 @@ export const DIRECTION_LABELS = Object.freeze({
   3: 'Left',
 } as const satisfies Readonly<Record<AnnouncedDirection, string>>);
 
-/**
- * Continuation phrase. It is the `.keep-playing-button` label of
- * index.html L51, the copy the vanilla actuator left to that control when it
- * cleared the overlay at js/html_actuator.js L135-L139.
- */
 const KEEP_PLAYING_LABEL = 'Keep going';
 
 /**
@@ -199,27 +157,13 @@ export const TERMINAL_VERDICT_LABELS = Object.freeze({
   loss: 'Game over!',
 } as const satisfies Readonly<Record<TerminalVerdict, string>>);
 
-/** Prefix of a relic-acquisition utterance. */
 const RELIC_ACQUIRED_LABEL = 'Relic acquired';
 
-/** Prefix of the score clause of a verdict utterance. */
 const FINAL_SCORE_LABEL = 'Final score';
 
-/** Prefix of the score clause of a gameplay utterance. */
 const SCORE_LABEL = 'Score';
 
-/**
- * Added to a zero-based index to produce the number an utterance states.
- *
- * It is the `+ 1` of `normalizePosition` at js/html_actuator.js L97-L99,
- * applied to the zero-based column and row of the engine's `Position` and to
- * the zero-based `stageIndex` of src/config/stage-config.ts L264-L265.
- */
 const HUMAN_INDEX_OFFSET = 1;
-
-/* ==========================================================================
- * 3. The announcement vocabulary
- * ========================================================================== */
 
 /** Discriminant of every announcement this module models. */
 export type AnnouncementKind =
@@ -244,8 +188,8 @@ export const ANNOUNCEMENT_KINDS: readonly AnnouncementKind[] = Object.freeze([
 
 /**
  * The kinds a verdict supersedes within one flush, and the kinds the queue
- * bound discards first. `relicAcquired`, `terminal` and `text` are absent
- * from this list and are never discarded by the bound.
+ * bound discards first. `relicAcquired`, `terminal` and `text` are absent from
+ * this list and are never discarded by the bound.
  */
 export const GAMEPLAY_ANNOUNCEMENT_KINDS: readonly AnnouncementKind[] =
   Object.freeze([
@@ -258,17 +202,12 @@ export const GAMEPLAY_ANNOUNCEMENT_KINDS: readonly AnnouncementKind[] =
 /**
  * One resolved move.
  *
- * `changed` is the engine's own `moved` flag. A move that changed no
- * position spawns no tile. Such a move is composed into nothing.
+ * `changed` is the engine's own `moved` flag. A move that changed no position
+ * spawns no tile. Such a move is composed into nothing.
  */
 export interface MoveAnnouncement {
-  /** Discriminant. */
   readonly kind: 'move';
-
-  /** Direction the move resolved in. */
   readonly direction: AnnouncedDirection;
-
-  /** Whether any tile position changed. */
   readonly changed: boolean;
 
   /** Score after the move. */
@@ -280,13 +219,8 @@ export interface MoveAnnouncement {
  * can produce more than one of these.
  */
 export interface MergeAnnouncement {
-  /** Discriminant. */
   readonly kind: 'merge';
-
-  /** Value of the tile the merge produced. */
   readonly resultValue: number;
-
-  /** Points the merge added. */
   readonly scoreDelta: number;
 }
 
@@ -299,25 +233,17 @@ export interface MergeAnnouncement {
  * stated in that case.
  */
 export interface SpawnAnnouncement {
-  /** Discriminant. */
   readonly kind: 'spawn';
-
-  /** Value of the spawned tile. */
   readonly value: number;
-
-  /** Cell the tile occupies, where the board supplied one. */
   readonly position?: AnnouncedPosition | undefined;
 }
 
 /** The end of a stage. `stageIndex` is zero-based; the text is 1-based. */
 export interface StageClearAnnouncement {
-  /** Discriminant. */
   readonly kind: 'stageClear';
 
   /** Zero-based index of the stage that ended. */
   readonly stageIndex: number;
-
-  /** Whether the stage goal was met. */
   readonly cleared: boolean;
 }
 
@@ -326,40 +252,23 @@ export interface StageClearAnnouncement {
  * fields, so this module names no type of src/relics/.
  */
 export interface RelicAcquiredAnnouncement {
-  /** Discriminant. */
   readonly kind: 'relicAcquired';
-
-  /** Relic name as it is displayed. */
   readonly name: string;
-
-  /** Rarity as a word. */
   readonly rarity: string;
-
-  /** Charges the relic starts with, where it is charge-based. */
   readonly charges?: number | undefined;
 }
 
 /** A run verdict. Written with `ASSERTIVE_POLARITY`. */
 export interface TerminalAnnouncement {
-  /** Discriminant. */
   readonly kind: 'terminal';
-
-  /** Which verdict. */
   readonly verdict: TerminalVerdict;
-
-  /** Score to state alongside the verdict. */
   readonly score?: number | undefined;
 }
 
 /** Free text: screen transitions, preference changes, fallback notices. */
 export interface TextAnnouncement {
-  /** Discriminant. */
   readonly kind: 'text';
-
-  /** Text to speak. Trimmed; an empty result is rejected. */
   readonly text: string;
-
-  /** Urgency. Defaults to `DEFAULT_POLARITY`. */
   readonly polarity?: AnnouncementPolarity | undefined;
 }
 
@@ -375,43 +284,18 @@ export type Announcement =
 
 /** One composed line, and the urgency it is written with. */
 export interface Utterance {
-  /** Text written to a region. */
   readonly text: string;
-
-  /** Region the text is written to. */
   readonly polarity: AnnouncementPolarity;
 }
 
-/**
- * Compile-time exhaustiveness check.
- *
- * Its parameter is `never`, so a member added to a union without a matching
- * case fails the type gate at the call site. It performs nothing, returns
- * nothing and throws nothing.
- *
- * @param value The unreachable value.
- */
 function unhandledKind(value: never): void {
   void value;
 }
 
-/* ==========================================================================
- * 4. Narrowing and sanitising
- * ========================================================================== */
-
-/** Value stated in place of a number that is not finite. */
 const REPLACED_NUMBER = 0;
 
-/** Result of a search that found nothing. */
 const NOT_FOUND = -1;
 
-/**
- * Every field any announcement variant reads, each as `unknown`.
- *
- * The shape a candidate is viewed through before it is narrowed, so a value
- * arriving from an untyped caller is inspected without an `any` and without a
- * cast.
- */
 interface AnnouncementRecord {
   readonly kind?: unknown;
   readonly direction?: unknown;
@@ -431,12 +315,7 @@ interface AnnouncementRecord {
   readonly polarity?: unknown;
 }
 
-/**
- * Whether a value is one of the modelled kinds.
- *
- * @param value Candidate discriminant.
- * @returns Whether `value` is an `AnnouncementKind`.
- */
+/** Whether a value is one of the modelled kinds. */
 export function isAnnouncementKind(
   value: unknown,
 ): value is AnnouncementKind {
@@ -451,6 +330,19 @@ export function isAnnouncementKind(
   }
 
   return false;
+}
+
+/**
+ * Whether a kind the bound discards only as a last resort.
+ *
+ * The complement of the two kinds `indexOfEvictable` prefers: everything that
+ * is neither a gameplay kind nor free text.
+ *
+ * @param kind Kind to test.
+ * @returns Whether `kind` is protected from ordinary discarding.
+ */
+export function isProtectedAnnouncementKind(kind: AnnouncementKind): boolean {
+  return !isGameplayAnnouncementKind(kind) && kind !== 'text';
 }
 
 /**
@@ -469,12 +361,6 @@ export function isGameplayAnnouncementKind(kind: AnnouncementKind): boolean {
   return false;
 }
 
-/**
- * Narrows a value to a polarity.
- *
- * @param value Candidate polarity.
- * @returns The polarity, or `undefined` where the value is not one.
- */
 function toPolarity(value: unknown): AnnouncementPolarity | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -490,12 +376,6 @@ function toPolarity(value: unknown): AnnouncementPolarity | undefined {
   }
 }
 
-/**
- * Narrows a value to a direction.
- *
- * @param value Candidate direction.
- * @returns The direction, or `null` where the value is not one.
- */
 function toDirection(value: unknown): AnnouncedDirection | null {
   if (typeof value !== 'number') {
     return null;
@@ -515,12 +395,6 @@ function toDirection(value: unknown): AnnouncedDirection | null {
   }
 }
 
-/**
- * Narrows a value to a verdict.
- *
- * @param value Candidate verdict.
- * @returns The verdict, or `null` where the value is not one.
- */
 function toVerdict(value: unknown): TerminalVerdict | null {
   if (typeof value !== 'string') {
     return null;
@@ -538,15 +412,6 @@ function toVerdict(value: unknown): TerminalVerdict | null {
   }
 }
 
-/**
- * Narrows a value to a board coordinate.
- *
- * An absent, malformed or non-finite coordinate resolves to `undefined`. A
- * spawn on a full board therefore states no coordinate.
- *
- * @param value Candidate position.
- * @returns The position, or `undefined`.
- */
 function toPosition(value: unknown): AnnouncedPosition | undefined {
   if (value === null || typeof value !== 'object') {
     return undefined;
@@ -567,12 +432,6 @@ function toPosition(value: unknown): AnnouncedPosition | undefined {
   return Object.freeze({ x, y });
 }
 
-/**
- * Narrows a value to a charge count.
- *
- * @param value Candidate count.
- * @returns A non-negative integer, or `undefined`.
- */
 function toCharges(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     return undefined;
@@ -581,12 +440,6 @@ function toCharges(value: unknown): number | undefined {
   return value < 0 ? undefined : value;
 }
 
-/**
- * Narrows a value to a finite number.
- *
- * @param value Candidate number.
- * @returns The number, or `undefined`.
- */
 function toOptionalNumber(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined;
@@ -595,26 +448,10 @@ function toOptionalNumber(value: unknown): number | undefined {
   return value;
 }
 
-/**
- * Trims a value to a string.
- *
- * @param value Candidate text.
- * @returns The trimmed text, or an empty string where the value is not one,
- *   so neither `null` nor `undefined` is ever spoken.
- */
 function toText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-/**
- * Reads a number, reporting and replacing one that is not finite.
- *
- * @param value Candidate number.
- * @param field Field the number came from, carried into the report.
- * @param reporter Contained sink.
- * @param context Label naming the caller.
- * @returns The number, or `REPLACED_NUMBER`.
- */
 function toReportedNumber(
   value: unknown,
   field: string,
@@ -637,15 +474,6 @@ function toReportedNumber(
   return REPLACED_NUMBER;
 }
 
-/**
- * Reads a zero-based index, reporting and replacing one that is not usable.
- *
- * @param value Candidate index.
- * @param field Field the index came from, carried into the report.
- * @param reporter Contained sink.
- * @param context Label naming the caller.
- * @returns A non-negative integer.
- */
 function toReportedIndex(
   value: unknown,
   field: string,
@@ -670,13 +498,6 @@ function toReportedIndex(
   return REPLACED_NUMBER;
 }
 
-/**
- * Records a rejected announcement.
- *
- * @param reason Short machine-readable reason.
- * @param reporter Contained sink.
- * @param context Label naming the caller.
- */
 function reportRejection(
   reason: string,
   reporter: UiReporter,
@@ -694,12 +515,11 @@ function reportRejection(
  *
  * Every field is narrowed here rather than at composition, so no composed
  * utterance can contain `NaN`, `null` or `undefined`. A candidate whose
- * direction, verdict or text cannot be used is rejected outright and
- * reported; a numeric field that cannot be used is reported and replaced.
+ * direction, verdict or text cannot be used is rejected outright and reported;
+ * a numeric field that cannot be used is reported and replaced.
  *
- * @param input Candidate announcement, from a typed or an untyped caller.
- * @param reporter Contained sink.
- * @param context Label naming the caller.
+ * @param sink Report sink, contained at entry. Defaults to
+ *   `NOOP_UI_REPORTER`.
  * @returns The announcement to enqueue, or `null` where it was rejected.
  */
 export function normalizeAnnouncement(
@@ -832,58 +652,29 @@ export function normalizeAnnouncement(
   }
 }
 
-/* ==========================================================================
- * 5. Composition
- * ========================================================================== */
-
-/** Separator between the clauses of one utterance. */
 const CLAUSE_SEPARATOR = ' ';
 
-/** Separator between the merged values one utterance lists. */
 const VALUE_SEPARATOR = ', ';
 
-/** Quantity a singular noun describes. */
 const SINGULAR_COUNT = 1;
 
-/** Multiplier that renders a 0-to-1 volume as a whole-number percentage. */
 const PERCENT_SCALE = 100;
 
-/** Separator a theme id is split on to read it as prose. */
 const THEME_ID_SEPARATOR = '-';
 
 /** What one composition produced, and what it discarded producing it. */
 export interface Composition {
   /** The lines to write, in the order they are to be written. */
   readonly utterances: readonly Utterance[];
-
-  /** Gameplay items a verdict superseded. */
   readonly superseded: number;
-
-  /** Repeated consecutive utterances collapsed into their predecessor. */
   readonly collapsed: number;
-
-  /** Moves that changed nothing and were therefore composed into nothing. */
   readonly unchangedMoves: number;
 }
 
-/**
- * Chooses between a singular and a plural noun.
- *
- * @param count Quantity the noun describes.
- * @param singular Noun for one.
- * @param plural Noun for any other quantity.
- * @returns The noun to use.
- */
 function pluralize(count: number, singular: string, plural: string): string {
   return count === SINGULAR_COUNT ? singular : plural;
 }
 
-/**
- * Joins the non-empty clauses of one utterance.
- *
- * @param clauses Clauses in the order they are spoken.
- * @returns One line, or an empty string where every clause was empty.
- */
 function joinClauses(clauses: readonly string[]): string {
   const present: string[] = [];
 
@@ -896,16 +687,6 @@ function joinClauses(clauses: readonly string[]): string {
   return present.join(CLAUSE_SEPARATOR);
 }
 
-/**
- * Composes the move clause.
- *
- * Only moves that changed the board reach here. Several of them in one flush
- * are stated as a count plus the last direction rather than as one clause
- * each.
- *
- * @param moves Changed moves in the order they were announced.
- * @returns The clause, or an empty string where there were none.
- */
 function describeMoves(moves: readonly MoveAnnouncement[]): string {
   if (moves.length === 0) {
     return '';
@@ -920,15 +701,6 @@ function describeMoves(moves: readonly MoveAnnouncement[]): string {
   return `${moves.length} moves, last ${label.toLowerCase()}.`;
 }
 
-/**
- * Composes the merge clause.
- *
- * Every merge of one flush collapses into this single clause, which names the
- * count, each resulting value and the points they added together.
- *
- * @param merges Merges in the order they were announced.
- * @returns The clause, or an empty string where there were none.
- */
 function describeMerges(merges: readonly MergeAnnouncement[]): string {
   if (merges.length === 0) {
     return '';
@@ -956,12 +728,6 @@ function describeMerges(merges: readonly MergeAnnouncement[]): string {
   return `${head} Plus ${total} ${unit}.`;
 }
 
-/**
- * Composes the spawn clause, in 1-based coordinates.
- *
- * @param spawns Spawns in the order they were announced.
- * @returns The clause, or an empty string where there were none.
- */
 function describeSpawns(spawns: readonly SpawnAnnouncement[]): string {
   if (spawns.length === 0) {
     return '';
@@ -986,12 +752,6 @@ function describeSpawns(spawns: readonly SpawnAnnouncement[]): string {
   return `New ${spawn.value} at column ${column}, row ${row}.`;
 }
 
-/**
- * Composes the stage clause, in 1-based stage numbers.
- *
- * @param stages Stage ends in the order they were announced.
- * @returns The clause, or an empty string where there were none.
- */
 function describeStages(stages: readonly StageClearAnnouncement[]): string {
   if (stages.length === 0) {
     return '';
@@ -1003,12 +763,6 @@ function describeStages(stages: readonly StageClearAnnouncement[]): string {
   return stage.cleared ? `Stage ${number} cleared.` : `Stage ${number} ended.`;
 }
 
-/**
- * Composes the score clause from the last changed move of a flush.
- *
- * @param moves Changed moves in the order they were announced.
- * @returns The clause, or an empty string where there were none.
- */
 function describeScore(moves: readonly MoveAnnouncement[]): string {
   if (moves.length === 0) {
     return '';
@@ -1017,14 +771,6 @@ function describeScore(moves: readonly MoveAnnouncement[]): string {
   return `${SCORE_LABEL} ${moves[moves.length - 1].score}.`;
 }
 
-/**
- * Composes a relic-acquisition utterance.
- *
- * A blank name or a blank rarity is omitted from the line.
- *
- * @param item The relic taken.
- * @returns One line.
- */
 function describeRelic(item: RelicAcquiredAnnouncement): string {
   const name = item.name;
   const rarity = item.rarity;
@@ -1049,12 +795,6 @@ function describeRelic(item: RelicAcquiredAnnouncement): string {
   return `${head}. ${charges} ${unit}.`;
 }
 
-/**
- * Composes a verdict utterance.
- *
- * @param item The verdict.
- * @returns One line, opening with the js/html_actuator.js L129 wording.
- */
 function describeTerminal(item: TerminalAnnouncement): string {
   const verdict = TERMINAL_VERDICT_LABELS[item.verdict];
   const score = item.score;
@@ -1066,12 +806,6 @@ function describeTerminal(item: TerminalAnnouncement): string {
   return `${verdict} ${FINAL_SCORE_LABEL} ${score}.`;
 }
 
-/**
- * Drops each utterance identical to the one before it.
- *
- * @param utterances Utterances in composition order.
- * @returns The retained utterances and the number dropped.
- */
 function collapseRepeats(utterances: readonly Utterance[]): {
   readonly kept: readonly Utterance[];
   readonly collapsed: number;
@@ -1119,9 +853,6 @@ function collapseRepeats(utterances: readonly Utterance[]): {
  *    were announced.
  * 5. The verdict becomes the last line, written with `ASSERTIVE_POLARITY`.
  * 6. A line identical to the one before it is dropped and counted.
- *
- * @param items Normalised announcements in the order they were announced.
- * @returns The lines to write and the three coalescing counts.
  */
 export function composeAnnouncements(
   items: readonly Announcement[],
@@ -1228,13 +959,8 @@ export function composeAnnouncements(
   });
 }
 
-/* ==========================================================================
- * 6. Task scheduling
- * ========================================================================== */
-
 /** A scheduled task that has not run, and the means to prevent it running. */
 export interface ScheduledAnnouncerTask {
-  /** Prevents the callback running. Calling it more than once is harmless. */
   cancel(): void;
 }
 
@@ -1243,17 +969,14 @@ export type AnnouncerScheduler = (
   callback: () => void,
 ) => ScheduledAnnouncerTask;
 
-/** Delay a deferred task is scheduled with. */
 const ZERO_DELAY = 0;
 
-/** A token whose callback has already run or cannot be cancelled. */
 const NOOP_TASK: ScheduledAnnouncerTask = Object.freeze({
   cancel(): void {
     return;
   },
 });
 
-/** Returned in place of a real unsubscribe where a subscription failed. */
 const NOOP_UNSUBSCRIBE = (): void => {
   return;
 };
@@ -1263,11 +986,8 @@ const NOOP_UNSUBSCRIBE = (): void => {
  *
  * A zero-delay task where the environment supplies `setTimeout`, a microtask
  * where it supplies only `queueMicrotask`, and the caller's own stack where it
- * supplies neither. A frame callback is never used: src/render/render-loop.ts
- * owns the frame loop and this module does not reach into it.
- *
- * @param reporter Sink the absence of a scheduler is reported through.
- * @returns A scheduler that throws for nothing.
+ * supplies neither, in which case the absence is reported. A frame callback is
+ * never used: this module does not reach into the frame loop.
  */
 export function createDefaultScheduler(
   reporter: UiReporter = NOOP_UI_REPORTER,
@@ -1311,39 +1031,35 @@ export function createDefaultScheduler(
   };
 }
 
-/* ==========================================================================
- * 7. Options and the public surface
- * ========================================================================== */
-
-/** Selector of the announcer region index.html L105 declares. */
+/** Selector of the announcer region index.html declares. */
 export const DEFAULT_LIVE_REGION_SELECTOR = '#live-region';
 
-/** Class style/_a11y.scss L157-L170 hides the region with. */
+/** Class style/_a11y.scss hides the region with. */
 export const VISUALLY_HIDDEN_CLASS = 'visually-hidden';
 
 /** Announcements held before the queue bound starts discarding. */
 export const DEFAULT_MAX_QUEUED_ANNOUNCEMENTS = 32;
 
+/**
+ * How many times the queue bound the outbox may hold.
+ *
+ * One announcement can compose into more than one utterance, so the outbox
+ * needs headroom above the queue bound; it does not need an independent option.
+ */
+export const OUTBOX_CAPACITY_MULTIPLE = 2;
+
 /** `aria-atomic` value index.html L105 declares. */
 const ARIA_TRUE = 'true';
 
-/** Role each polarity is given where the markup declares no live semantics. */
 const REGION_ROLES = Object.freeze({
   polite: 'status',
   assertive: 'alert',
 } as const satisfies Readonly<Record<AnnouncementPolarity, string>>);
 
-/** Stated where a forced number-only mode arrives with no reason. */
 const UNSTATED_REASON = 'Reason not stated';
 
 /** A source of preference changes. `PreferenceStore` satisfies it. */
 export interface PreferenceAnnouncementSource {
-  /**
-   * Registers a listener and returns its unsubscribe function.
-   *
-   * @param listener Callback invoked after a preference changes.
-   * @returns Function that removes `listener`.
-   */
   subscribe(
     listener: (
       preferences: UiPreferences,
@@ -1355,23 +1071,17 @@ export interface PreferenceAnnouncementSource {
 /** What `createLiveRegionAnnouncer` accepts. Every field has a default. */
 export interface LiveRegionAnnouncerOptions {
   /**
-   * The region itself, where the caller resolved it already. This is the form
-   * src/ui/screen-router.ts uses, having resolved its whole mount set once at
-   * boot. `null` states that there is none and disables the announcer.
+   * The region itself, where the caller resolved it already. `null` states that
+   * there is none and disables the announcer.
    */
   readonly region?: Element | null;
-
-  /**
-   * Selector the region is resolved from where no element is supplied.
-   * Defaults to `DEFAULT_LIVE_REGION_SELECTOR`.
-   */
   readonly selector?: string;
 
   /**
    * A second region assertive utterances are written to. Supply it only where
-   * the markup declares a polite and an assertive region; index.html L105
-   * declares one region, so this is absent by default and both polarities are
-   * written to `region`.
+   * the markup declares a polite and an assertive region; index.html declares
+   * one region, so this is absent by default and both polarities are written
+   * to `region`.
    */
   readonly assertiveRegion?: Element | null;
 
@@ -1380,143 +1090,70 @@ export interface LiveRegionAnnouncerOptions {
    * miss is reported for a region nobody configured.
    */
   readonly assertiveSelector?: string;
-
-  /** Node the selectors are resolved against. Defaults to the document. */
   readonly root?: MountRoot | null;
-
-  /** Sink every report is made through. Defaults to `NOOP_UI_REPORTER`. */
   readonly reporter?: UiReporter;
-
-  /** Label carried into every report. Defaults to `ui.liveRegion`. */
   readonly context?: string;
 
   /**
    * Announcements the queue holds before it discards the oldest gameplay
-   * items. Defaults to `DEFAULT_MAX_QUEUED_ANNOUNCEMENTS`. A value that is
-   * not a positive integer is reported and the default is used.
+   * items. Defaults to `DEFAULT_MAX_QUEUED_ANNOUNCEMENTS`. A value that is not
+   * a positive integer is reported and the default is used.
    */
   readonly maxQueued?: number;
-
-  /**
-   * Scheduler the deferred flush and the write sequence run on. Defaults to
-   * `createDefaultScheduler`.
-   */
   readonly schedule?: AnnouncerScheduler;
 
   /**
-   * Whether a queue the caller has not flushed flushes itself on a later
-   * task. Defaults to `true`.
+   * Whether a queue the caller has not flushed flushes itself on a later task.
+   * Defaults to `true`.
    */
   readonly autoFlush?: boolean;
 
   /**
    * Renders a theme id as the prose name a preference change is announced
-   * with. Defaults to reading the id with its hyphens as spaces. src/main.ts
-   * supplies the `name` of the src/theme/themes.ts catalogue entry, the
-   * module this one does not import.
+   * with. Defaults to reading the id with its hyphens as spaces. A caller can
+   * supply the `name` of the src/theme/themes.ts catalogue entry, the module
+   * this one does not import.
    */
   readonly describeTheme?: (theme: string) => string;
 }
 
 /**
- * The announcer src/ui/screen-router.ts receives through
- * `ScreenRouterOptions` and drives.
+ * The announcer a caller holds and drives.
  *
  * No member throws, and every member is a safe no-op once the region is
  * unavailable or `destroy()` has been called.
  */
 export interface LiveRegionAnnouncer {
-  /**
-   * Enqueues one announcement. It writes nothing: composition and the DOM
-   * write happen at the next `flush()`, or on a later task where auto-flush
-   * is on.
-   *
-   * @param input The announcement.
-   */
   announce(input: Announcement): void;
-
-  /**
-   * Enqueues free text, for a screen transition, a preference change or a
-   * fallback notice.
-   *
-   * @param text Text to speak. Trimmed; an empty result is rejected.
-   * @param polarity Urgency. Defaults to `DEFAULT_POLARITY`.
-   */
   announceText(text: string, polarity?: AnnouncementPolarity): void;
-
-  /**
-   * Composes everything queued and starts writing it. The caller calls this
-   * at the `state:commit` turn boundary.
-   */
   flush(): void;
-
-  /** Empties the queue, the pending lines and the region text. */
   clear(): void;
 
-  /**
-   * Announcements queued plus lines composed and not yet written.
-   *
-   * @returns The pending depth.
-   */
+  /** Announcements queued plus lines composed and not yet written. */
   pending(): number;
 
-  /**
-   * Whether a region is available and `destroy()` has not been called.
-   *
-   * @returns Whether announcements reach a region.
-   */
+  /** Whether a region is available and `destroy()` has not been called. */
   isEnabled(): boolean;
-
-  /**
-   * Announces a preference change for as long as the returned function is
-   * uncalled. The subscription src/ui/a11y/settings.ts L1104-L1108 names.
-   *
-   * @param source Preference store to observe.
-   * @returns Function that stops the announcements.
-   */
   observePreferences(source: PreferenceAnnouncementSource): () => void;
 
   /**
-   * Cancels every scheduled task, empties the queue and the pending lines,
-   * and releases the region references. Every member is a no-op afterwards,
-   * and calling it more than once is harmless.
+   * Cancels every scheduled task, empties the queue and the pending lines, and
+   * releases the region references. Every member is a no-op afterwards, and
+   * calling it more than once is harmless.
    */
   destroy(): void;
 }
 
-/* ==========================================================================
- * 8. Region resolution, queue bound and preference copy
- * ========================================================================== */
-
-/** Where the write sequence is: idle, about to clear, or about to write. */
 type WritePhase = 'idle' | 'clear' | 'write';
 
-/** One region a resolution was asked for. */
 interface RegionRequest {
-  /** Element the caller resolved already, if any. */
   readonly supplied: Element | null | undefined;
-
-  /** Selector to resolve where no element was supplied. */
   readonly selector: string | undefined;
-
-  /** Logical name of the region, carried into every report. */
   readonly name: string;
-
-  /** Node the selector is resolved against. */
   readonly root: MountRoot | null | undefined;
-
-  /** Whether the absence of this region is worth reporting. */
   readonly required: boolean;
 }
 
-/**
- * Resolves one region without asserting and without throwing.
- *
- * @param request The region asked for.
- * @param reporter Contained sink.
- * @param context Label naming the caller.
- * @returns The region, or `null`.
- */
 function resolveRegion(
   request: RegionRequest,
   reporter: UiReporter,
@@ -1580,14 +1217,6 @@ function resolveRegion(
   return found;
 }
 
-/**
- * Records one attribute or class the markup left off and this module added.
- *
- * @param region Logical name of the region.
- * @param attribute What was added.
- * @param reporter Contained sink.
- * @param context Label naming the caller.
- */
 function reportRemediation(
   region: string,
   attribute: string,
@@ -1602,25 +1231,6 @@ function reportRemediation(
   reporter.count(REMEDIATED_METRIC, { region, attribute, context });
 }
 
-/**
- * Completes a region's semantics once, at construction.
- *
- * index.html L105 already declares `class`, `role`, `aria-live` and
- * `aria-atomic`, so on that markup this function changes nothing and reports
- * nothing. Where an attribute is absent it is added and the addition is
- * reported; where `aria-live` is already present it is left exactly as
- * declared, and it is never written again after this call.
- *
- * A `hidden` attribute is removed: an element carrying it is not in the
- * accessibility tree. No style property is assigned; the visually-hidden
- * treatment is `VISUALLY_HIDDEN_CLASS`, defined at style/_a11y.scss L168.
- *
- * @param region The region.
- * @param polarity Polarity the region serves.
- * @param name Logical name of the region.
- * @param reporter Contained sink.
- * @param context Label naming the caller.
- */
 function prepareRegion(
   region: Element,
   polarity: AnnouncementPolarity,
@@ -1667,14 +1277,6 @@ function prepareRegion(
   }
 }
 
-/**
- * Resolves the queue bound, reporting a value that cannot be used.
- *
- * @param requested Bound the caller asked for, if any.
- * @param reporter Contained sink.
- * @param context Label naming the caller.
- * @returns A positive integer.
- */
 function resolveCapacity(
   requested: number | undefined,
   reporter: UiReporter,
@@ -1699,15 +1301,22 @@ function resolveCapacity(
 }
 
 /**
- * Index of the oldest announcement the queue bound may discard.
+ * Index of the oldest announcement the queue bound discards next.
  *
- * Gameplay kinds first, then free text. A `relicAcquired` and a `terminal`
- * are never returned, so neither is ever discarded by the bound.
+ * Four tiers, in the order the semantics allow: a gameplay kind, then free
+ * text, then a `terminal` a later `terminal` already supersedes — which
+ * `composeAnnouncements` would discard anyway, since it composes the last
+ * verdict of a batch and no other — and only then the oldest remaining
+ * `relicAcquired` or `terminal`.
+ *
+ * Total for a non-empty queue: the fourth tier returns index `0`, so the
+ * bound always has a victim and `enforceCapacity` always makes progress.
+ * `NOT_FOUND` is returned for an empty queue alone.
  *
  * @param items The queue.
- * @returns The index, or `NOT_FOUND` where nothing may be discarded.
+ * @returns The index, or `NOT_FOUND` for an empty queue.
  */
-function indexOfDroppable(items: readonly Announcement[]): number {
+function indexOfEvictable(items: readonly Announcement[]): number {
   for (let index = 0; index < items.length; index += 1) {
     if (isGameplayAnnouncementKind(items[index].kind)) {
       return index;
@@ -1720,25 +1329,41 @@ function indexOfDroppable(items: readonly Announcement[]): number {
     }
   }
 
-  return NOT_FOUND;
+  const lastVerdict = lastIndexOfKind(items, 'terminal');
+
+  for (let index = 0; index < lastVerdict; index += 1) {
+    if (items[index].kind === 'terminal') {
+      return index;
+    }
+  }
+
+  return items.length > 0 ? 0 : NOT_FOUND;
 }
 
 /**
- * Reads a theme id as prose.
+ * Index of the last announcement of one kind.
  *
- * @param theme The id.
- * @returns The id with each hyphen read as a space.
+ * @param items The queue.
+ * @param kind Kind to look for.
+ * @returns The index, or `NOT_FOUND` where the queue holds none.
  */
+function lastIndexOfKind(
+  items: readonly Announcement[],
+  kind: AnnouncementKind,
+): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index].kind === kind) {
+      return index;
+    }
+  }
+
+  return NOT_FOUND;
+}
+
 function humanizeThemeId(theme: string): string {
   return theme.split(THEME_ID_SEPARATOR).join(CLAUSE_SEPARATOR);
 }
 
-/**
- * Renders a 0-to-1 volume as a whole-number percentage.
- *
- * @param volume The volume.
- * @returns A percentage.
- */
 function describeVolume(volume: number): number {
   if (!Number.isFinite(volume)) {
     return 0;
@@ -1747,12 +1372,6 @@ function describeVolume(volume: number): number {
   return Math.round(volume * PERCENT_SCALE);
 }
 
-/**
- * Builds a polite free-text announcement.
- *
- * @param text The text.
- * @returns The announcement.
- */
 function politeText(text: string): TextAnnouncement {
   return Object.freeze({
     kind: 'text',
@@ -1761,17 +1380,6 @@ function politeText(text: string): TextAnnouncement {
   } as const);
 }
 
-/**
- * Composes the announcement for one changed preference.
- *
- * A forced number-only mode is the one preference written with
- * `ASSERTIVE_POLARITY`; every other change is polite.
- *
- * @param key Preference that changed.
- * @param preferences Snapshot that now holds.
- * @param describeTheme Renders a theme id as prose.
- * @returns The announcement, or `null` where the key is not modelled.
- */
 function describePreferenceChange(
   key: PreferenceKey,
   preferences: UiPreferences,
@@ -1826,19 +1434,12 @@ function describePreferenceChange(
   }
 }
 
-/* ==========================================================================
- * 9. The announcer
- * ========================================================================== */
-
 /**
  * Builds the announcer.
  *
  * The region is resolved once here and held. Where it cannot be resolved the
  * miss is reported with the selector that produced it and every member of the
  * returned announcer becomes a safe no-op.
- *
- * @param options Region, sink, queue bound, scheduler and copy hooks.
- * @returns An announcer no member of which throws.
  */
 export function createLiveRegionAnnouncer(
   options: LiveRegionAnnouncerOptions = {},
@@ -1851,6 +1452,11 @@ export function createLiveRegionAnnouncer(
   const schedule = settings.schedule ?? createDefaultScheduler(reporter);
   const autoFlush = settings.autoFlush !== false;
   const capacity = resolveCapacity(settings.maxQueued, reporter, context);
+
+  // Derived from the queue bound rather than configured separately, so one
+  // option governs the whole pipeline. A composition can emit more than one
+  // utterance per announcement, hence the multiple.
+  const outboxCapacity = capacity * OUTBOX_CAPACITY_MULTIPLE;
   const describeTheme = settings.describeTheme ?? humanizeThemeId;
   const politeSelector = settings.selector ?? DEFAULT_LIVE_REGION_SELECTOR;
 
@@ -1885,6 +1491,16 @@ export function createLiveRegionAnnouncer(
     prepareRegion(assertiveRegion, 'assertive', 'assertive', reporter, context);
   }
 
+  /**
+   * Whether THIS module created `assertiveRegion`, and must therefore remove it
+   * again on destruction. An assertive region the markup declares is left in
+   * place, exactly as the polite one is.
+   */
+  let ownsAssertiveRegion = false;
+
+  /** Whether the downgrade below was reported, so it is said exactly once. */
+  let reportedAssertiveDowngrade = false;
+
   const queue: Announcement[] = [];
   const outbox: Utterance[] = [];
   let destroyed = false;
@@ -1894,11 +1510,6 @@ export function createLiveRegionAnnouncer(
   let writePending = false;
   let writeTask: ScheduledAnnouncerTask | null = null;
 
-  /**
-   * Whether announcements can reach a region at all.
-   *
-   * @returns Whether the announcer is a no-op.
-   */
   function disabled(): boolean {
     return destroyed || (politeRegion === null && assertiveRegion === null);
   }
@@ -1906,28 +1517,112 @@ export function createLiveRegionAnnouncer(
   /**
    * The region a polarity is written to.
    *
-   * Where the markup declares one region, as index.html L105 does, both
-   * polarities resolve to it and its `aria-live` attribute is left alone.
+   * Where the markup declares one region, as index.html does, both polarities
+   * resolve to it and its `aria-live` attribute is left alone.
    *
-   * @param polarity Polarity to route.
    * @returns The region, or `null`.
    */
   function regionFor(polarity: AnnouncementPolarity): Element | null {
-    if (polarity === 'assertive' && assertiveRegion !== null) {
+    if (polarity !== 'assertive') {
+      return politeRegion ?? assertiveRegion;
+    }
+
+    if (assertiveRegion !== null) {
       return assertiveRegion;
     }
 
-    return politeRegion ?? assertiveRegion;
+    // Created on first assertive use rather than eagerly, so a run that never
+    // announces assertively adds nothing to the document.
+    if (createAssertiveRegion()) {
+      return assertiveRegion;
+    }
+
+    reportAssertiveDowngrade();
+
+    return politeRegion;
   }
 
   /**
-   * Writes one string to the region a polarity routes to.
+   * Creates an owned assertive region beside the polite one.
    *
-   * @param polarity Polarity to route.
-   * @param text Text to write. An empty string is the clear half of the
-   *   clear-then-write sequence.
-   * @returns Whether the write landed.
+   * A polite `role="status"` region does not interrupt, so routing an assertive
+   * request into it is not an assertive announcement. The markup declares only
+   * the polite region, so the assertive one is built here, given
+   * `role="alert"`, `aria-live="assertive"` and the same visually-hidden
+   * treatment, and inserted next to its polite sibling.
+   *
+   * @returns Whether an assertive region is now in place.
    */
+  function createAssertiveRegion(): boolean {
+    const sibling = politeRegion;
+
+    if (sibling === null) {
+      return false;
+    }
+
+    const doc = sibling.ownerDocument;
+    const parent = sibling.parentNode;
+
+    if (doc === null || parent === null) {
+      return false;
+    }
+
+    try {
+      const created = doc.createElement('div');
+
+      created.className = VISUALLY_HIDDEN_CLASS;
+      created.setAttribute('role', REGION_ROLES.assertive);
+      created.setAttribute('aria-live', 'assertive');
+      created.setAttribute('aria-atomic', ARIA_TRUE);
+
+      // Beside the polite region, so both live regions sit in the same place in
+      // the document and neither is nested inside the other.
+      parent.insertBefore(created, sibling.nextSibling);
+
+      assertiveRegion = created;
+      ownsAssertiveRegion = true;
+
+      reporter.count(ASSERTIVE_CREATED_METRIC, { context });
+      reporter.log('debug', 'live region created an assertive region', {
+        context,
+      });
+
+      return true;
+    } catch (error: unknown) {
+      reporter.error(
+        'live region could not create an assertive region',
+        error,
+        { context },
+      );
+
+      return false;
+    }
+  }
+
+  /**
+   * Reports, once, that an assertive request is being served politely.
+   *
+   * Stated rather than silent: a caller asking for an assertive announcement
+   * and receiving a polite one has had its request downgraded, and that is a
+   * behavioural difference an operator needs to be able to see.
+   */
+  function reportAssertiveDowngrade(): void {
+    reporter.count(ASSERTIVE_DOWNGRADE_METRIC, { context });
+
+    if (reportedAssertiveDowngrade) {
+      return;
+    }
+
+    reportedAssertiveDowngrade = true;
+
+    reporter.log(
+      'warn',
+      'an assertive announcement is being made politely, because no ' +
+        'assertive region is available and one could not be created',
+      { context },
+    );
+  }
+
   function writeText(polarity: AnnouncementPolarity, text: string): boolean {
     const region = regionFor(polarity);
 
@@ -1952,12 +1647,6 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /**
-   * Schedules a callback, running it inline where the scheduler refuses.
-   *
-   * @param callback Work to defer.
-   * @returns The task token.
-   */
   function deferTask(callback: () => void): ScheduledAnnouncerTask {
     try {
       return schedule(callback);
@@ -1972,7 +1661,6 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /** Cancels a scheduled flush, if there is one. */
   function cancelFlush(): void {
     const task = flushTask;
 
@@ -1992,7 +1680,6 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /** Cancels a scheduled write step, if there is one. */
   function cancelWrite(): void {
     const task = writeTask;
 
@@ -2012,7 +1699,6 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /** Schedules the next step of the write sequence. */
   function scheduleWriteStep(): void {
     if (writePending) {
       return;
@@ -2033,12 +1719,6 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /**
-   * Runs one step of the write sequence: a clear, or one utterance.
-   *
-   * The clear and the write occupy separate tasks: the region is emptied in
-   * one task and the utterance is written in the next.
-   */
   function runWriteStep(): void {
     if (destroyed || outbox.length === 0) {
       phase = 'idle';
@@ -2087,7 +1767,6 @@ export function createLiveRegionAnnouncer(
     runWriteStep();
   }
 
-  /** Schedules a flush of an unflushed queue. */
   function scheduleFlush(): void {
     if (!autoFlush || flushPending || queue.length === 0) {
       return;
@@ -2106,19 +1785,28 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /** Brings the queue back within its bound, reporting what it discarded. */
   function enforceCapacity(): void {
     if (queue.length <= capacity) {
       return;
     }
 
     let dropped = 0;
+    let droppedProtected = 0;
 
     while (queue.length > capacity) {
-      const index = indexOfDroppable(queue);
+      const index = indexOfEvictable(queue);
 
       if (index === NOT_FOUND) {
         break;
+      }
+
+      const discarded = queue[index];
+
+      if (
+        discarded !== undefined &&
+        isProtectedAnnouncementKind(discarded.kind)
+      ) {
+        droppedProtected += 1;
       }
 
       queue.splice(index, 1);
@@ -2128,18 +1816,58 @@ export function createLiveRegionAnnouncer(
     if (dropped > 0) {
       reporter.log('warn', 'live region discarded queued announcements', {
         dropped,
+        protected: droppedProtected,
         capacity,
         context,
       });
-      reporter.count(DROPPED_METRIC, { dropped, capacity, context });
+      reporter.count(DROPPED_METRIC, {
+        dropped,
+        protected: droppedProtected,
+        capacity,
+        context,
+      });
+    }
+
+    // Counted separately: discarding a terminal state or a relic pickup is the
+    // bound's last resort, worth distinguishing from ordinary pressure.
+    if (droppedProtected > 0) {
+      reporter.count(DROPPED_PROTECTED_METRIC, {
+        droppedProtected,
+        capacity,
+        context,
+      });
     }
   }
 
   /**
-   * Enqueues one announcement.
+   * Brings the outbox back within its bound.
    *
-   * @param input The announcement.
+   * Composed utterances were pushed with no ceiling, so a burst that outran the
+   * write cadence grew the outbox without limit. The OLDEST are discarded: an
+   * utterance still waiting behind a long backlog is stale by the time it would
+   * be spoken, and the newest state is the one worth announcing.
    */
+  function enforceOutboxCapacity(): void {
+    if (outbox.length <= outboxCapacity) {
+      return;
+    }
+
+    const dropped = outbox.length - outboxCapacity;
+
+    outbox.splice(0, dropped);
+
+    reporter.log('warn', 'live region discarded pending utterances', {
+      dropped,
+      capacity: outboxCapacity,
+      context,
+    });
+    reporter.count(OUTBOX_DROPPED_METRIC, {
+      dropped,
+      capacity: outboxCapacity,
+      context,
+    });
+  }
+
   function announce(input: Announcement): void {
     if (destroyed) {
       reporter.count(AFTER_DESTROY_METRIC, { method: 'announce' });
@@ -2165,12 +1893,6 @@ export function createLiveRegionAnnouncer(
     scheduleFlush();
   }
 
-  /**
-   * Enqueues free text.
-   *
-   * @param text Text to speak.
-   * @param polarity Urgency. Defaults to `DEFAULT_POLARITY`.
-   */
   function announceText(
     text: string,
     polarity?: AnnouncementPolarity,
@@ -2178,7 +1900,6 @@ export function createLiveRegionAnnouncer(
     announce({ kind: 'text', text, polarity });
   }
 
-  /** Composes everything queued and starts writing it. */
   function flush(): void {
     cancelFlush();
 
@@ -2218,10 +1939,10 @@ export function createLiveRegionAnnouncer(
       outbox.push(utterance);
     }
 
+    enforceOutboxCapacity();
     driveWrites();
   }
 
-  /** Empties the queue, the pending lines and the region text. */
   function clear(): void {
     cancelFlush();
     cancelWrite();
@@ -2238,30 +1959,14 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /**
-   * The pending depth.
-   *
-   * @returns Announcements queued plus lines composed and not yet written.
-   */
   function pending(): number {
     return queue.length + outbox.length;
   }
 
-  /**
-   * Whether announcements reach a region.
-   *
-   * @returns Whether the announcer is live.
-   */
   function isEnabled(): boolean {
     return !disabled();
   }
 
-  /**
-   * Announces one preference snapshot's changed keys.
-   *
-   * @param preferences Snapshot that now holds.
-   * @param changed Keys that changed.
-   */
   function announcePreferences(
     preferences: UiPreferences,
     changed: readonly PreferenceKey[],
@@ -2286,12 +1991,6 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /**
-   * Announces preference changes until the returned function is called.
-   *
-   * @param source Preference store to observe.
-   * @returns Function that stops the announcements.
-   */
   function observePreferences(
     source: PreferenceAnnouncementSource,
   ): () => void {
@@ -2360,7 +2059,6 @@ export function createLiveRegionAnnouncer(
     };
   }
 
-  /** Cancels every task, empties every buffer and releases the regions. */
   function destroy(): void {
     if (destroyed) {
       return;
@@ -2372,6 +2070,14 @@ export function createLiveRegionAnnouncer(
     phase = 'idle';
     queue.length = 0;
     outbox.length = 0;
+
+    // Removed only where this module created it: a region the markup declares
+    // outlives the announcer, exactly as the polite one does.
+    if (ownsAssertiveRegion && assertiveRegion !== null) {
+      assertiveRegion.remove();
+    }
+
+    ownsAssertiveRegion = false;
     politeRegion = null;
     assertiveRegion = null;
     reporter.count(DESTROYED_METRIC, { context });

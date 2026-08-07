@@ -6,10 +6,10 @@
  * serialisable data rather than writing anything onto the global object, so the
  * health surface can report it and a caller can fall back to the number-only
  * renderer. It is the sixth capability check in the product and the first that
- * is reported; src/observability/health.ts reads it directly. Its result is held
- * after the first call; `resetWebGLSupportProbe()` discards it. Every DOM read
- * is guarded, and the probe canvas is created, read, released and discarded
- * without ever being appended.
+ * is reported. Its result is held after the first call;
+ * `resetWebGLSupportProbe()` discards it. Every DOM read is guarded, and the
+ * probe canvas is created, read, released and discarded without ever being
+ * appended.
  *
  * The probe requests no extension that carries an identifier — only
  * `WEBGL_lose_context`, to release its own context — so no renderer or vendor
@@ -20,13 +20,11 @@
  * src/render/ imports src/observability/: reports leave through the injected
  * reporter, and a reporter that throws is contained at the point of delivery.
  * This module imports nothing and is the leaf of the src/render/ import graph.
- * The module boundaries are drawn as Figure 2, "To-Be Architecture:
- * Event-Driven Engine with Subscribed Renderer and Hook Bus", in
- * docs/architecture/ARCHITECTURE.md.
  *
  * The reduced-motion surface self-detects through `matchMedia` and accepts an
- * explicit override; consumers gate the camera and particle effects on it.
- * src/ui/a11y/settings.ts drives that override; this module does not import it.
+ * explicit override; consumers gate the camera and particle effects on it. A
+ * caller drives that override, so an accessibility preference reaches this
+ * module without it importing src/ui/.
  */
 
 /* ==========================================================================
@@ -74,6 +72,19 @@ export interface RenderDiagnostic {
 
   /** The caught value, present only on records that report one. */
   readonly error?: RenderErrorInfo;
+
+  /**
+   * The caught value ITSELF, unconverted, present on records that report
+   * one and are able to carry it.
+   *
+   * `error` above is a bounded two-field summary, which is what a console
+   * sink or a `RenderDetail` can hold; it cannot hold an `Error`'s `stack`,
+   * its `cause` chain, or the structure of a thrown object. This member
+   * carries the value as caught so a sink that can keep more of it — the
+   * logger-backed adapter, whose `serializeError` reads all three — is not
+   * limited by what the summary kept.
+   */
+  readonly thrown?: unknown;
 }
 
 /** One increment of a named counter. */
@@ -217,7 +228,7 @@ export function createGuardedRenderReporter(
  * `0` for a sink that never throws. A non-zero value means reports have
  * been lost and the sink is faulty; it is read out of band, because a
  * contained throw is deliberately not reported through the sink that
- * produced it. src/observability/diagnostics-overlay.ts renders it.
+ * produced it.
  *
  * @returns The count, across every guarded reporter in this process.
  */
@@ -225,9 +236,7 @@ export function readContainedReporterThrows(): number {
   return containedReporterThrows;
 }
 
-/**
- * Resets the contained-throw count. Present for suites that assert on it.
- */
+/** Resets the contained-throw count. Present for suites that assert on it. */
 export function resetContainedReporterThrows(): void {
   containedReporterThrows = 0;
 }
@@ -324,15 +333,27 @@ function safeText(value: unknown): string {
  * Reduces a caught value of any type to serialisable fields, so a
  * report carries it rather than discarding it.
  *
+ * THE RENDER LAYER'S ONLY SUCH REDUCTION, and the reason it is exported:
+ * every module under src/render/ that reports a caught value calls this
+ * one, rather than writing a serialiser of its own. Two of them did, and
+ * both read `error.name`, `error.message` and `String(error)` without
+ * guarding them, so a hostile getter or a throwing `toString` replaced the
+ * failure being reported with a second one.
+ *
  * Total: it accepts any value, including a `Proxy` whose traps throw and
  * an object whose `toString` throws, returns on every path, and throws
  * on none. Both fields are capped at `MAX_ERROR_TEXT_LENGTH`.
+ *
+ * A report that needs the value itself — its `stack`, its `cause` chain, a
+ * non-`Error` throwable's own structure — carries it on
+ * `RenderDiagnostic.thrown` instead, where the observability layer's
+ * serialiser reads it.
  *
  * @param error Caught value, of any type, including `null` and
  *   `undefined`.
  * @returns Frozen name and message fields.
  */
-function describeError(error: unknown): RenderErrorInfo {
+export function describeRenderError(error: unknown): RenderErrorInfo {
   if (error instanceof Error) {
     // An Error subclass can define `name` and `message` as throwing
     // accessors, so both are read through the contained reader.
@@ -362,6 +383,12 @@ function describeError(error: unknown): RenderErrorInfo {
   return Object.freeze(info);
 }
 
+/**
+ * This module's own name for `describeRenderError`, so its internal call
+ * sites read as they did before the reduction was exported.
+ */
+const describeError = describeRenderError;
+
 /* ==========================================================================
  * 2. WebGL capability probe — the sixth capability check
  * ========================================================================== */
@@ -386,9 +413,8 @@ export type WebGLProbeFailure =
  * Outcome of `probeWebGLSupport()`.
  *
  * A frozen plain object of JSON scalars: no class instance, no live
- * context handle, no closure. `JSON.stringify()` round-trips it.
- * src/observability/health.ts reports it as a health check and
- * src/observability/metrics.ts exports it in a snapshot.
+ * context handle, no closure. `JSON.stringify()` round-trips it, so a
+ * health or metrics surface can carry it verbatim.
  *
  * It carries no timestamp. Probe duration is reported through
  * `RenderReporter.onTiming`. Two probes of one environment therefore
@@ -758,9 +784,8 @@ function describeSupport(result: WebGLSupportResult): RenderDiagnostic {
  * which level, why not, and how the probe context was released.
  *
  * The result is held after the first call and returned unchanged to
- * every later caller. src/main.ts, src/observability/health.ts and
- * src/observability/diagnostics-overlay.ts therefore share the single
- * canvas and single context of that first call. Reports are emitted on
+ * every later caller, so every caller shares the single canvas and
+ * single context of that first call. Reports are emitted on
  * the call that performs the probe; a call answered from the held result
  * emits none.
  *
@@ -1149,6 +1174,7 @@ function dispatchMotionPreference(): void {
         message: 'A reduced-motion listener threw and was isolated.',
         detail,
         error: describeError(error),
+        thrown: error,
       });
     }
   }
@@ -1186,7 +1212,6 @@ function releaseMotionQueryListener(): void {
  * Forces the reduced-motion preference on or off regardless of the
  * operating-system setting, or restores following it.
  *
- * src/ui/a11y/settings.ts calls this from the accessibility surface.
  * Live subscriptions are notified when the effective value changes.
  *
  * @param reduced `true` or `false` to force the value; `null` to follow
@@ -1349,6 +1374,7 @@ function invokeLossHandler(
       message: `The ${handler} handler threw and was isolated.`,
       detail,
       error: describeError(error),
+      thrown: error,
     });
   }
 }
@@ -1362,10 +1388,9 @@ function invokeLossHandler(
  * `webglcontextrestored`, so the listener performs it before anything
  * else and before either caller-supplied handler runs.
  *
- * Both transitions are reported through `reporter`;
- * src/observability/diagnostics-overlay.ts renders them. A
- * caller-supplied handler that throws is reported and contained; the
- * other handler and the listeners themselves are unaffected.
+ * Both transitions are reported through `reporter`. A caller-supplied
+ * handler that throws is reported and contained; the other handler and
+ * the listeners themselves are unaffected.
  *
  * @param canvas Canvas whose context is observed. A value carrying
  *   neither listener operation is reported and attaches nothing.
@@ -1446,4 +1471,3 @@ export function attachContextLossHandlers(
     canvas.removeEventListener(CONTEXT_RESTORED_EVENT, onContextRestored);
   };
 }
-

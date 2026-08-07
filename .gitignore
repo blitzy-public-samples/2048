@@ -1,4 +1,4 @@
-# Generated output only. Each directory name below mirrors a path declared in
+# Generated output only. Each directory below mirrors a path declared in
 # vite.config.ts, vitest.config.ts, vitest.snapshot.config.ts or
 # playwright.config.ts.
 
@@ -8,20 +8,17 @@
 # Dependencies
 node_modules/
 
-# Static production bundle — `build.outDir` in vite.config.ts
+# Static production bundle
 dist/
 
-# Coverage reports — `coverage.reportsDirectory` in vitest.config.ts and in
-# vitest.snapshot.config.ts, which both name this one directory
+# Coverage reports
 coverage/
 
-# Playwright per-test output — `outputDir` in playwright.config.ts. The
-# recorded-gameplay video is written to test-results/<test>/video.webm, so this
-# entry already covers it and no separate video entry is added.
+# Playwright per-test output. The recorded-gameplay video is written to
+# test-results/<test>/video.webm, so this entry covers it.
 test-results/
 
-# Playwright HTML report — the `html` reporter's `outputFolder` in
-# playwright.config.ts
+# Playwright HTML report
 playwright-report/
 
 # Local browser-automation artifacts

@@ -1,25 +1,30 @@
 // One focusable, tappable control per bindable action, and the only module in
 // src/input/ that binds an element to an action.
 //
-// Ported from js/keyboard_input_manager.js, which is deleted:
-//   L71-L74    the three control bindings — `.retry-button` and
-//              `.restart-button` to `restart`, `.keep-playing-button` to
-//              `keepPlaying`, in that order
-//   L140-L144  `bindButtonPress` — the selector lookup at L141, the `'click'`
-//              listener at L142 and the resolved touch-end listener at L143
+// Ported from js/keyboard_input_manager.js, which is deleted: the three control
+// bindings — `.retry-button` and `.restart-button` to `restart`,
+// `.keep-playing-button` to `keepPlaying`, in that order — and
+// `bindButtonPress`, its selector lookup, its `'click'` listener and its
+// resolved touch-end listener.
 //
 // Retained from that port: `bindButtonPress` binds BOTH `'click'` and the
-// resolved touch-end event to one handler, so a tap can dispatch twice
-// (L142-L143). Noted, not fixed.
+// resolved touch-end event to one handler, so a tap can dispatch twice. Noted,
+// not fixed.
 //
-// Changed against that port, each recorded in docs/DECISION_LOG.md:
-//   - the L141 lookup is null-checked, reported and skipped
+// Changed against that port:
+//   - the lookup is null-checked, reported and skipped
 //   - a control the markup leaves unfocusable or unnamed is promoted, and the
 //     promotion is reported
-//   - `fn.bind(this)` at L142-L143 is a lexically scoped handler;
-//     js/bind_polyfill.js is deleted
+//   - `fn.bind(this)` becomes a lexically scoped handler; js/bind_polyfill.js
+//     is deleted
 //   - every action of `INPUT_ACTIONS` also gets a generated `<button>`, so the
 //     eleven actions the markup declares no control for are reachable too
+//   - the three L72-L74 controls carry `InputContext` availability like every
+//     generated one: unavailable, each leaves the accessibility tree and the
+//     tab order and publishes nothing. `MarkupControlBinding.contexts` is what
+//     a markup control declares when the markup places it somewhere its
+//     action's key is not bound, as `.retry-button` sits inside the terminal
+//     overlay
 //
 // Imports are limited to ./keymap, ./touch-input and ./input-manager. This
 // module reads no storage and declares no visual value: every colour, length,
@@ -48,67 +53,45 @@ import {
   isMoveAction,
   listBindings,
 } from './keymap';
+import {
+  REDUCED_MOTION_ATTRIBUTE,
+  readReflectedReducedMotion,
+} from '../ui/a11y/settings';
 import type { PointerEventFamily } from './touch-input';
 import { detectPointerEventFamily } from './touch-input';
 import type { InputEmitter, InputModality } from './input-manager';
 
-/* ==========================================================================
- * 1. Report names
- * ========================================================================== */
-
-/** Counter raised once per completed mount, carrying the control count. */
 const MOUNTED_METRIC = 'input.onScreen.mounted';
 
-/** Counter raised once per unmount. */
 const UNMOUNTED_METRIC = 'input.onScreen.unmounted';
 
-/** Counter raised when the mount host cannot be resolved. */
 const HOST_MISSING_METRIC = 'input.onScreen.host.missing';
 
-/** Counter raised when a control's selector resolves to nothing. */
 const CONTROL_MISSING_METRIC = 'input.onScreen.control.missing';
 
-/** Counter raised when a selector is not one the engine can parse. */
 const SELECTOR_INVALID_METRIC = 'input.onScreen.selector.invalid';
 
-/** Counter raised once per control whose semantics had to be repaired. */
 const REMEDIATED_METRIC = 'input.onScreen.control.remediated';
 
-/** Counter raised once per action published from this layer. */
 const ACTION_METRIC = 'input.onScreen.action';
 
-/** Counter raised when an unavailable control was nonetheless activated. */
 const UNAVAILABLE_METRIC = 'input.onScreen.rejected.unavailable';
 
-/** Counter raised when an activation handler threw. */
 const HANDLER_ERROR_METRIC = 'input.onScreen.handler.error';
 
-/** Counter raised once per context change applied to the controls. */
 const CONTEXT_METRIC = 'input.onScreen.context.changed';
 
-/** Counter raised once per keymap change applied to the controls. */
 const KEYMAP_METRIC = 'input.onScreen.keymap.applied';
 
-/** Counter carrying the resolved reduced-motion preference. */
 const REDUCED_MOTION_METRIC = 'input.onScreen.reducedMotion';
 
-/** Counter raised when an `indexes` entry names an unsupported action. */
 const INDEX_REJECTED_METRIC = 'input.onScreen.index.rejected';
 
-/** Counter raised when a listener could not be bound. */
 const BIND_FAILED_METRIC = 'input.onScreen.bind.failed';
 
-/** Span covering one activation, from the event to the published action. */
 const ACTIVATE_SPAN = 'input.onScreen.activate';
 
-/** Span covering one mount. */
 const MOUNT_SPAN = 'input.onScreen.mount';
-
-/** `errorName` reported for a caught value that carries none. */
-const UNKNOWN_ERROR_NAME = 'OnScreenControlsError';
-
-/** `errorMessage` reported for a caught value that carries none. */
-const UNKNOWN_ERROR_MESSAGE = 'Unknown on-screen control error.';
 
 /* ==========================================================================
  * 2. Contract
@@ -122,31 +105,10 @@ export type UnmountOnScreenControls = () => void;
 
 /** What `bindButtonPress` binds, and what it reports through. */
 export interface BindButtonPressOptions {
-  /**
-   * Node a selector is resolved against. Defaults to `ownerDocument`, and
-   * then to the ambient `document`.
-   */
   readonly root?: ParentNode;
-
-  /**
-   * Document a selector is resolved against when no `root` is given.
-   * Defaults to the ambient `document`.
-   */
   readonly ownerDocument?: Document;
-
-  /** Sink for the counters and logs raised. Defaults to `NOOP_REPORTER`. */
   readonly reporter?: InputReporter;
-
-  /**
-   * Pointer event family whose touch-end name is bound. Defaults to the
-   * result of `detectPointerEventFamily()`.
-   */
   readonly family?: PointerEventFamily;
-
-  /**
-   * Action the binding serves. Reported alongside the selector, so a failed
-   * lookup names both.
-   */
   readonly action?: string;
 
   /**
@@ -155,12 +117,6 @@ export interface BindButtonPressOptions {
    * report still names that selector.
    */
   readonly reportedAs?: string;
-
-  /**
-   * Whether the resolved touch-end event is bound alongside `'click'`.
-   * Defaults to `true`, which is the pair js/keyboard_input_manager.js
-   * L142-L143 bound.
-   */
   readonly bindTouchEnd?: boolean;
 }
 
@@ -174,118 +130,67 @@ export interface BindButtonPressOptions {
  * stays in one place.
  */
 export interface OnScreenControlHost extends InputEmitter {
-  /**
-   * Publishes `'restart'`, cancelling the event's default action first.
-   *
-   * @param event Event to cancel the default action of.
-   */
   restart(event?: Event): void;
-
-  /**
-   * Publishes `'keepPlaying'`, cancelling the event's default action first.
-   *
-   * @param event Event to cancel the default action of.
-   */
   keepPlaying(event?: Event): void;
-
-  /**
-   * Publishes `'move'` carrying the bare numeric direction.
-   *
-   * @param direction Direction to publish.
-   * @param modality How the move arrived.
-   * @returns How many callbacks were invoked.
-   */
   emitMove(direction: Direction, modality?: InputModality): number;
-
-  /**
-   * The table accessible names are derived from, when the caller names none.
-   *
-   * @returns The active table.
-   */
   getKeymap?(): Keymap;
-
-  /**
-   * The context control availability is derived from, when the caller names
-   * none.
-   *
-   * @returns The active context.
-   */
   context?(): InputContext;
 }
 
 /** One control the markup declares, and the action it publishes. */
 export interface MarkupControlBinding {
-  /** Selector the control is looked up by. */
   readonly selector: string;
-
-  /** Action a pointer activation on it publishes. */
   readonly action: InputAction;
+
+  /**
+   * Contexts this control is available in. Defaults to the contexts the
+   * action's binding lists, so a markup control carries the availability of
+   * the action it publishes unless the markup places it somewhere the key is
+   * not bound: `.retry-button` sits inside the terminal overlay and is
+   * declared for `'overlay'` as well as `'game'` below, while the `r` key
+   * remains bound in `'game'` alone.
+   */
+  readonly contexts?: readonly InputContext[];
 }
 
 /** One control this layer owns, generated or promoted. */
 export interface OnScreenControl {
-  /** Action the control publishes. */
   readonly action: InputAction;
-
-  /** Index the action's payload carries. `0` for a payload-free action. */
   readonly index: number;
-
-  /** The bound element. */
   readonly element: Element;
-
-  /** Whether the element was created here rather than declared in markup. */
   readonly generated: boolean;
 }
 
 /** Construction parameters. Only `host` is required. */
 export interface OnScreenControlsOptions {
-  /** Manager the controls publish through. */
   readonly host: OnScreenControlHost;
-
-  /**
-   * Element the generated controls are appended to, or a selector to look one
-   * up by. Defaults to `DEFAULT_ON_SCREEN_HOST_SELECTOR`.
-   */
   readonly mount?: Element | string;
-
-  /**
-   * Document every selector is resolved against, and every generated element
-   * created by. Defaults to the mount element's own document, and then to the
-   * ambient `document`.
-   */
   readonly ownerDocument?: Document;
-
-  /**
-   * Sink for the counters, logs and spans raised. Defaults to
-   * `NOOP_REPORTER`.
-   */
   readonly reporter?: InputReporter;
-
-  /**
-   * Pointer event family the ported binding uses. Defaults to the result of
-   * `detectPointerEventFamily()`.
-   */
   readonly family?: PointerEventFamily;
-
-  /**
-   * Table accessible names are derived from. A function is consulted on every
-   * refresh. Omitted, the table is read from `host.getKeymap()`, and then from
-   * `DEFAULT_KEY_BINDINGS`.
-   */
   readonly keymap?: Keymap | (() => Keymap);
-
-  /**
-   * Context control availability is derived from. A function is consulted on
-   * every refresh. Omitted, the context is read from `host.context()`, and
-   * then defaults to `'game'`.
-   */
   readonly context?: InputContext | (() => InputContext);
+  readonly view?: Window;
 
   /**
-   * Window the reduced-motion preference is read from. Defaults to the
-   * document's own view, and then to the ambient `window`.
+   * Element the effective reduced-motion value is read from, in the attribute
+   * `src/ui/a11y/settings.ts` reflects it into.
+   *
+   * Consulted ahead of the media query, so an explicit `'reduce'` or `'allow'`
+   * setting reaches these controls and not only the operating system's answer.
+   * Defaults to the owner document's `documentElement`.
    */
-  readonly view?: Window;
+  readonly motionRoot?: Element | null;
+
+  /**
+   * Effective reduced-motion value to hold regardless of the reflected
+   * attribute or the media query.
+   *
+   * Supplied where the caller already owns the preference; `setReducedMotion()`
+   * replaces it later. Absent, the resolution order is the reflected attribute
+   * and then the media query.
+   */
+  readonly reducedMotion?: boolean;
 
   /**
    * Payload indices to generate a control for, per action. Honoured for the
@@ -300,7 +205,7 @@ export interface OnScreenControlsOptions {
    * promoted where the markup leaves it unfocusable or unnamed. Defaults to
    * `LEGACY_CONTROL_BINDINGS`, the three of js/keyboard_input_manager.js
    * L72-L74. A caller that declares a further control in markup — the
-   * `.settings-button` of index.html L37, say — passes an extended list here
+   * `.settings-button` of index.html, say — passes an extended list here
    * rather than binding the element itself.
    */
   readonly markupControls?: readonly MarkupControlBinding[];
@@ -313,40 +218,35 @@ export interface OnScreenControlsHandle {
 
   /** Every control bound, generated and promoted, in creation order. */
   readonly controls: readonly OnScreenControl[];
-
-  /** How many controls had their semantics repaired. */
   readonly remediated: number;
 
   /**
    * Replaces the context control availability is derived from, and reapplies
    * it. A control whose action is inactive in the new context leaves both the
    * accessibility tree and the tab order.
-   *
-   * @param context Context to derive availability from.
    */
   setContext(context: InputContext): void;
+  setKeymap(keymap: Keymap): void;
 
   /**
-   * Replaces the table accessible names are derived from, and reapplies them,
-   * so a name states the key currently bound rather than the default.
+   * Holds an effective reduced-motion value, overriding both the reflected
+   * attribute and the media query, and reapplies it.
    *
-   * @param keymap Table to derive names from.
+   * @param reduced The effective value, or `null` to resolve it from the
+   *   reflected attribute and then the media query again.
    */
-  setKeymap(keymap: Keymap): void;
+  setReducedMotion(reduced: boolean | null): void;
+
+  /** The effective reduced-motion value now in force. */
+  isReducedMotion(): boolean;
 
   /**
    * Re-reads the keymap, the context and the reduced-motion preference from
    * their configured sources and reapplies all three.
    */
   refresh(): void;
-
-  /** Removes every listener and every generated element. */
   readonly unmount: UnmountOnScreenControls;
 }
-
-/* ==========================================================================
- * 3. Markup vocabulary
- * ========================================================================== */
 
 /** Selector the generated controls are appended inside by default. */
 export const DEFAULT_ON_SCREEN_HOST_SELECTOR = '#on-screen-controls';
@@ -357,10 +257,20 @@ export const DEFAULT_ON_SCREEN_HOST_SELECTOR = '#on-screen-controls';
  * Ported from js/keyboard_input_manager.js L72-L74, in the order those three
  * lines bound them: `.retry-button` and `.restart-button` both publish
  * `restart`, and `.keep-playing-button` publishes `keepPlaying`.
+ *
+ * `.retry-button` declares its own contexts because index.html L52 places it
+ * inside `.game-message`, the terminal overlay, whereas the `restart` binding
+ * of src/input/keymap.ts lists `'game'` alone. `.restart-button` at
+ * index.html L36 sits above the board and takes the binding's contexts, and
+ * `.keep-playing-button` at index.html L51 takes `keepPlaying`'s `'overlay'`.
  */
 export const LEGACY_CONTROL_BINDINGS: readonly MarkupControlBinding[] =
   Object.freeze([
-    Object.freeze({ selector: '.retry-button', action: 'restart' as const }),
+    Object.freeze({
+      selector: '.retry-button',
+      action: 'restart' as const,
+      contexts: Object.freeze<InputContext[]>(['game', 'overlay']),
+    }),
     Object.freeze({ selector: '.restart-button', action: 'restart' as const }),
     Object.freeze({
       selector: '.keep-playing-button',
@@ -368,76 +278,42 @@ export const LEGACY_CONTROL_BINDINGS: readonly MarkupControlBinding[] =
     }),
   ]);
 
-/**
- * The two actions whose payload carries an index, and which therefore accept
- * more than one control.
- */
 const INDEXED_ACTIONS: ReadonlySet<InputAction> = new Set<InputAction>([
   'selectReward',
   'activateRelic',
 ]);
 
-/** Largest number of controls one action may be given. */
 const MAX_CONTROLS_PER_ACTION = 8;
 
-/** Index generated for an action the caller named no index for. */
 const DEFAULT_CONTROL_INDEX = 0;
 
-/**
- * Class every control carries, generated or promoted. The style layer owns its
- * declarations; no length, colour or duration is written here.
- */
 const CONTROL_CLASS = 'on-screen-control';
 
-/**
- * The established button vocabulary, declared by `@mixin screen-control` in
- * style/_screens.scss over the tokens of style/_tokens.scss. Carried alongside
- * `CONTROL_CLASS` so a generated control is presented as every other control
- * in the interface is.
- */
 const CONTROL_VOCABULARY_CLASS = 'screen-button';
 
-/** Class each generated group carries. */
 const GROUP_CLASS = 'on-screen-controls-group';
 
-/** Class the four direction controls' group carries. */
 const PAD_GROUP_CLASS = 'on-screen-controls-pad';
 
-/** Class the remaining controls' group carries. */
 const ACTION_GROUP_CLASS = 'on-screen-controls-actions';
 
-/**
- * Class the mount root carries only while motion is permitted. It is the sole
- * carrier of this layer's transitions, so under
- * `(prefers-reduced-motion: reduce)` the layer triggers none.
- */
 const MOTION_CLASS = 'on-screen-controls-animated';
-
-/** Attribute the mount root carries the resolved motion preference in. */
-const REDUCED_MOTION_ATTRIBUTE = 'data-reduced-motion';
 
 /** Attribute a control carries its action in. */
 const ACTION_ATTRIBUTE = 'data-action';
 
-/** Attribute a control carries its payload index in. */
 const INDEX_ATTRIBUTE = 'data-index';
 
-/** Attribute a direction control carries its bare numeric direction in. */
 const DIRECTION_ATTRIBUTE = 'data-direction';
 
-/** Media query the reduced-motion preference is read from. */
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
-/** Accessible name of the group holding the four direction controls. */
 const PAD_GROUP_LABEL = 'Move tiles';
 
-/** Accessible name of the group holding every remaining control. */
 const ACTION_GROUP_LABEL = 'Game actions';
 
-/** Modality every activation from this layer is counted under. */
 const ON_SCREEN_MODALITY: InputModality = 'onScreen';
 
-/** Tag names that are focusable and activation-capable without repair. */
 const NATIVE_CONTROL_TAGS: ReadonlySet<string> = new Set([
   'BUTTON',
   'INPUT',
@@ -445,14 +321,12 @@ const NATIVE_CONTROL_TAGS: ReadonlySet<string> = new Set([
   'TEXTAREA',
 ]);
 
-/** `KeyboardEvent.key` values that activate a promoted control. */
 const ACTIVATION_KEYS: ReadonlySet<string> = new Set([
   'Enter',
   ' ',
   'Spacebar',
 ]);
 
-/** The unbind handle a failed bind returns. It removes nothing. */
 const NOOP_UNBIND: UnbindControl = () => {
   return;
 };
@@ -461,27 +335,6 @@ const NOOP_UNBIND: UnbindControl = () => {
  * 4. Reporting helpers
  * ========================================================================== */
 
-/**
- * Reduces a caught value to two reportable fields.
- *
- * @param caught Value that was thrown.
- * @returns `errorName` and `errorMessage`, always populated.
- */
-function describeError(caught: unknown): InputReportFields {
-  if (caught instanceof Error) {
-    return { errorName: caught.name, errorMessage: caught.message };
-  }
-
-  const printable =
-    typeof caught === 'string' ||
-    typeof caught === 'number' ||
-    typeof caught === 'boolean'
-      ? String(caught)
-      : UNKNOWN_ERROR_MESSAGE;
-
-  return { errorName: UNKNOWN_ERROR_NAME, errorMessage: printable };
-}
-
 /** The span returned when the injected sink opens none. */
 const NOOP_SPAN: InputSpan = Object.freeze({
   end(): void {
@@ -489,65 +342,24 @@ const NOOP_SPAN: InputSpan = Object.freeze({
   },
 });
 
-/**
- * Opens a span through a sink that may implement none.
- *
- * @param reporter Sink to open the span through. It is already contained by
- *   `createSafeInputReporter`, so neither `startSpan` nor the returned span's
- *   `end` can throw into the caller.
- * @param name Span name.
- * @returns The open span, or a span whose `end` does nothing.
- */
 function openSpan(reporter: InputReporter, name: string): InputSpan {
   const open = reporter.startSpan;
 
   return open === undefined ? NOOP_SPAN : open.call(reporter, name);
 }
 
-/* ==========================================================================
- * 5. DOM resolution
- * ========================================================================== */
-
-/**
- * Reads the ambient `document`.
- *
- * @returns The document, or `null` outside a browser.
- */
 function readAmbientDocument(): Document | null {
   return typeof document === 'undefined' ? null : document;
 }
 
-/**
- * Reads the ambient `window`.
- *
- * @returns The window, or `null` outside a browser.
- */
 function readAmbientWindow(): Window | null {
   return typeof window === 'undefined' ? null : window;
 }
 
-/**
- * Resolves the node a selector is looked up against.
- *
- * @param options Options passed to `bindButtonPress`.
- * @returns The root, or `null` when there is none to resolve.
- */
 function resolveLookupRoot(options: BindButtonPressOptions): ParentNode | null {
   return options.root ?? options.ownerDocument ?? readAmbientDocument();
 }
 
-/**
- * Resolves an element from an element or a selector.
- *
- * This is the guarded form of the lookup at js/keyboard_input_manager.js
- * L141, which dereferenced its result at L142 without checking it.
- *
- * @param target Element to use as given, or a selector to look one up by.
- * @param root Node a selector is resolved against.
- * @param reporter Sink for a selector the engine cannot parse.
- * @returns The element, or `null` when the selector matches nothing, the root
- *   is absent, or the selector is not a valid one.
- */
 function resolveElement(
   target: Element | string,
   root: ParentNode | null,
@@ -565,16 +377,15 @@ function resolveElement(
     return root.querySelector(target);
   } catch (caught: unknown) {
     // An invalid selector makes `querySelector` throw rather than return null.
-    // The throw is reported here and reduced to `null`; the caller reports the
+    // The caught value is carried unconverted through the reporter's failure
+    // channel; the call is reduced to `null` and the caller reports the
     // absence of the control it was resolving.
-    const fields: InputReportFields = {
-      selector: target,
-      ...describeError(caught),
-    };
+    const fields: InputReportFields = { selector: target };
 
-    reporter.log(
+    reporter.failure?.(
       'error',
       'An on-screen control selector is not valid.',
+      caught,
       fields,
     );
     reporter.count(SELECTOR_INVALID_METRIC, fields);
@@ -583,23 +394,10 @@ function resolveElement(
   }
 }
 
-/**
- * Names a target for a report.
- *
- * @param target Element or selector that was resolved.
- * @returns The selector as given, or the element's tag name in lower case.
- */
 function describeTarget(target: Element | string): string {
   return typeof target === 'string' ? target : target.tagName.toLowerCase();
 }
 
-/**
- * Names a generated control for a report, as the selector that addresses it.
- *
- * @param action Action the control publishes.
- * @param index Payload index the control carries.
- * @returns A selector naming exactly that control.
- */
 function describeGenerated(action: InputAction, index: number): string {
   return (
     `.${CONTROL_CLASS}[${ACTION_ATTRIBUTE}="${action}"]` +
@@ -607,27 +405,10 @@ function describeGenerated(action: InputAction, index: number): string {
   );
 }
 
-/* ==========================================================================
- * 6. Accessible names and focusability
- * ========================================================================== */
-
-/**
- * Trims a value that may be absent.
- *
- * @param value Value read off an element.
- * @returns The trimmed text, or the empty string.
- */
 function trimmed(value: string | null): string {
   return value === null ? '' : value.trim();
 }
 
-/**
- * Resolves the text an `aria-labelledby` list refers to.
- *
- * @param element Element carrying the attribute.
- * @returns The referenced text, or the empty string when the attribute is
- *   absent or refers to nothing that carries text.
- */
 function labelledByText(element: Element): string {
   const ids = trimmed(element.getAttribute('aria-labelledby'));
 
@@ -664,7 +445,6 @@ function labelledByText(element: Element): string {
  * computation resolves one: `aria-labelledby`, then `aria-label`, then the
  * element's own text, then `title`.
  *
- * @param element Element to name.
  * @returns The name, or the empty string when the element carries none.
  */
 export function accessibleNameOf(element: Element): string {
@@ -689,12 +469,6 @@ export function accessibleNameOf(element: Element): string {
   return trimmed(element.getAttribute('title'));
 }
 
-/**
- * Reports whether an element is already in the tab order.
- *
- * @param element Element to test.
- * @returns `true` when the element is reachable by Tab as it stands.
- */
 function isInTabOrder(element: Element): boolean {
   const declared = element.getAttribute('tabindex');
 
@@ -713,13 +487,6 @@ function isInTabOrder(element: Element): boolean {
   return element.tagName === 'A' && element.hasAttribute('href');
 }
 
-/**
- * Reports whether an element already activates on Enter and Space without a
- * listener of this layer's own.
- *
- * @param element Element to test.
- * @returns `true` when the engine synthesises a click from both keys.
- */
 function activatesFromKeyboard(element: Element): boolean {
   if (NATIVE_CONTROL_TAGS.has(element.tagName)) {
     return true;
@@ -728,12 +495,6 @@ function activatesFromKeyboard(element: Element): boolean {
   return element.tagName === 'A' && element.hasAttribute('href');
 }
 
-/**
- * Reports whether an element carries a role that names it a control.
- *
- * @param element Element to test.
- * @returns `true` when a role is unnecessary or already correct.
- */
 function hasControlRole(element: Element): boolean {
   if (NATIVE_CONTROL_TAGS.has(element.tagName)) {
     return true;
@@ -744,10 +505,6 @@ function hasControlRole(element: Element): boolean {
   return role.length > 0;
 }
 
-/* ==========================================================================
- * 7. The ported binding
- * ========================================================================== */
-
 /**
  * Binds one handler to a control's pointer activation.
  *
@@ -755,20 +512,9 @@ function hasControlRole(element: Element): boolean {
  * null-checked here; `'click'` at L142 and the resolved touch-end name at L143
  * are both bound, so a tap can dispatch the handler twice.
  *
- * @param target Element to bind, or a selector to look one up by.
- * @param handler Called with the dispatched event.
- * @param options Lookup root, document, sink, pointer family, reported action
- *   name, and whether the touch-end name is bound.
  * @returns A handle removing every listener added. An unresolved target is
  *   reported and yields a handle that removes nothing; nothing throws, and a
  *   second call of the handle is harmless.
- *
- * @example
- * ```ts
- * const unbind = bindButtonPress('.restart-button', (event) => {
- *   manager.restart(event);
- * });
- * ```
  */
 export function bindButtonPress(
   target: Element | string,
@@ -808,10 +554,14 @@ export function bindButtonPress(
         selector,
         action,
         eventType: event.type,
-        ...describeError(caught),
       };
 
-      reporter.log('error', 'An on-screen control handler threw.', fields);
+      reporter.failure?.(
+        'error',
+        'An on-screen control handler threw.',
+        caught,
+        fields,
+      );
       reporter.count(HANDLER_ERROR_METRIC, fields);
     }
   };
@@ -826,14 +576,14 @@ export function bindButtonPress(
       element.addEventListener(name, guarded);
       bound.push(name);
     } catch (caught: unknown) {
-      const fields: InputReportFields = {
-        selector,
-        action,
-        eventName: name,
-        ...describeError(caught),
-      };
+      const fields: InputReportFields = { selector, action, eventName: name };
 
-      reporter.log('error', 'An on-screen control could not be bound.', fields);
+      reporter.failure?.(
+        'error',
+        'An on-screen control could not be bound.',
+        caught,
+        fields,
+      );
       reporter.count(BIND_FAILED_METRIC, fields);
     }
   }
@@ -853,24 +603,6 @@ export function bindButtonPress(
   };
 }
 
-/* ==========================================================================
- * 8. Publishing an action
- * ========================================================================== */
-
-/**
- * Publishes the event one action resolves to.
- *
- * A movement action publishes `'move'` carrying the bare numeric direction,
- * which is the encoding of the table at js/keyboard_input_manager.js L37-L50,
- * so a control, a keypress and a swipe carry identical payloads. `restart` and
- * `keepPlaying` go through the manager's own members, which is what L72-L74
- * handed to `bindButtonPress`.
- *
- * @param host Manager to publish through.
- * @param action Action the activated control carries.
- * @param index Payload index the control carries.
- * @param event Event that activated the control.
- */
 function publishControlAction(
   host: OnScreenControlHost,
   action: InputAction,
@@ -928,32 +660,61 @@ function publishControlAction(
   }
 }
 
-/* ==========================================================================
- * 9. Control records
- * ========================================================================== */
-
-/** One bound control and the state the layer keeps for it. */
 interface ControlRecord {
-  /** Action the control publishes. */
   readonly action: InputAction;
-
-  /** Payload index the control carries. */
   readonly index: number;
+  readonly ordinal: number;
+  readonly element: Element;
+  readonly generated: boolean;
 
   /**
-   * Position of this control among those of the same action, one-based, or `0`
-   * when the action has a single control. Appended to the label when nonzero.
+   * Contexts this control is available in, where they are the control's own
+   * rather than its action's. `null` on every generated control and on a
+   * markup control whose binding declares none, and those read the contexts of
+   * the action's binding in the table currently in force.
    */
-  readonly ordinal: number;
+  readonly contexts: readonly InputContext[] | null;
 
-  /** The bound element. */
-  readonly element: Element;
+  /**
+   * Whether this layer supplies the element's accessible name. True for
+   * every generated control, and for a markup control whose name this layer
+   * had to write because the markup carried none.
+   */
+  ownsName: boolean;
 
-  /** Whether this layer created the element. */
-  readonly generated: boolean;
+  /**
+   * The availability attributes as the markup declared them, held for a
+   * markup control so an available one is restored rather than stripped.
+   * `null` for a generated control, whose element this layer created.
+   */
+  readonly declared: DeclaredAvailability | null;
 
   /** Whether the action is active in the context last applied. */
   available: boolean;
+}
+
+/**
+ * The availability attributes of a markup control as they stood before this
+ * layer first wrote them, so restoring one leaves the markup's own
+ * declarations in place.
+ *
+ * `tabindex` is captured when the control first becomes unavailable rather
+ * than at mount, because `promoteControl` may have written it in between; the
+ * value restored is therefore the one the control actually carried while it
+ * was available.
+ */
+interface DeclaredAvailability {
+  /** `hidden` as declared, or `null` when it was absent. */
+  readonly hidden: string | null;
+
+  /** `aria-hidden` as declared, or `null` when it was absent. */
+  readonly ariaHidden: string | null;
+
+  /** `disabled` as declared, or `null` when it was absent. */
+  readonly disabled: string | null;
+
+  /** `tabindex` as it stood while available, once one has been captured. */
+  tabIndex?: string | null;
 }
 
 /**
@@ -972,14 +733,21 @@ function projectControl(record: ControlRecord): OnScreenControl {
 }
 
 /**
- * Reports whether a binding is active in a context.
+ * Reports whether a context is one of those listed.
  *
- * @param binding Binding to test.
+ * Called with a binding's own `contexts` for a generated control and with the
+ * resolved `contexts` of a `MarkupControlBinding` for one the markup
+ * declares, so both kinds of control are measured by one rule.
+ *
+ * @param contexts Contexts the control is available in.
  * @param context Context to test against.
- * @returns `true` when the binding lists the context.
+ * @returns `true` when the list carries the context.
  */
-function isActiveIn(binding: InputBinding, context: InputContext): boolean {
-  for (const candidate of binding.contexts) {
+function isActiveIn(
+  contexts: readonly InputContext[],
+  context: InputContext,
+): boolean {
+  for (const candidate of contexts) {
     if (candidate === context) {
       return true;
     }
@@ -988,39 +756,16 @@ function isActiveIn(binding: InputBinding, context: InputContext): boolean {
   return false;
 }
 
-/**
- * Reports whether an action has any key bound.
- *
- * @param binding Binding to test.
- * @returns `true` when either list carries an entry.
- */
 function hasKey(binding: InputBinding): boolean {
   return binding.keys.length > 0 || binding.codes.length > 0;
 }
 
-/**
- * Builds the visible label of a control.
- *
- * @param action Action the control publishes.
- * @param ordinal One-based position among the action's controls, or `0`.
- * @returns The label, with the ordinal appended when there is one.
- */
 function labelFor(action: InputAction, ordinal: number): string {
   const label = describeAction(action);
 
   return ordinal > 0 ? `${label} ${ordinal}` : label;
 }
 
-/**
- * Builds the accessible name of a control from the table in force, so a
- * remapped key is announced rather than the default it replaced.
- *
- * @param keymap Table to read the bound keys from.
- * @param action Action the control publishes.
- * @param ordinal One-based position among the action's controls, or `0`.
- * @returns The name. The key phrase is appended only for an action that has a
- *   key bound; an action reached from its control alone is named by its label.
- */
 function nameFor(
   keymap: Keymap,
   action: InputAction,
@@ -1033,25 +778,11 @@ function nameFor(
     : label;
 }
 
-/* ==========================================================================
- * 10. Element construction and state
- * ========================================================================== */
-
-/** The one member the promoted-control activation handler reads. */
 interface ActivationKeyEventLike extends Event {
   /** `KeyboardEvent.key`. Absent from an event that carries none. */
   readonly key?: string;
 }
 
-/**
- * Writes the label, the accessible name and the shortcut tooltip of a
- * generated control.
- *
- * @param element Element to write to.
- * @param keymap Table names are derived from.
- * @param action Action the control publishes.
- * @param ordinal One-based position among the action's controls, or `0`.
- */
 function applyGeneratedName(
   element: Element,
   keymap: Keymap,
@@ -1070,21 +801,6 @@ function applyGeneratedName(
   element.removeAttribute('title');
 }
 
-/**
- * Creates one control.
- *
- * The element is a native `<button>`, so it is in the tab order and activates
- * on Enter and Space without a listener of this layer's own. Only class names
- * and data attributes are written: every colour, length, radius and duration
- * is declared in the stylesheet partials.
- *
- * @param ownerDocument Document the element is created by.
- * @param keymap Table the accessible name is derived from.
- * @param action Action the control publishes.
- * @param index Payload index the control carries.
- * @param ordinal One-based position among the action's controls, or `0`.
- * @returns The created control.
- */
 function createControl(
   ownerDocument: Document,
   keymap: Keymap,
@@ -1110,14 +826,6 @@ function createControl(
   return element;
 }
 
-/**
- * Creates one control group.
- *
- * @param ownerDocument Document the element is created by.
- * @param variantClass Class naming which group this is.
- * @param label Accessible name of the group.
- * @returns The created group.
- */
 function createGroup(
   ownerDocument: Document,
   variantClass: string,
@@ -1132,16 +840,6 @@ function createGroup(
   return group;
 }
 
-/**
- * Applies availability to one generated control.
- *
- * An unavailable control leaves the accessibility tree through `hidden` and
- * `aria-hidden`, and leaves the tab order through `tabindex` and `disabled`,
- * so it is neither announced nor reachable rather than merely invisible.
- *
- * @param element Element to apply to.
- * @param available Whether the action is active in the current context.
- */
 function applyAvailability(element: Element, available: boolean): void {
   if (available) {
     element.removeAttribute('hidden');
@@ -1150,6 +848,91 @@ function applyAvailability(element: Element, available: boolean): void {
     element.setAttribute('tabindex', '0');
 
     return;
+  }
+
+  element.setAttribute('hidden', '');
+  element.setAttribute('aria-hidden', 'true');
+  element.setAttribute('disabled', '');
+  element.setAttribute('tabindex', '-1');
+}
+
+/**
+ * Reads the availability attributes of a control the markup declares.
+ *
+ * Read once, before this layer writes any of them, so an available control is
+ * restored to what index.html declared instead of having the three
+ * attributes stripped from it.
+ *
+ * @param element Element to read.
+ * @returns The declared state.
+ */
+function captureDeclaredAvailability(element: Element): DeclaredAvailability {
+  return {
+    hidden: element.getAttribute('hidden'),
+    ariaHidden: element.getAttribute('aria-hidden'),
+    disabled: element.getAttribute('disabled'),
+  };
+}
+
+/**
+ * Writes one attribute, or removes it where the value is `null`.
+ *
+ * @param element Element to write to.
+ * @param name Attribute to write.
+ * @param value Value to write, or `null` to remove the attribute.
+ */
+function writeAttribute(
+  element: Element,
+  name: string,
+  value: string | null,
+): void {
+  if (value === null) {
+    element.removeAttribute(name);
+
+    return;
+  }
+
+  element.setAttribute(name, value);
+}
+
+/**
+ * Applies availability to one control the markup declares.
+ *
+ * The same four attributes `applyAvailability` writes, with two differences
+ * that follow from index.html owning the element: the visible label is never
+ * touched, and an available control is restored to the state the markup
+ * declared rather than having the attributes removed. `.game-message` keeps
+ * showing and hiding its own two controls through the stylesheet; this is the
+ * accessibility-tree and tab-order half of the same state, which the
+ * stylesheet cannot express.
+ *
+ * @param element Element to apply to.
+ * @param declared The element's declared availability state.
+ * @param available Whether the action is active in the current context.
+ */
+function applyMarkupAvailability(
+  element: Element,
+  declared: DeclaredAvailability,
+  available: boolean,
+): void {
+  if (available) {
+    writeAttribute(element, 'hidden', declared.hidden);
+    writeAttribute(element, 'aria-hidden', declared.ariaHidden);
+    writeAttribute(element, 'disabled', declared.disabled);
+
+    if (declared.tabIndex !== undefined) {
+      writeAttribute(element, 'tabindex', declared.tabIndex);
+      declared.tabIndex = undefined;
+    }
+
+    return;
+  }
+
+  // Captured on the transition rather than at mount: `promoteControl` may
+  // have supplied the tab stop, and that is the value an available control
+  // is restored to.
+  if (declared.tabIndex === undefined) {
+    declared.tabIndex = element.getAttribute('tabindex');
   }
 
   element.setAttribute('hidden', '');
@@ -1184,13 +967,6 @@ function applyGroupAvailability(
   group.setAttribute('aria-hidden', 'true');
 }
 
-/**
- * Resolves the media query the reduced-motion preference is read from.
- *
- * @param view Window to read from, or `null` outside a browser.
- * @param reporter Sink for a failed probe.
- * @returns The query, or `null` when the view implements none.
- */
 function resolveMotionQuery(
   view: Window | null,
   reporter: InputReporter,
@@ -1202,12 +978,58 @@ function resolveMotionQuery(
   try {
     return view.matchMedia(REDUCED_MOTION_QUERY);
   } catch (caught: unknown) {
-    reporter.log(
+    reporter.failure?.(
       'warn',
       'The reduced-motion preference could not be read.',
-      { query: REDUCED_MOTION_QUERY, ...describeError(caught) },
+      caught,
+      { query: REDUCED_MOTION_QUERY },
     );
 
+    return null;
+  }
+}
+
+/**
+ * Observes the element carrying the reflected reduced-motion value.
+ *
+ * The settings surface writes the attribute directly, which fires no
+ * media-query event, so the change is only seen by watching the element.
+ *
+ * @param target Element to observe, or `null`.
+ * @param owner Document the observer constructor is taken from.
+ * @param onChange Called on every attribute write.
+ * @returns The observer, or `null` where none could be created.
+ */
+function observeMotionRoot(
+  target: Element | null,
+  owner: Document | null,
+  onChange: () => void,
+): MutationObserver | null {
+  if (target === null) {
+    return null;
+  }
+
+  const view = owner?.defaultView ?? null;
+  const Observer = view?.MutationObserver;
+
+  if (typeof Observer !== 'function') {
+    return null;
+  }
+
+  try {
+    const observer = new Observer((): void => {
+      onChange();
+    });
+
+    observer.observe(target, {
+      attributes: true,
+      attributeFilter: [REDUCED_MOTION_ATTRIBUTE],
+    });
+
+    return observer;
+  } catch {
+    // An environment that rejects the observation leaves the media query and
+    // any pinned value as the sources, which is the documented fallback.
     return null;
   }
 }
@@ -1238,15 +1060,6 @@ function applyMotionPreference(root: Element | null, reduce: boolean): void {
   root.classList.add(MOTION_CLASS);
 }
 
-/**
- * Resolves the payload indices one action gets a control for.
- *
- * @param action Action being generated.
- * @param requested Indices the caller asked for, where it asked.
- * @param reporter Sink for a rejected request.
- * @returns The indices, always at least one, each a non-negative integer, in
- *   the order requested and without repetition.
- */
 function resolveIndices(
   action: InputAction,
   requested: readonly number[] | undefined,
@@ -1309,48 +1122,27 @@ function resolveIndices(
   return accepted.length > 0 ? accepted : [DEFAULT_CONTROL_INDEX];
 }
 
-/* ==========================================================================
- * 11. Promoting a control the markup declares
- * ========================================================================== */
-
-/** What one promotion repaired, and how to undo it. */
 interface Promotion {
-  /** Whether anything had to be repaired. */
   readonly remediated: boolean;
+
+  /**
+   * Whether the accessible name was among the repairs, and is therefore this
+   * layer's to keep current when the keymap changes.
+   */
+  readonly named: boolean;
 
   /** Undoes every repair, leaving the element as the markup declared it. */
   readonly revert: () => void;
 }
 
-/** A promotion that repaired nothing. */
 const NO_PROMOTION: Promotion = Object.freeze({
   remediated: false,
+  named: false,
   revert: (): void => {
     return;
   },
 });
 
-/**
- * Makes a control the markup declares a real focusable control with an
- * accessible name, repairing only what is missing.
- *
- * index.html is the authority and declares all three controls as native
- * `<button>` elements, for which this repairs nothing. It repaired four things
- * for the bare `<a>` elements with no `href` that index.html L31, L38 and L39
- * declared before this feature: a control role, a tab stop, activation from
- * Enter and Space, and an accessible name.
- *
- * The visible label is never written and never removed: it is the accessible
- * name whenever the markup carries one.
- *
- * @param element Element to promote.
- * @param action Action the control publishes.
- * @param selector Selector it was resolved by, for reporting.
- * @param keymap Table a substituted accessible name is derived from.
- * @param handler Called by the keyboard activation this may install.
- * @param reporter Sink for the repairs performed.
- * @returns What was repaired, and how to undo it.
- */
 function promoteControl(
   element: Element,
   action: InputAction,
@@ -1409,9 +1201,12 @@ function promoteControl(
     });
   }
 
+  let named = false;
+
   if (accessibleNameOf(element).length === 0) {
     element.setAttribute('aria-label', nameFor(keymap, action, 0));
     repairs.push('accessibleName');
+    named = true;
     steps.push((): void => {
       element.removeAttribute('aria-label');
     });
@@ -1432,6 +1227,7 @@ function promoteControl(
 
   return Object.freeze({
     remediated: true,
+    named,
     revert: (): void => {
       for (const step of steps) {
         step();
@@ -1440,19 +1236,6 @@ function promoteControl(
   });
 }
 
-/* ==========================================================================
- * 12. Mounting
- * ========================================================================== */
-
-/**
- * Reads a value that may be supplied directly or produced on demand.
- *
- * @param source Value, or a function producing one.
- * @param fallback Called when the source is absent, and when it throws.
- * @param reporter Sink for a source that throws.
- * @param name Name of the source, for reporting.
- * @returns The resolved value.
- */
 function readSource<T>(
   source: T | (() => T) | undefined,
   fallback: () => T,
@@ -1472,9 +1255,8 @@ function readSource<T>(
   try {
     return (source as () => T)();
   } catch (caught: unknown) {
-    reporter.log('error', 'An on-screen control source threw.', {
+    reporter.failure?.('error', 'An on-screen control source threw.', caught, {
       source: name,
-      ...describeError(caught),
     });
 
     return fallback();
@@ -1485,23 +1267,10 @@ function readSource<T>(
  * Mounts one focusable, tappable control per bindable action, and binds the
  * controls index.html declares.
  *
- * Nothing here throws: an absent mount root, an absent control and a source
- * that throws are each reported and skipped, and the returned handle is always
- * callable. This is the guarded successor of js/keyboard_input_manager.js
- * L71-L74, where an absent element was a startup failure.
- *
- * @param options Manager, mount root, document, sink, pointer family, keymap,
- *   context, window, payload indices and the controls the markup declares.
- * @returns The mounted handle.
- *
- * @example
- * ```ts
- * const manager = createInputManager({ ownerDocument: document });
- * const controls = mountOnScreenControls({ host: manager, reporter });
- *
- * controls.setContext('overlay');
- * controls.unmount();
- * ```
+ * Reports rather than throws: an absent mount root, an absent control and a
+ * source that throws are each reported and skipped, and the returned handle is
+ * callable in every one of those cases. The guarded successor of
+ * js/keyboard_input_manager.js, where an absent element was a startup failure.
  */
 export function mountOnScreenControls(
   options: OnScreenControlsOptions,
@@ -1542,9 +1311,6 @@ export function mountOnScreenControls(
   /**
    * Reports an attempt to drive the handle after it was unmounted, so the
    * attempt is diagnosable rather than a silent no-op.
-   *
-   * @param member Handle member that was called.
-   * @returns Whether the call is to be abandoned.
    */
   const isUnmounted = (member: string): boolean => {
     if (!unmounted) {
@@ -1609,13 +1375,6 @@ export function mountOnScreenControls(
   let activeKeymap = resolveKeymap();
   let activeContext = resolveContext();
 
-  /**
-   * Publishes one control's action, unless the control is unavailable in the
-   * context last applied.
-   *
-   * @param record Control that was activated.
-   * @param event Event that activated it.
-   */
   const activate = (record: ControlRecord, event: Event): void => {
     if (!record.available) {
       const fields: InputReportFields = {
@@ -1645,15 +1404,6 @@ export function mountOnScreenControls(
     }
   };
 
-  /**
-   * Binds one record's element and remembers how to unbind it.
-   *
-   * @param record Record to bind.
-   * @param selector Selector the element was resolved by, for reporting.
-   * @param bindTouchEnd Whether the touch-end name is bound alongside
-   *   `'click'`.
-   * @returns The handler bound, so a promotion can install it on `keydown`.
-   */
   const bindRecord = (
     record: ControlRecord,
     selector: string,
@@ -1698,15 +1448,34 @@ export function mountOnScreenControls(
       continue;
     }
 
+    const declared = captureDeclaredAvailability(element);
+    // Held as `null` where the binding declares none, so a later keymap
+    // reaches this control's availability as it reaches a generated one's.
+    const contexts = binding.contexts ?? null;
     const record: ControlRecord = {
       action: binding.action,
       index: DEFAULT_CONTROL_INDEX,
       ordinal: 0,
       element,
       generated: false,
-      available: true,
+      contexts,
+      // Replaced below where the promotion had to supply the name.
+      ownsName: false,
+      declared,
+      available: isActiveIn(
+        contexts ?? activeKeymap[binding.action].contexts,
+        activeContext,
+      ),
     };
     const handler = bindRecord(record, binding.selector, true);
+
+    // Registered before the promotion's own revert, so an unmount restores
+    // the availability attributes first and the promotion's tab stop and
+    // role second, leaving the element as index.html declared it.
+    reverts.push((): void => {
+      applyMarkupAvailability(element, declared, true);
+    });
+
     const promotion = promoteControl(
       element,
       binding.action,
@@ -1721,11 +1490,11 @@ export function mountOnScreenControls(
       reverts.push(promotion.revert);
     }
 
+    record.ownsName = promotion.named;
     records.push(record);
   }
 
   // One generated control per action, in `INPUT_ACTIONS` order, which is the
-  // order the settings panel presents the same actions in.
   let padGroup: Element | null = null;
   let actionGroup: Element | null = null;
 
@@ -1772,12 +1541,17 @@ export function mountOnScreenControls(
           ordinal,
           element,
           generated: true,
-          available: isActiveIn(binding, activeContext),
+          // A generated control follows its action's own binding, and this
+          // layer wrote its name, so both are re-derived from the table on
+          // every refresh.
+          contexts: null,
+          ownsName: true,
+          declared: null,
+          available: isActiveIn(binding.contexts, activeContext),
         };
 
         // A generated control binds `'click'` alone; the pair of listeners at
         // js/keyboard_input_manager.js L142-L143 is not reproduced here.
-        // Recorded in docs/DECISION_LOG.md.
         bindRecord(record, describeGenerated(binding.action, index), false);
         applyAvailability(element, record.available);
 
@@ -1795,13 +1569,6 @@ export function mountOnScreenControls(
     generatedRoots.push(padGroup, actionGroup);
   }
 
-  /**
-   * Applies the resolved keymap and context to every control: names first, so
-   * a remapped key is announced, then availability.
-   *
-   * @param keymap Table to derive names from.
-   * @param context Context to derive availability from.
-   */
   const apply = (keymap: Keymap, context: InputContext): void => {
     activeKeymap = keymap;
     activeContext = context;
@@ -1810,24 +1577,39 @@ export function mountOnScreenControls(
     let actionAvailable = false;
 
     for (const record of records) {
-      // A control the markup declares keeps the availability the markup gives
-      // it: `.game-message` shows and hides its own two controls, and
-      // `.restart-button` is shown throughout.
-      if (!record.generated) {
-        continue;
+      const contexts = record.contexts ?? keymap[record.action].contexts;
+
+      record.available = isActiveIn(contexts, context);
+
+      if (record.generated) {
+        applyGeneratedName(
+          record.element,
+          keymap,
+          record.action,
+          record.ordinal,
+        );
+        applyAvailability(record.element, record.available);
+      } else {
+        if (record.ownsName) {
+          record.element.setAttribute(
+            'aria-label',
+            nameFor(keymap, record.action, record.ordinal),
+          );
+        }
+
+        // `declared` is non-null for every record this branch reaches; the
+        // fallback keeps the read total rather than asserting.
+        applyMarkupAvailability(
+          record.element,
+          record.declared ?? captureDeclaredAvailability(record.element),
+          record.available,
+        );
       }
 
-      record.available = isActiveIn(keymap[record.action], context);
-
-      applyGeneratedName(
-        record.element,
-        keymap,
-        record.action,
-        record.ordinal,
-      );
-      applyAvailability(record.element, record.available);
-
-      if (!record.available) {
+      // Only a generated control belongs to one of the two groups, so only
+      // one of those keeps its group in the accessibility tree; a markup
+      // control sits where index.html places it.
+      if (!record.available || !record.generated) {
         continue;
       }
 
@@ -1842,15 +1624,47 @@ export function mountOnScreenControls(
     applyGroupAvailability(actionGroup, actionAvailable);
   };
 
-  // Reduced motion, resolved once and then followed. The camera and particle
-  // effects inside the canvas carry their own check; this covers the controls.
+  // Reduced motion, resolved from three sources in a fixed order and then
+  // followed. The camera and particle effects inside the canvas read the render
+  // layer's own store; this covers the controls, and the reflected attribute is
+  // what the two agree through.
   const motion = resolveMotionQuery(view, reporter);
+  const motionRoot =
+    options.motionRoot === undefined
+      ? (ownerDocument?.documentElement ?? null)
+      : options.motionRoot;
+
+  let pinnedMotion: boolean | null = options.reducedMotion ?? null;
+  let activeMotion = false;
+
+  const resolveMotion = (): { reduce: boolean; source: string } => {
+    if (pinnedMotion !== null) {
+      return { reduce: pinnedMotion, source: 'pinned' };
+    }
+
+    const reflected = readReflectedReducedMotion(motionRoot);
+
+    if (reflected !== null) {
+      return { reduce: reflected, source: 'reflected' };
+    }
+
+    if (motion !== null) {
+      return { reduce: motion.matches, source: 'query' };
+    }
+
+    return { reduce: false, source: 'default' };
+  };
 
   const applyMotion = (): void => {
-    const reduce = motion !== null && motion.matches;
+    const resolved = resolveMotion();
 
-    applyMotionPreference(root, reduce);
-    reporter.count(REDUCED_MOTION_METRIC, { reduce });
+    activeMotion = resolved.reduce;
+
+    applyMotionPreference(root, resolved.reduce);
+    reporter.count(REDUCED_MOTION_METRIC, {
+      reduce: resolved.reduce,
+      source: resolved.source,
+    });
   };
 
   if (motion !== null && typeof motion.addEventListener === 'function') {
@@ -1861,6 +1675,20 @@ export function mountOnScreenControls(
     motion.addEventListener('change', onMotionChange);
     reverts.push((): void => {
       motion.removeEventListener('change', onMotionChange);
+    });
+  }
+
+  // The reflected attribute changes without a media-query event, because the
+  // settings surface writes it, so the element carrying it is observed too.
+  const motionObserver = observeMotionRoot(
+    motionRoot,
+    ownerDocument,
+    applyMotion,
+  );
+
+  if (motionObserver !== null) {
+    reverts.push((): void => {
+      motionObserver.disconnect();
     });
   }
 
@@ -1906,6 +1734,19 @@ export function mountOnScreenControls(
       pinnedKeymap = keymap;
       apply(keymap, activeContext);
       reporter.count(KEYMAP_METRIC);
+    },
+
+    setReducedMotion(reduced: boolean | null): void {
+      if (isUnmounted('setReducedMotion')) {
+        return;
+      }
+
+      pinnedMotion = reduced;
+      applyMotion();
+    },
+
+    isReducedMotion(): boolean {
+      return activeMotion;
     },
 
     refresh(): void {

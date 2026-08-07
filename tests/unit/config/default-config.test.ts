@@ -3,32 +3,22 @@
 // exported merge rules, the factory's mutability contract and the frozen
 // template's immutability.
 //
-// Vanilla constructs pinned here, each named in the test that pins it. Each is
-// a source row of docs/TRACEABILITY_MATRIX.md, and the test naming it is that
-// row's runnable proof:
-//   js/application.js L3    boardSize 4
-//   js/game_manager.js L7   startTiles 2
-//   js/game_manager.js L71  spawn values [2, 4] at weights [0.9, 0.1]
-//   js/game_manager.js L156 defaultCanMerge
-//   js/game_manager.js L157 defaultProduceMergeValue
-//   js/game_manager.js L158 the populated mergedFrom a merged tile carries
-//   js/game_manager.js L170 winValue 2048
-//   js/tile.js L2-L7        the operand shape both merge rules read
+// The vanilla constructs pinned here, each named in the test that pins it:
+// boardSize 4 from the composition root, startTiles 2, spawn values [2, 4] at
+// weights [0.9, 0.1], the merge condition and the face value a merge yields,
+// the populated `mergedFrom` a merged tile carries, winValue 2048, and the
+// operand shape both merge rules read.
 //
 // Scope held here: the schema — which members exist and what their types are —
-// is pinned by tests/unit/config/rules-config.test.ts, stage goals by the
-// stage-goal suite beside it, and how a tile value is compared against
-// winValue by the suite of src/engine/terminal-state.ts. This file pins values
-// and merge behaviour only, and records no snapshot: those belong to
-// tests/snapshot/ behind vitest.snapshot.config.ts.
+// is pinned by tests/unit/config/rules-config.test.ts, and how a tile value is
+// compared against winValue by the terminal-state suite. This file pins values
+// and merge behaviour only, and records no snapshot.
 //
 // vitest.config.ts collects this file into the unit:dom-free project, so it
 // runs without a DOM. It reads no DOM node, no persisted state and no
 // environment value, opens no network call and needs no external fixture.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   createDefaultRulesConfig,
@@ -44,18 +34,19 @@ import type {
 
 /* ===== 1. Operands ===== */
 
+/**
+ * `Math.random` as this environment supplied it, read at module scope before
+ * any case installs a spy on it. The restoration case in section 11 compares
+ * against this rather than against whatever it finds.
+ */
+const PRISTINE_MATH_RANDOM = Math.random;
+
 /** The `{ x, y }` pair js/tile.js L11 saves into `previousPosition`. */
 interface VanillaPosition {
   readonly x: number;
   readonly y: number;
 }
 
-/**
- * The tile shape js/tile.js L2-L7 constructs, extending the structural view the
- * merge rules declare. `x`, `y` and `previousPosition` are the three members
- * the merge rules never read. The `extends` clause is a compile-time assertion
- * that the vanilla shape satisfies `MergeTileView` with no adapter.
- */
 interface VanillaTileShape extends MergeTileView {
   readonly x: number;
   readonly y: number;
@@ -63,30 +54,10 @@ interface VanillaTileShape extends MergeTileView {
   readonly mergedFrom: readonly VanillaTileShape[] | null;
 }
 
-/**
- * A tile that has not merged this turn: the null `mergedFrom` of js/tile.js L7,
- * with the position js/tile.js L11 saves.
- *
- * @param value Face value of the tile.
- * @param x Column of the tile.
- * @param y Row of the tile.
- * @returns A tile a merge is permitted to target.
- */
 function unmergedTile(value: number, x = 0, y = 0): VanillaTileShape {
   return { x, y, value, previousPosition: { x, y }, mergedFrom: null };
 }
 
-/**
- * A tile that has merged this turn: the two-member `mergedFrom` array
- * js/game_manager.js L158 assigns, holding the pair of half-valued tiles whose
- * merge produced it, with the null `previousPosition` of js/tile.js L6 that a
- * freshly constructed merge result carries.
- *
- * @param value Face value of the tile.
- * @param x Column of the tile.
- * @param y Row of the tile.
- * @returns A tile that has already absorbed a merge this turn.
- */
 function mergedTile(value: number, x = 0, y = 0): VanillaTileShape {
   const half = value / 2;
 
@@ -99,30 +70,22 @@ function mergedTile(value: number, x = 0, y = 0): VanillaTileShape {
   };
 }
 
-/**
- * A tile whose `mergedFrom` is the empty array. The declared member type admits
- * it and js/game_manager.js L156 tests falsiness, so this operand pins that an
- * empty array reads as merged; no vanilla path reaches this state.
- *
- * @param value Face value of the tile.
- * @returns A tile carrying an empty `mergedFrom`.
- */
 function emptyMergedFromTile(value: number): VanillaTileShape {
   return { x: 0, y: 0, value, previousPosition: null, mergedFrom: [] };
 }
 
-/**
- * Face value the default producer yields for an equal-valued pair — the only
- * pair js/game_manager.js L156 accepts, so the only pair L157 runs on.
- *
- * @param value Face value both operands carry.
- * @returns Face value the merge of that pair yields.
- */
 function producedValueFor(value: number): number {
   return defaultProduceMergeValue(unmergedTile(value), unmergedTile(value));
 }
 
 /* ===== 2. Subjects ===== */
+
+/**
+ * Calls one pure subject makes in a purity case. Repetition is what a static
+ * purity check stands on: a subject reading randomness, a clock or any other
+ * ambient source would not answer identically across every pass.
+ */
+const PURITY_REPEATS = 32;
 
 /**
  * Runs `assert` twice, once against each carrier of the defaults: the frozen
@@ -138,8 +101,6 @@ function forEachDefaultConfig(
   assert(DEFAULT_RULES_CONFIG, 'DEFAULT_RULES_CONFIG');
   assert(createDefaultRulesConfig(), 'createDefaultRulesConfig()');
 }
-
-/* ===== 3. Vanilla rule values ===== */
 
 describe('vanilla-equivalent rule values', () => {
   it('pins boardSize 4 (js/application.js L3)', () => {
@@ -188,8 +149,6 @@ describe('vanilla-equivalent rule values', () => {
   });
 });
 
-/* ===== 4. Spawn distribution structure ===== */
-
 describe('spawn distribution (js/game_manager.js L71)', () => {
   it('pairs weight 0.9 with value 2 and weight 0.1 with value 4', () => {
     forEachDefaultConfig((config, label) => {
@@ -223,8 +182,6 @@ describe('spawn distribution (js/game_manager.js L71)', () => {
   });
 });
 
-/* ===== 5. Member set ===== */
-
 describe('member set', () => {
   it('carries exactly the five configured rule members', () => {
     forEachDefaultConfig((config, label) => {
@@ -251,8 +208,6 @@ describe('member set', () => {
     });
   });
 });
-
-/* ===== 6. defaultProduceMergeValue ===== */
 
 describe('defaultProduceMergeValue (js/game_manager.js L157)', () => {
   it('yields double the value across the vanilla ramp', () => {
@@ -283,15 +238,12 @@ describe('defaultProduceMergeValue (js/game_manager.js L157)', () => {
     const target = unmergedTile(16, 3, 3);
 
     defaultProduceMergeValue(moving, target);
-
     expect(moving.value).toBe(16);
     expect(target.value).toBe(16);
     expect(moving.mergedFrom).toBeNull();
     expect(target.mergedFrom).toBeNull();
   });
 });
-
-/* ===== 7. defaultCanMerge ===== */
 
 describe('defaultCanMerge (js/game_manager.js L156)', () => {
   it('merges equal values into an unmerged target', () => {
@@ -361,15 +313,12 @@ describe('defaultCanMerge (js/game_manager.js L156)', () => {
     const target = unmergedTile(2, 0, 2);
 
     defaultCanMerge(moving, target);
-
     expect(moving.value).toBe(2);
     expect(target.value).toBe(2);
     expect(moving.mergedFrom).toBeNull();
     expect(target.mergedFrom).toBeNull();
   });
 });
-
-/* ===== 8. Merge-rule wiring ===== */
 
 describe('merge-rule wiring', () => {
   it('installs the exported merge rules as the defaults', () => {
@@ -390,8 +339,6 @@ describe('merge-rule wiring', () => {
     expect(template.merge.produce).toBe(first.merge.produce);
   });
 });
-
-/* ===== 9. createDefaultRulesConfig() ===== */
 
 describe('createDefaultRulesConfig()', () => {
   it('returns an equal but distinct object on every call', () => {
@@ -463,8 +410,6 @@ describe('createDefaultRulesConfig()', () => {
     expect(DEFAULT_RULES_CONFIG.spawn.values).toEqual([2, 4]);
   });
 });
-
-/* ===== 10. DEFAULT_RULES_CONFIG ===== */
 
 describe('DEFAULT_RULES_CONFIG', () => {
   it('is frozen at every level', () => {
@@ -549,35 +494,61 @@ describe('DEFAULT_RULES_CONFIG', () => {
   });
 });
 
-/* ===== 11. Randomness ===== */
+/* ===== 11. Purity ===== */
 
-describe('randomness', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
+describe('purity', () => {
+  it('builds the same configuration on every call', () => {
+    const built = Array.from({ length: PURITY_REPEATS }, () =>
+      createDefaultRulesConfig()
+    );
+
+    for (const config of built) {
+      expect(config).toEqual(built[0]);
+      expect(config).toEqual(DEFAULT_RULES_CONFIG);
+    }
   });
 
-  it('is observable through a call-through spy on Math.random', () => {
-    const randomSpy = vi.spyOn(Math, 'random');
-    const draw = Math.random();
-
-    expect(randomSpy).toHaveBeenCalledTimes(1);
-    expect(draw).toBeGreaterThanOrEqual(0);
-    expect(draw).toBeLessThan(1);
-  });
-
-  it('is never drawn by the factory or either merge rule', () => {
-    const randomSpy = vi.spyOn(Math, 'random');
+  it('answers both merge rules the same way on every call', () => {
     const moving = unmergedTile(4, 1, 0);
     const target = unmergedTile(4, 2, 0);
+    const blocked = unmergedTile(8, 3, 0);
 
-    createDefaultRulesConfig();
+    for (let pass = 0; pass < PURITY_REPEATS; pass += 1) {
+      expect(defaultCanMerge(moving, target)).toBe(true);
+      expect(defaultCanMerge(moving, blocked)).toBe(false);
+      expect(defaultProduceMergeValue(moving, target)).toBe(8);
+    }
+  });
+
+  it('leaves both merge operands unchanged', () => {
+    const moving = unmergedTile(4, 1, 0);
+    const target = unmergedTile(4, 2, 0);
+    const movingBefore = structuredClone(moving);
+    const targetBefore = structuredClone(target);
+
     defaultCanMerge(moving, target);
     defaultProduceMergeValue(moving, target);
 
-    expect(randomSpy).not.toHaveBeenCalled();
+    expect(moving).toEqual(movingBefore);
+    expect(target).toEqual(targetBefore);
   });
 
+  // Self-contained: the spy this case asserts the restoration of is installed
+  // by this case. Reading `Math.random` without installing one would pass
+  // whether or not restoration works, because it would only be describing the
+  // state the file started in.
   it('leaves Math.random unspied once a spy is restored', () => {
     expect(vi.isMockFunction(Math.random)).toBe(false);
+
+    const randomSpy = vi.spyOn(Math, 'random');
+
+    expect(vi.isMockFunction(Math.random)).toBe(true);
+    expect(Math.random).toBe(randomSpy);
+    expect(Math.random).not.toBe(PRISTINE_MATH_RANDOM);
+
+    vi.restoreAllMocks();
+
+    expect(vi.isMockFunction(Math.random)).toBe(false);
+    expect(Math.random).toBe(PRISTINE_MATH_RANDOM);
   });
 });

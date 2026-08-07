@@ -27,8 +27,6 @@
 // or removed here, which is the boundary
 // src/storage/local-storage-manager.ts enforces on the product itself. This
 // module holds no state between tests.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { afterEach } from 'vitest';
 

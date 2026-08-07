@@ -9,11 +9,11 @@
 //   volume applied to it;
 //   one voice per play request, built from a descriptor in
 //   src/audio/sound-map.ts and scheduled on the context's own clock;
-//   the readable state a diagnostics surface and a settings panel read.
+//   the readable state `getState()` reports.
 //
 // WHAT IT DOES NOT OWN
 //   no markup, no DOM query for a control and no key binding: mute and
-//   volume are methods, and the surface that drives them lives elsewhere;
+//   volume are methods, and no module drives them today;
 //   no persistence: nothing here reads or writes a store;
 //   no health probe: getState() is the readable surface;
 //   no audio file and no second runtime dependency: every voice is
@@ -25,10 +25,13 @@
 //
 // Every duration in a descriptor is in milliseconds and every time handed
 // to the Web Audio API is in seconds.
-//
-// Rationale for the decisions behind this file lives in the project
-// decision log, not in these comments.
 
+import {
+  DEFAULT_MUTED,
+  DEFAULT_VOLUME,
+  MAX_VOLUME,
+  MIN_VOLUME,
+} from './sound-map';
 import type { SoundEffect, SoundEffectName } from './sound-map';
 import {
   effectForMerge,
@@ -61,7 +64,10 @@ export type SoundReportCode =
   | 'voice-failed'
   | 'voice-dropped'
   | 'payload-unreadable'
-  | 'subscribe-failed';
+  | 'subscribe-failed'
+  | 'release-unavailable'
+  | 'release-failed'
+  | 'preference-owned';
 
 /** Fields a report may carry alongside its message. */
 export interface SoundReportDetails {
@@ -172,7 +178,7 @@ const METRIC_STATE_CHANGED = 'audio.context.statechange';
  * Containment
  * ----------------------------------------------------------------------- */
 
-/** Counters and descriptions the diagnostics boundary accumulates. */
+/** Counters and descriptions the module's report boundary accumulates. */
 interface DiagnosticsTotals {
   /** Contained failures of this module's own work. */
   failures: number;
@@ -227,18 +233,67 @@ interface Diagnostics {
   count(name: string, value?: number): void;
 }
 
+/** Characters a described caught value keeps. */
+const MAX_DESCRIPTION_LENGTH = 200;
+
+/** Text describing a caught value that offered nothing readable. */
+const UNREADABLE_THROWN = 'An unreadable value was thrown.';
+
+/**
+ * Reads one string property off a caught value without trusting the value.
+ *
+ * Both the membership test and the read are contained: a `Proxy` throws
+ * from its `has` or `get` trap, and an `Error` subclass can define `message`
+ * or `name` as a getter that throws. Either throw is read as an absent
+ * property, so describing a failure cannot raise a second one.
+ *
+ * @param source Value to read from.
+ * @param field Property name to read.
+ * @returns The value, capped, or `undefined` where it is absent,
+ *   unreadable, not a string or empty.
+ */
+function readThrownText(source: object, field: string): string | undefined {
+  let candidate: unknown;
+
+  try {
+    if (!(field in source)) {
+      return undefined;
+    }
+    candidate = Reflect.get(source, field);
+  } catch {
+    return undefined;
+  }
+
+  return typeof candidate === 'string' && candidate.length > 0
+    ? candidate.slice(0, MAX_DESCRIPTION_LENGTH)
+    : undefined;
+}
+
 /**
  * Describes a caught value as text, preserving an `Error`'s own message.
  *
+ * TOTAL. Every read of the value is contained and every conversion of it is
+ * contained: a getter that throws, a `Symbol.toStringTag` that throws and a
+ * `toString` that throws all yield fixed text rather than a second throw.
+ * That matters most on the paths that call it — describing a fault raised by
+ * the reporter or the recorder itself, where there is no second sink a throw
+ * could be reported to and a throw would escape into the audio path.
+ *
  * @param thrown The caught value.
- * @returns Text describing `thrown`.
+ * @returns Text describing `thrown`, capped at `MAX_DESCRIPTION_LENGTH`.
  */
 function describeThrown(thrown: unknown): string {
-  if (thrown instanceof Error) {
-    return thrown.message.length > 0 ? thrown.message : thrown.name;
+  if (typeof thrown === 'object' && thrown !== null) {
+    return (
+      readThrownText(thrown, 'message') ??
+      readThrownText(thrown, 'name') ??
+      UNREADABLE_THROWN
+    );
   }
   if (typeof thrown === 'string') {
-    return thrown.length > 0 ? thrown : 'Empty string thrown.';
+    return thrown.length > 0
+      ? thrown.slice(0, MAX_DESCRIPTION_LENGTH)
+      : 'Empty string thrown.';
   }
   if (typeof thrown === 'number' || typeof thrown === 'boolean') {
     return String(thrown);
@@ -249,8 +304,18 @@ function describeThrown(thrown: unknown): string {
   if (thrown === undefined) {
     return 'undefined thrown.';
   }
+  if (typeof thrown === 'bigint') {
+    try {
+      return `${thrown.toString()}n`.slice(0, MAX_DESCRIPTION_LENGTH);
+    } catch {
+      return UNREADABLE_THROWN;
+    }
+  }
+  if (typeof thrown === 'symbol') {
+    return 'A symbol was thrown.';
+  }
 
-  return Object.prototype.toString.call(thrown);
+  return UNREADABLE_THROWN;
 }
 
 /**
@@ -368,8 +433,44 @@ export interface EngineEventSource {
    *
    * @param eventName Event to listen for.
    * @param handler Called with the event's payload.
+   * @returns Whatever the source returns. `src/engine/engine-events.ts` returns
+   *   a function that removes the listener; a source that returns nothing is
+   *   equally acceptable and is then released through `off` instead. Typed
+   *   `unknown` rather than `void` so the handle is not discarded at the type
+   *   level before it can be stored.
    */
-  on(eventName: string, handler: EngineEventHandler): void;
+  on(eventName: string, handler: EngineEventHandler): unknown;
+
+  /**
+   * Removes a listener, for a source that returns no release handle from `on`.
+   *
+   * @param eventName Event the handler was registered for.
+   * @param handler The exact function that was registered.
+   */
+  off?(eventName: string, handler: EngineEventHandler): unknown;
+}
+
+/**
+ * The mute and volume preferences, as this module reads them.
+ *
+ * Declared structurally, by the three members this module calls, so the audio
+ * layer needs no import from the accessibility layer: `PreferenceStore` of
+ * src/ui/a11y/settings.ts satisfies it as written.
+ */
+export interface SoundPreferenceSource {
+  /** Whether audio is muted. */
+  isMuted(): boolean;
+
+  /** The volume in force, `MIN_VOLUME` through `MAX_VOLUME`. */
+  getVolume(): number;
+
+  /**
+   * Observes later changes.
+   *
+   * @param listener Called after any preference changes.
+   * @returns A function that stops the observation.
+   */
+  subscribe(listener: () => void): () => void;
 }
 
 /**
@@ -411,7 +512,21 @@ export interface SoundEngineOptions {
   /** Sink counter increments are delivered to. A no-op sink when omitted. */
   readonly metrics?: SoundMetricsRecorder;
 
-  /** Whether the engine starts muted. `DEFAULT_MUTED` when omitted. */
+  /**
+   * The preference store this engine reads mute and volume from.
+   *
+   * Supplied, it is the SINGLE source of truth: the engine takes its starting
+   * mute and volume from it, follows it for the rest of its life, and
+   * `setMuted`/`setVolume` are refused so the two cannot diverge. Omitted, the
+   * engine holds its own state from `muted` and `volume` below, which is how a
+   * caller with no accessibility surface drives it.
+   */
+  readonly preferences?: SoundPreferenceSource;
+
+  /**
+   * Whether the engine starts muted. `DEFAULT_MUTED` when omitted, and ignored
+   * entirely when `preferences` is supplied.
+   */
   readonly muted?: boolean;
 
   /**
@@ -435,10 +550,7 @@ export interface SoundEngineOptions {
   readonly maxConcurrentVoices?: number;
 }
 
-/**
- * The engine's state, as a diagnostics surface or a settings panel reads
- * it.
- */
+/** The engine's state, as `getState()` reports it. */
 export interface SoundEngineState {
   /** Whether an AudioContext constructor was found. */
   readonly available: boolean;
@@ -565,17 +677,10 @@ export interface SoundEngine {
  * 3. Bounds and fixed values
  * ========================================================================== */
 
-/** Lowest volume the master gain is held at. */
-const MIN_VOLUME = 0;
-
-/** Highest volume the master gain is held at. */
-const MAX_VOLUME = 1;
-
-/** Volume in force when the caller supplies none. */
-const DEFAULT_VOLUME = 0.6;
-
-/** Mute state in force when the caller supplies none. */
-const DEFAULT_MUTED = false;
+// The four bounds below are imported from src/audio/sound-map.ts rather than
+// declared here. This module's own `DEFAULT_VOLUME` was 0.6 while the
+// accessibility surface's was 1, so the volume a listener heard depended on
+// which of the two had last written the master gain.
 
 /** Voices allowed to sound at once when the caller supplies none. */
 const DEFAULT_MAX_VOICES = 12;
@@ -762,6 +867,40 @@ function msToSeconds(milliseconds: number | undefined): number {
   }
 
   return Math.max(milliseconds, 0) / MS_PER_SECOND;
+}
+
+/**
+ * Reads a volume off a preference source without trusting it.
+ *
+ * @param source Source to read.
+ * @returns The volume, or a non-finite value the caller normalises.
+ */
+function readPreferredVolume(source: SoundPreferenceSource): number {
+  try {
+    return source.getVolume();
+  } catch {
+    // A throwing store is not allowed to fail construction; the caller
+    // normalises the result to the default.
+    return Number.NaN;
+  }
+}
+
+/**
+ * Reads the mute state off a preference source without trusting it.
+ *
+ * @param source Source to read.
+ * @param fallback Value used where the source throws.
+ * @returns The mute state.
+ */
+function readPreferredMuted(
+  source: SoundPreferenceSource,
+  fallback: boolean,
+): boolean {
+  try {
+    return source.isMuted() === true;
+  } catch {
+    return fallback;
+  }
 }
 
 /**
@@ -1054,8 +1193,18 @@ export function createSoundEngine(
   const unlockTargets = normaliseUnlockTargets(options.unlockTargets);
   const voiceCeiling = normaliseVoiceCeiling(options.maxConcurrentVoices);
 
-  let volume = normaliseVolume(options.volume, DEFAULT_VOLUME);
-  let muted = options.muted ?? DEFAULT_MUTED;
+  const preferences = options.preferences ?? null;
+
+  // With a store supplied it is the only source: the `volume` and `muted`
+  // options are not consulted at all, so the two cannot start out disagreeing.
+  let volume =
+    preferences === null
+      ? normaliseVolume(options.volume, DEFAULT_VOLUME)
+      : normaliseVolume(readPreferredVolume(preferences), DEFAULT_VOLUME);
+  let muted =
+    preferences === null
+      ? (options.muted ?? DEFAULT_MUTED)
+      : readPreferredMuted(preferences, DEFAULT_MUTED);
 
   let context: AudioContext | null = null;
   let masterGain: GainNode | null = null;
@@ -1073,6 +1222,14 @@ export function createSoundEngine(
 
   const voices = new Set<Voice>();
   const subscribedSources = new Set<EngineEventSource>();
+
+  /**
+   * One release handle per registered handler, across every source.
+   *
+   * `subscribe()` appends to this and `dispose()` drains it, so a disposed
+   * engine is genuinely detached rather than merely refusing to make a sound.
+   */
+  const releases: (() => void)[] = [];
 
   /** One installed gesture listener, as it is removed by. */
   interface ArmedListener {
@@ -1912,11 +2069,6 @@ export function createSoundEngine(
     play(terminal);
   });
 
-  /** Sounds the relic-acquired effect. */
-  const handleRelic = contained('relic:acquired', (): void => {
-    playForEvent('relic:acquired');
-  });
-
   /**
    * Registers one handler on one source.
    *
@@ -1928,9 +2080,11 @@ export function createSoundEngine(
     events: EngineEventSource,
     eventName: string,
     handler: EngineEventHandler,
-  ): void => {
+  ): (() => void) | null => {
+    let result: unknown;
+
     try {
-      events.on(eventName, handler);
+      result = events.on(eventName, handler);
     } catch (thrown) {
       diagnostics.noteFailure(
         `subscribe-failed:${eventName}`,
@@ -1939,7 +2093,65 @@ export function createSoundEngine(
         thrown,
         { event: eventName },
       );
+
+      return null;
     }
+
+    // Normalised to one shape, so disposal has a single thing to call however
+    // the source expressed removal. Discarding this was what left every handler
+    // registered after `dispose()`: a disposed engine went on receiving
+    // every event for the lifetime of the emitter.
+    if (typeof result === 'function') {
+      const release = result as () => unknown;
+
+      return (): void => {
+        release();
+      };
+    }
+
+    const off = events.off;
+
+    if (typeof off === 'function') {
+      return (): void => {
+        off.call(events, eventName, handler);
+      };
+    }
+
+    diagnostics.reportOnce(`release-unavailable:${eventName}`, {
+      level: 'warn',
+      code: 'release-unavailable',
+      message:
+        'An event source returned no release handle and carries no off, so ' +
+        'this handler cannot be removed on disposal.',
+      details: { event: eventName },
+    });
+
+    return null;
+  };
+
+  /**
+   * Releases every handler this engine registered, on every source.
+   *
+   * Each release is contained, so one source that throws while removing a
+   * listener cannot leave the remaining sources subscribed.
+   */
+  const releaseSubscriptions = (): void => {
+    const held = releases.splice(0, releases.length);
+
+    for (const release of held) {
+      try {
+        release();
+      } catch (thrown) {
+        diagnostics.noteFailure(
+          'release-failed',
+          'release-failed',
+          'A handler could not be removed from the event source.',
+          thrown,
+        );
+      }
+    }
+
+    subscribedSources.clear();
   };
 
   /**
@@ -1976,12 +2188,56 @@ export function createSoundEngine(
 
     subscribedSources.add(events);
 
-    register(events, 'tile:merge', handleMerge);
-    register(events, 'tile:spawn', handleSpawn);
-    register(events, 'move:after', handleMoveAfter);
-    register(events, 'stage:end', handleStageEnd);
-    register(events, 'state:commit', handleCommit);
-    register(events, 'relic:acquired', handleRelic);
+    // Every name registered for is one the engine's own contract declares and
+    // emits. `move:before` and `stage:start` are deliberately not registered
+    // for; nothing is registered for a name no emitter produces.
+    const names: readonly [string, EngineEventHandler][] = [
+      ['tile:merge', handleMerge],
+      ['tile:spawn', handleSpawn],
+      ['move:after', handleMoveAfter],
+      ['stage:end', handleStageEnd],
+      ['state:commit', handleCommit],
+    ];
+
+    const taken: (() => void)[] = [];
+
+    let failed = false;
+
+    for (const [eventName, handler] of names) {
+      const release = register(events, eventName, handler);
+
+      if (release === null) {
+        failed = true;
+
+        continue;
+      }
+
+      taken.push(release);
+    }
+
+    // A partial subscription is undone rather than kept: half a set of handlers
+    // sounds some effects and not others, and the ones that did register would
+    // otherwise outlive an engine the caller may treat as unattached.
+    if (failed) {
+      for (const release of taken) {
+        try {
+          release();
+        } catch (thrown) {
+          diagnostics.noteFailure(
+            'release-failed',
+            'release-failed',
+            'A handler could not be removed from the event source.',
+            thrown,
+          );
+        }
+      }
+
+      subscribedSources.delete(events);
+
+      return;
+    }
+
+    releases.push(...taken);
   };
 
   /* ----------------------------------------------------------------------
@@ -1994,6 +2250,20 @@ export function createSoundEngine(
    * @param nextMuted Whether to hold the master gain at silence.
    */
   const setMuted = (nextMuted: boolean): void => {
+    if (preferences !== null) {
+      // The store owns the value, so writing it here would create the second
+      // owner this option exists to remove. The caller sets it on the store.
+      diagnostics.reportOnce('preference-owned:muted', {
+        level: 'warn',
+        code: 'preference-owned',
+        message:
+          'setMuted was refused because a preference store owns the mute ' +
+          'state; set it on the store instead.',
+      });
+
+      return;
+    }
+
     muted = nextMuted === true;
     applyMasterGain();
   };
@@ -2004,9 +2274,61 @@ export function createSoundEngine(
    * @param nextVolume Volume to hold.
    */
   const setVolume = (nextVolume: number): void => {
+    if (preferences !== null) {
+      diagnostics.reportOnce('preference-owned:volume', {
+        level: 'warn',
+        code: 'preference-owned',
+        message:
+          'setVolume was refused because a preference store owns the volume; ' +
+          'set it on the store instead.',
+      });
+
+      return;
+    }
+
     volume = normaliseVolume(nextVolume, volume);
     applyMasterGain();
   };
+
+  /** Takes the store's current mute and volume and applies them. */
+  const adoptPreferences = (): void => {
+    if (preferences === null || disposed) {
+      return;
+    }
+
+    volume = normaliseVolume(readPreferredVolume(preferences), volume);
+    muted = readPreferredMuted(preferences, muted);
+    applyMasterGain();
+  };
+
+  /**
+   * Released by `dispose()`; `null` where no store is followed.
+   *
+   * Subscribed rather than polled, so a mute toggled mid-run silences the next
+   * effect without the engine being asked.
+   */
+  const releasePreferences: (() => void) | null = ((): (() => void) | null => {
+    if (preferences === null) {
+      return null;
+    }
+
+    try {
+      const release = preferences.subscribe((): void => {
+        adoptPreferences();
+      });
+
+      return typeof release === 'function' ? release : null;
+    } catch (thrown) {
+      diagnostics.noteFailure(
+        'subscribe-failed:preferences',
+        'subscribe-failed',
+        'The preference store could not be observed.',
+        thrown,
+      );
+
+      return null;
+    }
+  })();
 
   /** The readable state, as a fresh frozen object. */
   const getState = (): SoundEngineState => {
@@ -2093,7 +2415,20 @@ export function createSoundEngine(
     unlocked = false;
     resumePending = false;
     lastTerminal = null;
-    subscribedSources.clear();
+    releaseSubscriptions();
+
+    if (releasePreferences !== null) {
+      try {
+        releasePreferences();
+      } catch (thrown) {
+        diagnostics.noteFailure(
+          'release-failed',
+          'release-failed',
+          'The preference store observation could not be released.',
+          thrown,
+        );
+      }
+    }
 
     if (activeContext === null) {
       return;
@@ -2130,4 +2465,3 @@ export function createSoundEngine(
     dispose,
   });
 }
-

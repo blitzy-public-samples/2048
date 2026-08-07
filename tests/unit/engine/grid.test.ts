@@ -1,52 +1,22 @@
 // Ported-fidelity suite of src/engine/grid.ts, the TypeScript port of
-// js/grid.js, which is deleted. That port is the
-// `js/grid.js -> src/engine/grid.ts` edge of Figure 8, "File Transformation
-// Map: Superseded Modules to TypeScript Targets", the visual index of
-// docs/TRACEABILITY_MATRIX.md, and this suite is the evidence that matrix
-// row cites.
+// js/grid.js, which is deleted. Every describe names one ported construct, and
+// all thirteen ported methods are covered in the order the source declared
+// them.
 //
-// Every describe below names one ported construct and the lines of
-// js/grid.js it came from, so a matrix row cites a test by name. All
-// thirteen ported methods are covered, in the order the source declared
-// them:
-//   js/grid.js L1-L4     constructor      section 2
-//   js/grid.js L7-L19    empty()          section 3
-//   js/grid.js L21-L34   fromState()      section 4
-//   js/grid.js L58-L64   eachCell()       section 5
-//   js/grid.js L45-L55   availableCells() section 6
-//   js/grid.js L37-L43   randomAvailableCell()  section 7
-//   js/grid.js L80-L86   cellContent()    section 8
-//   js/grid.js L76-L78   cellOccupied()   section 9
-//   js/grid.js L72-L74   cellAvailable()  section 10
-//   js/grid.js L67-L69   cellsAvailable() section 11
-//   js/grid.js L89-L91   insertTile()     section 12
-//   js/grid.js L93-L95   removeTile()     section 13
-//   js/grid.js L97-L100  withinBounds()   section 14
-//   js/grid.js L102-L117 serialize()      section 15
+// Two of those constructs changed rather than moved, and each is pinned as
+// changed: js/grid.js reached `Tile` as an ambient global and the port imports
+// it, so a rehydrated cell is asserted to hold a `Tile` instance; and it drew
+// the spawn position from the global random source where the port draws from
+// the `spawn-position` substream it is handed, so both the draw and the cursor
+// are asserted.
 //
-// Section 16 repeats the lattice, the bounds valve and the projection at
-// board sizes other than the configured one.
-//
-// Two of those lines changed rather than moved, and each is pinned as
-// changed:
-//   js/grid.js L29  reached `Tile` as an ambient global; the port imports
-//                   it. Section 4 asserts a rehydrated cell holds a `Tile`
-//                   instance.
-//   js/grid.js L41  drew from the global random source; the port draws
-//                   from the `spawn-position` substream it is handed.
-//                   Section 7 asserts the draw and the cursor.
-//
-// Coverage owned by sibling suites and not repeated here: the substreams'
-// own sequence properties (tests/unit/rng), prepareTiles, moveTile and the
-// traversals (tests/unit/engine/move-resolver.test.ts), loss detection
-// (tests/unit/engine/terminal-state.test.ts), and saved-versus-configured
-// board-size reconciliation (tests/unit/run).
+// Coverage owned by sibling suites and not repeated here: the substreams' own
+// sequence properties, prepareTiles, moveTile and the traversals, loss
+// detection, and saved-versus-configured board-size reconciliation.
 //
 // This suite reads no DOM and no storage, installs no mock and replaces no
 // global; the one test double below is hand-written. It runs in the
 // `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { describe, expect, it } from 'vitest';
 
@@ -74,24 +44,16 @@ import {
   createNearLossBoard,
 } from '../../fixtures/boards';
 
-/* ===== 1. Sizes, seeds, helpers and the one test double ===== */
-
-/** A board smaller than the configured size. */
 const SHRUNK_SIZE = 3;
 
-/** A board larger than the configured size. */
 const GROWN_SIZE = 5;
 
-/** A coordinate far outside every lattice this suite builds. */
 const FAR_OFF_COORDINATE = 99;
 
-/** The substream js/grid.js L41's draw was moved onto. */
 const SPAWN_POSITION = 'spawn-position';
 
-/** Run seed the deterministic draws below are taken under. */
 const RUN_SEED = 'grid-suite-run-seed';
 
-/** Seeds the availability assertion repeats a draw under. */
 const DRAW_SEEDS: readonly string[] = [
   'grid-seed-a',
   'grid-seed-b',
@@ -99,23 +61,10 @@ const DRAW_SEEDS: readonly string[] = [
   'grid-seed-d',
 ];
 
-/**
- * Builds the `spawn-position` substream of one run, at cursor 0.
- *
- * @param seed Run seed to derive the substream from.
- * @returns The run's `spawn-position` substream.
- */
 function spawnPositionStream(seed: string): RngStream {
   return createRngStreams(seed).stream(SPAWN_POSITION);
 }
 
-/**
- * Lists every cell of a `size` lattice in js/grid.js L58-L64's order:
- * x-outer, y-inner.
- *
- * @param size Edge length in cells.
- * @returns Fresh coordinates, `size * size` of them.
- */
 function everyCellInOrder(size: number): Position[] {
   const cells: Position[] = [];
 
@@ -128,27 +77,12 @@ function everyCellInOrder(size: number): Position[] {
   return cells;
 }
 
-/**
- * Puts one tile in every cell of `grid`, through `insertTile`.
- *
- * @param grid Grid to fill in place.
- * @param value Face value every inserted tile carries.
- */
 function fillEveryCell(grid: Grid, value: number): void {
   for (const cell of everyCellInOrder(grid.size)) {
     grid.insertTile(new Tile(cell, value));
   }
 }
 
-/**
- * Asserts that `grid` holds a `Tile` at the coordinates and face value of
- * every occupied cell of `expected`, and `null` at every empty one, with
- * neither animation member set.
- *
- * @param grid Grid to read.
- * @param expected Serialised matrix to compare against, read as
- *   `expected[x][y]`, which is how js/grid.js L28 read it.
- */
 function expectLatticeMatches(
   grid: Grid,
   expected: CellMatrix<SerializedTile>,
@@ -171,26 +105,11 @@ function expectLatticeMatches(
   }
 }
 
-/** A hand-written `RngStream` together with the calls it recorded. */
 interface RecordedStream {
-  /** The substream handed to the subject under test. */
   readonly stream: RngStream;
-
-  /** Candidate lists handed to `pick`, in call order. */
   readonly picked: readonly unknown[][];
 }
 
-/**
- * Builds a hand-written `RngStream` that records every candidate list
- * handed to `pick` and selects the entry at `selectedIndex`.
- *
- * The object satisfies the `RngStream` interface of src/rng/rng-streams.ts
- * member for member. Neither this suite nor vitest.config.ts installs a
- * mocking library.
- *
- * @param selectedIndex Index `pick` selects from a non-empty list.
- * @returns The substream and the list of candidate lists it received.
- */
 function createRecordedStream(selectedIndex: number): RecordedStream {
   const picked: unknown[][] = [];
   let cursor = 0;
@@ -244,8 +163,6 @@ function createRecordedStream(selectedIndex: number): RecordedStream {
   return { stream, picked };
 }
 
-/* ===== 2. Constructor: js/grid.js L1-L4 ===== */
-
 describe('Grid constructor (js/grid.js L1-L4)', () => {
   it('exposes the size it was constructed at (L2)', () => {
     expect(new Grid(DEFAULT_BOARD_SIZE).size).toBe(DEFAULT_BOARD_SIZE);
@@ -284,8 +201,6 @@ describe('Grid constructor (js/grid.js L1-L4)', () => {
   });
 });
 
-/* ===== 3. empty(): js/grid.js L7-L19 ===== */
-
 describe('Grid.empty (js/grid.js L7-L19)', () => {
   it('fills every cell with null at the configured size (L14)', () => {
     const grid = new Grid(DEFAULT_BOARD_SIZE);
@@ -316,8 +231,6 @@ describe('Grid.empty (js/grid.js L7-L19)', () => {
     expect(rebuilt).toEqual(grid.cells);
   });
 });
-
-/* ===== 4. fromState(): js/grid.js L21-L34 ===== */
 
 describe('Grid.fromState (js/grid.js L21-L34)', () => {
   it('reads the cell matrix it is handed, not the board (L28)', () => {
@@ -377,9 +290,185 @@ describe('Grid.fromState (js/grid.js L21-L34)', () => {
     expect(grid.cells[0][0]).toBe(rehydrated);
     expect(rehydrated).toBeInstanceOf(Tile);
   });
-});
 
-/* ===== 5. eachCell(): js/grid.js L58-L64 ===== */
+  // A persisted matrix is only a matrix as far as the type system is concerned:
+  // it comes back out of JSON, where nothing guarantees it measures the
+  // size the
+  // grid is built at. js/grid.js L28 read `state[x][y]` unguarded, so a missing
+  // column threw there. The port's loops are bounded by the grid's own size and
+  // its column read is guarded, which is what these cases measure — the result
+  // is always size by size, whatever shape it was handed.
+  it('absorbs a matrix missing whole columns (L26-L28)', () => {
+    const board = copyBoard(MERGE_PAIR_BOARD);
+    const ragged: CellMatrix<SerializedTile> = [board.grid.cells[0]];
+    const grid = new Grid(board.grid.size, ragged);
+
+    expect(grid.size).toBe(board.grid.size);
+    expect(grid.cells).toHaveLength(board.grid.size);
+
+    for (const column of grid.cells) {
+      expect(column).toHaveLength(board.grid.size);
+    }
+
+    // Column 0 was supplied and is rehydrated; the columns that were not
+    // supplied are empty rather than absent.
+    expect(grid.cells[0][0]).toBeInstanceOf(Tile);
+    expect(grid.cells[0][0]?.value).toBe(board.grid.cells[0][0]?.value);
+
+    for (let x = 1; x < board.grid.size; x += 1) {
+      for (let y = 0; y < board.grid.size; y += 1) {
+        expect(grid.cells[x][y]).toBeNull();
+      }
+    }
+  });
+
+  it('absorbs a matrix whose columns are short (L26-L29)', () => {
+    const board = copyBoard(NEAR_LOSS_BOARD);
+    const shortColumns: CellMatrix<SerializedTile> = board.grid.cells.map(
+      (column) => column.slice(0, 2),
+    );
+    const grid = new Grid(board.grid.size, shortColumns);
+
+    expect(grid.cells).toHaveLength(board.grid.size);
+
+    for (let x = 0; x < board.grid.size; x += 1) {
+      expect(grid.cells[x]).toHaveLength(board.grid.size);
+
+      for (let y = 0; y < board.grid.size; y += 1) {
+        const held = grid.cells[x][y];
+
+        if (y < 2) {
+          expect(held).toBeInstanceOf(Tile);
+          expect(held?.value).toBe(board.grid.cells[x][y]?.value);
+        } else {
+          expect(held).toBeNull();
+        }
+      }
+    }
+  });
+
+  it('absorbs a matrix with one ragged column (L26-L29)', () => {
+    const board = copyBoard(NEAR_LOSS_BOARD);
+    const ragged: CellMatrix<SerializedTile> = board.grid.cells.map(
+      (column, index) => (index === 1 ? column.slice(0, 1) : column),
+    );
+    const grid = new Grid(board.grid.size, ragged);
+
+    for (let y = 0; y < board.grid.size; y += 1) {
+      const held = grid.cells[1][y];
+
+      if (y === 0) {
+        expect(held).toBeInstanceOf(Tile);
+      } else {
+        expect(held).toBeNull();
+      }
+
+      // Every other column is unaffected by the short one beside it.
+      expect(grid.cells[0][y]).toBeInstanceOf(Tile);
+      expect(grid.cells[0][y]?.value).toBe(board.grid.cells[0][y]?.value);
+    }
+  });
+
+  it('truncates a matrix wider and taller than the grid (L26-L28)', () => {
+    const larger = createNearLossBoard(GROWN_SIZE);
+    const grid = new Grid(SHRUNK_SIZE, larger.grid.cells);
+
+    expect(grid.size).toBe(SHRUNK_SIZE);
+    expect(grid.cells).toHaveLength(SHRUNK_SIZE);
+
+    for (const column of grid.cells) {
+      expect(column).toHaveLength(SHRUNK_SIZE);
+    }
+
+    // Every retained cell keeps the value it carried at that address, and
+    // nothing outside the configured size is reachable.
+    for (const cell of everyCellInOrder(SHRUNK_SIZE)) {
+      const held = grid.cells[cell.x][cell.y];
+
+      expect(held).toBeInstanceOf(Tile);
+      expect(held?.value).toBe(
+        larger.grid.cells[cell.x][cell.y]?.value,
+      );
+      expect(held?.x).toBe(cell.x);
+      expect(held?.y).toBe(cell.y);
+    }
+
+    expect(grid.cells[SHRUNK_SIZE]).toBeUndefined();
+    expect(grid.cells[0][SHRUNK_SIZE]).toBeUndefined();
+  });
+
+  it('fills a grid larger than the matrix it was handed (L26-L29)', () => {
+    const smaller = createMergePairBoard(SHRUNK_SIZE);
+    const grid = new Grid(GROWN_SIZE, smaller.grid.cells);
+
+    expect(grid.cells).toHaveLength(GROWN_SIZE);
+
+    for (const column of grid.cells) {
+      expect(column).toHaveLength(GROWN_SIZE);
+    }
+
+    expect(grid.cells[0][0]).toBeInstanceOf(Tile);
+    expect(grid.cells[1][0]).toBeInstanceOf(Tile);
+
+    for (const cell of everyCellInOrder(GROWN_SIZE)) {
+      const supplied =
+        cell.x < SHRUNK_SIZE && cell.y < SHRUNK_SIZE
+          ? smaller.grid.cells[cell.x][cell.y]
+          : null;
+
+      if (supplied === null) {
+        expect(grid.cells[cell.x][cell.y]).toBeNull();
+      } else {
+        expect(grid.cells[cell.x][cell.y]?.value).toBe(supplied.value);
+      }
+    }
+  });
+
+  it('absorbs an empty matrix as an empty lattice (L26-L28)', () => {
+    const grid = new Grid(DEFAULT_BOARD_SIZE, []);
+
+    expect(grid.cells).toHaveLength(DEFAULT_BOARD_SIZE);
+
+    for (const cell of everyCellInOrder(DEFAULT_BOARD_SIZE)) {
+      expect(grid.cells[cell.x][cell.y]).toBeNull();
+    }
+
+    expect(grid.cellsAvailable()).toBe(true);
+    expect(grid.availableCells()).toHaveLength(
+      DEFAULT_BOARD_SIZE * DEFAULT_BOARD_SIZE,
+    );
+  });
+
+  it('rehydrates a retained entry as a fresh Tile, not the entry (L29)', () => {
+    const board = copyBoard(NEAR_LOSS_BOARD);
+    const oversized = board.grid.cells;
+    const grid = new Grid(SHRUNK_SIZE, oversized);
+
+    for (const cell of everyCellInOrder(SHRUNK_SIZE)) {
+      const held = grid.cells[cell.x][cell.y];
+      const source = oversized[cell.x][cell.y];
+
+      expect(held).toBeInstanceOf(Tile);
+      expect(held).not.toBe(source);
+      expect(held?.x).toBe(source?.position.x);
+      expect(held?.y).toBe(source?.position.y);
+    }
+
+    // The coordinates were read, not held: moving the serialised entry
+    // afterwards leaves the rehydrated tile where it was built.
+    const entry = oversized[0][0];
+
+    expect(entry).not.toBeNull();
+
+    if (entry !== null) {
+      entry.position.x = FAR_OFF_COORDINATE;
+      entry.value = FAR_OFF_COORDINATE;
+    }
+
+    expect(grid.cells[0][0]?.x).toBe(0);
+    expect(grid.cells[0][0]?.value).not.toBe(FAR_OFF_COORDINATE);
+  });
+});
 
 describe('Grid.eachCell (js/grid.js L58-L64)', () => {
   it('visits every cell x-outer then y-inner at size 3 (L59-L61)', () => {
@@ -436,8 +525,6 @@ describe('Grid.eachCell (js/grid.js L58-L64)', () => {
   });
 });
 
-/* ===== 6. availableCells(): js/grid.js L45-L55 ===== */
-
 describe('Grid.availableCells (js/grid.js L45-L55)', () => {
   it('returns every cell of an empty board, in order (L50)', () => {
     const board = copyBoard(EMPTY_BOARD);
@@ -492,9 +579,6 @@ describe('Grid.availableCells (js/grid.js L45-L55)', () => {
   });
 });
 
-
-/* ===== 7. randomAvailableCell(): js/grid.js L37-L43 ===== */
-
 describe('Grid.randomAvailableCell (js/grid.js L37-L43)', () => {
   it('returns undefined for a full fixture board (L40-L43)', () => {
     const board = copyBoard(NEAR_LOSS_BOARD);
@@ -510,7 +594,6 @@ describe('Grid.randomAvailableCell (js/grid.js L37-L43)', () => {
     const grid = new Grid(GROWN_SIZE);
 
     fillEveryCell(grid, 2);
-
     expect(grid.availableCells()).toEqual([]);
     expect(
       grid.randomAvailableCell(spawnPositionStream(RUN_SEED)),
@@ -526,7 +609,6 @@ describe('Grid.randomAvailableCell (js/grid.js L37-L43)', () => {
     expect(before).toBe(0);
     expect(grid.randomAvailableCell(stream)).toBeUndefined();
     expect(stream.cursor).toBe(before);
-
     expect(grid.randomAvailableCell(stream)).toBeUndefined();
     expect(stream.cursor).toBe(before);
   });
@@ -546,10 +628,8 @@ describe('Grid.randomAvailableCell (js/grid.js L37-L43)', () => {
     const stream = spawnPositionStream(RUN_SEED);
 
     expect(stream.cursor).toBe(0);
-
     expect(grid.randomAvailableCell(stream)).not.toBeUndefined();
     expect(stream.cursor).toBe(1);
-
     expect(grid.randomAvailableCell(stream)).not.toBeUndefined();
     expect(stream.cursor).toBe(2);
   });
@@ -604,8 +684,6 @@ describe('Grid.randomAvailableCell (js/grid.js L37-L43)', () => {
     }
   });
 });
-
-/* ===== 8. cellContent(): js/grid.js L80-L86 ===== */
 
 describe('Grid.cellContent (js/grid.js L80-L86)', () => {
   it('returns the tile occupying an in-bounds cell (L82)', () => {
@@ -662,8 +740,6 @@ describe('Grid.cellContent (js/grid.js L80-L86)', () => {
   });
 });
 
-/* ===== 9. cellOccupied(): js/grid.js L76-L78 ===== */
-
 describe('Grid.cellOccupied (js/grid.js L76-L78)', () => {
   it('reports the truthiness of cellContent (L77)', () => {
     const board = copyBoard(MERGE_PAIR_BOARD);
@@ -673,7 +749,6 @@ describe('Grid.cellOccupied (js/grid.js L76-L78)', () => {
 
     expect(grid.cellContent(occupied)).not.toBeNull();
     expect(grid.cellOccupied(occupied)).toBe(true);
-
     expect(grid.cellContent(empty)).toBeNull();
     expect(grid.cellOccupied(empty)).toBe(false);
   });
@@ -682,13 +757,10 @@ describe('Grid.cellOccupied (js/grid.js L76-L78)', () => {
     const grid = new Grid(DEFAULT_BOARD_SIZE);
 
     fillEveryCell(grid, 2);
-
     expect(grid.cellOccupied({ x: grid.size, y: 0 })).toBe(false);
     expect(grid.cellOccupied({ x: -1, y: 0 })).toBe(false);
   });
 });
-
-/* ===== 10. cellAvailable(): js/grid.js L72-L74 ===== */
 
 describe('Grid.cellAvailable (js/grid.js L72-L74)', () => {
   it('negates cellOccupied (L73)', () => {
@@ -707,14 +779,11 @@ describe('Grid.cellAvailable (js/grid.js L72-L74)', () => {
     const grid = new Grid(DEFAULT_BOARD_SIZE);
 
     fillEveryCell(grid, 2);
-
     expect(grid.cellAvailable({ x: grid.size, y: 0 })).toBe(true);
     expect(grid.cellAvailable({ x: 0, y: grid.size })).toBe(true);
     expect(grid.cellAvailable({ x: -1, y: -1 })).toBe(true);
   });
 });
-
-/* ===== 11. cellsAvailable(): js/grid.js L67-L69 ===== */
 
 describe('Grid.cellsAvailable (js/grid.js L67-L69)', () => {
   it('is true for an empty board (L68)', () => {
@@ -749,9 +818,6 @@ describe('Grid.cellsAvailable (js/grid.js L67-L69)', () => {
     expect(grid.availableCells()).toEqual([{ x: 0, y: 0 }]);
   });
 });
-
-
-/* ===== 12. insertTile(): js/grid.js L89-L91 ===== */
 
 describe('Grid.insertTile (js/grid.js L89-L91)', () => {
   it('writes the tile into the cell its coordinates name (L90)', () => {
@@ -796,8 +862,6 @@ describe('Grid.insertTile (js/grid.js L89-L91)', () => {
     expect(grid.availableCells()).not.toContainEqual({ x: 2, y: 2 });
   });
 });
-
-/* ===== 13. removeTile(): js/grid.js L93-L95 ===== */
 
 describe('Grid.removeTile (js/grid.js L93-L95)', () => {
   it('clears the cell the tile coordinates name (L94)', () => {
@@ -847,8 +911,6 @@ describe('Grid.removeTile (js/grid.js L93-L95)', () => {
   });
 });
 
-/* ===== 14. withinBounds(): js/grid.js L97-L100 ===== */
-
 describe('Grid.withinBounds (js/grid.js L97-L100)', () => {
   it('accepts all four corners at the configured size (L98-L99)', () => {
     const grid = new Grid(DEFAULT_BOARD_SIZE);
@@ -883,8 +945,6 @@ describe('Grid.withinBounds (js/grid.js L97-L100)', () => {
     }
   });
 });
-
-/* ===== 15. serialize(): js/grid.js L102-L117 ===== */
 
 describe('Grid.serialize (js/grid.js L102-L117)', () => {
   it('projects to a size and a square cell matrix (L113-L116)', () => {
@@ -960,8 +1020,6 @@ describe('Grid.serialize (js/grid.js L102-L117)', () => {
   });
 });
 
-/* ===== 16. Board sizes other than the configured one ===== */
-
 describe('Grid at a size other than the configured one (L2)', () => {
   it('carries the lattice, the valve and the projection (L2-L3)', () => {
     for (const size of [SHRUNK_SIZE, GROWN_SIZE]) {
@@ -971,7 +1029,6 @@ describe('Grid at a size other than the configured one (L2)', () => {
       expect(grid.size).toBe(size);
       expect(grid.cells).toHaveLength(size);
       expectLatticeMatches(grid, board.grid.cells);
-
       expect(grid.cellContent({ x: size, y: 0 })).toBeNull();
       expect(grid.cellContent({ x: 0, y: size })).toBeNull();
       expect(grid.cellsAvailable()).toBe(false);
@@ -1007,4 +1064,3 @@ describe('Grid at a size other than the configured one (L2)', () => {
     expect(everyCellInOrder(GROWN_SIZE)).toContainEqual(drawn);
   });
 });
-

@@ -1,56 +1,27 @@
-// Contract suite for src/engine/hook-bus.ts, AAP Contract 2: the hook
-// execution protocol, together with the six-name hook vocabulary of
-// src/engine/hooks.ts. This suite is the executable counterpart of
-// Figure 5, Hook Dispatch Sequence, in
-// docs/architecture/hook-dispatch-sequence.md, and the sections named
-// below pin that figure's four obligations.
+// Contract suite for src/engine/hook-bus.ts: the hook execution protocol,
+// together with the six-name hook vocabulary of src/engine/hooks.ts.
 //
-// Constructs pinned, with the vanilla line range of each:
-//   js/keyboard_input_manager.js L2      the listener table
-//   js/keyboard_input_manager.js L18-L23 on(), now register()
-//   js/keyboard_input_manager.js L25-L32 emit(), now dispatch()
-//   js/game_manager.js L35-L59           setup(), now onStageStart
-//   js/game_manager.js L134              the terminal-state guard, and
-//   js/game_manager.js L113-L120         prepareTiles(), now onBeforeMove
-//   js/game_manager.js L156-L170         the merge branch, now onMerge
-//   js/game_manager.js L69-L76           addRandomTile(), and
-//   js/game_manager.js L183              the post-move spawn, now onSpawn
-//   js/game_manager.js L185-L189         the loss check and actuation,
-//                                        now onAfterMove
-//   js/local_storage_manager.js L32-L39  the only catch in the retired
-//                                        sources, whose L37 discarded
-//                                        its error object
+// Constructs pinned, and the vanilla construct each came from: the listener
+// table, `on()` now `register()` and `emit()` now `dispatch()` of
+// js/keyboard_input_manager.js; `setup()`, now onStageStart; the terminal-state
+// guard and `prepareTiles()`, now onBeforeMove; the merge branch, now onMerge;
+// `addRandomTile()` and the post-move spawn, now onSpawn; the loss check and
+// actuation, now onAfterMove; and the only `catch` in the retired sources,
+// which discarded its error object.
 //
-// Properties with no vanilla analogue, each citing AAP Contract 2:
-//   HOOK_NAMES, the six names
-//   pickup-order dispatch
-//   the charge guard, and consumeCharge as the one write path
-//   error isolation, degraded() and the reported error
-//   the compounding payload protocol
-//   onStageEnd
-//   unregister(), subscriptions() and subscribers()
-//   metrics(), the dispatch-count snapshot
+// Properties with NO vanilla analogue, each pinned below: HOOK_NAMES and its
+// six names, pickup-order dispatch, the charge guard with `consumeCharge` as
+// the one write path, error isolation with `degraded()` and the reported error,
+// the compounding payload protocol, onStageEnd, `unregister()`,
+// `subscriptions()`, `subscribers()`, and `metrics()`.
 //
-// The four Figure 5 obligations and the sections that pin them:
-//   pickup-order dispatch  sections 8, 9 and 10
-//   the charge guard       sections 11, 12 and 13
-//   error isolation        sections 14 and 15
-//   compounding            section 16
+// Not pinned here: the emitter's own `on()`, `emit()` and `off()` semantics,
+// which belong to tests/unit/engine/engine-events.test.ts.
 //
-// Not pinned here, and pinned by the sibling suite named:
-//   the emitter's own on(), emit() and off() semantics
-//     -> tests/unit/engine/engine-events.test.ts
-//   which hooks one turn dispatches, and whether a veto is honoured
-//     -> tests/unit/engine/engine.test.ts
-//   catalogue-level relic ordering, the sixteen relics, the seeded draw
-//     -> tests/unit/relics
-//
-// Every subscriber below is hand-built and every handler is a vi.fn()
-// spy. This suite reads no DOM and no storage, imports no module under
-// src/observability, src/relics, src/render, src/run or src/ui, installs
-// no mock library and writes no snapshot.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+// Every subscriber below is hand-built and every handler is a vi.fn() spy. This
+// suite reads no DOM and no storage, imports no module under src/observability,
+// src/relics, src/render, src/run or src/ui, installs no mock library and
+// writes no snapshot.
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -101,9 +72,6 @@ import type {
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import { createMergePairBoard } from '../../fixtures/boards';
 
-/* ===== 1. Names, seeds and values the assertions use ===== */
-
-/** The six hook names AAP Contract 2 requires, in turn order. */
 const EXPECTED_HOOK_NAMES: readonly string[] = [
   'onStageStart',
   'onBeforeMove',
@@ -113,47 +81,40 @@ const EXPECTED_HOOK_NAMES: readonly string[] = [
   'onStageEnd',
 ];
 
-/** How many names that is. */
 const EXPECTED_HOOK_NAME_COUNT = 6;
 
 /** Correlation identifier every bus below is constructed with. */
-const RUN_ID = 'run-hook-bus-0001';
+const CORRELATION_ID = 'run-hook-bus-0001';
 
-/** Seed every substream set below is derived from. */
 const RUN_SEED = 'hook-bus-suite-seed';
 
-/** Edge length every board below is built at. */
 const BOARD_SIZE = DEFAULT_BOARD_SIZE;
 
-/** Column index of the first merge-pair fixture tile. */
 const PAIR_X = 0;
 
-/** Column index of the second merge-pair fixture tile. */
 const PAIR_NEXT_X = 1;
 
-/** Row index of both merge-pair fixture tiles. */
 const PAIR_Y = 0;
 
-/** Face value of both merge-pair fixture tiles. */
 const PAIR_VALUE = 2;
 
-/** Face value js/game_manager.js L157 produced from two PAIR_VALUE tiles. */
 const MERGED_VALUE = 4;
 
-/** Amount js/game_manager.js L167 added for that merge. */
 const MERGE_SCORE_DELTA = 4;
 
-/** Stage index every stage payload below carries. */
 const STAGE_INDEX = 2;
 
-/** Score every stage payload below carries. */
 const STAGE_SCORE = 132;
 
-/** Face value js/game_manager.js L71 spawned nine times in ten. */
 const SPAWN_VALUE = 2;
 
-/** How many relics AAP §0.1.1.4 A1 fixes the catalogue at. */
 const RELIC_CATALOGUE_SIZE = 16;
+
+/** The substream js/game_manager.js L71's draw was moved onto. */
+const SPAWN_VALUE_STREAM = 'spawn-value';
+
+/** A board edge no view below may be talked into. */
+const HUGE_BOARD_SIZE = 1_000_000;
 
 /* ===== 2. Type-level assertion helper ===== */
 
@@ -169,24 +130,12 @@ type Exact<Left, Right> = [Left] extends [Right]
     : false
   : false;
 
-/* ===== 3. Environment, board and payload builders ===== */
-
-/**
- * Builds a live board from the merge-pair fixture.
- *
- * @returns A grid holding the fixture's two equal tiles in row 0.
- */
 function createBoard(): Grid {
   const board = createMergePairBoard(BOARD_SIZE);
 
   return new Grid(board.grid.size, board.grid.cells);
 }
 
-/**
- * Builds the collaborators one dispatch is handed.
- *
- * @returns The rules in force, the run's substreams and a live board.
- */
 function createEnvironment(): HookEnvironment {
   const config: RulesConfig = createDefaultRulesConfig();
 
@@ -197,15 +146,6 @@ function createEnvironment(): HookEnvironment {
   };
 }
 
-/**
- * Builds an `onStageStart` payload.
- *
- * Ported from js/game_manager.js L35-L59. The goal is typed as
- * `StageStartPayload['goal']`; src/config/stage-config.ts is not imported
- * here.
- *
- * @returns The payload.
- */
 function createStageStartPayload(): StageStartPayload {
   const goal: StageStartPayload['goal'] = {
     kind: 'highest-tile',
@@ -220,27 +160,10 @@ function createStageStartPayload(): StageStartPayload {
   };
 }
 
-/**
- * Builds an `onBeforeMove` payload, undispatched, so `cancelled` is
- * `false`.
- *
- * Ported from js/game_manager.js L134 and L113-L120.
- *
- * @param board Live board the move would resolve on.
- * @returns The payload.
- */
 function createBeforeMovePayload(board: Grid): BeforeMovePayload {
   return { direction: DIRECTION_UP, board, cancelled: false };
 }
 
-/**
- * Builds an `onMerge` payload from two live tiles.
- *
- * Ported from js/game_manager.js L156-L170: `resultValue` is the value
- * L157 produced and `scoreDelta` the amount L167 added.
- *
- * @returns The payload.
- */
 function createMergePayload(): MergePayload {
   const source = new Tile({ x: PAIR_NEXT_X, y: PAIR_Y }, PAIR_VALUE);
   const target = new Tile({ x: PAIR_X, y: PAIR_Y }, PAIR_VALUE);
@@ -257,25 +180,10 @@ function createMergePayload(): MergePayload {
   };
 }
 
-/**
- * Builds an `onSpawn` payload.
- *
- * Ported from js/game_manager.js L69-L76 and L183.
- *
- * @returns The payload, carrying an available cell.
- */
 function createSpawnPayload(): SpawnPayload {
   return { position: { x: PAIR_NEXT_X, y: PAIR_NEXT_X }, value: SPAWN_VALUE };
 }
 
-/**
- * Builds an `onAfterMove` payload.
- *
- * Ported from js/game_manager.js L185-L189.
- *
- * @param board Live board as the move left it.
- * @returns The payload.
- */
 function createAfterMovePayload(board: Grid): AfterMovePayload {
   return {
     moved: true,
@@ -287,13 +195,6 @@ function createAfterMovePayload(board: Grid): AfterMovePayload {
   };
 }
 
-/**
- * Builds an `onStageEnd` payload.
- *
- * AAP Contract 2: no vanilla analogue.
- *
- * @returns The payload.
- */
 function createStageEndPayload(): StageEndPayload {
   return {
     stageIndex: STAGE_INDEX,
@@ -302,12 +203,6 @@ function createStageEndPayload(): StageEndPayload {
   };
 }
 
-/**
- * Builds one payload for each of the six hook names.
- *
- * @param board Live board the two board-carrying payloads reference.
- * @returns The six payloads, keyed by hook name.
- */
 function createPayloadsByHook(board: Grid): HookPayloadMap {
   return {
     onStageStart: createStageStartPayload(),
@@ -319,28 +214,12 @@ function createPayloadsByHook(board: Grid): HookPayloadMap {
   };
 }
 
-/* ===== 4. Report recorders ===== */
-
-/** A reporter paired with the reports it received, in arrival order. */
 interface RecordingReporter {
-  /** The sink to inject into the bus. */
   readonly reporter: EngineReporter;
-
-  /** Every caught handler error handed to `onHookError`. */
   readonly errors: EngineHookErrorReport[];
-
-  /** Every countable occurrence handed to `onCount`. */
   readonly counts: EngineCountReport[];
 }
 
-/**
- * Builds a reporter that records every report it is handed.
- *
- * The injection seam AAP §0.9.3 requires: the bus reaches its report sink
- * through this interface and names no module under src/observability.
- *
- * @returns The sink and the two arrays it appends to.
- */
 function createRecordingReporter(): RecordingReporter {
   const errors: EngineHookErrorReport[] = [];
   const counts: EngineCountReport[] = [];
@@ -359,21 +238,10 @@ function createRecordingReporter(): RecordingReporter {
   };
 }
 
-/* ===== 5. Subscriber builders ===== */
-
-/** Charges, state and pickup order a subscriber may carry. */
 type SubscriberExtras = Partial<
   Pick<HookSubscriber, 'charges' | 'state' | 'pickupOrder'>
 >;
 
-/**
- * Builds a subscriber from a handler table supplied by the caller.
- *
- * @param id Identifier.
- * @param hooks Handler table to bind.
- * @param extras Charges, state and pickup order to carry.
- * @returns The subscriber, ready to register.
- */
 function createSubscriber(
   id: string,
   hooks: HookHandlerTable,
@@ -388,15 +256,6 @@ function createSubscriber(
   };
 }
 
-/**
- * Builds a subscriber whose `onStageEnd` handler appends `id` to `order`
- * when it runs and transforms no payload.
- *
- * @param id Identifier, and the label the handler appends.
- * @param order Array every handler built this way appends to.
- * @param extras Charges, state and pickup order to carry.
- * @returns The subscriber, ready to register.
- */
 function createStageEndRecorder(
   id: string,
   order: string[],
@@ -409,14 +268,48 @@ function createStageEndRecorder(
   return createSubscriber(id, { onStageEnd: handler }, extras);
 }
 
-/**
- * Registers a subscriber and fails the test where the bus rejected it.
- *
- * @param bus Bus to register on.
- * @param subscriber Subscriber to register.
- */
 function register(bus: HookBus, subscriber: HookSubscriber): void {
   expect(bus.register(subscriber)).toBe(true);
+}
+
+/**
+ * Runs a dispatch and asserts that nothing escaped it, then hands back its
+ * outcome, so both halves of a no-throw guarantee are asserted from one call.
+ *
+ * @param dispatch Dispatch under test.
+ * @returns What the dispatch produced.
+ */
+function expectNoDispatchThrow(
+  dispatch: () => HookDispatchResult<'onStageEnd'>,
+): HookDispatchResult<'onStageEnd'> {
+  const outcomes: HookDispatchResult<'onStageEnd'>[] = [];
+
+  expect(() => {
+    outcomes.push(dispatch());
+  }).not.toThrow();
+  expect(outcomes).toHaveLength(1);
+
+  return outcomes[0];
+}
+
+/**
+ * Runs a charge consumption and asserts that nothing escaped it, then hands
+ * back what it reported.
+ *
+ * @param consume Consumption under test.
+ * @returns What the consumption reported.
+ */
+function expectConsumption(
+  consume: () => ChargeConsumption,
+): ChargeConsumption {
+  const outcomes: ChargeConsumption[] = [];
+
+  expect(() => {
+    outcomes.push(consume());
+  }).not.toThrow();
+  expect(outcomes).toHaveLength(1);
+
+  return outcomes[0];
 }
 
 /**
@@ -432,8 +325,6 @@ function dispatchStageEnd(
 ): HookDispatchResult<'onStageEnd'> {
   return bus.dispatch('onStageEnd', payload, createEnvironment());
 }
-
-/* ===== 6. The six hook names (requirement R2, AAP Contract 2) ===== */
 
 describe('HOOK_NAMES declares exactly six hooks (AAP Contract 2)', () => {
   it('declares exactly the six names, in turn order', () => {
@@ -503,7 +394,7 @@ describe('HOOK_NAMES declares exactly six hooks (AAP Contract 2)', () => {
 
 describe('dispatch accepts every one of the six names (AAP Contract 2)', () => {
   it('dispatches each of the six and returns its own payload', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const board = createBoard();
     const payloads = createPayloadsByHook(board);
     const environment = createEnvironment();
@@ -519,7 +410,7 @@ describe('dispatch accepts every one of the six names (AAP Contract 2)', () => {
   });
 
   it('reaches a handler bound to each of the six names', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const board = createBoard();
     const payloads = createPayloadsByHook(board);
     const reached: string[] = [];
@@ -568,7 +459,7 @@ describe('dispatch accepts every one of the six names (AAP Contract 2)', () => {
   });
 
   it('types each name to its own payload', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const environment = createEnvironment();
 
     // @ts-expect-error onMerge does not carry an onSpawn payload.
@@ -584,8 +475,6 @@ describe('dispatch accepts every one of the six names (AAP Contract 2)', () => {
   });
 });
 
-/* ===== 7. Construction (js/keyboard_input_manager.js L1-L16) ===== */
-
 describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
   it('constructs with no argument at all', () => {
     const bus = createHookBus();
@@ -596,15 +485,19 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
   });
 
   it('defaults the correlation identifier to the empty string', () => {
-    expect(createHookBus().metrics().runId).toBe('');
+    expect(createHookBus().metrics().correlationId).toBe('');
   });
 
   it('carries the correlation identifier it was constructed with', () => {
-    expect(createHookBus({ runId: RUN_ID }).metrics().runId).toBe(RUN_ID);
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+    expect(bus.metrics().correlationId).toBe(CORRELATION_ID);
   });
 
   it('starts every counter at zero, as L2 started an empty table', () => {
-    const metrics: HookBusMetrics = createHookBus({ runId: RUN_ID }).metrics();
+    const metrics: HookBusMetrics = createHookBus({
+      correlationId: CORRELATION_ID,
+    }).metrics();
 
     expect(metrics.registered).toBe(0);
     expect(metrics.acceptedRegistrations).toBe(0);
@@ -618,7 +511,7 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
   });
 
   it('freezes the bus, so its surface is the eight members', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
 
     expect(Object.isFrozen(bus)).toBe(true);
     expect(typeof bus.register).toBe('function');
@@ -631,8 +524,9 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
     expect(typeof bus.metrics).toBe('function');
   });
 
-  it('hands the dispatch environment to a handler unchanged', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+  it('hands a frozen, capability-limited view of each collaborator to a ' +
+    'handler', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const environment = createEnvironment();
     const seen: HookContext[] = [];
 
@@ -650,13 +544,107 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
     const context = seen[0];
 
     expect(seen).toHaveLength(1);
-    expect(context.config).toBe(environment.config);
-    expect(context.rng).toBe(environment.rng);
-    expect(context.grid).toBe(environment.grid);
+
+    // Never the live collaborators themselves.
+    expect(context.config).not.toBe(environment.config);
+    expect(context.rng).not.toBe(environment.rng);
+    expect(context.grid).not.toBe(environment.grid);
+
+    // Every view is frozen, so an assignment through one throws under the
+    // strict mode ES modules run in.
+    expect(Object.isFrozen(context.config)).toBe(true);
+    expect(Object.isFrozen(context.rng)).toBe(true);
+    expect(Object.isFrozen(context.grid)).toBe(true);
+
+    // Reads agree with the live collaborators.
+    expect(context.config.boardSize).toBe(environment.config.boardSize);
+    expect(context.config.winValue).toBe(environment.config.winValue);
+    expect(context.config.startTiles).toBe(environment.config.startTiles);
+    expect(context.config.spawn.values).toEqual(
+      environment.config.spawn.values,
+    );
+    expect(context.config.merge.canMerge).toBe(
+      environment.config.merge.canMerge,
+    );
+    expect(context.rng.seed).toBe(environment.rng.seed);
+    expect(context.rng.stream(SPAWN_VALUE_STREAM)).toBe(
+      environment.rng.stream(SPAWN_VALUE_STREAM),
+    );
+    expect(context.grid.size).toBe(environment.grid.size);
+    expect(context.grid.cellValue({ x: PAIR_X, y: PAIR_Y })).toBe(PAIR_VALUE);
+    expect(context.grid.serialize()).toEqual(environment.grid.serialize());
+  });
+
+  it('refuses a write through a collaborator view and leaves the live ' +
+    'collaborators unchanged', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const environment = createEnvironment();
+    const thrown: string[] = [];
+
+    register(
+      bus,
+      createSubscriber('tries-to-write', {
+        onStageEnd: (_payload, context): void => {
+          const writable = context.config as unknown as { boardSize: number };
+          const swappable = context.grid as unknown as {
+            serialize: () => unknown;
+          };
+
+          try {
+            writable.boardSize = HUGE_BOARD_SIZE;
+          } catch (error: unknown) {
+            thrown.push(String((error as Error).name));
+          }
+
+          try {
+            swappable.serialize = (): unknown => null;
+          } catch (error: unknown) {
+            thrown.push(String((error as Error).name));
+          }
+        },
+      }),
+    );
+
+    const result = bus.dispatch(
+      'onStageEnd',
+      createStageEndPayload(),
+      environment,
+    );
+
+    expect(thrown).toEqual(['TypeError', 'TypeError']);
+    expect(environment.config.boardSize).toBe(BOARD_SIZE);
+    expect(environment.grid.size).toBe(BOARD_SIZE);
+    expect(result.invoked).toBe(1);
+    expect(result.failed).toBe(0);
+  });
+
+  it('exposes the board through queries alone, with no write and no live ' +
+    'tile', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const seen: HookContext['grid'][] = [];
+
+    register(
+      bus,
+      createSubscriber('reads-board', {
+        onStageEnd: (_payload, context): void => {
+          seen.push(context.grid);
+        },
+      }),
+    );
+
+    dispatchStageEnd(bus);
+
+    const view = seen[0] as unknown as Record<string, unknown>;
+
+    expect(view.insertTile).toBeUndefined();
+    expect(view.removeTile).toBeUndefined();
+    expect(view.cells).toBeUndefined();
+    expect(view.cellContent).toBeUndefined();
+    expect(typeof view.cellValue).toBe('function');
   });
 
   it('identifies the dispatch on the context it builds', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const seen: HookContext[] = [];
 
     register(
@@ -676,7 +664,7 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
 
     const context = seen[0];
 
-    expect(context.runId).toBe(RUN_ID);
+    expect(context.correlationId).toBe(CORRELATION_ID);
     expect(context.hook).toBe('onStageEnd');
     expect(context.subscriberId).toBe('identified');
     expect(context.pickupOrder).toBe(7);
@@ -684,8 +672,9 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
     expect(context.state).toEqual({ visits: 0 });
   });
 
-  it('writes the context state slot back onto the subscriber', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+  it('carries the context state slot from one dispatch to the next, in ' +
+    'the state the bus owns', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const subscriber = createSubscriber(
       'accumulates',
       {
@@ -703,19 +692,101 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
     register(bus, subscriber);
     dispatchStageEnd(bus);
 
-    expect(subscriber.state).toBe(1);
+    expect(bus.subscriptions('onStageEnd')[0].state).toBe(1);
 
     dispatchStageEnd(bus);
 
-    expect(subscriber.state).toBe(2);
+    expect(bus.subscriptions('onStageEnd')[0].state).toBe(2);
+
+    // The bus took the slot over at registration, so the caller's own
+    // object is not written through.
+    expect(subscriber.state).toBe(0);
+  });
+
+  it('keeps a state slot the handler wrote before it threw out of the ' +
+    'registration', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+    register(
+      bus,
+      createSubscriber(
+        'writes-then-throws',
+        {
+          onStageEnd: (_payload, context): StageEndPayload => {
+            context.state = 'written-before-the-throw';
+            throw new Error('relic handler failed');
+          },
+        },
+        { state: 'initial' },
+      ),
+    );
+
+    const result = dispatchStageEnd(bus);
+
+    expect(result.failed).toBe(1);
+    expect(bus.subscriptions('onStageEnd')[0].state).toBe('initial');
+  });
+
+  it('isolates one subscriber state slot from another', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const seen: unknown[] = [];
+
+    register(
+      bus,
+      createSubscriber(
+        'writes-its-own',
+        {
+          onStageEnd: (_payload, context): void => {
+            context.state = 'mine';
+          },
+        },
+        { pickupOrder: 0, state: 'a' },
+      ),
+    );
+    register(
+      bus,
+      createSubscriber(
+        'reads-its-own',
+        {
+          onStageEnd: (_payload, context): void => {
+            seen.push(context.state);
+          },
+        },
+        { pickupOrder: 1, state: 'b' },
+      ),
+    );
+
+    dispatchStageEnd(bus);
+
+    expect(seen).toEqual(['b']);
+    expect(bus.subscriptions('onStageEnd')[0].state).toBe('mine');
+    expect(bus.subscriptions('onStageEnd')[1].state).toBe('b');
+  });
+
+  it('freezes every subscription and subscriber snapshot it returns', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+    register(
+      bus,
+      createSubscriber(
+        'snapshotted',
+        { onStageEnd: (): void => undefined },
+        { charges: 2, state: { visits: 0 } },
+      ),
+    );
+
+    const subscription = bus.subscriptions('onStageEnd')[0];
+    const snapshot = bus.subscribers()[0];
+
+    expect(Object.isFrozen(subscription)).toBe(true);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.hooks)).toBe(true);
   });
 });
 
-/* ===== 8. Figure 5 obligation 1: dispatch walks pickup order ===== */
-
 describe('dispatch walks subscribers in pickup order (AAP Contract 2)', () => {
   it('fires three handlers on one hook in pickup order', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('first', order, { pickupOrder: 0 }));
@@ -731,15 +802,13 @@ describe('dispatch walks subscribers in pickup order (AAP Contract 2)', () => {
   });
 
   it('appends a subscriber that declares no pickup order', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('picked-first', order));
     register(bus, createStageEndRecorder('picked-second', order));
     register(bus, createStageEndRecorder('picked-third', order));
-
     dispatchStageEnd(bus);
-
     expect(order).toEqual([
       'picked-first',
       'picked-second',
@@ -753,7 +822,7 @@ describe('dispatch walks subscribers in pickup order (AAP Contract 2)', () => {
   });
 
   it('reports pickup order on the subscriptions bound to a hook', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('alpha', order, { pickupOrder: 4 }));
@@ -776,12 +845,11 @@ describe('dispatch walks subscribers in pickup order (AAP Contract 2)', () => {
   });
 
   it('reads subscribers in pickup order, not in array position', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('late', order, { pickupOrder: 5 }));
     register(bus, createStageEndRecorder('early', order, { pickupOrder: 1 }));
-
     expect(
       bus.subscribers().map((subscriber): string => subscriber.id),
     ).toEqual(['early', 'late']);
@@ -789,27 +857,23 @@ describe('dispatch walks subscribers in pickup order (AAP Contract 2)', () => {
   });
 
   it('breaks a shared pickup index by registration sequence', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('tied-a', order, { pickupOrder: 3 }));
     register(bus, createStageEndRecorder('tied-b', order, { pickupOrder: 3 }));
     register(bus, createStageEndRecorder('tied-c', order, { pickupOrder: 3 }));
-
     dispatchStageEnd(bus);
-
     expect(order).toEqual(['tied-a', 'tied-b', 'tied-c']);
   });
 });
-
-/* ===== 9. Pickup order is not an artefact of registration order ===== */
 
 describe(
   'pickup order overrides registration order, which the vanilla bus ' +
     'could not do (js/keyboard_input_manager.js L18-L23, L25-L32)',
   () => {
     it('fires in pickup order when registered in the reverse of it', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('third', order, { pickupOrder: 2 }));
@@ -817,28 +881,24 @@ describe(
         pickupOrder: 1,
       }));
       register(bus, createStageEndRecorder('first', order, { pickupOrder: 0 }));
-
       dispatchStageEnd(bus);
-
       expect(order).toEqual(['first', 'second', 'third']);
     });
 
     it('fires in pickup order when registered in no order at all', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('c', order, { pickupOrder: 20 }));
       register(bus, createStageEndRecorder('a', order, { pickupOrder: 5 }));
       register(bus, createStageEndRecorder('d', order, { pickupOrder: 31 }));
       register(bus, createStageEndRecorder('b', order, { pickupOrder: 12 }));
-
       dispatchStageEnd(bus);
-
       expect(order).toEqual(['a', 'b', 'c', 'd']);
     });
 
     it('holds a subscriber ahead of one registered before it', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('registered-first', order, {
@@ -849,31 +909,26 @@ describe(
       }));
 
       dispatchStageEnd(bus);
-
       expect(order).toEqual(['registered-second', 'registered-first']);
     });
   },
 );
-
-/* ===== 10. Dispatch order is part of the reproducibility contract ===== */
 
 describe(
   'dispatch order is stable, so RNG consumption order is reproducible ' +
     '(AAP Contract 2, validation gate V2)',
   () => {
     it('repeats the same order across four dispatches', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('one', order, { pickupOrder: 0 }));
       register(bus, createStageEndRecorder('two', order, { pickupOrder: 1 }));
       register(bus, createStageEndRecorder('three', order, { pickupOrder: 2 }));
-
       dispatchStageEnd(bus);
       dispatchStageEnd(bus);
       dispatchStageEnd(bus);
       dispatchStageEnd(bus);
-
       expect(order).toEqual([
         'one', 'two', 'three',
         'one', 'two', 'three',
@@ -883,7 +938,7 @@ describe(
     });
 
     it('keeps the order after an unrelated subscriber is removed', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('one', order, { pickupOrder: 0 }));
@@ -901,15 +956,12 @@ describe(
       );
       register(bus, createStageEndRecorder('two', order, { pickupOrder: 2 }));
       register(bus, createStageEndRecorder('three', order, { pickupOrder: 3 }));
-
       dispatchStageEnd(bus);
-
       expect(order).toEqual(['one', 'two', 'three']);
       expect(bus.unregister('unrelated')).toBe(true);
 
       order.length = 0;
       dispatchStageEnd(bus);
-
       expect(order).toEqual(['one', 'two', 'three']);
     });
 
@@ -927,7 +979,7 @@ describe(
         );
 
       const runOnce = (): number[] => {
-        const bus = createHookBus({ runId: RUN_ID });
+        const bus = createHookBus({ correlationId: CORRELATION_ID });
 
         register(bus, drawer(2));
         register(bus, drawer(0));
@@ -946,11 +998,9 @@ describe(
   },
 );
 
-/* ===== 11. Figure 5 obligation 2: the charge guard lives in the bus ===== */
-
 describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
   it('never invokes a handler whose charges are zero', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const handler = vi.fn<HookHandler<'onStageEnd'>>((): void => undefined);
 
     register(
@@ -969,7 +1019,7 @@ describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
   });
 
   it('never invokes a handler whose charges are negative', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const handler = vi.fn<HookHandler<'onStageEnd'>>((): void => undefined);
 
     register(
@@ -984,7 +1034,7 @@ describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
   });
 
   it('never invokes a handler whose charges are not a number at all', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const handler = vi.fn<HookHandler<'onStageEnd'>>((): void => undefined);
 
     register(
@@ -1001,31 +1051,28 @@ describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
   });
 
   it('invokes a handler whose charges are above zero', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('funded', order, { charges: 1 }));
-
     expect(dispatchStageEnd(bus).invoked).toBe(1);
     expect(order).toEqual(['funded']);
   });
 
   it('treats absent charges as unlimited and always fires', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('unlimited', order));
-
     dispatchStageEnd(bus);
     dispatchStageEnd(bus);
     dispatchStageEnd(bus);
-
     expect(order).toEqual(['unlimited', 'unlimited', 'unlimited']);
     expect(bus.metrics().totals.skippedExhausted).toBe(0);
   });
 
   it('throws nothing when every subscriber is spent', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
 
     register(
       bus,
@@ -1068,7 +1115,7 @@ describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
   });
 
   it('leaves a spent subscriber state slot untouched', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const original = { pristine: true };
     const subscriber = createSubscriber(
       'spent-state',
@@ -1082,13 +1129,12 @@ describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
 
     register(bus, subscriber);
     dispatchStageEnd(bus);
-
     expect(subscriber.state).toBe(original);
     expect(subscriber.charges).toBe(0);
   });
 
   it('lets the subscribers around a spent one fire normally', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('before', order, { pickupOrder: 0 }));
@@ -1114,7 +1160,7 @@ describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
   });
 
   it('skips every hook of a spent subscriber, not just one', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const board = createBoard();
     const payloads = createPayloadsByHook(board);
     const reached: string[] = [];
@@ -1143,7 +1189,7 @@ describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
   });
 
   it('records a skipped handler as exhausted, not as failed', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
 
     register(
       bus,
@@ -1167,14 +1213,12 @@ describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
   });
 });
 
-/* ===== 12. One guard in the bus covers every charge-bearing relic ===== */
-
 describe(
   'one guard in the bus satisfies the zero-charge case for all sixteen ' +
     'relics, so no handler carries its own guard (AAP Contract 2)',
   () => {
     it('skips sixteen spent subscribers without invoking one', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const handlers: HookHandler<'onStageEnd'>[] = [];
 
       for (let index = 0; index < RELIC_CATALOGUE_SIZE; index += 1) {
@@ -1209,7 +1253,7 @@ describe(
     });
 
     it('guards a handler that never reads charges at all', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const handler = vi.fn<HookHandler<'onStageEnd'>>(
         (payload): StageEndPayload => ({
           ...payload,
@@ -1239,13 +1283,11 @@ describe(
   },
 );
 
-/* ===== 13. consumeCharge is the one path that writes charges ===== */
-
 describe('consumeCharge is the only path that writes charges ' +
   '(AAP Contract 2)', () => {
   it('leaves charges untouched across a dispatch that invoked a handler',
     () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const subscriber = createSubscriber(
         'holds-two',
         { onStageEnd: (): void => undefined },
@@ -1255,13 +1297,12 @@ describe('consumeCharge is the only path that writes charges ' +
       register(bus, subscriber);
       dispatchStageEnd(bus);
       dispatchStageEnd(bus);
-
       expect(subscriber.charges).toBe(2);
       expect(bus.metrics().chargesConsumed).toBe(0);
     });
 
   it('deducts one charge by default', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const subscriber = createSubscriber(
       'holds-three',
       { onStageEnd: (): void => undefined },
@@ -1276,12 +1317,16 @@ describe('consumeCharge is the only path that writes charges ' +
     expect(consumption.limited).toBe(true);
     expect(consumption.consumed).toBe(1);
     expect(consumption.remaining).toBe(2);
-    expect(subscriber.charges).toBe(2);
     expect(Object.isFrozen(consumption)).toBe(true);
+
+    // The bus owns the budget: it reports the deduction on its own
+    // snapshot and leaves the caller's object as it was registered.
+    expect(bus.subscriptions('onStageEnd')[0].charges).toBe(2);
+    expect(subscriber.charges).toBe(3);
   });
 
   it('stops firing after exactly the charges it held are consumed', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
     const budget = 3;
 
@@ -1295,15 +1340,13 @@ describe('consumeCharge is the only path that writes charges ' +
     }
 
     expect(order).toEqual(['budgeted', 'budgeted', 'budgeted']);
-
     dispatchStageEnd(bus);
-
     expect(order).toHaveLength(budget);
     expect(bus.metrics().hooks.onStageEnd.skippedExhausted).toBe(1);
   });
 
   it('never lets a budget fall below zero', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const subscriber = createSubscriber(
       'holds-two',
       { onStageEnd: (): void => undefined },
@@ -1316,11 +1359,12 @@ describe('consumeCharge is the only path that writes charges ' +
 
     expect(overdraw.consumed).toBe(2);
     expect(overdraw.remaining).toBe(0);
-    expect(subscriber.charges).toBe(2 - 2);
+    expect(bus.subscriptions('onStageEnd')[0].charges).toBe(2 - 2);
+    expect(subscriber.charges).toBe(2);
   });
 
   it('deducts nothing from a budget already spent', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
 
     register(
       bus,
@@ -1340,7 +1384,7 @@ describe('consumeCharge is the only path that writes charges ' +
   });
 
   it('reports a subscriber carrying no budget as unlimited', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const subscriber = createSubscriber('unlimited', {
       onStageEnd: (): void => undefined,
     });
@@ -1357,7 +1401,7 @@ describe('consumeCharge is the only path that writes charges ' +
   });
 
   it('reports an identifier that is not registered as unheld', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const consumption = bus.consumeCharge('never-registered');
 
     expect(consumption.held).toBe(false);
@@ -1367,7 +1411,7 @@ describe('consumeCharge is the only path that writes charges ' +
   });
 
   it('normalises a budget that is not a whole number as it writes it', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const subscriber = createSubscriber(
       'fractional',
       { onStageEnd: (): void => undefined },
@@ -1380,11 +1424,12 @@ describe('consumeCharge is the only path that writes charges ' +
 
     expect(consumption.consumed).toBe(1);
     expect(consumption.remaining).toBe(1);
-    expect(subscriber.charges).toBe(1);
+    expect(bus.subscriptions('onStageEnd')[0].charges).toBe(1);
+    expect(subscriber.charges).toBe(2.7);
   });
 
   it('reports every deduction on the snapshot', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
 
     register(
       bus,
@@ -1407,14 +1452,12 @@ describe('consumeCharge is the only path that writes charges ' +
   });
 });
 
-/* ===== 14. Figure 5 obligation 3: error isolation ===== */
-
 describe(
   'a throwing handler is contained, where the vanilla bus let a throw ' +
     'escape (js/keyboard_input_manager.js L25-L32)',
   () => {
     it('does not propagate a handler throw out of dispatch', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       register(
         bus,
@@ -1431,7 +1474,7 @@ describe(
     });
 
     it('completes the turn, returning a payload and its counts', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const payload = createStageEndPayload();
 
       register(
@@ -1453,7 +1496,7 @@ describe(
     });
 
     it('marks the throwing subscriber degraded', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       register(bus, createSubscriber('healthy', {
         onStageEnd: (): void => undefined,
@@ -1468,15 +1511,13 @@ describe(
       );
 
       expect(bus.degraded()).toEqual([]);
-
       dispatchStageEnd(bus);
-
       expect(bus.degraded()).toEqual(['thrower']);
       expect(Object.isFrozen(bus.degraded())).toBe(true);
     });
 
     it('reports degraded identifiers in pickup order', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const thrower = (id: string, pickupOrder: number): HookSubscriber =>
         createSubscriber(
           id,
@@ -1490,14 +1531,12 @@ describe(
 
       register(bus, thrower('late-thrower', 8));
       register(bus, thrower('early-thrower', 1));
-
       dispatchStageEnd(bus);
-
       expect(bus.degraded()).toEqual(['early-thrower', 'late-thrower']);
     });
 
     it('keeps the last good payload when a later handler throws', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const transformed: StageEndPayload = {
         stageIndex: STAGE_INDEX,
         cleared: false,
@@ -1528,15 +1567,15 @@ describe(
       const original = createStageEndPayload();
       const result = dispatchStageEnd(bus, original);
 
-      expect(result.payload).toBe(transformed);
-      expect(result.payload).not.toBe(original);
+      expect(result.payload).toEqual(transformed);
+      expect(result.payload).not.toEqual(original);
       expect(result.payload).not.toBeUndefined();
       expect(result.failed).toBe(1);
     });
 
     it('fires the subscribers after a thrower, in pickup order, on the ' +
       'last good payload', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
       const seen: StageEndPayload[] = [];
       const transformed: StageEndPayload = {
@@ -1610,11 +1649,11 @@ describe(
       expect(seen).toEqual([transformed, transformed]);
       expect(result.invoked).toBe(4);
       expect(result.failed).toBe(1);
-      expect(result.payload).toBe(transformed);
+      expect(result.payload).toEqual(transformed);
     });
 
     it('skips a degraded subscriber on every later dispatch', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const handler = vi.fn<HookHandler<'onStageEnd'>>(
         (): StageEndPayload => {
           throw new Error('relic handler failed');
@@ -1638,7 +1677,7 @@ describe(
     });
 
     it('degrades the subscriber across every hook it bound', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
       const payloads = createPayloadsByHook(board);
       const spawn = vi.fn<HookHandler<'onSpawn'>>((): void => undefined);
@@ -1662,7 +1701,7 @@ describe(
 
     it('still lists a degraded registration among its hook subscriptions',
       () => {
-        const bus = createHookBus({ runId: RUN_ID });
+        const bus = createHookBus({ correlationId: CORRELATION_ID });
 
         register(
           bus,
@@ -1674,7 +1713,6 @@ describe(
         );
 
         dispatchStageEnd(bus);
-
         expect(
           bus.subscriptions('onStageEnd').map(
             (subscription): string => subscription.subscriberId,
@@ -1686,7 +1724,7 @@ describe(
     it('contains a thrown value that is not an Error', () => {
       const recording = createRecordingReporter();
       const bus = createHookBus({
-        runId: RUN_ID,
+        correlationId: CORRELATION_ID,
         reporter: recording.reporter,
       });
 
@@ -1728,7 +1766,7 @@ describe(
     it('absorbs the report into NOOP_ENGINE_REPORTER without throwing',
       () => {
         const bus = createHookBus({
-          runId: RUN_ID,
+          correlationId: CORRELATION_ID,
           reporter: NOOP_ENGINE_REPORTER,
         });
 
@@ -1751,7 +1789,7 @@ describe(
 
     it('contains a reporter that throws while receiving the report', () => {
       const bus = createHookBus({
-        runId: RUN_ID,
+        correlationId: CORRELATION_ID,
         reporter: {
           onHookError: (): void => {
             throw new Error('the sink itself failed');
@@ -1781,8 +1819,6 @@ describe(
   },
 );
 
-/* ===== 15. The report carries the run correlation identifier ===== */
-
 describe(
   'the caught error is reported through the injected reporter and carries ' +
     'the run correlation identifier, where js/local_storage_manager.js ' +
@@ -1791,7 +1827,7 @@ describe(
     it('hands the caught error to the injected reporter', () => {
       const recording = createRecordingReporter();
       const bus = createHookBus({
-        runId: RUN_ID,
+        correlationId: CORRELATION_ID,
         reporter: recording.reporter,
       });
       const thrown = new Error('relic handler failed');
@@ -1806,7 +1842,6 @@ describe(
       );
 
       dispatchStageEnd(bus);
-
       expect(recording.errors).toHaveLength(1);
 
       const report: EngineHookErrorReport = recording.errors[0];
@@ -1817,7 +1852,7 @@ describe(
     it('carries the run correlation identifier on the report', () => {
       const recording = createRecordingReporter();
       const bus = createHookBus({
-        runId: RUN_ID,
+        correlationId: CORRELATION_ID,
         reporter: recording.reporter,
       });
 
@@ -1832,13 +1867,13 @@ describe(
 
       dispatchStageEnd(bus);
 
-      expect(recording.errors[0].runId).toBe(RUN_ID);
+      expect(recording.errors[0].correlationId).toBe(CORRELATION_ID);
     });
 
     it('carries the correlation identifier of the bus that caught it', () => {
       const firstRecording = createRecordingReporter();
       const secondRecording = createRecordingReporter();
-      const secondRunId = 'run-hook-bus-0002';
+      const secondCorrelationId = 'run-hook-bus-0002';
       const thrower: HookHandlerTable = {
         onStageEnd: (): StageEndPayload => {
           throw new Error('relic handler failed');
@@ -1846,11 +1881,11 @@ describe(
       };
 
       const firstBus = createHookBus({
-        runId: RUN_ID,
+        correlationId: CORRELATION_ID,
         reporter: firstRecording.reporter,
       });
       const secondBus = createHookBus({
-        runId: secondRunId,
+        correlationId: secondCorrelationId,
         reporter: secondRecording.reporter,
       });
 
@@ -1859,17 +1894,17 @@ describe(
       dispatchStageEnd(firstBus);
       dispatchStageEnd(secondBus);
 
-      expect(firstRecording.errors[0].runId).toBe(RUN_ID);
-      expect(secondRecording.errors[0].runId).toBe(secondRunId);
-      expect(firstRecording.errors[0].runId).not.toBe(
-        secondRecording.errors[0].runId,
+      expect(firstRecording.errors[0].correlationId).toBe(CORRELATION_ID);
+      expect(secondRecording.errors[0].correlationId).toBe(secondCorrelationId);
+      expect(firstRecording.errors[0].correlationId).not.toBe(
+        secondRecording.errors[0].correlationId,
       );
     });
 
     it('names the hook and the subscriber the error came from', () => {
       const recording = createRecordingReporter();
       const bus = createHookBus({
-        runId: RUN_ID,
+        correlationId: CORRELATION_ID,
         reporter: recording.reporter,
       });
       const board = createBoard();
@@ -1890,13 +1925,13 @@ describe(
 
       expect(report.hook).toBe('onMerge');
       expect(report.subscriberId).toBe('merge-thrower');
-      expect(report.runId).toBe(RUN_ID);
+      expect(report.correlationId).toBe(CORRELATION_ID);
     });
 
     it('reports one error per throw, in pickup order', () => {
       const recording = createRecordingReporter();
       const bus = createHookBus({
-        runId: RUN_ID,
+        correlationId: CORRELATION_ID,
         reporter: recording.reporter,
       });
       const thrower = (id: string, pickupOrder: number): HookSubscriber =>
@@ -1912,42 +1947,44 @@ describe(
 
       register(bus, thrower('second-thrower', 1));
       register(bus, thrower('first-thrower', 0));
-
       dispatchStageEnd(bus);
-
       expect(
         recording.errors.map((report): string => report.subscriberId),
       ).toEqual(['first-thrower', 'second-thrower']);
       expect(
-        recording.errors.every((report): boolean => report.runId === RUN_ID),
+        recording.errors.every(
+          (report): boolean => report.correlationId === CORRELATION_ID,
+        ),
+      ).toBe(true);
+      expect(
+        recording.errors.every(
+          (report): boolean => report.correlationId === CORRELATION_ID,
+        ),
       ).toBe(true);
     });
 
     it('reports nothing while every handler returns normally', () => {
       const recording = createRecordingReporter();
       const bus = createHookBus({
-        runId: RUN_ID,
+        correlationId: CORRELATION_ID,
         reporter: recording.reporter,
       });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('healthy', order));
       dispatchStageEnd(bus);
-
       expect(recording.errors).toEqual([]);
       expect(order).toEqual(['healthy']);
     });
   },
 );
 
-/* ===== 16. Figure 5 obligation 4: the compounding payload protocol ===== */
-
 describe(
   'each handler receives the payload the handler before it returned ' +
     '(AAP Contract 2)',
   () => {
     it('hands the second subscriber what the first returned', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const seen: StageEndPayload[] = [];
       const transformed: StageEndPayload = {
         stageIndex: STAGE_INDEX,
@@ -1986,7 +2023,7 @@ describe(
 
     it('compounds two onMerge subscribers in pickup order ' +
       '(js/game_manager.js L156-L170)', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const bonus = 4;
       const factor = 10;
 
@@ -2030,7 +2067,7 @@ describe(
 
     it('compounds in the reverse of pickup order when picked in reverse',
       () => {
-        const bus = createHookBus({ runId: RUN_ID });
+        const bus = createHookBus({ correlationId: CORRELATION_ID });
         const bonus = 4;
         const factor = 10;
 
@@ -2074,7 +2111,7 @@ describe(
 
     it('compounds the score delta independently of the result value ' +
       '(js/game_manager.js L157, L167)', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       register(
         bus,
@@ -2114,7 +2151,7 @@ describe(
     });
 
     it('returns the accumulated payload to the caller', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const transformed: StageEndPayload = {
         stageIndex: STAGE_INDEX,
         cleared: false,
@@ -2132,7 +2169,7 @@ describe(
     });
 
     it('leaves the payload unchanged where a handler returns nothing', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const observed: StageEndPayload[] = [];
 
       register(
@@ -2159,14 +2196,18 @@ describe(
       const original = createStageEndPayload();
       const result = bus.dispatch('onStageEnd', original, createEnvironment());
 
-      expect(result.payload).toBe(original);
-      expect(observed[0]).toBe(original);
+      // Each handler is handed a copy, so the values carry through while
+      // the caller's own object is never the object a handler held.
+      expect(result.payload).toEqual(original);
+      expect(observed[0]).toEqual(original);
+      expect(observed[0]).not.toBe(original);
+      expect(result.payload).not.toBe(original);
       expect(result.rejected).toBe(0);
       expect(result.invoked).toBe(2);
     });
 
     it('does not blank the payload where every handler only observes', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('observer-a', order, {
@@ -2179,13 +2220,14 @@ describe(
       const original = createStageEndPayload();
       const result = bus.dispatch('onStageEnd', original, createEnvironment());
 
-      expect(result.payload).toBe(original);
+      expect(result.payload).toEqual(original);
       expect(result.payload).not.toBeUndefined();
       expect(order).toEqual(['observer-a', 'observer-b']);
     });
 
-    it('carries a payload mutated in place through to the caller', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+    it('carries a payload mutated in place through to the caller and ' +
+      'leaves the caller\'s own payload untouched', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
 
       register(
@@ -2204,12 +2246,20 @@ describe(
         createEnvironment(),
       );
 
-      expect(result.payload).toBe(original);
+      // The in-place assignment is honoured, and it reached the copy the
+      // bus handed the handler: the payload the caller passed still reads
+      // as it was dispatched.
       expect(result.payload.cancelled).toBe(true);
+      expect(result.payload).not.toBe(original);
+      expect(original.cancelled).toBe(false);
+
+      // The live board still travels by reference, so a subscriber of the
+      // event the engine emits from this payload reads the same board.
+      expect(result.payload.board).toBe(board);
     });
 
     it('carries a freshly returned object through to the caller', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
 
       register(
@@ -2238,7 +2288,7 @@ describe(
 
     it('discards a return that is not a payload and keeps the payload',
       () => {
-        const bus = createHookBus({ runId: RUN_ID });
+        const bus = createHookBus({ correlationId: CORRELATION_ID });
         const observed: StageEndPayload[] = [];
 
         register(
@@ -2272,14 +2322,14 @@ describe(
           createEnvironment(),
         );
 
-        expect(result.payload).toBe(original);
-        expect(observed[0]).toBe(original);
+        expect(result.payload).toEqual(original);
+        expect(observed[0]).toEqual(original);
         expect(result.rejected).toBe(1);
         expect(result.failed).toBe(0);
       });
 
     it('discards an array return and keeps the payload', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       register(
         bus,
@@ -2296,8 +2346,160 @@ describe(
       expect(bus.metrics().hooks.onStageEnd.rejected).toBe(1);
     });
 
+    it('discards an empty object return and keeps the payload', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const observed: StageEndPayload[] = [];
+
+      register(
+        bus,
+        createSubscriber(
+          'returns-an-empty-object',
+          {
+            onStageEnd: (): StageEndPayload => ({}) as StageEndPayload,
+          },
+          { pickupOrder: 0 },
+        ),
+      );
+      register(
+        bus,
+        createSubscriber(
+          'reads-after-empty-object',
+          {
+            onStageEnd: (payload): void => {
+              observed.push(payload);
+            },
+          },
+          { pickupOrder: 1 },
+        ),
+      );
+
+      const original = createStageEndPayload();
+      const result = bus.dispatch('onStageEnd', original, createEnvironment());
+
+      // The empty object is discarded, so every member the caller
+      // dispatched still reads as it was dispatched. Compared by value
+      // rather than by identity because each handler is handed a copy: the
+      // reader after the rejected return observes that copy, not the
+      // caller's own object.
+      expect(result.payload).toEqual(original);
+      expect(observed[0]).toEqual(original);
+      expect(result.rejected).toBe(1);
+      expect(result.failed).toBe(0);
+      expect(bus.metrics().hooks.onStageEnd.rejected).toBe(1);
+    });
+
+    it('discards a return missing a required member', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const partial = {
+        stageIndex: STAGE_INDEX,
+        cleared: true,
+      } as unknown as StageEndPayload;
+
+      register(
+        bus,
+        createSubscriber('drops-the-score-member', {
+          onStageEnd: (): StageEndPayload => partial,
+        }),
+      );
+
+      const original = createStageEndPayload();
+      const result = bus.dispatch('onStageEnd', original, createEnvironment());
+
+      expect(result.payload).toBe(original);
+      expect(result.payload).not.toBe(partial);
+      expect(result.rejected).toBe(1);
+    });
+
+    it('discards a return whose required member is the wrong type', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const board = createBoard();
+      const mistyped = {
+        moved: true,
+        board,
+        score: 'not a number',
+        over: false,
+        won: false,
+        terminated: false,
+      } as unknown as AfterMovePayload;
+
+      register(
+        bus,
+        createSubscriber('returns-a-string-score', {
+          onAfterMove: (): AfterMovePayload => mistyped,
+        }),
+      );
+
+      const original = createAfterMovePayload(board);
+      const result = bus.dispatch('onAfterMove', original, createEnvironment());
+
+      expect(result.payload).toBe(original);
+      expect(result.payload.score).toBe(STAGE_SCORE);
+      expect(result.rejected).toBe(1);
+    });
+
+    it('discards a foreign payload returned on onMerge', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const foreign = createStageEndPayload() as unknown as MergePayload;
+      const observed: MergePayload[] = [];
+
+      register(
+        bus,
+        createSubscriber(
+          'returns-a-stage-end-payload',
+          {
+            onMerge: (): MergePayload => foreign,
+          },
+          { pickupOrder: 0 },
+        ),
+      );
+      register(
+        bus,
+        createSubscriber(
+          'reads-after-foreign-payload',
+          {
+            onMerge: (payload): void => {
+              observed.push(payload);
+            },
+          },
+          { pickupOrder: 1 },
+        ),
+      );
+
+      const original = createMergePayload();
+      const result = bus.dispatch('onMerge', original, createEnvironment());
+
+      // The stage-end payload is discarded, so the merge payload's own
+      // members survive the foreign return. Compared by value rather than
+      // by identity for the same reason as the empty-object case above.
+      expect(result.payload).toEqual(original);
+      expect(result.payload.resultValue).toBe(MERGED_VALUE);
+      expect(result.payload.scoreDelta).toBe(MERGE_SCORE_DELTA);
+      expect(observed[0]).toEqual(original);
+      expect(result.rejected).toBe(1);
+    });
+
+    it('discards a foreign payload returned on onSpawn', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const foreign = createMergePayload() as unknown as SpawnPayload;
+
+      register(
+        bus,
+        createSubscriber('returns-a-merge-payload', {
+          onSpawn: (): SpawnPayload => foreign,
+        }),
+      );
+
+      const original = createSpawnPayload();
+      const result = bus.dispatch('onSpawn', original, createEnvironment());
+
+      expect(result.payload).toBe(original);
+      expect(result.payload.value).toBe(SPAWN_VALUE);
+      expect(result.rejected).toBe(1);
+      expect(bus.metrics().hooks.onSpawn.rejected).toBe(1);
+    });
+
     it('does not leak a transformation from one hook into another', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
       const payloads = createPayloadsByHook(board);
       const biasedValue = 64;
@@ -2336,7 +2538,7 @@ describe(
     });
 
     it('starts each dispatch from the payload it was handed', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       register(
         bus,
@@ -2357,6 +2559,355 @@ describe(
   },
 );
 
+/* ===== 16b. A return is validated against the hook's exact payload ===== */
+
+describe(
+  'dispatch adopts a return only where it is the hook\'s payload exactly ' +
+    '(AAP Contract 2)',
+  () => {
+    it('rejects a return that omits a declared member', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+      register(
+        bus,
+        createSubscriber('drops-cleared', {
+          onStageEnd: (payload): StageEndPayload =>
+            ({
+              stageIndex: payload.stageIndex,
+              score: payload.score,
+            }) as unknown as StageEndPayload,
+        }),
+      );
+
+      const original = createStageEndPayload();
+      const result = bus.dispatch('onStageEnd', original, createEnvironment());
+
+      expect(result.rejected).toBe(1);
+      expect(result.failed).toBe(0);
+      expect(result.payload).toEqual(original);
+    });
+
+    it('rejects a return that carries a member the payload does not ' +
+      'declare', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+      register(
+        bus,
+        createSubscriber('widens-the-payload', {
+          onStageEnd: (payload): StageEndPayload =>
+            ({ ...payload, smuggled: true }) as unknown as StageEndPayload,
+        }),
+      );
+
+      const original = createStageEndPayload();
+      const result = bus.dispatch('onStageEnd', original, createEnvironment());
+
+      expect(result.rejected).toBe(1);
+      expect(result.payload).toEqual(original);
+    });
+
+    it('rejects a return whose members are out of range or not finite',
+      () => {
+        const cases: readonly [string, HookHandlerTable][] = [
+          [
+            'not-a-number-score',
+            {
+              onStageEnd: (payload): StageEndPayload => ({
+                ...payload,
+                score: Number.NaN,
+              }),
+            },
+          ],
+          [
+            'negative-stage-index',
+            {
+              onStageEnd: (payload): StageEndPayload => ({
+                ...payload,
+                stageIndex: -1,
+              }),
+            },
+          ],
+          [
+            'not-a-boolean-cleared',
+            {
+              onStageEnd: (payload): StageEndPayload => ({
+                ...payload,
+                cleared: 'yes' as unknown as boolean,
+              }),
+            },
+          ],
+        ];
+
+        for (const [id, hooks] of cases) {
+          const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+          register(bus, createSubscriber(id, hooks));
+
+          const original = createStageEndPayload();
+          const result = bus.dispatch(
+            'onStageEnd',
+            original,
+            createEnvironment(),
+          );
+
+          expect(result.rejected, id).toBe(1);
+          expect(result.payload, id).toEqual(original);
+        }
+      });
+
+    it('rejects a spawn position outside the live board and a value that ' +
+      'is not positive', () => {
+      const outside = createHookBus({ correlationId: CORRELATION_ID });
+
+      register(
+        outside,
+        createSubscriber('spawns-off-board', {
+          onSpawn: (payload): SpawnPayload => ({
+            ...payload,
+            position: { x: BOARD_SIZE, y: 0 },
+          }),
+        }),
+      );
+
+      const offBoard = outside.dispatch(
+        'onSpawn',
+        createSpawnPayload(),
+        createEnvironment(),
+      );
+
+      expect(offBoard.rejected).toBe(1);
+      expect(offBoard.payload.position).toEqual({
+        x: PAIR_NEXT_X,
+        y: PAIR_NEXT_X,
+      });
+
+      const zeroValue = createHookBus({ correlationId: CORRELATION_ID });
+
+      register(
+        zeroValue,
+        createSubscriber('spawns-nothing', {
+          onSpawn: (payload): SpawnPayload => ({ ...payload, value: 0 }),
+        }),
+      );
+
+      const spawned = zeroValue.dispatch(
+        'onSpawn',
+        createSpawnPayload(),
+        createEnvironment(),
+      );
+
+      expect(spawned.rejected).toBe(1);
+      expect(spawned.payload.value).toBe(SPAWN_VALUE);
+    });
+
+    it('accepts a spawn that suppresses itself by dropping the position',
+      () => {
+        const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+        register(
+          bus,
+          createSubscriber('suppresses-the-spawn', {
+            onSpawn: (payload): SpawnPayload => ({ value: payload.value }),
+          }),
+        );
+
+        const result = bus.dispatch(
+          'onSpawn',
+          createSpawnPayload(),
+          createEnvironment(),
+        );
+
+        expect(result.rejected).toBe(0);
+        expect(result.payload.position).toBeUndefined();
+        expect(result.payload.value).toBe(SPAWN_VALUE);
+      });
+
+    it('rejects a substituted board on onBeforeMove and onAfterMove', () => {
+      const board = createBoard();
+      const foreign = createBoard();
+
+      const before = createHookBus({ correlationId: CORRELATION_ID });
+
+      register(
+        before,
+        createSubscriber('swaps-the-board', {
+          onBeforeMove: (payload): BeforeMovePayload => ({
+            ...payload,
+            board: foreign,
+          }),
+        }),
+      );
+
+      const beforeResult = before.dispatch(
+        'onBeforeMove',
+        createBeforeMovePayload(board),
+        createEnvironment(),
+      );
+
+      expect(beforeResult.rejected).toBe(1);
+      expect(beforeResult.payload.board).toBe(board);
+
+      const after = createHookBus({ correlationId: CORRELATION_ID });
+
+      register(
+        after,
+        createSubscriber('swaps-the-board', {
+          onAfterMove: (payload): AfterMovePayload => ({
+            ...payload,
+            board: foreign,
+          }),
+        }),
+      );
+
+      const afterResult = after.dispatch(
+        'onAfterMove',
+        createAfterMovePayload(board),
+        createEnvironment(),
+      );
+
+      expect(afterResult.rejected).toBe(1);
+      expect(afterResult.payload.board).toBe(board);
+    });
+
+    it('rejects a substituted tile on onMerge', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const foreign = new Tile({ x: PAIR_X, y: PAIR_Y }, PAIR_VALUE);
+      const original = createMergePayload();
+
+      register(
+        bus,
+        createSubscriber('swaps-the-source', {
+          onMerge: (payload): MergePayload => ({
+            ...payload,
+            source: foreign,
+          }),
+        }),
+      );
+
+      const result = bus.dispatch('onMerge', original, createEnvironment());
+
+      expect(result.rejected).toBe(1);
+      expect(result.payload.source).toBe(original.source);
+      expect(result.payload.target).toBe(original.target);
+    });
+
+    it('rejects a stage start that misreports the board it began on', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+      register(
+        bus,
+        createSubscriber('misreports-the-size', {
+          onStageStart: (payload): StageStartPayload => ({
+            ...payload,
+            boardSize: HUGE_BOARD_SIZE,
+          }),
+        }),
+      );
+
+      const original = createStageStartPayload();
+      const result = bus.dispatch(
+        'onStageStart',
+        original,
+        createEnvironment(),
+      );
+
+      expect(result.rejected).toBe(1);
+      expect(result.payload.boardSize).toBe(BOARD_SIZE);
+    });
+
+    it('rolls back an in-place mutation made by a handler that then throws',
+      () => {
+        const bus = createHookBus({ correlationId: CORRELATION_ID });
+        const board = createBoard();
+        const seen: boolean[] = [];
+
+        register(
+          bus,
+          createSubscriber(
+            'vetoes-then-throws',
+            {
+              onBeforeMove: (payload): BeforeMovePayload => {
+                payload.cancelled = true;
+                throw new Error('relic handler failed');
+              },
+            },
+            { pickupOrder: 0 },
+          ),
+        );
+        register(
+          bus,
+          createSubscriber(
+            'reads-after',
+            {
+              onBeforeMove: (payload): void => {
+                seen.push(payload.cancelled);
+              },
+            },
+            { pickupOrder: 1 },
+          ),
+        );
+
+        const original = createBeforeMovePayload(board);
+        const result = bus.dispatch(
+          'onBeforeMove',
+          original,
+          createEnvironment(),
+        );
+
+        expect(result.failed).toBe(1);
+        expect(seen).toEqual([false]);
+        expect(result.payload.cancelled).toBe(false);
+        expect(original.cancelled).toBe(false);
+      });
+
+    it('adopts a successful in-place mutation, compounds it and still ' +
+      'leaves the caller\'s payload untouched', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const board = createBoard();
+      const seen: boolean[] = [];
+
+      register(
+        bus,
+        createSubscriber(
+          'vetoes',
+          {
+            onBeforeMove: (payload): void => {
+              payload.cancelled = true;
+            },
+          },
+          { pickupOrder: 0 },
+        ),
+      );
+      register(
+        bus,
+        createSubscriber(
+          'reads-after',
+          {
+            onBeforeMove: (payload): void => {
+              seen.push(payload.cancelled);
+            },
+          },
+          { pickupOrder: 1 },
+        ),
+      );
+
+      const original = createBeforeMovePayload(board);
+      const result = bus.dispatch(
+        'onBeforeMove',
+        original,
+        createEnvironment(),
+      );
+
+      // The mutation is adopted and compounds into the next handler's
+      // payload, while the payload the caller built still reads as it was
+      // dispatched.
+      expect(seen).toEqual([true]);
+      expect(result.payload.cancelled).toBe(true);
+      expect(original.cancelled).toBe(false);
+    });
+  },
+);
+
 /* ===== 17. The cancellable onBeforeMove veto ===== */
 
 describe(
@@ -2364,7 +2915,7 @@ describe(
     '(js/game_manager.js L134)',
   () => {
     it('dispatches onBeforeMove with the veto unset', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
       const seen: BeforeMovePayload[] = [];
 
@@ -2387,7 +2938,7 @@ describe(
     });
 
     it('shows a veto set in place on the payload dispatch returns', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
 
       register(
@@ -2409,7 +2960,7 @@ describe(
     });
 
     it('shows a veto returned on a fresh payload dispatch returns', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
 
       register(
@@ -2435,7 +2986,7 @@ describe(
 
     it('keeps a veto set by an early subscriber past later ones that do ' +
       'not clear it', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
       const seen: boolean[] = [];
 
@@ -2490,7 +3041,7 @@ describe(
 
     it('lets a later subscriber clear a veto, since the bus ranks no ' +
       'subscriber above another', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
 
       register(
@@ -2530,7 +3081,7 @@ describe(
     });
 
     it('keeps a veto that a throwing later subscriber never cleared', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
 
       register(
@@ -2570,7 +3121,7 @@ describe(
     });
 
     it('leaves the veto unset where no subscriber sets it', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
       const order: string[] = [];
 
@@ -2594,7 +3145,7 @@ describe(
     });
 
     it('never reaches a spent subscriber that would have vetoed', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
 
       register(
@@ -2622,14 +3173,12 @@ describe(
   },
 );
 
-/* ===== 18. The dispatch-count snapshot (AAP §0.9.3) ===== */
-
 describe(
   'metrics reports dispatch counts per hook and per subscriber as plain ' +
     'data, reachable without any observability import (AAP §0.9.3)',
   () => {
     it('carries a row for each of the six names, dispatched or not', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       dispatchStageEnd(bus);
 
@@ -2642,7 +3191,7 @@ describe(
     });
 
     it('counts one dispatch per hook, per call', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
       const payloads = createPayloadsByHook(board);
 
@@ -2658,12 +3207,11 @@ describe(
     });
 
     it('counts one invocation per handler that ran', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('one', order, { pickupOrder: 0 }));
       register(bus, createStageEndRecorder('two', order, { pickupOrder: 1 }));
-
       dispatchStageEnd(bus);
       dispatchStageEnd(bus);
 
@@ -2676,7 +3224,7 @@ describe(
     });
 
     it('separates a skipped dispatch from a failed one', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       register(
         bus,
@@ -2708,7 +3256,6 @@ describe(
       expect(counters.invoked).toBe(1);
       expect(counters.skippedDegraded).toBe(0);
       expect(counters.skippedDetached).toBe(0);
-
       dispatchStageEnd(bus);
 
       const later = bus.metrics().hooks.onStageEnd;
@@ -2720,7 +3267,7 @@ describe(
     });
 
     it('counts a handler that threw as both invoked and failed', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       register(
         bus,
@@ -2742,7 +3289,7 @@ describe(
     });
 
     it('attributes each count to the subscriber it belongs to', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('healthy', order, {
@@ -2787,7 +3334,7 @@ describe(
     });
 
     it('orders the subscriber rows by pickup order', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('late', order, {
@@ -2806,7 +3353,7 @@ describe(
     });
 
     it('counts nothing against a subscriber not bound to the hook', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
       const payloads = createPayloadsByHook(board);
 
@@ -2829,12 +3376,11 @@ describe(
     });
 
     it('keeps a row after its subscriber is removed', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('transient', order));
       dispatchStageEnd(bus);
-
       expect(bus.unregister('transient')).toBe(true);
 
       const row = bus.metrics().subscribers[0];
@@ -2846,7 +3392,7 @@ describe(
     });
 
     it('reports registration and removal counts', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('kept', order));
@@ -2863,7 +3409,7 @@ describe(
     });
 
     it('is plain frozen data, built fresh on each call', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(bus, createStageEndRecorder('counted', order));
@@ -2877,7 +3423,6 @@ describe(
       expect(Object.isFrozen(first.subscribers)).toBe(true);
       expect(Object.isFrozen(first.degraded)).toBe(true);
       expect(JSON.parse(JSON.stringify(first))).toBeTruthy();
-
       dispatchStageEnd(bus);
 
       const second = bus.metrics();
@@ -2888,7 +3433,7 @@ describe(
     });
 
     it('lists the degraded identifiers on the snapshot', () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       register(
         bus,
@@ -2900,14 +3445,13 @@ describe(
       );
 
       dispatchStageEnd(bus);
-
       expect(bus.metrics().degraded).toEqual(['thrower']);
     });
 
     it('reports every count through the injected reporter as well', () => {
       const recording = createRecordingReporter();
       const bus = createHookBus({
-        runId: RUN_ID,
+        correlationId: CORRELATION_ID,
         reporter: recording.reporter,
       });
       const order: string[] = [];
@@ -2927,7 +3471,12 @@ describe(
       expect(names).toContain('engine.hook.charge.consumed');
       expect(
         recording.counts.every(
-          (report): boolean => report.runId === RUN_ID,
+          (report): boolean => report.correlationId === CORRELATION_ID,
+        ),
+      ).toBe(true);
+      expect(
+        recording.counts.every(
+          (report): boolean => report.correlationId === CORRELATION_ID,
         ),
       ).toBe(true);
       expect(
@@ -2943,7 +3492,7 @@ describe(
         'degraded',
         'detached',
       ];
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const counters = bus.metrics().hooks.onStageEnd;
 
       expect(reasons).toHaveLength(3);
@@ -2954,12 +3503,10 @@ describe(
   },
 );
 
-/* ===== 19. Registration lifecycle ===== */
-
 describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
   'AAP Contract 2)', () => {
   it('takes on a subscriber and reports it registered', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     expect(bus.register(createStageEndRecorder('taken-on', order))).toBe(true);
@@ -2970,12 +3517,11 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
   });
 
   it('removes a subscriber and never invokes it again', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const handler = vi.fn<HookHandler<'onStageEnd'>>((): void => undefined);
 
     register(bus, createSubscriber('removable', { onStageEnd: handler }));
     dispatchStageEnd(bus);
-
     expect(handler).toHaveBeenCalledTimes(1);
     expect(bus.unregister('removable')).toBe(true);
 
@@ -2995,11 +3541,10 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
   });
 
   it('reports a repeated removal as removing nothing', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('removable', order));
-
     expect(bus.unregister('removable')).toBe(true);
     expect(bus.unregister('removable')).toBe(false);
     expect(bus.unregister('never-registered')).toBe(false);
@@ -3007,7 +3552,7 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
   });
 
   it('rejects a second registration under an identifier already held', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
     const first = createStageEndRecorder('duplicated', order);
     const second = createStageEndRecorder('duplicated', order);
@@ -3015,29 +3560,33 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
     expect(bus.register(first)).toBe(true);
     expect(bus.register(second)).toBe(false);
     expect(bus.subscribers()).toHaveLength(1);
-    expect(bus.subscribers()[0]).toBe(first);
+
+    // The retained registration is the first one: its handler is the one
+    // the snapshot carries, and the second table never reached the bus.
+    expect(bus.subscribers()[0].id).toBe('duplicated');
+    expect(bus.subscribers()[0].hooks.onStageEnd).toBe(first.hooks.onStageEnd);
+    expect(bus.subscribers()[0].hooks.onStageEnd).not.toBe(
+      second.hooks.onStageEnd,
+    );
 
     dispatchStageEnd(bus);
-
     expect(order).toEqual(['duplicated']);
   });
 
   it('takes the identifier again once it has been removed', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('recycled', order));
     expect(bus.unregister('recycled')).toBe(true);
     expect(bus.register(createStageEndRecorder('recycled', order))).toBe(true);
-
     dispatchStageEnd(bus);
-
     expect(order).toEqual(['recycled']);
   });
 
   it('clears the degraded mark when the identifier is registered again',
     () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
       const order: string[] = [];
 
       register(
@@ -3049,19 +3598,16 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
         }),
       );
       dispatchStageEnd(bus);
-
       expect(bus.degraded()).toEqual(['flaky']);
       expect(bus.unregister('flaky')).toBe(true);
       expect(bus.register(createStageEndRecorder('flaky', order))).toBe(true);
       expect(bus.degraded()).toEqual([]);
-
       dispatchStageEnd(bus);
-
       expect(order).toEqual(['flaky']);
     });
 
   it('rejects an identifier that is not a non-empty string', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     expect(bus.register(createStageEndRecorder('', order))).toBe(false);
@@ -3076,7 +3622,7 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
   });
 
   it('rejects a handler table that binds no callable handler', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
 
     expect(bus.register({ id: 'empty-table', hooks: {} })).toBe(false);
     expect(
@@ -3090,7 +3636,7 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
 
   it('rejects a handler table binding a name to something uncallable',
     () => {
-      const bus = createHookBus({ runId: RUN_ID });
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
 
       expect(
         bus.register({
@@ -3104,7 +3650,7 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
     });
 
   it('reads no key outside the six hook names', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
     const extras = {
       id: 'carries-an-extra-key',
@@ -3117,14 +3663,12 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
     };
 
     expect(bus.register(extras)).toBe(true);
-
     dispatchStageEnd(bus);
-
     expect(order).toEqual(['carries-an-extra-key']);
   });
 
   it('dispatches a hook with no subscriber as a no-op', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const payload = createStageEndPayload();
     const result = dispatchStageEnd(bus, payload);
 
@@ -3137,7 +3681,7 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
   });
 
   it('never invokes a subscriber for a hook it did not bind', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const board = createBoard();
     const payloads = createPayloadsByHook(board);
     const stageEnd = vi.fn<HookHandler<'onStageEnd'>>((): void => undefined);
@@ -3155,14 +3699,12 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
     expect(stageEnd).not.toHaveBeenCalled();
     expect(bus.subscriptions('onMerge')).toEqual([]);
     expect(bus.subscriptions('onStageEnd')).toHaveLength(1);
-
     dispatchStageEnd(bus);
-
     expect(stageEnd).toHaveBeenCalledTimes(1);
   });
 
   it('skips a subscriber removed while a dispatch was walking', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(
@@ -3191,7 +3733,7 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
   });
 
   it('reaches a subscriber registered mid-walk on the next dispatch', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(
@@ -3214,16 +3756,15 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
     );
 
     dispatchStageEnd(bus);
-
     expect(order).toEqual(['adder']);
-
     dispatchStageEnd(bus);
-
     expect(order).toEqual(['adder', 'adder', 'added']);
   });
 
-  it('reads charges and state from the subscriber at call time', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+  it('owns the charges and the state it was registered with, and ignores ' +
+    'a later edit to the registered object', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const replacement: HookHandler<'onStageEnd'> = vi.fn();
     const subscriber = createSubscriber(
       'mutable',
       { onStageEnd: (): void => undefined },
@@ -3231,19 +3772,210 @@ describe('register and unregister (js/keyboard_input_manager.js L18-L23, ' +
     );
 
     register(bus, subscriber);
-
     expect(bus.subscriptions('onStageEnd')[0].charges).toBe(3);
     expect(bus.subscriptions('onStageEnd')[0].state).toBe('initial');
 
     bus.consumeCharge('mutable');
-    subscriber.state = 'later';
 
+    // Every edit below is made to the object the caller registered, after
+    // the bus accepted it.
+    const mutable = subscriber as {
+      charges?: number;
+      state?: unknown;
+      hooks: HookHandlerTable;
+    };
+
+    mutable.state = 'later';
+    mutable.charges = 99;
+    mutable.hooks = { onStageEnd: replacement };
+
+    // `consumeCharge` is the one path that changed the budget, the state
+    // slot still reads as registered, and the handler the bus dispatches
+    // is still the one it accepted.
     expect(bus.subscriptions('onStageEnd')[0].charges).toBe(2);
-    expect(bus.subscriptions('onStageEnd')[0].state).toBe('later');
+    expect(bus.subscriptions('onStageEnd')[0].state).toBe('initial');
+
+    dispatchStageEnd(bus);
+
+    expect(replacement).not.toHaveBeenCalled();
   });
 });
 
-/* ===== 20. Type-level payload mapping ===== */
+/* ===== 20. Registration edits arriving during a dispatch ===== */
+
+// The bus holds its registrations in pickup order and walks that array itself
+// rather than a per-dispatch copy of it, so the membership a walk sees has to
+// be stable by construction. An edit that arrives while a handler is running is
+// deferred until the walk returns; a removal is marked at once so the walk in
+// progress skips the subscriber as detached.
+describe('an edit during a dispatch leaves the walk in progress stable ' +
+  '(AAP Contract 2)', () => {
+  it('does not invoke a subscriber registered during the dispatch', () => {
+    const bus = createHookBus();
+    const order: string[] = [];
+    const late = createStageEndRecorder('late', order, { pickupOrder: 0 });
+
+    register(
+      bus,
+      createSubscriber(
+        'first',
+        {
+          onStageEnd: (): void => {
+            order.push('first');
+            bus.register(late);
+          },
+        },
+        { pickupOrder: 1 },
+      ),
+    );
+    register(bus, createStageEndRecorder('second', order, { pickupOrder: 2 }));
+
+    dispatchStageEnd(bus);
+
+    expect(order).toEqual(['first', 'second']);
+  });
+
+  it('holds the subscriber it registered, in pickup order, for the next ' +
+    'dispatch', () => {
+    const bus = createHookBus();
+    const order: string[] = [];
+    const late = createStageEndRecorder('late', order, { pickupOrder: 0 });
+
+    register(
+      bus,
+      createSubscriber(
+        'first',
+        {
+          onStageEnd: (): void => {
+            order.push('first');
+            bus.register(late);
+          },
+        },
+        { pickupOrder: 1 },
+      ),
+    );
+
+    dispatchStageEnd(bus);
+    order.length = 0;
+    dispatchStageEnd(bus);
+
+    // Pickup order 0 places it ahead of the subscriber that registered it, on
+    // the dispatch after the one it was registered during.
+    expect(order).toEqual(['late', 'first']);
+    expect(bus.subscribers().map((held) => held.id)).toEqual(['late', 'first']);
+  });
+
+  it('skips a subscriber unregistered during the dispatch as detached', () => {
+    const bus = createHookBus();
+    const order: string[] = [];
+
+    register(
+      bus,
+      createSubscriber(
+        'first',
+        {
+          onStageEnd: (): void => {
+            order.push('first');
+            expect(bus.unregister('second')).toBe(true);
+          },
+        },
+        { pickupOrder: 0 },
+      ),
+    );
+    register(bus, createStageEndRecorder('second', order, { pickupOrder: 1 }));
+    register(bus, createStageEndRecorder('third', order, { pickupOrder: 2 }));
+
+    const result = dispatchStageEnd(bus);
+
+    expect(order).toEqual(['first', 'third']);
+    expect(result.invoked).toBe(2);
+    expect(result.skipped).toBe(1);
+    expect(bus.metrics().hooks.onStageEnd.skippedDetached).toBe(1);
+  });
+
+  it('has removed the unregistered subscriber once the dispatch returns',
+    () => {
+      const bus = createHookBus();
+      const order: string[] = [];
+
+      register(
+        bus,
+        createSubscriber('first', {
+          onStageEnd: (): void => {
+            bus.unregister('second');
+          },
+        }),
+      );
+      register(bus, createStageEndRecorder('second', order));
+
+      dispatchStageEnd(bus);
+
+      expect(bus.subscribers().map((held) => held.id)).toEqual(['first']);
+      expect(
+        bus.subscriptions('onStageEnd').map((held) => held.subscriberId),
+      ).toEqual(['first']);
+      expect(bus.unregister('second')).toBe(false);
+    });
+
+  it('accepts a subscriber re-registered under an identifier unregistered ' +
+    'during the same dispatch', () => {
+    const bus = createHookBus();
+    const order: string[] = [];
+
+    let swapped = false;
+
+    register(
+      bus,
+      createSubscriber('first', {
+        onStageEnd: (): void => {
+          if (swapped) {
+            return;
+          }
+
+          swapped = true;
+          expect(bus.unregister('second')).toBe(true);
+          expect(bus.register(createStageEndRecorder('second', order))).toBe(
+            true,
+          );
+        },
+      }),
+    );
+    register(bus, createStageEndRecorder('second', order));
+
+    dispatchStageEnd(bus);
+    order.length = 0;
+    dispatchStageEnd(bus);
+
+    expect(order).toEqual(['second']);
+    expect(bus.subscribers().map((held) => held.id)).toEqual([
+      'first',
+      'second',
+    ]);
+  });
+
+  it('applies the deferred edits even where a handler threw', () => {
+    const bus = createHookBus();
+    const order: string[] = [];
+
+    register(
+      bus,
+      createSubscriber('first', {
+        onStageEnd: (): void => {
+          bus.unregister('second');
+
+          throw new Error('handler failed');
+        },
+      }),
+    );
+    register(bus, createStageEndRecorder('second', order));
+
+    dispatchStageEnd(bus);
+
+    expect(bus.subscribers().map((held) => held.id)).toEqual(['first']);
+  });
+});
+
+/* ===== 21. Type-level payload mapping ===== */
 
 describe('HookPayloadMap types each handler to its own payload ' +
   '(AAP Contract 2)', () => {
@@ -3291,7 +4023,7 @@ describe('HookPayloadMap types each handler to its own payload ' +
       }),
     };
 
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
 
     register(bus, createSubscriber('typed', table));
 
@@ -3319,7 +4051,7 @@ describe('HookPayloadMap types each handler to its own payload ' +
       },
     };
 
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
 
     register(bus, createSubscriber('narrow', table));
 
@@ -3335,7 +4067,7 @@ describe('HookPayloadMap types each handler to its own payload ' +
   });
 
   it('types the dispatch result to the hook that was dispatched', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const result: HookDispatchResult<'onMerge'> = bus.dispatch(
       'onMerge',
       createMergePayload(),
@@ -3351,7 +4083,7 @@ describe('HookPayloadMap types each handler to its own payload ' +
   });
 
   it('types a subscription to the hook it was resolved for', () => {
-    const bus = createHookBus({ runId: RUN_ID });
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
 
     register(bus, createStageEndRecorder('typed', order));
@@ -3365,5 +4097,546 @@ describe('HookPayloadMap types each handler to its own payload ' +
 
     expect(handlerIsStageEndHandler).toBe(true);
     expect(subscriptions).toHaveLength(1);
+  });
+});
+
+/* ===== 21. Charge boundaries: the values a persisted budget can hold ===== */
+
+// `charges` and a `consumeCharge` amount both reach the bus from outside it: a
+// relic's declared budget survives in the run-state envelope, so it comes back
+// out of JSON, and an amount is whatever a caller passes. The guard reads
+// `charges > 0` and the deduction normalises through `Math.trunc`, so the
+// boundaries below are the ones a payload can actually carry.
+
+/**
+ * A budget the guard treats as spent, so the handler is skipped. The test is
+ * `charges > 0`, so zero, every negative value and every value that is not a
+ * number at all fall here — and a fraction above zero does not.
+ */
+const SPENT_BUDGETS: readonly { label: string; charges: number }[] = [
+  { label: 'zero', charges: 0 },
+  { label: 'negative zero', charges: -0 },
+  { label: 'one charge in debt', charges: -1 },
+  { label: 'a large negative budget', charges: -100 },
+  { label: 'NaN', charges: Number.NaN },
+  { label: '-Infinity', charges: Number.NEGATIVE_INFINITY },
+];
+
+/** A budget above zero, so the handler runs. */
+const LIVE_BUDGETS: readonly { label: string; charges: number }[] = [
+  { label: 'one charge', charges: 1 },
+  { label: 'a fraction above one', charges: 1.7 },
+  { label: 'a fraction below one but above zero', charges: 0.4 },
+  { label: 'Infinity', charges: Number.POSITIVE_INFINITY },
+];
+
+/**
+ * A consumption amount that normalises to zero, so nothing is deducted and the
+ * budget is left exactly as it stood.
+ */
+const ZERO_AMOUNTS: readonly { label: string; amount: number }[] = [
+  { label: 'zero', amount: 0 },
+  { label: 'a negative amount', amount: -1 },
+  { label: 'a fraction below one', amount: 0.9 },
+  { label: 'NaN', amount: Number.NaN },
+  { label: '-Infinity', amount: Number.NEGATIVE_INFINITY },
+];
+
+describe('the charge guard reads a budget however it was written', () => {
+  it.each(SPENT_BUDGETS)(
+    'skips a subscriber whose budget is $label',
+    ({ charges }: { charges: number }) => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const order: string[] = [];
+
+      register(bus, createStageEndRecorder('spent', order, { charges }));
+
+      const payload = createStageEndPayload();
+      const result = dispatchStageEnd(bus, payload);
+
+      expect(order).toEqual([]);
+      expect(result.invoked).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(result.failed).toBe(0);
+      expect(result.payload).toBe(payload);
+      expect(bus.metrics().hooks.onStageEnd.skippedExhausted).toBe(1);
+      expect(bus.degraded()).toEqual([]);
+    }
+  );
+
+  it.each(LIVE_BUDGETS)(
+    'invokes a subscriber whose budget is $label',
+    ({ charges }: { charges: number }) => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const order: string[] = [];
+
+      register(bus, createStageEndRecorder('live', order, { charges }));
+
+      const result = dispatchStageEnd(bus);
+
+      expect(order).toEqual(['live']);
+      expect(result.invoked).toBe(1);
+      expect(result.skipped).toBe(0);
+      expect(bus.metrics().hooks.onStageEnd.skippedExhausted).toBe(0);
+    }
+  );
+
+  it('never spends an infinite budget, however often it dispatches', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const order: string[] = [];
+    const subscriber = createStageEndRecorder('endless', order, {
+      charges: Number.POSITIVE_INFINITY,
+    });
+
+    register(bus, subscriber);
+
+    for (let dispatched = 0; dispatched < 3; dispatched += 1) {
+      dispatchStageEnd(bus);
+    }
+
+    expect(order).toEqual(['endless', 'endless', 'endless']);
+
+    // The deduction normalises a non-finite budget to zero, so the first
+    // consumption spends the whole of it and the guard skips the handler
+    // afterwards. Reading it never changed it.
+    const consumption = bus.consumeCharge('endless');
+
+    expect(consumption.limited).toBe(true);
+    expect(consumption.consumed).toBe(0);
+    expect(consumption.remaining).toBe(0);
+    expect(bus.subscriptions('onStageEnd')[0].charges).toBe(0);
+    expect(order).toHaveLength(3);
+
+    dispatchStageEnd(bus);
+
+    expect(order).toHaveLength(3);
+  });
+
+  it('leaves a spent budget where it stood rather than writing it', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+    for (const [index, { charges }] of SPENT_BUDGETS.entries()) {
+      const subscriber = createSubscriber(
+        `spent-${String(index)}`,
+        { onStageEnd: (): void => undefined },
+        { charges }
+      );
+
+      register(bus, subscriber);
+      dispatchStageEnd(bus);
+
+      // Dispatch reads the budget and never writes it: `consumeCharge` is the
+      // only path that does.
+      // The bus owns the budget, so the caller's object is unchanged too.
+      expect(subscriber.charges).toBe(charges);
+      expect(
+        bus.subscriptions('onStageEnd')[index].charges
+      ).toBe(charges);
+    }
+  });
+});
+
+describe('consumeCharge normalises the amount it is given', () => {
+  it.each(ZERO_AMOUNTS)(
+    'deducts nothing for $label and leaves the budget untouched',
+    ({ amount }: { amount: number }) => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const subscriber = createSubscriber(
+        'metered',
+        { onStageEnd: (): void => undefined },
+        { charges: 3 }
+      );
+
+      register(bus, subscriber);
+
+      const consumption = bus.consumeCharge('metered', amount);
+
+      expect(consumption.held).toBe(true);
+      expect(consumption.limited).toBe(true);
+      expect(consumption.consumed).toBe(0);
+      expect(consumption.remaining).toBe(3);
+      expect(bus.subscriptions('onStageEnd')[0].charges).toBe(3);
+      expect(bus.metrics().chargesConsumed).toBe(0);
+      expect(bus.metrics().subscribers[0].chargesConsumed).toBe(0);
+    }
+  );
+
+  it('spends the whole budget for an infinite amount', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const subscriber = createSubscriber(
+      'drained',
+      { onStageEnd: (): void => undefined },
+      { charges: 3 }
+    );
+
+    register(bus, subscriber);
+
+    // The amount normalises to zero because it is not finite, so the deduction
+    // takes nothing at all rather than taking everything.
+    const consumption = bus.consumeCharge(
+      'drained',
+      Number.POSITIVE_INFINITY
+    );
+
+    expect(consumption.consumed).toBe(0);
+    expect(consumption.remaining).toBe(3);
+    expect(bus.subscriptions('onStageEnd')[0].charges).toBe(3);
+  });
+
+  it('truncates a fractional amount towards zero', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const subscriber = createSubscriber(
+      'fractional-amount',
+      { onStageEnd: (): void => undefined },
+      { charges: 5 }
+    );
+
+    register(bus, subscriber);
+
+    const consumption = bus.consumeCharge('fractional-amount', 2.9);
+
+    expect(consumption.consumed).toBe(2);
+    expect(consumption.remaining).toBe(3);
+    expect(bus.subscriptions('onStageEnd')[0].charges).toBe(3);
+    expect(bus.metrics().chargesConsumed).toBe(2);
+  });
+
+  it('takes no more than the budget holds', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const subscriber = createSubscriber(
+      'overdrawn',
+      { onStageEnd: (): void => undefined },
+      { charges: 2 }
+    );
+
+    register(bus, subscriber);
+
+    const consumption = bus.consumeCharge('overdrawn', 10);
+
+    expect(consumption.consumed).toBe(2);
+    expect(consumption.remaining).toBe(0);
+    expect(bus.subscriptions('onStageEnd')[0].charges).toBe(0);
+    expect(bus.metrics().chargesConsumed).toBe(2);
+  });
+
+  it.each(SPENT_BUDGETS)(
+    'reports a budget of $label as spent without throwing',
+    ({ charges }: { charges: number }) => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const subscriber = createSubscriber(
+        'already-spent',
+        { onStageEnd: (): void => undefined },
+        { charges }
+      );
+
+      register(bus, subscriber);
+
+      const consumption = expectConsumption(() =>
+        bus.consumeCharge('already-spent')
+      );
+
+      expect(consumption.held).toBe(true);
+      expect(consumption.limited).toBe(true);
+      expect(consumption.consumed).toBe(0);
+      expect(consumption.remaining).toBe(0);
+
+      // A non-finite or negative budget is normalised as it is written back, so
+      // a later read finds a whole number at or above zero.
+      expect(bus.subscriptions('onStageEnd')[0].charges).toBe(0);
+      expect(bus.metrics().chargesConsumed).toBe(0);
+    }
+  );
+
+  it('reports an unheld identifier as unheld for every amount', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+    for (const { amount } of ZERO_AMOUNTS) {
+      const consumption = bus.consumeCharge('never-registered', amount);
+
+      expect(consumption.held).toBe(false);
+      expect(consumption.limited).toBe(false);
+      expect(consumption.consumed).toBe(0);
+      expect(consumption.remaining).toBeUndefined();
+    }
+  });
+});
+
+describe('pickup order falls back when it is not a finite number', () => {
+  it('appends a subscriber whose pickup order is not finite', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const order: string[] = [];
+
+    register(bus, createStageEndRecorder('first', order, { pickupOrder: 0 }));
+    register(
+      bus,
+      createStageEndRecorder('nan', order, { pickupOrder: Number.NaN })
+    );
+    register(
+      bus,
+      createStageEndRecorder('infinite', order, {
+        pickupOrder: Number.POSITIVE_INFINITY,
+      })
+    );
+    register(
+      bus,
+      createStageEndRecorder('negative-infinite', order, {
+        pickupOrder: Number.NEGATIVE_INFINITY,
+      })
+    );
+
+    dispatchStageEnd(bus);
+
+    // Each non-finite value is replaced by the index the registration would
+    // have been appended at, so the three fall in registration order behind the
+    // subscriber that declared 0.
+    expect(order).toEqual(['first', 'nan', 'infinite', 'negative-infinite']);
+    expect(
+      bus.metrics().subscribers.map((row: HookSubscriberMetrics): string =>
+        row.id
+      )
+    ).toEqual(['first', 'nan', 'infinite', 'negative-infinite']);
+  });
+
+  it('honours a negative pickup order, which is finite', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const order: string[] = [];
+
+    register(bus, createStageEndRecorder('appended', order));
+    register(
+      bus,
+      createStageEndRecorder('early', order, { pickupOrder: -5 })
+    );
+
+    dispatchStageEnd(bus);
+
+    expect(order).toEqual(['early', 'appended']);
+  });
+
+  it('breaks a tie by registration sequence', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const order: string[] = [];
+
+    register(bus, createStageEndRecorder('tied-a', order, { pickupOrder: 4 }));
+    register(bus, createStageEndRecorder('tied-b', order, { pickupOrder: 4 }));
+    register(bus, createStageEndRecorder('tied-c', order, { pickupOrder: 4 }));
+
+    dispatchStageEnd(bus);
+
+    expect(order).toEqual(['tied-a', 'tied-b', 'tied-c']);
+  });
+});
+
+/* ===== 22. Reporter faults are contained on every reporting path ===== */
+
+// Every count and every caught handler error is delivered through one wrapper,
+// so a reporter that throws must not reach the caller from any of them. The
+// error channel is covered in section 14; these cover the counting channel,
+// which is reached by registration, dispatch, each skip reason, charge
+// consumption and removal.
+
+/**
+ * Builds a reporter whose `onCount` throws `fault` and whose `onHookError`
+ * behaves, so a fault can only have arrived through the counting channel.
+ *
+ * @param fault Value `onCount` throws.
+ * @param errors Array the behaving error sink appends to.
+ * @returns The reporter.
+ */
+function createCountThrowingReporter(
+  fault: unknown,
+  errors: EngineHookErrorReport[]
+): EngineReporter {
+  return {
+    onCount: (): never => {
+      throw fault;
+    },
+    onHookError: (report: EngineHookErrorReport): void => {
+      errors.push(report);
+    },
+  };
+}
+
+/** Message every reporter fault below is raised with. */
+const REPORTER_FAULT_MESSAGE = 'the counting sink itself failed';
+
+/**
+ * Runs the scenario every case in this section runs, on a bus built with the
+ * reporter supplied.
+ *
+ * Reaches every counting path: an accepted registration, a rejected one, a
+ * dispatch, an invoked handler, a skipped one, a failed one, a charge
+ * consumption and a removal.
+ *
+ * @param bus Bus to exercise.
+ * @returns What the payload-transforming dispatch produced.
+ */
+function exerciseEveryCountingPath(
+  bus: HookBus
+): HookDispatchResult<'onStageEnd'> {
+  register(
+    bus,
+    createSubscriber(
+      'counted',
+      {
+        onStageEnd: (payload): StageEndPayload => ({
+          ...payload,
+          score: payload.score + 1,
+        }),
+      },
+      { charges: 2 }
+    )
+  );
+  register(
+    bus,
+    createSubscriber('thrower', {
+      onStageEnd: (): StageEndPayload => {
+        throw new Error('relic handler failed');
+      },
+    })
+  );
+  register(
+    bus,
+    createSubscriber('spent', { onStageEnd: (): void => undefined }, {
+      charges: 0,
+    })
+  );
+
+  // A registration the bus rejects, which counts on its own metric.
+  expect(bus.register({ id: '', hooks: {} })).toBe(false);
+
+  const result = dispatchStageEnd(bus);
+
+  bus.consumeCharge('counted', 1);
+  expect(bus.unregister('spent')).toBe(true);
+
+  return result;
+}
+
+describe('a reporter that throws while counting is contained', () => {
+  it('completes every counting path and reports the fault out of band', () => {
+    const errors: EngineHookErrorReport[] = [];
+    const fault = new Error(REPORTER_FAULT_MESSAGE);
+    const bus = createHookBus({
+      correlationId: CORRELATION_ID,
+      reporter: createCountThrowingReporter(fault, errors),
+    });
+
+    const result = expectNoDispatchThrow(() =>
+      exerciseEveryCountingPath(bus)
+    );
+
+    // The dispatch itself is unaffected: the surviving handler's payload is
+    // carried, the thrower is contained and the spent subscriber is skipped.
+    // Two handlers were reached and one of those threw, so the dispatch reports
+    // two invocations and one failure alongside the one skip.
+    expect(result.payload.score).toBe(STAGE_SCORE + 1);
+    expect(result.invoked).toBe(2);
+    expect(result.failed).toBe(1);
+    expect(result.skipped).toBe(1);
+    expect(errors).toHaveLength(1);
+    expect(bus.degraded()).toEqual(['thrower']);
+
+    const metrics = bus.metrics();
+
+    expect(metrics.lastReporterFault).toBe(REPORTER_FAULT_MESSAGE);
+    expect(metrics.reporterFaults).toBeGreaterThan(0);
+    expect(metrics.acceptedRegistrations).toBe(3);
+    expect(metrics.rejectedRegistrations).toBe(1);
+    expect(metrics.removedSubscribers).toBe(1);
+    expect(metrics.chargesConsumed).toBe(1);
+    expect(metrics.hooks.onStageEnd.dispatched).toBe(1);
+    expect(metrics.hooks.onStageEnd.invoked).toBe(2);
+    expect(metrics.hooks.onStageEnd.failed).toBe(1);
+    expect(metrics.hooks.onStageEnd.skippedExhausted).toBe(1);
+  });
+
+  it('counts exactly one fault per report the sink would have received', () => {
+    const recording = createRecordingReporter();
+    const behaving = createHookBus({
+      correlationId: CORRELATION_ID,
+      reporter: recording.reporter,
+    });
+
+    exerciseEveryCountingPath(behaving);
+
+    const errors: EngineHookErrorReport[] = [];
+    const faulty = createHookBus({
+      correlationId: CORRELATION_ID,
+      reporter: createCountThrowingReporter(
+        new Error(REPORTER_FAULT_MESSAGE),
+        errors
+      ),
+    });
+
+    exerciseEveryCountingPath(faulty);
+
+    // Every count the behaving sink received is a count the throwing sink threw
+    // from, and each was contained exactly once.
+    expect(recording.counts.length).toBeGreaterThan(0);
+    expect(faulty.metrics().reporterFaults).toBe(recording.counts.length);
+    expect(behaving.metrics().reporterFaults).toBe(0);
+    expect(behaving.metrics().lastReporterFault).toBeUndefined();
+  });
+
+  it('describes a thrown value that is not an Error', () => {
+    const errors: EngineHookErrorReport[] = [];
+    const bus = createHookBus({
+      correlationId: CORRELATION_ID,
+      reporter: createCountThrowingReporter('a bare string', errors),
+    });
+    const order: string[] = [];
+
+    register(bus, createStageEndRecorder('counted', order));
+    dispatchStageEnd(bus);
+
+    expect(order).toEqual(['counted']);
+    expect(bus.metrics().lastReporterFault).toBe('a bare string');
+  });
+
+  it('contains a reporter whose every member throws', () => {
+    const fault = new Error(REPORTER_FAULT_MESSAGE);
+    const bus = createHookBus({
+      correlationId: CORRELATION_ID,
+      reporter: {
+        onCount: (): never => {
+          throw fault;
+        },
+        onHookError: (): never => {
+          throw fault;
+        },
+      },
+    });
+
+    const result = expectNoDispatchThrow(() =>
+      exerciseEveryCountingPath(bus)
+    );
+
+    expect(result.payload.score).toBe(STAGE_SCORE + 1);
+    expect(result.failed).toBe(1);
+    expect(bus.degraded()).toEqual(['thrower']);
+    expect(bus.metrics().lastReporterFault).toBe(REPORTER_FAULT_MESSAGE);
+  });
+
+  it('keeps its counters exact while the sink is failing', () => {
+    const errors: EngineHookErrorReport[] = [];
+    const faulty = createHookBus({
+      correlationId: CORRELATION_ID,
+      reporter: createCountThrowingReporter(
+        new Error(REPORTER_FAULT_MESSAGE),
+        errors
+      ),
+    });
+    const silent = createHookBus({ correlationId: CORRELATION_ID });
+
+    exerciseEveryCountingPath(faulty);
+    exerciseEveryCountingPath(silent);
+
+    const faultyMetrics = faulty.metrics();
+    const silentMetrics = silent.metrics();
+
+    expect(faultyMetrics.hooks).toStrictEqual(silentMetrics.hooks);
+    expect(faultyMetrics.totals).toStrictEqual(silentMetrics.totals);
+    expect(faultyMetrics.chargesConsumed).toBe(silentMetrics.chargesConsumed);
+    expect(faultyMetrics.degraded).toStrictEqual(silentMetrics.degraded);
   });
 });

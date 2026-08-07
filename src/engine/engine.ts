@@ -1,17 +1,18 @@
 // The rules engine: turn orchestration, state ownership and event
 // emission, with no reference to any view.
 //
-// Ported from js/game_manager.js, which is deleted. Method for method:
-//   js/game_manager.js L1-L14    constructor            -> constructor
-//   js/game_manager.js L17-L21   restart()              -> restart()
-//   js/game_manager.js L24-L27   keepPlaying()          -> continuePlaying()
-//   js/game_manager.js L30-L32   isGameTerminated()     -> isGameTerminated()
-//   js/game_manager.js L35-L59   setup()                -> setup()
-//   js/game_manager.js L62-L66   addStartTiles()        -> addStartTiles()
-//   js/game_manager.js L69-L76   addRandomTile()        -> addRandomTile()
-//   js/game_manager.js L79-L99   actuate()              -> commit()
-//   js/game_manager.js L102-L110 serialize()            -> serialize()
-//   js/game_manager.js L130-L191 move()                 -> move()
+// Ported from js/game_manager.js, which is deleted. Method for method,
+// each row a traceability row of docs/TRACEABILITY_MATRIX.md:
+//   TR-ENGINE-01  L1-L14    constructor        -> constructor
+//   TR-ENGINE-02  L17-L21   restart()          -> restart()
+//   TR-ENGINE-03  L24-L27   keepPlaying()      -> continuePlaying()
+//   TR-ENGINE-04  L30-L32   isGameTerminated() -> isGameTerminated()
+//   TR-ENGINE-05  L35-L59   setup()            -> setup()
+//   TR-ENGINE-06  L62-L66   addStartTiles()    -> addStartTiles()
+//   TR-ENGINE-07  L69-L76   addRandomTile()    -> addRandomTile()
+//   TR-ENGINE-08  L79-L99   actuate()          -> commit()
+//   TR-ENGINE-09  L102-L110 serialize()        -> serialize()
+//   TR-ENGINE-10  L130-L191 move()             -> move()
 // The tile preparation, tile relocation, vector, traversal,
 // farthest-position and comparison helpers and the merge branch
 // — L113-L127, L146-L180, L194-L236 and L270-L272 — moved to
@@ -19,7 +20,8 @@
 // calls, and the terminal-state checks to
 // src/engine/terminal-state.ts.
 //
-// FOUR CHANGES TO THE PORTED BEHAVIOUR, EACH REQUIRED BY THE SPLIT
+// FOUR CHANGES TO THE PORTED BEHAVIOUR, EACH REQUIRED BY THE SPLIT,
+// decisions DL-ENGINE-01 through DL-ENGINE-04 in that order
 //   The push call at L91-L97 becomes the `state:commit` event. The engine
 //   holds no view reference and calls no renderer.
 //
@@ -35,11 +37,17 @@
 //   `continuePlaying()`. The persisted member name is unchanged: it is
 //   still written as `keepPlaying` by `serialize()`.
 //
+// TWO IDENTIFIERS, NOT ONE
+//   `runId` identifies the run instance and is the value `RunState.runId`
+//   persists. `correlationId` is what the observability layer keys records,
+//   counters and spans on, and it is derived from the run seed and the run
+//   identifier together by src/observability/logger.ts. This module derives
+//   neither — it reaches no observability module — so the composition root
+//   supplies both and every report and every dispatch context carries both.
+//
 // Invariants of this module: it reads no DOM, opens no timer, reads no
 // clock and touches no storage key of its own — every persistence call
 // goes through the injected port.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import type { RulesConfig } from '../config/rules-config';
 import type { RngStreams } from '../rng/rng-streams';
@@ -59,6 +67,7 @@ import { Tile } from './tile';
 import type {
   BestScorePort,
   CellMatrix,
+  CorrelationId,
   Direction,
   EngineReporter,
   RelicCommitContext,
@@ -176,10 +185,14 @@ export interface EngineOptions {
   readonly reporter?: EngineReporter;
 
   /**
-   * Correlation identifier of the run, carried into every report.
-   * Defaults to the run seed.
+   * Correlation identifier of the run, carried into every report and
+   * into every hook context. Injected, never derived here: the one
+   * authority is `deriveCorrelationId` in src/observability/logger.ts,
+   * and src/main.ts supplies the value it derives from the run seed.
+   * Defaults to the empty string, which reports no correlation rather
+   * than putting the seed itself into a report.
    */
-  readonly runId?: string;
+  readonly correlationId?: CorrelationId;
 
   /**
    * Supplies the stage slice of every commit. Defaults to a provider
@@ -340,8 +353,8 @@ export class Engine {
   /** The hook bus relics register on. */
   readonly hooks: HookBus;
 
-  /** Correlation identifier of the run. */
-  readonly runId: string;
+  /** Correlation identifier of the run, exactly as it was injected. */
+  readonly correlationId: CorrelationId;
 
   /** The board. Replaced by `setup()`, mutated in place by a move. */
   grid: Grid;
@@ -378,19 +391,29 @@ export class Engine {
 
   /**
    * @param options Rules, substreams, persistence port and the optional
-   *   emitter, bus, reporter, correlation identifier and context
-   *   providers.
+   *   emitter, bus, reporter, run identifier, correlation identifier and
+   *   context providers.
    */
   constructor(options: EngineOptions) {
     this.config = options.config;
     this.streams = options.streams;
     this.storage = options.storage;
     this.reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
-    this.runId = options.runId ?? options.streams.seed;
-    this.events = options.events ?? createEngineEvents();
+    this.correlationId = options.correlationId ?? '';
+    // The emitter is handed the reporter, so a listener that throws is
+    // contained and reported rather than aborting the emission.
+    this.events =
+      options.events ??
+      createEngineEvents({
+        correlationId: this.correlationId,
+        reporter: this.reporter,
+      });
     this.hooks =
       options.hooks ??
-      createHookBus({ runId: this.runId, reporter: this.reporter });
+      createHookBus({
+        correlationId: this.correlationId,
+        reporter: this.reporter,
+      });
     this.stageContext =
       options.stageContext ?? ((): StageCommitContext => EMPTY_STAGE_CONTEXT);
     this.relicContext =
@@ -422,13 +445,13 @@ export class Engine {
 
     if (snapshot === null) {
       this.reporter.onCount?.({
-        runId: this.runId,
+        correlationId: this.correlationId,
         metric: SNAPSHOT_REJECTED_METRIC,
         value: 1,
       });
     } else {
       this.reporter.onCount?.({
-        runId: this.runId,
+        correlationId: this.correlationId,
         metric: SNAPSHOT_RESTORED_METRIC,
         value: 1,
       });
@@ -444,7 +467,7 @@ export class Engine {
 
     if (size !== this.config.boardSize) {
       this.reporter.onCount?.({
-        runId: this.runId,
+        correlationId: this.correlationId,
         metric: SIZE_RECONCILED_METRIC,
         value: 1,
       });
@@ -585,7 +608,7 @@ export class Engine {
     // Ported from L134.
     if (this.isGameTerminated()) {
       this.reporter.onCount?.({
-        runId: this.runId,
+        correlationId: this.correlationId,
         metric: MOVE_BLOCKED_METRIC,
         value: 1,
       });
@@ -618,7 +641,7 @@ export class Engine {
     // through the one check below.
     if (requested.cancelled) {
       this.reporter.onCount?.({
-        runId: this.runId,
+        correlationId: this.correlationId,
         metric: MOVE_CANCELLED_METRIC,
         value: 1,
       });
@@ -662,7 +685,7 @@ export class Engine {
     // Ported from L175-L177 through the resolver's outcome.
     if (!outcome.moved) {
       this.reporter.onCount?.({
-        runId: this.runId,
+        correlationId: this.correlationId,
         metric: MOVE_IDLE_METRIC,
         value: 1,
       });
@@ -673,8 +696,10 @@ export class Engine {
     // Ported from L183.
     this.addRandomTile();
 
-    // Ported from L185-L187.
-    if (!movesAvailable(this.grid)) {
+    // Ported from L185-L187. The live configuration travels with the
+    // board, so the neighbour probe reads the merge predicate in force
+    // rather than a comparison of its own.
+    if (!movesAvailable(this.grid, this.config)) {
       this.over = true;
     }
 
@@ -709,7 +734,7 @@ export class Engine {
     });
 
     this.reporter.onCount?.({
-      runId: this.runId,
+      correlationId: this.correlationId,
       metric: MOVE_RESOLVED_METRIC,
       value: 1,
     });
@@ -761,21 +786,23 @@ export class Engine {
   /**
    * Spawns one tile.
    *
-   * Ported from js/game_manager.js L69-L76 with both randomness call
-   * sites replaced: the value is drawn from the `spawn-value` substream
-   * against the configured distribution, which reproduces
-   * `Math.random() < 0.9 ? 2 : 4` under the default weights, and the
-   * cell is drawn from the `spawn-position` substream over the list
-   * js/grid.js L45-L55 collects. The value is drawn before the cell,
+   * Ported from js/game_manager.js L69-L76, keeping its two calls and
+   * their order: `cellsAvailable()` at L70 guards the spawn, and the cell
+   * comes from `Grid.randomAvailableCell` — js/grid.js L37-L43 — which is
+   * the sole position-draw implementation. Both randomness call sites are
+   * replaced by substreams: the value is drawn from `spawn-value` against
+   * the configured distribution, which reproduces
+   * `Math.random() < 0.9 ? 2 : 4` under the default weights, and the cell
+   * is drawn from `spawn-position` inside `randomAvailableCell` over the
+   * list js/grid.js L45-L55 collects. The value is drawn before the cell,
    * which is the order L71 and js/grid.js L41 were reached in.
    *
-   * A full board spawns nothing, which is the boundary js/grid.js
-   * L37-L43 expressed by returning no cell.
+   * A full board spawns nothing and consumes no draw from either
+   * substream, which is the boundary js/grid.js L37-L43 expressed by
+   * returning no cell.
    */
   private addRandomTile(): void {
-    const available = this.grid.availableCells();
-
-    if (available.length === 0) {
+    if (!this.grid.cellsAvailable()) {
       return;
     }
 
@@ -783,7 +810,9 @@ export class Engine {
       .stream('spawn-value')
       .pickWeighted(this.config.spawn.values, this.config.spawn.weights);
     const value = drawn ?? FALLBACK_SPAWN_VALUE;
-    const cell = this.streams.stream('spawn-position').pick(available);
+    const cell = this.grid.randomAvailableCell(
+      this.streams.stream('spawn-position'),
+    );
 
     const spawned = this.hooks.dispatch(
       'onSpawn',

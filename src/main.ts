@@ -29,8 +29,6 @@
 //   substreams of the seed created here, and the seed itself comes from
 //   Web Crypto or, where that is unavailable, from the two clocks — never
 //   from `Math.random`.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 // The stylesheet enters through the module graph. index.html's <link> to
 // the committed generated CSS was removed; this import is its replacement
@@ -43,6 +41,7 @@ import { Engine } from './engine/engine';
 import type { EngineReporter } from './engine/types';
 import { createInputManager } from './input/input-manager';
 import type { InputReporter } from './input/keymap';
+import { deriveCorrelationId } from './observability/logger';
 import { createNumberOnlyRenderer } from './render/number-only-renderer';
 import { createRenderLoop } from './render/render-loop';
 import type {
@@ -52,11 +51,21 @@ import type {
 } from './render/webgl-support';
 import {
   createRenderReporter,
+  describeRenderError,
   probeWebGLSupport,
+  queryReducedMotion,
+  setReducedMotionOverride,
+  subscribeReducedMotion,
 } from './render/webgl-support';
 import type { RngStreams } from './rng/rng-streams';
 import { createRngStreams } from './rng/rng-streams';
 import { LocalStorageManager } from './storage/local-storage-manager';
+import { mountOnScreenControls } from './input/on-screen-controls';
+import type { UiReporter } from './ui/a11y/settings';
+import {
+  createPreferenceStore,
+  reflectReducedMotion,
+} from './ui/a11y/settings';
 
 /* --------------------------------------------------------------------------
  * Mount points
@@ -74,6 +83,7 @@ import { LocalStorageManager } from './storage/local-storage-manager';
 const SELECTORS = Object.freeze({
   boardNumberOnly: '#board-number-only',
   boardCanvas: '#board-canvas',
+  boardA11y: '#board-a11y',
   score: '.score-container',
   best: '.best-container',
   message: '.game-message',
@@ -124,7 +134,14 @@ function writeDiagnostic(diagnostic: RenderDiagnostic): void {
   const prefix = `[${diagnostic.source}] ${diagnostic.message}`;
 
   if (diagnostic.level === 'error') {
-    console.error(prefix, diagnostic.detail ?? '', diagnostic.error ?? '');
+    // The caught value itself is written when the record carries one, so the
+    // console shows its stack and its cause chain rather than only the
+    // bounded two-field summary. Presence is tested with `in`, because a
+    // throw can carry `null` or `undefined`.
+    const reported: unknown =
+      'thrown' in diagnostic ? diagnostic.thrown : (diagnostic.error ?? '');
+
+    console.error(prefix, diagnostic.detail ?? '', reported);
 
     return;
   }
@@ -175,6 +192,74 @@ function createInputSink(reporter: RenderReporter): InputReporter {
         detail: fields === undefined ? undefined : Object.freeze({ ...fields }),
       });
     },
+
+    failure(level, message, thrown, fields): void {
+      reporter.onDiagnostic({
+        level: level === 'warn' ? 'warning' : level,
+        source: 'input',
+        message,
+        detail: fields === undefined ? undefined : Object.freeze({ ...fields }),
+        error: describeRenderError(thrown),
+        thrown,
+      });
+    },
+  };
+}
+
+/**
+ * Projects a caught value onto the render sink's error shape.
+ *
+ * @param caught Value that was thrown.
+ * @returns Its name and message, with a printable fallback for a non-error.
+ */
+function describeCaught(caught: unknown): {
+  readonly name: string;
+  readonly message: string;
+} {
+  if (caught instanceof Error) {
+    return Object.freeze({
+      name: caught.name.length > 0 ? caught.name : 'Error',
+      message: caught.message,
+    });
+  }
+
+  return Object.freeze({ name: 'UiError', message: String(caught) });
+}
+
+/**
+ * Adapts a render sink to the accessibility surface's sink shape.
+ *
+ * @param reporter Render sink to write through.
+ * @returns A preference-store sink.
+ */
+function createPreferenceSink(reporter: RenderReporter): UiReporter {
+  return {
+    log(level, message, fields): void {
+      reporter.onDiagnostic({
+        level: level === 'warn' ? 'warning' : level,
+        source: 'ui/a11y',
+        message,
+        detail: fields === undefined ? undefined : Object.freeze({ ...fields }),
+      });
+    },
+
+    count(metric, fields): void {
+      reporter.onCount({
+        name: metric,
+        value: 1,
+        detail: fields === undefined ? undefined : Object.freeze({ ...fields }),
+      });
+    },
+
+    error(message, caught, fields): void {
+      reporter.onDiagnostic({
+        level: 'error',
+        source: 'ui/a11y',
+        message,
+        detail: fields === undefined ? undefined : Object.freeze({ ...fields }),
+        error: describeCaught(caught),
+      });
+    },
   };
 }
 
@@ -192,9 +277,31 @@ function createEngineSink(reporter: RenderReporter): EngineReporter {
         source: 'engine',
         message: `A ${report.hook} handler threw.`,
         detail: Object.freeze({
-          runId: report.runId,
+          correlationId: report.correlationId,
           hook: report.hook,
           subscriber: report.subscriberId,
+        }),
+        // The one total reduction, shared with src/render/: reading
+        // `name`, `message` or `String(value)` here would let a hostile
+        // getter or a throwing `toString` replace the failure being
+        // reported. `thrown` carries the value itself for a sink that can
+        // keep more of it than the summary does.
+        error: describeRenderError(report.error),
+        thrown: report.error,
+      });
+    },
+
+    onListenerError(report): void {
+      reporter.onDiagnostic({
+        level: 'error',
+        source: 'engine',
+        message:
+          `A ${report.event} listener threw and was contained; the ` +
+          'emission continued with the listeners after it.',
+        detail: Object.freeze({
+          reportedCorrelationId: report.correlationId,
+          event: report.event,
+          listenerIndex: report.listenerIndex,
         }),
         error: Object.freeze({
           name:
@@ -214,7 +321,7 @@ function createEngineSink(reporter: RenderReporter): EngineReporter {
         name: report.metric,
         value: report.value,
         detail: Object.freeze({
-          runId: report.runId,
+          correlationId: report.correlationId,
           hook: report.hook ?? null,
         }),
       });
@@ -223,26 +330,30 @@ function createEngineSink(reporter: RenderReporter): EngineReporter {
 }
 
 /* --------------------------------------------------------------------------
- * Run seed
+ * Run identity
  * ----------------------------------------------------------------------- */
 
-/** Bytes drawn for a run seed. */
+/** Bytes drawn for one run token. */
 const SEED_BYTES = 8;
 
-/** Radix every seed component is written in. */
+/** Radix every token component is written in. */
 const SEED_RADIX = 36;
 
 /**
- * Creates a run seed.
+ * Creates one random run token.
+ *
+ * Called twice per page load, once for the run seed and once for the
+ * run-instance identifier, and the two draws are independent.
  *
  * Web Crypto is the source where it is available. Where it is not, the
- * two clocks are combined, which yields a distinct seed per page load
+ * two clocks are combined, which yields a distinct token per page load
  * without reaching for `Math.random()`: no module under src/ calls it,
  * and a test asserts the global is never replaced.
  *
- * @returns A seed string, used verbatim by the substreams.
+ * @returns A token string. The seed form is used verbatim by the
+ *   substreams.
  */
-function createRunSeed(): string {
+function createRunToken(): string {
   const source = globalThis.crypto;
 
   if (source !== undefined && typeof source.getRandomValues === 'function') {
@@ -349,7 +460,12 @@ export interface Application {
 export function start(ownerDocument: Document): Application {
   const reporter = createSink();
   const config = createDefaultRulesConfig();
-  const seed = createRunSeed();
+  const seed = createRunToken();
+
+  // The one derivation of the run correlation identifier. Every module
+  // that reports receives this value; none derives one of its own, and
+  // the seed itself is never carried into a report.
+  const correlationId = deriveCorrelationId(seed);
   const streams = createRngStreams(seed);
   const storage = new LocalStorageManager({
     reporter: {
@@ -374,6 +490,7 @@ export function start(ownerDocument: Document): Application {
     config,
     streams,
     storage,
+    correlationId,
     reporter: createEngineSink(reporter),
   });
 
@@ -388,7 +505,7 @@ export function start(ownerDocument: Document): Application {
       webglFallback: selection.fallback,
       webglLevel: selection.support.level,
       boardSize: config.boardSize,
-      seed,
+      correlationId,
     }),
   });
 
@@ -400,6 +517,14 @@ export function start(ownerDocument: Document): Application {
   const renderer = createNumberOnlyRenderer({
     host: ownerDocument.querySelector(SELECTORS.boardNumberOnly),
     canvas: ownerDocument.querySelector(SELECTORS.boardCanvas),
+    // index.html L65 ships `#board-a11y` with `role="grid"`, and the
+    // number-only lattice carries the same role over the same board. Handed in
+    // so the renderer that draws the board owns which of the two is exposed.
+    parallelBoard: ownerDocument.querySelector(SELECTORS.boardA11y),
+    // Handed in so the lattice is built at mount rather than deferred to the
+    // first commit, which is what makes the board present before the first
+    // turn is resolved.
+    config,
     scoreContainer: ownerDocument.querySelector(SELECTORS.score),
     bestContainer: ownerDocument.querySelector(SELECTORS.best),
     messageContainer: ownerDocument.querySelector(SELECTORS.message),
@@ -416,7 +541,66 @@ export function start(ownerDocument: Document): Application {
     renderer.frame(),
   );
 
+  // The reduced-motion preference, composed here because it is the only place
+  // that sees both the accessibility surface and the render layer. The store in
+  // src/render/webgl-support.ts is the single effective source every animating
+  // member already reads; this pushes the setting into it and reflects the
+  // effective value onto the document element, which is where the stylesheet
+  // and the on-screen controls read it from.
+  const preferences = createPreferenceStore({
+    reporter: createPreferenceSink(reporter),
+  });
+
+  const reflectMotion = (reduced: boolean): void => {
+    const written = reflectReducedMotion(
+      ownerDocument.documentElement,
+      reduced,
+    );
+
+    reporter.onCount({
+      name: 'ui.reducedMotion.reflect',
+      value: 1,
+      detail: Object.freeze({ reduced, written }),
+    });
+  };
+
+  setReducedMotionOverride(preferences.reducedMotionOverride());
+  reflectMotion(queryReducedMotion());
+
+  // Follows the store rather than the setting, so an operating-system change
+  // under the `'system'` setting is reflected too. Reflecting is the ONLY
+  // thing done here: the reflected attribute is the single channel the style
+  // layer and the on-screen controls both read, so pushing the value into the
+  // controls separately would give them a second, competing source.
+  const stopMotion = subscribeReducedMotion((reduced): void => {
+    reflectMotion(reduced);
+  });
+
+  const stopPreferences = preferences.subscribe((_snapshot, changed): void => {
+    if (!changed.includes('reducedMotion')) {
+      return;
+    }
+
+    // Pushed into the store, which dispatches to every animating member and
+    // back through the subscription above; an explicit `reduce` or `allow`
+    // therefore reaches the style layer and the controls as well as the canvas.
+    setReducedMotionOverride(preferences.reducedMotionOverride());
+    reflectMotion(preferences.isReducedMotion());
+  });
+
   const input = createInputManager({
+    ownerDocument,
+    reporter: createInputSink(reporter),
+  });
+
+  // `reducedMotion` is deliberately NOT supplied: supplying it pins a value
+  // that takes precedence over the reflected attribute for the rest of the
+  // mount, which would make the attribute — the one source the style layer also
+  // reads — unable to move these controls. The attribute is written above,
+  // before this mount, so it is already correct here, and the controls observe
+  // it for every later change.
+  const controls = mountOnScreenControls({
+    host: input,
     ownerDocument,
     reporter: createInputSink(reporter),
   });
@@ -492,6 +676,9 @@ export function start(ownerDocument: Document): Application {
 
       stopRendering();
       frameSubscription.remove();
+      stopMotion();
+      stopPreferences();
+      controls.unmount();
       input.detach();
       loop.stop();
       renderer.destroy();

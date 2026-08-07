@@ -1,40 +1,35 @@
 // TypeScript configuration for the browser-context sources: src/ and every
-// DOM-context suite under tests/, the Playwright specs under tests/e2e/
-// included, because their `page.evaluate()` callbacks are authored against DOM
-// globals. The four root tooling configs — the Vite, Vitest and Playwright
-// configs — belong to tsconfig.node.json, so the two projects partition the
-// repository's root file set. `npm run typecheck` runs both in sequence.
+// suite under tests/, the Playwright specs included, because their
+// `page.evaluate()` callbacks are authored against DOM globals. The four root
+// tooling configs belong to tsconfig.node.json, so the two projects partition
+// the repository's root file set. `npm run typecheck` runs both in sequence.
 //
-// Supersedes .jshintrc, which is deleted. One of its checks has a compiler
-// equivalent and is carried forward as such: `unused: true` becomes the two
-// unused-symbol options below. Its `indent: 2`, `maxlen: 80` and
-// `camelcase: true` have none — no option in this file, and no package in the
-// dependency set, enforces indentation, line length or identifier casing. The
-// sources under src/ and tests/ follow those three conventions by authoring
-// discipline.
+// Supersedes the deleted .jshintrc. Its `unused: true` is carried forward as
+// the two unused-symbol options below. Its `indent: 2`, `maxlen: 80` and
+// `camelcase: true` have no compiler equivalent and no package in the
+// dependency set enforces them, so the sources follow those three conventions
+// by authoring discipline.
 {
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
 
-    // Extensionless relative specifiers such as './engine/grid' resolve here
-    // exactly as the bundler resolves them at build time.
+    // Extensionless relative specifiers resolve here exactly as the bundler
+    // resolves them at build time.
     "module": "ESNext",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
     "resolveJsonModule": true,
 
     // `vite/client` supplies `import.meta.env` and the stylesheet and asset
-    // module declarations. `three` and `seedrandom` are typed through their
-    // own declaration packages, so neither is named here.
+    // module declarations. `three` and `seedrandom` carry their own declaration
+    // packages, so neither is named here.
     "types": ["vite/client"],
 
 
-    // Permits the explicit `.ts` specifier that the three modules in
-    // vite.config.ts's import chain carry, so that config satisfies Vite's
-    // native config loader. Extensionless relative specifiers remain the
-    // convention for every other module and still resolve, and this option is
-    // available because the project emits nothing.
+    // Permits the explicit `.ts` specifier that vite.config.ts's import chain
+    // carries, which Vite's native config loader requires. Available because
+    // this project emits nothing.
     "allowImportingTsExtensions": true,
 
     "strict": true,
@@ -44,8 +39,6 @@
     "noImplicitOverride": true,
     "forceConsistentCasingInFileNames": true,
 
-    // Each file is emitted in isolation, so type-only syntax is written
-    // explicitly rather than elided.
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "useDefineForClassFields": true,
@@ -66,9 +59,8 @@
     "blitzy-deck",
     "js",
 
-    // Covered by tsconfig.node.json. The Playwright specs are not listed here:
-    // they are browser-context sources, so the `tests/**/*.ts` pattern above
-    // claims them and tsconfig.node.json holds the four root configs alone.
+    // Covered by tsconfig.node.json, which holds the four root configs alone;
+    // the Playwright specs stay with the browser-context sources above.
     "vite.config.ts",
     "vitest.config.ts",
     "vitest.snapshot.config.ts",

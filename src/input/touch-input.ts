@@ -3,7 +3,7 @@
  *
  * The pointer family is selected once, from `msPointerEnabled`, into a
  * `PointerEventFamily`, and the three handlers branch on that value. The probe
- * result is exported as `POINTER_EVENT_FAMILY` and read by the health surface.
+ * result is exported as `POINTER_EVENT_FAMILY`.
  *
  * The only import is ./keymap: this module reads no storage and emits no event
  * name. A resolved swipe leaves through the `onSwipe` callback, and every
@@ -11,9 +11,7 @@
  * by `createSafeInputReporter`, so a sink that throws breaks neither the attach
  * path nor any gesture handler. Module scope performs one guarded read of
  * `window.navigator` and touches no document, so the module imports cleanly
- * outside a browser. The module boundaries are drawn as Figure 3, "Component
- * Interaction: Input, Engine, Hook Bus, Relics, Renderer, Persistence", in
- * docs/architecture/component-interaction.md.
+ * outside a browser.
  */
 
 import {
@@ -29,27 +27,19 @@ import {
   type InputSpan,
 } from './keymap';
 
-/* ==========================================================================
- * 1. Legacy pointer shim
- * ========================================================================== */
-
 /** The one non-standard `Navigator` member this module reads. */
 export interface MsPointerNavigatorLike {
   /** IE10's pointer-family flag. Absent from a standard `Navigator`. */
   readonly msPointerEnabled?: boolean;
 }
 
-/** The ambient `Navigator`, viewed through `MsPointerNavigatorLike`. */
 interface MsPointerNavigator extends Navigator, MsPointerNavigatorLike {}
 
-/** One entry of a touch list: the two coordinates the port reads. */
 interface TouchPointLike {
   readonly clientX: number;
-
   readonly clientY: number;
 }
 
-/** The subset of `TouchList` the three handlers read. */
 interface TouchListLike {
   readonly length: number;
 
@@ -57,54 +47,31 @@ interface TouchListLike {
   readonly [index: number]: TouchPointLike | null | undefined;
 }
 
-/** The shape the three handlers read off their event. */
 interface GestureEventLike extends Event {
-  /** Every active touch. */
   readonly touches?: TouchListLike;
-
-  /** Touches on the event target. */
   readonly targetTouches?: TouchListLike;
-
-  /** Touches that changed. */
   readonly changedTouches?: TouchListLike;
-
-  /** Document-relative x. */
   readonly pageX?: number;
-
-  /** Document-relative y. */
   readonly pageY?: number;
 }
 
-/* ==========================================================================
- * 2. Pointer-family probe
- * ========================================================================== */
-
 /** The three pointer event names, and the flag that selected them. */
 export interface PointerEventFamily {
-  /** The `msPointerEnabled` value the selection was made on. */
   readonly msPointerEnabled: boolean;
-
-  /** Gesture-start event name: `MSPointerDown` or `touchstart`. */
   readonly touchstart: string;
-
-  /** Gesture-move event name: `MSPointerMove` or `touchmove`. */
   readonly touchmove: string;
-
-  /** Gesture-end event name: `MSPointerUp` or `touchend`. */
   readonly touchend: string;
 }
 
-/** Family selected when `msPointerEnabled` is truthy. */
 const MS_POINTER_FAMILY: PointerEventFamily = Object.freeze({
   msPointerEnabled: true,
 
-  //Internet Explorer 10 style
+  // Internet Explorer 10 style
   touchstart: 'MSPointerDown',
   touchmove: 'MSPointerMove',
   touchend: 'MSPointerUp',
 });
 
-/** Family selected otherwise. */
 const TOUCH_EVENT_FAMILY: PointerEventFamily = Object.freeze({
   msPointerEnabled: false,
   touchstart: 'touchstart',
@@ -112,12 +79,6 @@ const TOUCH_EVENT_FAMILY: PointerEventFamily = Object.freeze({
   touchend: 'touchend',
 });
 
-/**
- * Reads `msPointerEnabled` off the ambient navigator.
- *
- * @returns The flag coerced to a boolean, or `false` when there is no navigator
- * to read.
- */
 function readAmbientMsPointerEnabled(): boolean {
   if (typeof window === 'undefined') {
     return false;
@@ -131,11 +92,9 @@ function readAmbientMsPointerEnabled(): boolean {
 /**
  * Selects the pointer event family.
  *
- * @param navigatorLike Navigator view to read. Omitted or `null` reads the
- * ambient `window.navigator`.
  * @returns The frozen family. A truthy `msPointerEnabled` selects
- * `MSPointerDown` / `MSPointerMove` / `MSPointerUp`; anything else selects
- * `touchstart` / `touchmove` / `touchend`.
+ *   `MSPointerDown` / `MSPointerMove` / `MSPointerUp`; anything else selects
+ *   `touchstart` / `touchmove` / `touchend`.
  */
 export function detectPointerEventFamily(
   navigatorLike?: MsPointerNavigatorLike | null
@@ -152,26 +111,16 @@ export function detectPointerEventFamily(
 export const POINTER_EVENT_FAMILY: PointerEventFamily =
   detectPointerEventFamily();
 
-/* ==========================================================================
- * 3. Report names and helpers
- * ========================================================================== */
-
-/** Counter raised once per attach, carrying the resolved family. */
 const PROBE_METRIC = 'input.touch.probe';
 
-/** Counter raised once per successful attach. */
 const ATTACHED_METRIC = 'input.touch.attached';
 
-/** Counter raised once per detach. */
 const DETACHED_METRIC = 'input.touch.detached';
 
-/** Counter raised when the host element cannot be resolved. */
 const HOST_MISSING_METRIC = 'input.touch.attach.hostMissing';
 
-/** Counter raised when a listener cannot be bound. */
 const ATTACH_FAILED_METRIC = 'input.touch.attach.failed';
 
-/** Counter raised once per emitted swipe. */
 const SWIPE_METRIC = 'input.touch.swipe';
 
 const MULTI_TOUCH_METRIC = 'input.touch.rejected.multiTouch';
@@ -180,47 +129,15 @@ const STILL_TOUCHING_METRIC = 'input.touch.rejected.stillTouching';
 
 const BELOW_THRESHOLD_METRIC = 'input.touch.rejected.belowThreshold';
 
-/** Counter raised when the enablement predicate suspended a handler. */
 const SUSPENDED_METRIC = 'input.touch.rejected.suspended';
 
-/** Counter raised when a gesture ended with no start point captured. */
 const MISSING_START_METRIC = 'input.touch.rejected.missingStart';
 
-/** Counter raised when an event carried no readable coordinate pair. */
 const MISSING_POINT_METRIC = 'input.touch.rejected.missingPoint';
 
-/** Counter raised when an injected callback or span operation threw. */
 const HANDLER_ERROR_METRIC = 'input.touch.handler.error';
 
-/** Span covering one gesture, from its start event to its end event. */
 const GESTURE_SPAN = 'input.touch.gesture';
-
-/** `name` reported for a caught value that carries none. */
-const UNKNOWN_ERROR_NAME = 'TouchInputError';
-
-/** `message` reported for a caught value that carries none. */
-const UNKNOWN_ERROR_MESSAGE = 'Unknown touch input error.';
-
-/**
- * Reduces a caught value to two reportable fields.
- *
- * @param caught Value that was thrown.
- * @returns `errorName` and `errorMessage`, always populated.
- */
-function describeError(caught: unknown): InputReportFields {
-  if (caught instanceof Error) {
-    return { errorName: caught.name, errorMessage: caught.message };
-  }
-
-  const printable =
-    typeof caught === 'string' ||
-    typeof caught === 'number' ||
-    typeof caught === 'boolean'
-      ? String(caught)
-      : UNKNOWN_ERROR_MESSAGE;
-
-  return { errorName: UNKNOWN_ERROR_NAME, errorMessage: printable };
-}
 
 /**
  * Joins a family's three event names for a report field.
@@ -232,12 +149,6 @@ function describeFamilyEvents(family: PointerEventFamily): string {
   return `${family.touchstart}, ${family.touchmove}, ${family.touchend}`;
 }
 
-/**
- * Builds the report fields that describe a family.
- *
- * @param family Family to describe.
- * @returns One field per member of `PointerEventFamily`.
- */
 function describeFamily(family: PointerEventFamily): InputReportFields {
   return {
     msPointerEnabled: family.msPointerEnabled,
@@ -247,41 +158,24 @@ function describeFamily(family: PointerEventFamily): InputReportFields {
   };
 }
 
-/* ==========================================================================
- * 4. Gesture geometry
- * ========================================================================== */
-
 /**
  * Minimum travel, in pixels, that the dominant axis must exceed before a
  * gesture resolves.
  */
 export const SWIPE_THRESHOLD_PX = 10;
 
-/** One captured gesture endpoint. */
 interface GesturePoint {
-  /** Horizontal coordinate, from `clientX` or `pageX`. */
   readonly x: number;
-
-  /** Vertical coordinate, from `clientY` or `pageY`. */
   readonly y: number;
 }
 
-/** The outcome of measuring one gesture. */
 interface SwipeMeasurement {
   /** Resolved direction, or `null` when the threshold was not exceeded. */
   readonly direction: Direction | null;
-
   readonly absDx: number;
-
   readonly absDy: number;
 }
 
-/**
- * Reads the length of one of the three touch lists.
- *
- * @param list List to measure, when the event carried one.
- * @returns The length, or `0` when there is nothing usable to read.
- */
 function readTouchListLength(list: TouchListLike | undefined): number {
   if (list === undefined || list === null) {
     return 0;
@@ -294,12 +188,6 @@ function readTouchListLength(list: TouchListLike | undefined): number {
     : 0;
 }
 
-/**
- * Reads the first entry of a touch list as a gesture point.
- *
- * @param list List to read, when the event carried one.
- * @returns The point, or `null` when there is none to read.
- */
 function readTouchPoint(
   list: TouchListLike | undefined
 ): GesturePoint | null {
@@ -316,23 +204,10 @@ function readTouchPoint(
   return toGesturePoint(point.clientX, point.clientY);
 }
 
-/**
- * Reads the `pageX`/`pageY` pair an `MSPointer*` event carries.
- *
- * @param event Event to read.
- * @returns The point, or `null` when either coordinate is unusable.
- */
 function readPagePoint(event: GestureEventLike): GesturePoint | null {
   return toGesturePoint(event.pageX, event.pageY);
 }
 
-/**
- * Builds a gesture point from two candidate coordinates.
- *
- * @param x Candidate horizontal coordinate.
- * @param y Candidate vertical coordinate.
- * @returns The point, or `null` when either value is not a finite number.
- */
 function toGesturePoint(x: unknown, y: unknown): GesturePoint | null {
   if (typeof x !== 'number' || !Number.isFinite(x)) {
     return null;
@@ -348,12 +223,8 @@ function toGesturePoint(x: unknown, y: unknown): GesturePoint | null {
 /**
  * Measures a gesture and resolves the direction it travelled. The dominant axis
  * wins, and an exact tie between the two absolute deltas resolves on the
- * vertical axis.
- *
- * @param start Point captured by the gesture-start handler.
- * @param end Point captured by the gesture-end handler.
- * @returns The resolved direction with both absolute deltas. `direction` is
- * `null` when neither axis exceeded `SWIPE_THRESHOLD_PX`.
+ * vertical axis. `direction` is `null` when neither axis exceeded
+ * `SWIPE_THRESHOLD_PX`.
  */
 function measureSwipe(
   start: GesturePoint,
@@ -382,10 +253,6 @@ function measureSwipe(
   return { direction: null, absDx, absDy };
 }
 
-/* ==========================================================================
- * 5. Attaching the gesture path
- * ========================================================================== */
-
 /** Selector the gesture host is looked up by when the caller names none. */
 export const DEFAULT_GESTURE_HOST_SELECTOR = '.game-container';
 
@@ -394,75 +261,33 @@ export type DetachTouchInput = () => void;
 
 /** What `attachTouchInput` binds, and what it reports through. */
 export interface TouchInputOptions {
-  /**
-   * Called once per resolved swipe, with the direction the gesture travelled.
-   *
-   * @param direction Direction the gesture resolved to.
-   */
   onSwipe(direction: Direction): void;
-
-  /**
-   * Element the three listeners bind to, or a selector to look one up by.
-   * Defaults to `DEFAULT_GESTURE_HOST_SELECTOR`.
-   */
   readonly host?: Element | string;
-
-  /**
-   * Document a selector is resolved against. Defaults to the ambient
-   * `document`.
-   */
   readonly ownerDocument?: Document;
-
-  /**
-   * Sink for the counters, logs and spans this module raises. Defaults to
-   * `NOOP_REPORTER`.
-   */
   readonly reporter?: InputReporter;
-
-  /**
-   * Family to bind. Defaults to `POINTER_EVENT_FAMILY`, resolved once when this
-   * module loaded.
-   */
   readonly family?: PointerEventFamily;
 
   /**
    * Consulted first by each of the three handlers. Returning `false` suspends
-   * the gesture path: no coordinate is captured, no default action is cancelled
-   * and no swipe is emitted. Absent is read as always enabled.
-   *
-   * @returns Whether the gesture path is live.
+   * the gesture path: no coordinate is captured, no default action is
+   * cancelled and no swipe is emitted. Absent is read as always enabled.
    */
   isEnabled?(): boolean;
 }
 
-/** Registration options for all three listeners. */
 const LISTENER_OPTIONS: AddEventListenerOptions = Object.freeze({
   passive: false,
   capture: false,
 });
 
-/** The detach handle a failed attach returns. It removes nothing. */
 const NOOP_DETACH: DetachTouchInput = () => {
   return;
 };
 
-/**
- * Reads the ambient `document`.
- *
- * @returns The document, or `null` outside a browser.
- */
 function readAmbientDocument(): Document | null {
   return typeof document === 'undefined' ? null : document;
 }
 
-/**
- * Resolves the element the gesture listeners bind to.
- *
- * @param options Options passed to `attachTouchInput`.
- * @param reporter Sink for a failed lookup.
- * @param family Family whose names were about to be bound.
- * @returns The host element, or `null` when it cannot be resolved.
- */
 function resolveHost(
   options: TouchInputOptions,
   reporter: InputReporter,
@@ -497,11 +322,12 @@ function resolveHost(
   try {
     found = owner.querySelector(selector);
   } catch (caught: unknown) {
-    reporter.log('error', 'Touch input host selector is unusable.', {
-      selector,
-      events,
-      ...describeError(caught),
-    });
+    reporter.failure?.(
+      'error',
+      'Touch input host selector is unusable.',
+      caught,
+      { selector, events },
+    );
     reporter.count(HOST_MISSING_METRIC, { selector, reason: 'badSelector' });
 
     return null;
@@ -526,11 +352,10 @@ function resolveHost(
  * The injected reporter is contained before it is used, so a sink that throws
  * breaks neither the attach path nor any gesture handler.
  *
- * @param options Callback, host, reporter, family and enablement predicate.
  * @returns A detach handle that removes every listener this call did bind. A
- * missing host or an unusable selector binds nothing, so the handle removes
- * nothing; where some registrations are rejected and others succeed, the handle
- * removes the ones that succeeded. Neither case throws.
+ *   missing host or an unusable selector binds nothing, so the handle removes
+ *   nothing; where some registrations are rejected and others succeed, the
+ *   handle removes the ones that succeeded. Neither case throws.
  */
 export function attachTouchInput(
   options: TouchInputOptions
@@ -559,7 +384,6 @@ export function attachTouchInput(
   let gestureSpan: InputSpan | null = null;
   let detached = false;
 
-  /** Closes the open gesture span, if there is one. */
   const closeGestureSpan = (): void => {
     const open = gestureSpan;
 
@@ -572,9 +396,11 @@ export function attachTouchInput(
     try {
       open.end();
     } catch (caught: unknown) {
-      reporter.log('warn', 'Touch input span could not be closed.', {
-        ...describeError(caught),
-      });
+      reporter.failure?.(
+        'warn',
+        'Touch input span could not be closed.',
+        caught,
+      );
       reporter.count(HANDLER_ERROR_METRIC, { stage: 'endSpan' });
     }
   };
@@ -591,9 +417,11 @@ export function attachTouchInput(
       gestureSpan = reporter.startSpan(GESTURE_SPAN);
     } catch (caught: unknown) {
       gestureSpan = null;
-      reporter.log('warn', 'Touch input span could not be opened.', {
-        ...describeError(caught),
-      });
+      reporter.failure?.(
+        'warn',
+        'Touch input span could not be opened.',
+        caught,
+      );
       reporter.count(HANDLER_ERROR_METRIC, { stage: 'startSpan' });
     }
   };
@@ -602,7 +430,7 @@ export function attachTouchInput(
    * Reports whether the gesture path is live.
    *
    * @returns The predicate's result, or `true` when none was supplied. A
-   * predicate that throws suspends the path and is reported.
+   *   predicate that throws suspends the path and is reported.
    */
   const isEnabled = (): boolean => {
     if (options.isEnabled === undefined) {
@@ -612,21 +440,17 @@ export function attachTouchInput(
     try {
       return options.isEnabled() !== false;
     } catch (caught: unknown) {
-      reporter.log('warn', 'Touch input enablement predicate threw.', {
-        ...describeError(caught),
-      });
+      reporter.failure?.(
+        'warn',
+        'Touch input enablement predicate threw.',
+        caught,
+      );
       reporter.count(HANDLER_ERROR_METRIC, { stage: 'isEnabled' });
 
       return false;
     }
   };
 
-  /**
-   * Hands a resolved direction to the callback.
-   *
-   * @param measured Measurement whose direction resolved.
-   * @param direction The resolved direction.
-   */
   const emitSwipe = (
     measured: SwipeMeasurement,
     direction: Direction
@@ -640,15 +464,13 @@ export function attachTouchInput(
     try {
       options.onSwipe(direction);
     } catch (caught: unknown) {
-      reporter.log('error', 'Touch input swipe callback threw.', {
+      reporter.failure?.('error', 'Touch input swipe callback threw.', caught, {
         direction,
-        ...describeError(caught),
       });
       reporter.count(HANDLER_ERROR_METRIC, { stage: 'onSwipe' });
     }
   };
 
-  /** Gesture start. */
   const handleTouchStart = (event: Event): void => {
     if (!isEnabled()) {
       reporter.count(SUSPENDED_METRIC, { stage: 'touchstart' });
@@ -684,7 +506,6 @@ export function attachTouchInput(
     event.preventDefault();
   };
 
-  /** Gesture move. */
   const handleTouchMove = (event: Event): void => {
     if (!isEnabled()) {
       reporter.count(SUSPENDED_METRIC, { stage: 'touchmove' });
@@ -695,7 +516,8 @@ export function attachTouchInput(
     event.preventDefault();
   };
 
-  /** Gesture end. Cancels no default action of its own. */
+  // Retained from the port: gesture end cancels no default action of its own,
+  // so a tap can still be followed by a synthesised click.
   const handleTouchEnd = (event: Event): void => {
     if (!isEnabled()) {
       reporter.count(SUSPENDED_METRIC, { stage: 'touchend' });
@@ -764,11 +586,12 @@ export function attachTouchInput(
       host.addEventListener(type, listener, LISTENER_OPTIONS);
       bound.push([type, listener]);
     } catch (caught: unknown) {
-      reporter.log('error', 'Touch input listener could not be bound.', {
-        event: type,
-        events,
-        ...describeError(caught),
-      });
+      reporter.failure?.(
+        'error',
+        'Touch input listener could not be bound.',
+        caught,
+        { event: type, events },
+      );
       reporter.count(ATTACH_FAILED_METRIC, { event: type });
     }
   }
@@ -800,10 +623,12 @@ export function attachTouchInput(
       try {
         host.removeEventListener(type, listener, LISTENER_OPTIONS);
       } catch (caught: unknown) {
-        reporter.log('warn', 'Touch input listener could not be removed.', {
-          event: type,
-          ...describeError(caught),
-        });
+        reporter.failure?.(
+          'warn',
+          'Touch input listener could not be removed.',
+          caught,
+          { event: type },
+        );
         reporter.count(HANDLER_ERROR_METRIC, { stage: 'detach' });
       }
     }

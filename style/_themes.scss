@@ -114,7 +114,11 @@ $palette-default: (
   overlay-win: rgba($tile-gold-color, 0.5),
   overlay-win-text: $bright-text-color,
 
-  focus-ring: $text-color,
+  // The outer band takes the same derivation $diagnostics-surface below is
+  // written from rather than $text-color itself, so the stronger of the two
+  // bands measures at least 3.7:1 against every default surface the ring is
+  // drawn on. src/theme/themes.ts carries the compiled form of the same pair.
+  focus-ring: color.adjust($text-color, $lightness: -22%),
   focus-ring-contrast: $bright-text-color,
 
   diagnostics-surface: color.adjust($text-color, $lightness: -22%),
@@ -122,7 +126,7 @@ $palette-default: (
   diagnostics-accent: $tile-gold-color
 );
 
-// The high-contrast palette (decision DL-THEME-01). Its ramp is a single
+// The high-contrast palette. Its ramp is a single
 // monotonic luminance ladder from a mid-tone low anchor to a near-black high
 // anchor. It declares no accent band. Every step differs in luminance.
 $palette-high-contrast: (
@@ -168,7 +172,7 @@ $palette-high-contrast: (
   diagnostics-accent: #7fd4ff
 );
 
-// The colourblind-safe palette (decision DL-THEME-02). Both anchors and all
+// The colourblind-safe palette. Both anchors and all
 // four accents are drawn from the Okabe-Ito colour set and sit on a monotonic
 // luminance ladder, so it carries protanopia, deuteranopia and tritanopia.
 $palette-colorblind-safe: (
@@ -301,17 +305,26 @@ $themes: (
 // A tile's background: the two anchors interpolated at that exponent, then the
 // accent for that exponent mixed over the result at the palette's weight.
 @function ramp-background($palette, $exponent) {
-  $background: color.mix(
-    palette-value($palette, tile-high),
-    palette-value($palette, tile-low),
-    ramp-anchor-weight($exponent)
+  // Quantised at both steps, matching `overlayBackground` under
+  // `quantiseIntermediate` in src/theme/tile-ramp.ts: the interpolated base is
+  // floored BEFORE the accent is mixed over it, and the result is floored
+  // again. Flooring only the result would mix the accent over unfloored
+  // channels and land a channel off by one.
+  $background: quantised(
+    color.mix(
+      palette-value($palette, tile-high),
+      palette-value($palette, tile-low),
+      ramp-anchor-weight($exponent)
+    )
   );
   $accent: ramp-accent($palette, $exponent);
   @if $accent {
-    $background: color.mix(
-      $accent,
-      $background,
-      palette-value($palette, tile-accent-weight)
+    $background: quantised(
+      color.mix(
+        $accent,
+        $background,
+        palette-value($palette, tile-accent-weight)
+      )
     );
   }
   @return $background;
@@ -403,7 +416,7 @@ $themes: (
     $exponent: $exponent + 1;
   }
 
-  // One accent per rarity tier, from the section 3 port. Published for the two
+  // One accent per rarity tier, from `ramp-rarity`. Published for the two
   // surfaces that present a relic's rarity: style/_hud.scss's active-relic tray
   // and style/_reward.scss's reward card and rarity chip. Both read these
   // properties with their own compiled mix as the fallback, so the default
@@ -424,8 +437,17 @@ $themes: (
   $exponent: 1;
   @while $exponent <= $ramp-limit {
     &.tile-#{ramp-power($exponent)} .tile-inner {
-      background: ramp-background($palette, $exponent);
-      color: ramp-numeral($palette, $exponent);
+      // The fill and the numeral are published as the same two
+      // `--tile-*-compiled` properties style/main.scss publishes its own
+      // compiled ramp under, rather than declared. `.tile-inner` there resolves
+      // `var(--tile-fill, var(--tile-fill-compiled, …))`, so the value
+      // src/render/number-only-renderer.ts writes stays authoritative under a
+      // palette as well as under the default one, and a tile the renderer wrote
+      // nothing for falls back to this palette's compiled entry rather than to
+      // the default palette's. `box-shadow` is declared: no custom property
+      // carries the glow and nothing else writes it.
+      --tile-fill-compiled: #{ramp-background($palette, $exponent)};
+      --tile-numeral-compiled: #{ramp-numeral($palette, $exponent)};
       box-shadow: ramp-shadow($palette, $exponent);
     }
     $exponent: $exponent + 1;
@@ -509,14 +531,14 @@ $themes: (
 
   .tile {
     .tile-inner {
-      background: palette-value($palette, tile-low);
+      --tile-fill-compiled: #{palette-value($palette, tile-low)};
     }
 
     @include palette-ramp($palette);
 
     &.tile-super .tile-inner {
-      background: palette-value($palette, tile-super);
-      color: palette-value($palette, bright-text);
+      --tile-fill-compiled: #{palette-value($palette, tile-super)};
+      --tile-numeral-compiled: #{palette-value($palette, bright-text)};
     }
   }
 }

@@ -1,7 +1,7 @@
 // Reward screen: the choose-1-of-3 relic offer.
 //
-// DOM contract. src/ui/screens/reward.ts and src/ui/components/relic-card.ts
-// render this tree into the empty `.screen[data-screen="reward"]` container:
+// DOM contract. Its consumer renders this tree into the empty
+// `.screen[data-screen="reward"]` container:
 //
 //   .reward-panel
 //     h2.reward-heading
@@ -83,11 +83,10 @@ $reward-pop-duration: $transition-speed * 2 !default;
 $reward-pop-delay: $transition-speed !default;
 $reward-state-duration: $transition-speed !default;
 
-// The rarity tiers in ascending order, as src/ui/screens/reward.ts writes them
-// into `data-rarity`. Read from $rarity-tiers of style/_tokens.scss, the one
+// The rarity tiers in ascending order, as a consumer writes them into
+// `data-rarity`. Read from $rarity-tiers of style/_tokens.scss, the one
 // vocabulary style/_hud.scss reads as well, so a relic carries the same tier on
-// the reward card and on the active-relic tray it moves to. The four names are
-// unchanged; the list is no longer declared twice.
+// the reward card and on the active-relic tray it moves to.
 $reward-rarities: $rarity-tiers !default;
 
 // Rarity ramp. The two functions below run the tile ramp's own interpolation —
@@ -150,8 +149,9 @@ $reward-rarities: $rarity-tiers !default;
   line-height: $reward-heading-size;
   text-transform: $text-transform;
 
-  // A chip wraps to the next row before it shrinks, and shrinks with an ellipsis
-  // only where it is the sole chip on a row narrower than its own label.
+  // A chip wraps to the next row before it shrinks, and shrinks with an
+  // ellipsis only where it is the sole chip on a row narrower than its own
+  // label.
   min-inline-size: 0;
   max-inline-size: 100%;
   white-space: nowrap;
@@ -166,8 +166,8 @@ $reward-rarities: $rarity-tiers !default;
   box-sizing: border-box;
   padding: $reward-panel-padding;
 
-  // The win-state tint of the `.game-message` overlay, carried on this element's
-  // own `background` rather than through `opacity` on a wrapper.
+  // The win-state tint of the `.game-message` overlay, carried on this
+  // element's own `background` rather than through `opacity` on a wrapper.
   background: var(
     --theme-overlay-win,
     #{rgba($tile-gold-color, $reward-scrim-alpha)}
@@ -176,8 +176,8 @@ $reward-rarities: $rarity-tiers !default;
   align-items: center;
   justify-content: center;
 
-  // style/main.scss maps `.screen[hidden]` to `display: none` and the router owns
-  // the attribute, so this `display` is scoped to `:not([hidden])`.
+  // style/main.scss maps `.screen[hidden]` to `display: none` and the router
+  // owns the attribute, so this `display` is scoped to `:not([hidden])`.
   &:not([hidden]) {
     display: flex;
   }
@@ -205,9 +205,9 @@ $reward-rarities: $rarity-tiers !default;
   background: var(--theme-page-background, #{$bright-text-color});
   color: var(--theme-text, #{$text-color});
 
-  // The panel's visible edge. style/_a11y.scss already draws `dialog-boundary` on
-  // the containing `[role="dialog"][aria-modal="true"]` element, so the edge here
-  // is a border alone and follows the corner radius.
+  // The panel's visible edge. style/_a11y.scss already draws `dialog-boundary`
+  // on the containing `[role="dialog"][aria-modal="true"]` element, so the edge
+  // here is a border alone and follows the corner radius.
   border: $reward-hairline solid var(--theme-text, #{$text-color});
   border-radius: $tile-border-radius * 2;
 
@@ -275,8 +275,8 @@ $reward-rarities: $rarity-tiers !default;
   background: var(--theme-tile-super, #{$reward-card-surface});
   color: var(--theme-tile-super-numeral, #{$bright-text-color});
 
-  // The block-start edge is the rarity accent. The tier rules below recolour it,
-  // and the unqualified value is the ramp's low anchor.
+  // The block-start edge is the rarity accent. The tier rules below recolour
+  // it, and the unqualified value is the ramp's low anchor.
   border: $reward-hairline solid transparent;
   border-block-start: $reward-accent-thickness solid
     reward-rarity-accent(list.nth($reward-rarities, 1));
@@ -452,9 +452,9 @@ $reward-rarities: $rarity-tiers !default;
   @include focusable;
 
   // src/ui/a11y/ keeps an `aria-disabled` card focusable and announceable, so
-  // this block withdraws pointer interaction only. The accent edge switches from
-  // solid to dashed; nothing here clears `box-shadow` or `outline`, and nothing
-  // alters a colour.
+  // this block withdraws pointer interaction only. The accent edge switches
+  // from solid to dashed; nothing here clears `box-shadow` or `outline`, and
+  // nothing alters a colour.
   &[disabled],
   &[aria-disabled="true"] {
     cursor: default;
@@ -470,17 +470,17 @@ $reward-rarities: $rarity-tiers !default;
     }
   }
 
-  // The entrance animation and the state transitions are declared only where the
-  // user expresses no reduced-motion preference. Under `reduce` the card carries
-  // neither, so it renders at the end state of `pop` — its natural size.
-  @media (prefers-reduced-motion: no-preference) {
+  // The entrance animation and the state transitions are declared only where
+  // motion is permitted. Under `reduce` the card carries neither, so it renders
+  // at the end state of `pop` — its natural size.
+  @include motion-allowed {
     @include transition(
       box-shadow $reward-state-duration ease-in-out,
       border-color $reward-state-duration ease-in-out
     );
 
-    // The `pop` keyframes style/main.scss declares, at the same duration, delay and
-    // fill mode.
+    // The `pop` keyframes style/main.scss declares, at the same duration, delay
+    // and fill mode.
     @include animation(pop $reward-pop-duration ease $reward-pop-delay);
     @include animation-fill-mode(backwards);
   }

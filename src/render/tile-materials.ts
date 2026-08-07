@@ -7,66 +7,50 @@
 // style/main.scss compiles and the 2.5D layer this module dresses resolve
 // through one generative implementation.
 //
-// Source construct to implementation, one row per rule:
+// The two tile shadows of style/main.scss map onto two material terms. The
+// outer halo, drawn in the gold glow colour at the glow opacity over 1.8,
+// becomes the emissive colour and the emissive intensity: the colour is the
+// palette's halo entry and the intensity is the same alpha, which
+// src/theme/tile-ramp.ts publishes as `haloAlpha`. The inset ring, drawn in
+// white at the glow opacity over 3, becomes a reduction in roughness scaled by
+// `insetAlpha`.
 //
-// | Source              | Rule                          | Implemented by |
-// |---------------------|-------------------------------|----------------|
-// | main.scss L560-L561 | base fill to material colour  | section 6      |
-// | main.scss L568-L570 | accent overlay, the flat band | section 6      |
-// | main.scss L572-L574 | numeral colour                | section 7      |
-// | main.scss L578      | glow strength                 | section 6      |
-// | main.scss L580      | shadow suppression            | section 6      |
-// | main.scss L581      | outer halo to emissive        | section 6      |
-// | main.scss L582      | inset ring to roughness       | section 6      |
-// | main.scss L605-L607 | the super tile                | section 6      |
-// | main.scss L459-L470 | empty-cell plate              | section 7      |
-// | main.scss L358      | board field                   | section 7      |
-// | html_actuator.js L58| one material per tile value   | section 8      |
-// | html_actuator.js L60| super threshold, strict `>`   | section 6      |
+// The stylesheet emits no shadow at all for a value that took an accent
+// overlay. src/theme/tile-ramp.ts publishes that condition as `glowSuppressed`
+// and it gates the emissive term here: a suppressed value takes a flat material
+// whose emissive is left at the Three.js default. A value that is not
+// suppressed takes the halo colour even where its alpha is zero, which is the
+// state values 2 and 4 are emitted in.
 //
-// The two shadows of style/main.scss L581-L582 map onto two material terms.
-// The outer halo, which L581 draws in `$tile-gold-glow-color` at the glow
-// opacity over 1.8, becomes the emissive colour and the emissive intensity:
-// the colour is the palette's halo entry and the intensity is the same alpha,
-// which src/theme/tile-ramp.ts publishes as `haloAlpha`. The inset ring, which
-// L582 draws in white at the glow opacity over 3, becomes a reduction in
-// roughness scaled by `insetAlpha`. Decision DL-MATERIAL-01.
+// Fills are transferred from the ramp's unquantised `color` channels.
+// Quantised, those are the twelve fills the pinned compiler emits from
+// style/main.scss for the default palette. The ramp's `colorHex` form, which
+// reproduces the fills the pre-migration generated stylesheet shipped and
+// differs from `color` by one unit on the four accented values, is reachable
+// through the `fillPrecision` option.
 //
-// L580 reads `@if not $special-background`, so a value that took an accent
-// overlay is emitted with no shadow at all. src/theme/tile-ramp.ts publishes
-// that condition as `glowSuppressed` and it gates the emissive term here: a
-// suppressed value takes a flat material whose emissive is left at the Three.js
-// default. A value that is not suppressed takes the halo colour even where its
-// alpha is zero, which is the state values 2 and 4 are emitted in.
-//
-// Fills are transferred from the ramp's unquantised channels, which
-// src/theme/tile-ramp.ts publishes as `color`. Quantised, those are the twelve
-// fills the pinned compiler emits from style/main.scss for the default palette.
-// Its `colorHex` form, which reproduces the fills the deleted `style/main.css`
-// shipped and differs from `color` by one unit on the four accented values, is
-// reachable through the `fillPrecision` option. Decisions DL-RAMP-02 and
-// DL-RAMP-04 own that pair.
-//
-// The plate of style/main.scss L468 is declared `rgba($tile-color, .35)`. It is
-// pre-composited over the board field of L358 and delivered as an opaque
+// The empty-cell plate is declared in the stylesheet as the tile colour at 35%
+// alpha. It is pre-composited over the board field and delivered as an opaque
 // material; the `emptyCellCompositing` option delivers it as a transparent
-// material instead. Decision DL-MATERIAL-02.
+// material instead.
 //
-// Invariants of this module: it holds no scene, mesh, geometry or engine
-// reference and takes a tile value rather than a tile; it touches no DOM,
-// reads no clock, consumes no randomness and performs no I/O; it imports no
-// stylesheet and nothing from src/engine or src/observability. Reporting is
-// injected and defaults to the no-op sink. One material is created per distinct
-// tile value and shared across every mesh that carries it, and every material
-// this module creates is released by `dispose()`.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md, the
-// DL-MATERIAL decisions.
+// This module holds no scene, mesh, geometry or engine reference and takes a
+// tile value rather than a tile; it touches no DOM, reads no clock, consumes no
+// randomness and performs no I/O; it imports no stylesheet and nothing from
+// src/engine or src/observability. Reporting is injected and defaults to the
+// no-op sink. One material is created per distinct tile value and shared across
+// every mesh that carries it, and every material this module creates is
+// released by `dispose()`.
 
 import { Color, MeshStandardMaterial, SRGBColorSpace } from 'three';
 
 import type { RampColor, TileTheme } from '../theme/tile-ramp';
-import { formatHexColor, parseHexColor } from '../theme/tile-ramp';
+import {
+  formatHexColor,
+  parseHexColor,
+  rampValue,
+  tileRampConstants,
+} from '../theme/tile-ramp';
 import type { Theme, ThemeId, ThemePalette } from '../theme/themes';
 import {
   getActiveTheme,
@@ -81,94 +65,49 @@ import {
   textColor,
   tileGoldGlowColor,
 } from '../theme/tokens';
-import type {
-  RenderDetail,
-  RenderErrorInfo,
-  RenderReporter,
-} from './webgl-support';
+import type { RenderDetail, RenderReporter } from './webgl-support';
 import {
   NOOP_RENDER_REPORTER,
   createGuardedRenderReporter,
+  describeRenderError,
 } from './webgl-support';
 
-/* ==========================================================================
- * 1. Module identity and the metrics it reports
- * ========================================================================== */
-
-/** `source` every diagnostic from this module carries. */
 const MODULE_SOURCE = 'render.tile-materials';
 
-/** A tile material was constructed. */
 const MATERIAL_CREATED_METRIC = 'render.material.created';
 
-/** A tile value was asked for that no material was cached against. */
 const CACHE_MISS_METRIC = 'render.material.cache.miss';
 
-/** A board field or empty-cell plate material was constructed. */
 const SURFACE_CREATED_METRIC = 'render.material.surface.created';
 
-/** Materials were released. */
 const DISPOSED_METRIC = 'render.material.disposed';
 
-/** The cache rebuilt against a new theme. */
 const THEME_REBUILD_METRIC = 'render.material.theme.rebuild';
 
-/** A tile value was asked for that the ramp does not resolve. */
 const INVALID_VALUE_METRIC = 'render.material.value.invalid';
 
-/** A construction option was replaced by its default. */
 const INVALID_OPTION_METRIC = 'render.material.option.invalid';
 
-/** A palette colour was unreadable and its token default was used. */
 const COLOR_FALLBACK_METRIC = 'render.material.color.fallback';
 
-/** A theme-change notification was contained. */
 const THEME_LISTENER_METRIC = 'render.material.theme.listener.failed';
 
-/* ==========================================================================
- * 2. Colour reading and the colour-space transfer
- * ========================================================================== */
-
-/** Highest 8-bit channel value, the scale `RampColor` states channels on. */
 const CHANNEL_MAX = 255;
 
-/** Fully opaque alpha. */
 const ALPHA_OPAQUE = 1;
 
-/** Fully transparent alpha. */
 const ALPHA_CLEAR = 0;
 
-/** Divisor a channel or an alpha written as a percentage is scaled by. */
 const PERCENT_SCALE = 100;
 
-/** Channel count `rgb()` states before its optional alpha. */
 const RGB_CHANNEL_COUNT = 3;
 
-/** Argument count `rgba()` states. */
 const RGBA_ARGUMENT_COUNT = 4;
 
-/** Separators CSS accepts between the arguments of `rgb()` and `rgba()`. */
 const RGB_SEPARATORS = /[\s,/]+/;
 
-/**
- * Decimal places a channel is rounded to after a transfer through Three.js's
- * working colour space and back.
- *
- * That transfer is a pair of inverse transfer functions evaluated in floating
- * point, and returns a channel offset from the one it was given by up to
- * 2e-3 above and 7e-11 below. Rounding at this precision removes that offset,
- * leaving a later `Math.floor` on the result equal to a `Math.floor` on the
- * channel that was given.
- */
 const CHANNEL_PRECISION = 6;
 
-/**
- * Confines an alpha into 0-1, replacing a value that is not a finite number
- * with fully opaque.
- *
- * @param alpha Candidate alpha.
- * @returns Finite alpha in 0-1.
- */
 function confineAlpha(alpha: number): number {
   if (!Number.isFinite(alpha)) {
     return ALPHA_OPAQUE;
@@ -176,14 +115,6 @@ function confineAlpha(alpha: number): number {
   return Math.min(ALPHA_OPAQUE, Math.max(ALPHA_CLEAR, alpha));
 }
 
-/**
- * Reads one channel of an `rgb()` or `rgba()` argument list, accepting both the
- * 0-255 and the percentage form the pinned Sass compiler emits.
- *
- * @param argument One argument, already trimmed of surrounding whitespace.
- * @returns Channel on the 0-255 scale, or `null` where the argument is not a
- *   number.
- */
 function readRgbChannel(argument: string): number | null {
   const isPercentage = argument.endsWith('%');
   const magnitude = Number.parseFloat(
@@ -195,13 +126,6 @@ function readRgbChannel(argument: string): number | null {
   return isPercentage ? (magnitude / PERCENT_SCALE) * CHANNEL_MAX : magnitude;
 }
 
-/**
- * Reads the alpha argument of an `rgba()` list, accepting both the 0-1 and the
- * percentage form.
- *
- * @param argument The alpha argument, already trimmed.
- * @returns Alpha in 0-1, or `null` where the argument is not a number.
- */
 function readRgbAlpha(argument: string): number | null {
   const isPercentage = argument.endsWith('%');
   const magnitude = Number.parseFloat(
@@ -213,19 +137,6 @@ function readRgbAlpha(argument: string): number | null {
   return confineAlpha(isPercentage ? magnitude / PERCENT_SCALE : magnitude);
 }
 
-/**
- * Reads an `rgb()` or `rgba()` colour, in either the comma-separated or the
- * space-separated form, with channels stated on the 0-255 scale or as
- * percentages.
- *
- * The five translucent surfaces a palette of src/theme/themes.ts may declare
- * arrive in this form, and `parseHexColor` of src/theme/tile-ramp.ts reads the
- * hex form only.
- *
- * @param value Candidate colour string, already trimmed.
- * @returns Colour with channels on the 0-255 scale, or `null` where `value` is
- *   not an `rgb()` or `rgba()` colour.
- */
 function readRgbFunction(value: string): RampColor | null {
   const open = value.indexOf('(');
   if (open < 0 || !value.endsWith(')')) {
@@ -266,14 +177,6 @@ function readRgbFunction(value: string): RampColor | null {
   });
 }
 
-/**
- * Reads a colour a theme palette declares, in any of the forms a palette
- * carries: a 3- or 6-digit hex colour, or an `rgb()` or `rgba()` colour.
- *
- * @param value Colour string from a `ThemePalette` field.
- * @returns Colour with channels on the 0-255 scale, or `null` where `value` is
- *   not a form this module reads.
- */
 function tryReadThemeColor(value: string): RampColor | null {
   if (typeof value !== 'string') {
     return null;
@@ -295,8 +198,6 @@ function tryReadThemeColor(value: string): RampColor | null {
 /**
  * Reads a colour a theme palette declares.
  *
- * @param value Colour string from a `ThemePalette` field, as a 3- or 6-digit
- *   hex colour or an `rgb()` or `rgba()` colour.
  * @returns Frozen colour with channels on the 0-255 scale and alpha in 0-1.
  * @throws RangeError when `value` is not a form this module reads.
  */
@@ -315,8 +216,6 @@ export function readThemeColor(value: string): RampColor {
  * Composites one colour over another with the source-over operator, the
  * operator a browser paints a translucent background with.
  *
- * @param source Colour in front, whose alpha drives the blend.
- * @param backdrop Colour behind.
  * @returns Frozen colour. Its alpha is the composite of both alphas, so an
  *   opaque backdrop yields an opaque result.
  * @throws RangeError when a channel of either operand is not a finite number.
@@ -348,13 +247,6 @@ export function compositeOver(
   });
 }
 
-/**
- * Rejects a colour carrying a channel that is not a finite number.
- *
- * @param name Name reported in the error message.
- * @param color Colour under test.
- * @throws RangeError when any channel of `color` is not finite.
- */
 function assertReadableColor(name: string, color: RampColor): void {
   const finite =
     Number.isFinite(color.r) &&
@@ -378,8 +270,6 @@ function assertReadableColor(name: string, color: RampColor): void {
  * already-converted values. Alpha is not transferred: a `THREE.Color` carries
  * none, and the two materials that need one carry it as `opacity`.
  *
- * @param color Colour with channels on the 0-255 scale.
- * @param target Colour to write into. A new one is allocated when omitted.
  * @returns `target`, or the newly allocated colour.
  * @throws RangeError when any channel of `color` is not finite.
  */
@@ -401,7 +291,6 @@ export function toThreeColor(color: RampColor, target?: Color): Color {
  * The inverse of `toThreeColor`, and the form a caller compares a material
  * colour against a ramp fill in.
  *
- * @param color Colour to read.
  * @returns Frozen opaque colour with channels on the 0-255 scale, unrounded.
  */
 export function fromThreeColor(color: Color): RampColor {
@@ -423,9 +312,6 @@ export function fromThreeColor(color: Color): RampColor {
  * `formatHexColor` of src/theme/tile-ramp.ts applies. Three.js's own
  * `getHexString` rounds to the nearest 8-bit step instead, so the two disagree
  * on a fill whose channels are not integers.
- *
- * @param color Colour to serialise.
- * @returns Lowercase 6-digit hex string with a leading `#`.
  */
 export function formatThreeColor(color: Color): string {
   const transferred = fromThreeColor(color);
@@ -437,13 +323,6 @@ export function formatThreeColor(color: Color): string {
   });
 }
 
-/**
- * Rounds a channel that has been transferred through the working colour space
- * and back, at `CHANNEL_PRECISION`.
- *
- * @param channel Channel on the 0-255 scale, carrying transfer residue.
- * @returns The channel with that residue removed.
- */
 function roundTransferredChannel(channel: number): number {
   if (!Number.isFinite(channel)) {
     return channel;
@@ -451,32 +330,28 @@ function roundTransferredChannel(channel: number): number {
   return Number(channel.toFixed(CHANNEL_PRECISION));
 }
 
-/* ==========================================================================
- * 3. The surface response, and the two forms a fill is transferred in
- * ========================================================================== */
-
 /**
  * Which of the ramp's two fill forms a material colour is transferred from.
  *
  * `exact` takes `color`, the unquantised channels. Quantised, these are the
- * twelve fills the pinned Dart Sass compiler emits from style/main.scss for the
- * default palette, so the 2D layer that stylesheet compiles and the material
- * built here carry the same fill on every ramp value.
+ * twelve fills the pinned Dart Sass compiler emits from style/main.scss for
+ * the default palette, so the 2D layer that stylesheet compiles and the
+ * material built here carry the same fill on every ramp value.
  *
- * `legacy` takes `colorHex`, which reproduces the twelve fills the deleted
- * `style/main.css` shipped. It differs from `exact` by one unit on the four
- * accented values, where the pinned compiler and the historically shipped
- * artifact disagree. Decisions DL-RAMP-02 and DL-RAMP-04 own that pair.
+ * `legacy` takes `colorHex`, which reproduces the twelve fills the
+ * pre-migration generated stylesheet shipped. It differs from `exact` by one
+ * unit on the four accented values, where the pinned compiler and the
+ * historically shipped artifact disagree.
  */
 export type TileFillPrecision = 'exact' | 'legacy';
 
 /**
- * How the alpha of the empty-cell plate declared at style/main.scss L468 is
+ * How the alpha of the empty-cell plate declared in style/main.scss is
  * delivered.
  *
- * `pre-composited` resolves the plate against the board field of L358 and
- * delivers an opaque material. `transparent` delivers the declared colour on a
- * transparent material at that alpha. Decision DL-MATERIAL-02.
+ * `pre-composited` resolves the plate against the board field and delivers an
+ * opaque material. `transparent` delivers the declared colour on a transparent
+ * material at that alpha.
  */
 export type EmptyCellCompositing = 'pre-composited' | 'transparent';
 
@@ -487,37 +362,62 @@ export type EmptyCellCompositing = 'pre-composited' | 'transparent';
  * style/main.scss declares flat fills and box-shadows and no material
  * vocabulary of any kind, so these four have no token to resolve against and
  * are stated here. Each is overridable through `TileMaterialCacheOptions`.
- * Decision DL-MATERIAL-03.
  */
 export const tileMaterialDefaults = Object.freeze({
-  /** Roughness a tile takes where the inset ring contributes nothing. */
   roughness: 0.62,
-
-  /** Roughness a tile approaches as the inset ring reaches full strength. */
   minRoughness: 0.34,
-
-  /** Metalness every material this module creates takes. */
   metalness: 0,
-
-  /** Multiplier applied to the halo alpha to obtain emissive intensity. */
   emissiveScale: 1,
 } as const);
 
-/** Lowest value the four numeric options accept. */
 const MIN_OPTION_VALUE = 0;
 
-/** Highest value `roughness`, `minRoughness` and `metalness` accept. */
 const MAX_UNIT_OPTION = 1;
 
-/**
- * Key every super tile's material is cached against.
- *
- * js/html_actuator.js L60 pushed one `tile-super` class for every value
- * strictly above the threshold, and style/main.scss L605-L607 gives that class
- * a single rule, so every such value resolves to one appearance and shares one
- * material. No ramp value is zero, so the key cannot collide with one.
- */
 const SUPER_MATERIAL_KEY = 0;
+
+/** Counter name for a value the ramp refused and the fallback covered. */
+const VALUE_FALLBACK_METRIC = 'render.material.value.fallback';
+
+/** Counter name for a call refused because the cache was destroyed. */
+const AFTER_DESTROY_METRIC = 'render.material.after_destroy';
+
+/**
+ * The ramp value a tile value off the ramp is dressed as.
+ *
+ * `RulesConfig.merge.produce` may yield any positive integer, so a configured
+ * or relic-created tile can carry a value the ramp is not defined over — the
+ * ramp covers the powers of two from 2 to 2048 and the band above 2048. Rather
+ * than refuse such a tile, it is dressed as the ramp entry at or below it:
+ *
+ *   above `superThreshold`  the first super value, which is the single
+ *                           appearance every value above the ramp shares
+ *   on the ramp             the value itself
+ *   between two ramp values the lower of the two
+ *   below the ramp's first  the ramp's first value
+ *
+ * Deterministic and total for every finite value: the same value always
+ * resolves to the same ramp entry, so the material and the numeral a tile is
+ * dressed with never depend on when it was requested.
+ *
+ * @param value Tile value to place on the ramp.
+ * @returns A ramp value `computeTileTheme` resolves.
+ */
+function rampValueFor(value: number): number {
+  const first = rampValue(tileRampConstants.exponentStart);
+
+  if (!Number.isFinite(value) || value <= first) {
+    return first;
+  }
+
+  if (value > tileRampConstants.superThreshold) {
+    // One exponent above the ramp's last, which is the first value
+    // `computeTileTheme` reports as a super tile.
+    return rampValue(tileRampConstants.limit + 1);
+  }
+
+  return rampValue(Math.floor(Math.log2(value)));
+}
 
 /* ==========================================================================
  * 4. Construction options and the reported state
@@ -525,38 +425,12 @@ const SUPER_MATERIAL_KEY = 0;
 
 /** Construction options for `createTileMaterialCache`. */
 export interface TileMaterialCacheOptions {
-  /**
-   * Theme the materials are built against, as a theme or an id. Defaults to
-   * the theme in force, which `getActiveTheme` of src/theme/themes.ts reports.
-   */
   readonly theme?: Theme | ThemeId;
-
-  /**
-   * Whether a theme change rebuilds the materials. Defaults to `true` where
-   * `theme` is omitted and to `false` where it is supplied, so a pinned theme
-   * stays pinned. Setting it alongside `theme` adopts each new active theme.
-   */
   readonly followActiveTheme?: boolean;
-
-  /** Which fill form a material colour is transferred from. */
   readonly fillPrecision?: TileFillPrecision;
-
-  /** How the empty-cell plate's alpha is delivered. */
   readonly emptyCellCompositing?: EmptyCellCompositing;
-
-  /**
-   * Roughness where the inset ring contributes nothing, in 0-1. Defaults to
-   * `tileMaterialDefaults.roughness`.
-   */
   readonly roughness?: number;
-
-  /**
-   * Roughness approached as the inset ring reaches full strength, in 0-1.
-   * Defaults to `tileMaterialDefaults.minRoughness`.
-   */
   readonly minRoughness?: number;
-
-  /** Metalness of every material, in 0-1. */
   readonly metalness?: number;
 
   /**
@@ -566,48 +440,27 @@ export interface TileMaterialCacheOptions {
   readonly emissiveScale?: number;
 
   /**
-   * Sink this cache reports through. Defaults to `NOOP_RENDER_REPORTER`, and is
-   * wrapped so no channel of it can throw into a caller.
+   * Sink this cache reports through. Defaults to `NOOP_RENDER_REPORTER`, and
+   * is wrapped so no channel of it can throw into a caller.
    */
   readonly reporter?: RenderReporter;
 }
 
 /** What one cache has done and where it stands. */
 export interface TileMaterialStats {
-  /** Id of the theme the cached materials were built against. */
   readonly themeId: ThemeId;
-
-  /** Tile materials held right now. */
   readonly cachedTileMaterials: number;
-
-  /** Tile materials constructed over this cache's life. */
   readonly tileMaterialsCreated: number;
-
-  /** Requests served from the cache. */
   readonly cacheHits: number;
-
-  /** Requests that had to construct a material. */
   readonly cacheMisses: number;
-
-  /** Board field and empty-cell plate materials constructed. */
   readonly surfaceMaterialsCreated: number;
-
-  /** Materials released, by `dispose()` and by a theme rebuild. */
   readonly materialsDisposed: number;
-
-  /** Rebuilds triggered by a theme change or by `setTheme`. */
   readonly themeRebuilds: number;
 
   /** Requests for a value the ramp does not resolve. */
   readonly invalidValues: number;
-
-  /** Palette colours that were unreadable and fell back to a token. */
   readonly colorFallbacks: number;
-
-  /** Construction options replaced by their default. */
   readonly invalidOptions: number;
-
-  /** Whether `destroy()` has released the theme subscription. */
   readonly destroyed: boolean;
 }
 
@@ -619,74 +472,23 @@ export interface TileMaterialStats {
  * same instance rather than a second one.
  */
 export interface TileMaterialCache {
-  /**
-   * The material for one tile value, constructing it on first request and
-   * returning the same instance on every later one.
-   *
-   * Every value strictly above the ramp's last one shares a single material,
-   * which is the appearance style/main.scss L605-L607 gives them all.
-   *
-   * @param value Tile value; a power of two at two or above.
-   * @returns The shared material for that value. Never disposed by this call.
-   * @throws RangeError when the ramp does not resolve `value`.
-   */
   getTileMaterial(value: number): MeshStandardMaterial;
 
   /**
    * The numeral colour for one tile value, as the CSS colour string the theme
    * states it in.
    *
-   * The value style/main.scss L572-L574 emits as a `color` declaration, which
+   * The value style/main.scss emits as a `color` declaration, which
    * src/render/tile-mesh-factory.ts labels a block with and the number-only
    * path writes onto an element.
    *
-   * @param value Tile value; a power of two at two or above.
-   * @returns The theme's numeral colour for that value.
    * @throws RangeError when the ramp does not resolve `value`.
    */
   getNumeralColor(value: number): string;
-
-  /**
-   * The numeral colour for one tile value, transferred into a `THREE.Color`.
-   *
-   * @param value Tile value; a power of two at two or above.
-   * @param target Colour to write into. A new one is allocated when omitted,
-   *   so a caller on a hot path supplies one and this method allocates
-   *   nothing.
-   * @returns `target`, or the newly allocated colour.
-   * @throws RangeError when the ramp does not resolve `value`.
-   */
   getNumeralThreeColor(value: number, target?: Color): Color;
-
-  /**
-   * The material of the surface the cells sit on, which style/main.scss L358
-   * fills with the theme's board field.
-   *
-   * @returns The shared board field material.
-   */
   getBoardFieldMaterial(): MeshStandardMaterial;
-
-  /**
-   * The material of one empty cell of the lattice, which style/main.scss L468
-   * fills with the theme's cell colour.
-   *
-   * @returns The shared empty-cell plate material.
-   */
   getEmptyCellMaterial(): MeshStandardMaterial;
-
-  /** @returns The theme the cached materials were built against. */
   getTheme(): Theme;
-
-  /**
-   * Adopts a theme, releasing every cached material so the next request
-   * rebuilds against the new palette.
-   *
-   * A call naming the theme already in force releases nothing.
-   *
-   * @param theme The theme to adopt, as a theme or an id.
-   * @returns The theme now in force for this cache.
-   * @throws RangeError when an id is not one of the catalogue's ids.
-   */
   setTheme(theme: Theme | ThemeId): Theme;
 
   /**
@@ -695,61 +497,26 @@ export interface TileMaterialCache {
    * The Three.js resources a material holds are not collected for a caller, so
    * this is the call a board teardown makes — including the rebuild a
    * board-mutating relic forces by changing the board's size. The theme
-   * subscription is left in place and the cache remains usable: a later request
-   * constructs a fresh material.
+   * subscription is left in place and the cache remains usable: a later
+   * request constructs a fresh material.
    */
   dispose(): void;
-
-  /**
-   * Releases every cached material and the theme subscription.
-   *
-   * The cache keeps serving materials against the theme in force, and no longer
-   * follows a theme change.
-   */
   destroy(): void;
-
-  /** @returns What this cache has done and where it stands. */
   readStats(): TileMaterialStats;
-
-  /** Clears every count `readStats()` reports. Present for suites. */
   resetStats(): void;
 }
 
 /* ==========================================================================
- * 5. Option resolution and error description
+ * 5. Option resolution and value description
+ *
+ * A caught value is described by `describeRenderError` in
+ * src/render/webgl-support.ts, which reads a hostile getter and a throwing
+ * `toString` through contained reads. `capText` below describes a declared
+ * THEME VALUE, not a throwable.
  * ========================================================================== */
 
-/** `name` carried by a thrown value that has none of its own. */
-const THROWN_NAME = 'RenderError';
-
-/** `message` carried by a thrown value that has none of its own. */
-const THROWN_MESSAGE = 'a non-Error value was thrown';
-
-/** Characters either field of a described throw is capped at. */
+/** Characters a described value is capped at. */
 const MAX_THROWN_TEXT_LENGTH = 200;
-
-/**
- * Reads a thrown value down to the two serialisable fields a diagnostic
- * carries, so a contained throw is reported rather than discarded.
- *
- * Total: it accepts any value, including one whose accessors or `toString`
- * throw, returns on every path and throws on none.
- *
- * @param error Thrown value, of any type, `null` and `undefined` included.
- * @returns Name and message fields, each capped in length.
- */
-function describeThrown(error: unknown): RenderErrorInfo {
-  if (error instanceof Error) {
-    return Object.freeze({
-      name: capText(error.name) ?? THROWN_NAME,
-      message: capText(error.message) ?? THROWN_MESSAGE,
-    });
-  }
-  return Object.freeze({
-    name: THROWN_NAME,
-    message: capText(error) ?? THROWN_MESSAGE,
-  });
-}
 
 /**
  * Renders a value as text of at most `MAX_THROWN_TEXT_LENGTH` characters.
@@ -771,23 +538,11 @@ function capText(value: unknown): string | null {
   return text.slice(0, MAX_THROWN_TEXT_LENGTH);
 }
 
-/** What an option resolver reports a rejection through. */
 interface OptionContext {
-  /** Sink the rejection is reported to. */
   readonly reporter: RenderReporter;
-
-  /** Called once per rejection, so the cache can count it. */
   readonly onRejected: () => void;
 }
 
-/**
- * Reports one construction option that was replaced by its default.
- *
- * @param context Sink and counter.
- * @param option Option name, as `'roughness'`.
- * @param supplied Value that was rejected.
- * @param fallback Value used in its place.
- */
 function reportRejectedOption(
   context: OptionContext,
   option: string,
@@ -815,17 +570,6 @@ function reportRejectedOption(
   });
 }
 
-/**
- * Resolves a numeric option, confining it to a finite value from
- * `MIN_OPTION_VALUE` to `maximum`.
- *
- * @param supplied Value the caller passed, or `undefined`.
- * @param fallback Value used where `supplied` is absent or rejected.
- * @param option Option name, for the report.
- * @param maximum Highest accepted value.
- * @param context Sink and counter.
- * @returns The accepted value, or `fallback`.
- */
 function resolveNumericOption(
   supplied: number | undefined,
   fallback: number,
@@ -847,16 +591,6 @@ function resolveNumericOption(
   return fallback;
 }
 
-/**
- * Resolves an option whose value is one of a fixed set of names.
- *
- * @param supplied Value the caller passed, or `undefined`.
- * @param allowed Every accepted name.
- * @param fallback Value used where `supplied` is absent or rejected.
- * @param option Option name, for the report.
- * @param context Sink and counter.
- * @returns The accepted name, or `fallback`.
- */
 function resolveNamedOption<T extends string>(
   supplied: T | undefined,
   allowed: readonly T[],
@@ -874,25 +608,16 @@ function resolveNamedOption<T extends string>(
   return fallback;
 }
 
-/** Every accepted `fillPrecision`. */
 const FILL_PRECISIONS: readonly TileFillPrecision[] = Object.freeze([
   'exact',
   'legacy',
 ]);
 
-/** Every accepted `emptyCellCompositing`. */
 const EMPTY_CELL_COMPOSITINGS: readonly EmptyCellCompositing[] = Object.freeze([
   'pre-composited',
   'transparent',
 ]);
 
-/**
- * Resolves a theme argument from either form a caller holds it in.
- *
- * @param theme A theme, an id, or `undefined` for the theme in force.
- * @returns The theme.
- * @throws RangeError when an id is not one of the catalogue's ids.
- */
 function resolveThemeArgument(theme?: Theme | ThemeId): Theme {
   if (theme === undefined) {
     return getActiveTheme();
@@ -900,39 +625,19 @@ function resolveThemeArgument(theme?: Theme | ThemeId): Theme {
   return typeof theme === 'string' ? getTheme(theme) : theme;
 }
 
-/* ==========================================================================
- * 6. Tile fill, the surface response, and material construction
- * ========================================================================== */
-
-/** The surface response one cache builds every material with. */
 interface SurfaceResponse {
-  /** Roughness where the inset ring contributes nothing. */
   readonly roughness: number;
-
-  /** Roughness approached as the inset ring reaches full strength. */
   readonly minRoughness: number;
-
-  /** Metalness of every material. */
   readonly metalness: number;
-
-  /** Multiplier applied to the halo alpha. */
   readonly emissiveScale: number;
 }
 
-/** Reads a palette field, falling back to its token default. */
 type PaletteReader = (
   declared: string,
   fallback: string,
   field: string,
 ) => RampColor;
 
-/**
- * The fill of one resolved tile theme, in the requested form.
- *
- * @param tileTheme Resolved tile theme.
- * @param precision Which of the ramp's two fill forms to take.
- * @returns Colour with channels on the 0-255 scale.
- */
 function readTileFill(
   tileTheme: TileTheme,
   precision: TileFillPrecision,
@@ -946,11 +651,6 @@ function readTileFill(
 /**
  * The fill of one tile value under one theme.
  *
- * @param value Tile value; a power of two at two or above.
- * @param theme A theme, an id, or omitted for the theme in force.
- * @param precision Which of the ramp's two fill forms to take. Defaults to
- *   `'exact'`.
- * @returns Colour with channels on the 0-255 scale.
  * @throws RangeError when the ramp does not resolve `value`.
  */
 export function resolveTileFill(
@@ -965,9 +665,6 @@ export function resolveTileFill(
  * The numeral colour of one tile value under one theme, as the CSS colour
  * string the theme states it in.
  *
- * @param value Tile value; a power of two at two or above.
- * @param theme A theme, an id, or omitted for the theme in force.
- * @returns The theme's numeral colour for that value.
  * @throws RangeError when the ramp does not resolve `value`.
  */
 export function resolveTileNumeralColor(
@@ -977,18 +674,6 @@ export function resolveTileNumeralColor(
   return resolveTileTheme(value, theme).numeralColor;
 }
 
-/**
- * The roughness one tile value's material takes.
- *
- * style/main.scss L580 suppresses the whole shadow declaration for a value that
- * took an accent overlay, so both of its shadows are absent and the inset ring
- * of L582 contributes nothing there — including on the two suppressed values
- * whose glow alpha is not zero.
- *
- * @param tileTheme Resolved tile theme.
- * @param response The cache's surface response.
- * @returns Roughness from `response.minRoughness` to `response.roughness`.
- */
 function readTileRoughness(
   tileTheme: TileTheme,
   response: SurfaceResponse,
@@ -1012,6 +697,57 @@ function readTileRoughness(
  * intensity is set to zero, so the emissive term contributes nothing under
  * either reading. Decision DL-MATERIAL-01.
  *
+ * Written onto an existing material rather than returned as a new one, so a
+ * theme change re-dresses the instances live meshes already reference instead
+ * of replacing them. Every property the material carries is assigned on every
+ * call, so no residue of the previous theme survives: the suppressed band
+ * resets the emissive colour to black alongside the zero intensity.
+ *
+ * @param material Material to dress.
+ * @param tileTheme Resolved tile theme.
+ * @param palette Palette of the theme it was resolved against.
+ * @param precision Which of the ramp's two fill forms to take.
+ * @param response The cache's surface response.
+ * @param readPalette Reader the halo entry is resolved through.
+ * @returns `material`.
+ */
+function applyTileMaterial(
+  material: MeshStandardMaterial,
+  tileTheme: TileTheme,
+  palette: ThemePalette,
+  precision: TileFillPrecision,
+  response: SurfaceResponse,
+  readPalette: PaletteReader,
+): MeshStandardMaterial {
+  toThreeColor(readTileFill(tileTheme, precision), material.color);
+  material.roughness = readTileRoughness(tileTheme, response);
+  material.metalness = response.metalness;
+
+  if (tileTheme.glowSuppressed) {
+    material.emissive.setRGB(ALPHA_CLEAR, ALPHA_CLEAR, ALPHA_CLEAR);
+    material.emissiveIntensity = ALPHA_CLEAR;
+    material.needsUpdate = true;
+
+    return material;
+  }
+
+  toThreeColor(
+    readPalette(palette.tileGlow, tileGoldGlowColor, 'tileGlow'),
+    material.emissive,
+  );
+  material.emissiveIntensity =
+    confineAlpha(tileTheme.haloAlpha) * response.emissiveScale;
+  material.needsUpdate = true;
+
+  return material;
+}
+
+/**
+ * Builds the material for one tile value.
+ *
+ * The whole of the appearance is `applyTileMaterial`; this call allocates the
+ * instance the cache then holds for the lifetime of the cache.
+ *
  * @param tileTheme Resolved tile theme.
  * @param palette Palette of the theme it was resolved against.
  * @param precision Which of the ramp's two fill forms to take.
@@ -1026,24 +762,14 @@ function buildTileMaterial(
   response: SurfaceResponse,
   readPalette: PaletteReader,
 ): MeshStandardMaterial {
-  const material = new MeshStandardMaterial({
-    color: toThreeColor(readTileFill(tileTheme, precision)),
-    roughness: readTileRoughness(tileTheme, response),
-    metalness: response.metalness,
-  });
-
-  if (tileTheme.glowSuppressed) {
-    material.emissiveIntensity = ALPHA_CLEAR;
-    return material;
-  }
-
-  toThreeColor(
-    readPalette(palette.tileGlow, tileGoldGlowColor, 'tileGlow'),
-    material.emissive,
+  return applyTileMaterial(
+    new MeshStandardMaterial(),
+    tileTheme,
+    palette,
+    precision,
+    response,
+    readPalette,
   );
-  material.emissiveIntensity =
-    confineAlpha(tileTheme.haloAlpha) * response.emissiveScale;
-  return material;
 }
 
 /* ==========================================================================
@@ -1053,6 +779,37 @@ function buildTileMaterial(
 /**
  * Builds the material of the surface the cells sit on, which style/main.scss
  * L358 fills with the theme's board field.
+ *
+ * Written onto an existing material for the reason `applyTileMaterial` states.
+ *
+ * @param material Material to dress.
+ * @param palette Palette in force.
+ * @param response The cache's surface response.
+ * @param readPalette Reader the board field is resolved through.
+ * @returns `material`.
+ */
+function applyBoardFieldMaterial(
+  material: MeshStandardMaterial,
+  palette: ThemePalette,
+  response: SurfaceResponse,
+  readPalette: PaletteReader,
+): MeshStandardMaterial {
+  toThreeColor(
+    readPalette(palette.boardField, gameContainerBackground, 'boardField'),
+    material.color,
+  );
+  material.roughness = response.roughness;
+  material.metalness = response.metalness;
+  material.transparent = false;
+  material.opacity = ALPHA_OPAQUE;
+  material.depthWrite = true;
+  material.needsUpdate = true;
+
+  return material;
+}
+
+/**
+ * Builds the material of the surface the cells sit on.
  *
  * @param palette Palette in force.
  * @param response The cache's surface response.
@@ -1064,13 +821,12 @@ function buildBoardFieldMaterial(
   response: SurfaceResponse,
   readPalette: PaletteReader,
 ): MeshStandardMaterial {
-  return new MeshStandardMaterial({
-    color: toThreeColor(
-      readPalette(palette.boardField, gameContainerBackground, 'boardField'),
-    ),
-    roughness: response.roughness,
-    metalness: response.metalness,
-  });
+  return applyBoardFieldMaterial(
+    new MeshStandardMaterial(),
+    palette,
+    response,
+    readPalette,
+  );
 }
 
 /**
@@ -1085,6 +841,62 @@ function buildBoardFieldMaterial(
  * palettes do, resolves to the same material either way. Decision
  * DL-MATERIAL-02.
  *
+ * Written onto an existing material for the reason `applyTileMaterial` states.
+ * The three transparency properties are assigned on both branches, so a palette
+ * change between an opaque and a translucent cell colour leaves no residue.
+ *
+ * @param material Material to dress.
+ * @param palette Palette in force.
+ * @param response The cache's surface response.
+ * @param compositing How the alpha is delivered.
+ * @param readPalette Reader both entries are resolved through.
+ * @returns `material`.
+ */
+function applyEmptyCellMaterial(
+  material: MeshStandardMaterial,
+  palette: ThemePalette,
+  response: SurfaceResponse,
+  compositing: EmptyCellCompositing,
+  readPalette: PaletteReader,
+): MeshStandardMaterial {
+  const cell = readPalette(
+    palette.cell,
+    derivedColors.gridCellBackground,
+    'cell',
+  );
+
+  material.roughness = response.roughness;
+  material.metalness = response.metalness;
+  material.needsUpdate = true;
+
+  if (compositing === 'transparent') {
+    const translucent = cell.a < ALPHA_OPAQUE;
+
+    toThreeColor(cell, material.color);
+    material.transparent = translucent;
+    material.opacity = cell.a;
+    material.depthWrite = !translucent;
+
+    return material;
+  }
+
+  const field = readPalette(
+    palette.boardField,
+    gameContainerBackground,
+    'boardField',
+  );
+
+  toThreeColor(compositeOver(cell, field), material.color);
+  material.transparent = false;
+  material.opacity = ALPHA_OPAQUE;
+  material.depthWrite = true;
+
+  return material;
+}
+
+/**
+ * Builds the material of one empty cell of the lattice.
+ *
  * @param palette Palette in force.
  * @param response The cache's surface response.
  * @param compositing How the alpha is delivered.
@@ -1097,39 +909,14 @@ function buildEmptyCellMaterial(
   compositing: EmptyCellCompositing,
   readPalette: PaletteReader,
 ): MeshStandardMaterial {
-  const cell = readPalette(
-    palette.cell,
-    derivedColors.gridCellBackground,
-    'cell',
+  return applyEmptyCellMaterial(
+    new MeshStandardMaterial(),
+    palette,
+    response,
+    compositing,
+    readPalette,
   );
-
-  if (compositing === 'transparent') {
-    const translucent = cell.a < ALPHA_OPAQUE;
-    return new MeshStandardMaterial({
-      color: toThreeColor(cell),
-      roughness: response.roughness,
-      metalness: response.metalness,
-      transparent: translucent,
-      opacity: cell.a,
-      depthWrite: !translucent,
-    });
-  }
-
-  const field = readPalette(
-    palette.boardField,
-    gameContainerBackground,
-    'boardField',
-  );
-  return new MeshStandardMaterial({
-    color: toThreeColor(compositeOver(cell, field)),
-    roughness: response.roughness,
-    metalness: response.metalness,
-  });
 }
-
-/* ==========================================================================
- * 8. The cache
- * ========================================================================== */
 
 /**
  * Builds a per-value tile material cache for the WebGL board.
@@ -1145,8 +932,6 @@ function buildEmptyCellMaterial(
  * the next request rebuilds against the new palette and the WebGL board cannot
  * be left on the previous one while the DOM layer moves to the new one.
  *
- * @param options Construction options. Every field is optional, and an option
- *   that is rejected is replaced by its default, counted, and reported.
  * @returns A frozen cache.
  * @throws RangeError when `options.theme` is an id the catalogue does not
  *   carry.
@@ -1242,13 +1027,9 @@ export function createTileMaterialCache(
   let destroyed = false;
 
   /**
-   * Reads a palette field, falling back to the token the default palette states
-   * it from where the declared value is not a colour this module reads.
+   * Reads a palette field, falling back to the token the default palette
+   * states it from where the declared value is not a colour this module reads.
    *
-   * @param declared Value the palette carries.
-   * @param fallback Token used in its place.
-   * @param field Palette field name, for the report.
-   * @returns Colour with channels on the 0-255 scale.
    * @throws RangeError when `fallback` is not a colour this module reads.
    */
   const readPalette: PaletteReader = (declared, fallback, field) => {
@@ -1275,44 +1056,75 @@ export function createTileMaterialCache(
     return readThemeColor(fallback);
   };
 
-  /**
-   * Resolves one tile value against the theme in force, counting and reporting
-   * a value the ramp rejects.
-   *
-   * @param value Tile value.
-   * @returns The resolved tile theme.
-   * @throws RangeError when the ramp does not resolve `value`.
-   */
   const resolveValue = (value: number): TileTheme => {
     try {
       return resolveTileTheme(value, theme);
     } catch (error: unknown) {
       invalidValues += 1;
+
+      const placed = rampValueFor(value);
       const detail: RenderDetail = Object.freeze({
         themeId: theme.id,
         value: Number.isFinite(value) ? value : String(value),
+        dressedAs: placed,
       });
+
       reporter.onCount({ name: INVALID_VALUE_METRIC, value: 1, detail });
+      reporter.onCount({ name: VALUE_FALLBACK_METRIC, value: 1, detail });
       reporter.onDiagnostic({
-        level: 'error',
+        level: 'warning',
         source: MODULE_SOURCE,
-        message: 'the ramp does not resolve the requested tile value',
+        message:
+          'the ramp is not defined over the requested tile value; it was ' +
+          'dressed as the ramp entry at or below it',
         detail,
-        error: describeThrown(error),
+        error: describeRenderError(error),
+        thrown: error,
       });
-      throw error;
+
+      return resolveTileTheme(placed, theme);
     }
   };
 
-  /**
-   * The cache key one resolved tile theme's material is held under.
-   *
-   * @param tileTheme Resolved tile theme.
-   * @returns `SUPER_MATERIAL_KEY` for a value above the ramp, and the value
-   *   itself otherwise.
-   */
   const materialKey = (tileTheme: TileTheme): number =>
     tileTheme.isSuper ? SUPER_MATERIAL_KEY : tileTheme.value;
+
+  /**
+   * Refuses a call that would allocate or dress a material after `destroy()`.
+   *
+   * `destroy()` is terminal: it releases every material AND the theme
+   * subscription, so anything allocated after it would never be released and
+   * anything dressed would be a disposed resource. A caller that has
+   * destroyed a cache and still asks it for a material has a lifecycle defect,
+   * and this is where that defect surfaces. `dispose()` is the reusable
+   * release and is not guarded — the cache rebuilds after it.
+   *
+   * @param method Name of the member called, for the report.
+   * @throws Error when the cache has been destroyed.
+   */
+  const refuseAfterDestroy = (method: string): void => {
+    if (!destroyed) {
+      return;
+    }
+
+    const detail: RenderDetail = Object.freeze({
+      themeId: theme.id,
+      method,
+    });
+
+    reporter.onCount({ name: AFTER_DESTROY_METRIC, value: 1, detail });
+    reporter.onDiagnostic({
+      level: 'error',
+      source: MODULE_SOURCE,
+      message: `\`${method}\` was called on a destroyed material cache`,
+      detail,
+    });
+
+    throw new Error(
+      `tile-materials: \`${method}\` is unavailable on a destroyed cache; ` +
+        'use `dispose()` where the cache is to be reused',
+    );
+  };
 
   /**
    * Releases every material held and clears the caches.
@@ -1355,12 +1167,6 @@ export function createTileMaterialCache(
     return released;
   };
 
-  /**
-   * Adopts a theme and releases every material built against the previous one.
-   *
-   * @param next Theme to adopt.
-   * @returns The theme now in force for this cache.
-   */
   const adoptTheme = (next: Theme): Theme => {
     if (next === theme) {
       return theme;
@@ -1368,7 +1174,47 @@ export function createTileMaterialCache(
 
     const previousId = theme.id;
     theme = next;
-    const released = releaseMaterials('theme');
+
+    // Re-dressed against the new theme under the key each was cached at, so a
+    // super material stays the super material and a ramp material stays its
+    // own value's.
+    for (const [key, material] of tileMaterials) {
+      const value =
+        key === SUPER_MATERIAL_KEY
+          ? rampValue(tileRampConstants.limit + 1)
+          : key;
+
+      applyTileMaterial(
+        material,
+        resolveValue(value),
+        theme.palette,
+        fillPrecision,
+        response,
+        readPalette,
+      );
+    }
+
+    numeralColors.clear();
+
+    if (boardFieldMaterial !== null) {
+      applyBoardFieldMaterial(
+        boardFieldMaterial,
+        theme.palette,
+        response,
+        readPalette,
+      );
+    }
+
+    if (emptyCellMaterial !== null) {
+      applyEmptyCellMaterial(
+        emptyCellMaterial,
+        theme.palette,
+        response,
+        emptyCellCompositing,
+        readPalette,
+      );
+    }
+
     themeRebuilds += 1;
     reporter.onCount({
       name: THEME_REBUILD_METRIC,
@@ -1376,21 +1222,13 @@ export function createTileMaterialCache(
       detail: Object.freeze({
         themeId: next.id,
         previousThemeId: previousId,
-        released,
+        redressed: tileMaterials.size,
       }),
     });
+
     return theme;
   };
 
-  /**
-   * Follows a theme change.
-   *
-   * `applyTheme` of src/theme/themes.ts collects a throwing listener into an
-   * `AggregateError`, so this one contains its own failures and reports them
-   * rather than letting one reach the activation path.
-   *
-   * @param next Theme now in force.
-   */
   const handleThemeChange = (next: Theme): void => {
     try {
       adoptTheme(next);
@@ -1405,7 +1243,8 @@ export function createTileMaterialCache(
         source: MODULE_SOURCE,
         message: 'a theme change could not be adopted',
         detail: Object.freeze({ themeId: next.id }),
-        error: describeThrown(error),
+        error: describeRenderError(error),
+        thrown: error,
       });
     }
   };
@@ -1416,6 +1255,8 @@ export function createTileMaterialCache(
 
   return Object.freeze({
     getTileMaterial: (value: number): MeshStandardMaterial => {
+      refuseAfterDestroy('getTileMaterial');
+
       const tileTheme = resolveValue(value);
       const key = materialKey(tileTheme);
       const cached = tileMaterials.get(key);
@@ -1446,10 +1287,15 @@ export function createTileMaterialCache(
       return material;
     },
 
-    getNumeralColor: (value: number): string =>
-      resolveValue(value).numeralColor,
+    getNumeralColor: (value: number): string => {
+      refuseAfterDestroy('getNumeralColor');
+
+      return resolveValue(value).numeralColor;
+    },
 
     getNumeralThreeColor: (value: number, target?: Color): Color => {
+      refuseAfterDestroy('getNumeralThreeColor');
+
       const tileTheme = resolveValue(value);
       const key = materialKey(tileTheme);
       let cached = numeralColors.get(key);
@@ -1469,6 +1315,8 @@ export function createTileMaterialCache(
     },
 
     getBoardFieldMaterial: (): MeshStandardMaterial => {
+      refuseAfterDestroy('getBoardFieldMaterial');
+
       if (boardFieldMaterial === null) {
         boardFieldMaterial = buildBoardFieldMaterial(
           theme.palette,
@@ -1486,6 +1334,8 @@ export function createTileMaterialCache(
     },
 
     getEmptyCellMaterial: (): MeshStandardMaterial => {
+      refuseAfterDestroy('getEmptyCellMaterial');
+
       if (emptyCellMaterial === null) {
         emptyCellMaterial = buildEmptyCellMaterial(
           theme.palette,
@@ -1509,14 +1359,33 @@ export function createTileMaterialCache(
 
     getTheme: (): Theme => theme,
 
-    setTheme: (next: Theme | ThemeId): Theme =>
-      adoptTheme(resolveThemeArgument(next)),
+    setTheme: (next: Theme | ThemeId): Theme => {
+      refuseAfterDestroy('setTheme');
+
+      return adoptTheme(resolveThemeArgument(next));
+    },
 
     dispose: (): void => {
+      if (destroyed) {
+        // Reported rather than refused: `dispose()` releases nothing a
+        // destroyed cache still holds, so the call is harmless.
+        reporter.onCount({
+          name: AFTER_DESTROY_METRIC,
+          value: 1,
+          detail: Object.freeze({ themeId: theme.id, method: 'dispose' }),
+        });
+
+        return;
+      }
+
       releaseMaterials('dispose');
     },
 
     destroy: (): void => {
+      if (destroyed) {
+        return;
+      }
+
       destroyed = true;
       releaseMaterials('destroy');
 

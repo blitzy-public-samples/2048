@@ -1,28 +1,16 @@
 // Ported-fidelity suite for src/engine/tile.ts against its deleted vanilla
-// predecessor js/tile.js. Figure 8, File Transformation Map, records the
-// js/tile.js -> src/engine/tile.ts mapping these tests are the evidence for.
+// predecessor js/tile.js. The constructs pinned are the constructor,
+// `savePosition()`, `updatePosition()` and `serialize()`.
 //
-// Constructs pinned, with the vanilla line range of each:
-//   js/tile.js L1-L8   constructor
-//   js/tile.js L10-L12 savePosition()
-//   js/tile.js L14-L17 updatePosition()
-//   js/tile.js L19-L27 serialize()
-//
-// Consumers the assertions below hold those constructs to:
-//   js/grid.js L29           new Tile(tile.position, tile.value)
-//   js/grid.js L89-L95       grid.cells[tile.x][tile.y]
-//   js/game_manager.js L156  next.value === tile.value && !next.mergedFrom
-//   js/game_manager.js L158  merged.mergedFrom = [tile, next]
-//   js/game_manager.js L175  positionsEqual(cell, tile)
-//
-// Not pinned here, and pinned by the sibling suite named:
-//   js/grid.js L21-L34            tests/unit/engine/grid.test.ts
-//   js/game_manager.js L113-L127  tests/unit/engine/move-resolver.test.ts
+// The assertions hold those constructs to the consumers the vanilla sources
+// were: grid rehydration reconstructing a tile from a position and a value,
+// grid insertion indexing `cells[tile.x][tile.y]`, the merge condition
+// comparing values and rejecting an already-merged neighbour, the merged tile
+// carrying both source tiles in `mergedFrom`, and the change check comparing a
+// cell against a tile.
 //
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock and writes no snapshot.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { describe, expect, it } from 'vitest';
 
@@ -38,74 +26,38 @@ import {
   createMergePairBoard,
 } from '../../fixtures/boards';
 
-/* ===== 1. Cells and values the assertions use ===== */
-
-/** Column index a tile is constructed at. */
 const ORIGIN_X = 1;
 
-/** Row index a tile is constructed at. */
 const ORIGIN_Y = 2;
 
-/** Column index a tile is moved to. */
 const TARGET_X = 3;
 
-/** Row index a tile is moved to. */
 const TARGET_Y = 0;
 
-/** Face value a tile is constructed with. */
 const TILE_VALUE = 4;
 
-/** Face value js/tile.js L4 substitutes for a falsy argument. */
 const DEFAULT_VALUE = 2;
 
-/** Face value js/game_manager.js L157 produced from two TILE_VALUE tiles. */
 const MERGED_VALUE = 8;
 
-/** Column index of the first merge-pair fixture tile. */
 const MERGE_PAIR_X = 0;
 
-/** Column index of the second merge-pair fixture tile. */
 const MERGE_PAIR_NEXT_X = 1;
 
-/** Row index of both merge-pair fixture tiles. */
 const MERGE_PAIR_Y = 0;
 
-/** Face value of both merge-pair fixture tiles. */
 const MERGE_PAIR_VALUE = 2;
 
-/** How many source tiles js/game_manager.js L158 assigned to a merge. */
 const MERGE_SOURCE_COUNT = 2;
 
-/* ===== 2. Helpers ===== */
-
-/**
- * The cell a tile is constructed at, as a fresh object per call.
- *
- * @returns A new position at (`ORIGIN_X`, `ORIGIN_Y`).
- */
 function originCell(): Position {
   return { x: ORIGIN_X, y: ORIGIN_Y };
 }
 
-/**
- * The cell a tile is moved to, as a fresh object per call.
- *
- * @returns A new position at (`TARGET_X`, `TARGET_Y`).
- */
 function targetCell(): Position {
   return { x: TARGET_X, y: TARGET_Y };
 }
 
-/**
- * Reads one occupied cell of a fixture board's matrix, which js/grid.js L28
- * addressed as `state[x][y]`.
- *
- * @param board Fixture board to read.
- * @param x Zero-based column index.
- * @param y Zero-based row index.
- * @returns The serialised tile at that cell.
- * @throws {Error} If the cell carries no tile.
- */
 function fixtureTileAt(
   board: SerializedGameState,
   x: number,
@@ -120,13 +72,6 @@ function fixtureTileAt(
   return cell;
 }
 
-/**
- * Reads the cell js/tile.js L11 recorded on a tile.
- *
- * @param tile Tile whose `savePosition()` has been called.
- * @returns The recorded cell.
- * @throws {Error} If `previousPosition` is null.
- */
 function savedCellOf(tile: Tile): Position {
   const saved = tile.previousPosition;
 
@@ -137,13 +82,6 @@ function savedCellOf(tile: Tile): Position {
   return saved;
 }
 
-/**
- * Reads the pair js/game_manager.js L158 assigned to a merged tile.
- *
- * @param tile Tile carrying merge sources.
- * @returns The two source tiles, in the assigned order.
- * @throws {Error} If `mergedFrom` is null.
- */
 function sourcesOf(tile: Tile): readonly [Tile, Tile] {
   const sources = tile.mergedFrom;
 
@@ -153,8 +91,6 @@ function sourcesOf(tile: Tile): readonly [Tile, Tile] {
 
   return sources;
 }
-
-/* ===== 3. Constructor ===== */
 
 describe('Tile constructor (js/tile.js L1-L8)', () => {
   it('flattens position onto top-level x and y (js/tile.js L2-L3)', () => {
@@ -264,8 +200,6 @@ describe('Tile constructor (js/tile.js L1-L8)', () => {
   });
 });
 
-/* ===== 4. savePosition ===== */
-
 describe('Tile.savePosition (js/tile.js L10-L12)', () => {
   it('snapshots the current x and y (js/tile.js L10-L12)', () => {
     const tile = new Tile(originCell(), TILE_VALUE);
@@ -333,8 +267,6 @@ describe('Tile.savePosition (js/tile.js L10-L12)', () => {
   });
 });
 
-/* ===== 5. updatePosition ===== */
-
 describe('Tile.updatePosition (js/tile.js L14-L17)', () => {
   it('writes the new x and y (js/tile.js L15-L16)', () => {
     const tile = new Tile(originCell(), TILE_VALUE);
@@ -398,8 +330,6 @@ describe('Tile.updatePosition (js/tile.js L14-L17)', () => {
     expect(sourcesOf(merged)[1]).toBe(right);
   });
 });
-
-/* ===== 6. serialize ===== */
 
 describe('Tile.serialize (js/tile.js L19-L27)', () => {
   it('returns exactly position and value keys (js/tile.js L20-L26)', () => {
@@ -486,8 +416,6 @@ describe('Tile.serialize (js/tile.js L19-L27)', () => {
   });
 });
 
-/* ===== 7. serialize and construct round trip ===== */
-
 describe('Tile serialize round trip (js/grid.js L29)', () => {
   it('accepts its own output as construction input (js/grid.js L29)', () => {
     const tile = new Tile(originCell(), TILE_VALUE);
@@ -534,8 +462,6 @@ describe('Tile serialize round trip (js/grid.js L29)', () => {
     }
   });
 });
-
-/* ===== 8. mergedFrom ===== */
 
 describe('Tile.mergedFrom (js/tile.js L7)', () => {
   it('holds exactly two source tiles (js/game_manager.js L158)', () => {
@@ -585,8 +511,6 @@ describe('Tile.mergedFrom (js/tile.js L7)', () => {
     expect(merged.mergedFrom).toBeNull();
   });
 });
-
-/* ===== 9. Structural compatibility with the merge rule ===== */
 
 describe('Tile as MergeTileView (js/game_manager.js L156)', () => {
   it('satisfies MergeTileView with no adapter (js/tile.js L4, L7)', () => {

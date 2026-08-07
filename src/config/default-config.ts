@@ -7,15 +7,14 @@
  * sharing no object with `DEFAULT_RULES_CONFIG` or with any earlier return
  * value, and `DEFAULT_RULES_CONFIG` is frozen at every level.
  *
- * This module imports only the types of src/config/rules-config.ts. It reads no
- * DOM and no storage, consumes no randomness and takes no spawn draw: it
- * declares the distribution the engine's seeded draw resolves against.
+ * This module reads no DOM and no storage, consumes no randomness and takes no
+ * spawn draw: it declares the distribution the engine's seeded draw resolves
+ * against.
  */
 
-// The specifier carries its `.ts` extension: vite.config.ts imports
-// src/theme/tokens.ts for the Sass token projection and that module imports this
-// one, so every specifier in the chain must resolve under Vite's native config
-// loader, which resolves no extensionless specifier.
+// The specifier carries its `.ts` extension because this module is reached
+// from vite.config.ts, whose native config loader resolves no extensionless
+// specifier.
 import type {
   MergePredicate,
   MergeProducer,
@@ -23,19 +22,11 @@ import type {
   RulesConfig,
 } from './rules-config.ts';
 
-/* ===== 1. Default merge rules ===== */
-
 /**
  * The default merge predicate: a moving tile merges into the tile it has run
  * into when the two carry the same value and the target has not already merged
  * this turn. Reads `moving.value`, `target.value` and `target.mergedFrom` only,
  * and mutates neither operand.
- *
- * @param moving Tile being moved into the target's cell.
- * @param target Tile already occupying the destination cell; its presence is
- *   established by the move resolver and is not retested here.
- * @returns `true` when the pair merges, `false` when the moving tile instead
- *   stops short of the target.
  */
 export function defaultCanMerge(
   moving: MergeTileView,
@@ -49,12 +40,6 @@ export function defaultCanMerge(
  * tile's value. Returns a face value only and constructs nothing. The engine
  * adds this value to the score, so this module declares no separate score rule
  * and a replaced producer changes scoring with it.
- *
- * @param moving Tile being moved into the target's cell.
- * @param _target Tile already occupying the destination cell; unread.
- * @returns Face value of the tile the merge yields — a positive integer for any
- *   pair of positive-integer values. Called only for a pair a `MergePredicate`
- *   has already accepted, so the two operands carry equal values here.
  */
 export function defaultProduceMergeValue(
   moving: MergeTileView,
@@ -62,8 +47,6 @@ export function defaultProduceMergeValue(
 ): number {
   return moving.value * 2;
 }
-
-/* ===== 2. Default rule values ===== */
 
 /**
  * Default edge length of the square board, in cells. The single board-size
@@ -73,19 +56,61 @@ export function defaultProduceMergeValue(
 export const DEFAULT_BOARD_SIZE = 4;
 
 /**
+ * Highest board edge length the product supports, in cells.
+ *
+ * The single board-edge ceiling. src/run/run-state.ts,
+ * src/run/run-state-store.ts, src/render/number-only-renderer.ts and
+ * src/ui/a11y/focus-manager.ts all measure a candidate edge against this one
+ * value, so an edge cannot be accepted by one of them and refused by another.
+ * Each of those modules turns an accepted edge into a `size` by `size`
+ * allocation — a cell matrix, a lattice of grid cells, or a pair of parallel
+ * arrays — so this is the bound on all of them.
+ *
+ * src/engine/grid.ts allocates the size it is handed and does not test it:
+ * every caller reaching it has already been through this ceiling.
+ * src/engine/hook-bus.ts measures a payload's board size against the live
+ * grid's own `size` instead, so the engine folder reads no constant from here.
+ *
+ * Recorded in docs/DECISION_LOG.md.
+ */
+export const MAX_BOARD_SIZE = 16;
+
+/**
+ * Reports whether `value` is a board edge length the product supports: an
+ * integer from 1 through `MAX_BOARD_SIZE`.
+ *
+ * Pure and total, and accepts a value of any type: a candidate edge reaches a
+ * caller from persisted JSON, from a `state:commit` payload or from a
+ * board-mutating relic. Rejects `NaN`, both infinities, every fractional and
+ * negative value, zero, every magnitude beyond the exactly representable
+ * integer range, everything above `MAX_BOARD_SIZE`, and every value that is
+ * not a number.
+ *
+ * @param value Value to test.
+ * @returns `true` for a positive safe integer at or below `MAX_BOARD_SIZE`.
+ */
+export function isSupportedBoardSize(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= MAX_BOARD_SIZE
+  );
+}
+
+/**
  * Default tile value that wins the game. How a tile value is compared against it
  * belongs to src/engine/terminal-state.ts, and the visual band above it to
  * src/theme/tile-ramp.ts.
  */
 const DEFAULT_WIN_VALUE = 2048;
 
-/** Default number of tiles inserted when a stage begins. */
 const DEFAULT_START_TILES = 2;
 
 /**
- * Default tile values a spawn draws from, in the index order the
- * `SpawnDistribution` selection convention walks. Paired with
- * `DEFAULT_SPAWN_WEIGHTS` by index, and this order is not reversed.
+ * Default tile values a spawn draws from, paired with `DEFAULT_SPAWN_WEIGHTS`
+ * by index in the order the selection convention walks; this order is not
+ * reversed.
  */
 const DEFAULT_SPAWN_VALUES: readonly number[] = [2, 4];
 
@@ -96,16 +121,12 @@ const DEFAULT_SPAWN_VALUES: readonly number[] = [2, 4];
  */
 const DEFAULT_SPAWN_WEIGHTS: readonly number[] = [0.9, 0.1];
 
-/* ===== 3. Factory ===== */
-
 /**
  * Builds the vanilla-equivalent rules: a freshly allocated, unfrozen
  * `RulesConfig` on every call, sharing no object — not the config, its `spawn`,
- * either spawn array, or its `merge` — with `DEFAULT_RULES_CONFIG` or an earlier
- * return value. The two merge members are this module's exported functions; they
- * hold no state and are shared, not copied.
- *
- * @returns a new vanilla-equivalent `RulesConfig`.
+ * either spawn array, or its `merge` — with `DEFAULT_RULES_CONFIG` or an
+ * earlier return value. The two merge members are this module's exported
+ * functions; they hold no state and are shared, not copied.
  */
 export function createDefaultRulesConfig(): RulesConfig {
   const canMerge: MergePredicate = defaultCanMerge;
@@ -123,14 +144,9 @@ export function createDefaultRulesConfig(): RulesConfig {
   };
 }
 
-/* ===== 4. Frozen template ===== */
-
 /**
  * Freezes a config at every level: both spawn arrays, its `spawn`, its `merge`,
  * and the object itself.
- *
- * @param config the config to freeze in place.
- * @returns the same object, frozen.
  */
 function deepFreezeRulesConfig(config: RulesConfig): RulesConfig {
   Object.freeze(config.spawn.values);
@@ -143,8 +159,8 @@ function deepFreezeRulesConfig(config: RulesConfig): RulesConfig {
 /**
  * The vanilla-equivalent rules, deep-frozen: `boardSize` 4, `winValue` 2048,
  * `startTiles` 2, spawn values `[2, 4]` at weights `[0.9, 0.1]`, and the two
- * default merge rules. Frozen at every level, so no consumer can mutate the
- * shared template; `createDefaultRulesConfig()` returns a mutable copy.
+ * default merge rules. No consumer can mutate the shared template;
+ * `createDefaultRulesConfig()` returns a mutable copy.
  */
 export const DEFAULT_RULES_CONFIG: RulesConfig = deepFreezeRulesConfig(
   /* @__PURE__ */ createDefaultRulesConfig(),

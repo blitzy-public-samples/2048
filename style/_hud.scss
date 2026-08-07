@@ -23,20 +23,18 @@ $hud-hairline: math.div($tile-border-radius, 3) !default;
 $hud-gap-inner: math.div($grid-spacing, 3) !default;
 $hud-gap-tight: math.div($grid-spacing, 5) !default;
 
-// The type scale style/main.scss applies to the score surfaces.
 $hud-numeral-size: math.div($field-width, 20) !default;
 $hud-label-size: $grid-spacing - $hud-hairline * 2 !default;
 
 $hud-meter-block: $tile-border-radius * 2 !default;
 
-// The delineation colour the horizontal rule carries.
 $hud-rule-color: color.adjust($text-color, $lightness: 40%) !default;
 
 // The same colour, resolved through the `--theme-rule` custom property
 // style/_themes.scss publishes, with $hud-rule-color as the fallback. Every
-// palette's `rule` entry is written from that palette's own text colour, and
-// the default palette's entry is this same expression, so each delineated edge
-// below follows the active palette and is unchanged under the default one.
+// palette's `rule` entry is written from that palette's own text colour, so
+// each delineated edge below follows the active palette and is unchanged under
+// the default one.
 $hud-rule: var(--theme-rule, $hud-rule-color) !default;
 
 // The alpha the empty-cell surface carries, which style/_themes.scss carries as
@@ -47,24 +45,18 @@ $hud-track-alpha: 0.35 !default;
 // property is multiplied by. A ratio, not a length; no token applies to it.
 $hud-fraction-full: 100% !default;
 
-// A tray item's cap: one board column.
 $hud-item-max-inline: $tile-size !default;
 
-// Mobile geometry: the two lengths read the mobile-scale tokens
-// style/_tokens.scss declares. Same values, 280px and 10px.
 $hud-mobile-field-width: $mobile-field-width !default;
 $hud-mobile-gap: $mobile-grid-spacing !default;
 
 $hud-mobile-item-max-inline:
   math.div($hud-mobile-field-width - $hud-mobile-gap, 2) !default;
 
-// The ordered rarity list the accent loop below generates one rule per.
-// Read from $rarity-tiers of style/_tokens.scss, the one vocabulary
+// The ordered rarity list the accent loop below generates one rule per. Read
+// from $rarity-tiers of style/_tokens.scss, the one vocabulary
 // style/_reward.scss reads as well, so a relic carries the same tier on the
-// active-relic tray and on the reward card it was chosen from. This line
-// previously declared a list of its own ending in `cursed`, which disagreed
-// with the reward surface's fourth tier and named a relic FAMILY rather than a
-// rarity.
+// active-relic tray and on the reward card it was chosen from.
 //
 // The list stays the file's only configuration point: `@use "hud" with
 // ($hud-rarity-tiers: ...)` replaces it, and the loop re-derives every accent
@@ -87,15 +79,14 @@ $hud-rarity-tiers: $rarity-tiers !default;
 
 // Stage index and goal progress. Both readout groups are built from
 // `.hud-label` and `.hud-value`, so both sit on the score surfaces' type scale.
-// src/config/stage-config.ts provides the two goal kinds and their progress
-// values; no rule below branches on the kind or generates readout text, and
+// No rule below branches on the goal kind or generates readout text, and
 // `.hud-value` sizes to whatever text it receives.
 
 .hud-stage {
   display: flex;
 
   // Wraps forwards. `wrap-reverse` is not used, so a wrapped group keeps its
-// document order.
+  // document order.
   flex-wrap: wrap;
   align-items: flex-start;
   gap: $grid-spacing;
@@ -129,10 +120,10 @@ $hud-rarity-tiers: $rarity-tiers !default;
   overflow-wrap: break-word;
 }
 
-// The goal track. src/ui/screens/hud.ts sets `--hud-goal-fraction` from the
-// stage progress, which is clamped to the closed interval [0, 1]. The element is
-// optional: `.hud-value` carries the same quantity as text, so a goal rendered
-// without a track loses no information.
+// The goal track. `--hud-goal-fraction` carries the stage progress, clamped to
+// the closed interval [0, 1]. The element is optional: `.hud-value` carries the
+// same quantity as text, so a goal rendered without a track loses no
+// information.
 .hud-goal-meter {
   display: flex;
   margin-block-start: $hud-gap-inner;
@@ -148,7 +139,6 @@ $hud-rarity-tiers: $rarity-tiers !default;
   background: var(--theme-cell, #{rgba($tile-color, $hud-track-alpha)});
 }
 
-// The filled span, bounded at the whole track.
 .hud-goal-meter-fill {
   align-self: stretch;
   inline-size: calc(var(--hud-goal-fraction, 0) * #{$hud-fraction-full});
@@ -157,9 +147,8 @@ $hud-rarity-tiers: $rarity-tiers !default;
   border-radius: $tile-border-radius;
 
   // The page text colour, resolved through `--theme-text` with the token as the
-  // fallback. The measured 4.44:1 above is the ratio of the default palette's
-  // pair; each additive palette supplies its own text and cell colours, so the
-  // fill and the track follow the active one together.
+  // fallback. Each additive palette supplies its own text and cell colours, so
+  // the fill and the track follow the active one together.
   background: var(--theme-text, #{$text-color});
 
   // The movement timing the tiles carry, collapsed by the reduced-motion layer.
@@ -181,18 +170,17 @@ $hud-rarity-tiers: $rarity-tiers !default;
   flex-wrap: wrap;
   gap: $grid-spacing;
 
-  // Every item on a line takes the height of the tallest, so an item carrying no
-// charge count still aligns with one that does.
+  // Every item on a line takes the height of the tallest, so an item carrying
+  // no charge count still aligns with one that does.
   align-items: stretch;
 
   // The user-agent list box is removed; `role="list"` on the element keeps the
-// list semantics.
+  // list semantics.
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-// One relic, sized to its own content up to one board column.
 .relic-tray-item {
   counter-increment: hud-relic-slot;
 
@@ -248,20 +236,15 @@ $hud-rarity-tiers: $rarity-tiers !default;
   font: inherit;
   text-align: start;
 
-  // The ring from style/_a11y.scss, which already binds it to every focusable
-  // control.
   @include a11y.focusable;
 
   // The hover, activation and disabled states, from the shared mixin in
-  // style/_a11y.scss. This control previously carried focus and cursor
-  // behaviour only, so an activatable relic gave no feedback on being pointed
-  // at, pressed or made inert. The mixin's two rings are drawn in
-  // `currentColor`, which this control inherits from the tray item, so they
-  // follow whatever palette style/_themes.scss has applied.
+  // style/_a11y.scss. Its two rings are drawn in `currentColor`, which this
+  // control inherits from the tray item, so they follow whatever palette
+  // style/_themes.scss has applied.
   @include a11y.interactive-states;
 }
 
-// Only the button form is pointer-activated.
 button.relic-tray-control {
   cursor: pointer;
 }
@@ -282,7 +265,7 @@ button.relic-tray-control {
 }
 
 // The remaining-charge count. Omitted on a relic that carries no charges, and
-// the item's layout closes over the gap without it.
+// the item layout closes over the gap without it.
 .relic-tray-charges {
   flex: 0 0 auto;
   padding-inline: $hud-gap-tight;
@@ -294,8 +277,8 @@ button.relic-tray-control {
   font-variant-numeric: tabular-nums;
 }
 
-// The exhausted state, which src/engine/hook-bus.ts's charge guard skips. It is
-// marked three ways that do not depend on colour: the item's edge and the
+// The exhausted state, which the charge guard of src/engine/hook-bus.ts skips.
+// It is marked three ways that do not depend on colour: the item's edge and the
 // count's edge both become dashed, the count is struck through, and the count
 // itself reads 0.
 .relic-tray-item[data-charges="0"] {
@@ -308,14 +291,14 @@ button.relic-tray-control {
 }
 
 // Rarity accent. One rule per entry in $hud-rarity-tiers, interpolated between
-// the tile ramp's two anchors by a weight linear in the entry's ordinal, so no
+// the tile ramp's two anchors by a weight linear in the entry's ordinal; no
 // compiled ramp colour is written out. The ordinal is carried a second time by
-// the accent's thickness — each tier one hairline thicker than the last — so the
-// tier stays legible without reference to colour.
+// the accent's thickness — each tier one hairline thicker than the last — so
+// the tier stays legible without reference to colour.
 //
 // BLITZY [A11Y]: the four accent colours sit below the WCAG 1.4.11 non-text
-// threshold of 3:1 against the page background. Recorded as decision
-// DL-A11Y-02.
+// threshold of 3:1 against the page background, which is why the thickness
+// carries the ordinal as well.
 
 $hud-rarity-tier-count: list.length($hud-rarity-tiers);
 
@@ -336,12 +319,11 @@ $hud-rarity-tier-count: list.length($hud-rarity-tiers);
     border-inline-start-width: $hud-hairline * ($ordinal + 1);
 
     // The tier's accent, resolved through the `--theme-rarity-<tier>` custom
-    // property style/_themes.scss publishes for every palette, with this
-    // file's own mix as the fallback. That mix is what the accent resolved to
-    // before, and it is what the default palette republishes, so the tray is
-    // unchanged under the default palette and follows the anchors of either
-    // additive one. style/_reward.scss reads the same property for the reward
-    // card, so a tier's colour is declared once per palette.
+    // property style/_themes.scss publishes for every palette, with this file's
+    // own mix as the fallback. The default palette republishes that same mix,
+    // so the tray is unchanged under it and follows the anchors of either
+    // additive palette. style/_reward.scss reads the same property for the
+    // reward card, so a tier's colour is declared once per palette.
     border-inline-start-color: var(
       --theme-rarity-#{"" + $tier},
       #{color.mix($tile-gold-color, $tile-color, $anchor-weight)}
@@ -350,8 +332,8 @@ $hud-rarity-tier-count: list.length($hud-rarity-tiers);
 }
 
 // Mobile: the single breakpoint style/main.scss uses, through the same
-// `smaller()` mixin. The surface rescales — no group moves, none is dropped, and
-// the type scale is unchanged.
+// `smaller()` mixin. The surface rescales — no group moves, none is dropped,
+// and the type scale is unchanged.
 
 @include smaller($mobile-threshold) {
   .hud {

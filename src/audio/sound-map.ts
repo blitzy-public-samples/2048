@@ -2,17 +2,43 @@
  * Sound effect descriptors and the pure resolvers that select them.
  *
  * Each descriptor is plain numbers and shape names, with every duration and
- * offset in ms. The timings are design choices sized against the interface's own
- * animation cadence rather than one-to-one transpositions of it: `move`, `merge`
- * and `spawn` span their tile animations, while `stageClear` and
- * `relicAcquired` are sized to the same rhythm without accompanying one
- * animation each. The merge pitch ramp follows the exponent shape of the tile
- * colour ramp.
+ * offset in ms. `move`, `merge` and `spawn` span their tile animations, while
+ * `stageClear` and `relicAcquired` accompany no single animation. The merge
+ * pitch ramp follows the exponent shape of the tile colour ramp.
  *
  * Declarations and pure functions only: this module reads no platform state,
  * holds no mutable state, and does no work on load beyond freezing its two
- * tables.
+ * tables. Nothing here is ported: js/ plays no sound, so both tables are
+ * target-only rows TR-AUDIO-05 and TR-AUDIO-06 of
+ * docs/TRACEABILITY_MATRIX.md.
  */
+
+/* ==========================================================================
+ * 0. Audio bounds
+ * ========================================================================== */
+
+// The mute and volume bounds are declared HERE, in the audio domain that
+// defines them, and re-exported by src/ui/a11y/settings.ts so the preference
+// surface keeps its published names. Two independent declarations disagreed on
+// the starting volume, so the value a listener heard depended on which of the
+// two owners had last written the master gain.
+
+/** Lowest accepted volume: silence. */
+export const MIN_VOLUME = 0;
+
+/** Highest accepted volume: unattenuated. */
+export const MAX_VOLUME = 1;
+
+/**
+ * The volume in force before anything is chosen.
+ *
+ * Unattenuated, so no volume is applied that the player did not ask for; the
+ * accessibility surface is what lowers it.
+ */
+export const DEFAULT_VOLUME: number = MAX_VOLUME;
+
+/** Whether the audio layer is muted before anything is chosen. */
+export const DEFAULT_MUTED = false;
 
 /* ==========================================================================
  * 1. Descriptor vocabulary
@@ -35,11 +61,6 @@ export type SoundEffectName =
 export interface SoundEffect {
   /** Wave shape of the voice. Not read when `noise` is true. */
   readonly waveform: SoundWaveform;
-
-  /**
-   * Starting pitch, in Hz. Read instead as the centre of the noise band when
-   * `noise` is true.
-   */
   readonly frequencyHz: number;
 
   /**
@@ -56,8 +77,6 @@ export interface SoundEffect {
 
   /** Gain fall from `peakGain` back to silence, in ms. */
   readonly releaseMs: number;
-
-  /** Envelope peak, 0 through 1, applied ahead of the master gain. */
   readonly peakGain: number;
 
   /**
@@ -76,19 +95,11 @@ export interface SoundEffect {
   readonly noise?: boolean;
 }
 
-/* ==========================================================================
- * 2. Effect table
- * ========================================================================== */
-
-/** Freezes one descriptor. */
 function frozenEffect(effect: SoundEffect): SoundEffect {
   return Object.freeze(effect);
 }
 
-/**
- * The descriptor for each sounded moment, frozen entry by entry. The waveform,
- * pitch, envelope and gain of every entry are decision DL-AUDIO-01.
- */
+/** The descriptor for each sounded moment, frozen entry by entry. */
 export const soundMap: Readonly<Record<SoundEffectName, SoundEffect>> =
   Object.freeze({
     move: frozenEffect({
@@ -172,35 +183,22 @@ export const soundMap: Readonly<Record<SoundEffectName, SoundEffect>> =
     }),
   });
 
-/* ==========================================================================
- * 3. Merge pitch derivation
- * ========================================================================== */
-
 const rampFloorValue = 2;
 
 const rampCeilingValue = 2048;
 
-/** Base-2 exponent of `rampFloorValue`. */
 const rampFloorExponent = 1;
 
-/** Base-2 exponent of `rampCeilingValue`. */
 const rampCeilingExponent = 11;
 
-/** Octaves the merge pitch spans across the whole ramp. Decision DL-AUDIO-01. */
 const mergePitchOctaves = 2;
 
-/**
- * Ratio from a merge voice's starting pitch to its ramp target. Decision
- * DL-AUDIO-01.
- */
 const mergeRampRatio = 1.5;
 
-/** Rounds a frequency to two decimal places. */
 function roundHz(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-/** Position of a merge result on the tile colour ramp, 0 through 1. */
 function mergeRampProgress(resultValue: number): number {
   if (Number.isNaN(resultValue)) {
     return 0;
@@ -218,11 +216,7 @@ function mergeRampProgress(resultValue: number): number {
   return Math.min(Math.max(position, 0), 1);
 }
 
-/**
- * The merge descriptor pitched for one merge result.
- *
- * @param resultValue Value of the tile the merge produced.
- */
+/** The merge descriptor pitched for one merge result. */
 export function effectForMerge(resultValue: number): SoundEffect {
   const base = soundMap.merge;
   const position = mergeRampProgress(resultValue);
@@ -241,20 +235,26 @@ export function effectForMerge(resultValue: number): SoundEffect {
  * 4. Event resolution
  * ========================================================================== */
 
-/** The engine event names this module resolves. */
-type EngineEventName =
+/**
+ * The engine event names this module resolves.
+ *
+ * Exactly the seven names `EngineEventPayloadMap` of
+ * src/engine/engine-events.ts
+ * declares, and no others: a name absent from that contract is emitted by
+ * nothing, so a mapping for it can never resolve. Declared locally rather
+ * than imported, so this module names no engine module.
+ */
+type AudioEventName =
   | 'stage:start'
   | 'move:before'
   | 'tile:merge'
   | 'tile:spawn'
   | 'move:after'
   | 'stage:end'
-  | 'state:commit'
-  | 'relic:acquired';
+  | 'state:commit';
 
-/** The candidate effect for each recognised event name. */
 const eventEffectTable: Readonly<
-  Record<EngineEventName, SoundEffectName | null>
+  Record<AudioEventName, SoundEffectName | null>
 > = Object.freeze({
   'stage:start': null,
   'move:before': null,
@@ -263,19 +263,13 @@ const eventEffectTable: Readonly<
   'move:after': 'move',
   'stage:end': 'stageClear',
   'state:commit': 'lose',
-  'relic:acquired': 'relicAcquired',
 });
 
-/** Reports whether a name is an own key of `eventEffectTable`. */
-function isMappedEventName(name: string): name is EngineEventName {
+function isMappedEventName(name: string): name is AudioEventName {
   return Object.prototype.hasOwnProperty.call(eventEffectTable, name);
 }
 
-/**
- * The candidate effect name for an engine event name.
- *
- * @param eventName Engine event name, as emitted.
- */
+/** The candidate effect name for one `AudioEventName`. */
 export function effectNameForEvent(
   eventName: string,
 ): SoundEffectName | null {
@@ -286,11 +280,6 @@ export function effectNameForEvent(
   return eventEffectTable[eventName];
 }
 
-/* ==========================================================================
- * 5. Payload gates
- * ========================================================================== */
-
-/** Narrows a value to one whose named fields can be read. */
 function isReadableRecord(
   value: unknown,
 ): value is Readonly<Record<string, unknown>> {
@@ -298,7 +287,8 @@ function isReadableRecord(
 }
 
 /**
- * Reads one field of a payload and reports whether it holds exactly `true`.
+ * Reads one field of a payload and reports whether it holds EXACTLY `true`, so
+ * a merely truthy value opens no gate below.
  */
 function readBooleanField(payload: unknown, field: string): boolean {
   if (!isReadableRecord(payload)) {
@@ -308,28 +298,19 @@ function readBooleanField(payload: unknown, field: string): boolean {
   return payload[field] === true;
 }
 
-/**
- * Reports whether a `move:after` payload sounds `move`.
- *
- * @param payload The `move:after` payload.
- */
+/** Reports whether a `move:after` payload sounds `move`. */
 export function shouldPlayMove(payload: unknown): boolean {
   return readBooleanField(payload, 'moved');
 }
 
-/**
- * Reports whether a `stage:end` payload sounds `stageClear`.
- *
- * @param payload The `stage:end` payload.
- */
+/** Reports whether a `stage:end` payload sounds `stageClear`. */
 export function shouldPlayStageClear(payload: unknown): boolean {
   return readBooleanField(payload, 'cleared');
 }
 
 /**
- * The terminal effect for a `state:commit` payload, or `null`.
- *
- * @param payload The `state:commit` payload.
+ * The terminal effect for a `state:commit` payload, or `null`. Nothing sounds
+ * until `terminated` is set, and `over` is tested before `won`.
  */
 export function terminalEffectName(
   payload: unknown,
