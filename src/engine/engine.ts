@@ -11,11 +11,12 @@
 //   js/game_manager.js L69-L76   addRandomTile()        -> addRandomTile()
 //   js/game_manager.js L79-L99   actuate()              -> commit()
 //   js/game_manager.js L102-L110 serialize()            -> serialize()
-//   js/game_manager.js L113-L120 prepareTiles()         -> prepareTiles()
-//   js/game_manager.js L123-L127 moveTile()             -> moveTile()
 //   js/game_manager.js L130-L191 move()                 -> move()
-// The vector, traversal, farthest-position and comparison helpers moved
-// to src/engine/move-resolver.ts and the terminal-state checks to
+// The tile preparation, tile relocation, vector, traversal,
+// farthest-position and comparison helpers and the merge branch
+// — L113-L127, L146-L180, L194-L236 and L270-L272 — moved to
+// src/engine/move-resolver.ts, whose `resolveMove` this file's `move()`
+// calls, and the terminal-state checks to
 // src/engine/terminal-state.ts.
 //
 // FOUR CHANGES TO THE PORTED BEHAVIOUR, EACH REQUIRED BY THE SPLIT
@@ -47,13 +48,8 @@ import { createEngineEvents } from './engine-events';
 import { Grid } from './grid';
 import type { HookBus } from './hook-bus';
 import { createHookBus } from './hook-bus';
-import type { HookEnvironment } from './hooks';
-import {
-  buildTraversals,
-  findFarthestPosition,
-  positionsEqual,
-  vectorForDirection,
-} from './move-resolver';
+import type { HookEnvironment, MergePayload } from './hooks';
+import { resolveMove } from './move-resolver';
 import {
   isTerminated,
   isWinningValue,
@@ -65,7 +61,6 @@ import type {
   CellMatrix,
   Direction,
   EngineReporter,
-  Position,
   RelicCommitContext,
   RelicCommitContextProvider,
   SerializedGameState,
@@ -627,44 +622,41 @@ export class Engine {
       return false;
     }
 
-    const vector = vectorForDirection(direction);
-    const traversals = buildTraversals(vector, this.grid.size);
+    // Ported from L138-L143 and L146-L180, which
+    // src/engine/move-resolver.ts owns: the vector, the two traversal
+    // orders, the tile preparation, the walk, the merge branch and the
+    // change signal. The board is mutated in place, as those lines did.
+    // The `onMerge` dispatch reaches the merge branch as a callback, and
+    // a handler's `resultValue` is the value written to the board.
+    const outcome = resolveMove(this.grid, direction, this.config, {
+      dispatchMerge: (payload: MergePayload): MergePayload =>
+        this.hooks.dispatch('onMerge', payload, this.hookEnvironment())
+          .payload,
+    });
 
-    let moved = false;
-    let scoreDelta = 0;
+    // Ported from L167: the sum of the additions each merge made, every
+    // one of which an `onMerge` handler may have transformed.
+    this.score += outcome.scoreDelta;
 
-    // Ported from L143.
-    this.prepareTiles();
-
-    // Ported from L146-L180. The two loops are the traversal orders,
-    // x-outer and y-inner, each already reversed where the vector
-    // requires it.
-    for (const x of traversals.x) {
-      for (const y of traversals.y) {
-        const cell: Position = { x, y };
-        const tile = this.grid.cellContent(cell);
-
-        if (!tile) {
-          continue;
-        }
-
-        const positions = findFarthestPosition(this.grid, cell, vector);
-        const next = this.grid.cellContent(positions.next);
-
-        if (next && this.config.merge.canMerge(tile, next)) {
-          scoreDelta += this.resolveMerge(tile, next, positions.next);
-        } else {
-          this.moveTile(tile, positions.farthest);
-        }
-
-        // Ported from L175-L177: the sole signal that the board changed.
-        if (!positionsEqual(cell, tile)) {
-          moved = true;
-        }
+    for (const merge of outcome.merges) {
+      // Ported from L170: strict equality against the configured value.
+      if (isWinningValue(merge.merged.value, this.config)) {
+        this.won = true;
       }
+
+      // The pair L158 assigned to `mergedFrom` travels by reference: both
+      // tiles are out of `grid.cells` by L161 and reach a subscriber as
+      // live references alone.
+      this.events.emit('tile:merge', {
+        source: merge.source,
+        target: merge.target,
+        resultValue: merge.merged.value,
+        scoreDelta: merge.scoreDelta,
+      });
     }
 
-    if (!moved) {
+    // Ported from L175-L177 through the resolver's outcome.
+    if (!outcome.moved) {
       this.reporter.onCount?.({
         runId: this.runId,
         metric: MOVE_IDLE_METRIC,
@@ -815,98 +807,6 @@ export class Engine {
       position: position === null ? undefined : position,
       value: payload.value,
     });
-  }
-
-  /**
-   * Resolves one merge and returns what it added to the score.
-   *
-   * Ported from js/game_manager.js L156-L170. The produced value comes
-   * from the configured producer and the score addition is carried
-   * separately, so a handler can change either. The insert-then-remove
-   * order is the vanilla order: the merged tile overwrites the target's
-   * cell first, and the moving tile's own cell is cleared second.
-   *
-   * @param tile Tile that moved into the target's cell.
-   * @param target Tile already occupying the destination cell.
-   * @param destination Cell the merge resolves in.
-   * @returns The amount added to the score.
-   */
-  private resolveMerge(
-    tile: Tile,
-    target: Tile,
-    destination: Position,
-  ): number {
-    const produced = this.config.merge.produce(tile, target);
-
-    const resolved = this.hooks.dispatch(
-      'onMerge',
-      {
-        source: tile,
-        target,
-        resultValue: produced,
-        scoreDelta: produced,
-      },
-      this.hookEnvironment(),
-    );
-
-    const payload = resolved.payload;
-
-    // Ported from L157: the merged tile is built at the cell the
-    // traversal resolved, carrying the produced value.
-    const merged = new Tile(destination, payload.resultValue);
-
-    merged.mergedFrom = [tile, target];
-
-    this.grid.insertTile(merged);
-    this.grid.removeTile(tile);
-    tile.updatePosition(destination);
-
-    this.score += payload.scoreDelta;
-
-    // Ported from L170: strict equality against the configured value.
-    if (isWinningValue(merged.value, this.config)) {
-      this.won = true;
-    }
-
-    // The pair L158 assigned to `mergedFrom` travels by reference: both
-    // tiles are out of `grid.cells` by L161 and reach a subscriber as
-    // live references alone.
-    this.events.emit('tile:merge', {
-      source: tile,
-      target,
-      resultValue: merged.value,
-      scoreDelta: payload.scoreDelta,
-    });
-
-    return payload.scoreDelta;
-  }
-
-  /**
-   * Records every tile's cell and clears its merge history.
-   *
-   * Ported from js/game_manager.js L113-L120.
-   */
-  private prepareTiles(): void {
-    this.grid.eachCell((_x: number, _y: number, tile: Tile | null) => {
-      if (tile) {
-        tile.mergedFrom = null;
-        tile.savePosition();
-      }
-    });
-  }
-
-  /**
-   * Moves a tile to a cell, in the lattice and on the tile.
-   *
-   * Ported from js/game_manager.js L123-L127.
-   *
-   * @param tile Tile to move.
-   * @param cell Cell to move it to.
-   */
-  private moveTile(tile: Tile, cell: Position): void {
-    this.grid.cells[tile.x][tile.y] = null;
-    this.grid.cells[cell.x][cell.y] = tile;
-    tile.updatePosition(cell);
   }
 
   /**

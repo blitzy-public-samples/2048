@@ -1,23 +1,29 @@
+# Generated output only. Each directory name below mirrors a path declared in
+# vite.config.ts, vitest.config.ts, vitest.snapshot.config.ts or
+# playwright.config.ts.
+
+# Sass compiler cache
 .sass-cache/
 
 # Dependencies
 node_modules/
 
-# Build output (static bundle produced by `npm run build`)
+# Static production bundle — `build.outDir` in vite.config.ts
 dist/
 
-# Test, coverage and recorded-gameplay artifacts
+# Coverage reports — `coverage.reportsDirectory` in vitest.config.ts and in
+# vitest.snapshot.config.ts, which both name this one directory
 coverage/
+
+# Playwright per-test output — `outputDir` in playwright.config.ts. The
+# recorded-gameplay video is written to test-results/<test>/video.webm, so this
+# entry already covers it and no separate video entry is added.
 test-results/
+
+# Playwright HTML report — the `html` reporter's `outputFolder` in
+# playwright.config.ts
 playwright-report/
+
+# Local browser-automation artifacts
 blitzy/screenshots/
 blitzy/screen_recordings/
-
-# Local environment overrides
-.env
-.env.*
-!.env.example
-
-# Editor / OS noise
-.DS_Store
-*.log
