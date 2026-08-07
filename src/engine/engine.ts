@@ -42,15 +42,12 @@
 
 import type { RulesConfig } from '../config/rules-config';
 import type { RngStreams } from '../rng/rng-streams';
-import type {
-  BoardProjection,
-  EngineEvents,
-  TileProjection,
-} from './engine-events';
+import type { EngineEvents, MoveBeforeEvent } from './engine-events';
 import { createEngineEvents } from './engine-events';
 import { Grid } from './grid';
 import type { HookBus } from './hook-bus';
 import { createHookBus } from './hook-bus';
+import type { HookEnvironment } from './hooks';
 import {
   buildTraversals,
   findFarthestPosition,
@@ -58,7 +55,6 @@ import {
   vectorForDirection,
 } from './move-resolver';
 import {
-  highestTileValue,
   isTerminated,
   isWinningValue,
   movesAvailable,
@@ -316,61 +312,6 @@ function readSnapshot(value: unknown): SerializedGameState | null {
 }
 
 /* --------------------------------------------------------------------------
- * Board projection
- * ----------------------------------------------------------------------- */
-
-/**
- * Projects one tile, and the pair it merged from, to the immutable form
- * an event carries.
- *
- * @param tile Tile to project.
- * @returns A frozen projection.
- */
-function projectTile(tile: Tile): TileProjection {
-  const previous = tile.previousPosition;
-  const merged = tile.mergedFrom;
-
-  return Object.freeze({
-    x: tile.x,
-    y: tile.y,
-    value: tile.value,
-    previousPosition:
-      previous === null
-        ? null
-        : Object.freeze({ x: previous.x, y: previous.y }),
-    mergedFrom:
-      merged === null
-        ? null
-        : Object.freeze(merged.map((source: Tile) => projectTile(source))),
-  });
-}
-
-/**
- * Projects a grid to the immutable form an event carries.
- *
- * The vanilla actuation call passed the grid itself by reference
- * (js/game_manager.js L91), and the view read and could have written its
- * tiles. The projection is a copy, so a subscriber cannot reach engine
- * state through an event.
- *
- * @param grid Grid to project.
- * @returns A frozen projection, `cells[x][y]`, x-major.
- */
-function projectBoard(grid: Grid): BoardProjection {
-  const columns: readonly (TileProjection | null)[][] = grid.cells.map(
-    (column: (Tile | null)[]) =>
-      column.map((tile: Tile | null): TileProjection | null =>
-        tile === null ? null : projectTile(tile),
-      ),
-  );
-
-  return Object.freeze({
-    size: grid.size,
-    cells: Object.freeze(columns.map((column) => Object.freeze(column))),
-  });
-}
-
-/* --------------------------------------------------------------------------
  * The engine
  * ----------------------------------------------------------------------- */
 
@@ -451,9 +392,7 @@ export class Engine {
     this.storage = options.storage;
     this.reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
     this.runId = options.runId ?? options.streams.seed;
-    this.events =
-      options.events ??
-      createEngineEvents({ runId: this.runId, reporter: this.reporter });
+    this.events = options.events ?? createEngineEvents();
     this.hooks =
       options.hooks ??
       createHookBus({ runId: this.runId, reporter: this.reporter });
@@ -533,12 +472,16 @@ export class Engine {
 
     const stage = this.stageContext();
 
-    this.hooks.dispatch('onStageStart', {
-      stageIndex: stage.stageIndex,
-      goal: stage.goal,
-      seed: this.streams.seed,
-      boardSize: this.grid.size,
-    });
+    this.hooks.dispatch(
+      'onStageStart',
+      {
+        stageIndex: stage.stageIndex,
+        goal: stage.goal,
+        seed: this.streams.seed,
+        boardSize: this.grid.size,
+      },
+      this.hookEnvironment(),
+    );
 
     if (!restored) {
       this.addStartTiles();
@@ -549,24 +492,18 @@ export class Engine {
       goal: stage.goal,
       seed: this.streams.seed,
       boardSize: this.grid.size,
-      board: projectBoard(this.grid),
     });
 
-    this.events.emit('state:restore', {
-      reason: restored ? 'snapshot' : 'stage-start',
-      snapshot: this.grid.serialize(),
-      goal: stage.goal,
-    });
-
-    this.commit(0);
+    this.commit();
   }
 
   /**
    * Discards the persisted snapshot and starts a fresh board.
    *
    * Ported from js/game_manager.js L17-L21. The actuator call at L19
-   * that cleared the win and loss message becomes the `state:restore`
-   * event `setup()` emits, whose `reason` tells a view the board is new.
+   * that cleared the win and loss message is not made here: the commit
+   * `setup()` ends with carries `terminated` as `false`, which is what a
+   * view clears the message on.
    */
   restart(): void {
     this.storage.clearGameState();
@@ -583,13 +520,24 @@ export class Engine {
   continuePlaying(): void {
     this.continuedPlay = true;
 
-    this.events.emit('state:restore', {
-      reason: 'continue',
-      snapshot: this.grid.serialize(),
-      goal: this.stageContext().goal,
-    });
+    this.commit();
+  }
 
-    this.commit(0);
+  /**
+   * Assembles the live collaborators handed to every hook handler.
+   *
+   * Extension with no vanilla source. Rebuilt on each dispatch, so every
+   * member is the instance in force: `setup()` replaces `this.grid` on
+   * every stage start and every restore.
+   *
+   * @returns The environment for one dispatch.
+   */
+  private hookEnvironment(): HookEnvironment {
+    return {
+      config: this.config,
+      rng: this.streams,
+      grid: this.grid,
+    };
   }
 
   /**
@@ -646,19 +594,30 @@ export class Engine {
       return false;
     }
 
-    const before = this.hooks.dispatch('onBeforeMove', {
-      direction,
-      boardSize: this.grid.size,
-      score: this.score,
-      cancelled: false,
-    });
+    const before = this.hooks.dispatch(
+      'onBeforeMove',
+      {
+        direction,
+        board: this.grid,
+        cancelled: false,
+      },
+      this.hookEnvironment(),
+    );
 
-    this.events.emit('move:before', {
-      ...before.payload,
-      board: projectBoard(this.grid),
-    });
+    // The accumulated hook payload is emitted as it stands rather than
+    // rebuilt: src/engine/engine-events.ts aliases `MoveBeforeEvent` to
+    // `BeforeMovePayload`, so the hook contract and the event contract are
+    // one type and cannot diverge. The board inside it travels by
+    // reference, which is what js/game_manager.js L91 passed to the view,
+    // and `cancelled` stays the same mutable member the handlers saw.
+    const requested: MoveBeforeEvent = before.payload;
 
-    if (before.payload.cancelled) {
+    this.events.emit('move:before', requested);
+
+    // `cancelled` is read back after the emission, so a veto raised by a
+    // hook handler and a veto raised by a subscriber withdraw the move
+    // through the one check below.
+    if (requested.cancelled) {
       this.reporter.onCount?.({
         runId: this.runId,
         metric: MOVE_CANCELLED_METRIC,
@@ -723,16 +682,18 @@ export class Engine {
       this.over = true;
     }
 
-    const after = this.hooks.dispatch('onAfterMove', {
-      direction,
-      moved: true,
-      score: this.score,
-      scoreDelta,
-      highestTileValue: highestTileValue(this.grid),
-      over: this.over,
-      won: this.won,
-      terminated: this.isGameTerminated(),
-    });
+    const after = this.hooks.dispatch(
+      'onAfterMove',
+      {
+        moved: true,
+        board: this.grid,
+        score: this.score,
+        over: this.over,
+        won: this.won,
+        terminated: this.isGameTerminated(),
+      },
+      this.hookEnvironment(),
+    );
 
     // Two members are read back from the resolved payload: a handler may
     // declare the game lost or won, which is how a cursed relic ends a
@@ -743,11 +704,12 @@ export class Engine {
     this.won = after.payload.won;
 
     this.events.emit('move:after', {
-      ...after.payload,
+      moved: after.payload.moved,
+      board: this.grid,
+      score: this.score,
       over: this.over,
       won: this.won,
       terminated: this.isGameTerminated(),
-      board: projectBoard(this.grid),
     });
 
     this.reporter.onCount?.({
@@ -757,7 +719,7 @@ export class Engine {
     });
 
     // Ported from L189.
-    this.commit(scoreDelta);
+    this.commit();
 
     return true;
   }
@@ -774,14 +736,18 @@ export class Engine {
   endStage(cleared: boolean): void {
     const stage = this.stageContext();
 
-    const resolved = this.hooks.dispatch('onStageEnd', {
-      stageIndex: stage.stageIndex,
-      cleared,
-      score: this.score,
-    });
+    const resolved = this.hooks.dispatch(
+      'onStageEnd',
+      {
+        stageIndex: stage.stageIndex,
+        cleared,
+        score: this.score,
+      },
+      this.hookEnvironment(),
+    );
 
     this.events.emit('stage:end', resolved.payload);
-    this.commit(0);
+    this.commit();
   }
 
   /**
@@ -821,22 +787,34 @@ export class Engine {
       .stream('spawn-value')
       .pickWeighted(this.config.spawn.values, this.config.spawn.weights);
     const value = drawn ?? FALLBACK_SPAWN_VALUE;
-    const cell = this.streams.stream('spawn-position').pick(available) ?? null;
+    const cell = this.streams.stream('spawn-position').pick(available);
 
-    const spawned = this.hooks.dispatch('onSpawn', {
-      position: cell === null ? null : { x: cell.x, y: cell.y },
-      value,
-      availableCells: available.length,
-    });
+    const spawned = this.hooks.dispatch(
+      'onSpawn',
+      {
+        position: cell === undefined ? undefined : { x: cell.x, y: cell.y },
+        value,
+      },
+      this.hookEnvironment(),
+    );
 
     const payload = spawned.payload;
     const position = payload.position;
 
-    if (position !== null && this.grid.withinBounds(position)) {
+    // An absent position spawns nothing, which is the boundary
+    // js/grid.js L37-L43 produced on a full board, and a handler
+    // reaches the same state by returning the payload without one.
+    if (position !== undefined && this.grid.withinBounds(position)) {
       this.grid.insertTile(new Tile(position, payload.value));
     }
 
-    this.events.emit('tile:spawn', payload);
+    // The hook carries no cell as `null` and the event carries none by
+    // omitting the member, which is the boundary js/grid.js L37-L43
+    // expressed by returning nothing on a full board.
+    this.events.emit('tile:spawn', {
+      position: position === null ? undefined : position,
+      value: payload.value,
+    });
   }
 
   /**
@@ -860,31 +838,28 @@ export class Engine {
   ): number {
     const produced = this.config.merge.produce(tile, target);
 
-    const resolved = this.hooks.dispatch('onMerge', {
-      sourceValue: tile.value,
-      targetValue: target.value,
-      position: { x: destination.x, y: destination.y },
-      resultValue: produced,
-      scoreDelta: produced,
-    });
+    const resolved = this.hooks.dispatch(
+      'onMerge',
+      {
+        source: tile,
+        target,
+        resultValue: produced,
+        scoreDelta: produced,
+      },
+      this.hookEnvironment(),
+    );
 
     const payload = resolved.payload;
 
-    // A handler may move the merge, and the lattice is the authority on
-    // where a tile can go: an out-of-bounds cell falls back to the cell
-    // the traversal resolved. src/engine/grid.ts applies the same valve
-    // to every read.
-    const cell = this.grid.withinBounds(payload.position)
-      ? payload.position
-      : destination;
-
-    const merged = new Tile(cell, payload.resultValue);
+    // Ported from L157: the merged tile is built at the cell the
+    // traversal resolved, carrying the produced value.
+    const merged = new Tile(destination, payload.resultValue);
 
     merged.mergedFrom = [tile, target];
 
     this.grid.insertTile(merged);
     this.grid.removeTile(tile);
-    tile.updatePosition(cell);
+    tile.updatePosition(destination);
 
     this.score += payload.scoreDelta;
 
@@ -893,7 +868,15 @@ export class Engine {
       this.won = true;
     }
 
-    this.events.emit('tile:merge', payload);
+    // The pair L158 assigned to `mergedFrom` travels by reference: both
+    // tiles are out of `grid.cells` by L161 and reach a subscriber as
+    // live references alone.
+    this.events.emit('tile:merge', {
+      source: tile,
+      target,
+      resultValue: merged.value,
+      scoreDelta: payload.scoreDelta,
+    });
 
     return payload.scoreDelta;
   }
@@ -943,11 +926,8 @@ export class Engine {
    *   The best score placed in the payload is re-read from storage after
    *   the possible write (L95), so the value a view shows is the value
    *   that is persisted.
-   *
-   * @param scoreDelta Amount the turn that produced this commit added to
-   *   the score.
    */
-  private commit(scoreDelta: number): void {
+  private commit(): void {
     const best = this.storage.getBestScore();
 
     // Ported from L80-L82. The union is narrowed for the operator; the
@@ -962,10 +942,12 @@ export class Engine {
       this.storage.setGameState(this.serialize());
     }
 
+    // Ported from L91-L97: the board travels by reference, as L91 passed
+    // it, and the five metadata members L92-L96 carried are joined by the
+    // stage and relic slices the injected providers supply.
     this.events.emit('state:commit', {
-      board: projectBoard(this.grid),
+      board: this.grid,
       score: this.score,
-      scoreDelta,
       bestScore: this.storage.getBestScore(),
       over: this.over,
       won: this.won,

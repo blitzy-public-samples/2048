@@ -27,11 +27,13 @@
 // Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import type {
-  HookDispatchContext,
+  HookContext,
+  HookEnvironment,
   HookHandler,
   HookHandlerTable,
   HookName,
   HookPayloadMap,
+  HookSubscription,
 } from './hooks';
 import type { EngineReporter } from './types';
 import { NOOP_ENGINE_REPORTER } from './types';
@@ -156,12 +158,29 @@ export interface HookBus {
    *
    * @param hook Hook to dispatch.
    * @param payload Payload the first handler receives.
+   * @param environment The live rules, substreams and board, supplied
+   *   per dispatch so each handler reads the instance in force.
    * @returns The accumulated payload and the dispatch's counts.
    */
   dispatch<K extends HookName>(
     hook: K,
     payload: HookPayloadMap[K],
+    environment: HookEnvironment,
   ): HookDispatchResult<K>;
+
+  /**
+   * Reads the subscriptions bound to one hook, in pickup order.
+   *
+   * Extension with no vanilla source.
+   *
+   * @param hook Hook to resolve.
+   * @returns A fresh array each call, ordered by `pickupOrder`. The
+   *   `charges` and `state` members are the subscriber's values as at
+   *   the moment of the call.
+   */
+  subscriptions<K extends HookName>(
+    hook: K,
+  ): readonly HookSubscription<K>[];
 
   /**
    * Reads the registered subscribers in pickup order.
@@ -232,11 +251,11 @@ function isUsableTable(hooks: HookHandlerTable): boolean {
  *   },
  * });
  *
- * const { payload } = bus.dispatch('onSpawn', {
- *   position: { x: 0, y: 0 },
- *   value: 2,
- *   availableCells: 14,
- * });
+ * const { payload } = bus.dispatch(
+ *   'onSpawn',
+ *   { position: { x: 0, y: 0 }, value: 2 },
+ *   { config, rng, grid },
+ * );
  * ```
  */
 export function createHookBus(options: HookBusOptions = {}): HookBus {
@@ -250,6 +269,51 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   const held = new Set<string>();
 
   let nextPickupIndex = 0;
+
+  /**
+   * Reads the registrations ordered by pickup index.
+   *
+   * The index is the ordering authority, not the position a
+   * registration happens to hold in the backing array.
+   *
+   * @returns A fresh array each call.
+   */
+  const orderedRegistrations = (): Registration[] =>
+    registrations
+      .slice()
+      .sort((left, right) => left.pickupIndex - right.pickupIndex);
+
+  /**
+   * Builds the subscription a registration presents for one hook.
+   *
+   * `charges` and `state` are read from the subscriber at call time, so
+   * the returned record carries the values in force.
+   *
+   * @param registration Registration to read.
+   * @param hook Hook to resolve.
+   * @returns The subscription, or `null` when the subscriber binds no
+   *   handler for that hook.
+   */
+  const subscriptionFor = <K extends HookName>(
+    registration: Registration,
+    hook: K,
+  ): HookSubscription<K> | null => {
+    const handler = registration.subscriber.hooks[hook] as
+      | HookHandler<K>
+      | undefined;
+
+    if (handler === undefined) {
+      return null;
+    }
+
+    return {
+      subscriberId: registration.subscriber.id,
+      pickupOrder: registration.pickupIndex,
+      handler,
+      charges: registration.subscriber.charges,
+      state: registration.subscriber.state,
+    };
+  };
 
   /**
    * Adds to a counter.
@@ -337,6 +401,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     dispatch<K extends HookName>(
       hook: K,
       payload: HookPayloadMap[K],
+      environment: HookEnvironment,
     ): HookDispatchResult<K> {
       count(DISPATCH_METRIC, hook);
 
@@ -348,14 +413,12 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       // Snapshotted before the walk, so a handler that registers or
       // unregisters a subscriber cannot alter this dispatch's order or
       // membership. It takes effect on the next dispatch.
-      const walking = registrations.slice();
+      const walking = orderedRegistrations();
 
       for (const registration of walking) {
-        const handler = registration.subscriber.hooks[hook] as
-          | HookHandler<K>
-          | undefined;
+        const subscription = subscriptionFor(registration, hook);
 
-        if (handler === undefined) {
+        if (subscription === null) {
           continue;
         }
 
@@ -366,7 +429,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
           continue;
         }
 
-        const charges = registration.subscriber.charges;
+        const charges = subscription.charges;
 
         // The charge guard. A subscriber with no `charges` member is
         // never guarded; one carrying a value at or below zero is
@@ -379,19 +442,23 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
           continue;
         }
 
-        const context: HookDispatchContext = Object.freeze({
-          hook,
-          subscriberId: registration.subscriber.id,
+        const context: HookContext = {
+          config: environment.config,
+          rng: environment.rng,
+          grid: environment.grid,
           runId,
+          hook,
+          subscriberId: subscription.subscriberId,
+          pickupOrder: subscription.pickupOrder,
           charges,
-          pickupIndex: registration.pickupIndex,
-        });
+          state: subscription.state,
+        };
 
         invoked += 1;
         count(HANDLER_METRIC, hook);
 
         try {
-          const returned = handler(accumulated, context);
+          const returned = subscription.handler(accumulated, context);
 
           if (returned !== undefined && returned !== null) {
             accumulated = returned;
@@ -400,6 +467,10 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
           failed += 1;
           reportThrow(registration, hook, error);
         }
+
+        // The state slot belongs to the subscriber and the context is
+        // where a handler assigns it, so the value is carried back.
+        registration.subscriber.state = context.state;
       }
 
       return Object.freeze({
@@ -408,6 +479,22 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
         skipped,
         failed,
       });
+    },
+
+    subscriptions<K extends HookName>(
+      hook: K,
+    ): readonly HookSubscription<K>[] {
+      const resolved: HookSubscription<K>[] = [];
+
+      for (const registration of orderedRegistrations()) {
+        const subscription = subscriptionFor(registration, hook);
+
+        if (subscription !== null) {
+          resolved.push(subscription);
+        }
+      }
+
+      return resolved;
     },
 
     subscribers(): readonly HookSubscriber[] {

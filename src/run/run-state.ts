@@ -1416,8 +1416,8 @@ function fnv1a32(text: string): number {
 
 /**
  * Derives the run correlation identifier the observability layer keys
- * structured logs, counters and spans on, and the value `HookDispatchContext`
- * in src/engine/hooks.ts carries as its `runId`.
+ * structured logs, counters and spans on, and the value `HookContext` in
+ * src/engine/hooks.ts carries as its `runId`.
  *
  * Pure and deterministic: it reads no clock, consumes no randomness and
  * holds no state, so one `(seed, runId)` pair yields one identifier on

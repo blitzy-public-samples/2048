@@ -19,11 +19,14 @@
 //
 // Supersedes js/html_actuator.js, which is deleted. It is a subscriber,
 // not a callee: js/game_manager.js L91-L97 pushed to the actuator, and
-// this module reads the `state:commit` and `state:restore` events
-// instead. Method for method:
+// this module reads the `state:commit` event instead. Method for
+// method:
 //   js/html_actuator.js L1-L8     constructor       -> the four lookups
 //   js/html_actuator.js L10-L36   actuate()         -> paint()
-//   js/html_actuator.js L39-L41   continueGame()    -> restore()
+//   js/html_actuator.js L39-L41   continueGame()    -> paint(), the
+//                                                      branch a commit
+//                                                      with `terminated`
+//                                                      false takes
 //   js/html_actuator.js L43-L47   clearContainer()  -> clearElement()
 //   js/html_actuator.js L49-L91   addTile()          -> addTile()
 //   js/html_actuator.js L93-L95   applyClasses()    -> applyClasses()
@@ -48,19 +51,40 @@
 //
 // Invariants of this module: it consumes no randomness, touches no
 // storage, reads no clock and holds no engine reference — it reads the
-// two events and nothing else.
+// `state:commit` event and nothing else.
 //
 // Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import type {
-  BoardProjection,
   EngineEvents,
   StateCommitEvent,
-  StateRestoreEvent,
-  TileProjection,
 } from '../engine/engine-events';
 import type { RenderReporter } from './webgl-support';
 import { NOOP_RENDER_REPORTER } from './webgl-support';
+
+/* --------------------------------------------------------------------------
+ * How a commit carries the board
+ * ----------------------------------------------------------------------- */
+
+/**
+ * The board as `state:commit` carries it: the engine's live grid.
+ *
+ * Read off the payload, exactly as js/html_actuator.js L16-L22 read
+ * `grid.cells` off the grid js/game_manager.js L91 handed it. Derived
+ * from the event type so this module names no engine module other than
+ * the event contract.
+ */
+type CommitBoard = StateCommitEvent['board'];
+
+/**
+ * One tile as `state:commit` carries it: a live tile of the grid, whose
+ * `value`, `previousPosition` and `mergedFrom` js/html_actuator.js read
+ * at L58, L54, L67 and L73-L80.
+ *
+ * The board's cells hold `null` where a cell is empty, which this type
+ * excludes.
+ */
+type CommitTile = NonNullable<CommitBoard['cells'][number][number]>;
 
 /* --------------------------------------------------------------------------
  * Class names and copy
@@ -184,7 +208,7 @@ export interface NumberOnlyRendererOptions {
 /**
  * The renderer.
  *
- * Frozen: the six members below are its whole surface.
+ * Frozen: the five members below are its whole surface.
  */
 export interface NumberOnlyRenderer {
   /** Whether the mount point was found and the renderer will paint. */
@@ -202,16 +226,6 @@ export interface NumberOnlyRenderer {
   render(commit: StateCommitEvent): void;
 
   /**
-   * Clears the terminal overlay.
-   *
-   * Ported from js/html_actuator.js L39-L41, which the manager called on
-   * both restart and keep-playing.
-   *
-   * @param event The restore event that cleared it.
-   */
-  restore(event: StateRestoreEvent): void;
-
-  /**
    * Runs one frame of queued work.
    *
    * @returns `true` while work remains, which is the value
@@ -220,10 +234,10 @@ export interface NumberOnlyRenderer {
   frame(): boolean;
 
   /**
-   * Subscribes to an engine's commit and restore events.
+   * Subscribes to an engine's `state:commit` event.
    *
    * @param events Emitter to subscribe to.
-   * @returns A handle that removes both subscriptions.
+   * @returns A handle that removes the subscription.
    */
   subscribe(events: EngineEvents): () => void;
 
@@ -454,7 +468,7 @@ export function createNumberOnlyRenderer(
    * @param tile Tile to draw.
    * @param superThreshold Value above which the super treatment applies.
    */
-  const addTile = (tile: TileProjection, superThreshold: number): void => {
+  const addTile = (tile: CommitTile, superThreshold: number): void => {
     if (owner === null || tileLayer === null) {
       return;
     }
@@ -505,10 +519,10 @@ export function createNumberOnlyRenderer(
   /**
    * Redraws every tile of a board.
    *
-   * @param board The board projection to draw.
+   * @param board The board the commit carried.
    * @param superThreshold Value above which the super treatment applies.
    */
-  const drawBoard = (board: BoardProjection, superThreshold: number): void => {
+  const drawBoard = (board: CommitBoard, superThreshold: number): void => {
     if (tileLayer === null) {
       return;
     }
@@ -643,6 +657,12 @@ export function createNumberOnlyRenderer(
       } else if (commit.won) {
         showMessage(true);
       }
+    } else {
+      // Ported from js/html_actuator.js L39-L41, which the manager called
+      // on restart (js/game_manager.js L19) and on keep-playing (L26).
+      // Both now reach this module as a commit carrying `terminated` as
+      // `false`.
+      clearMessage();
     }
 
     reporter.onCount({ name: PAINT_METRIC, value: 1 });
@@ -658,24 +678,6 @@ export function createNumberOnlyRenderer(
     requestWork();
   };
 
-  /**
-   * Clears the terminal overlay and, where the board was replaced rather
-   * than continued, drops any queued position rewrite.
-   *
-   * A board adopted rather than moved has no movement to animate, and a
-   * rewrite queued by an earlier commit would reposition tiles the new
-   * board has replaced.
-   *
-   * @param event The restore event.
-   */
-  const handleRestore = (event: StateRestoreEvent): void => {
-    clearMessage();
-
-    if (event.reason !== 'continue') {
-      deferred = [];
-    }
-  };
-
   // The canvas carries no drawing while the board is drawn as DOM tiles,
   // so it is hidden once, here.
   const toggleableCanvas = asToggleable(options.canvas);
@@ -688,8 +690,6 @@ export function createNumberOnlyRenderer(
     mounted,
 
     render: queueCommit,
-
-    restore: handleRestore,
 
     frame(): boolean {
       const commit = queued;
@@ -720,13 +720,7 @@ export function createNumberOnlyRenderer(
     },
 
     subscribe(events: EngineEvents): () => void {
-      const stopCommit = events.on('state:commit', queueCommit);
-      const stopRestore = events.on('state:restore', handleRestore);
-
-      return (): void => {
-        stopCommit();
-        stopRestore();
-      };
+      return events.on('state:commit', queueCommit);
     },
 
     destroy(): void {
