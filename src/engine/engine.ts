@@ -51,8 +51,8 @@ import { createHookBus } from './hook-bus';
 import type { HookEnvironment, MergePayload } from './hooks';
 import { resolveMove } from './move-resolver';
 import {
-  isTerminated,
-  isWinningValue,
+  isGameTerminated as isTerminated,
+  isWinningMergeValue,
   movesAvailable,
 } from './terminal-state';
 import { Tile } from './tile';
@@ -543,7 +543,11 @@ export class Engine {
    * @returns `true` when the engine refuses further moves.
    */
   isGameTerminated(): boolean {
-    return isTerminated(this.over, this.won, this.continuedPlay);
+    return isTerminated({
+      over: this.over,
+      won: this.won,
+      continuedPlay: this.continuedPlay,
+    });
   }
 
   /**
@@ -640,7 +644,7 @@ export class Engine {
 
     for (const merge of outcome.merges) {
       // Ported from L170: strict equality against the configured value.
-      if (isWinningValue(merge.merged.value, this.config)) {
+      if (isWinningMergeValue(merge.merged.value, this.config)) {
         this.won = true;
       }
 
@@ -670,7 +674,7 @@ export class Engine {
     this.addRandomTile();
 
     // Ported from L185-L187.
-    if (!movesAvailable(this.grid, this.config)) {
+    if (!movesAvailable(this.grid)) {
       this.over = true;
     }
 
