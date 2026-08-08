@@ -22,8 +22,9 @@
  *   `RunState.runId` identifies the run instance and is persisted with the
  *   envelope. The correlation identifier is derived from the seed and that
  *   run identifier together, is not persisted, and is what the
- *   observability layer keys records on. `runCorrelationId()` in section 12
- *   delegates to the single derivation in src/observability/logger.ts.
+ *   observability layer keys records on. This module declares no derivation of
+ *   its own: `deriveCorrelationId()` in src/observability/logger.ts is the
+ *   single one, and the value reaches the run layer by injection.
  *
  * WRAPPED BOARD SNAPSHOT
  *   `RunState.board` carries the pre-migration board snapshot unchanged, in

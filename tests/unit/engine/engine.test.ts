@@ -1,0 +1,2740 @@
+// Orchestration suite of src/engine/engine.ts: the DOM-free rules engine and
+// turn orchestrator, and the primary successor to js/game_manager.js.
+//
+// It is the unit-level evidence for gate V1 — Phase 1 plays identically to
+// vanilla 2048 from the player's perspective — so every `describe` below
+// names the vanilla construct it pins together with that construct's line
+// range, which is how the orchestration rows of docs/TRACEABILITY_MATRIX.md
+// are each covered by a named test:
+//   js/game_manager.js L1-L14    constructor        -> constructor
+//   js/game_manager.js L17-L21   restart()          -> restart()
+//   js/game_manager.js L24-L27   keepPlaying()      -> continuePlaying()
+//   js/game_manager.js L30-L32   isGameTerminated() -> isGameTerminated()
+//   js/game_manager.js L35-L59   setup()            -> setup()
+//   js/game_manager.js L62-L66   addStartTiles()    -> addStartTiles()
+//   js/game_manager.js L69-L76   addRandomTile()    -> addRandomTile()
+//   js/game_manager.js L79-L99   actuate()          -> commit()
+//   js/game_manager.js L102-L110 serialize()        -> serialize()
+//   js/game_manager.js L130-L191 move()             -> move()
+//
+// The sequence sections 5 through 9 walk is AAP Figure 4, Turn Data Flow, of
+// docs/architecture/data-flow.md: the direction, the cancellable
+// `onBeforeMove`, tile preparation, the traversal, the merge, the win check,
+// the moved? decision, the spawn, `onAfterMove`, the loss check and
+// `state:commit`. The absent view collaborator asserted in section 1 is the
+// one decisive difference between AAP Figure 1 and AAP Figure 2 of
+// docs/architecture/ARCHITECTURE.md.
+//
+// TWO LOGGED DEVIATIONS ARE VERIFIED HERE by their observable consequences:
+// the forced `keepPlaying` prototype-shadowing repair of L24-L27, in section
+// 10, and the board-by-reference-versus-immutable-projection choice of the
+// commit payload, in section 9.
+//
+// SCOPE. Sibling suites own what this one does not repeat: the lattice ->
+// grid.test.ts; the traversals and the merge math -> move-resolver.test.ts;
+// the win and loss predicates -> terminal-state.test.ts; bus mechanics ->
+// hook-bus.test.ts; emitter mechanics -> engine-events.test.ts; the spawn's
+// substream wiring and cursor accounting -> engine-spawn.test.ts; per-hook
+// payload adoption -> engine-hook-payloads.test.ts; listener
+// non-interference -> engine-observer-non-interference.test.ts; persisted
+// board bounds -> engine-snapshot-bounds.test.ts; the `bestScore` key format
+// and the storage failure paths -> tests/unit/storage; run-state versioning
+// -> tests/unit/run; PRNG sequence properties -> tests/unit/rng. No snapshot
+// matcher appears below: the seeded regression gate is tests/snapshot, which
+// carries its own configuration and runs separately.
+//
+// Every collaborator arrives through the single options object, so this suite
+// needs no mocking library and no module mocking; the doubles in the next
+// section are hand written. It reads no DOM and no storage, and runs in the
+// `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
+//
+// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+
+import { describe, expect, it, vi } from 'vitest';
+
+import {
+  DEFAULT_BOARD_SIZE,
+  createDefaultRulesConfig,
+} from '../../../src/config/default-config';
+import type { RulesConfig } from '../../../src/config/rules-config';
+import {
+  DEFAULT_STAGE_CONFIG,
+  createDefaultStageConfig,
+} from '../../../src/config/stage-config';
+import type { StageGoal } from '../../../src/config/stage-config';
+import { Engine } from '../../../src/engine/engine';
+import type { EngineStoragePort } from '../../../src/engine/engine';
+import {
+  ENGINE_EVENT_NAMES,
+  createEngineEvents,
+} from '../../../src/engine/engine-events';
+import type { StateCommitEvent } from '../../../src/engine/engine-events';
+import { Grid } from '../../../src/engine/grid';
+import { createHookBus } from '../../../src/engine/hook-bus';
+import type { BeforeMovePayload } from '../../../src/engine/hooks';
+import { Tile } from '../../../src/engine/tile';
+import {
+  DIRECTION_DOWN,
+  DIRECTION_LEFT,
+  DIRECTION_RIGHT,
+  DIRECTION_UP,
+  EMPTY_RELIC_CONTEXT,
+  EMPTY_STAGE_CONTEXT,
+  NOOP_ENGINE_REPORTER,
+} from '../../../src/engine/types';
+import type {
+  BestScorePort,
+  CellMatrix,
+  Direction,
+  EngineCountReport,
+  EngineReporter,
+  SerializedGameState,
+  SerializedTile,
+} from '../../../src/engine/types';
+import { createRngStreams } from '../../../src/rng/rng-streams';
+import type { RngStreams } from '../../../src/rng/rng-streams';
+import {
+  BLOCKED_BOARD,
+  EMPTY_BOARD,
+  MERGE_PAIR_BOARD,
+  NEAR_LOSS_BOARD,
+  NEAR_WIN_BOARD,
+  copyBoard,
+  createEmptyBoard,
+  createNearWinBoard,
+} from '../../fixtures/boards';
+
+/* ===== 0. Constants, doubles and helpers ===== */
+
+/** Run seed every deterministic case below is built from. */
+const RUN_SEED = 'engine-suite-seed-1';
+
+/** A second run seed, for the cases that compare two runs. */
+const OTHER_SEED = 'engine-suite-seed-2';
+
+/** The win value js/game_manager.js L170 compared against. */
+const VANILLA_WIN_VALUE = 2048;
+
+/** The start-tile count js/game_manager.js L7 held. */
+const VANILLA_START_TILES = 2;
+
+/** The two spawn values js/game_manager.js L71 could produce. */
+const VANILLA_SPAWN_VALUES: readonly number[] = [2, 4];
+
+/** The weights js/game_manager.js L71's `< 0.9` expressed. */
+const VANILLA_SPAWN_WEIGHTS: readonly number[] = [0.9, 0.1];
+
+/** The four members of `HookPayloadMap` a dispatch order is recorded as. */
+const ALL_HOOK_ORDER: readonly string[] = [
+  'onStageStart',
+  'onBeforeMove',
+  'onMerge',
+  'onSpawn',
+  'onAfterMove',
+  'onStageEnd',
+];
+
+/**
+ * Builds the run's four substreams.
+ *
+ * @param seed Run seed. Defaults to `RUN_SEED`.
+ * @returns Substreams standing at cursor zero in every stream.
+ */
+function streamsFor(seed: string = RUN_SEED): RngStreams {
+  return createRngStreams(seed);
+}
+
+/** One call the engine made on its persistence port. */
+type PortCall =
+  | 'getBestScore'
+  | 'setBestScore'
+  | 'getGameState'
+  | 'setGameState'
+  | 'clearGameState';
+
+/** A persistence port that records what the engine asked of it. */
+interface RecordingPort {
+  /** The port itself, for `EngineOptions.storage`. */
+  readonly port: EngineStoragePort;
+
+  /** Every call, in the order the engine made it. */
+  readonly calls: PortCall[];
+
+  /** Every snapshot written through `setGameState`. */
+  readonly written: SerializedGameState[];
+
+  /**
+   * The stored best score, in the frozen shape
+   * js/local_storage_manager.js L43-L45 returned: the raw string when a value
+   * is present, and the number `0` when it is absent.
+   */
+  best: string | 0;
+
+  /** The stored board snapshot `getGameState` returns. */
+  snapshot: unknown;
+
+  /** Discards the call log and the written snapshots. */
+  reset(): void;
+}
+
+/**
+ * Builds a recording persistence port.
+ *
+ * @param snapshot Snapshot `getGameState` reports. Defaults to none.
+ * @param best Best score `getBestScore` reports. Defaults to the absent
+ *   reading `0`.
+ * @returns The port and the three recordings taken through it.
+ */
+function createRecordingPort(
+  snapshot: unknown = null,
+  best: string | 0 = 0,
+): RecordingPort {
+  const calls: PortCall[] = [];
+  const written: SerializedGameState[] = [];
+
+  const recording: RecordingPort = {
+    calls,
+    written,
+    best,
+    snapshot,
+
+    reset(): void {
+      calls.length = 0;
+      written.length = 0;
+    },
+
+    port: {
+      getBestScore(): string | 0 {
+        calls.push('getBestScore');
+
+        return recording.best;
+      },
+
+      setBestScore(score: number): unknown {
+        calls.push('setBestScore');
+        recording.best = String(score);
+
+        return true;
+      },
+
+      getGameState(): unknown {
+        calls.push('getGameState');
+
+        return recording.snapshot;
+      },
+
+      setGameState(state: unknown): unknown {
+        calls.push('setGameState');
+        written.push(state as SerializedGameState);
+
+        return true;
+      },
+
+      clearGameState(): unknown {
+        calls.push('clearGameState');
+        recording.snapshot = null;
+
+        return true;
+      },
+    },
+  };
+
+  return recording;
+}
+
+/** A report sink that keeps every count it receives. */
+interface RecordingReporter {
+  /** The sink itself, for `EngineOptions.reporter`. */
+  readonly reporter: EngineReporter;
+
+  /** Every count, in the order it was reported. */
+  readonly counts: EngineCountReport[];
+}
+
+/**
+ * Builds a recording report sink.
+ *
+ * @returns The sink and the counts taken through it.
+ */
+function createRecordingReporter(): RecordingReporter {
+  const counts: EngineCountReport[] = [];
+
+  return {
+    counts,
+
+    reporter: {
+      onCount(report: EngineCountReport): void {
+        counts.push(report);
+      },
+    },
+  };
+}
+
+/**
+ * Reads the report sink the engine holds.
+ *
+ * js/game_manager.js L1-L5 held its collaborators as ordinary members; the
+ * sink is TypeScript private here, and this narrows that one member.
+ *
+ * @param engine Engine to read.
+ * @returns The sink in force.
+ */
+function reporterOf(engine: Engine): EngineReporter {
+  return (engine as unknown as { readonly reporter: EngineReporter }).reporter;
+}
+
+/**
+ * Projects the board to face values, in the x-major order
+ * js/grid.js L102-L117 serialised.
+ *
+ * @param engine Engine to read.
+ * @returns `values[x][y]`, with `null` in every empty cell.
+ */
+function boardValues(engine: Engine): (number | null)[][] {
+  return engine.grid.cells.map((column) =>
+    column.map((tile) => (tile === null ? null : tile.value)),
+  );
+}
+
+/**
+ * Counts the tiles on the board, through the walk js/grid.js L58-L64
+ * performed.
+ *
+ * @param engine Engine to read.
+ * @returns The number of occupied cells.
+ */
+function tileCount(engine: Engine): number {
+  let held = 0;
+
+  engine.grid.eachCell((_x, _y, tile) => {
+    if (tile !== null) {
+      held += 1;
+    }
+  });
+
+  return held;
+}
+
+/**
+ * Reads one cell's face value.
+ *
+ * @param engine Engine to read.
+ * @param x Column.
+ * @param y Row.
+ * @returns The value, or `null` where the cell is empty or out of bounds.
+ */
+function valueAt(engine: Engine, x: number, y: number): number | null {
+  const tile = engine.grid.cellContent({ x, y });
+
+  return tile === null ? null : tile.value;
+}
+
+/**
+ * Collects every face value on the board.
+ *
+ * @param engine Engine to read.
+ * @returns The values of the occupied cells, in the walk's order.
+ */
+function faceValues(engine: Engine): number[] {
+  const values: number[] = [];
+
+  engine.grid.eachCell((_x, _y, tile) => {
+    if (tile !== null) {
+      values.push(tile.value);
+    }
+  });
+
+  return values;
+}
+
+/**
+ * Builds a persisted snapshot from a y-major visual matrix.
+ *
+ * `rows[y][x]` is the value at cell (x, y), so a literal reads as the board
+ * looks while the matrix written is the x-major one js/grid.js L102-L117
+ * serialised. The matrix must be square.
+ *
+ * @param rows Row-major values, `null` for an empty cell.
+ * @param overrides Snapshot members to replace; the four defaults are the
+ *   fresh-game values js/game_manager.js L48-L51 assigned.
+ * @returns A fresh, unfrozen snapshot.
+ */
+function snapshotFromRows(
+  rows: readonly (readonly (number | null)[])[],
+  overrides: Partial<SerializedGameState> = {},
+): SerializedGameState {
+  const size = rows.length;
+  const cells: CellMatrix<SerializedTile> = [];
+
+  for (let x = 0; x < size; x += 1) {
+    const column: (SerializedTile | null)[] = [];
+
+    for (let y = 0; y < size; y += 1) {
+      const value = rows[y][x];
+
+      column.push(value === null ? null : { position: { x, y }, value });
+    }
+
+    cells.push(column);
+  }
+
+  return {
+    grid: { size, cells },
+    score: 0,
+    over: false,
+    won: false,
+    keepPlaying: false,
+    ...overrides,
+  };
+}
+
+/**
+ * The rules with a single-valued spawn distribution, so a spawned value is
+ * fixed whatever the seed draws.
+ *
+ * @param value The only value a spawn can take.
+ * @returns A fresh configuration.
+ */
+function withFixedSpawn(value: number): RulesConfig {
+  const config = createDefaultRulesConfig();
+
+  config.spawn = { values: [value], weights: [1] };
+
+  return config;
+}
+
+/**
+ * The board that is one left move from having no move available, given a
+ * spawn of 8: the pair in row 0 merges, the freed cell takes the spawn, and
+ * no two neighbours then match.
+ *
+ * Cell values, row y = 0 first:
+ *    2  2
+ *   16 32
+ *
+ * @returns A fresh, unfrozen snapshot.
+ */
+function createLosingBoard(): SerializedGameState {
+  return snapshotFromRows([
+    [2, 2],
+    [16, 32],
+  ]);
+}
+
+/**
+ * Registers one subscriber bound to all six hooks, appending each hook's name
+ * to `log` as it is dispatched.
+ *
+ * @param engine Engine whose bus to register on.
+ * @param log List each dispatch appends to.
+ */
+function recordHooks(engine: Engine, log: string[]): void {
+  engine.hooks.register({
+    id: 'hook-order-recorder',
+    hooks: {
+      onStageStart: () => {
+        log.push('onStageStart');
+      },
+      onBeforeMove: () => {
+        log.push('onBeforeMove');
+      },
+      onMerge: () => {
+        log.push('onMerge');
+      },
+      onSpawn: () => {
+        log.push('onSpawn');
+      },
+      onAfterMove: () => {
+        log.push('onAfterMove');
+      },
+      onStageEnd: () => {
+        log.push('onStageEnd');
+      },
+    },
+  });
+}
+
+/**
+ * Subscribes to all seven events, appending each event's name to `log` as it
+ * is emitted.
+ *
+ * @param engine Engine whose emitter to subscribe to.
+ * @param log List each emission appends to.
+ */
+function recordEvents(engine: Engine, log: string[]): void {
+  for (const name of ENGINE_EVENT_NAMES) {
+    engine.events.on(name, () => {
+      log.push(name);
+    });
+  }
+}
+
+/**
+ * Subscribes to `state:commit` and collects every payload emitted after the
+ * call.
+ *
+ * @param engine Engine whose emitter to subscribe to.
+ * @returns The growing list of commits.
+ */
+function captureCommits(engine: Engine): StateCommitEvent[] {
+  const commits: StateCommitEvent[] = [];
+
+  engine.events.on('state:commit', (payload) => {
+    commits.push(payload);
+  });
+
+  return commits;
+}
+
+/**
+ * Plays a list of directions in order.
+ *
+ * @param engine Engine to drive.
+ * @param directions Directions to play.
+ * @returns One entry per direction, `true` where the board changed.
+ */
+function play(engine: Engine, directions: readonly Direction[]): boolean[] {
+  return directions.map((direction) => engine.move(direction));
+}
+
+/* ===== 1. constructor (js/game_manager.js L1-L14) ===== */
+
+describe('constructor (js/game_manager.js L1-L14)', () => {
+  it('constructs with every option but the substreams defaulted', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    expect(engine.config.boardSize).toBe(DEFAULT_BOARD_SIZE);
+    expect(engine.config.winValue).toBe(VANILLA_WIN_VALUE);
+    expect(engine.config.startTiles).toBe(VANILLA_START_TILES);
+    expect(engine.config.spawn.values).toEqual(VANILLA_SPAWN_VALUES);
+    expect(engine.config.spawn.weights).toEqual(VANILLA_SPAWN_WEIGHTS);
+    expect(engine.stages).toBe(DEFAULT_STAGE_CONFIG);
+    expect(engine.stageResolution).toBe('observer');
+    expect(engine.correlationId).toBe('');
+    expect(engine.grid).toBeInstanceOf(Grid);
+    expect(engine.grid.size).toBe(DEFAULT_BOARD_SIZE);
+    expect(engine.score).toBe(0);
+    expect(engine.over).toBe(false);
+    expect(engine.won).toBe(false);
+    expect(engine.continuedPlay).toBe(false);
+  });
+
+  it('plays a complete turn with no option beyond the substreams', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(valueAt(engine, 0, 0)).toBe(4);
+    expect(engine.score).toBe(4);
+  });
+
+  it('leaves the board empty rather than setting up, unlike L13', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    expect(tileCount(engine)).toBe(0);
+  });
+
+  it('takes a replacement rules configuration', () => {
+    const config = createDefaultRulesConfig();
+
+    config.winValue = 512;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    expect(engine.config).toBe(config);
+    expect(engine.config.winValue).toBe(512);
+  });
+
+  it('takes a replacement progression curve', () => {
+    const stages = createDefaultStageConfig();
+    const engine = new Engine({ streams: streamsFor(), stages });
+
+    expect(engine.stages).toBe(stages);
+    expect(engine.stages).not.toBe(DEFAULT_STAGE_CONFIG);
+  });
+
+  it('takes the substreams, the emitter and the bus by reference', () => {
+    const streams = streamsFor();
+    const events = createEngineEvents();
+    const hooks = createHookBus();
+    const engine = new Engine({ streams, events, hooks });
+
+    expect(engine.streams).toBe(streams);
+    expect(engine.events).toBe(events);
+    expect(engine.hooks).toBe(hooks);
+  });
+
+  it('takes a replacement stage-resolution authority', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageResolution: 'engine',
+    });
+
+    expect(engine.stageResolution).toBe('engine');
+  });
+
+  it('takes a correlation identifier verbatim', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      correlationId: 'run-correlation-1',
+    });
+
+    expect(engine.correlationId).toBe('run-correlation-1');
+  });
+
+  it('takes a persistence port carrying the best-score pair alone', () => {
+    // js/local_storage_manager.js L43-L49 is the whole surface this port
+    // exposes; the three snapshot calls L52-L63 made are absent.
+    const bestScoreOnly: BestScorePort = {
+      getBestScore: (): string | 0 => 0,
+      setBestScore: (): unknown => undefined,
+    };
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: bestScoreOnly,
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.score).toBe(4);
+  });
+
+  it('takes stage and relic context providers', () => {
+    const goal: StageGoal = { kind: 'score-threshold', target: 500 };
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageContext: () => ({
+        stageIndex: 4,
+        goal,
+        goalProgress: 0.25,
+      }),
+      relicContext: () => [{ id: 'relic-a', charges: 2 }],
+    });
+    const commits = captureCommits(engine);
+
+    engine.setup(null);
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0].stage.stageIndex).toBe(4);
+    expect(commits[0].stage.goal).toEqual(goal);
+    expect(commits[0].stage.goalProgress).toBe(0.25);
+    expect(commits[0].relics).toEqual([{ id: 'relic-a', charges: 2 }]);
+  });
+
+  it('defaults the report sink to NOOP_ENGINE_REPORTER', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    expect(reporterOf(engine)).toBe(NOOP_ENGINE_REPORTER);
+  });
+
+  it('takes an injected report sink and counts through it', () => {
+    const recording = createRecordingReporter();
+    const engine = new Engine({
+      streams: streamsFor(),
+      reporter: recording.reporter,
+    });
+
+    expect(reporterOf(engine)).toBe(recording.reporter);
+
+    engine.setup(null);
+    engine.move(DIRECTION_LEFT);
+
+    expect(recording.counts.length).toBeGreaterThan(0);
+
+    for (const count of recording.counts) {
+      expect(count.correlationId).toBe('');
+      expect(typeof count.metric).toBe('string');
+    }
+  });
+
+  it('plays a complete game with no report sink wired', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(null);
+
+    expect(() => {
+      play(engine, [DIRECTION_LEFT, DIRECTION_UP, DIRECTION_RIGHT]);
+    }).not.toThrow();
+    expect(tileCount(engine)).toBeGreaterThanOrEqual(VANILLA_START_TILES);
+  });
+
+  it('holds no view collaborator, which is AAP Figure 2', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const members = [
+      ...Object.keys(engine),
+      ...Object.getOwnPropertyNames(Object.getPrototypeOf(engine) as object),
+    ];
+
+    // js/game_manager.js L5 held `this.actuator` and L58, L91 and L189
+    // called into it; js/html_actuator.js exposed `actuate` at L10 and
+    // `continueGame` at L39.
+    expect(members).not.toContain('actuator');
+    expect(members).not.toContain('actuate');
+    expect(members).not.toContain('continueGame');
+    expect(members).not.toContain('renderer');
+    expect(members).not.toContain('render');
+    expect(members).not.toContain('view');
+
+    for (const key of Object.keys(engine)) {
+      const held = (engine as unknown as Record<string, unknown>)[key];
+
+      if (typeof held !== 'object' || held === null) {
+        continue;
+      }
+
+      expect(held).not.toHaveProperty('actuate');
+      expect(held).not.toHaveProperty('continueGame');
+    }
+  });
+});
+
+/* ===== 2. setup() (js/game_manager.js L35-L59) ===== */
+
+describe('setup() (js/game_manager.js L35-L59)', () => {
+  it('resets the score and the three flags on a fresh board (L46-L55)', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(
+      snapshotFromRows([[2, null], [null, null]], {
+        score: 900,
+        over: true,
+        won: true,
+        keepPlaying: true,
+      }),
+    );
+    engine.setup(null);
+
+    expect(engine.score).toBe(0);
+    expect(engine.over).toBe(false);
+    expect(engine.won).toBe(false);
+    expect(engine.continuedPlay).toBe(false);
+  });
+
+  it('restores the grid, the score and the flags (L36-L45)', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(
+      snapshotFromRows([
+        [2, 4, null, null],
+        [null, 8, null, null],
+        [null, null, null, null],
+        [null, null, null, 16],
+      ], { score: 128, over: false, won: true, keepPlaying: true }),
+    );
+
+    expect(engine.score).toBe(128);
+    expect(engine.over).toBe(false);
+    expect(engine.won).toBe(true);
+    expect(engine.continuedPlay).toBe(true);
+    expect(valueAt(engine, 0, 0)).toBe(2);
+    expect(valueAt(engine, 1, 0)).toBe(4);
+    expect(valueAt(engine, 1, 1)).toBe(8);
+    expect(valueAt(engine, 3, 3)).toBe(16);
+    expect(tileCount(engine)).toBe(4);
+  });
+
+  it('rebuilds the grid at the SAVED size (L40-L41)', () => {
+    const config = createDefaultRulesConfig();
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    expect(config.boardSize).toBe(DEFAULT_BOARD_SIZE);
+
+    engine.setup(createEmptyBoard(3));
+
+    expect(engine.grid).toBeInstanceOf(Grid);
+    expect(engine.grid.size).toBe(3);
+    expect(engine.grid.cells).toHaveLength(3);
+    expect(engine.grid.cells[0]).toHaveLength(3);
+  });
+
+  it('reconciles a saved size against the configured one', () => {
+    // AAP section 0.4.1.3 names this the corruption risk. The saved size is
+    // written back to the configuration, so every later read — the win and
+    // loss checks included — sees the size the lattice has.
+    const config = createDefaultRulesConfig();
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(
+      snapshotFromRows([
+        [2, null, null],
+        [null, null, null],
+        [null, null, 4],
+      ]),
+    );
+
+    expect(config.boardSize).toBe(3);
+    expect(engine.config.boardSize).toBe(3);
+    expect(engine.grid.size).toBe(3);
+    expect(valueAt(engine, 0, 0)).toBe(2);
+    expect(valueAt(engine, 2, 2)).toBe(4);
+    expect(tileCount(engine)).toBe(2);
+  });
+
+  it('keeps the configured size when no snapshot is restored', () => {
+    const config = createDefaultRulesConfig();
+
+    config.boardSize = 5;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(null);
+
+    expect(engine.grid.size).toBe(5);
+    expect(config.boardSize).toBe(5);
+  });
+
+  it('plays on after a reconciled size without corrupting the board', () => {
+    const config = createDefaultRulesConfig();
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(
+      snapshotFromRows([
+        [2, 2, null],
+        [null, null, null],
+        [null, null, null],
+      ]),
+    );
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(valueAt(engine, 0, 0)).toBe(4);
+    expect(engine.score).toBe(4);
+    expect(engine.over).toBe(false);
+    expect(engine.grid.size).toBe(3);
+  });
+
+  it('reads the port only when no snapshot is supplied (L36)', () => {
+    const recording = createRecordingPort(null);
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup();
+
+    expect(recording.calls).toContain('getGameState');
+
+    recording.reset();
+    engine.setup(null);
+
+    expect(recording.calls).not.toContain('getGameState');
+
+    recording.reset();
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(recording.calls).not.toContain('getGameState');
+  });
+
+  it('restores the snapshot the port reports (L36-L45)', () => {
+    const recording = createRecordingPort(
+      snapshotFromRows([
+        [2, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ], { score: 64, won: true, keepPlaying: true }),
+    );
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup();
+
+    expect(engine.score).toBe(64);
+    expect(engine.won).toBe(true);
+    expect(engine.continuedPlay).toBe(true);
+    expect(tileCount(engine)).toBe(1);
+  });
+
+  it('starts fresh from an unusable snapshot rather than throwing', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    expect(() => {
+      engine.setup({ nonsense: true } as unknown as SerializedGameState);
+    }).not.toThrow();
+    expect(engine.score).toBe(0);
+    expect(tileCount(engine)).toBe(VANILLA_START_TILES);
+  });
+
+  it('commits once at the end, as L58 actuated', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const commits = captureCommits(engine);
+
+    engine.setup(null);
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0].score).toBe(0);
+    expect(commits[0].over).toBe(false);
+    expect(commits[0].won).toBe(false);
+    expect(commits[0].terminated).toBe(false);
+  });
+});
+
+/* ===== 3. addStartTiles() (js/game_manager.js L62-L66) ===== */
+
+describe('addStartTiles() (js/game_manager.js L62-L66)', () => {
+  it('places config.startTiles tiles, defaulting to the 2 of L7', () => {
+    const config = createDefaultRulesConfig();
+
+    expect(config.startTiles).toBe(VANILLA_START_TILES);
+
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(null);
+
+    expect(tileCount(engine)).toBe(VANILLA_START_TILES);
+  });
+
+  it('places three tiles for a configuration asking for three', () => {
+    const config = createDefaultRulesConfig();
+
+    config.startTiles = 3;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(null);
+
+    expect(tileCount(engine)).toBe(3);
+  });
+
+  it('places none for a configuration asking for none', () => {
+    const config = createDefaultRulesConfig();
+
+    config.startTiles = 0;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(null);
+
+    expect(tileCount(engine)).toBe(0);
+  });
+
+  it('places none when a snapshot was restored (L53-L55)', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(EMPTY_BOARD));
+
+    expect(tileCount(engine)).toBe(0);
+  });
+});
+
+/* ===== 4. addRandomTile() (js/game_manager.js L69-L76) ===== */
+
+describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
+  it('draws values from config.spawn.values alone (L71)', () => {
+    const config = createDefaultRulesConfig();
+
+    config.startTiles = 8;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(null);
+
+    const spawned = faceValues(engine);
+
+    expect(spawned).toHaveLength(8);
+
+    for (const value of spawned) {
+      expect(VANILLA_SPAWN_VALUES).toContain(value);
+    }
+  });
+
+  it('honours a replacement distribution (L71)', () => {
+    const config = withFixedSpawn(8);
+
+    config.startTiles = 5;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(null);
+
+    expect(faceValues(engine)).toEqual([8, 8, 8, 8, 8]);
+  });
+
+  it('spawns identical values at identical cells for one seed', () => {
+    const first = new Engine({ streams: streamsFor(RUN_SEED) });
+    const second = new Engine({ streams: streamsFor(RUN_SEED) });
+
+    first.setup(null);
+    second.setup(null);
+
+    expect(boardValues(second)).toEqual(boardValues(first));
+
+    play(first, [DIRECTION_LEFT, DIRECTION_DOWN, DIRECTION_RIGHT]);
+    play(second, [DIRECTION_LEFT, DIRECTION_DOWN, DIRECTION_RIGHT]);
+
+    expect(boardValues(second)).toEqual(boardValues(first));
+    expect(second.score).toBe(first.score);
+  });
+
+  it('spawns a different opening board for a different seed', () => {
+    const first = new Engine({ streams: streamsFor(RUN_SEED) });
+    const second = new Engine({ streams: streamsFor(OTHER_SEED) });
+
+    first.setup(null);
+    second.setup(null);
+
+    expect(boardValues(second)).not.toEqual(boardValues(first));
+  });
+
+  it('never calls Math.random across a turn (L71, js/grid.js L41)', () => {
+    // The two audited call sites are the only randomness the vanilla game
+    // held, and both are substream draws now. The spy also guards against a
+    // seeded generator being installed over the platform function.
+    const spy = vi.spyOn(Math, 'random');
+
+    try {
+      const engine = new Engine({ streams: streamsFor() });
+
+      engine.setup(null);
+      play(engine, [DIRECTION_LEFT, DIRECTION_UP, DIRECTION_RIGHT]);
+      engine.serialize();
+      engine.continuePlaying();
+      engine.endStage(true);
+      engine.restart();
+
+      expect(spy).toHaveBeenCalledTimes(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('attempts no spawn on a full board and does not throw (L70)', () => {
+    // js/grid.js L37-L43 returned no cell on a full board, which is the
+    // boundary the guard at L70 kept the spawn away from. Six start tiles on
+    // a four-cell board reach the guard twice.
+    const config = createDefaultRulesConfig();
+
+    config.boardSize = 2;
+    config.startTiles = 6;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+    const spawned: number[] = [];
+
+    engine.events.on('tile:spawn', (payload) => {
+      spawned.push(payload.value);
+    });
+
+    expect(() => {
+      engine.setup(null);
+    }).not.toThrow();
+
+    expect(tileCount(engine)).toBe(4);
+    expect(spawned).toHaveLength(4);
+  });
+
+  it('spawns nothing further once a move leaves the board full', () => {
+    const config = withFixedSpawn(8);
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(createLosingBoard());
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(tileCount(engine)).toBe(4);
+    expect(engine.over).toBe(true);
+    expect(() => {
+      engine.move(DIRECTION_RIGHT);
+    }).not.toThrow();
+    expect(tileCount(engine)).toBe(4);
+  });
+});
+
+/* ===== 5. move(): the terminal guard (js/game_manager.js L134) ===== */
+
+describe('move(): the terminal guard (js/game_manager.js L134)', () => {
+  /**
+   * Builds an engine standing on a win that has not been acknowledged, which
+   * is the state L31 refused a move in.
+   *
+   * @returns The engine and its recording port.
+   */
+  function createTerminatedEngine(): {
+    readonly engine: Engine;
+    readonly recording: RecordingPort;
+  } {
+    const recording = createRecordingPort();
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.won).toBe(true);
+    expect(engine.isGameTerminated()).toBe(true);
+
+    return { engine, recording };
+  }
+
+  it('refuses the move and reports no change', () => {
+    const { engine } = createTerminatedEngine();
+    const before = boardValues(engine);
+    const score = engine.score;
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(boardValues(engine)).toEqual(before);
+    expect(engine.score).toBe(score);
+  });
+
+  it('returns ahead of prepareTiles, so no tile is prepared (L143)', () => {
+    const { engine } = createTerminatedEngine();
+    const tile = engine.grid.cellContent({ x: 0, y: 0 });
+
+    expect(tile).not.toBeNull();
+
+    const marker: [Tile, Tile] = [
+      new Tile({ x: 0, y: 0 }, 2),
+      new Tile({ x: 1, y: 0 }, 2),
+    ];
+
+    // js/game_manager.js L113-L120 cleared `mergedFrom` and saved the
+    // position on every tile; both markers survive a refused move.
+    (tile as Tile).mergedFrom = marker;
+    (tile as Tile).previousPosition = null;
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect((tile as Tile).mergedFrom).toBe(marker);
+    expect((tile as Tile).previousPosition).toBeNull();
+  });
+
+  it('dispatches no hook and emits no event', () => {
+    const { engine } = createTerminatedEngine();
+    const hooks: string[] = [];
+    const events: string[] = [];
+
+    recordHooks(engine, hooks);
+    recordEvents(engine, events);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(hooks).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('makes no persistence call', () => {
+    const { engine, recording } = createTerminatedEngine();
+
+    recording.reset();
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(recording.calls).toEqual([]);
+  });
+
+  it('accepts moves again once the win is acknowledged (L30-L32)', () => {
+    const { engine } = createTerminatedEngine();
+
+    engine.continuePlaying();
+
+    expect(engine.isGameTerminated()).toBe(false);
+    expect(engine.move(DIRECTION_DOWN)).toBe(true);
+  });
+
+  it('refuses every move once the game is lost', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      config: withFixedSpawn(8),
+    });
+
+    engine.setup(createLosingBoard());
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.over).toBe(true);
+    expect(engine.isGameTerminated()).toBe(true);
+
+    const before = boardValues(engine);
+
+    for (const direction of [
+      DIRECTION_UP,
+      DIRECTION_RIGHT,
+      DIRECTION_DOWN,
+      DIRECTION_LEFT,
+    ]) {
+      expect(engine.move(direction)).toBe(false);
+    }
+
+    expect(boardValues(engine)).toEqual(before);
+  });
+});
+
+/* ===== 6. move(): the moved? decision (js/game_manager.js L182-L190) ===== */
+
+describe('move(): the moved? decision (js/game_manager.js L182-L190)', () => {
+  it('spawns nothing and commits nothing when no position changed', () => {
+    // BLOCKED_BOARD's tiles already sit in column 0, so L175's
+    // `positionsEqual` check never reports a change and the whole `if
+    // (moved)` block of L182-L190 is skipped. AAP Figure 4 marks this as one
+    // of the two deliberately preserved turn properties.
+    const recording = createRecordingPort();
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const before = boardValues(engine);
+    const events: string[] = [];
+
+    recordEvents(engine, events);
+    recording.reset();
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(boardValues(engine)).toEqual(before);
+    expect(tileCount(engine)).toBe(4);
+    expect(engine.score).toBe(0);
+    expect(events).not.toContain('tile:spawn');
+    expect(events).not.toContain('move:after');
+    expect(events).not.toContain('state:commit');
+    expect(recording.calls).toEqual([]);
+  });
+
+  it('spawns exactly one tile and commits once when a position changed', () => {
+    // A right move on BLOCKED_BOARD slides every tile and merges none, so
+    // the tile count rises by exactly the one tile L183 spawned.
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const commits = captureCommits(engine);
+    const spawns: number[] = [];
+
+    engine.events.on('tile:spawn', (payload) => {
+      spawns.push(payload.value);
+    });
+
+    expect(tileCount(engine)).toBe(4);
+    expect(engine.move(DIRECTION_RIGHT)).toBe(true);
+    expect(tileCount(engine)).toBe(5);
+    expect(spawns).toHaveLength(1);
+    expect(commits).toHaveLength(1);
+  });
+
+  it('nets no tile for a move that merged one pair', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(tileCount(engine)).toBe(2);
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(valueAt(engine, 0, 0)).toBe(4);
+    expect(tileCount(engine)).toBe(2);
+  });
+
+  it('checks for a loss after the spawn and still commits (L185-L189)', () => {
+    const recording = createRecordingPort();
+    const engine = new Engine({
+      streams: streamsFor(),
+      config: withFixedSpawn(8),
+      storage: recording.port,
+    });
+
+    engine.setup(createLosingBoard());
+
+    const commits = captureCommits(engine);
+
+    recording.reset();
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(tileCount(engine)).toBe(4);
+    expect(engine.over).toBe(true);
+    expect(commits).toHaveLength(1);
+    expect(commits[0].over).toBe(true);
+    expect(commits[0].terminated).toBe(true);
+    expect(recording.calls).toContain('clearGameState');
+  });
+
+  it('leaves the game unlost while a move remains available', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(NEAR_LOSS_BOARD));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(tileCount(engine)).toBe(16);
+    expect(engine.over).toBe(false);
+    expect(engine.score).toBe(8);
+  });
+
+  it('accumulates the score from the merges of the turn (L167)', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(
+      snapshotFromRows([
+        [2, 2, null, null],
+        [4, 4, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ]),
+    );
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(valueAt(engine, 0, 0)).toBe(4);
+    expect(valueAt(engine, 0, 1)).toBe(8);
+    expect(engine.score).toBe(12);
+  });
+});
+
+/* ===== 7. move(): the win check (js/game_manager.js L170) ===== */
+
+describe('move(): the win check (js/game_manager.js L170)', () => {
+  it('sets won when a merge reaches the configured 2048', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+
+    expect(engine.won).toBe(false);
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.won).toBe(true);
+    expect(engine.score).toBe(VANILLA_WIN_VALUE);
+    expect(engine.isGameTerminated()).toBe(true);
+  });
+
+  it('honours a replacement win value', () => {
+    const config = createDefaultRulesConfig();
+
+    config.winValue = 512;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(createNearWinBoard(DEFAULT_BOARD_SIZE, 512));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.won).toBe(true);
+    expect(valueAt(engine, 0, 0)).toBe(512);
+  });
+
+  it('keeps the strict equality of L170 for a value past the target', () => {
+    const config = createDefaultRulesConfig();
+
+    config.winValue = 6;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+
+    engine.setup(createNearWinBoard(DEFAULT_BOARD_SIZE, 8));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(valueAt(engine, 0, 0)).toBe(8);
+    expect(engine.won).toBe(false);
+    expect(engine.isGameTerminated()).toBe(false);
+  });
+
+  it('leaves won false while no merge reaches the target', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.won).toBe(false);
+  });
+});
+
+/* ===== 8. The six hooks at their mapped points ===== */
+
+describe('the six hooks dispatch at their mapped points', () => {
+  it('dispatches all six across a stage, a turn and a stage end', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    engine.move(DIRECTION_LEFT);
+    engine.endStage(true);
+
+    for (const hook of ALL_HOOK_ORDER) {
+      expect(dispatched).toContain(hook);
+    }
+  });
+
+  it('dispatches onStageStart once as the stage is prepared (L35-L59)', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+    engine.setup(null);
+
+    expect(
+      dispatched.filter((hook) => hook === 'onStageStart'),
+    ).toHaveLength(1);
+    expect(dispatched[0]).toBe('onStageStart');
+  });
+
+  it('dispatches onStageStart before the start tiles are spawned', () => {
+    const config = createDefaultRulesConfig();
+
+    config.startTiles = VANILLA_START_TILES;
+
+    const engine = new Engine({ streams: streamsFor(), config });
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+    engine.setup(null);
+
+    expect(dispatched).toEqual(['onStageStart', 'onSpawn', 'onSpawn']);
+  });
+
+  it('dispatches one turn in the order of AAP Figure 4', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(dispatched).toEqual([
+      'onBeforeMove',
+      'onMerge',
+      'onSpawn',
+      'onAfterMove',
+    ]);
+  });
+
+  it('dispatches onBeforeMove before any board mutation', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const seen: (number | null)[] = [];
+
+    engine.hooks.register({
+      id: 'board-reader',
+      hooks: {
+        onBeforeMove: () => {
+          seen.push(valueAt(engine, 0, 0), valueAt(engine, 1, 0));
+        },
+      },
+    });
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(seen).toEqual([2, 2]);
+    expect(valueAt(engine, 0, 0)).toBe(4);
+  });
+
+  it('dispatches onMerge once per merge, so twice for two merges', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(
+      snapshotFromRows([
+        [2, 2, null, null],
+        [4, 4, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ]),
+    );
+
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(dispatched.filter((hook) => hook === 'onMerge')).toHaveLength(2);
+  });
+
+  it('dispatches no onMerge for a move that merged nothing', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+
+    expect(engine.move(DIRECTION_RIGHT)).toBe(true);
+    expect(dispatched).toEqual(['onBeforeMove', 'onSpawn', 'onAfterMove']);
+  });
+
+  it('dispatches onSpawn after the move resolves, before onAfterMove', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+    engine.move(DIRECTION_RIGHT);
+
+    expect(dispatched.indexOf('onSpawn')).toBeGreaterThan(
+      dispatched.indexOf('onBeforeMove'),
+    );
+    expect(dispatched.indexOf('onAfterMove')).toBeGreaterThan(
+      dispatched.indexOf('onSpawn'),
+    );
+  });
+
+  it('dispatches onStageEnd when the stage is resolved', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(null);
+
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+    engine.endStage(true);
+
+    expect(dispatched).toEqual(['onStageEnd']);
+  });
+
+  it('resolves the stage itself under the engine authority', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageResolution: 'engine',
+    });
+
+    engine.setup(createNearWinBoard(DEFAULT_BOARD_SIZE, 32));
+
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.stageProgress().cleared).toBe(true);
+    expect(dispatched).toContain('onStageEnd');
+    expect(dispatched.indexOf('onStageEnd')).toBeGreaterThan(
+      dispatched.indexOf('onAfterMove'),
+    );
+  });
+
+  it('leaves the stage to a subscriber under the observer authority', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(createNearWinBoard(DEFAULT_BOARD_SIZE, 32));
+
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.stageProgress().cleared).toBe(true);
+    expect(dispatched).not.toContain('onStageEnd');
+  });
+
+  it('honours an onBeforeMove veto, which is Figure 4\'s vetoed edge', () => {
+    const recording = createRecordingPort();
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const before = boardValues(engine);
+    const tile = engine.grid.cellContent({ x: 0, y: 0 }) as Tile;
+    const marker: [Tile, Tile] = [
+      new Tile({ x: 0, y: 0 }, 2),
+      new Tile({ x: 1, y: 0 }, 2),
+    ];
+
+    tile.mergedFrom = marker;
+
+    const dispatched: string[] = [];
+    const events: string[] = [];
+
+    recordHooks(engine, dispatched);
+    recordEvents(engine, events);
+    engine.hooks.register({
+      id: 'veto',
+      hooks: {
+        onBeforeMove: (payload): BeforeMovePayload => ({
+          ...payload,
+          cancelled: true,
+        }),
+      },
+    });
+    recording.reset();
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(boardValues(engine)).toEqual(before);
+    expect(engine.score).toBe(0);
+    expect(tile.mergedFrom).toBe(marker);
+    expect(dispatched).toEqual(['onBeforeMove']);
+    expect(events).not.toContain('tile:merge');
+    expect(events).not.toContain('tile:spawn');
+    expect(events).not.toContain('move:after');
+    expect(events).not.toContain('state:commit');
+    expect(recording.calls).toEqual([]);
+  });
+
+  it('reports a vetoed move to a subscriber through move:before', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const cancelled: boolean[] = [];
+
+    engine.events.on('move:before', (payload) => {
+      cancelled.push(payload.cancelled);
+    });
+    engine.hooks.register({
+      id: 'veto',
+      hooks: {
+        onBeforeMove: (payload): BeforeMovePayload => ({
+          ...payload,
+          cancelled: true,
+        }),
+      },
+    });
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(cancelled).toEqual([true]);
+  });
+});
+
+/* ===== 9. The seven engine events (js/game_manager.js L91-L97) ===== */
+
+describe('the seven engine events (js/game_manager.js L91-L97)', () => {
+  it('emits every event name across a stage, a turn and a stage end', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const emitted: string[] = [];
+
+    recordEvents(engine, emitted);
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    engine.move(DIRECTION_LEFT);
+    engine.endStage(true);
+
+    for (const name of ENGINE_EVENT_NAMES) {
+      expect(emitted).toContain(name);
+    }
+  });
+
+  it('emits one turn in the order of AAP Figure 4', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const emitted: string[] = [];
+
+    recordEvents(engine, emitted);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(emitted).toEqual([
+      'move:before',
+      'tile:merge',
+      'tile:spawn',
+      'move:after',
+      'state:commit',
+    ]);
+  });
+
+  it('emits tile:merge once per merge with the produced value', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(
+      snapshotFromRows([
+        [2, 2, null, null],
+        [4, 4, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ]),
+    );
+
+    const results: number[] = [];
+    const deltas: number[] = [];
+
+    engine.events.on('tile:merge', (payload) => {
+      results.push(payload.resultValue);
+      deltas.push(payload.scoreDelta);
+
+      expect(payload.source).not.toBeNull();
+      expect(payload.target).not.toBeNull();
+    });
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(results).toEqual([4, 8]);
+    expect(deltas).toEqual([4, 8]);
+  });
+
+  it('emits tile:spawn with the cell the tile was inserted into', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const spawns: { x: number; y: number; value: number }[] = [];
+
+    engine.events.on('tile:spawn', (payload) => {
+      expect(payload.position).toBeDefined();
+      spawns.push({
+        x: payload.position?.x ?? -1,
+        y: payload.position?.y ?? -1,
+        value: payload.value,
+      });
+    });
+
+    expect(engine.move(DIRECTION_RIGHT)).toBe(true);
+    expect(spawns).toHaveLength(1);
+    expect(valueAt(engine, spawns[0].x, spawns[0].y)).toBe(spawns[0].value);
+  });
+
+  it('emits move:after carrying what was applied', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const after: {
+      moved: boolean;
+      score: number;
+      over: boolean;
+      won: boolean;
+      terminated: boolean;
+    }[] = [];
+
+    engine.events.on('move:after', (payload) => {
+      after.push({
+        moved: payload.moved,
+        score: payload.score,
+        over: payload.over,
+        won: payload.won,
+        terminated: payload.terminated,
+      });
+    });
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(after).toEqual([
+      {
+        moved: true,
+        score: 4,
+        over: false,
+        won: false,
+        terminated: false,
+      },
+    ]);
+  });
+
+  it('emits stage:start with the seed and the reconciled board size', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const starts: { seed: string; boardSize: number }[] = [];
+
+    engine.events.on('stage:start', (payload) => {
+      starts.push({ seed: payload.seed, boardSize: payload.boardSize });
+    });
+
+    engine.setup(createEmptyBoard(3));
+
+    expect(starts).toEqual([{ seed: RUN_SEED, boardSize: 3 }]);
+  });
+
+  it('emits stage:end with the resolution it was given', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(null);
+
+    const ends: { stageIndex: number; cleared: boolean; score: number }[] = [];
+
+    engine.events.on('stage:end', (payload) => {
+      ends.push({
+        stageIndex: payload.stageIndex,
+        cleared: payload.cleared,
+        score: payload.score,
+      });
+    });
+    engine.endStage(false);
+
+    expect(ends).toEqual([{ stageIndex: 0, cleared: false, score: 0 }]);
+  });
+
+  it('carries the eight members of the commit payload', () => {
+    // Successor to L91-L97's `actuate(grid, {score, over, won, bestScore,
+    // terminated})`, extended with the stage and relic slices.
+    const engine = new Engine({ streams: streamsFor() });
+    const commits = captureCommits(engine);
+
+    engine.setup(null);
+
+    expect(commits).toHaveLength(1);
+    expect(Object.keys(commits[0]).sort()).toEqual([
+      'bestScore',
+      'board',
+      'over',
+      'relics',
+      'score',
+      'stage',
+      'terminated',
+      'won',
+    ]);
+  });
+
+  it('fills the stage and relic slices with the neutral defaults', () => {
+    // No provider is injected, so src/engine/types.ts's two frozen neutral
+    // constants stand in and the engine reaches no src/run or src/relics
+    // module to obtain them.
+    const engine = new Engine({ streams: streamsFor() });
+    const commits = captureCommits(engine);
+
+    engine.setup(null);
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0].stage.stageIndex).toBe(EMPTY_STAGE_CONTEXT.stageIndex);
+    expect(commits[0].stage.goal).toEqual(EMPTY_STAGE_CONTEXT.goal);
+    expect(commits[0].stage.goalProgress).toBe(
+      EMPTY_STAGE_CONTEXT.goalProgress,
+    );
+    expect(commits[0].relics).toEqual(EMPTY_RELIC_CONTEXT);
+  });
+
+  it('commits a complete payload with no provider and no port', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const commits = captureCommits(engine);
+
+    engine.setup(null);
+    engine.move(DIRECTION_LEFT);
+    engine.move(DIRECTION_UP);
+
+    for (const commit of commits) {
+      expect(commit.board.size).toBe(DEFAULT_BOARD_SIZE);
+      expect(typeof commit.score).toBe('number');
+      expect(commit.bestScore).toBe(0);
+      expect(typeof commit.over).toBe('boolean');
+      expect(typeof commit.won).toBe('boolean');
+      expect(typeof commit.terminated).toBe('boolean');
+      expect(commit.stage).toBeDefined();
+      expect(commit.relics).toEqual([]);
+    }
+  });
+
+  it('takes the stage and relic slices from injected providers', () => {
+    let stageIndex = 0;
+    const goal: StageGoal = { kind: 'highest-tile', target: 64 };
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageContext: () => ({ stageIndex, goal, goalProgress: 0.5 }),
+      relicContext: () => [{ id: 'first' }, { id: 'second', charges: 1 }],
+    });
+    const commits = captureCommits(engine);
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    stageIndex = 3;
+    engine.move(DIRECTION_LEFT);
+
+    expect(commits).toHaveLength(2);
+    expect(commits[0].stage.stageIndex).toBe(0);
+    expect(commits[1].stage.stageIndex).toBe(3);
+    expect(commits[1].stage.goal).toEqual(goal);
+    expect(commits[1].relics).toEqual([
+      { id: 'first' },
+      { id: 'second', charges: 1 },
+    ]);
+  });
+
+  it('commits a detached frozen board rather than the live lattice', () => {
+    // The logged deviation from L91's by-reference hand-off, which
+    // js/html_actuator.js L16-L22 read `grid.cells` straight out of: the
+    // emitter projects the board before any listener is reached, so a
+    // subscriber holds a snapshot and not the engine's own lattice.
+    const engine = new Engine({ streams: streamsFor() });
+    const commits = captureCommits(engine);
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0].board as unknown).not.toBe(engine.grid as unknown);
+    expect(commits[0].board.cells as unknown).not.toBe(
+      engine.grid.cells as unknown,
+    );
+    expect(Object.isFrozen(commits[0])).toBe(true);
+    expect(Object.isFrozen(commits[0].board)).toBe(true);
+    expect(Object.isFrozen(commits[0].board.cells)).toBe(true);
+  });
+
+  it('projects the members js/html_actuator.js L16-L22 read', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const commits = captureCommits(engine);
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    engine.move(DIRECTION_LEFT);
+
+    const board = commits[commits.length - 1].board;
+    const merged = board.cells[0][0];
+
+    expect(merged).not.toBeNull();
+    expect(merged?.x).toBe(0);
+    expect(merged?.y).toBe(0);
+    expect(merged?.value).toBe(4);
+    expect(merged?.previousPosition).not.toBeUndefined();
+    expect(merged?.mergedFrom).not.toBeUndefined();
+  });
+
+  it('leaves the live board untouched by a projection a listener holds', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const commits = captureCommits(engine);
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const held = commits[0].board;
+    const before = boardValues(engine);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(boardValues(engine)).not.toEqual(before);
+    expect(held.cells[0][0]?.value).toBe(2);
+    expect(held.cells[1][0]?.value).toBe(2);
+  });
+});
+
+/* ===== 10. keepPlaying() (js/game_manager.js L24-L27) ===== */
+
+describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
+  /**
+   * Builds an engine standing on an unacknowledged win.
+   *
+   * @returns The engine.
+   */
+  function createWonEngine(): Engine {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.won).toBe(true);
+
+    return engine;
+  }
+
+  it('separates the method from the flag L25 assigned over it', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const members = engine as unknown as Record<string, unknown>;
+
+    expect(typeof members.continuePlaying).toBe('function');
+    expect(typeof members.continuedPlay).toBe('boolean');
+    expect(engine.continuedPlay).toBe(false);
+  });
+
+  it('leaves no callable shadowing the flag after the method runs', () => {
+    const engine = createWonEngine();
+
+    engine.continuePlaying();
+
+    const members = engine as unknown as Record<string, unknown>;
+
+    expect(typeof members.continuedPlay).toBe('boolean');
+    expect(members.continuedPlay).toBe(true);
+    expect(typeof members.continuePlaying).toBe('function');
+  });
+
+  it('carries no member under the shadowed name at all', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    expect('keepPlaying' in (engine as unknown as object)).toBe(false);
+    expect(
+      (engine as unknown as Record<string, unknown>).keepPlaying,
+    ).toBeUndefined();
+  });
+
+  it('sets the flag and clears the terminal condition (L26)', () => {
+    const engine = createWonEngine();
+
+    expect(engine.isGameTerminated()).toBe(true);
+
+    engine.continuePlaying();
+
+    expect(engine.continuedPlay).toBe(true);
+    expect(engine.won).toBe(true);
+    expect(engine.isGameTerminated()).toBe(false);
+  });
+
+  it('commits once rather than calling a view, as L26 did', () => {
+    const engine = createWonEngine();
+    const commits = captureCommits(engine);
+
+    engine.continuePlaying();
+
+    expect(commits).toHaveLength(1);
+    expect(commits[0].won).toBe(true);
+    expect(commits[0].terminated).toBe(false);
+  });
+
+  it('keeps the frozen input event name of L11 reaching the method', () => {
+    // js/keyboard_input_manager.js L18-L32's bus dispatched by name, and L11
+    // subscribed under `keepPlaying`. The three names L9-L11 registered still
+    // reach the engine methods they reached then.
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+
+    const subscriptions: Record<string, (data?: unknown) => void> = {
+      move: (data) => {
+        engine.move(data as Direction);
+      },
+      restart: () => {
+        engine.restart();
+      },
+      keepPlaying: () => {
+        engine.continuePlaying();
+      },
+    };
+
+    expect(Object.keys(subscriptions)).toEqual([
+      'move',
+      'restart',
+      'keepPlaying',
+    ]);
+
+    subscriptions.move(DIRECTION_LEFT);
+
+    expect(engine.won).toBe(true);
+    expect(engine.isGameTerminated()).toBe(true);
+
+    subscriptions.keepPlaying();
+
+    expect(engine.continuedPlay).toBe(true);
+    expect(engine.isGameTerminated()).toBe(false);
+
+    subscriptions.restart();
+
+    expect(engine.won).toBe(false);
+    expect(engine.continuedPlay).toBe(false);
+  });
+});
+
+/* ===== 11. isGameTerminated() (js/game_manager.js L30-L32) ===== */
+
+describe('isGameTerminated() (js/game_manager.js L30-L32)', () => {
+  it('reports false on a fresh board', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(null);
+
+    expect(engine.isGameTerminated()).toBe(false);
+  });
+
+  it('reports true once the game is lost', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      config: withFixedSpawn(8),
+    });
+
+    engine.setup(createLosingBoard());
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.over).toBe(true);
+    expect(engine.isGameTerminated()).toBe(true);
+  });
+
+  it('reports true on a win that has not been acknowledged', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(
+      snapshotFromRows([
+        [2, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ], { won: true, keepPlaying: false }),
+    );
+
+    expect(engine.isGameTerminated()).toBe(true);
+  });
+
+  it('reports false on a win that has been acknowledged', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(
+      snapshotFromRows([
+        [2, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ], { won: true, keepPlaying: true }),
+    );
+
+    expect(engine.isGameTerminated()).toBe(false);
+  });
+
+  it('reports true on a loss even after the win was acknowledged', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(
+      snapshotFromRows([
+        [2, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ], { over: true, won: true, keepPlaying: true }),
+    );
+
+    expect(engine.isGameTerminated()).toBe(true);
+  });
+});
+
+/* ===== 12. serialize() (js/game_manager.js L102-L110) ===== */
+
+describe('serialize() (js/game_manager.js L102-L110)', () => {
+  it('returns exactly the five members L103-L109 wrote', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const snapshot = engine.serialize();
+
+    expect(Object.keys(snapshot)).toEqual([
+      'grid',
+      'score',
+      'over',
+      'won',
+      'keepPlaying',
+    ]);
+  });
+
+  it('keeps the persisted member name of L108 spelled keepPlaying', () => {
+    // The in-class flag is `continuedPlay`; the persisted name is frozen, so
+    // src/run/run-state.ts can wrap this shape verbatim and a snapshot
+    // written by the pre-migration game still loads.
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+    engine.move(DIRECTION_LEFT);
+    engine.continuePlaying();
+
+    const snapshot = engine.serialize();
+
+    expect(engine.continuedPlay).toBe(true);
+    expect(snapshot.keepPlaying).toBe(true);
+    expect(
+      Object.prototype.hasOwnProperty.call(snapshot, 'keepPlaying'),
+    ).toBe(true);
+    expect(
+      Object.prototype.hasOwnProperty.call(snapshot, 'continuedPlay'),
+    ).toBe(false);
+  });
+
+  it('projects the grid in the shape js/grid.js L102-L117 wrote', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const snapshot = engine.serialize();
+
+    expect(Object.keys(snapshot.grid)).toEqual(['size', 'cells']);
+    expect(snapshot.grid.size).toBe(DEFAULT_BOARD_SIZE);
+    expect(snapshot.grid.cells).toHaveLength(DEFAULT_BOARD_SIZE);
+    expect(snapshot.grid.cells[0][0]).toEqual({
+      position: { x: 0, y: 0 },
+      value: 2,
+    });
+    expect(snapshot.grid.cells[0][1]).toBeNull();
+  });
+
+  it('returns a fresh object on every call', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const first = engine.serialize();
+    const second = engine.serialize();
+
+    expect(second).not.toBe(first);
+    expect(second).toEqual(first);
+  });
+
+  it('round-trips its own output through setup()', () => {
+    const source = new Engine({ streams: streamsFor() });
+
+    source.setup(copyBoard(NEAR_LOSS_BOARD));
+    source.move(DIRECTION_LEFT);
+
+    const snapshot = source.serialize();
+    const restored = new Engine({ streams: streamsFor() });
+
+    restored.setup(snapshot);
+
+    expect(boardValues(restored)).toEqual(boardValues(source));
+    expect(restored.score).toBe(source.score);
+    expect(restored.over).toBe(source.over);
+    expect(restored.won).toBe(source.won);
+    expect(restored.continuedPlay).toBe(source.continuedPlay);
+  });
+
+  it('loads a snapshot written under the pre-migration name', () => {
+    const legacy: SerializedGameState = {
+      grid: {
+        size: 4,
+        cells: [
+          [{ position: { x: 0, y: 0 }, value: 1024 }, null, null, null],
+          [null, null, null, null],
+          [null, null, null, null],
+          [null, null, null, null],
+        ],
+      },
+      score: 20_140,
+      over: false,
+      won: true,
+      keepPlaying: true,
+    };
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(legacy);
+
+    expect(engine.score).toBe(20_140);
+    expect(engine.won).toBe(true);
+    expect(engine.continuedPlay).toBe(true);
+    expect(engine.isGameTerminated()).toBe(false);
+    expect(valueAt(engine, 0, 0)).toBe(1024);
+  });
+});
+
+/* ===== 13. restart() (js/game_manager.js L17-L21) ===== */
+
+describe('restart() (js/game_manager.js L17-L21)', () => {
+  it('clears the persisted snapshot before setting up (L18, L20)', () => {
+    const recording = createRecordingPort(
+      snapshotFromRows([
+        [1024, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ], { score: 4096, won: true, keepPlaying: true }),
+    );
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup();
+
+    expect(engine.score).toBe(4096);
+
+    recording.reset();
+    engine.restart();
+
+    expect(recording.calls[0]).toBe('clearGameState');
+    expect(recording.calls).toContain('getGameState');
+  });
+
+  it('resets to a fresh board, score and flags', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.won).toBe(true);
+    expect(engine.score).toBe(VANILLA_WIN_VALUE);
+
+    engine.restart();
+
+    expect(engine.score).toBe(0);
+    expect(engine.over).toBe(false);
+    expect(engine.won).toBe(false);
+    expect(engine.continuedPlay).toBe(false);
+    expect(tileCount(engine)).toBe(VANILLA_START_TILES);
+  });
+
+  it('clears the terminal condition rather than calling a view (L19)', () => {
+    // js/game_manager.js L19 called `actuator.continueGame()` to clear the
+    // win and loss message; the commit setup() ends with carries
+    // `terminated` as false instead, which is what a view clears on.
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.isGameTerminated()).toBe(true);
+
+    const commits = captureCommits(engine);
+
+    engine.restart();
+
+    expect(engine.isGameTerminated()).toBe(false);
+    expect(commits).toHaveLength(1);
+    expect(commits[0].terminated).toBe(false);
+    expect(commits[0].over).toBe(false);
+    expect(commits[0].won).toBe(false);
+    expect(commits[0].score).toBe(0);
+  });
+
+  it('restarts a lost game into a playable one', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      config: withFixedSpawn(8),
+    });
+
+    engine.setup(createLosingBoard());
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.over).toBe(true);
+
+    engine.restart();
+
+    expect(engine.over).toBe(false);
+    expect(engine.grid.size).toBe(2);
+    expect(tileCount(engine)).toBe(VANILLA_START_TILES);
+  });
+
+  it('restarts without a port that can clear anything', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    engine.move(DIRECTION_LEFT);
+
+    expect(() => {
+      engine.restart();
+    }).not.toThrow();
+    expect(engine.score).toBe(0);
+  });
+});
+
+/* ===== 14. actuate() -> commit() (js/game_manager.js L79-L99) ===== */
+
+describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
+  it('promotes the score only when it beats the stored one (L80-L82)', () => {
+    const recording = createRecordingPort(null, '3');
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    recording.reset();
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.score).toBe(4);
+    expect(recording.calls).toContain('setBestScore');
+    expect(recording.best).toBe('4');
+  });
+
+  it('writes nothing when the stored score already leads', () => {
+    const recording = createRecordingPort(null, '1024');
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    recording.reset();
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(recording.calls).not.toContain('setBestScore');
+    expect(recording.best).toBe('1024');
+  });
+
+  it('compares the stored string relationally, without coercing it', () => {
+    // js/local_storage_manager.js L43-L45 returned the raw stored string, and
+    // L80 compared against it relationally. `'1024' < 4` is false, so a
+    // pre-migration best score of 1024 outlives a score of 4, and a port
+    // reporting the same value as a number reaches the same verdict.
+    const stored = createRecordingPort(null, '1024');
+    const numeric = createRecordingPort(null, 0);
+
+    numeric.best = 1024 as unknown as string;
+
+    const fromString = new Engine({
+      streams: streamsFor(),
+      storage: stored.port,
+    });
+    const fromNumber = new Engine({
+      streams: streamsFor(),
+      storage: numeric.port,
+    });
+
+    fromString.setup(copyBoard(MERGE_PAIR_BOARD));
+    fromNumber.setup(copyBoard(MERGE_PAIR_BOARD));
+    stored.reset();
+    numeric.reset();
+    fromString.move(DIRECTION_LEFT);
+    fromNumber.move(DIRECTION_LEFT);
+
+    expect(stored.calls.includes('setBestScore')).toBe(
+      numeric.calls.includes('setBestScore'),
+    );
+    expect(stored.calls).not.toContain('setBestScore');
+  });
+
+  it('promotes past a stored string a numeric reading would also pass', () => {
+    const recording = createRecordingPort(null, '2');
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    recording.reset();
+    engine.move(DIRECTION_LEFT);
+
+    expect(recording.calls).toContain('setBestScore');
+    expect(recording.best).toBe('4');
+  });
+
+  it('reads the absent best score as the number 0 (L43-L45)', () => {
+    const recording = createRecordingPort(null, 0);
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+    const commits = captureCommits(engine);
+
+    engine.setup(null);
+
+    expect(recording.best).toBe(0);
+    expect(commits[0].bestScore).toBe(0);
+  });
+
+  it('re-reads the best score after the possible write (L95)', () => {
+    const recording = createRecordingPort(null, '3');
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const commits = captureCommits(engine);
+
+    recording.reset();
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+
+    const write = recording.calls.indexOf('setBestScore');
+    const reads = recording.calls.reduce<number[]>((found, call, index) => {
+      if (call === 'getBestScore') {
+        found.push(index);
+      }
+
+      return found;
+    }, []);
+
+    expect(write).toBeGreaterThanOrEqual(0);
+    expect(reads.some((index) => index < write)).toBe(true);
+    expect(reads.some((index) => index > write)).toBe(true);
+    expect(commits).toHaveLength(1);
+    expect(commits[0].bestScore).toBe('4');
+    expect(commits[0].bestScore).toBe(recording.best);
+  });
+
+  it('clears the persisted snapshot on a loss alone (L84-L89)', () => {
+    const recording = createRecordingPort();
+    const engine = new Engine({
+      streams: streamsFor(),
+      config: withFixedSpawn(8),
+      storage: recording.port,
+    });
+
+    engine.setup(createLosingBoard());
+    recording.reset();
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.over).toBe(true);
+    expect(recording.calls).toContain('clearGameState');
+    expect(recording.calls).not.toContain('setGameState');
+  });
+
+  it('saves the snapshot on a win, which L85 did not clear', () => {
+    const recording = createRecordingPort();
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+    recording.reset();
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.won).toBe(true);
+    expect(engine.over).toBe(false);
+    expect(recording.calls).toContain('setGameState');
+    expect(recording.calls).not.toContain('clearGameState');
+    expect(recording.written).toHaveLength(1);
+    expect(recording.written[0].won).toBe(true);
+    expect(recording.written[0].keepPlaying).toBe(false);
+  });
+
+  it('saves the snapshot on an ordinary turn', () => {
+    const recording = createRecordingPort();
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recording.port,
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    recording.reset();
+    engine.move(DIRECTION_LEFT);
+
+    expect(recording.written).toHaveLength(1);
+    expect(recording.written[0].score).toBe(4);
+    expect(recording.written[0].over).toBe(false);
+    expect(recording.written[0].grid.size).toBe(DEFAULT_BOARD_SIZE);
+  });
+
+  it('completes the turn when every port call raises', () => {
+    const failing: EngineStoragePort = {
+      getBestScore: (): string | 0 => {
+        throw new Error('quota');
+      },
+      setBestScore: (): unknown => {
+        throw new Error('quota');
+      },
+      getGameState: (): unknown => {
+        throw new Error('quota');
+      },
+      setGameState: (): unknown => {
+        throw new Error('quota');
+      },
+      clearGameState: (): unknown => {
+        throw new Error('quota');
+      },
+    };
+    const engine = new Engine({ streams: streamsFor(), storage: failing });
+
+    expect(() => {
+      engine.setup();
+    }).not.toThrow();
+
+    const commits = captureCommits(engine);
+
+    expect(() => {
+      play(engine, [DIRECTION_LEFT, DIRECTION_UP]);
+    }).not.toThrow();
+
+    for (const commit of commits) {
+      expect(commit.bestScore).toBe(0);
+    }
+  });
+});
+
+/* ===== 15. Vanilla parity from the five fixtures (gate V1) ===== */
+
+describe('vanilla parity from the five fixtures (gate V1)', () => {
+  /**
+   * Builds a set-up engine on one seed.
+   *
+   * @param board Snapshot to restore.
+   * @param seed Run seed. Defaults to `RUN_SEED`.
+   * @returns The engine, ready for its first move.
+   */
+  function engineOn(
+    board: SerializedGameState,
+    seed: string = RUN_SEED,
+  ): Engine {
+    const engine = new Engine({ streams: streamsFor(seed) });
+
+    engine.setup(board);
+
+    return engine;
+  }
+
+  it('leaves the empty board unchanged in every direction', () => {
+    const engine = engineOn(copyBoard(EMPTY_BOARD));
+    const commits = captureCommits(engine);
+
+    expect(tileCount(engine)).toBe(0);
+    expect(
+      play(engine, [
+        DIRECTION_UP,
+        DIRECTION_RIGHT,
+        DIRECTION_DOWN,
+        DIRECTION_LEFT,
+      ]),
+    ).toEqual([false, false, false, false]);
+    expect(tileCount(engine)).toBe(0);
+    expect(engine.score).toBe(0);
+    expect(engine.over).toBe(false);
+    expect(engine.won).toBe(false);
+    expect(commits).toEqual([]);
+  });
+
+  it('merges the merge-pair board once in each horizontal direction', () => {
+    const left = engineOn(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(left.move(DIRECTION_LEFT)).toBe(true);
+    expect(valueAt(left, 0, 0)).toBe(4);
+    expect(left.score).toBe(4);
+    expect(tileCount(left)).toBe(2);
+    expect(left.over).toBe(false);
+    expect(left.won).toBe(false);
+
+    const right = engineOn(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(right.move(DIRECTION_RIGHT)).toBe(true);
+    expect(valueAt(right, DEFAULT_BOARD_SIZE - 1, 0)).toBe(4);
+    expect(right.score).toBe(4);
+  });
+
+  it('leaves the merge-pair board unchanged moving up', () => {
+    const engine = engineOn(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(engine.move(DIRECTION_UP)).toBe(false);
+    expect(engine.score).toBe(0);
+    expect(tileCount(engine)).toBe(2);
+  });
+
+  it('slides the merge-pair board down without merging it', () => {
+    const engine = engineOn(copyBoard(MERGE_PAIR_BOARD));
+    const last = DEFAULT_BOARD_SIZE - 1;
+
+    expect(engine.move(DIRECTION_DOWN)).toBe(true);
+    expect(valueAt(engine, 0, last)).toBe(2);
+    expect(valueAt(engine, 1, last)).toBe(2);
+    expect(engine.score).toBe(0);
+    expect(tileCount(engine)).toBe(3);
+  });
+
+  it('refuses the blocked board in three directions and moves in one', () => {
+    for (const direction of [DIRECTION_LEFT, DIRECTION_UP, DIRECTION_DOWN]) {
+      const engine = engineOn(copyBoard(BLOCKED_BOARD));
+
+      expect(engine.move(direction)).toBe(false);
+      expect(engine.score).toBe(0);
+      expect(tileCount(engine)).toBe(4);
+    }
+
+    const engine = engineOn(copyBoard(BLOCKED_BOARD));
+    const last = DEFAULT_BOARD_SIZE - 1;
+
+    expect(engine.move(DIRECTION_RIGHT)).toBe(true);
+    expect(engine.score).toBe(0);
+    expect(tileCount(engine)).toBe(5);
+    expect(valueAt(engine, last, 0)).toBe(2);
+    expect(valueAt(engine, last, 1)).toBe(4);
+    expect(valueAt(engine, last, 2)).toBe(8);
+    expect(valueAt(engine, last, 3)).toBe(16);
+  });
+
+  it('wins on the near-win board and refuses to play on', () => {
+    const engine = engineOn(copyBoard(NEAR_WIN_BOARD));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(valueAt(engine, 0, 0)).toBe(VANILLA_WIN_VALUE);
+    expect(engine.score).toBe(VANILLA_WIN_VALUE);
+    expect(engine.won).toBe(true);
+    expect(engine.over).toBe(false);
+    expect(engine.isGameTerminated()).toBe(true);
+    expect(engine.move(DIRECTION_DOWN)).toBe(false);
+  });
+
+  it('merges the one pair of the near-loss board and stays playable', () => {
+    const engine = engineOn(copyBoard(NEAR_LOSS_BOARD));
+    const full = DEFAULT_BOARD_SIZE * DEFAULT_BOARD_SIZE;
+
+    expect(tileCount(engine)).toBe(full);
+    expect(engine.move(DIRECTION_UP)).toBe(false);
+    expect(engine.move(DIRECTION_DOWN)).toBe(false);
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.score).toBe(8);
+    expect(tileCount(engine)).toBe(full);
+    expect(engine.over).toBe(false);
+    expect(engine.won).toBe(false);
+  });
+
+  it('reaches the same state from one seed and one move list', () => {
+    // The unit-level echo of gate V2. The seeded regression gate itself is
+    // tests/snapshot, which holds the recorded sequences.
+    const moves: readonly Direction[] = [
+      DIRECTION_LEFT,
+      DIRECTION_DOWN,
+      DIRECTION_RIGHT,
+      DIRECTION_UP,
+      DIRECTION_LEFT,
+      DIRECTION_DOWN,
+      DIRECTION_RIGHT,
+      DIRECTION_UP,
+    ];
+    const first = new Engine({ streams: streamsFor(RUN_SEED) });
+    const second = new Engine({ streams: streamsFor(RUN_SEED) });
+
+    first.setup(null);
+    second.setup(null);
+
+    expect(play(second, moves)).toEqual(play(first, moves));
+    expect(boardValues(second)).toEqual(boardValues(first));
+    expect(second.score).toBe(first.score);
+    expect(second.over).toBe(first.over);
+    expect(second.won).toBe(first.won);
+    expect(second.continuedPlay).toBe(first.continuedPlay);
+    expect(second.serialize()).toEqual(first.serialize());
+  });
+
+  it('reaches the same state from each fixture on one seed', () => {
+    const moves: readonly Direction[] = [
+      DIRECTION_LEFT,
+      DIRECTION_UP,
+      DIRECTION_RIGHT,
+      DIRECTION_DOWN,
+    ];
+    const fixtures: readonly SerializedGameState[] = [
+      EMPTY_BOARD,
+      MERGE_PAIR_BOARD,
+      BLOCKED_BOARD,
+      NEAR_WIN_BOARD,
+      NEAR_LOSS_BOARD,
+    ];
+
+    for (const fixture of fixtures) {
+      const first = engineOn(copyBoard(fixture));
+      const second = engineOn(copyBoard(fixture));
+
+      expect(play(second, moves)).toEqual(play(first, moves));
+      expect(second.serialize()).toEqual(first.serialize());
+    }
+  });
+
+  it('advances the substream cursors identically for one seed', () => {
+    const moves: readonly Direction[] = [
+      DIRECTION_LEFT,
+      DIRECTION_DOWN,
+      DIRECTION_RIGHT,
+    ];
+    const first = new Engine({ streams: streamsFor(RUN_SEED) });
+    const second = new Engine({ streams: streamsFor(RUN_SEED) });
+
+    first.setup(null);
+    second.setup(null);
+    play(first, moves);
+    play(second, moves);
+
+    expect(second.streams.snapshotCursors()).toEqual(
+      first.streams.snapshotCursors(),
+    );
+  });
+
+  it('reaches a different state from a different seed', () => {
+    const moves: readonly Direction[] = [
+      DIRECTION_LEFT,
+      DIRECTION_DOWN,
+      DIRECTION_RIGHT,
+      DIRECTION_UP,
+    ];
+    const first = new Engine({ streams: streamsFor(RUN_SEED) });
+    const second = new Engine({ streams: streamsFor(OTHER_SEED) });
+
+    first.setup(null);
+    second.setup(null);
+    play(first, moves);
+    play(second, moves);
+
+    expect(boardValues(second)).not.toEqual(boardValues(first));
+  });
+
+  it('plays a long run without throwing or corrupting the board', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(null);
+
+    const cycle: readonly Direction[] = [
+      DIRECTION_LEFT,
+      DIRECTION_UP,
+      DIRECTION_RIGHT,
+      DIRECTION_DOWN,
+    ];
+
+    expect(() => {
+      for (let turn = 0; turn < 200; turn += 1) {
+        engine.move(cycle[turn % cycle.length]);
+      }
+    }).not.toThrow();
+
+    const size = engine.grid.size;
+
+    expect(size).toBe(DEFAULT_BOARD_SIZE);
+    expect(engine.grid.cells).toHaveLength(size);
+
+    engine.grid.eachCell((x, y, tile) => {
+      if (tile === null) {
+        return;
+      }
+
+      expect(tile.x).toBe(x);
+      expect(tile.y).toBe(y);
+      expect(tile.value).toBeGreaterThan(0);
+    });
+
+    expect(engine.score).toBeGreaterThan(0);
+    expect(tileCount(engine)).toBeLessThanOrEqual(size * size);
+  });
+});

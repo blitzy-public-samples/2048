@@ -6,12 +6,13 @@
 //   draw without replacement over the relic pool, taken from the `relic-draw`
 //   and `rarity-weight` substreams.
 //
-//   Two of those three parts have landed and are recorded here: the substreams
-//   themselves, and the rarity table and tier order in
-//   src/relics/relic-types.ts. The third — the relic catalogue and
-//   src/relics/relic-draw.ts — has not landed, so NO RELIC IDENTIFIER APPEARS
-//   IN ANY SNAPSHOT BELOW. This file does not stand in for that module and does
-//   not simulate it.
+//   Recorded here are the substreams themselves and the rarity table and tier
+//   order of src/relics/relic-types.ts. NO RELIC IDENTIFIER APPEARS IN ANY
+//   SNAPSHOT BELOW, and that is deliberate rather than provisional: the relic
+//   catalogue and src/relics/relic-draw.ts have landed, and this file still
+//   records the draw sequence alone so that adding, removing or reordering a
+//   relic cannot invalidate a recorded run. This file does not stand in for
+//   that module and does not simulate it.
 //
 //   What it does instead is pin the sequence of draws a rarity-weighted 1-of-3
 //   selection without replacement consumes, at exactly the call sites such a

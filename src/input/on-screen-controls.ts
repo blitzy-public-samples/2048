@@ -248,6 +248,18 @@ export interface OnScreenControlsHandle {
   isReducedMotion(): boolean;
 
   /**
+   * Holds an effective reduced-motion value, overriding both the reflected
+   * attribute and the media query, and reapplies it.
+   *
+   * @param reduced The effective value, or `null` to resolve it from the
+   *   reflected attribute and then the media query again.
+   */
+  setReducedMotion(reduced: boolean | null): void;
+
+  /** The effective reduced-motion value now in force. */
+  isReducedMotion(): boolean;
+
+  /**
    * Re-reads the keymap, the context and the reduced-motion preference from
    * their configured sources and reapplies all three.
    */

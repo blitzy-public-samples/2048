@@ -1,72 +1,99 @@
-// The 2.5D board renderer: the replacement for js/html_actuator.js.
+// The 2.5D board renderer. AAP R1 and R7. Supersedes js/html_actuator.js.
 //
-// AAP R1 and R7. The vanilla actuator was PUSHED to — js/game_manager.js L91
-// held a reference to it and called `actuate(grid, metadata)` at the end of
-// every turn. This module inverts that: it SUBSCRIBES to the engine's events
-// and the engine holds no reference to it, which is the whole point of the
-// engine/renderer split and the reason this file exists rather than the
-// actuator being patched to host 3D.
+// Called by nobody: this module registers listeners on the engine's event
+// emitter and is entered only from those listeners and from the frame callback
+// src/main.ts registers with src/render/render-loop.ts. Figures 1 and 2 of
+// docs/architecture/ARCHITECTURE.md are the two states. Every choice named
+// below is logged in docs/DECISION_LOG.md.
 //
-// WHAT IT OWNS, AND WHAT IT DOES NOT
-//   It owns the board and nothing else. The score outlets, the rising score
-//   delta and the terminal overlay belong to src/ui/screens/hud.ts, which
-//   subscribes to the same `state:commit` independently; selecting this
-//   renderer instead of the number-only one therefore changes what draws the
-//   board and nothing more.
+// PROVENANCE MAP — every member of js/html_actuator.js to its target, no
+// gaps in either direction. Rows TR-THREE-01 through TR-THREE-16 of
+// docs/TRACEABILITY_MATRIX.md, in that order.
+//   01 actuate            L10-L36   `render()` queues, `frame()` draws
+//   02 the x-major walk   L16-L22   `planCommit()`
+//   03 clearContainer     L43-L47   `clearLiveTiles()`
+//   04 addTile            L49-L91   `planTile()` and `addTile()`
+//   05 previousPosition   L54       `PlannedTile.from`
+//   06 super threshold    L60       `resolveTileTheme().isSuper`
+//   07 nested-frame move  L67-L72   `createMoveTween` of ./animations
+//   08 the mergedFrom     L73-L80   `PlannedTile.merged`, `addTile(_, true)`
+//                                   recursion
+//   09 the tile-new       L82       `createSpawnTween` of ./animations
+//                                   branch
+//   10 applyClasses       L93-L95   material and mesh acquisition; no class
+//                                   attribute is written and the classList
+//                                   workaround is not carried forward
+//   11 normalizePosition  L97-L99   `cellToWorldIn` of ./tile-mesh-factory
+//   12 positionClass      L101-L104 `cellToWorldIn` of ./tile-mesh-factory
+//   13 updateScore        L106-L121 src/ui/components/score-panel.ts. NOT
+//                                   here: this module carries the difference
+//                                   as `PaintPlan.scoreDelta` into
+//                                   `readRenderedBoard()` and writes no
+//                                   score outlet and no rising-delta node
+//   14 updateBestScore    L123-L125 src/ui/screens/hud.ts. Not here
+//   15 message L127-L133, clearMessage L135-L139
+//                                   src/ui/screens/hud.ts. Not here
+//   16 continueGame       L39-L41   src/ui/screens/hud.ts. Not here
 //
-//   It also owns the OUTPUT SURFACE: the canvas host is looked up and guarded
-//   here, so the `WebGLRenderer`, its pixel ratio, its clear colour, its
-//   drawing-buffer size and its context-loss listeners are held here as well.
+// Target-only rows, which have no vanilla source: TR-THREE-17 the hook-free
+// subscription surface, TR-THREE-18 the WebGL surface and its context-loss
+// handling, TR-THREE-19 the parallel accessibility board, TR-THREE-20 the
+// stage lighting and the stage-clear punch.
+//
+// SURFACES THIS MODULE HOLDS
+//   The canvas, the `WebGLRenderer` built on it, its pixel ratio, its clear
+//   colour, its drawing-buffer size and its context-loss listeners.
 //   src/render/scene.ts builds the scene graph, the camera and the lighting rig
 //   and constructs no renderer.
 //
-// THE PARALLEL ACCESSIBILITY BOARD
-//   `#board-canvas` carries `aria-hidden="true"` and is one opaque node to
-//   assistive technology: a screen reader perceives the entire 2.5D board as a
-//   single block. This renderer therefore MOUNTS and updates the parallel
-//   `role="grid"` layer beside the canvas rather than claiming it, which is the
-//   mirror image of what src/render/number-only-renderer.ts does — that
-//   renderer's own lattice carries the semantics, so it takes the parallel
-//   layer down. Exactly one of the two lattices is exposed at a time, and each
-//   renderer hands the surface over through the layer's own api.
+//   The canvas carries `aria-hidden="true"`; the parallel `role="grid"` layer
+//   beside it carries the board's semantics and is mounted through that layer's
+//   own api. src/render/number-only-renderer.ts takes the same layer down while
+//   its own lattice draws, so exactly one of the two is exposed at a time.
 //
-// HOW A TURN IS DRAWN
-//   `state:commit` carries the live board, and every animation the vanilla
-//   actuator ran is derivable from it: `previousPosition` says a tile moved,
-//   `mergedFrom` says it is the product of a merge and carries the two tiles
-//   that produced it, and a tile with neither is a spawn. The plan is built
-//   INSIDE the emission, because the next turn mutates the same objects, and
-//   applied on the next frame. `tile:merge` is subscribed to as well, for the
-//   particle burst and the camera punch: it fires once per merge with the
-//   `resultValue` an `onMerge` relic handler may have transformed, which the
-//   commit's board cannot report per merge.
+// EVENTS SUBSCRIBED — AAP Contract 1, six of the seven names
+//   state:commit  the reconciliation authority: what exists, at what value, in
+//                 which cell. Planned synchronously; drawn on the next frame
+//   tile:merge    once per merge, carrying the `resultValue` an `onMerge`
+//                 handler resolved: one pop, one burst, one punch each
+//   tile:spawn    the resolved cell, absent for a spawn that inserted nothing
+//   move:after    the cells a move repositioned, and their origins
+//   stage:start   `boardSize` to re-frame for, `stageIndex` to light for
+//   stage:end     the stage-clear punch
+//   move:before   NOT subscribed. src/engine/engine-events.ts reports the
+//                 engine's decision there rather than taking it, and a
+//                 withdrawn move changes no state
 //
-// MOTION PARITY
-//   The tweens are the stylesheet's own keyframes over the stylesheet's own
-//   timing, built by src/render/animations.ts: a move is `100ms ease-in-out`, a
-//   spawn is `appear` over `200ms ease` after a `100ms` hold at scale zero, and
-//   a merge is `pop` over the same cadence overshooting to 1.2. The 2D game
-//   therefore feels the same rendered as blocks.
+//   Payloads are frozen snapshots taken at emission, per the `TileProjection`
+//   and `BoardProjection` contract of src/engine/engine-events.ts, and are
+//   planned synchronously all the same.
 //
-//   The 100ms hold at scale zero is load-bearing rather than decorative: the
-//   two tiles a merge consumed finish their slide exactly as the merged block
-//   begins to grow, so the three blocks never occupy one cell at full size and
-//   no depth test has to break the tie.
+// TIMING TAKEN FROM style/main.scss THROUGH ./animations
+//   move 100ms ease-in-out; spawn `appear` 200ms ease after a 100ms hold at
+//   scale zero; merge `pop` 200ms ease to 1.2 after the same 100ms hold. The
+//   two blocks a merge consumed hold for that same 100ms and leave on the frame
+//   the merged block starts to grow.
 //
-// REDUCED MOTION
-//   Every animating member follows the effective preference of
-//   src/render/webgl-support.ts on its own: a tween built while motion is to be
-//   reduced starts complete, a particle burst is refused outright, and a camera
-//   effect is suppressed. Nothing here re-implements that decision.
-//
-// This module reads no storage and consumes no randomness.
+// Reduced motion is resolved by each animating member against
+// src/render/webgl-support.ts and is not re-decided here. This module reads no
+// storage and consumes no randomness.
 
 import { Color, SRGBColorSpace, WebGLRenderer } from 'three';
 import type { Vector3 } from 'three';
 
 import { isSupportedBoardSize } from '../config/default-config';
-import type { EngineEvents, EngineEventSubscription } from '../engine/engine-events';
-import type { StateCommitEvent, TileMergeEvent } from '../engine/engine-events';
+import type {
+  EngineEvents,
+  EngineEventSubscription,
+} from '../engine/engine-events';
+import type {
+  MoveAfterEvent,
+  StageEndEvent,
+  StageStartEvent,
+  StateCommitEvent,
+  TileMergeEvent,
+  TileSpawnEvent,
+} from '../engine/engine-events';
 import type { RulesConfig } from '../config/rules-config';
 import { DEFAULT_BOARD_SIZE } from '../config/default-config';
 import { mobileThreshold } from '../theme/tokens';
@@ -107,7 +134,11 @@ import {
   createTileMeshFactory,
   resolveBoardGeometry,
 } from './tile-mesh-factory';
-import type { BoardMeshes, TileMesh, TileMeshFactory } from './tile-mesh-factory';
+import type {
+  BoardMeshes,
+  TileMesh,
+  TileMeshFactory,
+} from './tile-mesh-factory';
 import type { RenderedBoard, RenderedCell } from './number-only-renderer';
 import { numberOnlyRendererCopy } from './number-only-renderer';
 import type { RenderDetail, RenderReporter } from './webgl-support';
@@ -163,6 +194,24 @@ const CONTEXT_FAILED_METRIC = 'render.three.context.failed';
 /** Counter raised once per merge recorded for its burst and punch. */
 const MERGE_METRIC = 'render.three.merge';
 
+/** Counter raised once per spawn recorded for its `appear` tween. */
+const SPAWN_METRIC = 'render.three.spawn';
+
+/** Counter raised once per spawn that resolved to no cell. */
+const SPAWN_SUPPRESSED_METRIC = 'render.three.spawn.suppressed';
+
+/** Counter raised once per resolved move whose origins were recorded. */
+const MOVE_METRIC = 'render.three.move';
+
+/** Counter raised once per stage the board was re-framed and lit for. */
+const STAGE_START_METRIC = 'render.three.stage.start';
+
+/** Counter raised once per stage index the lighting rig was tuned for. */
+const STAGE_LIGHTING_METRIC = 'render.three.stage.lighting';
+
+/** Counter raised once per stage resolution presented. */
+const STAGE_END_METRIC = 'render.three.stage.end';
+
 /* ==========================================================================
  * 2. The drawing buffer
  * ========================================================================== */
@@ -170,10 +219,9 @@ const MERGE_METRIC = 'render.three.merge';
 /**
  * Alpha the drawing buffer is cleared to.
  *
- * Zero: the canvas replaces z-index layers 1 and 2 of style/main.scss —
- * `.grid-container` at L254 and `.tile-container` at L288 — which were drawn
- * inside `.game-container`, and its own background at style/main.scss L188 is
- * what shows through every pixel the tilted board does not cover.
+ * Zero. The canvas stands in for the two board layers style/main.scss L254 and
+ * L288 drew inside `.game-container`, and that container's own background at
+ * style/main.scss L188 shows through every pixel the tilted board leaves.
  */
 const CLEAR_ALPHA = 0;
 
@@ -404,6 +452,30 @@ export interface ThreeRendererStats {
 
   /** Merges awaiting the frame that starts their animation. */
   readonly pendingMerges: number;
+
+  /** Spawned cells awaiting the plan that draws them. */
+  readonly pendingSpawns: number;
+
+  /** Move origins awaiting the plan that draws them. */
+  readonly pendingMoves: number;
+
+  /** `tile:spawn` emissions that carried a cell. */
+  readonly spawnsAnnounced: number;
+
+  /** `tile:spawn` emissions that inserted nothing. */
+  readonly spawnsSuppressed: number;
+
+  /** `move:after` emissions whose origins were recorded. */
+  readonly movesAnnounced: number;
+
+  /** `stage:start` emissions the board was re-framed and lit for. */
+  readonly stagesStarted: number;
+
+  /** Stage index the lighting rig stands tuned for, or `null` before any. */
+  readonly litStageIndex: number | null;
+
+  /** `stage:end` emissions presented. */
+  readonly stagesEnded: number;
   readonly refusedSizes: number;
   readonly contextLost: boolean;
   readonly disposed: boolean;
@@ -434,7 +506,16 @@ export interface ThreeRenderer {
   /** Releases the context, the meshes and the parallel layer. */
   unmount(): void;
 
-  /** Subscribes to the engine. */
+  /**
+   * Registers this renderer's listeners on one emitter.
+   *
+   * Six of the seven names of AAP Contract 1: `stage:start`, `tile:merge`,
+   * `tile:spawn`, `move:after`, `stage:end` and `state:commit`. `move:before`
+   * is not among them.
+   *
+   * @param events The engine's emitter.
+   * @returns A handle releasing every listener taken. Idempotent.
+   */
   subscribe(events: EngineEvents): EngineEventSubscription;
 
   /** Queues one commit. Called by the subscription; public for tests. */
@@ -537,10 +618,11 @@ function readCell(board: CommitBoard, x: number, y: number): CommitTile | null {
 }
 
 /**
- * Projects one live tile, and the pair it was merged from, into plain data.
+ * Projects one tile of a commit, and the pair it was merged from, into the
+ * plain data one paint reads.
  *
- * `previousPosition` and `mergedFrom` are read here, inside the emission that
- * carried the tile, because the next turn mutates the same objects.
+ * `previousPosition` and `mergedFrom` are read inside the emission that carried
+ * the tile, which is where src/engine/engine-events.ts took the projection.
  */
 function planTile(tile: CommitTile): PlannedTile {
   const previous = tile.previousPosition;
@@ -551,10 +633,10 @@ function planTile(tile: CommitTile): PlannedTile {
     y: tile.y,
     from: previous === null ? null : { x: previous.x, y: previous.y },
 
-    // js/html_actuator.js L60-L65 drew the two source tiles by the same path it
-    // drew every other tile, so the pair is planned the same way. Each source
-    // carries its own `previousPosition` and the merge cell as its position, so
-    // each slides from where it started to where the merge happened.
+    // js/html_actuator.js L78-L80 passed each member of `mergedFrom` back
+    // through `addTile`, so the pair is planned by this same function. Each
+    // source carries its own `previousPosition` and the merge cell as its
+    // position, so each slides from where it started to where the merge landed.
     merged:
       previous === null && tile.mergedFrom !== null
         ? tile.mergedFrom.map(planTile)
@@ -674,6 +756,21 @@ function asCanvas(value: Element | null | undefined): HTMLCanvasElement | null {
     : null;
 }
 
+/**
+ * The attribute a canvas is marked with, and the value it carries.
+ *
+ * index.html ships `#board-canvas` already carrying it; `mount()` asserts it on
+ * whatever canvas it was handed so the invariant holds for a canvas built by a
+ * caller as well.
+ */
+const CANVAS_ARIA_ATTRIBUTE = 'aria-hidden';
+const CANVAS_ARIA_VALUE = 'true';
+
+/** A cell coordinate pair as one key, for the pending-animation lookups. */
+function cellKey(x: number, y: number): string {
+  return `${x}:${y}`;
+}
+
 /** The measured size of one element, or `null` where it has none yet. */
 function measureElement(
   element: Element,
@@ -764,8 +861,31 @@ export function createThreeRenderer(
 
   const live: LiveTile[] = [];
   const pendingMerges: PendingMerge[] = [];
+
+  /**
+   * Cells `tile:spawn` resolved this turn, keyed by `cellKey`.
+   *
+   * Consumed by `addTile`: a planned tile standing in one of these cells takes
+   * the spawn tween whatever its projected origin says.
+   */
+  const pendingSpawns = new Set<string>();
+
+  /**
+   * Origins `move:after` reported this turn, keyed by destination `cellKey`.
+   *
+   * Consumed by `addTile` as the move tween's origin where the commit's own
+   * projection carries none.
+   */
+  const pendingMoveOrigins = new Map<string, PlannedPosition>();
+
   const subscriptions: EngineEventSubscription[] = [];
   const worldScratch: Vector3[] = [];
+
+  /**
+   * The `aria-hidden` state the canvas was found in, or `undefined` while no
+   * canvas is held. Restored by `unmount()`.
+   */
+  let canvasAriaHidden: string | null | undefined;
 
   let queued: PaintPlan | null = null;
 
@@ -777,6 +897,12 @@ export function createThreeRenderer(
    */
   let lastPlan: PaintPlan | null = null;
   let rendered: RenderedBoard | null = null;
+
+  /**
+   * Stage index the lighting rig stands tuned for, or `null` before the first
+   * tuning.
+   */
+  let litStageIndex: number | null = null;
   let lastScore = 0;
   let lastFrameAt: number | null = null;
   let boardSize = 0;
@@ -784,6 +910,11 @@ export function createThreeRenderer(
   let paints = 0;
   let boardsBuilt = 0;
   let refusedSizes = 0;
+  let spawnsAnnounced = 0;
+  let spawnsSuppressed = 0;
+  let movesAnnounced = 0;
+  let stagesStarted = 0;
+  let stagesEnded = 0;
   let mounted = false;
   let disposed = false;
 
@@ -899,7 +1030,8 @@ export function createThreeRenderer(
     }
 
     // The content box of `.game-container`, which is the box the canvas
-    // occupies, is the fallback a canvas the layout has not measured yet takes —
+    // occupies, is the fallback a canvas the layout has not measured yet
+    // takes —
     // which is every canvas under a document with no layout engine.
     const measured = measureElement(surface);
     const unmeasured = geometry.fieldWidth - geometry.gridSpacing * 2;
@@ -988,6 +1120,66 @@ export function createThreeRenderer(
 
       return false;
     }
+  };
+
+  /* ------------------------------------------------------------------
+   * The canvas's accessibility marking
+   * --------------------------------------------------------------- */
+
+  /**
+   * Marks the canvas hidden from assistive technology, recording the state it
+   * was found in.
+   *
+   * @param surface The canvas being mounted.
+   */
+  const markCanvasAria = (surface: Element): void => {
+    if (typeof surface.getAttribute !== 'function') {
+      canvasAriaHidden = undefined;
+
+      return;
+    }
+
+    canvasAriaHidden = surface.getAttribute(CANVAS_ARIA_ATTRIBUTE);
+
+    if (canvasAriaHidden === CANVAS_ARIA_VALUE) {
+      return;
+    }
+
+    if (typeof surface.setAttribute !== 'function') {
+      return;
+    }
+
+    surface.setAttribute(CANVAS_ARIA_ATTRIBUTE, CANVAS_ARIA_VALUE);
+
+    reporter.onDiagnostic({
+      level: 'info',
+      source: DIAGNOSTIC_SOURCE,
+      message: 'The canvas was marked hidden from assistive technology.',
+      detail: Object.freeze({ found: canvasAriaHidden }),
+    });
+  };
+
+  /**
+   * Restores the `aria-hidden` state `markCanvasAria` recorded.
+   *
+   * @param surface The canvas being released, or `null` where none is held.
+   */
+  const restoreCanvasAria = (surface: Element | null): void => {
+    const found = canvasAriaHidden;
+
+    canvasAriaHidden = undefined;
+
+    if (surface === null || found === undefined) {
+      return;
+    }
+
+    if (found === null) {
+      surface.removeAttribute?.(CANVAS_ARIA_ATTRIBUTE);
+
+      return;
+    }
+
+    surface.setAttribute?.(CANVAS_ARIA_ATTRIBUTE, found);
   };
 
   /* ------------------------------------------------------------------
@@ -1132,11 +1324,10 @@ export function createThreeRenderer(
     tile.mesh.position.copy(target);
 
     // The spawn keyframes of style/main.scss animate `opacity` alongside
-    // `transform: scale()`. Only the scale is applied here: the materials are
-    // shared per value by src/render/tile-materials.ts — which is what keeps one
-    // material per value rather than one per block — so a per-block opacity
-    // would need a clone per tile. Scale zero already draws nothing, so the
-    // keyframe's visual outcome is reproduced without the clone.
+    // `transform: scale()`. Only the scale is applied here: src/render/
+    // tile-materials.ts shares one material per value across every block of
+    // that value, so a per-block opacity would need a clone per tile. Scale
+    // zero draws nothing. DL-THREE-04.
     const spawn = tile.spawn;
     const merge = tile.merge;
 
@@ -1207,13 +1398,35 @@ export function createThreeRenderer(
 
     const group = tweens;
     const target: PlannedPosition = { x: planned.x, y: planned.y };
-    const from = planned.from;
+    const key = cellKey(planned.x, planned.y);
     const isMerged = planned.merged.length > 0;
-    const isNew = from === null && !isMerged;
+
+    // js/html_actuator.js L82 took a tile carrying neither a previous position
+    // nor a merge pair for a new one. `tile:spawn` names the cell the engine
+    // resolved a spawn into, and a tile standing in one of those cells is new
+    // whatever its projected origin says. A merge source is never new.
+    const isNew =
+      !isMerged &&
+      !retireOnArrival &&
+      (planned.from === null || pendingSpawns.has(key));
+
+    // Where a tile came from, in three cases and in this order:
+    //   a merge source keeps its projected origin, and takes its own cell where
+    //   the projection reports it did not move, so the move tween below always
+    //   exists to hold it on screen;
+    //   a new tile has no origin;
+    //   every other tile takes its projected origin, or the one `move:after`
+    //   reported for its destination cell where the projection carries none.
+    const from: PlannedPosition | null = retireOnArrival
+      ? planned.from ?? target
+      : isNew
+        ? null
+        : planned.from ?? pendingMoveOrigins.get(key) ?? null;
 
     // A merge source ALWAYS takes a move tween, even where it did not move.
-    // js/html_actuator.js kept the stationary source painted beneath the merged
-    // tile — `.tile-inner` at z-index 10 under `.tile-merged .tile-inner` at 20
+    // js/html_actuator.js L73-L80 left the stationary source painted beneath
+    // the merged tile — `.tile-inner` at z-index 10 under
+    // `.tile-merged .tile-inner` at 20
     // — for the 100ms the merged tile is held at scale zero, and the tween is
     // what holds it on screen for exactly that interval here. Its duration and
     // the merged block's delay are both `$transition-speed`, so the source
@@ -1278,13 +1491,64 @@ export function createThreeRenderer(
     pendingMerges.length = 0;
   };
 
+  /**
+   * Tunes the lighting rig for one stage index, at most once per index.
+   *
+   * Two callers reach it: `onStageStart`, and `render` off the `stage` slice
+   * every commit carries. src/engine/engine.ts emits `stage:start` from
+   * `setup()` alone, so a run whose board carries across a stage boundary
+   * announces the boundary in the commit's slice and nowhere else.
+   * DL-THREE-01.
+   *
+   * @param stageIndex Zero-based stage index. A non-finite index is ignored;
+   *   src/render/scene.ts confines and reports the rest.
+   * @returns Whether the rig was asked to re-tune.
+   */
+  const lightForStage = (stageIndex: number): boolean => {
+    if (!Number.isFinite(stageIndex) || stageIndex === litStageIndex) {
+      return false;
+    }
+
+    const activeScene = scene;
+
+    if (activeScene === null) {
+      return false;
+    }
+
+    litStageIndex = stageIndex;
+
+    // The rig's own tuning of the key light's share and warmth, which is the
+    // evolving lighting theme of AAP R7.
+    activeScene.applyStageTheme(stageIndex);
+
+    reporter.onCount({
+      name: STAGE_LIGHTING_METRIC,
+      value: 1,
+      detail: Object.freeze({ stageIndex }),
+    });
+
+    return true;
+  };
+
+  /**
+   * Drops every animation trigger the granular events armed.
+   *
+   * Called once a plan has been drawn, and once a commit has been refused for
+   * its board size.
+   */
+  const clearPendingTriggers = (): void => {
+    pendingMerges.length = 0;
+    pendingSpawns.clear();
+    pendingMoveOrigins.clear();
+  };
+
   /** Projects one plan into the shape a consumer reads the board through. */
   const projectRendered = (plan: PaintPlan): RenderedBoard => {
     const themeInForce = materials?.getTheme() ?? getActiveTheme();
     const byCell = new Map<string, PlannedTile>();
 
     for (const tile of plan.tiles) {
-      byCell.set(`${tile.x}:${tile.y}`, tile);
+      byCell.set(cellKey(tile.x, tile.y), tile);
     }
 
     const cells: RenderedCell[] = [];
@@ -1292,7 +1556,7 @@ export function createThreeRenderer(
     // Row-major, which is the order the parallel layer's cells are built in.
     for (let y = 0; y < plan.size; y += 1) {
       for (let x = 0; x < plan.size; x += 1) {
-        const tile = byCell.get(`${x}:${y}`) ?? null;
+        const tile = byCell.get(cellKey(x, y)) ?? null;
         const row = y + 1;
         const column = x + 1;
 
@@ -1319,6 +1583,11 @@ export function createThreeRenderer(
         let fill: string | null = null;
         let numeralColor: string | null = null;
 
+        // js/html_actuator.js L60 compared against the literal 2048; the ramp
+        // of src/theme/tile-ramp.ts carries that comparison as `isSuper`, and a
+        // configured win value replaces it where one was supplied.
+        let rampIsSuper = false;
+
         try {
           // The same call src/render/number-only-renderer.ts projects through,
           // so the two renderers describe one tile identically and a consumer
@@ -1327,6 +1596,7 @@ export function createThreeRenderer(
 
           fill = resolved.colorHex;
           numeralColor = resolved.numeralColor;
+          rampIsSuper = resolved.isSuper;
         } catch {
           // `resolveTileTheme` rejects a value that is not a power of the
           // ramp's base, which is what `null` states for both fields.
@@ -1341,7 +1611,9 @@ export function createThreeRenderer(
             value: tile.value,
             label: copy.cellLabel(row, column, tile.value),
             isSuper:
-              superThreshold !== undefined && tile.value > superThreshold,
+              superThreshold === undefined
+                ? rampIsSuper
+                : tile.value > superThreshold,
             isMerged: tile.merged.length > 0,
             isNew: tile.from === null && tile.merged.length === 0,
             moved: tile.from !== null,
@@ -1392,9 +1664,10 @@ export function createThreeRenderer(
     clearLiveTiles();
 
     for (const planned of plan.tiles) {
-      // js/html_actuator.js L60-L65 drew the two source tiles first and the
-      // merged tile over them; the order is kept so a depth tie, if the tweens
-      // ever produced one, resolves the way the 2D board resolved it.
+      // js/html_actuator.js L73-L80 appended the two source tiles after the
+      // merged tile had been classed, leaving them beneath it in the container;
+      // the order is kept so a depth tie, if the tweens ever produced one,
+      // resolves the way the 2D board resolved it.
       for (const source of planned.merged) {
         addTile(source, true);
       }
@@ -1403,6 +1676,10 @@ export function createThreeRenderer(
     }
 
     startMergeEffects();
+
+    // Every trigger this plan consumed is dropped here, so the next plan starts
+    // from the events of its own turn alone.
+    clearPendingTriggers();
 
     // A terminal turn shakes the camera once: the 2D board's own terminal
     // treatment is the overlay src/ui/screens/hud.ts fades in, and this is the
@@ -1613,7 +1890,7 @@ export function createThreeRenderer(
       reporter.onDiagnostic({
         level: 'warning',
         source: DIAGNOSTIC_SOURCE,
-        message: 'A mount was refused because the renderer is disposed.',
+        message: 'A mount was refused: the renderer is disposed.',
       });
 
       return false;
@@ -1728,6 +2005,8 @@ export function createThreeRenderer(
       canvasElement.hidden = false;
     }
 
+    markCanvasAria(surface);
+
     mounted = true;
     ensureBoard(size);
     claimParallelBoard(boardSize > 0 ? boardSize : size);
@@ -1815,16 +2094,22 @@ export function createThreeRenderer(
       numberOnly.hidden = numberOnlyWasHidden;
     }
 
-    // HIDDEN, not restored. index.html ships the canvas shown, because it is
-    // the layer this build draws with; restoring that state would leave a blank
-    // canvas over the board after this renderer has released its context. The
-    // number-only host above IS restored, because it belongs to the other
-    // renderer and its shipped state is the one that renderer expects.
+    // The canvas is left HIDDEN rather than restored to the shown state
+    // index.html ships it in. The number-only host above is restored to its
+    // shipped state instead. DL-THREE-02.
     const canvasElement = asHtmlElement(canvas);
 
     if (canvasElement !== null) {
       canvasElement.hidden = true;
     }
+
+    // Released with the scene: a remount builds a new rig, which stands at the
+    // scene's own default index until a stage is announced again.
+    litStageIndex = null;
+
+    // The `aria-hidden="true"` mount asserted is restored to the state the
+    // canvas was found in. DL-THREE-03.
+    restoreCanvasAria(canvas);
 
     canvas = null;
 
@@ -1861,9 +2146,9 @@ export function createThreeRenderer(
         detail: Object.freeze({ size: commit.board.size, boardSize }),
       });
 
-      // Dropped rather than carried: a burst queued against a board that is
+      // Dropped rather than carried: a trigger queued against a board that is
       // never drawn would otherwise fire at a cell of the next board.
-      pendingMerges.length = 0;
+      clearPendingTriggers();
 
       return;
     }
@@ -1872,8 +2157,13 @@ export function createThreeRenderer(
 
     lastScore = commit.score;
 
-    // Read here, inside the emission: `state:commit` carries the live board and
-    // the next turn mutates the same objects.
+    // The stage slice of AAP Contract 1, which is the authority on the stage in
+    // force: a board that carries across a stage boundary reports the new index
+    // here, and the rig is tuned for it.
+    lightForStage(commit.stage.stageIndex);
+
+    // Planned here, inside the emission that carried the projection, and drawn
+    // on the next frame.
     queued = planCommit(commit, delta);
     commits += 1;
 
@@ -1917,6 +2207,168 @@ export function createThreeRenderer(
     reporter.onCount({ name: MERGE_METRIC, value: 1, detail });
   };
 
+  /**
+   * Records the cell one spawn resolved into, for its `appear` tween.
+   *
+   * `position` is absent for a spawn that inserted nothing — a full board, a
+   * cell an `onSpawn` handler withheld, or one outside the lattice — per the
+   * `TileSpawnEvent` contract of src/engine/engine-events.ts. Such an emission
+   * arms nothing and is counted apart.
+   */
+  const onSpawn = (spawn: TileSpawnEvent): void => {
+    if (disposed) {
+      return;
+    }
+
+    const position = spawn.position;
+
+    if (position === undefined) {
+      spawnsSuppressed += 1;
+
+      reporter.onCount({
+        name: SPAWN_SUPPRESSED_METRIC,
+        value: 1,
+        detail: Object.freeze({ tileValue: spawn.value }),
+      });
+
+      return;
+    }
+
+    pendingSpawns.add(cellKey(position.x, position.y));
+    spawnsAnnounced += 1;
+
+    reporter.onCount({
+      name: SPAWN_METRIC,
+      value: 1,
+      detail: Object.freeze({
+        tileValue: spawn.value,
+        x: position.x,
+        y: position.y,
+      }),
+    });
+  };
+
+  /**
+   * Records the origin of every cell the resolved move repositioned a tile
+   * into, keyed by destination.
+   *
+   * Read from the same `previousPosition` member js/html_actuator.js L54 read,
+   * off the projection `move:after` carries.
+   */
+  const onMoveAfter = (move: MoveAfterEvent): void => {
+    if (disposed || !move.moved) {
+      return;
+    }
+
+    const board = move.board;
+    const size = board.size;
+    let recorded = 0;
+
+    for (let x = 0; x < size; x += 1) {
+      for (let y = 0; y < size; y += 1) {
+        const tile = readCell(board, x, y);
+        const previous = tile?.previousPosition ?? null;
+
+        if (tile === null || previous === null) {
+          continue;
+        }
+
+        pendingMoveOrigins.set(cellKey(tile.x, tile.y), {
+          x: previous.x,
+          y: previous.y,
+        });
+        recorded += 1;
+      }
+    }
+
+    movesAnnounced += 1;
+
+    reporter.onCount({
+      name: MOVE_METRIC,
+      value: 1,
+      detail: Object.freeze({ size, moved: recorded }),
+    });
+  };
+
+  /**
+   * Re-frames the board for the stage's size and re-tunes the lighting rig for
+   * its index.
+   *
+   * `boardSize` is the size the stage's grid was built at, which for a board
+   * restored from a snapshot is the size that snapshot carried. Generating the
+   * board recalls every block into the factory's pool, so the plan the board
+   * last showed is queued again, as the change of scale does.
+   */
+  const onStageStart = (stage: StageStartEvent): void => {
+    if (disposed) {
+      return;
+    }
+
+    stagesStarted += 1;
+
+    const detail: RenderDetail = Object.freeze({
+      stageIndex: stage.stageIndex,
+      boardSize: stage.boardSize,
+    });
+
+    if (!isSupportedBoardSize(stage.boardSize)) {
+      refusedSizes += 1;
+
+      reporter.onCount({ name: REFUSED_SIZE_METRIC, value: 1, detail });
+      reporter.onDiagnostic({
+        level: 'warning',
+        source: DIAGNOSTIC_SOURCE,
+        message:
+          'A stage announced a board size above the supported maximum; the ' +
+          'board already drawn stands.',
+        detail,
+      });
+    } else if (mounted && stage.boardSize !== boardSize) {
+      ensureBoard(stage.boardSize);
+
+      if (lastPlan !== null && lastPlan.size === stage.boardSize) {
+        queued = restPlan(lastPlan);
+      }
+    }
+
+    lightForStage(stage.stageIndex);
+
+    reporter.onCount({ name: STAGE_START_METRIC, value: 1, detail });
+    options.onWork?.();
+  };
+
+  /**
+   * Presents one stage resolution on the board.
+   *
+   * A cleared stage punches the camera once. Suppressed while motion is to be
+   * reduced by src/render/camera-effects.ts itself. The stage-clear copy, the
+   * reward screen and the run summary belong to src/ui.
+   */
+  const onStageEnd = (stage: StageEndEvent): void => {
+    if (disposed) {
+      return;
+    }
+
+    stagesEnded += 1;
+
+    const punched = stage.cleared ? (camera?.punch() ?? false) : false;
+
+    reporter.onCount({
+      name: STAGE_END_METRIC,
+      value: 1,
+      detail: Object.freeze({
+        stageIndex: stage.stageIndex,
+        cleared: stage.cleared,
+        score: stage.score,
+        punched,
+      }),
+    });
+
+    if (punched) {
+      options.onWork?.();
+    }
+  };
+
   const subscribe = (events: EngineEvents): EngineEventSubscription => {
     if (disposed) {
       reporter.onCount({
@@ -1930,14 +2382,27 @@ export function createThreeRenderer(
       };
     }
 
-    const releaseCommit = events.on('state:commit', render);
-    const releaseMerge = events.on('tile:merge', onMerge);
+    // The six names of AAP Contract 1 this renderer reads. `move:before` is
+    // not among them.
+    const taken: EngineEventSubscription[] = [
+      events.on('stage:start', onStageStart),
+      events.on('tile:merge', onMerge),
+      events.on('tile:spawn', onSpawn),
+      events.on('move:after', onMoveAfter),
+      events.on('stage:end', onStageEnd),
+      events.on('state:commit', render),
+    ];
+
+    const releaseTaken = (): void => {
+      for (const release of taken) {
+        release();
+      }
+    };
 
     // `events.on` can dispose this renderer before it returns, by way of a
     // listener the same emitter already holds.
     if (disposed) {
-      releaseCommit();
-      releaseMerge();
+      releaseTaken();
 
       reporter.onCount({
         name: REFUSED_SUBSCRIBE_METRIC,
@@ -1950,7 +2415,7 @@ export function createThreeRenderer(
       };
     }
 
-    subscriptions.push(releaseCommit, releaseMerge);
+    subscriptions.push(...taken);
 
     let released = false;
 
@@ -1960,8 +2425,7 @@ export function createThreeRenderer(
       }
 
       released = true;
-      releaseCommit();
-      releaseMerge();
+      releaseTaken();
     };
   };
 
@@ -2015,6 +2479,14 @@ export function createThreeRenderer(
         liveTiles: live.length,
         activeTweens: tweens?.size() ?? 0,
         pendingMerges: pendingMerges.length,
+        pendingSpawns: pendingSpawns.size,
+        pendingMoves: pendingMoveOrigins.size,
+        spawnsAnnounced,
+        spawnsSuppressed,
+        movesAnnounced,
+        stagesStarted,
+        litStageIndex,
+        stagesEnded,
         refusedSizes,
         contextLost,
         disposed,

@@ -72,7 +72,10 @@ import type {
   DiagnosticsOverlay,
   HealthCheckResult,
 } from './observability/diagnostics-overlay';
-import { createDiagnosticsOverlay } from './observability/diagnostics-overlay';
+import {
+  createDiagnosticsOverlay,
+  isDiagnosticsRequested,
+} from './observability/diagnostics-overlay';
 import { createNumberOnlyRenderer } from './render/number-only-renderer';
 import { createRenderLoop } from './render/render-loop';
 import type { FrameContext } from './render/render-loop';
@@ -1607,6 +1610,17 @@ export function start(ownerDocument: Document): Application {
 
   loop.start();
   engine.setup();
+
+  // The diagnostics surface's runtime opt-in, DEFAULT OFF: it mounts and opens
+  // only for a session carrying `?diagnostics` or `#diagnostics`, and every
+  // other session — the recorded-gameplay run of requirement R11 included —
+  // leaves it dormant. `isDiagnosticsRequested` of
+  // src/observability/diagnostics-overlay.ts is the single declaration of the
+  // flag. Decision DL-DIAG-01.
+  if (isDiagnosticsRequested()) {
+    diagnostics.mount();
+    diagnostics.open();
+  }
 
   return Object.freeze({
     engine,
