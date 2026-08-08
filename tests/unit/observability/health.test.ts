@@ -1002,6 +1002,50 @@ describe('the report roll-up', () => {
     }
   });
 
+  it('rotates with the logger when a second run starts', () => {
+    surface.check();
+
+    logger.setCorrelationId('health-second-run');
+
+    const report = surface.check();
+
+    // The identifier is read on every report rather than captured at
+    // construction, so the probes of a second run are attributed to the second
+    // run — the surface, the report it returns and the readiness projection all
+    // answer with the rotated scope.
+    expect(surface.correlationId).toBe('health-second-run');
+    expect(report.correlationId).toBe('health-second-run');
+    expect(surface.readiness().correlationId).toBe('health-second-run');
+  });
+
+  it('reports the empty identifier when the logger refuses the read', () => {
+    // The surface logs through a CHILD of the injected logger, so the child is
+    // where the correlation read has to be made hostile. Both objects delegate
+    // every other member to the real logger.
+    const hostileChild = Object.create(logger.child('health')) as Logger;
+
+    Object.defineProperty(hostileChild, 'correlationId', {
+      get: (): never => {
+        throw new Error('the correlation scope is unreadable');
+      },
+    });
+
+    const hostile = Object.create(logger) as Logger;
+
+    Object.defineProperty(hostile, 'child', {
+      value: (): Logger => hostileChild,
+    });
+
+    const guarded = createHealthSurface({ logger: hostile, metrics });
+
+    // Every member of the surface is total, so the refused read yields the
+    // empty string and neither the getter nor the two reports raise through it.
+    expect(() => guarded.correlationId).not.toThrow();
+    expect(guarded.correlationId).toBe('');
+    expect(guarded.check().correlationId).toBe('');
+    expect(guarded.readiness().correlationId).toBe('');
+  });
+
   it('carries the injected correlation identifier and a timestamp', () => {
     const report = surface.check();
 

@@ -24,6 +24,8 @@
 //                                         value
 //   TR-HUD-11  target-only row            the narrow-layout restatement at the
 //                                         mobile threshold
+//   TR-HUD-14  target-only row            the `.hud-degraded` notice, the
+//                                         visible half of TR-HUD-12
 //
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
@@ -184,6 +186,34 @@ $hud-rarity-tiers: $rarity-tiers !default;
 
   // The movement timing the tiles carry, collapsed by the reduced-motion layer.
   transition: inline-size $transition-speed ease-in-out;
+}
+
+// The unconfirmed-status notice. `src/ui/screens/hud.ts` appends one
+// `.hud-degraded` to the run-status group and toggles its `hidden` from
+// `StateCommitEvent.degraded`, and marks the group `data-degraded` for the same
+// state.
+//
+// NO `display` IS DECLARED, so the `hidden` attribute the module toggles keeps
+// the notice out of the rendering tree and out of the accessibility tree; the
+// paragraph's own block display is what shows it. The state is marked three ways
+// that do not depend on colour: the dashed edge — the same marking the exhausted
+// relic carries — the notice's own text, and the attribute on the group.
+.hud-degraded {
+  margin: 0;
+
+  padding-block: $hud-gap-tight;
+  padding-inline: $hud-gap-inner;
+
+  border: $hud-hairline dashed $hud-rule;
+  border-radius: $tile-border-radius;
+
+  font-size: $hud-label-size;
+  line-height: $hud-numeral-size;
+  font-weight: bold;
+
+  // The page text colour, resolved through `--theme-text` with the token as the
+  // fallback, exactly as the goal track's fill is.
+  color: var(--theme-text, #{$text-color});
 }
 
 // Active-relic tray. One `.relic-tray-item` per active relic in pickup order,

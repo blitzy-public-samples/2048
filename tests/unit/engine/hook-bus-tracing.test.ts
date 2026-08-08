@@ -475,3 +475,319 @@ describe('a bus with no tracing port', () => {
     expect(shape(traced)).toEqual(shape(plain));
   });
 });
+
+/* ==========================================================================
+ * The wrapped work runs exactly once
+ * ========================================================================== */
+
+describe('a wrapper cannot suppress, repeat or substitute the work', () => {
+  /** A handler that draws, spends and records, then throws. */
+  const failingSubscriber = (
+    counter: { invocations: number },
+  ): Parameters<ReturnType<typeof createHookBus>['register']>[0] => ({
+    id: 'thrower',
+    charges: 3,
+    hooks: {
+      onBeforeMove: (_payload, context): BeforeMovePayload => {
+        counter.invocations += 1;
+        context.rng.stream('spawn-value').next();
+        context.spendCharge();
+        context.effects.insertTile({ x: 0, y: 0 }, 4);
+
+        throw new Error('relic fault');
+      },
+    },
+  });
+
+  it('invokes a throwing handler once, not twice, under a wrapper', () => {
+    const environment = createEnvironment();
+    const counter = { invocations: 0 };
+    const bus = createHookBus({ tracing: createRecorder().tracing });
+
+    bus.register(failingSubscriber(counter));
+
+    const result = bus.dispatch(
+      'onBeforeMove',
+      beforeMove(environment),
+      environment,
+    );
+
+    // ONE invocation, and its whole transaction rolled back: the retry the
+    // wrapper's rethrow used to trigger re-entered the handler inside the
+    // transaction that was already open.
+    expect(counter.invocations).toBe(1);
+    expect(result.invoked).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(result.effectsApplied).toBe(0);
+    expect(bus.metrics().chargesConsumed).toBe(0);
+    expect(bus.subscribers()[0]?.charges).toBe(3);
+    expect(environment.rng.snapshotCursors()['spawn-value']).toBe(0);
+    expect(environment.grid.cellsAvailable()).toBe(true);
+    expect(environment.grid.cellContent({ x: 0, y: 0 })).toBeNull();
+  });
+
+  it('leaves the identical outcome with tracing and without it', () => {
+    const traced = createHookBus({ tracing: createRecorder().tracing });
+    const plain = createHookBus();
+    const shapes: unknown[] = [];
+
+    for (const bus of [traced, plain]) {
+      const environment = createEnvironment();
+      const counter = { invocations: 0 };
+
+      bus.register(failingSubscriber(counter));
+
+      const result = bus.dispatch(
+        'onBeforeMove',
+        beforeMove(environment),
+        environment,
+      );
+
+      shapes.push({
+        invocations: counter.invocations,
+        invoked: result.invoked,
+        failed: result.failed,
+        effectsApplied: result.effectsApplied,
+        charges: bus.subscribers()[0]?.charges,
+        consumed: bus.metrics().chargesConsumed,
+        cursors: environment.rng.snapshotCursors(),
+        degraded: bus.metrics().degraded,
+      });
+    }
+
+    // R5: the observer is non-interfering, on the failing path as well as the
+    // succeeding one.
+    expect(shapes[0]).toEqual(shapes[1]);
+  });
+
+  it('runs the work when a wrapper returns without calling it', () => {
+    const environment = createEnvironment();
+    let invoked = 0;
+    const bus = createHookBus({
+      tracing: {
+        // A wrapper that measures nothing and calls nothing.
+        traceRelicHandler: <T>(): T => undefined as T,
+        traceHookDispatch: <T>(_hook: HookName, run: () => T): T => run(),
+      },
+    });
+
+    bus.register({
+      id: 'unwrapped',
+      hooks: {
+        onBeforeMove: (payload): BeforeMovePayload => {
+          invoked += 1;
+
+          return { ...payload, direction: DIRECTION_LEFT };
+        },
+      },
+    });
+
+    const result = bus.dispatch(
+      'onBeforeMove',
+      beforeMove(environment),
+      environment,
+    );
+
+    // The handler ran, its return was adopted, and the wrapper's own
+    // `undefined` did not stand in for work that never happened.
+    expect(invoked).toBe(1);
+    expect(result.payload.direction).toBe(DIRECTION_LEFT);
+    expect(result.rejected).toBe(0);
+    expect(bus.metrics().hooks.onBeforeMove.invoked).toBe(1);
+  });
+
+  it('runs the work once when a wrapper calls it twice', () => {
+    const environment = createEnvironment();
+    let invoked = 0;
+    const bus = createHookBus({
+      tracing: {
+        traceRelicHandler: <T>(
+          _hook: HookName,
+          _relicId: string,
+          run: () => T,
+        ): T => {
+          run();
+
+          return run();
+        },
+      },
+    });
+
+    bus.register({
+      id: 'doubled',
+      charges: 2,
+      hooks: {
+        onBeforeMove: (payload, context): BeforeMovePayload => {
+          invoked += 1;
+          context.spendCharge();
+
+          return payload;
+        },
+      },
+    });
+
+    bus.dispatch('onBeforeMove', beforeMove(environment), environment);
+
+    // The second call replays the first outcome rather than re-entering the
+    // handler, so exactly one charge is spent.
+    expect(invoked).toBe(1);
+    expect(bus.metrics().chargesConsumed).toBe(1);
+    expect(bus.subscribers()[0]?.charges).toBe(1);
+  });
+
+  it('replays the held throw when a wrapper calls a failing work twice', () => {
+    const environment = createEnvironment();
+    let invoked = 0;
+    const bus = createHookBus({
+      tracing: {
+        traceRelicHandler: <T>(
+          _hook: HookName,
+          _relicId: string,
+          run: () => T,
+        ): T => {
+          try {
+            run();
+          } catch {
+            // Swallowed here, and asked for again, which is the shape that used
+            // to re-enter the handler.
+          }
+
+          return run();
+        },
+      },
+    });
+
+    bus.register({
+      id: 'thrower',
+      hooks: {
+        onBeforeMove: (): BeforeMovePayload => {
+          invoked += 1;
+
+          throw new Error('relic fault');
+        },
+      },
+    });
+
+    const result = bus.dispatch(
+      'onBeforeMove',
+      beforeMove(environment),
+      environment,
+    );
+
+    expect(invoked).toBe(1);
+    expect(result.failed).toBe(1);
+  });
+
+  it('propagates the work s throw when a wrapper swallows it', () => {
+    const environment = createEnvironment();
+    let invoked = 0;
+    const bus = createHookBus({
+      tracing: {
+        traceRelicHandler: <T>(
+          _hook: HookName,
+          _relicId: string,
+          run: () => T,
+        ): T => {
+          try {
+            return run();
+          } catch {
+            // A wrapper that reports and returns rather than rethrowing.
+            return undefined as T;
+          }
+        },
+      },
+    });
+
+    bus.register({
+      id: 'thrower',
+      charges: 2,
+      hooks: {
+        onBeforeMove: (_payload, context): BeforeMovePayload => {
+          invoked += 1;
+          context.spendCharge();
+
+          throw new Error('relic fault');
+        },
+      },
+    });
+
+    const result = bus.dispatch(
+      'onBeforeMove',
+      beforeMove(environment),
+      environment,
+    );
+
+    // The bus, not the wrapper, decides what a throw costs: the failure is
+    // still counted and the budget is still untouched.
+    expect(invoked).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(result.invoked).toBe(1);
+    expect(bus.subscribers()[0]?.charges).toBe(2);
+    expect(bus.metrics().degraded).toContain('thrower');
+  });
+
+  it('returns the work s value when a wrapper returns another', () => {
+    const environment = createEnvironment();
+    const bus = createHookBus({
+      tracing: {
+        traceHookDispatch: <T>(_hook: HookName, run: () => T): T => {
+          run();
+
+          return { payload: 'nonsense' } as T;
+        },
+      },
+    });
+
+    bus.register({
+      id: 'measured',
+      hooks: { onBeforeMove: (payload): BeforeMovePayload => payload },
+    });
+
+    const result = bus.dispatch(
+      'onBeforeMove',
+      beforeMove(environment),
+      environment,
+    );
+
+    // A wrapper is a measurement and never a transformation, at the dispatch
+    // boundary as well as the handler one.
+    expect(result.invoked).toBe(1);
+    expect(result.payload.direction).toBe(DIRECTION_UP);
+    expect(bus.metrics().totals.dispatched).toBe(1);
+  });
+
+  it('runs the dispatch when a wrapper throws before calling it', () => {
+    const environment = createEnvironment();
+    let invoked = 0;
+    const bus = createHookBus({
+      tracing: {
+        traceHookDispatch: <T>(): T => {
+          throw new Error('tracing fault');
+        },
+      },
+    });
+
+    bus.register({
+      id: 'still-runs',
+      hooks: {
+        onBeforeMove: (payload): BeforeMovePayload => {
+          invoked += 1;
+
+          return payload;
+        },
+      },
+    });
+
+    const result = bus.dispatch(
+      'onBeforeMove',
+      beforeMove(environment),
+      environment,
+    );
+
+    // The instrumentation's own failure is contained and the walk still
+    // happened, exactly once.
+    expect(invoked).toBe(1);
+    expect(result.invoked).toBe(1);
+    expect(bus.metrics().totals.dispatched).toBe(1);
+  });
+});

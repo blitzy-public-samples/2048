@@ -367,6 +367,52 @@ describe('a verdict reaches the region', () => {
 });
 
 /* ==========================================================================
+ * The unconfirmed terminal or stage status
+ * ========================================================================== */
+
+describe('an unestablished status reaches the region', () => {
+  it('announces the transition into it, and not again', () => {
+    const harness = setup();
+
+    harness.events.emit('state:commit', commit(16));
+
+    const settled = harness.read();
+
+    harness.events.emit('state:commit', {
+      ...commit(20),
+      degraded: true,
+    });
+
+    const spoken = harness.read();
+
+    // THE FLAG IS SPOKEN. Before this the announcer read only the three
+    // ordinary terminal flags, so a commit whose status the engine could not
+    // establish sounded exactly like one it could.
+    expect(spoken).not.toBe(settled);
+    expect(spoken.toLowerCase()).toContain('unconfirmed');
+
+    // Every commit carries the flag, so the state is announced on its
+    // transitions alone.
+    harness.events.emit('state:commit', {
+      ...commit(24),
+      degraded: true,
+    });
+
+    expect(harness.read()).toBe(spoken);
+  });
+
+  it('announces the recovery when a measurement succeeds again', () => {
+    const harness = setup();
+
+    harness.events.emit('state:commit', { ...commit(16), degraded: true });
+    harness.read();
+    harness.events.emit('state:commit', commit(20));
+
+    expect(harness.read().toLowerCase()).toContain('confirmed again');
+  });
+});
+
+/* ==========================================================================
  * Lifecycle
  * ========================================================================== */
 

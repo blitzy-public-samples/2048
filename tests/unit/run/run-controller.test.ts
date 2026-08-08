@@ -594,6 +594,188 @@ describe('the stage and relic slices of a commit', () => {
     expect(commits[0]).toEqual({ stageIndex: 4, target: 500, relics: 1 });
   });
 
+  it('carries a stage slice measured from the board the commit carries', () => {
+    // The withdrawn-move rewind: the board is restored AND the move is
+    // withdrawn, so the turn emits no `move:after` and the `move:after`
+    // measurement never runs for it.
+    const { controller, engine, stop } = compose({ setup: false });
+
+    // Half of stage 0's target, so the restored board moves the progress
+    // measurably without clearing the stage and starting another one.
+    const goalTile = 8;
+
+    engine.hooks.register({
+      id: 'anchor',
+      hooks: {
+        onBeforeMove: (payload, context): typeof payload => {
+          const board = payload.board.serialize();
+
+          for (const column of board.cells) {
+            for (let y = 0; y < column.length; y += 1) {
+              column[y] = null;
+            }
+          }
+
+          const first = board.cells[0];
+
+          if (first !== undefined) {
+            first[0] = { position: { x: 0, y: 0 }, value: goalTile };
+          }
+
+          context.effects.request({ kind: 'restoreBoard', board });
+          payload.cancelled = true;
+
+          return payload;
+        },
+      },
+    });
+
+    engine.setup(boardWith(2));
+
+    const progress: number[] = [];
+
+    engine.events.on('state:commit', (event): void => {
+      progress.push(event.stage.goalProgress);
+    });
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+
+    const goal = controller.stageContext().goal;
+    const expected = Math.min(goalTile / goal.target, 1);
+
+    // The commit the rewind made carries progress measured from the RESTORED
+    // board, not from the board the run stood on before the rewind — which
+    // held a single tile of 2 and would have reported an eighth of this.
+    expect(progress).toHaveLength(1);
+    expect(progress[0]).toBeCloseTo(expected, 10);
+
+    stop();
+  });
+
+  it('projects the relic slice from the registry at commit time', () => {
+    const spender: Relic = {
+      id: 'spender',
+      name: 'Spender',
+      rarity: 'common',
+      description: 'Spends one charge on every resolved move.',
+      charges: 2,
+      hooks: {
+        onAfterMove: (payload, context): typeof payload => {
+          context.spendCharge();
+
+          return payload;
+        },
+      },
+    };
+
+    const { controller, engine, stop } = composeWithRelics({
+      catalogue: [spender],
+    });
+
+    controller.recordRewardOffer([spender.id]);
+
+    expect(controller.resolveReward(spender.id).accepted).toBe(true);
+
+    const charges: (number | undefined)[] = [];
+
+    engine.events.on('state:commit', (event): void => {
+      charges.push(event.relics[0]?.charges);
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    // The charge the handler spent DURING this turn is on this turn's commit.
+    // Projected from the envelope instead, the count reached a consumer one
+    // commit late: the tray showed the old budget and a reload restored it.
+    expect(charges).toEqual([1]);
+
+    stop();
+  });
+
+  it('hands out a frozen copy of the stage goal, never the live one', () => {
+    const { controller, stages } = compose({ setup: false });
+    const target = stages.ladder[0].target;
+    const projected = controller.stageContext().goal;
+
+    // `readonly` in `StageCommitContext` binds the reference, not the object, so
+    // the projection is frozen as well: a listener cannot retarget the goal the
+    // run is measured against and the goal that reaches storage.
+    expect(Object.isFrozen(projected)).toBe(true);
+    expect(() => {
+      (projected as { target: number }).target = 1;
+    }).toThrow(TypeError);
+
+    // A fresh object per call, so a listener that holds one cannot reach the
+    // envelope's own goal through it either.
+    expect(controller.stageContext().goal).not.toBe(projected);
+    expect(controller.stageContext().goal.target).toBe(target);
+    expect(controller.state().stageGoal.target).toBe(target);
+  });
+
+  it('copies the board on the exceptional state projection', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+
+    // A relic whose state slot cannot be read: `cloneRunState()` raises while
+    // copying it, which is the one path `state()` falls back on.
+    const hostile: PersistedRelic = {
+      id: 'hostile',
+
+      get state(): unknown {
+        throw new Error('unreadable relic state');
+      },
+    };
+
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      relics: {
+        snapshotRelics: (): readonly PersistedRelic[] => [hostile],
+      },
+    });
+
+    controller.begin();
+
+    const engine = new Engine({
+      config,
+      streams: createRngStreams(controller.seed(), controller.cursors()),
+      storage: manager,
+      stageContext: () => controller.stageContext(),
+      relicContext: () => controller.relicContext(),
+    });
+
+    const stop = controller.observe(engine, () => ({
+      'spawn-value': 0,
+      'spawn-position': 0,
+      'relic-draw': 0,
+      'rarity-weight': 0,
+    }));
+
+    // The commit is what puts the hostile relic and the engine's board into the
+    // envelope.
+    engine.setup(boardWith(2));
+
+    const projected = controller.state();
+
+    expect(projected.board.grid.cells[0]?.[0]?.value).toBe(2);
+
+    // The fallback projection must share no board with the envelope: a caller
+    // that writes into what it was handed cannot corrupt the board the run
+    // persists.
+    const cells = projected.board.grid.cells as (SerializedGameState['grid']['cells'][number])[];
+    const column = cells[0];
+
+    if (column !== undefined) {
+      column[0] = null;
+    }
+
+    expect(controller.state().board.grid.cells[0]?.[0]?.value).toBe(2);
+
+    stop();
+  });
+
   it('carries relics in pickup order and never carries their private state', () => {
     const backing = new MemoryStorage();
 
@@ -1670,6 +1852,54 @@ describe('run-scoped rebuild', () => {
     expect(scopes[0].seed).toBe(controller.seed());
     expect(scopes[0].runId).toBe(controller.runId());
     expect(scopes[0].cursors['spawn-value']).toBe(0);
+  });
+
+  it('publishes the new scope before it reports that the run started', () => {
+    const order: string[] = [];
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      reporter: {
+        onRunStarted: (): void => {
+          order.push('reported');
+        },
+      },
+      onRunScope: (): void => {
+        order.push('scope');
+      },
+    });
+
+    controller.begin();
+
+    // THE ORDER IS THE POINT. A root rebuilds the run's correlation scope from
+    // this publication, so reporting first attributed the run's own opening
+    // report to whatever run the root was reporting under before it.
+    expect(order).toEqual(['scope', 'reported']);
+  });
+
+  it('reads a correlation READER, so a run rotation reaches its reports', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    let current = 'run-first';
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      correlationId: (): string => current,
+    });
+
+    expect(controller.correlationId()).toBe('run-first');
+
+    // A second run of one page load. A captured identifier kept every later
+    // report of this controller attributed to the run that ended.
+    current = 'run-second';
+
+    expect(controller.correlationId()).toBe('run-second');
   });
 
   it('publishes the new scope before the engine opens a board', () => {

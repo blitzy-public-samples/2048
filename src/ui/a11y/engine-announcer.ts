@@ -30,6 +30,9 @@
 //                   vocabulary of ./live-region
 //   TR-ANNOUNCE-03  the last-verdict record and the once-per-verdict rule
 //   TR-ANNOUNCE-04  `EngineAnnouncer.dispose` and the released subscriptions
+//   TR-ANNOUNCE-05  the unconfirmed-status announcement, spoken on each
+//                   transition of `StateCommitEvent.degraded` in both
+//                   directions
 //
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
@@ -61,6 +64,21 @@ const VERDICT_METRIC = 'ui.announcer.verdict';
 
 /** Counter raised once per subscription refused. */
 const REFUSED_METRIC = 'ui.announcer.refused';
+
+/** Counter raised once per unconfirmed-status transition announced. */
+const DEGRADED_METRIC = 'ui.announcer.degraded';
+
+/**
+ * Spoken when a commit reports that the engine could not establish the turn's
+ * terminal or stage status. The HUD shows the same state as text; this is what
+ * reaches a player who is not reading the run-status group.
+ */
+const DEGRADED_ANNOUNCEMENT =
+  'Board status unconfirmed. The game could not check for a win, a loss or a ' +
+  'cleared stage on this move.';
+
+/** Spoken when a later commit establishes the status again. */
+const CONFIRMED_ANNOUNCEMENT = 'Board status confirmed again.';
 
 /* ==========================================================================
  * 2. Types
@@ -186,6 +204,12 @@ export function createEngineAnnouncer(
   /** The verdict last announced, so a verdict is announced once and not per commit. */
   let lastVerdict: TerminalVerdict | null = null;
 
+  /**
+   * Whether the last commit reported an unestablished status, so the transition
+   * is announced and the state is not repeated on every commit that follows it.
+   */
+  let lastDegraded = false;
+
   const announced = (name: EngineEventName): void => {
     reporter.count(ANNOUNCE_METRIC, { context: REPORT_CONTEXT, event: name });
   };
@@ -265,6 +289,28 @@ export function createEngineAnnouncer(
         }),
 
         events.on('state:commit', (payload): void => {
+          // THE UNCONFIRMED STATUS IS ANNOUNCED ON ITS TRANSITIONS, both of
+          // them: a commit whose terminal or stage status the engine could not
+          // establish, and the commit that establishes one again. Every commit
+          // carries the flag, so the last state announced is held and only a
+          // change is spoken. Said through the `text` announcement, which is the
+          // vocabulary ./live-region carries for a state that is not one of the
+          // gameplay kinds.
+          if (payload.degraded !== lastDegraded) {
+            lastDegraded = payload.degraded;
+
+            announcer.announce({
+              kind: 'text',
+              text: payload.degraded
+                ? DEGRADED_ANNOUNCEMENT
+                : CONFIRMED_ANNOUNCEMENT,
+            });
+            reporter.count(DEGRADED_METRIC, {
+              context: REPORT_CONTEXT,
+              degraded: payload.degraded,
+            });
+          }
+
           const verdict = resolveVerdict(
             payload.over,
             payload.won,
@@ -339,6 +385,7 @@ export function createEngineAnnouncer(
 
       releases.length = 0;
       pendingDirection = null;
+      lastDegraded = false;
     },
   });
 }

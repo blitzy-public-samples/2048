@@ -38,6 +38,10 @@
  *                                        `gridSpacing`
  *   TR-TOKEN-08  target-only row          `sassTokenProjection`, the map
  *                                        vite.config.ts passes to Dart Sass
+ *   TR-TOKEN-12  target-only row          `neutralLightColor`, the neutral
+ *                                        white point of the 2.5D lighting rig,
+ *                                        the one token the stylesheet has no
+ *                                        counterpart for
  *
  * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
  * only so the construct can be found from the log:
@@ -48,6 +52,10 @@
  *                here in compiled form
  *   DL-TOKEN-04  exactly one import, so the module stays importable with no
  *                DOM, no WebGL and no browser
+ *   DL-TOKEN-07  the renderer's neutral white point declared as a token here
+ *                and stated per palette as `ThemePalette.neutralLight`, and
+ *                kept out of `sassTokenProjection` because the stylesheet
+ *                declares no light
  */
 
 // The specifier carries its `.ts` extension because vite.config.ts imports this
@@ -143,6 +151,21 @@ export const tileGoldColor = '#edc22e';
 
 /** Halo colour of the merge glow. */
 export const tileGoldGlowColor = '#f3d774';
+
+/**
+ * The neutral white point of the 2.5D lighting rig: the colour the key light
+ * departs from before it warms toward a palette's halo, and the colour of the
+ * fill light's sky half.
+ *
+ * DECLARED HERE rather than in src/render/, and absent from
+ * `sassTokenProjection`, because the stylesheet declares no light: this is the
+ * one token whose consumer is the renderer alone. It is the hex spelling of the
+ * unit channel Three's own `new Color()` produces, so the lighting arithmetic is
+ * unchanged by reading it from here. A palette states its own value through
+ * `ThemePalette.neutralLight`, and src/render/scene.ts holds this token as the
+ * fallback for an entry it cannot parse.
+ */
+export const neutralLightColor = '#ffffff';
 
 /** Offset between the board and the content above it, in px. */
 export const gameContainerMarginTop = 40;

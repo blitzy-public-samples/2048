@@ -755,6 +755,101 @@ describe('remap is the one api a rebind goes through', () => {
     manager.destroy();
   });
 
+  it('refuses a PHYSICAL CODE another action holds, changing nothing', () => {
+    const announced: string[] = [];
+    const persisted: Keymap[] = [];
+    const counted: { metric: string; dimension: string }[] = [];
+    const manager = createInputManager({
+      keymap: DEFAULT_KEY_BINDINGS,
+      reporter: {
+        log: (): void => {},
+        count: (metric, fields): void => {
+          counted.push({
+            metric,
+            dimension: String(fields?.dimension ?? ''),
+          });
+        },
+        failure: (): void => {},
+      },
+      onKeymapChange: (_keymap, reason): void => {
+        announced.push(reason);
+      },
+      persistKeymap: (keymap): boolean => {
+        persisted.push(keymap);
+
+        return true;
+      },
+    });
+
+    manager.detach();
+
+    // A FREE KEY ON AN OCCUPIED CODE, which is the collision `binding.keys`
+    // alone cannot see: `KeyR` is the code `restart` holds, and both actions are
+    // active in `'game'`. On an alternate layout the character that key produces
+    // is not `r`, so validating the logical dimension alone accepted the rebind
+    // and shadowed `restart` by physical key.
+    expect(DEFAULT_KEY_BINDINGS.restart.codes).toContain('KeyR');
+
+    const result = manager.remap('moveUp', {
+      keys: ['\u00e7'],
+      codes: ['KeyR'],
+    });
+
+    expect(result.applied).toBe(false);
+    expect(result.conflict?.action).toBe('restart');
+    expect(result.conflictDimension).toBe('code');
+
+    // The table in force is returned unchanged and neither follower ran.
+    expect(manager.getKeymap().moveUp).toEqual(DEFAULT_KEY_BINDINGS.moveUp);
+    expect(persisted).toHaveLength(0);
+    expect(announced).toHaveLength(0);
+
+    // The conflict is counted with the dimension, so a reader can tell a
+    // physical collision from a logical one.
+    expect(
+      counted.some(
+        (entry) =>
+          entry.metric === 'input.keymap.remap.conflict' &&
+          entry.dimension === 'code',
+      ),
+    ).toBe(true);
+
+    manager.destroy();
+  });
+
+  it('names the KEY dimension when the logical key is the collision', () => {
+    const manager = createInputManager({ keymap: DEFAULT_KEY_BINDINGS });
+
+    manager.detach();
+
+    const result = manager.remap('moveUp', { keys: ['r'], codes: ['KeyQ'] });
+
+    expect(result.applied).toBe(false);
+    expect(result.conflictDimension).toBe('key');
+
+    manager.destroy();
+  });
+
+  it('allows a code held only in a context the action is not active in', () => {
+    const manager = createInputManager({ keymap: DEFAULT_KEY_BINDINGS });
+
+    manager.detach();
+
+    // `selectReward` holds `Digit1` in `'overlay'` alone, so the code is free
+    // where a `'game'` action would read it. The code dimension is validated in
+    // exactly the contexts the key dimension is.
+    const result = manager.remap('moveUp', {
+      keys: ['\u00e0'],
+      codes: ['Digit1'],
+    });
+
+    expect(result.applied).toBe(true);
+    expect(result.conflictDimension).toBeUndefined();
+    expect(manager.getKeymap().moveUp.codes).toEqual(['Digit1']);
+
+    manager.destroy();
+  });
+
   it('allows a key held only in a context the action is not active in', () => {
     const manager = createInputManager({ keymap: DEFAULT_KEY_BINDINGS });
 
@@ -770,6 +865,87 @@ describe('remap is the one api a rebind goes through', () => {
     expect(result.applied).toBe(true);
     expect(manager.getKeymap().moveUp.keys).toEqual(['1']);
     expect(manager.getKeymap().selectReward.keys).toEqual(['1', '2', '3']);
+
+    manager.destroy();
+  });
+
+  it('refuses a physical CODE another action holds, even where the key is free', () => {
+    const manager = createInputManager({ keymap: DEFAULT_KEY_BINDINGS });
+
+    manager.detach();
+
+    // `restart` holds key `r` AND code `KeyR` in `'game'`. A capture on a layout
+    // where that physical key produces something else reports a free `key` and
+    // the same `code`, so validating `keys` alone accepted a binding that fires
+    // two actions from one keystroke.
+    const result = manager.remap('moveUp', {
+      keys: ['é'],
+      codes: ['KeyR'],
+    });
+
+    expect(result.applied).toBe(false);
+    expect(result.conflict?.action).toBe('restart');
+    expect(manager.getKeymap().moveUp).toEqual(DEFAULT_KEY_BINDINGS.moveUp);
+
+    manager.destroy();
+  });
+
+  it('refuses an override that widens the contexts onto an occupied key', () => {
+    const manager = createInputManager({ keymap: DEFAULT_KEY_BINDINGS });
+
+    manager.detach();
+
+    // `selectReward` holds 1, 2 and 3 in `'overlay'` alone. Requesting `1` for a
+    // `'game'` action while ALSO moving that action into `'overlay'` collides,
+    // and validating against the action's declared contexts could not see it:
+    // `mergeBinding` replaces the contexts with the ones the override names.
+    const result = manager.remap('moveUp', {
+      keys: ['1'],
+      codes: ['Digit1'],
+      contexts: ['game', 'overlay'],
+    });
+
+    expect(result.applied).toBe(false);
+    expect(result.conflict?.action).toBe('selectReward');
+    expect(manager.getKeymap().moveUp).toEqual(DEFAULT_KEY_BINDINGS.moveUp);
+
+    manager.destroy();
+  });
+
+  it('refuses a context widening that collides through the keys in force', () => {
+    const manager = createInputManager({
+      keymap: createKeymap({
+        moveUp: { keys: ['1'], codes: ['Digit1'], contexts: ['game'] },
+      }),
+    });
+
+    manager.detach();
+
+    // NO KEY IS REQUESTED AT ALL: the override moves the action into `'overlay'`,
+    // where the keys it already holds are `selectReward`'s. `mergeBinding` keeps
+    // those keys, so the merged binding is the colliding one.
+    const result = manager.remap('moveUp', { contexts: ['game', 'overlay'] });
+
+    expect(result.applied).toBe(false);
+    expect(result.conflict?.action).toBe('selectReward');
+    expect(manager.getKeymap().moveUp.contexts).toEqual(['game']);
+
+    manager.destroy();
+  });
+
+  it('applies a code-carrying rebind onto keys and codes that are free', () => {
+    const manager = createInputManager({ keymap: DEFAULT_KEY_BINDINGS });
+
+    manager.detach();
+
+    // The complete validation must still accept a legitimate rebind: `q` and
+    // `KeyQ` are held by nothing in `'game'`.
+    const result = manager.remap('moveUp', { keys: ['q'], codes: ['KeyQ'] });
+
+    expect(result.applied).toBe(true);
+    expect(result.conflict).toBeNull();
+    expect(manager.getKeymap().moveUp.keys).toEqual(['q']);
+    expect(manager.getKeymap().moveUp.codes).toEqual(['KeyQ']);
 
     manager.destroy();
   });

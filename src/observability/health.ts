@@ -1102,8 +1102,26 @@ function rollUpStatus(
  * call that does either.
  */
 export class HealthSurface {
-  /** Correlation identifier every record and report carries. */
-  readonly correlationId: string;
+  /**
+   * Correlation identifier every record and report carries, as it stands now.
+   *
+   * A GETTER over this surface's own logger, not a captured value: one page load
+   * can play more than one run, and `Logger.setCorrelationId` rotates the
+   * identifier for every logger sharing its state, so a value captured at
+   * construction attributed every report of a second run played without a reload
+   * to the first run. Total, as every member of this class is: a logger that
+   * refuses the read yields the empty string rather than raising out of
+   * `check()`. Decision DL-TYPES-04.
+   */
+  get correlationId(): string {
+    try {
+      const read: unknown = this.logger.correlationId;
+
+      return typeof read === 'string' ? read : '';
+    } catch {
+      return '';
+    }
+  }
 
   private readonly logger: Logger;
 
@@ -1140,7 +1158,6 @@ export class HealthSurface {
       options.logger ?? createLogger({ subsystem: HEALTH_SUBSYSTEM });
 
     this.logger = base.child(HEALTH_SUBSYSTEM);
-    this.correlationId = this.logger.correlationId;
     this.metrics =
       options.metrics ?? createMetricsRegistry({ logger: this.logger });
     this.storageState = isStorageStateView(options.storage)

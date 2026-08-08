@@ -43,6 +43,12 @@ const MARKUP = `
     <button type="button" class="restart-button">New Game</button>
     <button type="button" class="settings-button" id="settings-button"
             aria-haspopup="dialog" aria-controls="settings-panel">Settings</button>
+    <div class="hud" id="screen-hud" data-screen="hud" role="group"
+         aria-label="Run status" hidden>
+      <div class="hud-stage" id="hud-stage"></div>
+      <ul class="relic-tray" id="relic-tray" role="list"
+          aria-label="Active relics, in pickup order"></ul>
+    </div>
     <div class="game-container">
       <div class="game-message">
         <p></p>
@@ -906,6 +912,53 @@ describe('the relic activation control', () => {
     }
 
     expect(budgetOf('frostbind')).toBe(0);
+  });
+
+  /** The charge count the HUD tray currently shows for one relic. */
+  const trayCharges = (id: string): string | null =>
+    document
+      .querySelector(`#relic-tray .relic-tray-item[data-relic-id="${id}"]`)
+      ?.getAttribute('data-charges') ?? null;
+
+  it('publishes the spent charge to the HUD before the next turn', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
+
+    application = start(document);
+
+    expect(trayCharges('frostbind')).toBe('5');
+
+    activationControl()?.click();
+
+    // THE TRAY IS A PROJECTION OF THE COMMIT'S RELIC SLICE, and a manual
+    // activation spends a charge between turns. The activation persisted and was
+    // announced but published no presentation state, so the tray went on showing
+    // the budget the last commit carried until the player made a move.
+    expect(budgetOf('frostbind')).toBe(4);
+    expect(trayCharges('frostbind')).toBe('4');
+    expect(application.hud.readRendered()?.relics).toContain('frostbind');
+  });
+
+  it('publishes nothing when an activation spent nothing', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
+
+    application = start(document);
+
+    const activate = activationControl();
+
+    for (let press = 0; press < 5; press += 1) {
+      activate?.click();
+    }
+
+    expect(trayCharges('frostbind')).toBe('0');
+
+    const written = application.hud.readRendered();
+
+    // A refused activation is not a state change, so the exhausted budget is
+    // published once and a further press republishes nothing.
+    activate?.click();
+
+    expect(application.hud.readRendered()).toBe(written);
+    expect(trayCharges('frostbind')).toBe('0');
   });
 
   it('spends nothing when the run holds no relic', () => {

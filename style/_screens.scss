@@ -530,11 +530,24 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
 //
 // BLITZY [DESIGN_SYSTEM_GAP]: the repository's vocabulary declares no slider
 // primitive. The native control is kept and tinted. Decision DL-SCREEN-04.
+//
+// THE SHARED TREATMENT IS INCLUDED, not restated. `accent-color` alone left the
+// one range control in the dialog outside the focus and interaction vocabulary
+// every other control here carries: the generic `input` rule of style/_a11y.scss
+// reaches it through `.screen-layer` for keyboard focus, but a slider disabled
+// or hovered was dressed by nothing, and a caller mounting the panel outside
+// that root lost the ring as well. Both mixins are tokenized — the ring from
+// `--theme-focus-ring` and the states from `currentColor` — so no value is
+// stated here, and neither mixin declares `appearance`, so the native range
+// keeps its own thumb, its keyboard behaviour and its `role="slider"` semantics.
 .settings-slider {
   accent-color: var(
     --theme-button-surface,
     #{color.adjust($game-container-background, $lightness: -20%)}
   );
+
+  @include focusable;
+  @include interactive-states;
 }
 
 // One setting: its name, its current value, and the control that changes it.

@@ -263,3 +263,60 @@ describe('no tracked file carries loose whitespace', () => {
     ).toEqual([]);
   });
 });
+
+/* ==========================================================================
+ * 4. One declaration per Sass function
+ * ========================================================================== */
+
+describe('no stylesheet declares one function twice', () => {
+  /** Every `@function` name declared in a file, in source order. */
+  const declaredFunctions = (text: string): string[] => {
+    const found: string[] = [];
+    const pattern = /^\s*@function\s+([\w-]+)\s*\(/gmu;
+    let match = pattern.exec(text);
+
+    while (match !== null) {
+      found.push(match[1] ?? '');
+      match = pattern.exec(text);
+    }
+
+    return found;
+  };
+
+  it('declares each @function exactly once per stylesheet', () => {
+    // A second declaration under one name silently supersedes the first: Sass
+    // resolves the last one and reports nothing, so the earlier block — and the
+    // documentation and provenance on it — is dead code that reads as live.
+    expect(
+      offences((file) => {
+        if (!file.path.endsWith('.scss')) {
+          return [];
+        }
+
+        const seen = new Map<string, number>();
+        const repeated: string[] = [];
+
+        for (const name of declaredFunctions(file.text)) {
+          const count = (seen.get(name) ?? 0) + 1;
+
+          seen.set(name, count);
+
+          if (count === 2) {
+            repeated.push(`${file.path}: @function ${name} declared twice`);
+          }
+        }
+
+        return repeated;
+      }),
+    ).toEqual([]);
+  });
+
+  it('reads the token layer, where the duplication was', () => {
+    // The corpus assertion for this rule: a gate that resolved no stylesheet
+    // would pass it silently.
+    const tokens = SOURCES.find((file) => file.path === 'style/_tokens.scss');
+
+    expect(tokens).toBeDefined();
+    expect(declaredFunctions(tokens?.text ?? '')).toContain('quantised');
+  });
+});

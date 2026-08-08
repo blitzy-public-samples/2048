@@ -571,6 +571,43 @@ describe('Tracer span lifecycle and the bounded record buffer', () => {
     }
   });
 
+  it('rotates with the logger when a second run starts in one page load', () => {
+    const first = logger.correlationId;
+
+    tracer.withSpan(SPAN_NAMES.inputDispatch, (): void => undefined);
+
+    logger.setCorrelationId('run-second-of-this-page');
+
+    tracer.withSpan(SPAN_NAMES.renderCommit, (): void => undefined);
+
+    const records = tracer.recent();
+
+    // The tracer captured one identifier at construction, so every span of a
+    // second run was keyed to the run that ended. The span opened BEFORE the
+    // rotation keeps the identifier it opened under.
+    expect(tracer.correlationId).toBe('run-second-of-this-page');
+    expect(tracer.snapshot().correlationId).toBe('run-second-of-this-page');
+    expect(records[0]?.correlationId).toBe(first);
+    expect(records[1]?.correlationId).toBe('run-second-of-this-page');
+    expect(records[1]?.id.startsWith('run-second-of-this-page')).toBe(true);
+  });
+
+  it('keys a span crossing a rotation to the run that opened it', () => {
+    const span = tracer.startSpan(SPAN_NAMES.engineStage);
+    const opened = logger.correlationId;
+
+    logger.setCorrelationId('run-after-the-span-opened');
+    span.end();
+
+    const record = tracer.recent()[0];
+
+    // A span identifier is `${correlationId}#${counter}`, fixed when the span
+    // opened: a record keyed at close time would disagree with its own
+    // identifier.
+    expect(record?.correlationId).toBe(opened);
+    expect(record?.id.startsWith(opened)).toBe(true);
+  });
+
   it('reflects attributes and events set during the span, and merges the attributes passed to end', () => {
     const span = tracer.startSpan(SPAN_NAMES.engineTurn, {
       attributes: { [SPAN_ATTRIBUTES.direction]: DIRECTION_UP },

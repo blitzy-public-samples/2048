@@ -66,6 +66,10 @@
 //                                               src/theme/themes.ts and
 //                                               `tileNumeralSize` of
 //                                               src/theme/tokens.ts
+//   TR-NUMBER-10  target-only row               `degraded` carried by the
+//                                               paint plan and by the
+//                                               rendered-board snapshot, from
+//                                               `StateCommitEvent.degraded`
 //
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
@@ -321,6 +325,15 @@ export interface RenderedBoard {
   readonly over: boolean;
   readonly terminated: boolean;
 
+  /**
+   * Whether the engine could not establish this turn's terminal or stage
+   * status: `StateCommitEvent.degraded`, carried through so a presentation can
+   * say that the verdict beside it is unconfirmed rather than showing it as
+   * settled. Both renderers carry it, so a consumer reads one snapshot shape
+   * whichever draws the board.
+   */
+  readonly degraded: boolean;
+
   readonly themeId: ThemeId;
 }
 
@@ -559,6 +572,7 @@ interface PaintPlan {
   readonly over: boolean;
   readonly won: boolean;
   readonly terminated: boolean;
+  readonly degraded: boolean;
 }
 
 type HiddenState = HTMLElement['hidden'];
@@ -859,6 +873,7 @@ function planCommit(commit: StateCommitEvent): PaintPlan {
     over: commit.over,
     won: commit.won,
     terminated: commit.terminated,
+    degraded: commit.degraded,
   });
 }
 
@@ -1882,6 +1897,7 @@ export function createNumberOnlyRenderer(
       won: plan.won,
       over: plan.over,
       terminated: plan.terminated,
+      degraded: plan.degraded,
       themeId: theme.id,
     });
 

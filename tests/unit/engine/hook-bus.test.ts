@@ -538,6 +538,46 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
     expect(bus.metrics().correlationId).toBe(CORRELATION_ID);
   });
 
+  it('reads an injected reader per report, so a run rotation reaches it', () => {
+    let current = 'run-first';
+    const reports: string[] = [];
+    const bus = createHookBus({
+      correlationId: (): string => current,
+      reporter: {
+        onCount(report): void {
+          reports.push(report.correlationId);
+        },
+      },
+    });
+
+    expect(bus.metrics().correlationId).toBe('run-first');
+
+    // A second run of one page load. A bus that captured the identifier at
+    // construction kept reporting the ended run's.
+    current = 'run-second';
+    register(
+      bus,
+      createSubscriber('reader', { onStageEnd: (): void => undefined }),
+    );
+    dispatchStageEnd(bus);
+
+    expect(bus.metrics().correlationId).toBe('run-second');
+    expect(reports.length).toBeGreaterThan(0);
+    expect(reports[reports.length - 1]).toBe('run-second');
+  });
+
+  it('reports the empty string where an injected reader raises', () => {
+    const bus = createHookBus({
+      correlationId: (): string => {
+        throw new Error('correlation unavailable');
+      },
+    });
+
+    // Total, as every read of an injected collaborator is here: a reader that
+    // raises must not take a metrics snapshot down with it.
+    expect(bus.metrics().correlationId).toBe('');
+  });
+
   it('starts every counter at zero, as L2 started an empty table', () => {
     const metrics: HookBusMetrics = createHookBus({
       correlationId: CORRELATION_ID,

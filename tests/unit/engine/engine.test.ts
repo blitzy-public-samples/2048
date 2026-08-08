@@ -702,6 +702,34 @@ describe('constructor (js/game_manager.js L1-L14)', () => {
     expect(engine.correlationId).toBe('run-correlation-1');
   });
 
+  it('takes a correlation READER and resolves it on every read', () => {
+    let current = 'run-first';
+    const engine = new Engine({
+      streams: streamsFor(),
+      correlationId: (): string => current,
+    });
+
+    expect(engine.correlationId).toBe('run-first');
+
+    // One page load can play more than one run. A captured identifier kept
+    // every later report of this engine attributed to the run that ended.
+    current = 'run-second';
+
+    expect(engine.correlationId).toBe('run-second');
+    expect(engine.hooks.metrics().correlationId).toBe('run-second');
+  });
+
+  it('reads the empty string where a correlation reader raises', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      correlationId: (): string => {
+        throw new Error('correlation unavailable');
+      },
+    });
+
+    expect(engine.correlationId).toBe('');
+  });
+
   it('takes a persistence port carrying the best-score pair alone', () => {
     // js/local_storage_manager.js L43-L49 is the whole surface this port
     // exposes; the three snapshot calls L52-L63 made are absent.
@@ -3468,5 +3496,150 @@ describe('vanilla parity from the five fixtures (gate V1)', () => {
 
     expect(engine.score).toBeGreaterThan(0);
     expect(tileCount(engine)).toBeLessThanOrEqual(size * size);
+  });
+});
+
+/* ==========================================================================
+ * attemptMove(): the structured outcome of one attempt
+ * ========================================================================== */
+
+describe('attemptMove(): which of the four paths a move took', () => {
+  it('reports a resolved move as moved and committed', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(attempt).toEqual({
+      moved: true,
+      resolution: 'moved',
+      committed: true,
+      direction: DIRECTION_LEFT,
+      resolvedDirection: DIRECTION_LEFT,
+    });
+  });
+
+  it('reports a move refused by the terminal guard as blocked', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.isGameTerminated()).toBe(true);
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    // The path a boolean could not distinguish from an idle turn, although the
+    // engine has counted the two separately all along.
+    expect(attempt.resolution).toBe('blocked');
+    expect(attempt.moved).toBe(false);
+    expect(attempt.committed).toBe(false);
+  });
+
+  it('reports a move a listener withdrew as cancelled', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    engine.events.on('move:before', (payload) => {
+      payload.cancelled = true;
+    });
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(attempt.resolution).toBe('cancelled');
+    expect(attempt.moved).toBe(false);
+    expect(attempt.committed).toBe(false);
+  });
+
+  it('reports a move an onBeforeMove handler withdrew as cancelled', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    engine.hooks.register({
+      id: 'vetoes',
+      hooks: {
+        onBeforeMove: (payload): BeforeMovePayload => ({
+          ...payload,
+          cancelled: true,
+        }),
+      },
+    });
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    // A veto a HANDLER cast is resolved after `move:before` was emitted, so no
+    // listener sees it and the returned outcome is the only report of it.
+    expect(attempt.resolution).toBe('cancelled');
+    expect(attempt.committed).toBe(false);
+  });
+
+  it('reports the direction a handler redirected the move to', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    engine.hooks.register({
+      id: 'redirects',
+      hooks: {
+        onBeforeMove: (payload): BeforeMovePayload => ({
+          ...payload,
+          direction: DIRECTION_RIGHT,
+        }),
+      },
+    });
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(attempt.direction).toBe(DIRECTION_LEFT);
+    expect(attempt.resolvedDirection).toBe(DIRECTION_RIGHT);
+  });
+
+  it('reports a move that changed nothing as idle', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup({
+      grid: {
+        size: DEFAULT_BOARD_SIZE,
+        cells: [
+          [{ position: { x: 0, y: 0 }, value: 2 }, null, null, null],
+          [null, null, null, null],
+          [null, null, null, null],
+          [null, null, null, null],
+        ],
+      },
+      score: 0,
+      over: false,
+      won: false,
+      keepPlaying: false,
+    });
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(attempt.resolution).toBe('idle');
+    expect(attempt.moved).toBe(false);
+    expect(attempt.committed).toBe(false);
+  });
+
+  it('is the outcome move() projects to a boolean', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const control = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    control.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    // `move()` is `attemptMove().moved` and nothing else: the same board, the
+    // same score and the same return value.
+    expect(control.move(DIRECTION_LEFT)).toBe(
+      engine.attemptMove(DIRECTION_LEFT).moved,
+    );
+    expect(engine.serialize()).toEqual(control.serialize());
+  });
+
+  it('freezes the outcome it reports', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(Object.isFrozen(engine.attemptMove(DIRECTION_LEFT))).toBe(true);
   });
 });

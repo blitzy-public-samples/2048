@@ -787,6 +787,37 @@ describe('an unversioned envelope migrates to the current version', () => {
 
     expect(failures(world.records)).toEqual([]);
   });
+
+  it('reads a correlation READER per report, so a run rotation reaches it', () => {
+    const storage = new MemoryStorage();
+
+    trackedStorages.push(storage);
+
+    const payload = loosenEnvelope();
+
+    delete payload.schemaVersion;
+
+    storage.setItem(RUN_STATE_KEY, JSON.stringify(payload));
+
+    const sink = createCapturingSink();
+    let current = 'run-first';
+    const store = new RunStateStore({
+      storage: new LocalStorageManager({ storage }),
+      reporter: sink.reporter,
+      correlationId: (): string => current,
+    });
+
+    // A second run of one page load: the store outlives the run it was
+    // constructed under, and a captured identifier attributed every later
+    // report to the run that ended.
+    current = 'run-second';
+    store.load();
+
+    const reports = recordsOn(sink.records, 'onVersionMigrated');
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.correlationId).toBe('run-second');
+  });
 });
 
 describe('the version history decides which payload migrates', () => {

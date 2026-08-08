@@ -41,12 +41,33 @@ import type {
 } from '../../../src/engine/types';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import type { RngStreams } from '../../../src/rng/rng-streams';
-import { MERGE_PAIR_BOARD, copyBoard } from '../../fixtures/boards';
+import {
+  BLOCKED_BOARD,
+  MERGE_PAIR_BOARD,
+  copyBoard,
+} from '../../fixtures/boards';
 
 /* ===== 0. Constants, doubles and helpers ===== */
 
 /** Run seed every deterministic case below is built from. */
 const RUN_SEED = 'engine-capabilities-seed-1';
+
+/**
+ * Row of column 0 the excision case removes a tile from.
+ *
+ * `createBlockedBoard()` fills column 0 top to bottom, so any row holds a tile;
+ * the last one is taken so the cell freed is not the one a merge would have
+ * used.
+ */
+const EXCISED_Y = DEFAULT_BOARD_SIZE - 1;
+
+/**
+ * Face value the stage-goal cases target.
+ *
+ * Above every value `createBlockedBoard()` carries at the default board size,
+ * so a goal set to it is unmet until a handler installs the tile.
+ */
+const GOAL_TILE_VALUE = 2 ** (DEFAULT_BOARD_SIZE + 2);
 
 /**
  * Builds the run's four substreams.
@@ -298,6 +319,193 @@ describe('the board-effect channel', () => {
     expect(commits).toHaveLength(1);
   });
 
+  it('commits an accepted pre-move effect the walk then found nothing to move', () => {
+    const bus = createHookBus();
+    const saved: SerializedGameState[] = [];
+
+    // Never withdraws the move, exactly as `tumbler` and `culling-blade` do
+    // not: the excision is recorded and the requested slide still resolves.
+    register(bus, 'blade', {
+      onBeforeMove: (payload: BeforeMovePayload, context: HookContext) => {
+        context.effects.removeTile({ x: 0, y: EXCISED_Y });
+
+        return payload;
+      },
+    });
+
+    const engine = new Engine({
+      streams: streamsFor(),
+      hooks: bus,
+      storage: {
+        getBestScore: (): string | 0 => 0,
+        setBestScore: (): void => {},
+        getGameState: (): unknown => null,
+        setGameState: (state: unknown): void => {
+          saved.push(state as SerializedGameState);
+        },
+        clearGameState: (): void => {},
+      },
+    });
+
+    // LEFT is the fixture's blocked direction: every tile is already in column
+    // 0, so the walk moves nothing and the vanilla turn would end silently.
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const commits = captureCommits(engine);
+    const spawns: number[] = [];
+
+    engine.events.on('tile:spawn', (): void => {
+      spawns.push(1);
+    });
+    saved.length = 0;
+
+    // The slide is what the return reports, and the slide moved nothing.
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+
+    const cells = engine.serialize().grid.cells.flat();
+
+    // The excision stands, and NOTHING was spawned to refill the cell it freed:
+    // a spawn belongs to a move that moved.
+    expect(cells.filter((cell) => cell !== null)).toHaveLength(
+      DEFAULT_BOARD_SIZE - 1,
+    );
+    expect(spawns).toHaveLength(0);
+
+    // The board changed, so the turn published and persisted it rather than
+    // leaving every view and the stored snapshot on the pre-effect board.
+    expect(commits).toHaveLength(1);
+    expect(
+      commits[0]?.board.cells.flat().filter((cell) => cell !== null),
+    ).toHaveLength(DEFAULT_BOARD_SIZE - 1);
+    expect(
+      saved.at(-1)?.grid.cells.flat().filter((cell) => cell !== null),
+    ).toHaveLength(DEFAULT_BOARD_SIZE - 1);
+  });
+
+  it('reports an effect-only turn as idle AND committed', () => {
+    const bus = createHookBus();
+
+    // The same excision as the case above, whose slide moves nothing: this one
+    // measures what `attemptMove()` REPORTS about that turn rather than what it
+    // persisted, because the two answers are resolved on separate lines.
+    register(bus, 'blade', {
+      onBeforeMove: (payload: BeforeMovePayload, context: HookContext) => {
+        context.effects.removeTile({ x: 0, y: EXCISED_Y });
+
+        return payload;
+      },
+    });
+
+    const engine = new Engine({ streams: streamsFor(), hooks: bus });
+
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const commits = captureCommits(engine);
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    // `resolution` and `moved` report the SLIDE, which moved nothing, while
+    // `committed` reports that the turn nevertheless committed the board the
+    // effect left. A turn that says it committed nothing while a commit was
+    // emitted would misreport the one path where the two differ.
+    expect(attempt.resolution).toBe('idle');
+    expect(attempt.moved).toBe(false);
+    expect(attempt.committed).toBe(true);
+    expect(commits).toHaveLength(1);
+  });
+
+  it('reports a withdrawn turn that reseated the board as committed', () => {
+    const bus = createHookBus();
+
+    register(bus, 'undoes', {
+      onBeforeMove: (payload: BeforeMovePayload, context: HookContext) => {
+        context.effects.request({
+          kind: 'restoreBoard',
+          board: { size: DEFAULT_BOARD_SIZE, cells: [] },
+          score: 99,
+        });
+        payload.cancelled = true;
+
+        return payload;
+      },
+    });
+
+    const engine = new Engine({ streams: streamsFor(), hooks: bus });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const commits = captureCommits(engine);
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(attempt.resolution).toBe('cancelled');
+    expect(attempt.moved).toBe(false);
+    expect(attempt.committed).toBe(true);
+    expect(commits).toHaveLength(1);
+  });
+
+  it('resolves a stage the reseated board of a withdrawn move cleared', () => {
+    const bus = createHookBus();
+
+    // The rewind pairing: the board is restored AND the move is withdrawn,
+    // which is what `temporal-anchor` does.
+    register(bus, 'anchor', {
+      onBeforeMove: (payload: BeforeMovePayload, context: HookContext) => {
+        const board = payload.board.serialize();
+
+        for (const column of board.cells) {
+          for (let y = 0; y < column.length; y += 1) {
+            column[y] = null;
+          }
+        }
+
+        const first = board.cells[0];
+
+        if (first !== undefined) {
+          first[0] = { position: { x: 0, y: 0 }, value: GOAL_TILE_VALUE };
+        }
+
+        context.effects.request({ kind: 'restoreBoard', board });
+        payload.cancelled = true;
+
+        return payload;
+      },
+    });
+
+    const goal: StageGoal = {
+      kind: 'highest-tile',
+      target: GOAL_TILE_VALUE,
+    };
+
+    const engine = new Engine({
+      streams: streamsFor(),
+      hooks: bus,
+      stageContext: (): StageCommitContext =>
+        Object.freeze({ stageIndex: 0, goal, goalProgress: 0 }),
+
+      // The engine resolves its own stage here, so the clear is observable
+      // without a run controller.
+      stageResolution: 'engine',
+    });
+
+    const ends: boolean[] = [];
+
+    engine.events.on('stage:end', (event): void => {
+      ends.push(event.cleared);
+    });
+
+    // The highest tile on the board the move is pressed on is below the target,
+    // so only the restored lattice can clear the stage.
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const commits = captureCommits(engine);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+
+    // The withdrawn move reseated the board, so the stage was measured against
+    // what it left and resolved from it.
+    expect(ends).toEqual([true]);
+    expect(commits.length).toBeGreaterThan(0);
+  });
+
   it('resizes the live board, keeping in-bounds tiles in their own cells', () => {
     const bus = createHookBus();
     const config = createDefaultRulesConfig();
@@ -508,6 +716,49 @@ describe('the spawn count', () => {
     expect(play()).toBe(play());
   });
 
+  it('suppresses a spawn a handler aimed at an occupied cell', () => {
+    const bus = createHookBus();
+    const recording = createRecordingReporter();
+
+    // The merged tile's cell: a LEFT move on the merge-pair fixture merges into
+    // (0, 0), so this is in bounds, and occupied, at the moment the spawn
+    // resolves.
+    register(bus, 'squatter', {
+      onSpawn: (payload: SpawnPayload): SpawnPayload => ({
+        ...payload,
+        position: { x: 0, y: 0 },
+      }),
+    });
+
+    const engine = new Engine({
+      streams: streamsFor(),
+      hooks: bus,
+      reporter: recording.reporter,
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const merged = engine.serialize().grid.cells[0]?.[0];
+    const positions: (unknown | undefined)[] = [];
+
+    engine.events.on('tile:spawn', (event): void => {
+      positions.push(event.position);
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    const occupant = engine.serialize().grid.cells[0]?.[0];
+
+    // THE TILE THAT WAS THERE IS STILL THERE. A spawn draws an empty cell, so a
+    // transformed position that names an occupied one inserts nothing rather
+    // than replacing what the board holds.
+    expect(occupant?.value).toBe((merged?.value ?? 0) * 2);
+    expect(recording.metric('engine.spawn.suppressed')).toBeGreaterThan(0);
+
+    // The suppressed attempt is still emitted, and carries no position.
+    expect(positions).toEqual([undefined]);
+  });
+
   it('inserts nothing beyond the cells the board has left', () => {
     const bus = createHookBus();
 
@@ -660,6 +911,37 @@ describe('a terminal-state measurement that cannot be taken', () => {
     expect(ends).toHaveLength(0);
     expect(recording.metric('engine.terminal.unknown')).toBeGreaterThan(0);
     expect(engine.isDegraded()).toBe(true);
+  });
+
+  it('publishes a degradation the stage measurement raised, in a following commit', () => {
+    // The stage resolution runs AFTER the commit its turn ended with, so a
+    // measurement that raises there records the degradation on an engine whose
+    // last published commit said otherwise. The state is published again from
+    // the degradation now recorded.
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageResolution: 'engine',
+      stageContext: (): StageCommitContext =>
+        Object.freeze({
+          stageIndex: 0,
+          goal: { kind: 'unknown-kind', target: 4 } as unknown as StageGoal,
+          goalProgress: 0,
+        }),
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const commits = captureCommits(engine);
+
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.isDegraded()).toBe(true);
+
+    // The LAST commit a view holds is the truthful one, and the turn's own
+    // commit — taken before the measurement was attempted — is still in the
+    // stream ahead of it.
+    expect(commits.length).toBeGreaterThan(1);
+    expect(commits.at(-1)?.degraded).toBe(true);
   });
 
   it('is treated as non-terminal by the engine and by what it persists', () => {

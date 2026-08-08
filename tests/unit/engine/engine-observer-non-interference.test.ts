@@ -34,10 +34,12 @@ import type {
   ChargeConsumption,
   HookBus,
   HookBusMetrics,
+  HookBusTracing,
   HookDispatchResult,
   HookSubscriber,
 } from '../../../src/engine/hook-bus';
 import type {
+  AfterMovePayload,
   BeforeMovePayload,
   HookEnvironment,
   HookName,
@@ -53,6 +55,7 @@ import type {
   Position,
   SerializedGameState,
 } from '../../../src/engine/types';
+import type { RngCursorMap } from '../../../src/rng/rng-streams';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 
 const RUN_SEED = 'observer-non-interference-seed';
@@ -659,3 +662,112 @@ describe('a relic handler that throws does not perturb a seeded run (F2)',
       expect(withRelic).toEqual(withoutRelic);
     });
   });
+
+describe('an injected span wrapper does not perturb a seeded run (F2)', () => {
+  /** Twelve moves, in the order each run below plays them. */
+  const MOVES: readonly (0 | 1 | 2 | 3)[] = [
+    3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2,
+  ];
+
+  /**
+   * A tracing port that runs each boundary exactly once, as a span does.
+   *
+   * @returns The port, and the names it was called with in order.
+   */
+  function createTracing(): {
+    readonly tracing: HookBusTracing;
+    readonly names: readonly string[];
+  } {
+    const names: string[] = [];
+
+    return {
+      names,
+      tracing: {
+        traceHookDispatch: <T>(hook: HookName, run: () => T): T => {
+          names.push(`dispatch:${hook}`);
+
+          return run();
+        },
+        traceRelicHandler: <T>(
+          hook: HookName,
+          relicId: string,
+          run: () => T,
+        ): T => {
+          names.push(`handler:${hook}:${relicId}`);
+
+          return run();
+        },
+      },
+    };
+  }
+
+  /**
+   * Plays the fixed move list against an engine whose bus is measured or not.
+   *
+   * @param tracing The port to inject, or `undefined` for an unmeasured bus.
+   * @returns The serialised end state, and the cursors the run consumed.
+   */
+  function play(tracing: HookBusTracing | undefined): {
+    readonly state: SerializedGameState;
+    readonly cursors: RngCursorMap;
+  } {
+    const streams = createRngStreams(RUN_SEED);
+    const engine = new Engine({
+      config: { ...DEFAULT_RULES_CONFIG },
+      streams,
+      storage: createPort(),
+      hooks: createHookBus(tracing === undefined ? {} : { tracing }),
+    });
+
+    engine.setup();
+
+    // One relic that draws, spends, records a command and then throws, and one
+    // that returns a transformed payload: the failing path and the succeeding
+    // path both cross the measured boundary.
+    engine.hooks.register({
+      id: 'draws-then-throws',
+      charges: 4,
+      hooks: {
+        onBeforeMove: (_payload, context): BeforeMovePayload => {
+          context.rng.stream('spawn-value').next();
+          context.spendCharge();
+          context.effects.insertTile({ x: 0, y: 0 }, 4);
+
+          throw new Error('relic handler failed');
+        },
+      },
+    });
+    engine.hooks.register({
+      id: 'doubles-nothing',
+      hooks: {
+        onAfterMove: (payload): AfterMovePayload => payload,
+      },
+    });
+
+    for (const direction of MOVES) {
+      engine.move(direction);
+    }
+
+    return { state: engine.serialize(), cursors: streams.snapshotCursors() };
+  }
+
+  it('leaves the identical board, score and cursors', () => {
+    const measured = createTracing();
+    const traced = play(measured.tracing);
+    const plain = play(undefined);
+
+    // The wrappers ran — this is a measured run, not an accidentally
+    // unmeasured one.
+    expect(measured.names.length).toBeGreaterThan(0);
+    expect(traced.state).toEqual(plain.state);
+    expect(traced.cursors).toEqual(plain.cursors);
+  });
+
+  it('leaves the identical state on a repeat', () => {
+    const first = play(createTracing().tracing);
+    const second = play(createTracing().tracing);
+
+    expect(second.state).toEqual(first.state);
+    expect(second.cursors).toEqual(first.cursors);
+  });
+});

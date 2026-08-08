@@ -210,6 +210,12 @@ export class Grid {
   /**
    * Writes a tile into the cell its own `x` and `y` name, not a nested
    * position member.
+   *
+   * WRITES THE ADDRESSED CELL WHATEVER IT HOLDS, which the merge branch of
+   * src/engine/move-resolver.ts depends on: the merged tile is inserted into the
+   * cell the tile it merged with still occupies. A caller that must not replace
+   * a tile — the spawn boundary of src/engine/engine.ts is the one such caller —
+   * tests `cellAvailable` first.
    */
   insertTile(tile: Tile): void {
     this.cells[tile.x][tile.y] = tile;

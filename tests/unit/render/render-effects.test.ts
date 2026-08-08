@@ -49,6 +49,7 @@ import {
   setReducedMotionOverride,
 } from '../../../src/render/webgl-support';
 import { applyTheme, getTheme } from '../../../src/theme/themes';
+import type { Theme } from '../../../src/theme/themes';
 
 /**
  * A world point a burst is emitted at.
@@ -607,6 +608,40 @@ describe('the stage lighting', () => {
     expect(scene.applyStageTheme(Number.NaN)).toBe(false);
     expect(scene.readTuning()).toEqual(before);
     expect(scene.readStats().refused).toBeGreaterThan(0);
+
+    scene.dispose();
+  });
+
+  it('takes the light white point from the palette, not from a literal', () => {
+    const scene = createScene({ theme: getTheme('default') });
+
+    // Every shipped palette states `#ffffff`, so the rig opens on the same white
+    // point it always had: this asserts WHERE the value comes from, and that it
+    // is unchanged, rather than changing the lighting.
+    expect(scene.lights.ambient.color.getHexString()).toBe('ffffff');
+    expect(getTheme('default').palette.neutralLight).toBe('#ffffff');
+
+    // A palette stating its own white point reaches the rig through the same
+    // guarded reader every other palette entry is read through. `scene.ts` named
+    // white itself, so no palette could state it.
+    const warmed: Theme = {
+      ...getTheme('default'),
+      palette: { ...getTheme('default').palette, neutralLight: '#ff0000' },
+    };
+
+    scene.applyTheme(warmed);
+
+    expect(scene.lights.ambient.color.getHexString()).toBe('ff0000');
+
+    // Unparseable, so the token's own value is held rather than a colour of the
+    // reader's choosing.
+    scene.applyTheme({
+      ...warmed,
+      id: 'default',
+      palette: { ...warmed.palette, neutralLight: 'not-a-colour' },
+    });
+
+    expect(scene.lights.ambient.color.getHexString()).toBe('ffffff');
 
     scene.dispose();
   });

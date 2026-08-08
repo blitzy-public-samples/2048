@@ -44,6 +44,7 @@ import {
 import { numberOnlyRendererCopy } from '../../../src/render/number-only-renderer';
 import { createThreeRenderer } from '../../../src/render/three-renderer';
 import type {
+  ContextRestoreOutcome,
   ParallelBoardSurface,
   ThreeRenderer,
 } from '../../../src/render/three-renderer';
@@ -687,6 +688,27 @@ describe('readRenderedBoard', () => {
     fixture.renderer.destroy();
   });
 
+  it('carries the unestablished-status flag the commit reported', () => {
+    const fixture = harness();
+
+    fixture.renderer.render({
+      ...commitOf(4, [{ x: 0, y: 0, value: 2 }]),
+      degraded: true,
+    });
+    drain(fixture.renderer);
+
+    // The shared snapshot shape carries it, so the HUD, the announcer and both
+    // renderers read one flag rather than the number-only board alone knowing.
+    expect(fixture.renderer.readRenderedBoard()?.degraded).toBe(true);
+
+    fixture.renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(fixture.renderer);
+
+    expect(fixture.renderer.readRenderedBoard()?.degraded).toBe(false);
+
+    fixture.renderer.destroy();
+  });
+
   it('names a cell exactly as the number-only renderer names it', () => {
     expect(threeRendererCopy.cellLabel).toBe(numberOnlyRendererCopy.cellLabel);
     expect(threeRendererCopy.emptyCellLabel).toBe(
@@ -1317,10 +1339,14 @@ describe('a restored context', () => {
     document.body.append(numberOnlyHost, mock.element);
 
     const diagnostics: RenderDiagnostic[] = [];
+    const verdicts: ContextRestoreOutcome[] = [];
     const renderer = createThreeRenderer({
       canvas: mock.element,
       numberOnlyHost,
       ownerDocument: document,
+      onContextRestored: (outcome): void => {
+        verdicts.push(outcome);
+      },
       reporter: {
         onDiagnostic: (diagnostic): void => {
           diagnostics.push(diagnostic);
@@ -1351,7 +1377,85 @@ describe('a restored context', () => {
       ),
     ).toBe(true);
 
+    // AND THE VERDICT IS REPORTED, so a caller does not read a restoration that
+    // rebuilt nothing as a board that came back.
+    expect(verdicts).toEqual([
+      { rebuilt: false, contextLost: true, attempted: true },
+    ]);
+
+    // Nothing is left allocated: the board, the scene and the factory were
+    // released rather than left holding a context that will not draw.
+    const stats = renderer.readStats();
+
+    expect(stats.boardSize).toBe(0);
+    expect(stats.liveTiles).toBe(0);
+    expect(stats.activeTweens).toBe(0);
+    expect(renderer.readRenderedBoard()).toBeNull();
+
+    // The caught value reaches the sink unconverted, beside the bounded summary.
+    const failure = diagnostics.find((diagnostic) =>
+      diagnostic.message.includes('could not be rebuilt'),
+    );
+
+    expect(failure?.error?.name.length ?? 0).toBeGreaterThan(0);
+    expect(failure?.thrown).toBeDefined();
+
     renderer.destroy();
+  });
+
+  it('reports a completed rebuild as the verdict of the restoration', () => {
+    const fixture = harness();
+    const verdicts: ContextRestoreOutcome[] = [];
+
+    fixture.renderer.destroy();
+
+    const mock = createMockCanvas({ context: createMockWebGLContext().gl });
+
+    document.body.append(mock.element);
+
+    const renderer = createThreeRenderer({
+      canvas: mock.element,
+      ownerDocument: document,
+      onContextRestored: (outcome): void => {
+        verdicts.push(outcome);
+      },
+    });
+
+    expect(renderer.mounted).toBe(true);
+
+    mock.emit('webglcontextlost');
+    mock.emit('webglcontextrestored');
+
+    expect(verdicts).toEqual([
+      { rebuilt: true, contextLost: false, attempted: true },
+    ]);
+    expect(renderer.readStats().contextLost).toBe(false);
+
+    renderer.destroy();
+  });
+
+  it('forwards no verdict for a restoration after destroy', () => {
+    const verdicts: ContextRestoreOutcome[] = [];
+    const mock = createMockCanvas({ context: createMockWebGLContext().gl });
+
+    document.body.append(mock.element);
+
+    const renderer = createThreeRenderer({
+      canvas: mock.element,
+      ownerDocument: document,
+      onContextRestored: (outcome): void => {
+        verdicts.push(outcome);
+      },
+    });
+
+    mock.emit('webglcontextlost');
+    renderer.destroy();
+    mock.emit('webglcontextrestored');
+
+    // The handlers went with the renderer, so a restoration arriving afterwards
+    // reaches nothing: a destroyed renderer cannot be the reason a caller is
+    // serving another board.
+    expect(verdicts).toEqual([]);
   });
 });
 

@@ -31,6 +31,7 @@ import {
   HEALTH_CHECK_COUNT,
   HEALTH_CHECK_IDS,
 } from '../../../src/observability/health';
+import type { LogRecord } from '../../../src/observability/logger';
 import {
   SPAN_ATTRIBUTES,
   SPAN_NAMES,
@@ -582,6 +583,128 @@ describe('the tracer is wired', () => {
     expect(resolve?.parentId).toBe(turn?.id);
   });
 
+  it('opens render.commit INSIDE the turn span that produced it', () => {
+    application = start(document);
+
+    playEveryDirection();
+
+    const records = application.tracer.recent(400);
+    const commits = records.filter(
+      (record) => record.name === SPAN_NAMES.renderCommit,
+    );
+    const turns = records.filter(
+      (record) => record.name === SPAN_NAMES.engineTurn,
+    );
+    const turnIds = new Set(turns.map((record) => record.id));
+
+    expect(commits.length).toBeGreaterThan(0);
+    expect(turns.length).toBeGreaterThan(0);
+
+    // A COMMIT MADE BY A TURN BELONGS TO THAT TURN. The listener that closes the
+    // turn span is another `state:commit` listener, and it used to be registered
+    // FIRST, so the turn was closed before the renderer's span was opened and
+    // every `render.commit` of a turn was recorded as a root span.
+    const inTurn = commits.filter(
+      (record) => record.parentId !== undefined && turnIds.has(record.parentId),
+    );
+
+    expect(inTurn.length).toBeGreaterThan(0);
+  });
+
+  it('keeps render.commit inside the turn after a renderer swap', () => {
+    application = start(document);
+
+    // The number-only board takes over, which re-subscribes a renderer and so
+    // re-registers a `state:commit` listener after the tracing subscription's.
+    application.preferences.setNumberOnlyMode(true);
+    playEveryDirection();
+
+    const records = application.tracer.recent(400);
+    const turnIds = new Set(
+      records
+        .filter((record) => record.name === SPAN_NAMES.engineTurn)
+        .map((record) => record.id),
+    );
+    const commits = records.filter(
+      (record) => record.name === SPAN_NAMES.renderCommit,
+    );
+
+    expect(application.renderer.mode).toBe('number-only');
+    expect(commits.length).toBeGreaterThan(0);
+    expect(
+      commits.filter(
+        (record) =>
+          record.parentId !== undefined && turnIds.has(record.parentId),
+      ).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('closes a withdrawn turn as cancelled rather than as idle', () => {
+    application = start(document);
+
+    // A relic that withdraws every move, which is the valid hook-veto path: the
+    // veto is cast AFTER `move:before` was emitted, so no listener can see it and
+    // the caller's outcome is the only thing that can classify the turn.
+    application.engine.hooks.register({
+      id: 'vetoes-everything',
+      hooks: {
+        onBeforeMove: (payload) => ({ ...payload, cancelled: true }),
+      },
+    });
+
+    press('ArrowDown', 'ArrowDown');
+
+    const turn = application.tracer
+      .recent(200)
+      .filter((record) => record.name === SPAN_NAMES.engineTurn)
+      .at(-1);
+
+    // `unmoved` is what a boolean return produced for this turn, which reported
+    // the player pressing into a wall.
+    expect(turn?.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.cancelled,
+    );
+    expect(application.tracer.snapshot().anomalies).toBe(0);
+  });
+
+  it('closes a failed attempt as failed and raises no anomaly', () => {
+    application = start(document);
+
+    const engine = application.engine;
+    const failing = (): boolean => {
+      throw new Error('move failed');
+    };
+
+    // The attempt itself throws, which the outcome taxonomy could not express at
+    // all: the turn span stayed open until the next input superseded it.
+    Object.defineProperty(engine, 'attemptMove', {
+      configurable: true,
+      value: (direction: 0 | 1 | 2 | 3): never => {
+        engine.events.emit('move:before', {
+          direction,
+          board: engine.grid,
+          cancelled: false,
+        });
+
+        return failing() as never;
+      },
+    });
+
+    press('ArrowDown', 'ArrowDown');
+
+    const turn = application.tracer
+      .recent(200)
+      .filter((record) => record.name === SPAN_NAMES.engineTurn)
+      .at(-1);
+
+    expect(turn?.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.failed,
+    );
+    // The stage span alone is left open; the turn span was closed by the
+    // settling in the listener's `finally`.
+    expect(application.tracer.snapshot().open).toBe(1);
+  });
+
   it('covers EVERY boundary span validation gate V8 enumerates', async () => {
     application = start(document);
 
@@ -875,6 +998,63 @@ describe('the frame metric', () => {
 });
 
 /* ==========================================================================
+ * A caught value reaches the sink whole
+ * ========================================================================== */
+
+describe('a contained failure', () => {
+  /** The records the logger buffered, newest last. */
+  const records = (subject: Application): readonly LogRecord[] =>
+    subject.logger.snapshot().records;
+
+  it('carries an engine listener s throw with its stack and cause', () => {
+    application = start(document);
+
+    const cause = new Error('the cause');
+    const thrown = new Error('the listener threw', { cause });
+
+    application.engine.events.on('state:commit', (): void => {
+      throw thrown;
+    });
+
+    playEveryDirection();
+
+    const reported = records(application).find(
+      (record) => record.error?.message === 'the listener threw',
+    );
+
+    // A NAME AND A MESSAGE WERE ALL THIS SEAM KEPT. `serializeError` reads the
+    // stack and the whole cause chain off the value itself, and it can only do
+    // that if the value itself was forwarded.
+    expect(reported).toBeDefined();
+    expect(reported?.error?.stack).toBeDefined();
+    expect(reported?.error?.cause?.message).toBe('the cause');
+  });
+
+  it('carries a settings failure s throw with its stack and cause', () => {
+    application = start(document);
+
+    const cause = new Error('the underlying cause');
+    const stop = application.preferences.subscribe((): void => {
+      throw new Error('the preference listener threw', { cause });
+    });
+
+    // A contained throw from a preference listener, which reaches the
+    // accessibility surface's own sink — the seam that reduced every caught
+    // value to a name and a message before forwarding it.
+    application.preferences.setNumberOnlyMode(true);
+    stop();
+
+    const reported = records(application).find(
+      (record) => record.error?.message === 'the preference listener threw',
+    );
+
+    expect(reported).toBeDefined();
+    expect(reported?.error?.stack).toBeDefined();
+    expect(reported?.error?.cause?.message).toBe('the underlying cause');
+  });
+});
+
+/* ==========================================================================
  * The correlation identifier identifies a run, not a seed
  * ========================================================================== */
 
@@ -944,6 +1124,217 @@ describe('the correlation identifier', () => {
 
     expect(application.metrics.snapshot().correlationId).toBe(expected);
     expect(application.diagnostics.lastSnapshot()?.correlationId).toBe(expected);
+  });
+
+  it('rotates across the WHOLE pipeline when a new run starts', () => {
+    application = start(document);
+    playEveryDirection();
+
+    const before = application.logger.correlationId;
+
+    application.startNewRun();
+
+    const after = application.logger.correlationId;
+
+    // A new run, a new identity, a new identifier.
+    expect(after).not.toBe(before);
+
+    // EVERY per-run observer follows it, not the logger alone: the registry, the
+    // tracer, the health surface, the engine, the emitter, the hook bus, the
+    // relic registry and the run controller each used to carry the identifier
+    // they were constructed with for the life of the page.
+    expect(application.metrics.snapshot().correlationId).toBe(after);
+    expect(application.tracer.snapshot().correlationId).toBe(after);
+    expect(application.health.check().correlationId).toBe(after);
+    expect(application.health.readiness().correlationId).toBe(after);
+    expect(application.engine.correlationId).toBe(after);
+    expect(application.engine.hooks.metrics().correlationId).toBe(after);
+    expect(application.relics.correlationId).toBe(after);
+    expect(application.run.correlationId()).toBe(after);
+    expect(application.diagnostics.snapshot().correlationId).toBe(after);
+  });
+
+  it('rotates BEFORE the new run s first emission', () => {
+    application = start(document);
+    playEveryDirection();
+
+    const before = application.logger.correlationId;
+
+    application.startNewRun();
+
+    const after = application.logger.correlationId;
+    const records = application.logger
+      .snapshot()
+      .records.filter((record) => record.message === 'A new run started.');
+
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every((record) => record.correlationId === after)).toBe(true);
+
+    // The stage the new run opened on, and the commit that opened it, are the
+    // FIRST emissions of the run: the rotation used to happen after them, so
+    // both were attributed to the run that had just ended.
+    //
+    // MEASURED ON THE SPANS THE NEW RUN CLOSED, because a span is keyed to the
+    // run that OPENED it and keeps that key at close — see the tracer suite's
+    // 'keys a span crossing a rotation to the run that opened it'. The new run's
+    // own stage span is therefore still open and files no record yet, while the
+    // last stage RECORD is the ended run's, closed as superseded after the
+    // rotation and correctly still keyed to the run it belonged to.
+    const records2 = application.tracer.snapshot().spans;
+    const stages = records2.filter(
+      (span) => span.name === SPAN_NAMES.engineStage,
+    );
+    const commits = records2.filter(
+      (span) => span.name === SPAN_NAMES.renderCommit,
+    );
+    const dispatches = records2.filter(
+      (span) => span.name === SPAN_NAMES.hookDispatch,
+    );
+
+    // The commit that opened the new run's stage, and the hook dispatches of
+    // that opening, are the run's first emissions and carry ITS identifier.
+    expect(commits.at(-1)?.correlationId).toBe(after);
+    expect(commits.at(-1)?.correlationId).not.toBe(before);
+    expect(commits.at(-1)?.id.startsWith(after)).toBe(true);
+    expect(
+      dispatches.filter((span) => span.correlationId === after).length,
+    ).toBeGreaterThan(0);
+
+    // The new run's stage span is still open — it is detached and closes on a
+    // `stage:end` of its own — so it files no record here, and at least one span
+    // is open for it. The newest stage RECORD is therefore the ended run's, and
+    // it agrees with its own identifier.
+    expect(application.tracer.snapshot().open).toBeGreaterThan(0);
+    expect(stages.at(-1)?.correlationId).toBe(before);
+    expect(stages.at(-1)?.id.startsWith(before)).toBe(true);
+  });
+
+  it('leaves the records of the finished run under its own identifier', () => {
+    application = start(document);
+    playEveryDirection();
+
+    const before = application.logger.correlationId;
+    const emittedBefore = application.logger
+      .snapshot()
+      .records.filter((record) => record.correlationId === before).length;
+
+    expect(emittedBefore).toBeGreaterThan(0);
+
+    application.startNewRun();
+
+    // Records already written are NOT relabelled: they were true when they were
+    // written, so a stream partitioned by identifier still shows the run that
+    // ended as its own partition.
+    expect(
+      application.logger
+        .snapshot()
+        .records.filter((record) => record.correlationId === before).length,
+    ).toBeGreaterThanOrEqual(emittedBefore);
+  });
+});
+
+/* ==========================================================================
+ * A second run in one page load rotates EVERY reporter
+ *
+ * The logger's identifier was the only rotatable one: the tracer, the engine,
+ * the hook bus, the relic registry, the run-state store, the run controller,
+ * the metrics registry and the health surface each captured a string at
+ * construction, and the root rotated the logger only after the new run had
+ * already opened its board. A second run therefore reported partly under its
+ * own identifier and partly under the ended run's, which is the one thing a
+ * correlation identifier exists to prevent.
+ * ========================================================================== */
+
+describe('the run correlation scope', () => {
+  it('rotates every reporter together when a second run starts', () => {
+    application = start(document);
+
+    const firstId = application.logger.correlationId;
+
+    application.startNewRun();
+
+    const secondId = application.logger.correlationId;
+
+    // A new run, so a new identifier.
+    expect(secondId).not.toBe(firstId);
+
+    // EVERY reporter, not just the logger. Each of these read a value captured
+    // at construction and kept reporting the ended run's identifier.
+    expect(application.tracer.correlationId).toBe(secondId);
+    expect(application.engine.correlationId).toBe(secondId);
+    expect(application.engine.hooks.metrics().correlationId).toBe(secondId);
+    expect(application.run.correlationId()).toBe(secondId);
+    expect(application.metrics.snapshot().correlationId).toBe(secondId);
+    expect(application.health.correlationId).toBe(secondId);
+    expect(application.health.check().correlationId).toBe(secondId);
+  });
+
+  it('is in force before the second run reports that it started', () => {
+    application = start(document);
+
+    const firstId = application.logger.correlationId;
+
+    application.startNewRun();
+
+    const secondId = application.logger.correlationId;
+    const started = application.logger
+      .recent(200)
+      .filter(
+        (record) =>
+          record.subsystem === 'run/controller' &&
+          record.message === 'Started a new run.',
+      );
+
+    // The run's OWN opening report. Rotating after the run had started left it
+    // attributed to the run that ended.
+    expect(started.length).toBeGreaterThan(0);
+    expect(started[started.length - 1].correlationId).toBe(secondId);
+    expect(started[started.length - 1].correlationId).not.toBe(firstId);
+  });
+
+  it('keys the spans of the second run to the second run', () => {
+    application = start(document);
+
+    application.startNewRun();
+
+    const secondId = application.logger.correlationId;
+
+    // Counted AFTER the rotation, so the records of the run that ended are not
+    // measured here: a span belongs to the run that opened it, and the ones
+    // opened before the rotation are correctly keyed to the first run.
+    const before = application.tracer.snapshot().spans.length;
+
+    playEveryDirection();
+
+    const spans = application.tracer.snapshot().spans.slice(before);
+
+    // Span identifiers are `${correlationId}#${counter}`, so a captured
+    // identifier keys every later span to the ended run.
+    expect(spans.length).toBeGreaterThan(0);
+
+    for (const span of spans) {
+      expect(span.correlationId).toBe(secondId);
+      expect(span.id.startsWith(secondId)).toBe(true);
+    }
+  });
+
+  it('still folds the hook bus counts into the registry after a rotation', () => {
+    application = start(document);
+
+    application.startNewRun();
+    playEveryDirection();
+
+    const snapshot = application.diagnostics.snapshot();
+    const rejected = application.logger
+      .recent(300)
+      .filter((record) => record.message === 'hook dispatch fold rejected');
+
+    // The registry refuses a snapshot carrying an identifier other than its
+    // own, so the bus and the registry have to rotate as one: rotating the bus
+    // alone would make its own counts foreign to the registry folding them.
+    expect(rejected).toHaveLength(0);
+    expect(snapshot.correlationId).toBe(application.logger.correlationId);
+    expect(snapshot.hooks.length).toBeGreaterThan(0);
   });
 });
 
@@ -1487,11 +1878,20 @@ describe('the tracer is wired, at every boundary', () => {
     playEveryDirection();
     playEveryDirection();
 
-    // ONE span stays open — the stage — and no turn does. At least one of those
-    // eight attempts moved nothing, and the engine emits no `move:after` for
-    // it; `settleTurn()` at the input boundary is what closes it, and without
-    // the call the span stayed open until the next attempt superseded it.
-    expect(application.tracer.snapshot().open).toBe(1);
+    // NO TURN SPAN stays open, which is what this case is about. At least one of
+    // those eight attempts moved nothing, and the engine emits no `move:after`
+    // for it; `settleTurn()` at the input boundary is what closes it, and
+    // without the call the span stayed open until the next attempt superseded
+    // it.
+    //
+    // MEASURED BY NAME, not by the open count. The stage span is the only other
+    // span that can still be open, and whether it is depends on where the run's
+    // random seed placed the tiles: eight attempts clear stage 1 for roughly one
+    // seed in fifteen, and a cleared stage closes that span and opens no
+    // successor until the reward is taken. Asserting `open === 1` therefore
+    // failed on those seeds for a reason this case does not measure.
+    expect(application.tracer.hasOpenSpan(SPAN_NAMES.engineTurn)).toBe(false);
+    expect(application.tracer.snapshot().open).toBeLessThanOrEqual(1);
 
     const turns = application.tracer
       .snapshot()

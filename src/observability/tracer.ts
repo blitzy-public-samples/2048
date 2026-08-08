@@ -86,6 +86,7 @@ import type {
   StateCommitEvent,
 } from '../engine/engine-events';
 import type { HookName } from '../engine/hooks';
+import type { CorrelationId, CorrelationSource } from '../engine/types';
 import type { LogFields, Logger, SerializedError } from './logger';
 import { serializeError } from './logger';
 import type { MetricsRegistry } from './metrics';
@@ -274,6 +275,44 @@ export type CommitPhase = (typeof COMMIT_PHASES)[keyof typeof COMMIT_PHASES];
 
 /** One of the outcomes `SPAN_OUTCOMES` declares. */
 export type SpanOutcome = (typeof SPAN_OUTCOMES)[keyof typeof SPAN_OUTCOMES];
+
+/**
+ * Which path a requested move took, as `EngineTracingSubscription.settleMove`
+ * receives it.
+ *
+ * The four of `MoveResolution` in src/engine/engine.ts, which `Engine.attemptMove`
+ * reports and which this type is satisfied by structurally — src/engine imports
+ * nothing from here — plus `'failed'`, which only the CALLER can report: an
+ * attempt that threw returned no outcome at all.
+ */
+export type FinalMoveResolution =
+  | 'blocked'
+  | 'cancelled'
+  | 'idle'
+  | 'moved'
+  | 'failed';
+
+/** The outcome of one whole move attempt, as a caller reports it. */
+export interface FinalMoveResult {
+  /** Which path the attempt took. */
+  readonly resolution: FinalMoveResolution;
+}
+
+/**
+ * The span outcome each move path closes its turn span under.
+ *
+ * A committed turn has already closed its own span by the time a caller settles,
+ * so `'moved'` maps to the outcome that turn was closed under and settling it is
+ * a no-op.
+ */
+const MOVE_SPAN_OUTCOMES: Readonly<Record<FinalMoveResolution, SpanOutcome>> =
+  Object.freeze({
+    blocked: SPAN_OUTCOMES.blocked,
+    cancelled: SPAN_OUTCOMES.cancelled,
+    idle: SPAN_OUTCOMES.unmoved,
+    moved: SPAN_OUTCOMES.committed,
+    failed: SPAN_OUTCOMES.failed,
+  });
 
 /**
  * The value `settledStageIndex` carries while no closed stage span is standing.
@@ -625,8 +664,14 @@ export interface TracerOptions {
    * Correlation identifier span identifiers are derived from. Defaults to
    * `logger.correlationId`, which `deriveCorrelationId` of
    * src/observability/logger.ts is the single authority for.
+   *
+   * A FUNCTION IS READ PER SPAN, so every span resolves the identifier at the
+   * moment it is opened, and the default follows the injected logger, which
+   * `Logger.setCorrelationId` rotates. A STRING PINS one identifier for the life
+   * of the tracer, so a second run played without a reload would derive its span
+   * identifiers from the first run's.
    */
-  readonly correlationId?: string;
+  readonly correlationId?: CorrelationSource;
 
   /** Whether spans are opened at all. Defaults to `true`. */
   readonly enabled?: boolean;
@@ -775,6 +820,46 @@ export interface EngineTracingSubscription {
    *   there was none — after a committed turn, or once detached.
    */
   readonly settleTurn: (outcome?: SpanOutcome) => boolean;
+
+  /**
+   * Closes an open turn span under the outcome the WHOLE ATTEMPT had.
+   *
+   * The form a caller holding `Engine.attemptMove()`'s outcome uses, and the one
+   * that classifies correctly: `settleTurn()`'s default reports every unresolved
+   * attempt as an idle turn, so a move an `onBeforeMove` handler withdrew, a
+   * move refused because the game is already over, and an attempt that threw
+   * were all recorded as the player having pressed into a wall.
+   *
+   * Safe on every path: a committed turn has already closed its own span and a
+   * blocked move opened none, so both are no-ops.
+   *
+   * @param result The attempt's outcome. `'failed'` is the caller's to report —
+   *   an attempt that threw returned no outcome at all.
+   * @returns `true` when a span was open and has been closed.
+   */
+  readonly settleMove: (result: FinalMoveResult) => boolean;
+
+  /**
+   * The turn span open right now, or `undefined` between turns.
+   *
+   * Read by a caller that opens a span of its own for work belonging to the
+   * turn — the renderer's `render.commit` — so the parent link is EXPLICIT
+   * rather than inherited from the implicit-parent stack, which depends on the
+   * order listeners happen to be registered in.
+   */
+  readonly currentTurnSpan: () => Span | undefined;
+
+  /**
+   * Moves this subscription's `state:commit` listener to the end of the
+   * emitter's registration order.
+   *
+   * That listener CLOSES the turn span, and listeners run in registration order,
+   * so any listener registered after this subscription was attached ran with the
+   * turn already closed. A caller subscribing a renderer — at boot, and again
+   * whenever the renderer is swapped — calls this afterwards, so the turn is
+   * closed last. Does nothing once detached.
+   */
+  readonly reattachCommitClosing: () => void;
 }
 
 /**
@@ -800,7 +885,16 @@ export interface BoundaryTracing {
     relicId: string,
     run: () => T,
   ) => T;
-  readonly traceRenderCommit: <T>(run: () => T) => T;
+  /**
+   * Wraps a renderer's `state:commit` reconciliation.
+   *
+   * @param run The reconciliation to measure.
+   * @param parent The turn span the commit belongs to, where the caller has it.
+   *   Passed EXPLICITLY, because the implicit-parent stack depends on listener
+   *   registration order and the listener that closes the turn span is another
+   *   listener of the same event.
+   */
+  readonly traceRenderCommit: <T>(run: () => T, parent?: Span | null) => T;
 }
 
 /* ==========================================================================
@@ -970,6 +1064,16 @@ class LiveSpan implements Span {
 
   readonly id: string;
 
+  /**
+   * Correlation identifier resolved when the span OPENED, and the same value
+   * `id` was built from.
+   *
+   * Carried on the span rather than read again at close, so a span opened in
+   * one run and closed after a second run rotated the scope files its record
+   * under the run that opened it and cannot disagree with its own identifier.
+   */
+  readonly correlationId: string;
+
   readonly parentId: string | undefined;
 
   readonly startTime: number;
@@ -1010,6 +1114,7 @@ class LiveSpan implements Span {
     host: SpanHost,
     name: SpanName,
     id: string,
+    correlationId: string,
     parentId: string | undefined,
     startTime: number,
     startMark: string | undefined,
@@ -1018,6 +1123,7 @@ class LiveSpan implements Span {
     this.host = host;
     this.name = name;
     this.id = id;
+    this.correlationId = correlationId;
     this.parentId = parentId;
     this.startTime = startTime;
     this.startMark = startMark;
@@ -1275,6 +1381,22 @@ function clampBudget(budget: number | undefined): number {
 }
 
 /**
+ * Reads a logger's correlation identifier without letting it throw.
+ *
+ * @param logger Logger to read.
+ * @returns The identifier, or the empty string where none could be read.
+ */
+function readLoggerCorrelation(logger: Logger): string {
+  try {
+    const read: unknown = logger.correlationId;
+
+    return typeof read === 'string' ? read : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Performance-API spans across the module boundaries of the chain validation
  * gate V8 names, plus the frame-callback seam.
  *
@@ -1290,13 +1412,18 @@ function clampBudget(budget: number | undefined): number {
  * ```
  */
 export class Tracer {
-  /** Identifier every span of this tracer is keyed under. */
-  readonly correlationId: string;
-
   /** Budget a frame is classified against, in milliseconds. */
   readonly frameBudgetMs: number;
 
   private readonly logger: Logger;
+
+  /**
+   * Reads the identifier every span and every snapshot carries.
+   *
+   * Resolved once from `TracerOptions.correlationId`: a pinned string, a shared
+   * scope, or the logger's own identifier where neither was given.
+   */
+  private readonly readCorrelationId: () => string;
 
   private readonly metrics: MetricsRegistry;
 
@@ -1364,11 +1491,33 @@ export class Tracer {
   constructor(options: TracerOptions) {
     this.logger = options.logger.child(TRACER_SUBSYSTEM);
     this.metrics = options.metrics;
-    this.correlationId =
-      typeof options.correlationId === 'string' &&
-      options.correlationId.length > 0
-        ? options.correlationId
-        : this.logger.correlationId;
+    // A READER, not a captured value. An injected non-empty identifier still
+    // wins over the logger's, pinned for the life of the tracer where it is a
+    // string; a function and an absent value both fall through to the shared
+    // scope, which is the logger's own identifier, read through the total
+    // `readLoggerCorrelation` so a logger that refuses the read cannot take a
+    // span down.
+    const scoped = this.logger;
+    const source = options.correlationId;
+    const fromLogger = (): string => readLoggerCorrelation(scoped);
+
+    if (typeof source === 'function') {
+      this.readCorrelationId = (): string => {
+        try {
+          const read: unknown = source();
+
+          return typeof read === 'string' && read.length > 0
+            ? read
+            : fromLogger();
+        } catch {
+          return fromLogger();
+        }
+      };
+    } else if (typeof source === 'string' && source.length > 0) {
+      this.readCorrelationId = (): string => source;
+    } else {
+      this.readCorrelationId = fromLogger;
+    }
     this.enabled = options.enabled !== false;
     this.marksEnabled = options.marks !== false;
     this.frameBudgetMs = clampBudget(options.frameBudgetMs);
@@ -1413,6 +1562,18 @@ export class Tracer {
     }
 
     this.enabled = next;
+  }
+
+  /**
+   * Identifier every span of this tracer is keyed under.
+   *
+   * A GETTER, not a captured value: one page load can play more than one run,
+   * and `Logger.setCorrelationId` rotating the run scope rotates this too, so
+   * a snapshot taken in the second run is never keyed to the first. Decision
+   * DL-TYPES-04.
+   */
+  get correlationId(): CorrelationId {
+    return this.readCorrelationId();
   }
 
   /** Records the tracer retains at most. */
@@ -1484,7 +1645,11 @@ export class Tracer {
 
       this.counter += 1;
 
-      const id = `${this.correlationId}${SPAN_ID_SEPARATOR}${this.counter}`;
+      // Resolved ONCE per span, and carried on it: the identifier the span is
+      // keyed under is the one in force when it opened, whatever the scope has
+      // rotated to by the time it closes.
+      const correlationId = this.readCorrelationId();
+      const id = `${correlationId}${SPAN_ID_SEPARATOR}${this.counter}`;
       const startMark = `${MARK_PREFIX}${id}${START_MARK_SUFFIX}`;
       const marked = this.marksEnabled && writeMark(startMark);
       // BOTH SPELLINGS, ONE REPRESENTATION. `detached: true` and
@@ -1495,6 +1660,7 @@ export class Tracer {
         this.host,
         name,
         id,
+        correlationId,
         this.resolveParentId(options),
         readNow(),
         marked ? startMark : undefined,
@@ -1765,7 +1931,7 @@ export class Tracer {
   snapshot(limit?: number): TraceSnapshot {
     return Object.freeze({
       schemaVersion: TRACE_SNAPSHOT_SCHEMA_VERSION,
-      correlationId: this.correlationId,
+      correlationId: this.readCorrelationId(),
       enabled: this.enabled,
       capacity: this.buffer.length,
       started: this.startedSpans,
@@ -2215,7 +2381,7 @@ export class Tracer {
     // Removed by identity, so a double close cannot take the open count below
     // what is actually open.
     this.unstacked.delete(span);
-    this.store(span.toRecord(this.correlationId, measured));
+    this.store(span.toRecord(span.correlationId, measured));
     this.closeMarks(span);
 
     try {
@@ -2656,10 +2822,17 @@ export function attachEngineTracing(
     ),
   );
 
-  stops.push(
-    events.on(
-      'state:commit',
-      guarded('state:commit', (payload): void => {
+  /**
+   * The `state:commit` listener, held so it can be moved to the END of the
+   * emitter's registration order.
+   *
+   * IT CLOSES THE TURN SPAN, and listeners run in registration order, so every
+   * listener registered after it runs with the turn already closed — which put
+   * the renderer's own `render.commit` span outside the turn that produced it
+   * rather than inside it. `reattachCommitClosing()` re-registers this listener
+   * so it is last again, and a caller calls it after subscribing a renderer.
+   */
+  const commitListener = guarded('state:commit', (payload): void => {
         // THE STAGE A COMMIT REPORTS IS THE AUTHORITATIVE ONE, and this is
         // the only event carrying it on every emission. `stage:start` is
         // emitted by `setup()` alone, so within one run it fires ONCE while
@@ -2786,9 +2959,30 @@ export function attachEngineTracing(
         );
         endTurn(SPAN_OUTCOMES.committed);
         tracer.recordCommitAttribution(COMMIT_ATTRIBUTIONS.turn);
-      }),
-    ),
-  );
+  });
+
+  /** The registration `commitListener` currently holds, or `null`. */
+  let stopCommit: EngineEventSubscription | null = null;
+
+  /**
+   * Registers the commit listener, moving it to the end of the order where it
+   * is already registered.
+   */
+  const attachCommitClosing = (): void => {
+    if (detached) {
+      return;
+    }
+
+    stopCommit?.();
+    stopCommit = events.on('state:commit', commitListener);
+  };
+
+  attachCommitClosing();
+
+  stops.push((): void => {
+    stopCommit?.();
+    stopCommit = null;
+  });
 
   stops.push(
     events.on(
@@ -2853,13 +3047,28 @@ export function attachEngineTracing(
     return true;
   };
 
+  // THE OUTCOME OF A WHOLE ATTEMPT, not of the boolean it projects to. Every
+  // path is closed under the outcome that path has: a withdrawn move as
+  // `cancelled`, an idle one as `unmoved`, an attempt that threw as `failed`,
+  // and a move refused because the game is over as `blocked` — which normally
+  // has no span to close, because no `move:before` was emitted for it.
+  const settleMove = (result: FinalMoveResult): boolean =>
+    settleTurn(MOVE_SPAN_OUTCOMES[result.resolution]);
+
   // Attached to the detach function rather than returned beside it, so every
   // existing caller — which calls the handle to detach — is unaffected.
   return Object.assign(detach, {
     settleTurn,
+    settleMove,
 
     closeIdleTurn: (): void => {
       settleTurn();
+    },
+
+    currentTurnSpan: (): Span | undefined => turnSpan,
+
+    reattachCommitClosing: (): void => {
+      attachCommitClosing();
     },
   });
 }
@@ -2891,7 +3100,11 @@ export function createBoundaryTracing(tracer: Tracer): BoundaryTracing {
       tracer.withSpan(SPAN_NAMES.hookDispatch, run, { hook }),
     traceRelicHandler: <T>(hook: HookName, relicId: string, run: () => T): T =>
       tracer.withSpan(SPAN_NAMES.relicHandler, run, { hook, relicId }),
-    traceRenderCommit: <T>(run: () => T): T =>
-      tracer.withSpan(SPAN_NAMES.renderCommit, run),
+    traceRenderCommit: <T>(run: () => T, parent?: Span | null): T =>
+      tracer.withSpan(
+        SPAN_NAMES.renderCommit,
+        run,
+        parent === undefined ? undefined : { parent },
+      ),
   });
 }

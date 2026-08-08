@@ -631,6 +631,102 @@ describe('when the context is lost after mounting', () => {
     ).not.toBeNull();
   });
 
+  it('serves the number-only board when the rebuild cannot be completed',
+    async () => {
+      application = start(document);
+      await settleFrames();
+
+      expect(application.renderer.mode).toBe('three');
+
+      fireContextEvent('webglcontextlost');
+
+      // The context comes back and the renderer's rebuild of it fails, which is
+      // what a driver refusing the new context does.
+      Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+        configurable: true,
+        writable: true,
+        value: (): null => null,
+      });
+
+      fireContextEvent('webglcontextrestored');
+      await settleFrames();
+
+      // WITHOUT WAITING OUT THE GRACE. The restoration used to cancel the wait
+      // on the strength of the event alone, which left the 2.5D board parked and
+      // nothing drawing at all; a rebuild that failed is final, so the
+      // number-only board takes over at once.
+      expect(application.renderer.mode).toBe('number-only');
+      expect(application.renderer.fallback).toBe(true);
+      expect(application.preferences.isNumberOnlyForced()).toBe(true);
+      expect(numberOnlyTiles()).toBeGreaterThan(0);
+    });
+
+  it('recomputes the HELD health report when the rebuild fails', async () => {
+    application = start(document);
+    await settleFrames();
+
+    expect(
+      application.health
+        .lastReport()
+        ?.checks.find((check) => check.id === 'webgl')?.status,
+    ).toBe('pass');
+
+    fireContextEvent('webglcontextlost');
+
+    Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+      configurable: true,
+      writable: true,
+      value: (): null => null,
+    });
+
+    fireContextEvent('webglcontextrestored');
+    await settleFrames();
+
+    // READ WITHOUT `refresh`, which is how the diagnostics panel and every
+    // exported snapshot read it: the held report used to be the BOOT report for
+    // the rest of the session, so the panel reported a healthy WebGL board while
+    // the number-only board was the one drawing.
+    const held = application.health.lastReport();
+    const webgl = held?.checks.find((check) => check.id === 'webgl');
+
+    expect(webgl?.status).toBe('fail');
+    expect(webgl?.data.failure).toBe('number-only-forced');
+    expect(application.health.readiness().requiresNumberOnlyFallback).toBe(
+      true,
+    );
+    expect(application.health.readiness().renderer).toBe('number-only');
+  });
+
+  it('recomputes the held health report when the rebuild succeeds',
+    async () => {
+      application = start(document);
+      await settleFrames();
+
+      fireContextEvent('webglcontextlost');
+
+      const parked = application.health
+        .lastReport()
+        ?.checks.find((check) => check.id === 'webgl');
+
+      // The loss alone refreshes the held report, so the panel reports the board
+      // as it stands during the wait as well as after it.
+      expect(parked?.status).toBe('fail');
+      expect(parked?.data.failure).toBe('context-lost');
+
+      fireContextEvent('webglcontextrestored');
+      await settleFrames();
+
+      const recovered = application.health
+        .lastReport()
+        ?.checks.find((check) => check.id === 'webgl');
+
+      expect(application.renderer.mode).toBe('three');
+      expect(recovered?.status).toBe('pass');
+      expect(application.health.readiness().requiresNumberOnlyFallback).toBe(
+        false,
+      );
+    });
+
   it('abandons the pending wait when the application is disposed', async () => {
     application = start(document);
     await settleFrames();

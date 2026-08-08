@@ -34,6 +34,9 @@
  *                                         resolver a renderer calls
  *   TR-THEME-06  target-only row          `subscribeToThemeChange` and
  *                                         `getActiveTheme`
+ *   TR-THEME-11  target-only row          `ThemePalette.neutralLight`, the
+ *                                         lighting white point each palette
+ *                                         states; decision DL-TOKEN-07
  *
  * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
  * only so the construct can be found from the log:
@@ -159,6 +162,14 @@ export interface ThemePalette {
   readonly tileGlowInset: string;
 
   /**
+   * The neutral white point of the 2.5D lighting rig, read by
+   * src/render/scene.ts for the key light's origin and the fill light's sky
+   * half. Every palette states `#ffffff`, so a palette becomes able to state a
+   * warmer or cooler light without the renderer naming a colour of its own.
+   */
+  readonly neutralLight: string;
+
+  /**
    * Tint mixed over the high anchor for a tile above the ramp. With
    * `tileSuperWeight` it replaces the resolved `tile-super` key of
    * style/_themes.scss: the fill is derived by `resolveTileTheme` rather than
@@ -262,6 +273,7 @@ export const defaultThemePalette: ThemePalette = Object.freeze({
   tileAccentWeight: defaultTileRampPalette.accentWeight,
   tileGlow: tileGoldGlowColor,
   tileGlowInset: WHITE,
+  neutralLight: WHITE,
   tileSuperTint: defaultTileRampPalette.superTint,
   tileSuperWeight: defaultTileRampPalette.superWeight,
   scoreSurface: gameContainerBackground,
@@ -325,6 +337,7 @@ export const highContrastThemePalette: ThemePalette = Object.freeze({
   tileAccentWeight: 1,
   tileGlow: '#c8c8c8',
   tileGlowInset: WHITE,
+  neutralLight: WHITE,
 
   // Mixed at full weight, so the tile above the ramp is the tint itself.
   tileSuperTint: BLACK,
@@ -388,6 +401,7 @@ export const colorblindSafeThemePalette: ThemePalette = Object.freeze({
   tileAccentWeight: 1,
   tileGlow: '#8ecae6',
   tileGlowInset: WHITE,
+  neutralLight: WHITE,
 
   // Mixed at full weight, so the tile above the ramp is the tint itself.
   tileSuperTint: BLACK,

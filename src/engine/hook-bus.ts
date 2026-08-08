@@ -107,6 +107,7 @@ import type { BoardEffect, BoardEffectTransaction } from './board-effects';
 import { INERT_BOARD_EFFECTS, openBoardEffects } from './board-effects';
 import type {
   CorrelationId,
+  CorrelationSource,
   EngineReporter,
   Position,
   SerializedGrid,
@@ -117,6 +118,7 @@ import {
   DIRECTION_RIGHT,
   DIRECTION_UP,
   NOOP_ENGINE_REPORTER,
+  correlationReader,
 } from './types';
 
 
@@ -318,9 +320,9 @@ export interface HookSubscriberMetrics extends HookHandlerCounters {
  */
 export interface HookBusMetrics {
   /**
-   * Correlation identifier every report from this bus carries, injected
-   * at construction. Read by src/observability/metrics.ts, which folds a
-   * snapshot under this identifier so counts from one bus are never
+   * Correlation identifier every report from this bus carries, as it stands
+   * when the snapshot is taken. Read by src/observability/metrics.ts, which
+   * folds a snapshot under this identifier so counts from one bus are never
    * attributed to another.
    */
   readonly correlationId: CorrelationId;
@@ -453,10 +455,14 @@ export interface HookBus {
  * never a transformation. Either wrapper may be absent, in which case that
  * boundary runs directly.
  *
- * A wrapper that throws, and one that returns without calling the function it was
- * given, are both contained: this bus's no-throw guarantee does not depend on the
- * caller's instrumentation behaving, and a contained fault is counted under
- * `engine.hook.tracing.fault`. Decision DL-HOOKBUS-05.
+ * A wrapper that throws, one that returns without calling the function it was
+ * given, one that calls it more than once, and one that returns a value of its
+ * own are all contained: the wrapped work runs EXACTLY ONCE and the value and
+ * the throw the bus acts on are the work's own, so no wrapper can suppress,
+ * repeat or substitute a dispatch or a handler invocation. This bus's no-throw
+ * guarantee does not depend on the caller's instrumentation behaving, and a
+ * contained fault is counted under `engine.hook.tracing.fault`. Decision
+ * DL-HOOKBUS-05.
  */
 export interface HookDispatchTracing {
   /** Wraps one whole dispatch of one hook. */
@@ -479,8 +485,14 @@ export interface HookBusOptions {
    * every dispatch context. Injected, never derived here: the one
    * authority is `deriveCorrelationId` in src/observability/logger.ts.
    * Defaults to the empty string.
+   *
+   * A READER IS ACCEPTED: pass a function and every report resolves the
+   * identifier at the moment it is made, so a bus that outlives the run it
+   * was built for reports under the run that is actually playing rather than
+   * under the first one. A string pins one identifier, which is what a caller
+   * with one run per page passes.
    */
-  readonly correlationId?: CorrelationId;
+  readonly correlationId?: CorrelationSource;
 
   /**
    * Sink for caught handler errors and counters. Defaults to
@@ -906,6 +918,12 @@ function isValidPayload<K extends HookName>(
       const position: unknown = candidate.position;
       const count: unknown = candidate.count;
 
+      // SHAPE AND BOUNDS, NOT VACANCY. The board effects recorded during this
+      // same dispatch are applied after the return is adopted, so a cell that is
+      // empty while this runs can be occupied by the time the spawn inserts:
+      // occupancy is therefore tested at the insertion boundary in
+      // src/engine/engine.ts, which is the last point before the write, and an
+      // occupied cell suppresses the spawn there.
       return (
         hasExactMembers(candidate, ['value'], ['position', 'count']) &&
         (position === undefined || isCellPosition(position, size)) &&
@@ -1528,7 +1546,11 @@ const UNLIMITED_CONSUMPTION: ChargeConsumption = Object.freeze({
  * optional.
  */
 export function createHookBus(options: HookBusOptions = {}): HookBus {
-  const correlationId = options.correlationId ?? '';
+  // A READER, not a captured value: `HookBusOptions.correlationId` may be a
+  // shared scope, and every report below reads it at report time. A page load
+  // can play more than one run, and a captured value keeps attributing to the
+  // first of them.
+  const readCorrelationId = correlationReader(options.correlationId);
   const reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
   const tracing = options.tracing;
 
@@ -1593,7 +1615,12 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     }
 
     deliver((): void => {
-      reporter.onCount?.({ correlationId, metric, value, hook });
+      reporter.onCount?.({
+        correlationId: readCorrelationId(),
+        metric,
+        value,
+        hook,
+      });
     });
   };
 
@@ -1601,12 +1628,32 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
    * Runs `body` inside an injected wrapper, or directly where none was
    * injected.
    *
-   * The wrapper is expected to call `body` once and to return its value. Where
-   * it throws, and where it returns without having called `body` at all, the
-   * outcome is recovered here: a completed body's value is returned, and a body
-   * that never ran is run directly. The work is therefore never lost, never
-   * performed twice, and never able to propagate a failure belonging to the
-   * instrumentation rather than to this bus.
+   * The wrapper is expected to call `body` once and to return its value.
+   * `body` RUNS EXACTLY ONCE whatever the wrapper does, and the value and the
+   * throw a caller sees are the body's own:
+   *
+   *   the body throws        the throw is rethrown as it stands and the body is
+   *                          NOT run again, whether the wrapper propagated the
+   *                          throw or swallowed it. A retry re-entered the work
+   *                          inside a transaction that was already open, so a
+   *                          second attempt could commit a second set of draws,
+   *                          board commands, state and charge requests.
+   *   the wrapper throws
+   *   on its own account     a completed body's value is returned, and a body
+   *                          the wrapper never started is run directly.
+   *   the wrapper never
+   *   calls the body         the body is run directly, rather than the wrapper's
+   *                          own return value standing in for work that never
+   *                          happened.
+   *   the wrapper calls the
+   *   body more than once    the first outcome is replayed — the held value, or
+   *                          the held throw — and the body is not re-entered.
+   *   the wrapper returns
+   *   something else         the body's value is returned, so a wrapper is a
+   *                          measurement and never a transformation.
+   *
+   * Every contained wrapper fault is counted under `engine.hook.tracing.fault`.
+   * Decision DL-HOOKBUS-05.
    *
    * @param wrap The injected wrapper, or `undefined`.
    * @param hook Hook the work belongs to, carried into the fault count.
@@ -1622,25 +1669,85 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       return body();
     }
 
-    let completed = false;
+    /** Whether the body has been entered. Raised BEFORE it runs. */
+    let started = false;
+
+    /** Whether the body returned. */
+    let settled = false;
+
+    /** Whether the body threw, which is separate from the wrapper throwing. */
+    let failed = false;
+
+    let thrown: unknown;
     let held: T | undefined;
 
     const inner = (): T => {
-      const value = body();
+      if (started) {
+        count(TRACING_FAULT_METRIC, hook);
 
-      completed = true;
-      held = value;
+        if (failed) {
+          throw thrown;
+        }
 
-      return value;
+        return held as T;
+      }
+
+      started = true;
+
+      try {
+        const value = body();
+
+        held = value;
+        settled = true;
+
+        return value;
+      } catch (error: unknown) {
+        failed = true;
+        thrown = error;
+
+        throw error;
+      }
     };
 
+    let returned: T;
+
     try {
-      return wrap(inner);
-    } catch {
+      returned = wrap(inner);
+    } catch (error: unknown) {
+      if (failed) {
+        // The failure belongs to the work, not to the instrumentation: the
+        // work's own value is rethrown for the caller's `catch` to contain — a
+        // wrapper that replaced it is counted and its substitute discarded —
+        // and the work is not repeated.
+        if (!Object.is(error, thrown)) {
+          count(TRACING_FAULT_METRIC, hook);
+        }
+
+        throw thrown;
+      }
+
       count(TRACING_FAULT_METRIC, hook);
 
-      return completed ? (held as T) : body();
+      return settled ? (held as T) : body();
     }
+
+    if (failed) {
+      count(TRACING_FAULT_METRIC, hook);
+
+      throw thrown;
+    }
+
+    if (settled) {
+      if (!Object.is(returned, held)) {
+        count(TRACING_FAULT_METRIC, hook);
+      }
+
+      return held as T;
+    }
+
+    count(TRACING_FAULT_METRIC, hook);
+
+    return body();
   };
 
   const hookRow = (hook: HookName): HookCounterRow => {
@@ -1768,7 +1875,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     if (reporter.onHookError !== undefined) {
       deliver((): void => {
         reporter.onHookError?.({
-          correlationId,
+          correlationId: readCorrelationId(),
 
           hook,
           subscriberId: id,
@@ -2152,7 +2259,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
               rng: draws.view,
               grid: board,
               effects: effects.queue,
-              correlationId,
+              correlationId: readCorrelationId(),
               hook,
               subscriberId: id,
               pickupOrder: subscription.pickupOrder,
@@ -2359,7 +2466,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       );
 
       return Object.freeze({
-        correlationId,
+        correlationId: readCorrelationId(),
 
         registered: registrations.length,
         acceptedRegistrations,

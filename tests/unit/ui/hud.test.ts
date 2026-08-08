@@ -576,6 +576,99 @@ describe('the relic tray', () => {
     hud.destroy();
   });
 
+  it('carries the rarity tier as an attribute and as accessible text', () => {
+    const outlets = runFixture();
+    const hud = createHud({
+      document,
+      relicName: (relicId): string => `Name of ${relicId}`,
+      relicRarity: (relicId): string =>
+        relicId === 'twin-seed' ? 'common' : 'legendary',
+    });
+
+    hud.render(
+      runCommit(0, stageSlice(0, 'highest-tile', 16, 0), [
+        { id: 'twin-seed' },
+        { id: 'frostbind', charges: 5 },
+      ]),
+    );
+
+    const items = Array.from(
+      outlets.tray.querySelectorAll('.relic-tray-item'),
+    );
+
+    // style/_hud.scss declares one accent rule per rarity tier, keyed on this
+    // attribute; without it written no rule could ever match.
+    expect(items.map((item) => item.getAttribute('data-rarity'))).toEqual([
+      'common',
+      'legendary',
+    ]);
+
+    // AND IN TEXT, for the reader the accent cannot reach. Visually hidden,
+    // because the accent states the tier twice over already.
+    const tier = items[1]?.querySelector('.visually-hidden');
+
+    expect(tier?.textContent).toBe(hudCopy.relicRarity('legendary'));
+    expect(items[1]?.textContent).toContain('legendary');
+
+    hud.destroy();
+  });
+
+  it('leaves the rarity unwritten where no resolver answers', () => {
+    const outlets = runFixture();
+    const hud = createHud({
+      document,
+      relicRarity: (): string => {
+        throw new Error('the catalogue is unavailable');
+      },
+    });
+
+    hud.render(
+      runCommit(0, stageSlice(0, 'highest-tile', 16, 0), [{ id: 'twin-seed' }]),
+    );
+
+    const item = outlets.tray.querySelector('.relic-tray-item');
+
+    // An empty attribute would match no rule and would state a tier the tray
+    // does not know; a resolver that raises must not fail the commit either.
+    expect(item?.hasAttribute('data-rarity')).toBe(false);
+    expect(item?.querySelector('.visually-hidden')).toBeNull();
+    expect(item?.getAttribute('data-relic-id')).toBe('twin-seed');
+
+    hud.destroy();
+  });
+
+  it('rebuilds the tray when only the rarity became resolvable', () => {
+    const outlets = runFixture();
+    let tier = '';
+    const hud = createHud({
+      document,
+      relicRarity: (): string => tier,
+    });
+    const held = [{ id: 'twin-seed' }];
+
+    hud.render(runCommit(0, stageSlice(0, 'highest-tile', 16, 0), held));
+
+    expect(
+      outlets.tray
+        .querySelector('.relic-tray-item')
+        ?.hasAttribute('data-rarity'),
+    ).toBe(false);
+
+    // The tray skips a rebuild whose signature is unchanged, so the rarity is
+    // part of that signature: a tier resolved between two commits would
+    // otherwise never reach the DOM.
+    tier = 'rare';
+    hud.render(runCommit(0, stageSlice(0, 'highest-tile', 16, 0), held));
+
+    expect(
+      outlets.tray
+        .querySelector('.relic-tray-item')
+        ?.getAttribute('data-rarity'),
+    ).toBe('rare');
+
+    hud.destroy();
+  });
+
   it('marks an exhausted relic through data-charges, including at zero', () => {
     const outlets = runFixture();
     const hud = createHud({ document });
@@ -739,5 +832,78 @@ describe('the relic tray', () => {
     ).toBe(hudCopy.relicCharges(4));
 
     hud.destroy();
+  });
+});
+
+/* ==========================================================================
+ * The unconfirmed terminal or stage status
+ * ========================================================================== */
+
+describe('the unconfirmed-status notice', () => {
+  it('shows the notice and marks the group while a commit is degraded', () => {
+    const outlets = runFixture();
+    const hud = createHud({ document });
+    const stage = stageSlice(0, 'highest-tile', 16, 0);
+
+    const settled = hud.render(runCommit(0, stage, []));
+
+    // Nothing while the engine can measure: no attribute, and the notice is
+    // built but held out of the rendering and accessibility trees.
+    expect(settled.degraded).toBe(false);
+    expect(outlets.hudGroup.hasAttribute('data-degraded')).toBe(false);
+    expect(
+      outlets.hudGroup.querySelector<HTMLElement>('.hud-degraded')?.hidden,
+    ).toBe(true);
+
+    const unknown = hud.render({
+      ...runCommit(4, stage, []),
+      degraded: true,
+    });
+    const notice = outlets.hudGroup.querySelector<HTMLElement>('.hud-degraded');
+
+    // THE FLAG REACHES THE PRESENTATION. Before this the commit carried
+    // `degraded` and the HUD rendered only the ordinary terminal flags, so a
+    // player was shown a settled board whose status the engine could not
+    // establish.
+    expect(unknown.degraded).toBe(true);
+    expect(outlets.hudGroup.getAttribute('data-degraded')).toBe('true');
+    expect(notice?.hidden).toBe(false);
+
+    // Real text, so a screen reader reaching the run-status group reads it; the
+    // once-per-transition announcement belongs to the announcer.
+    expect(notice?.textContent).toBe(hudCopy.degradedNotice);
+
+    hud.destroy();
+  });
+
+  it('clears the notice once a measurement succeeds again', () => {
+    const outlets = runFixture();
+    const hud = createHud({ document });
+    const stage = stageSlice(0, 'highest-tile', 16, 0);
+
+    hud.render({ ...runCommit(0, stage, []), degraded: true });
+    hud.render(runCommit(4, stage, []));
+
+    expect(outlets.hudGroup.hasAttribute('data-degraded')).toBe(false);
+    expect(
+      outlets.hudGroup.querySelector<HTMLElement>('.hud-degraded')?.hidden,
+    ).toBe(true);
+    expect(hud.readRendered()?.degraded).toBe(false);
+
+    hud.destroy();
+  });
+
+  it('takes its notice and its attribute away on destroy', () => {
+    const outlets = runFixture();
+    const hud = createHud({ document });
+
+    hud.render({
+      ...runCommit(0, stageSlice(0, 'highest-tile', 16, 0), []),
+      degraded: true,
+    });
+    hud.destroy();
+
+    expect(outlets.hudGroup.querySelector('.hud-degraded')).toBeNull();
+    expect(outlets.hudGroup.hasAttribute('data-degraded')).toBe(false);
   });
 });

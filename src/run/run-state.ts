@@ -85,6 +85,9 @@
  *                                            `summarizeRunStateForReport()`
  *   TR-RUN-10  target-only row               `RunReporter` and
  *                                            `NOOP_RUN_REPORTER`
+ *   TR-RUN-11  target-only row               `cloneBoardSnapshot()`, the one
+ *                                            board copier every projection of
+ *                                            a stored board passes through
  *
  * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
  * only so the construct can be found from the log:
@@ -1814,7 +1817,21 @@ function cloneCell(cell: SerializedTile | null): SerializedTile | null {
   };
 }
 
-function cloneBoardSnapshot(board: LegacyBoardSnapshot): LegacyBoardSnapshot {
+/**
+ * Copies a board snapshot, cell by cell.
+ *
+ * Exported so every projection of a stored board goes through ONE copier: a
+ * caller handed the envelope's own snapshot could otherwise reach the board this
+ * module's writer reads, and `readonly` types do not stop it from writing to it.
+ * `cloneRunState()` uses this for the whole-envelope copy and
+ * src/run/run-controller.ts uses it for the paths that project the board alone.
+ *
+ * @param board Snapshot to copy.
+ * @returns A fresh snapshot sharing no object with `board`.
+ */
+export function cloneBoardSnapshot(
+  board: LegacyBoardSnapshot,
+): LegacyBoardSnapshot {
   return {
     grid: {
       size: board.grid.size,

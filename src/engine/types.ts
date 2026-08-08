@@ -25,6 +25,10 @@
 //   TR-TYPES-07  target-only row          `StageCommitContext`,
 //                                         `RelicCommitContext` and the four
 //                                         frozen neutral constants
+//   TR-TYPES-08  target-only row          `CorrelationSource` and
+//                                         `correlationReader()`, the reader
+//                                         every reporter resolves its
+//                                         correlation identifier through
 //
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
@@ -34,6 +38,9 @@
 //                rather than widened to `string | number`
 //   DL-TYPES-03  the neutral stage and relic contexts declared here as frozen
 //                constants, so the engine is constructible with no run system
+//   DL-TYPES-04  a correlation identifier accepted as a VALUE OR A READER, so
+//                a reporter constructed once follows the run in force instead
+//                of the run its construction happened in
 
 import type { StageGoal } from '../config/stage-config';
 
@@ -106,6 +113,66 @@ export interface SerializedGameState {
  * without one.
  */
 export type CorrelationId = string;
+
+/**
+ * What a reporting module accepts for its correlation identifier: the value, or
+ * a reader that answers with the value in force.
+ *
+ * A STRING PINS one identifier for the life of the module; A READER is consulted
+ * on every report and reads a shared scope.
+ *
+ * WHY A READER IS ACCEPTED. A page load can play more than one run — the
+ * run-start screen's own control starts a second — and every run mints a new
+ * identifier. A module that captured the value at construction went on
+ * attributing its reports to the run the page loaded with, so one page load
+ * produced records from two runs under one identifier. Passing a reader instead
+ * lets a composition root hold ONE mutable correlation scope that every reporter
+ * follows, without any of them deriving an identifier or importing the module
+ * that does.
+ *
+ * A plain string is still accepted and still means a fixed identifier, so a
+ * caller with one run per page needs no reader. The one deriver of a value is
+ * still `deriveCorrelationId` in src/observability/logger.ts; this type only
+ * says where a value it produced is read from.
+ */
+export type CorrelationSource = CorrelationId | (() => CorrelationId);
+
+/**
+ * Reduces a correlation source to a reader that always returns a string.
+ *
+ * TOTAL. A reader built from a function contains that function's throw and
+ * refuses a value that is not a non-empty string, so a reporting path can
+ * neither be taken down nor made to report `undefined` by the source it reads
+ * through. One implementation, so the engine, src/run/ and src/relics/ resolve a
+ * source identically.
+ *
+ * @param source The pinned identifier, the shared scope, or `undefined`.
+ * @param fallback What to report when the source yields nothing usable.
+ *   Defaults to the empty string, which is the value a module constructed
+ *   without a source carries.
+ * @returns A reader that never throws, safe to call on any reporting path.
+ */
+export function correlationReader(
+  source?: CorrelationSource,
+  fallback: CorrelationId = '',
+): () => CorrelationId {
+  if (typeof source === 'function') {
+    return (): CorrelationId => {
+      try {
+        const read: unknown = source();
+
+        return typeof read === 'string' && read.length > 0 ? read : fallback;
+      } catch {
+        return fallback;
+      }
+    };
+  }
+
+  const pinned =
+    typeof source === 'string' && source.length > 0 ? source : fallback;
+
+  return (): CorrelationId => pinned;
+}
 
 /* --------------------------------------------------------------------------
  * Report sink

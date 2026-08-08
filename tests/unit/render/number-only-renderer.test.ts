@@ -634,3 +634,32 @@ describe('F-23 subscribe() after dispose()', () => {
     expect(renderer.frame()).toBe(false);
   });
 });
+
+/* ==========================================================================
+ * The unestablished terminal or stage status
+ * ========================================================================== */
+
+describe('the rendered snapshot carries the unestablished-status flag', () => {
+  it('reports what the commit reported, and clears with it', () => {
+    const { host } = hostFixture();
+    const renderer = createNumberOnlyRenderer({ host });
+
+    renderer.render({
+      ...commitOf(4, [{ x: 0, y: 0, value: 2 }]),
+      degraded: true,
+    });
+    drain(renderer);
+
+    // `RenderedBoard` is the shape src/ui/a11y reads, so dropping the flag left
+    // the number-only presentation — which is also the WebGL fallback and the
+    // accessible rendering mode — unable to say the verdict was unconfirmed.
+    expect(renderer.readRenderedBoard()?.degraded).toBe(true);
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    expect(renderer.readRenderedBoard()?.degraded).toBe(false);
+
+    renderer.dispose();
+  });
+});

@@ -30,6 +30,9 @@
 //   TR-ENGINE-15  resolveStage()
 //   TR-ENGINE-16  hookEnvironment()
 //   TR-ENGINE-17  throughPort()
+//   TR-ENGINE-18  deriveTerminalState()
+//   TR-ENGINE-19  settleEffectOnlyTurn()
+//   TR-ENGINE-20  publishRaisedDegradation()
 //
 // SEVEN CHANGES TO THE PORTED BEHAVIOUR, EACH REQUIRED BY THE SPLIT. Each
 // carries its own decision identifier, argued in docs/DECISION_LOG.md and
@@ -77,6 +80,17 @@
 //
 // DL-ENGINE-08 is the run identifier and the correlation identifier being
 // separate values, described under TWO IDENTIFIERS, NOT ONE above.
+//
+//   DL-ENGINE-09  An accepted `onBeforeMove` board effect is a state change
+//   whether or not the slide that follows moves anything, so a withdrawn move
+//   and an idle move that were preceded by one re-derive the verdict, commit
+//   and resolve the stage — without spawning, which stays L183's placement.
+//
+//   DL-ENGINE-10  A spawn position is inserted only into a cell
+//   `Grid.cellAvailable()` reports free, checked at this module's insertion
+//   boundary after every hook transformation. The guard is NOT in
+//   `Grid.insertTile()`, which the merge branch of
+//   src/engine/move-resolver.ts requires to overwrite.
 
 import {
   createDefaultRulesConfig,
@@ -120,6 +134,7 @@ import type {
   BestScorePort,
   CellMatrix,
   CorrelationId,
+  CorrelationSource,
   Direction,
   EngineReporter,
   RelicCommitContext,
@@ -133,6 +148,7 @@ import {
   EMPTY_RELIC_CONTEXT,
   EMPTY_STAGE_CONTEXT,
   NOOP_ENGINE_REPORTER,
+  correlationReader,
 } from './types';
 
 /* --------------------------------------------------------------------------
@@ -286,6 +302,71 @@ export interface EngineStoragePort extends BestScorePort {
 }
 
 /**
+ * Which of its four paths a requested move took.
+ *
+ * The four the engine already counts, named: `'blocked'` for a move refused
+ * because the game is over (`engine.move.blocked`), `'cancelled'` for one a
+ * listener or an `onBeforeMove` handler withdrew (`engine.move.cancelled`),
+ * `'idle'` for one the resolver found changed nothing (`engine.move.idle`), and
+ * `'moved'` for one that resolved (`engine.move.resolved`).
+ */
+export type MoveResolution = 'blocked' | 'cancelled' | 'idle' | 'moved';
+
+/**
+ * The outcome of one `Engine.attemptMove()`, frozen.
+ *
+ * `Engine.move()` returns `moved` alone, which is the vanilla boolean; this is
+ * what a caller needs to tell the three false paths apart.
+ */
+export interface MoveAttempt {
+  /** Whether the board changed. The value `move()` returns. */
+  readonly moved: boolean;
+
+  /** Which path the attempt took. */
+  readonly resolution: MoveResolution;
+
+  /**
+   * Whether the attempt committed. `true` for every resolved move, and for the
+   * two paths that commit without moving: a withdrawn move and an idle move
+   * whose pre-move dispatch reseated the board.
+   */
+  readonly committed: boolean;
+
+  /** The direction the caller asked for. */
+  readonly direction: Direction;
+
+  /**
+   * The direction the move resolved in, which an `onBeforeMove` handler may have
+   * redirected. Equal to `direction` on every path no handler changed.
+   */
+  readonly resolvedDirection: Direction;
+}
+
+/**
+ * Builds one frozen `MoveAttempt`.
+ *
+ * @param resolution Path the attempt took.
+ * @param direction Direction requested.
+ * @param resolvedDirection Direction resolved in.
+ * @param committed Whether a commit was made.
+ * @returns The frozen outcome.
+ */
+function frozenAttempt(
+  resolution: MoveResolution,
+  direction: Direction,
+  resolvedDirection: Direction,
+  committed: boolean,
+): MoveAttempt {
+  return Object.freeze({
+    moved: resolution === 'moved',
+    resolution,
+    committed,
+    direction,
+    resolvedDirection,
+  });
+}
+
+/**
  * Which collaborator resolves a stage whose goal has been met.
  *
  * `'observer'` leaves the resolution to a subscriber, which calls
@@ -365,8 +446,15 @@ export interface EngineOptions {
    * and src/main.ts supplies the value it derives from the run seed.
    * Defaults to the empty string, which reports no correlation rather
    * than putting the seed itself into a report.
+   *
+   * A READER IS ACCEPTED as well as a value, and src/main.ts supplies one: a
+   * page load can play more than one run, each with an identifier of its own,
+   * and an engine that captured the value went on attributing its reports to
+   * the run the page loaded with. A reader is READ PER REPORT, so an engine
+   * that outlives the run it was built for reports under the run in force
+   * without deriving an identifier of its own.
    */
-  readonly correlationId?: CorrelationId;
+  readonly correlationId?: CorrelationSource;
 
   /**
    * Supplies the stage slice of every commit. Defaults to a provider
@@ -606,9 +694,6 @@ export class Engine {
   /** The hook bus relics register on. */
   readonly hooks: HookBus;
 
-  /** Correlation identifier of the run, exactly as it was injected. */
-  readonly correlationId: CorrelationId;
-
   /** The board. Replaced by `setup()`, mutated in place by a move. */
   grid: Grid;
 
@@ -695,6 +780,15 @@ export class Engine {
   private turnCounter: number;
 
   /**
+   * Reads the run correlation identifier every report carries.
+   *
+   * Resolved once from `EngineOptions.correlationId`, which may be a pinned
+   * string or a shared scope; the reader is what makes `correlationId` above a
+   * live value rather than a captured one.
+   */
+  private readonly readCorrelationId: () => CorrelationId;
+
+  /**
    * @param options The substreams, and optionally the rules, the
    *   progression curve, the stage-resolution authority, the persistence
    *   port, the emitter, the bus, the reporter, the correlation identifier,
@@ -710,19 +804,21 @@ export class Engine {
       options.stageResolution ?? DEFAULT_STAGE_RESOLUTION;
     this.storage = options.storage ?? NOOP_STORAGE_PORT;
     this.reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
-    this.correlationId = options.correlationId ?? '';
+    this.readCorrelationId = correlationReader(options.correlationId);
     // The emitter is handed the reporter, so a listener that throws is
     // contained and reported rather than aborting the emission.
     this.events =
       options.events ??
       createEngineEvents({
-        correlationId: this.correlationId,
+        // The READER, not a value read once: an emitter and a bus built here
+        // follow the run in force exactly as this engine does.
+        correlationId: this.readCorrelationId,
         reporter: this.reporter,
       });
     this.hooks =
       options.hooks ??
       createHookBus({
-        correlationId: this.correlationId,
+        correlationId: this.readCorrelationId,
 
         reporter: this.reporter,
       });
@@ -761,6 +857,19 @@ export class Engine {
     this.stageEnded = false;
     this.terminalUnknown = false;
     this.turnCounter = 0;
+  }
+
+  /**
+   * Correlation identifier of the run in force, read through the injected
+   * source on every access.
+   *
+   * A GETTER, NOT A CAPTURED FIELD. Every report this engine makes reads it
+   * here, so a composition root that rotates one shared correlation scope for a
+   * new run rotates this engine's attribution with it. Where a plain value was
+   * injected the getter answers with that value, unchanged.
+   */
+  get correlationId(): CorrelationId {
+    return this.readCorrelationId();
   }
 
   /**
@@ -1226,11 +1335,40 @@ export class Engine {
    * `move:after` carrying `moved: false`, which is the completion signal
    * L182's silent return had no equivalent of.
    *
+   * ONE ADDITION L182 HAS NO ANALOGUE OF: a turn whose `onBeforeMove` dispatch
+   * reseated the board has changed state whether or not the walk then moved
+   * anything, so it re-derives the verdict, commits and resolves the stage
+   * through `settleEffectOnlyTurn()` — still without spawning, because the spawn
+   * belongs to a move that moved. The returned value reports the SLIDE, so such
+   * a turn returns `false`.
+   *
    * @param direction Direction to move in: 0 up, 1 right, 2 down, 3
    *   left.
    * @returns `true` when the board changed.
    */
   move(direction: Direction): boolean {
+    return this.attemptMove(direction).moved;
+  }
+
+  /**
+   * Resolves one move and reports WHICH of its four paths it took.
+   *
+   * The same turn `move()` resolves — that member is this one's boolean
+   * projection and every existing caller is unaffected — reported in the terms
+   * the four counters this method raises already distinguish: a move refused
+   * because the game is over, a move a listener or an `onBeforeMove` handler
+   * withdrew, a move the resolver found changed nothing, and a move that
+   * resolved. A boolean collapses the first three onto one value, so a caller
+   * holding it cannot tell a withdrawn move from an idle one, and an observer
+   * settling on the boolean alone labelled every one of them the same way.
+   *
+   * No new event is emitted and no emission is reordered: AAP Contract 1 fixes
+   * the seven events, so the outcome is RETURNED rather than announced.
+   *
+   * @param direction Direction to move in: 0 up, 1 right, 2 down, 3 left.
+   * @returns The frozen outcome of the attempt.
+   */
+  attemptMove(direction: Direction): MoveAttempt {
     // Ported from L134.
     if (this.isGameTerminated()) {
       this.reporter.onCount?.({
@@ -1240,7 +1378,7 @@ export class Engine {
         value: 1,
       });
 
-      return false;
+      return frozenAttempt('blocked', direction, direction, false);
     }
 
     // EMITTED BEFORE THE DECISION, and CANCELLABLE, which is what AAP
@@ -1299,14 +1437,22 @@ export class Engine {
 
       // A withdrawn move normally changes nothing and commits nothing, which is
       // L134's behaviour. A withdrawn move that ALSO reseated the board — undo
-      // is exactly that pairing — has changed state, so it commits, or the board
-      // the engine holds and the board every view shows would diverge until the
-      // next resolved turn.
+      // is exactly that pairing — has changed state, so it SETTLES: the terminal
+      // verdict is re-derived against the board the effect left, the state is
+      // committed, and the stage is resolved against it. Without the
+      // re-derivation and the resolution the board the engine holds and the board
+      // every view shows diverged until the next resolved turn, and a rewind that
+      // met the stage goal could never clear the stage.
       if (reseated) {
-        this.commit();
+        this.settleEffectOnlyTurn();
       }
 
-      return false;
+      return frozenAttempt(
+        'cancelled',
+        direction,
+        before.payload.direction,
+        reseated,
+      );
     }
 
     // The direction the move RESOLVES in is the one the HOOK payload carries,
@@ -1365,21 +1511,33 @@ export class Engine {
         value: 1,
       });
 
-      // THE COMPLETION SIGNAL OF A TURN THAT CHANGED NOTHING. Emitted from
-      // the state already in force, so nothing here writes engine state: no
-      // hook is dispatched, no tile is spawned, the loss check is not run,
-      // nothing is persisted and no commit is made. L182-L190's `if (moved)`
-      // block stays skipped exactly as it was; this emission is beside that
-      // block, not inside it.
+      // AN ACCEPTED PRE-MOVE EFFECT IS A STATE CHANGE, SLIDE OR NO SLIDE. A
+      // permutation, an excision or a restore recorded on `onBeforeMove` reached
+      // the board before the walk, and the walk can then find nothing left to
+      // move — a tumbled board whose tiles are already against the wall, a
+      // thinned board that was already settled. The verdict is re-derived here,
+      // BEFORE the emission below, so the completion signal and the commit that
+      // follows it report one state. Nothing is spawned: the spawn belongs to a
+      // move that moved, which is L183's placement.
+      if (reseated) {
+        this.deriveTerminalState();
+      }
+
+      // THE COMPLETION SIGNAL OF A TURN THAT MOVED NOTHING. Emitted from the
+      // state in force: no hook is dispatched and no tile is spawned.
+      // L182-L190's `if (moved)` block stays skipped exactly as it was; this
+      // emission is beside that block, not inside it.
       //
       // `moved` is `false`, and `score`, `over` and `won` are the values the
-      // turn began with because the resolver reported no change. A subscriber
-      // that opened work on `move:before` closes it here rather than holding
-      // it open until the next turn supersedes it.
+      // turn began with wherever the board was not reseated, because the
+      // resolver reported no change. A subscriber that opened work on
+      // `move:before` closes it here rather than holding it open until the next
+      // turn supersedes it.
       this.events.emit('move:after', {
         // The turn this emission ends, numbered as every granular event of a
-        // turn is: the counter advances only on a commit, and this turn makes
-        // none, so the number is the one the NEXT committed turn will carry.
+        // turn is: the counter advances only on a commit, so the number is the
+        // one the commit below carries, or — where nothing was reseated and no
+        // commit is made — the one the NEXT committed turn will carry.
         turn: this.turnCounter + 1,
         moved: false,
         board: this.grid,
@@ -1389,7 +1547,22 @@ export class Engine {
         terminated: this.isGameTerminated(),
       });
 
-      return false;
+      // A TURN THAT CHANGED THE BOARD PERSISTS AND PUBLISHES IT. Without this a
+      // relic that reseated the board on `onBeforeMove` left the renderer, the
+      // stored envelope, the substream cursors and its own spent charge
+      // describing the board as it stood BEFORE the effect, until some later
+      // turn happened to commit. A turn that reseated nothing still commits
+      // nothing, which is L182's behaviour.
+      if (reseated) {
+        this.commit();
+        this.resolveMetStageGoal();
+      }
+
+      // THE RESOLUTION IS `idle` EITHER WAY: a reseated board is a state change,
+      // not a move that moved, so the slide's own verdict is what the tracer and
+      // every caller of `attemptMove()` are told. `committed` is `reseated`,
+      // because the block above is the one idle path that does commit.
+      return frozenAttempt('idle', direction, resolved, reseated);
     }
 
     // Ported from L183.
@@ -1405,17 +1578,10 @@ export class Engine {
     // exactly as it stood rather than being asserted, and the commit below
     // carries `degraded: true` so a view and the diagnostics surface both see
     // that this turn's terminal status could not be established.
-    const available = this.measured((): boolean =>
-      movesAvailable(this.grid, this.config),
-    );
-
-    if (available === false) {
-      this.over = true;
-    }
-
-    if (available !== null) {
-      this.terminalUnknown = false;
-    }
+    //
+    // `deriveTerminalState()` is the one implementation of that measurement; the
+    // two turns that change the board without resolving a slide take it too.
+    this.deriveTerminalState();
 
     // The verdict as the ENGINE left it, kept so a handler that changed the
     // board can be told apart from one that declared the run lost.
@@ -1502,7 +1668,52 @@ export class Engine {
 
     this.resolveMetStageGoal();
 
-    return true;
+    return frozenAttempt('moved', direction, resolved, true);
+  }
+
+  /**
+   * Re-derives the loss flag against the board as it now stands.
+   *
+   * Extracted from the post-spawn check of L185-L187 so the two turns that
+   * change the board WITHOUT resolving a slide — a withdrawn move that reseated
+   * it, and a move whose walk found nothing to move after a pre-move effect had
+   * already rearranged it — take the same measurement the resolved turn takes.
+   *
+   * Taken through `measured()`, so a substituted merge predicate that raises
+   * leaves the engine degraded and the flag exactly as it stood rather than
+   * asserting a verdict that could not be established.
+   */
+  private deriveTerminalState(): void {
+    const available = this.measured((): boolean =>
+      movesAvailable(this.grid, this.config),
+    );
+
+    if (available === false) {
+      this.over = true;
+    }
+
+    if (available !== null) {
+      this.terminalUnknown = false;
+    }
+  }
+
+  /**
+   * Settles a turn whose board changed through an accepted effect alone.
+   *
+   * Has no vanilla source: no vanilla turn could change the board without
+   * resolving. The three steps are the ones a resolved turn ends with, minus the
+   * spawn — the verdict re-derived against the board the effect left, the state
+   * committed and persisted, and the stage resolved against what was committed.
+   * A spawn belongs to a move that moved, which is L183's placement.
+   *
+   * Called by the withdrawn-move path, which emits no `move:after`: the
+   * measurement its commit reports is taken by the stage-context provider while
+   * that commit's payload is assembled.
+   */
+  private settleEffectOnlyTurn(): void {
+    this.deriveTerminalState();
+    this.commit();
+    this.resolveMetStageGoal();
   }
 
   /**
@@ -1540,12 +1751,16 @@ export class Engine {
     );
 
     if (measurable !== true) {
+      this.publishRaisedDegradation(measurable);
+
       return;
     }
 
     const cleared = this.measured((): boolean => this.stageProgress().cleared);
 
     if (cleared !== true) {
+      this.publishRaisedDegradation(cleared);
+
       return;
     }
 
@@ -1556,6 +1771,31 @@ export class Engine {
     });
 
     this.endStage(true);
+  }
+
+  /**
+   * Publishes a degradation the stage resolution recorded, in a FOLLOWING
+   * authoritative commit.
+   *
+   * The stage resolution runs AFTER the commit its turn ended with, so a
+   * measurement that raises there records `degraded` on an engine whose last
+   * published commit carried `degraded: false` — the turn whose stage status
+   * could not be established was the one that should have said so. This emits
+   * the state again, from the degradation now recorded, so the last commit a
+   * view and the diagnostics surface hold is the truthful one.
+   *
+   * Only a RAISE publishes: `measured()` yields `null` for one, and a plain
+   * `false` — a non-finite score or target the measurement itself reported — is
+   * "goal not met" and changes no flag, so it publishes nothing.
+   *
+   * @param measurement What `measured()` returned, `null` where it raised.
+   */
+  private publishRaisedDegradation(measurement: boolean | null): void {
+    if (measurement !== null) {
+      return;
+    }
+
+    this.commit();
   }
 
   /**
@@ -1722,8 +1962,21 @@ export class Engine {
     // reaches the same state by returning the payload without one. A
     // position outside the lattice reaches the same state, because
     // `withinBounds` refuses it.
+    //
+    // THE VACANCY IS TESTED HERE, AT THE INSERTION BOUNDARY, and after every
+    // transformation and every board effect the dispatch applied. A spawn draws
+    // an EMPTY cell (js/grid.js L37-L43 draws from `availableCells`), while a
+    // hook payload's `position` is any in-bounds cell and `Grid.insertTile`
+    // writes the cell it is given — the merge branch of
+    // src/engine/move-resolver.ts depends on that — so without this test a
+    // transformed or effect-shadowed position replaced a tile the board already
+    // held. An occupied cell suppresses the spawn exactly as an off-lattice one
+    // does. Ordered after `withinBounds` because `Grid.cellAvailable` reads a
+    // cell outside the lattice as empty.
     const inserted =
-      position !== undefined && this.grid.withinBounds(position);
+      position !== undefined &&
+      this.grid.withinBounds(position) &&
+      this.grid.cellAvailable(position);
 
     if (inserted) {
       this.grid.insertTile(new Tile(position, payload.value));
@@ -1739,8 +1992,9 @@ export class Engine {
     // position a suppressed spawn never used would let a subscriber count
     // an insertion that did not happen and draw a tile the board does not
     // hold, so the member is omitted for every suppressed spawn: the full
-    // board of js/grid.js L37-L43, a handler that returned no cell, and a
-    // handler that returned one outside the lattice.
+    // board of js/grid.js L37-L43, a handler that returned no cell, a handler
+    // that returned one outside the lattice, and a handler that returned one
+    // another tile already occupies.
     this.events.emit('tile:spawn', {
       turn: this.turnCounter + 1,
       position: inserted ? position : undefined,

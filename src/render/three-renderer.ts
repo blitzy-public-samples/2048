@@ -48,6 +48,10 @@
 //   TR-THREE-20  target-only row              the parallel accessibility board
 //   TR-THREE-21  target-only row              the stage lighting and the
 //                                             stage-clear punch
+//   TR-THREE-22  target-only row              `degraded` carried by the paint
+//                                             plan, the same member
+//                                             src/render/number-only-renderer.ts
+//                                             carries
 //
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
@@ -405,6 +409,38 @@ export const threeRendererCopy: BoardCellCopy = Object.freeze({
   emptyCellLabel: numberOnlyRendererCopy.emptyCellLabel,
 });
 
+/**
+ * What one `webglcontextrestored` rebuild achieved, as
+ * `ThreeRendererOptions.onContextRestored` receives it.
+ *
+ * A restored context is a NEW context, so the scene graph, the material cache,
+ * the mesh factory, the particle system and the camera rig are all rebuilt
+ * before the board can draw again. That rebuild can itself fail — the driver
+ * can refuse the new context outright — and the two outcomes call for opposite
+ * responses from the caller, so the verdict is reported rather than implied by
+ * the callback having been made at all.
+ */
+export interface ContextRestoreOutcome {
+  /**
+   * Whether every renderer-owned GPU resource was rebuilt and the board is
+   * drawing again. `false` leaves the 2.5D board parked.
+   */
+  readonly rebuilt: boolean;
+
+  /**
+   * Whether the context still stands lost after the attempt, which is what
+   * `readStats().contextLost` reports.
+   */
+  readonly contextLost: boolean;
+
+  /**
+   * Whether a rebuild was attempted at all. `false` on a restoration that
+   * reached a disposed or unmounted renderer, which owns no resources to
+   * rebuild and no board to park.
+   */
+  readonly attempted: boolean;
+}
+
 /* ==========================================================================
  * 5. Construction parameters
  * ========================================================================== */
@@ -485,10 +521,16 @@ export interface ThreeRendererOptions {
   readonly onContextLost?: (info: WebGLContextLossInfo) => void;
 
   /**
-   * Called once the browser has restored the context, after the renderer has
-   * resumed drawing. Defaults to doing nothing.
+   * Called once the browser has restored the context, after this renderer has
+   * attempted the rebuild the new context requires, with the verdict of that
+   * attempt. Defaults to doing nothing.
+   *
+   * The verdict is what tells a caller whether the 2.5D board is drawing again:
+   * a restored context whose resources could NOT be rebuilt leaves the board
+   * parked, so a caller that ended its fallback on the restoration alone ended
+   * it on a board that never came back (implicit requirement I6).
    */
-  readonly onContextRestored?: () => void;
+  readonly onContextRestored?: (outcome: ContextRestoreOutcome) => void;
 }
 
 /** What one renderer has done and where it stands. */
@@ -646,6 +688,12 @@ interface PaintPlan {
   readonly terminated: boolean;
 
   /**
+   * `StateCommitEvent.degraded`, carried so `projectRendered` can put it on the
+   * shared `RenderedBoard` snapshot exactly as the number-only renderer does.
+   */
+  readonly degraded: boolean;
+
+  /**
    * Set on a plan queued to redraw the board the commit already drew, rather
    * than to draw a turn. `restPlan` builds one.
    */
@@ -746,6 +794,7 @@ function planCommit(commit: StateCommitEvent, scoreDelta: number): PaintPlan {
     over: commit.over,
     won: commit.won,
     terminated: commit.terminated,
+    degraded: commit.degraded,
   });
 }
 
@@ -1219,7 +1268,13 @@ export function createThreeRenderer(
         source: DIAGNOSTIC_SOURCE,
         message: 'The board could not be generated; nothing is drawn.',
         detail: Object.freeze({ boardSize: size, scale }),
+
+        // The bounded summary AND the value itself: `error` cannot hold a stack,
+        // a `cause` chain or a non-`Error` throwable's own structure, and
+        // `serializeError` of src/observability/logger.ts reads all three off
+        // `thrown`.
         error: describeRenderError(error),
+        thrown: error,
       });
 
       return false;
@@ -1495,6 +1550,7 @@ export function createThreeRenderer(
           y: planned.y,
         }),
         error: describeRenderError(error),
+        thrown: error,
       });
 
       return;
@@ -1839,6 +1895,7 @@ export function createThreeRenderer(
       won: plan.won,
       over: plan.over,
       terminated: plan.terminated,
+      degraded: plan.degraded,
       themeId: themeInForce.id,
     });
   };
@@ -2217,16 +2274,24 @@ export function createThreeRenderer(
    * @param surface The canvas the restored context belongs to.
    * @param size Board size to rebuild at.
    * @param scale Scale the geometry is resolved for.
+   * @returns The verdict of the attempt, which a caller acts on: a rebuild that
+   *   did not complete leaves the board parked and the context reported lost.
    */
   const rebuildAfterContextRestore = (
     surface: HTMLCanvasElement,
     size: number,
     scale: ScaleName,
-  ): void => {
+  ): ContextRestoreOutcome => {
     contextLost = false;
 
     if (disposed || !mounted) {
-      return;
+      // Nothing to rebuild and no board to park: a renderer that owns no
+      // resources cannot be the reason a caller is serving another board.
+      return Object.freeze({
+        rebuilt: false,
+        contextLost: false,
+        attempted: false,
+      });
     }
 
     const carried = lastPlan;
@@ -2269,6 +2334,13 @@ export function createThreeRenderer(
       // readable.
       contextLost = true;
 
+      // AND NOTHING IS LEFT ALLOCATED. The try above builds in order, so a
+      // failure part-way through it leaves every resource created before the
+      // throwing line holding a context this renderer will not draw with. They
+      // are released here, so a later restoration rebuilds from nothing rather
+      // than stacking a second set on top of them.
+      releaseGpuResources();
+
       reporter.onCount({ name: CONTEXT_FAILED_METRIC, value: 1 });
       reporter.onDiagnostic({
         level: 'error',
@@ -2279,9 +2351,14 @@ export function createThreeRenderer(
           'carries the same information.',
         detail: Object.freeze({ boardSize: size, scale }),
         error: describeRenderError(error),
+        thrown: error,
       });
 
-      return;
+      return Object.freeze({
+        rebuilt: false,
+        contextLost: true,
+        attempted: true,
+      });
     }
 
     contextRestores += 1;
@@ -2314,6 +2391,12 @@ export function createThreeRenderer(
     });
 
     options.onWork?.();
+
+    return Object.freeze({
+      rebuilt: true,
+      contextLost: false,
+      attempted: true,
+    });
   };
 
   const mount = (target?: Element | null): boolean => {
@@ -2405,8 +2488,16 @@ export function createThreeRenderer(
             options.onContextLost?.(info);
           },
           onContextRestored: (): void => {
-            rebuildAfterContextRestore(surface, size, scale);
-            options.onContextRestored?.();
+            // The rebuild is run FIRST and its verdict held: an optional call
+            // does not evaluate its arguments, so passing the rebuild inline
+            // would skip it entirely for a renderer built with no callback.
+            const outcome = rebuildAfterContextRestore(surface, size, scale);
+
+            // THE VERDICT IS FORWARDED, not the fact of the restoration: a
+            // rebuild that failed leaves this renderer parked, and the caller's
+            // fallback must stay in force rather than be ended by a restoration
+            // that restored nothing drawable.
+            options.onContextRestored?.(outcome);
           },
         },
         reporter,
@@ -2489,6 +2580,7 @@ export function createThreeRenderer(
           'instead, which keeps the game playable.',
         detail: Object.freeze({ boardSize: size, scale }),
         error: describeRenderError(error),
+        thrown: error,
       });
 
       return false;

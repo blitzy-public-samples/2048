@@ -336,7 +336,9 @@ const METRIC_HELP: Readonly<Record<keyof typeof METRIC_NAMES, string>> =
     rngDrawsTotal: 'Draws consumed, by named RNG substream.',
     metricsRejectedTotal:
       'Metric calls this registry rejected and reported.',
-    healthCheckStatus: 'Health check result: 1 healthy, 0 unhealthy.',
+    healthCheckStatus:
+      'Health check result: 1 healthy, 0 unhealthy, -1 not applicable ' +
+      '(the host offers nothing to evaluate).',
     frameTimeMilliseconds: 'Frame duration in milliseconds.',
     turnLatencyMilliseconds:
       'Turn latency in milliseconds, input dispatch through commit.',
@@ -1233,7 +1235,20 @@ interface MetricFamily {
  * rather than raised.
  */
 export class MetricsRegistry {
-  readonly correlationId: string;
+  /**
+   * Correlation identifier every snapshot is keyed under and every fold baseline
+   * is checked against, as it stands now.
+   *
+   * A GETTER over the injected logger, not a captured value: one page load can
+   * play more than one run, and `Logger.setCorrelationId` rotates the identifier
+   * for every logger sharing its state. A captured value would key a second
+   * run's snapshot to the first, and would make `resolveFoldSource` refuse the
+   * hook bus's own counts as foreign the moment the bus reported under the run
+   * that was actually playing. Decision DL-TYPES-04.
+   */
+  get correlationId(): string {
+    return readCorrelationId(this.logger);
+  }
 
   /** The families, in registration order. */
   private readonly families = new Map<string, MetricFamily>();
@@ -1339,7 +1354,6 @@ export class MetricsRegistry {
 
   constructor(options: MetricsRegistryOptions = {}) {
     this.logger = tagLogger(options.logger);
-    this.correlationId = readCorrelationId(this.logger);
 
     // Registered first. Rejections raised by the registrations below are
     // counted in it.
@@ -1775,6 +1789,20 @@ export class MetricsRegistry {
     }
   }
 
+  /**
+   * Writes one health verdict to `game2048_health_check_status`, labelled with
+   * the check id.
+   *
+   * TWO OF THE THREE ENCODINGS THE SERIES CARRIES. This member takes a boolean
+   * and so writes `1` or `0`; the third state, `-1` for a check the host offers
+   * nothing to evaluate, is set directly on the same series by
+   * `HealthSurface`, which owns the three-state verdict. The family's help text
+   * declares all three, because a reader of the series sees all three.
+   *
+   * @param check Check id, carried as the series label. An empty value is
+   *   reported and written nowhere.
+   * @param healthy Whether the check passed.
+   */
   recordHealthCheck(check: string, healthy: boolean): void {
     try {
       if (typeof check !== 'string' || check.length === 0) {

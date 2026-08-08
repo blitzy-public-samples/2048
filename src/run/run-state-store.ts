@@ -50,9 +50,11 @@ import type { RulesConfig } from '../config/rules-config';
 import type {
   CellMatrix,
   CorrelationId,
+  CorrelationSource,
   SerializedGrid,
   SerializedTile,
 } from '../engine/types';
+import { correlationReader } from '../engine/types';
 import type { LocalStorageManager } from '../storage/local-storage-manager';
 import {
   RUN_STATE_KEY,
@@ -1024,8 +1026,13 @@ export interface RunStateStoreOptions {
    * `deriveCorrelationId` in src/observability/logger.ts, and no seed —
    * neither the caller's nor a stored payload's — is read for it.
    * Defaults to the empty string, which reports no correlation.
+   *
+   * A READER IS ACCEPTED: pass a function and every report resolves the
+   * identifier at the moment it is made, so a store that persists a second run
+   * of one page load reports under the run that is actually playing rather than
+   * under the first.
    */
-  readonly correlationId?: CorrelationId;
+  readonly correlationId?: CorrelationSource;
 
   /**
    * The version set every load classifies and re-stamps against. Defaults to
@@ -1059,8 +1066,13 @@ export class RunStateStore {
 
   private readonly config: RulesConfig | undefined;
 
-  /** Correlation identifier every report carries, exactly as injected. */
-  private readonly correlationId: CorrelationId;
+  /**
+   * Reads the correlation identifier every report carries.
+   *
+   * Resolved from a pinned string or a shared scope, and read per report rather
+   * than once at construction, because a page load can play more than one run.
+   */
+  private readonly readCorrelationId: () => CorrelationId;
 
   /**
    * Version set every load classifies and re-stamps against, resolved once at
@@ -1076,7 +1088,7 @@ export class RunStateStore {
     this.storage = options.storage ?? NULL_PERSISTENCE_PORT;
     this.reporter = options.reporter ?? NOOP_RUN_REPORTER;
     this.config = options.config;
-    this.correlationId = options.correlationId ?? '';
+    this.readCorrelationId = correlationReader(options.correlationId);
     this.versionPolicy = resolveRunStateVersionPolicy(options.versionPolicy);
   }
 
@@ -1428,7 +1440,7 @@ export class RunStateStore {
    */
   private reportMigration(fromVersion: number | undefined): void {
     const report: RunStateMigrationReport = {
-      correlationId: this.correlationId,
+      correlationId: this.readCorrelationId(),
       fromVersion,
       toVersion: this.versionPolicy.current,
     };
@@ -1449,7 +1461,7 @@ export class RunStateStore {
     reconciliation: BoardSizeReconciliation
   ): void {
     const report: BoardSizeReconciliationDetail = {
-      correlationId: this.correlationId,
+      correlationId: this.readCorrelationId(),
       savedSize: reconciliation.savedSize,
       configuredSize: reconciliation.configuredSize,
       relicSize: reconciliation.relicSize,
@@ -1466,7 +1478,7 @@ export class RunStateStore {
 
   private reportWriteFailure(state: unknown, error: unknown): void {
     const report: RunStateWriteFailureReport = {
-      correlationId: this.correlationId,
+      correlationId: this.readCorrelationId(),
       key: RUN_STATE_KEY,
       byteLength: measureJsonBytes(state),
       error,
@@ -1486,7 +1498,7 @@ export class RunStateStore {
    */
   private reportRemovalFailure(error: unknown): void {
     const report: RunStateWriteFailureReport = {
-      correlationId: this.correlationId,
+      correlationId: this.readCorrelationId(),
       key: RUN_STATE_KEY,
       byteLength: 0,
       error,
@@ -1522,10 +1534,13 @@ export class RunStateStore {
    * is optional.
    *
    * @returns The identifier, or `undefined` when the store was
-   *   constructed without one.
+   *   constructed without one and when the injected reader resolves to the
+   *   empty string.
    */
   private reportedCorrelationId(): CorrelationId | undefined {
-    return this.correlationId.length === 0 ? undefined : this.correlationId;
+    const correlationId = this.readCorrelationId();
+
+    return correlationId.length === 0 ? undefined : correlationId;
   }
 
   /**

@@ -53,6 +53,9 @@
 //   DL-INPUT-03  the appended listener list retained as the publish surface,
 //                walked in registration order
 //   DL-INPUT-04  no report carrying a character a keypress produced
+//   DL-INPUT-05  a rebind validated against the MERGED binding — every
+//                requested key and physical code, in the contexts that will
+//                be in force once the override is applied
 
 import type {
   Direction,
@@ -172,6 +175,21 @@ export type KeymapChangeReason = 'remap' | 'replace';
  * in force AFTERWARDS, which on a refusal is the table that was already in
  * force.
  */
+/**
+ * The two dimensions a binding occupies, and a remap is validated in.
+ *
+ * `'key'` is `KeyboardEvent.key`, the character the key produces, compared
+ * case-insensitively; `'code'` is `KeyboardEvent.code`, the physical key,
+ * compared exactly.
+ */
+export type RemapDimension = 'key' | 'code';
+
+/** One binding already holding a requested value, and where it collided. */
+interface RemapConflict {
+  readonly binding: InputBinding;
+  readonly dimension: RemapDimension;
+}
+
 export interface RemapResult {
   /** Whether the binding was applied. */
   readonly applied: boolean;
@@ -180,10 +198,21 @@ export interface RemapResult {
   readonly keymap: Keymap;
 
   /**
-   * The binding already holding one of the requested keys in a context the
-   * remapped action is active in, or `null` where none did.
+   * The binding already holding one of the requested keys or codes in a context
+   * the remapped action is active in, or `null` where none did.
    */
   readonly conflict: InputBinding | null;
+
+  /**
+   * WHICH dimension collided: the logical `key` or the physical `code`.
+   *
+   * Present exactly when `conflict` is, so a caller can name the collision the
+   * way a player experiences it. A code collision is invisible in the `key`
+   * dimension — on an alternate layout the character a key produces differs
+   * while `KeyboardEvent.code` is identical — so the two are not
+   * interchangeable in a message.
+   */
+  readonly conflictDimension?: RemapDimension;
 }
 
 /** Construction parameters. Every member is optional. */
@@ -895,10 +924,12 @@ export class InputManager implements InputEmitter {
    * THE SINGLE ENTRY POINT FOR A REBIND. It performs, in order, the four steps
    * that used to be spread across the settings dialog and the composition root:
    *
-   *   1. VALIDATES. Every requested key is checked against every context the
-   *      action is active in, so a key already bound to another action in a
-   *      shared context is refused rather than shadowed. The occupying binding
-   *      is returned so the caller can name it.
+   *   1. VALIDATES. Every requested key AND every requested code is checked
+   *      against every context the action is active in, so a key already bound
+   *      to another action in a shared context is refused rather than shadowed —
+   *      including one that collides only by physical code, which the logical
+   *      key cannot see. The occupying binding and the dimension it collided in
+   *      are returned so the caller can name both.
    *   2. APPLIES. The table this manager's own keydown listener reads is
    *      replaced, so the new binding is live for the next keystroke with no
    *      second write.
@@ -913,19 +944,27 @@ export class InputManager implements InputEmitter {
    *   occupying binding on a refusal.
    */
   remap(action: InputAction, binding: InputBindingOverride): RemapResult {
-    const requested = binding.keys ?? [];
-    const conflict = this.findRemapConflict(action, requested);
+    // THE WHOLE OVERRIDE IS VALIDATED IN BOTH DIMENSIONS. `mergeBinding` of
+    // ./keymap.ts resolves each member independently, so the binding that goes
+    // live is the merge of this override onto the one in force; and `codes` used
+    // to be applied without being validated at all, so a direct caller could
+    // persist a physical-code collision that shadowed another action's binding —
+    // and this manager is the documented single authority for a rebind, so
+    // nothing else would refuse it.
+    const conflict = this.findRemapConflict(action, binding);
 
     if (conflict !== null) {
       this.reporter.count(KEYMAP_CONFLICT_METRIC, {
         action,
-        occupant: conflict.action,
+        occupant: conflict.binding.action,
+        dimension: conflict.dimension,
       });
 
       return Object.freeze({
         applied: false,
         keymap: this.keymap,
-        conflict,
+        conflict: conflict.binding,
+        conflictDimension: conflict.dimension,
       });
     }
 
@@ -940,33 +979,74 @@ export class InputManager implements InputEmitter {
   }
 
   /**
-   * Finds the binding already holding one of `keys` where it would collide.
+   * Finds the binding already holding any part of the MERGED binding where it
+   * would collide, and reports which dimension collided.
    *
-   * Only the contexts the rebound action is itself active in are searched: two
+   * Only the contexts the rebound action will be active in are searched: two
    * actions may share a key when no context activates both, which is what lets
    * a digit drive a reward choice in an overlay and nothing in the game.
    *
+   * THREE MEMBERS ARE READ FROM THE OVERRIDE, each resolved exactly as
+   * `mergeBinding` of ./keymap.ts resolves it — the override's value when it
+   * supplies one, and the binding in force when it does not:
+   *
+   *   `contexts`  an override naming contexts REPLACES the declared ones, so a
+   *               request that widens an overlay-only action into `'game'` has
+   *               to be free in `'game'` too. Searching the declared set alone
+   *               accepted a key already held in a context the override was
+   *               about to move the action into.
+   *   `codes`     `codes` is a second, independent channel the keydown listener
+   *               reads, and a physical code carries across layouts where the
+   *               character does not, so a requested code can land on a key
+   *               another action already holds even where every requested `key`
+   *               is free.
+   *   `keys`      omitted, the keys in force carry over, and they are searched
+   *               again because the contexts they are read in may have widened.
+   *
+   * Both lists are searched through `findBindingConflict`, which compares one
+   * value against a binding's keys case-insensitively AND against its codes
+   * exactly — so a code is looked up by passing it as the value, which is how
+   * the settings dialog's own preflight already reads it, and which also sees a
+   * requested code that lands on another action's logical key.
+   *
    * @param action Action being rebound, which never conflicts with itself.
-   * @param keys Keys requested for it.
-   * @returns The occupying binding, or `null` when every key is free.
+   * @param binding The override requested for it.
+   * @returns The occupying binding and the dimension it collided in, or `null`
+   *   where every value of the merged binding is free.
    */
   private findRemapConflict(
     action: InputAction,
-    keys: readonly string[],
-  ): InputBinding | null {
-    const declared = this.keymap[action].contexts;
+    binding: InputBindingOverride,
+  ): RemapConflict | null {
+    const current = this.keymap[action];
+    const keys = binding.keys ?? current.keys;
+    const codes = binding.codes ?? current.codes;
+    const declared = binding.contexts ?? current.contexts;
 
     // A binding that names no context is active in `'game'`, so that is where a
     // key it requests has to be free.
     const contexts: readonly InputContext[] =
       declared.length > 0 ? declared : ['game'];
+    const dimensions: readonly {
+      readonly values: readonly string[];
+      readonly dimension: RemapDimension;
+    }[] = [
+      { values: keys, dimension: 'key' },
+      { values: codes, dimension: 'code' },
+    ];
 
-    for (const key of keys) {
-      for (const context of contexts) {
-        const found = findBindingConflict(this.keymap, key, context);
+    for (const { values, dimension } of dimensions) {
+      for (const value of values) {
+        if (value.length === 0) {
+          continue;
+        }
 
-        if (found !== null && found.action !== action) {
-          return found;
+        for (const context of contexts) {
+          const found = findBindingConflict(this.keymap, value, context);
+
+          if (found !== null && found.action !== action) {
+            return { binding: found, dimension };
+          }
         }
       }
     }

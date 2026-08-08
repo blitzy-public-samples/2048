@@ -839,6 +839,30 @@ describe('EngineEvents.emit contains a throwing listener ' +
     ]);
   });
 
+  it('resolves a correlation READER when it reports, not at construction', () => {
+    const carried: string[] = [];
+    let current = 'run-first';
+    const events = createEngineEvents({
+      correlationId: (): string => current,
+      reporter: {
+        onListenerError: (report): void => {
+          carried.push(report.correlationId);
+        },
+      },
+    });
+
+    events.on('tile:spawn', () => {
+      throw new Error('listener failed');
+    });
+
+    // A second run of one page load: an emitter that captured the identifier
+    // reported every later contained failure under the run that ended.
+    current = 'run-second';
+    events.emit('tile:spawn', createTileSpawn());
+
+    expect(carried).toEqual(['run-second']);
+  });
+
   it('contains every listener of one emission independently', () => {
     const caught: unknown[] = [];
     const events = createEngineEvents({

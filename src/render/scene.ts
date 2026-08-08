@@ -90,6 +90,7 @@ import {
   gameContainerBackground,
   gridRowCells,
   gridSpacing,
+  neutralLightColor,
   tileGoldGlowColor,
 } from '../theme/tokens';
 import type { GeometryScale, ScaleName } from '../theme/tokens';
@@ -569,12 +570,15 @@ export interface BoardScene {
  * ========================================================================== */
 
 /**
- * The unit channel value, and the white point the key light departs from.
+ * The unit channel value.
  *
- * Three's `Color` constructor called with no argument is white, so this
- * carries the unit without stating it.
+ * Three's `Color` constructor called with no argument is white, so this carries
+ * the unit without stating it. It is the unit ALONE: the white point the lights
+ * depart from is `ThemePalette.neutralLight`, read per palette by `retune`
+ * through the same guarded reader every other palette entry is read through,
+ * with the `neutralLightColor` token of src/theme/tokens.ts as its fallback.
  */
-const WHITE = /* @__PURE__ */ new Color();
+const UNIT_CHANNEL = /* @__PURE__ */ new Color();
 
 /** Rejects an argument that is not a finite number. */
 function assertFiniteNumber(name: string, value: number): void {
@@ -923,6 +927,10 @@ export function createScene(options: SceneOptions = {}): BoardScene {
   const keyColor = new Color();
   const haloColor = new Color();
 
+  // The palette's own white point, re-read on every tuning so a palette change
+  // reaches the lights with the same latency every other palette entry does.
+  const neutralColor = new Color().copy(UNIT_CHANNEL);
+
   /**
    * The framing the scene opens with.
    *
@@ -1110,9 +1118,14 @@ export function createScene(options: SceneOptions = {}): BoardScene {
     const next = computeTuning(stageIndex, theme);
 
     readPaletteColor(haloColor, theme.palette.tileGlow, tileGoldGlowColor);
-    keyColor.copy(WHITE).lerp(haloColor, next.warmWeight);
+    readPaletteColor(
+      neutralColor,
+      theme.palette.neutralLight,
+      neutralLightColor,
+    );
+    keyColor.copy(neutralColor).lerp(haloColor, next.warmWeight);
 
-    ambient.color.copy(WHITE);
+    ambient.color.copy(neutralColor);
     readPaletteColor(
       ambient.groundColor,
       theme.palette.boardField,

@@ -515,6 +515,30 @@ describe('the spawn families', () => {
     expect(attempts).not.toContain('tile:spawn');
     expect(inserted).toContain('tile:spawn');
   });
+
+  it('declares all THREE encodings the health gauge carries', () => {
+    const registry = createMetricsRegistry();
+
+    registry.recordHealthCheck('storage', true);
+
+    const help =
+      registry
+        .snapshot()
+        .series.find(
+          (series): boolean => series.name === METRIC_NAMES.healthCheckStatus,
+        )?.help ?? '';
+
+    // The series carries -1 for a check the host offers nothing to evaluate —
+    // src/observability/health.ts writes it directly from
+    // `HEALTH_GAUGE_VALUES` — so a reader of the exposition sees a value the
+    // help text did not declare.
+    expect(help).toContain('1 healthy');
+    expect(help).toContain('0 unhealthy');
+    expect(help).toContain('-1 not applicable');
+    expect(registry.toPrometheusText()).toContain(
+      `# HELP ${METRIC_NAMES.healthCheckStatus} `,
+    );
+  });
 });
 
 /* ===== 3. recordEngineEvent, every other event ===== */
@@ -814,6 +838,26 @@ describe('foldHookDispatchCounts rejects before folding', () => {
       hooks: hookTable(2),
     });
 
+    expect(dispatchTotal(registry)).toBe(2 * HOOK_NAMES.length);
+    expect(registry.snapshot().rejected).toBe(0);
+  });
+
+  it('follows the logger through a run rotation, so a bus stays local', () => {
+    const logger = createSilentLogger('run-first');
+    const registry = createMetricsRegistry({ logger });
+
+    // A second run of one page load. The registry captured its identifier at
+    // construction, so a bus reporting under the run that was actually playing
+    // was refused as foreign and its counts were dropped.
+    logger.setCorrelationId('run-second');
+
+    registry.foldHookDispatchCounts({
+      correlationId: 'run-second',
+      hooks: hookTable(2),
+    });
+
+    expect(registry.correlationId).toBe('run-second');
+    expect(registry.snapshot().correlationId).toBe('run-second');
     expect(dispatchTotal(registry)).toBe(2 * HOOK_NAMES.length);
     expect(registry.snapshot().rejected).toBe(0);
   });

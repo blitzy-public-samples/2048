@@ -62,6 +62,10 @@
 //   DL-MAIN-03  one tracer, one health surface and one report sink constructed
 //               here and injected everywhere
 //   DL-MAIN-04  `setup()` called after every subscriber has attached
+//   DL-MAIN-06  one mutable run-correlation context: the logger is the sole
+//               authority, every reporter is handed a reader of it rather
+//               than a captured value, and the scope is rotated as a run is
+//               adopted, before the board opens
 
 // The stylesheet enters through the module graph. index.html's <link> to
 // the committed generated CSS was removed; this import is its replacement
@@ -84,7 +88,7 @@ import type {
   EngineEvents,
   StateCommitEvent,
 } from './engine/engine-events';
-import type { EngineReporter } from './engine/types';
+import type { CorrelationId, EngineReporter } from './engine/types';
 import { ENGINE_EVENT_NAMES } from './engine/engine-events';
 import type { SpawnDetail } from './observability/metrics';
 import { createInputManager } from './input/input-manager';
@@ -106,6 +110,8 @@ import { createHealthSurface } from './observability/health';
 import type {
   BoundaryTracing,
   EngineTracingSubscription,
+  FinalMoveResolution,
+  Span,
   Tracer,
 } from './observability/tracer';
 import {
@@ -126,6 +132,7 @@ import {
 import { createNumberOnlyRenderer } from './render/number-only-renderer';
 import { createRenderLoop } from './render/render-loop';
 import type { FrameContext } from './render/render-loop';
+import type { ContextRestoreOutcome } from './render/three-renderer';
 import { createThreeRenderer } from './render/three-renderer';
 import type {
   RenderCount,
@@ -474,26 +481,6 @@ function createInputSink(
 }
 
 /**
- * Projects a caught value onto the render sink's error shape.
- *
- * @param caught Value that was thrown.
- * @returns Its name and message, with a printable fallback for a non-error.
- */
-function describeCaught(caught: unknown): {
-  readonly name: string;
-  readonly message: string;
-} {
-  if (caught instanceof Error) {
-    return Object.freeze({
-      name: caught.name.length > 0 ? caught.name : 'Error',
-      message: caught.message,
-    });
-  }
-
-  return Object.freeze({ name: 'UiError', message: String(caught) });
-}
-
-/**
  * Adapts a render sink to the accessibility surface's sink shape.
  *
  * @param reporter Render sink to write through.
@@ -524,7 +511,15 @@ function createPreferenceSink(reporter: RenderReporter): UiReporter {
         source: 'ui/a11y',
         message,
         detail: fields === undefined ? undefined : Object.freeze({ ...fields }),
-        error: describeCaught(caught),
+
+        // The ONE total reduction, shared with src/render/: reading `name`,
+        // `message` or `String(value)` here would let a hostile getter or a
+        // throwing `toString` replace the failure being reported. `thrown`
+        // carries the value ITSELF, so `serializeError` of
+        // src/observability/logger.ts keeps the stack, the cause chain and a
+        // non-`Error` throwable's own structure that a two-field summary cannot.
+        error: describeRenderError(caught),
+        thrown: caught,
       });
     },
   };
@@ -551,7 +546,10 @@ function createSoundSink(reporter: RenderReporter): SoundReporter {
           ...(report.details === undefined ? {} : report.details),
         }),
         error:
-          report.error === undefined ? undefined : describeCaught(report.error),
+          report.error === undefined
+            ? undefined
+            : describeRenderError(report.error),
+        ...(report.error === undefined ? {} : { thrown: report.error }),
       });
     },
   };
@@ -615,16 +613,12 @@ function createEngineSink(
           event: report.event,
           listenerIndex: report.listenerIndex,
         }),
-        error: Object.freeze({
-          name:
-            report.error instanceof Error
-              ? report.error.name
-              : 'EngineError',
-          message:
-            report.error instanceof Error
-              ? report.error.message
-              : String(report.error),
-        }),
+
+        // The same pairing the hook-error member above uses: the bounded
+        // summary through the one total reducer, and the caught value itself for
+        // a sink that can keep more of it than two fields.
+        error: describeRenderError(report.error),
+        thrown: report.error,
       });
     },
 
@@ -977,6 +971,30 @@ export type BoardRenderMode = 'three' | 'number-only';
  */
 const CONTEXT_LOST_FAILURE = 'context-lost';
 
+/**
+ * The WebGL failure the health check reports while a restored context's
+ * resources could not be rebuilt.
+ *
+ * The context came back and the board still cannot draw, which is neither an
+ * unobtainable context nor a lost one.
+ */
+const CONTEXT_UNREBUILT_FAILURE = 'context-not-rebuilt';
+
+/**
+ * The WebGL failure the health check reports while the 2.5D board is selected
+ * but not mounted.
+ */
+const RENDERER_UNMOUNTED_FAILURE = 'renderer-not-mounted';
+
+/**
+ * The WebGL failure the health check reports while the number-only board is
+ * standing in for a WebGL board that could not be served.
+ *
+ * A number-only board the PLAYER chose reports no failure: that is the
+ * accessible rendering mode of R9 working as intended, not a capability gap.
+ */
+const FORCED_FALLBACK_FAILURE = 'number-only-forced';
+
 /** How the board is drawn, and why that mode is in force. */
 export interface BoardRenderSelection {
   /** The rendering mode in use. */
@@ -1092,11 +1110,16 @@ function selectBoardRenderer(
  *
  * @param events The engine's emitter.
  * @param traceRenderCommit The `render.commit` boundary wrapper.
+ * @param readTurnSpan Reads the turn span open right now, which the commit span
+ *   is opened as a CHILD of explicitly. The listener that closes the turn span
+ *   is another `state:commit` listener, so relying on the implicit-parent stack
+ *   made the parent link depend on which of the two was registered first.
  * @returns A frozen emitter with the same three members.
  */
 function createTracedRenderEvents(
   events: EngineEvents,
   traceRenderCommit: BoundaryTracing['traceRenderCommit'],
+  readTurnSpan: () => Span | undefined,
 ): EngineEvents {
   type CommitListener = EngineEventListener<'state:commit'>;
 
@@ -1115,7 +1138,7 @@ function createTracedRenderEvents(
       const traced: CommitListener = (commit): void => {
         traceRenderCommit((): void => {
           commitListener(commit);
-        });
+        }, readTurnSpan() ?? null);
       };
 
       wrapped.set(commitListener, traced);
@@ -1422,14 +1445,26 @@ export function start(ownerDocument: Document): Application {
   // event rather than an edge case, and an identifier derived from the seed
   // alone would put every one of them under a single value. No engine behaviour
   // reads this, so gameplay determinism is unaffected.
-  const correlationId = deriveCorrelationId(identity.seed, identity.runId);
+  //
+  // HELD IN A SCOPE RATHER THAN A CONSTANT. A run started without a reload mints
+  // a new identity, so an identifier captured by each module at construction
+  // attributed the second run's records, counters, spans, health reports, hook
+  // contexts, relic reports and persistence reports to the first run.
+  // `readCorrelationId` is what every module receives, and `rotateCorrelation`
+  // below is the ONE writer — of this scope and, through
+  // `Logger.setCorrelationId`, of the logger the metrics registry, the tracer
+  // and the health surface read theirs from.
+  let runCorrelationId = deriveCorrelationId(identity.seed, identity.runId);
+
+  /** Reads the correlation identifier of the run in force. */
+  const readCorrelationId = (): CorrelationId => runCorrelationId;
 
   // The structured logger and the metrics registry, both of which shipped fully
   // implemented and neither of which was ever constructed. `consoleOutput` keeps
   // everything that used to reach the console reaching it, now as a structured
   // record carrying the correlation identifier rather than a bare string.
   const logger = createLogger({
-    correlationId,
+    correlationId: runCorrelationId,
     subsystem: 'main',
     consoleOutput: true,
   });
@@ -1442,7 +1477,14 @@ export function start(ownerDocument: Document): Application {
   // The ONE tracer of the running application. Every span the diagnostics
   // trace panel shows is opened on it, and the correlation identifier its span
   // identifiers derive from is the same one the logger and the registry carry.
-  const tracer = createTracer({ logger, metrics, correlationId });
+  const tracer = createTracer({
+    logger,
+    metrics,
+
+    // The READER, so the tracer's span identifiers and its snapshot follow the
+    // rotation rather than the identifier this page loaded with.
+    correlationId: readCorrelationId,
+  });
 
   // The module-boundary wrappers, one per boundary of the input -> engine ->
   // hook bus -> relic handler -> renderer chain. Injected into the layers that
@@ -1457,16 +1499,18 @@ export function start(ownerDocument: Document): Application {
   let webglProbeResult: WebGLProbeView | undefined;
 
   /**
-   * Whether the board's WebGL context stands lost right now.
+   * The WebGL failure the board is living with right now, or `null` while the
+   * capability the boot probe found is the one in force.
    *
    * A SLOT, because the health surface is built before the renderer it asks
    * about: `probeWebGLSupport` holds its startup result and hands the same one to
    * every later caller, so a surface reading it alone would report the capability
    * the machine had at BOOT for the rest of the session — a context taken away
-   * ten minutes in would still read as healthy. Filled once the renderer exists,
-   * and answers `false` until then.
+   * ten minutes in, a 2.5D board that never mounted, or a rebuild that failed
+   * would all still read as healthy. Filled once the renderer exists, and answers
+   * `null` until then.
    */
-  let readLiveContextLoss: () => boolean = (): boolean => false;
+  let readLiveWebGLFailure: () => string | null = (): string | null => null;
 
   // The health surface: the five capability probes the vanilla sources
   // performed and reported nowhere, plus the WebGL probe the Three.js renderer
@@ -1492,19 +1536,62 @@ export function start(ownerDocument: Document): Application {
     webglProbe: (): WebGLProbeView => {
       const probed = webglProbeResult ?? probeWebGLSupport();
 
-      // THE LIVE VERDICT. A context that was obtained and then taken away is a
-      // WebGL failure now, whatever the boot probe found, and it is the verdict
-      // the readiness roll-up has to act on: the number-only board is required
-      // while the context stands lost.
-      return readLiveContextLoss()
-        ? {
-            supported: false,
-            level: probed.level,
-            failure: CONTEXT_LOST_FAILURE,
-          }
-        : probed;
+      // THE LIVE VERDICT. A context that was obtained and then taken away, one
+      // whose resources could not be rebuilt after a restoration, a 2.5D board
+      // that never mounted, and a number-only board forced in place of one are
+      // each a WebGL failure NOW, whatever the boot probe found, and each is the
+      // verdict the readiness roll-up has to act on: the number-only board is
+      // required for as long as any of them holds.
+      const failure = readLiveWebGLFailure();
+
+      return failure === null
+        ? probed
+        : { supported: false, level: probed.level, failure };
     },
   });
+
+  /**
+   * Whether the last restoration attempt failed to rebuild the board.
+   *
+   * Held so the live verdict above can tell a context that is merely lost from
+   * one that came back and could not be rebuilt.
+   */
+  let contextRebuildFailed = false;
+
+  /**
+   * Recomputes the held health report and readiness verdicts.
+   *
+   * `HealthSurface.report()` and `readiness()` return the report `check()` last
+   * produced, so a renderer transition that happens after boot — a fallback, a
+   * mode switch, a lost context, a rebuild that failed — left the diagnostics
+   * panel and every exported snapshot showing BOOT readiness against a board
+   * that was no longer the one drawing. Every such transition calls this.
+   *
+   * Nothing is probed that was not probed at boot: the WebGL result is the held
+   * one plus the live verdict above, and the Web Storage result is the manager's
+   * cached state, so this takes no second context and makes no second write.
+   *
+   * Silent before the boot check, so the six per-check records and gauges are
+   * still emitted once, by that call, in composition order.
+   *
+   * @param reason What changed, carried into the record.
+   */
+  const refreshHealth = (reason: string): void => {
+    if (health.lastReport() === null) {
+      return;
+    }
+
+    const refreshed = health.check();
+    const verdicts = health.readiness();
+
+    logger.debug('Health rechecked.', {
+      reason,
+      status: refreshed.status,
+      renderer: verdicts.renderer,
+      requiresNumberOnlyFallback: verdicts.requiresNumberOnlyFallback,
+      webglStatus: verdicts.webglStatus,
+    });
+  };
 
   // The storage sink now exists. Anything reported before it did is replayed
   // through it in the order it occurred.
@@ -1551,7 +1638,7 @@ export function start(ownerDocument: Document): Application {
   const engineReporter = createEngineSink(reporter, metrics);
 
   const hooks: HookBus = createHookBus({
-    correlationId,
+    correlationId: readCorrelationId,
     reporter: engineReporter,
     tracing: boundaries,
   });
@@ -1569,7 +1656,7 @@ export function start(ownerDocument: Document): Application {
   // their drawn indices against.
   const registry = new RelicRegistry({
     bus: hooks,
-    correlationId,
+    correlationId: readCorrelationId,
     reporter: engineReporter,
   });
 
@@ -1640,6 +1727,36 @@ export function start(ownerDocument: Document): Application {
   let replaceSwappableStreams: ((next: RngStreams) => void) | undefined;
 
   /**
+   * Rotates the one correlation scope every reporting module reads.
+   *
+   * ONE WRITE, and every observer follows it: the scope itself for the engine,
+   * the emitter, the hook bus, the relic registry, the run controller and the
+   * run-state store, and `Logger.setCorrelationId` for the logger and for every
+   * logger sharing its state — which is what the metrics registry, the tracer
+   * and the health surface read theirs from. Records, counters, spans and
+   * reports already emitted are not relabelled: they were true when they were
+   * written.
+   *
+   * @param next The identifier the run now in force is keyed under.
+   */
+  const rotateCorrelation = (next: CorrelationId): void => {
+    if (next.length === 0 || next === runCorrelationId) {
+      return;
+    }
+
+    const previous = runCorrelationId;
+
+    runCorrelationId = next;
+    logger.setCorrelationId(next);
+
+    reporter.onCount({
+      name: 'observability.correlation.rotated',
+      value: 1,
+      detail: Object.freeze({ previous, correlationId: next }),
+    });
+  };
+
+  /**
    * Rebuilds every construct scoped to the run.
    *
    * A new run mints a new seed and a new run identifier, and the substreams are
@@ -1647,8 +1764,29 @@ export function start(ownerDocument: Document): Application {
    * stayed in place and a "new" run replayed the previous sequence, which is
    * the determinism guarantee the seed provides. Invoked before the engine
    * opens a board, so the opening spawns come from the new sequence.
+   *
+   * The correlation scope is rotated HERE for the same reason and at the same
+   * moment: this is the one point before a new run's first emission, so every
+   * record, counter, span, hook context and persistence report the new run
+   * produces — the opening `stage:start` and `state:commit` included — is
+   * attributed to it rather than to the run the page loaded with.
    */
   const adoptRunScope = (scope: RunScope): void => {
+    // THE CORRELATION SCOPE, ROTATED FIRST. The controller publishes this scope
+    // BEFORE it opens the engine's board, so every report of the new run — the
+    // engine's, the bus's, the registry's, the store's, the controller's and
+    // every span the tracer opens — carries the new run's identifier from the
+    // opening spawns onward. Rotating after the run had opened left the first
+    // reports of a second run attributed to the run before it.
+    //
+    // Derived from the scope the controller published rather than from a later
+    // query, so the identifier matches the seed and the run identifier the
+    // envelope carries. Idempotent at composition time: the scope published by
+    // `begin()` carries the same identity `deriveCorrelationId` was first
+    // called with above, so a resumed run keeps the identifier it was stored
+    // under and `rotateCorrelation` short-circuits.
+    rotateCorrelation(deriveCorrelationId(scope.seed, scope.runId));
+
     const next = createRngStreams(
       scope.seed,
       scope.cursors,
@@ -1669,7 +1807,7 @@ export function start(ownerDocument: Document): Application {
     store: new RunStateStore({
       storage,
       config,
-      correlationId,
+      correlationId: readCorrelationId,
       reporter: runSink,
     }),
     identity,
@@ -1677,7 +1815,7 @@ export function start(ownerDocument: Document): Application {
     stages,
     createToken: createRunToken,
     reporter: runSink,
-    correlationId,
+    correlationId: readCorrelationId,
 
     // The registry, reached through the port so the controller names no relic
     // type. Every member delegates on each call rather than being captured, so a
@@ -1822,7 +1960,7 @@ export function start(ownerDocument: Document): Application {
     // envelope fires from the first dispatch of this engine and every dispatch
     // is spanned.
     hooks,
-    correlationId,
+    correlationId: readCorrelationId,
     reporter: engineReporter,
 
     // The stage and relic slices of every commit. Read through the controller on
@@ -1960,8 +2098,10 @@ export function start(ownerDocument: Document): Application {
    * path already destroys the old renderer, mounts the new one, subscribes it and
    * REPLAYS THE LAST COMMIT into it — so the board arrives populated instead of
    * standing empty until the next turn.
+   *
+   * @param reason Why the wait ended, carried into the record.
    */
-  const resolveLostContext = (): void => {
+  const resolveLostContext = (reason: string): void => {
     if (selection.mode !== 'three' || !readContextLost(renderer)) {
       return;
     }
@@ -1969,13 +2109,13 @@ export function start(ownerDocument: Document): Application {
     reporter.onDiagnostic({
       level: 'error',
       source: 'main',
-      message:
-        'The WebGL context was not restored; the number-only board is ' +
-        'taking over.',
+      message: `The WebGL board is unavailable (${reason}); the number-only ` +
+        'board is taking over.',
       detail: Object.freeze({
+        reason,
         graceMs: CONTEXT_RESTORE_GRACE_MS,
         webglLevel: support.level,
-        correlationId,
+        correlationId: readCorrelationId(),
       }),
     });
 
@@ -2007,23 +2147,65 @@ export function start(ownerDocument: Document): Application {
       detail: Object.freeze({ graceMs: CONTEXT_RESTORE_GRACE_MS }),
     });
 
+    // A fresh loss supersedes the verdict of the previous restoration.
+    contextRebuildFailed = false;
+
     cancelContextRestoreWait();
 
     contextRestoreWait = setTimeout((): void => {
       contextRestoreWait = null;
-      resolveLostContext();
+      resolveLostContext('the context was not restored');
     }, CONTEXT_RESTORE_GRACE_MS);
+
+    // The board that is drawing has changed state, so the held report is no
+    // longer the report of the board in force.
+    refreshHealth('a lost WebGL context');
   };
 
-  /** Ends the bounded wait, because the context came back inside it. */
-  const onContextRestored = (): void => {
-    cancelContextRestoreWait();
+  /**
+   * Ends the bounded wait, but ONLY for a restoration that rebuilt the board.
+   *
+   * A restored context is a new context, and the renderer's rebuild of every
+   * resource that context owns can fail. Ending the wait on the restoration
+   * alone ended it on a board that never came back: the 2.5D board stayed
+   * parked, the number-only fallback was cancelled, and nothing was drawing.
+   *
+   * @param outcome The renderer's verdict on its own rebuild.
+   */
+  const onContextRestored = (outcome: ContextRestoreOutcome): void => {
+    if (outcome.rebuilt || !outcome.contextLost) {
+      contextRebuildFailed = false;
+      cancelContextRestoreWait();
+
+      reporter.onCount({
+        name: 'render.context.restored.observed',
+        value: 1,
+        detail: Object.freeze({
+          mode: selection.mode,
+          rebuilt: outcome.rebuilt,
+          attempted: outcome.attempted,
+        }),
+      });
+
+      refreshHealth('a restored WebGL context');
+
+      return;
+    }
+
+    // The rebuild did not complete and the context still reads as lost, which is
+    // final: waiting longer cannot rebuild it, so the number-only board takes
+    // over now rather than at the deadline.
+    contextRebuildFailed = true;
 
     reporter.onCount({
-      name: 'render.context.restored.observed',
+      name: 'render.context.rebuild.failed',
       value: 1,
       detail: Object.freeze({ mode: selection.mode }),
     });
+
+    cancelContextRestoreWait();
+    resolveLostContext('its resources could not be rebuilt');
+    refreshHealth('a WebGL context that could not be rebuilt');
   };
 
   const buildNumberOnly = (): BoardRenderer =>
@@ -2068,6 +2250,25 @@ export function start(ownerDocument: Document): Application {
           onContextRestored,
         });
       } catch (error: unknown) {
+        // THE ACTIVE MODE IS MADE AUTHORITATIVE BEFORE THE FALLBACK IS
+        // RETURNED. A factory that raised leaves the number-only board drawing,
+        // and `selection` is what every later reader consults for the mode that
+        // is drawing: the mounted-state guard in `fallBackToNumberOnly` below,
+        // the live context-loss reader handed to the health surface, the
+        // context-restoration wait, and the settings surface. Leaving
+        // `selection.mode` as 'three' described a renderer that does not exist,
+        // and the fallback helper then refused to act because the number-only
+        // renderer it was meant to install had already mounted.
+        //
+        // The preference is forced as well as the selection recomputed, so the
+        // settings surface reports that the 2.5D choice is no longer available
+        // — the same pair `fallBackToNumberOnly` applies for a mount that
+        // failed.
+        preferences.forceNumberOnlyMode(
+          'the 2.5D renderer could not be constructed',
+        );
+        selection = selectBoardRenderer(support, preferences);
+
         reporter.onDiagnostic({
           level: 'error',
           source: 'main',
@@ -2075,11 +2276,16 @@ export function start(ownerDocument: Document): Application {
             'The 2.5D renderer could not be constructed, so the number-only ' +
             'board is drawing instead. Input, the screen flow and focus are ' +
             'unaffected.',
-          detail: Object.freeze({ correlationId }),
-          error: {
-            name: error instanceof Error ? error.name : 'Error',
-            message: error instanceof Error ? error.message : String(error),
-          },
+          detail: Object.freeze({ correlationId: readCorrelationId() }),
+
+          // THE TOTAL REDUCTION, shared with src/render/ and with the engine
+          // sink above. Reading `name`, `message` or `String(value)` here let a
+          // hostile getter or a throwing `toString` raise from inside the catch
+          // that exists to contain it, which would take `start()` down with the
+          // board. `thrown` carries the value itself for a sink that can keep
+          // more of it than the two-field summary does.
+          error: describeRenderError(error),
+          thrown: error,
         });
 
         return buildNumberOnly();
@@ -2103,7 +2309,7 @@ export function start(ownerDocument: Document): Application {
         numberOnlyChosen: selection.chosen,
         webglLevel: selection.support.level,
         boardSize: config.boardSize,
-        correlationId,
+        correlationId: readCorrelationId(),
       }),
     });
   };
@@ -2137,8 +2343,25 @@ export function start(ownerDocument: Document): Application {
   // The health surface can now ask the board itself, which is the only holder of
   // the live answer. Read through `selection` and `renderer` rather than captured
   // from them, so a renderer swapped mid-session is the one consulted.
-  readLiveContextLoss = (): boolean =>
-    selection.mode === 'three' && readContextLost(renderer);
+  //
+  // Four live states, in the order a reader needs them: a context taken away, a
+  // restored context whose resources could not be rebuilt, a 2.5D board that is
+  // selected but not mounted, and a number-only board FORCED in place of one. A
+  // number-only board the player chose reports nothing, because that mode is a
+  // feature rather than a failure.
+  readLiveWebGLFailure = (): string | null => {
+    if (selection.mode === 'three') {
+      if (readContextLost(renderer)) {
+        return contextRebuildFailed
+          ? CONTEXT_UNREBUILT_FAILURE
+          : CONTEXT_LOST_FAILURE;
+      }
+
+      return renderer.mounted ? null : RENDERER_UNMOUNTED_FAILURE;
+    }
+
+    return selection.fallback ? FORCED_FALLBACK_FAILURE : null;
+  };
 
   // RUN ONCE AT BOOT, rather than left until something reads the panel: the
   // per-check log records and the six status gauges ARE the delivery of Rule 3's
@@ -2203,9 +2426,16 @@ export function start(ownerDocument: Document): Application {
   const renderEvents = createTracedRenderEvents(
     engine.events,
     boundaries.traceRenderCommit,
+    stopEngineTracing.currentTurnSpan,
   );
 
   let stopRendering = renderer.subscribe(renderEvents);
+
+  // MOVED TO THE END OF THE ORDER, after the renderer's own commit listener.
+  // The tracing subscription's `state:commit` listener closes the turn span, and
+  // listeners run in registration order, so the turn used to be closed before
+  // the renderer's `render.commit` span was opened.
+  stopEngineTracing.reattachCommitClosing();
   const frameSubscription = loop.addFrameCallback((context): boolean => {
     // INTER-FRAME CADENCE, UNDER ITS OWN NAME. `FrameContext.delta` is the gap
     // since the previous frame, clamped at `maxDelta` and zero on the first
@@ -2270,12 +2500,20 @@ export function start(ownerDocument: Document): Application {
       fallBackToNumberOnly('the WebGL board could not be remounted');
       stopRendering = renderer.subscribe(renderEvents);
 
+      // The new renderer's commit listener is now the last registration, so the
+      // turn-closing listener is moved after it again.
+      stopEngineTracing.reattachCommitClosing();
+
       if (lastCommit !== null) {
         renderer.render(lastCommit);
       }
 
       onRendererWork();
       reportSelection();
+
+      // The board in force has changed, so the held health report is no longer
+      // the report of the renderer actually drawing.
+      refreshHealth(`a switch to the ${next.mode} board`);
     } finally {
       switchingRenderer = false;
     }
@@ -2324,6 +2562,14 @@ export function start(ownerDocument: Document): Application {
     // relic slice carries identifiers alone, so the tray reads the name through
     // here rather than showing the raw identifier.
     relicName: (relicId): string => relicName(relicId),
+
+    // The rarity tier, from the same catalogue definition and for the same
+    // reason: style/_hud.scss declares an accent rule per rarity tier and the
+    // reward card states the tier on the way in, so without this the tray was
+    // the one surface that named neither the tier visually nor to a screen
+    // reader. Resolved on each call, so a tray rebuilt for a relic taken later
+    // in the run carries its tier too.
+    relicRarity: (relicId): string => relicDefinition(relicId)?.rarity ?? '',
     document: ownerDocument,
     reporter: createPreferenceSink(reporter),
   });
@@ -2784,9 +3030,12 @@ export function start(ownerDocument: Document): Application {
    *   5. `run.startRun` clears the stored envelope, assembles a fresh one with a
    *      new run identifier at stage 0, and calls `engine.setup()`, whose commit
    *      persists it.
-   *   6. The logger's correlation identifier is rotated to the one derived from
-   *      the new run, so later records are attributed to the run that emitted
-   *      them rather than to the run this page loaded with.
+   *   6. The correlation scope every observer reads is rotated to the one
+   *      derived from the new run, so later records, counters, spans, health
+   *      reports, hook contexts and persistence reports are attributed to the
+   *      run that emitted them rather than to the run this page loaded with.
+   *      Rotated by `adoptRunScope`, which step 5 publishes to BEFORE the board
+   *      opens, so the new run's FIRST emission already carries it.
    *
    * @param seed Seed to play. Originated when absent.
    * @returns The seed the new run is played under.
@@ -2804,15 +3053,13 @@ export function start(ownerDocument: Document): Application {
     // overwrote it.
     storage.clearGameState();
 
-    // The substreams are replaced by `adoptRunScope`, which `run.startRun`
-    // publishes to BEFORE it opens the board — so the opening spawns are drawn
-    // from the new seed rather than from wherever the ended run had reached.
-    // Replacing them here as well would build the same instance twice.
+    // The substreams AND the correlation scope are replaced by `adoptRunScope`,
+    // which `run.startRun` publishes to BEFORE it opens the board — so the
+    // opening spawns are drawn from the new seed rather than from wherever the
+    // ended run had reached, and the new run's first reports already carry the
+    // new run's identifier. Doing either here as well would build the same
+    // instance twice and would rotate after the emissions it is meant to label.
     run.startRun(engine, { seed: nextSeed });
-
-    // Derived from the run as it now stands, so the identifier matches the seed
-    // and the run identifier the envelope carries.
-    logger.setCorrelationId(deriveCorrelationId(run.seed(), run.runId()));
 
     logger.info('A new run started.', {
       runId: run.runId(),
@@ -2840,19 +3087,32 @@ export function start(ownerDocument: Document): Application {
   // subscribers outside this block too. A wrapper here would nest a second span
   // of the same name inside it and count every input twice.
   const stopMove = input.on('move', (direction): void => {
-    const moved = engine.move(direction);
+    // `'failed'` UNTIL THE CALL RETURNS. An attempt that throws leaves the turn
+    // span open with no outcome at all, and the `finally` below is the only
+    // place that still runs; the default therefore names the path the attempt
+    // actually took rather than the one an unset value would suggest.
+    let resolution: FinalMoveResolution = 'failed';
 
-    // An attempt that moved nothing emits no `move:after`, so nothing an event
-    // listener sees can close the turn span it opened; the caller holding the
-    // return value closes it.
-    //
-    // SETTLED INSIDE THE INPUT SPAN, which is still open for the length of this
-    // listener: settling after it had ended left the turn span open across its
-    // own parent's end, which the tracer unwinds as an out-of-order end and then
-    // reports again for every attribute and for the second end that arrives on
-    // the closed span.
-    if (!moved) {
-      stopEngineTracing.settleTurn();
+    try {
+      // THE STRUCTURED OUTCOME, not the boolean. `move()` returns `false` for
+      // three different turns — one refused because the game is over, one a
+      // listener or an `onBeforeMove` handler withdrew, and one the resolver
+      // found changed nothing — so settling on the boolean labelled a withdrawn
+      // move as an idle one and could never report a blocked or a failed
+      // attempt at all.
+      resolution = engine.attemptMove(direction).resolution;
+    } finally {
+      // An attempt that moved nothing emits no `move:after`, so nothing an event
+      // listener sees can close the turn span it opened; the caller holding the
+      // outcome closes it. A committed turn has already closed its own span and
+      // a blocked move opened none, so both are no-ops here.
+      //
+      // SETTLED INSIDE THE INPUT SPAN, which is still open for the length of
+      // this listener: settling after it had ended left the turn span open
+      // across its own parent's end, which the tracer unwinds as an
+      // out-of-order end and then reports again for every attribute and for the
+      // second end that arrives on the closed span.
+      stopEngineTracing.settleMove({ resolution });
     }
   });
 
@@ -2933,6 +3193,22 @@ export function start(ownerDocument: Document): Application {
     });
 
     if (consumed > 0) {
+      // THE PRESENTATION STATE IS PUBLISHED, not left until the next commit. A
+      // manual activation spends a charge BETWEEN turns: the registry's budget
+      // and the persisted envelope both moved, and the tray — which is a
+      // projection of the commit's relic slice — went on showing the count the
+      // last commit carried until the player made a move. Republished here, from
+      // the last commit with the relic slice re-read through the controller, so
+      // the tray and the announcement below describe the same moment.
+      //
+      // THE HUD ALONE, not a re-emitted commit. Re-emitting `state:commit`
+      // through the engine would reach both renderers as a fresh turn and replay
+      // the previous turn's move, spawn and merge tweens; an activation changes
+      // charges, not the board, so the board must not be re-planned.
+      if (lastCommit !== null) {
+        hud.render({ ...lastCommit, relics: run.relicContext() });
+      }
+
       // Announced through the live region as well, because a charge count is a
       // state change a player who cannot see the tray still has to perceive.
       announcer.announceText(

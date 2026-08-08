@@ -288,6 +288,32 @@ describe('RelicRegistry bus registration', () => {
     expect(bus.subscribers()).toHaveLength(0);
   });
 
+  it('reads a correlation READER on every counter it reports', () => {
+    const carried: string[] = [];
+    let current = 'run-first';
+    const registry = new RelicRegistry({
+      bus: createHookBus(),
+      catalogue: [adHoc(), adHoc()],
+      correlationId: (): string => current,
+      reporter: {
+        onCount: (entry): void => {
+          carried.push(entry.correlationId);
+        },
+      },
+    });
+
+    // The duplicate identifier of the injected catalogue is counted at
+    // construction, under the run in force then.
+    expect(carried).toEqual(['run-first']);
+
+    // A second run of one page load: a registry that captured the identifier
+    // kept reporting under the run that ended.
+    current = 'run-second';
+    registry.pickUp('no-such-relic');
+
+    expect(carried[carried.length - 1]).toBe('run-second');
+  });
+
   it('needs no bus to be constructed or to track relics', () => {
     const registry = new RelicRegistry();
 

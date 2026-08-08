@@ -40,6 +40,13 @@
 //   TR-HUD-06  target-only row                the stage index, goal progress
 //                                             and relic tray slices a commit
 //                                             carries
+//   TR-HUD-12  target-only row                the unconfirmed-status notice:
+//                                             `.hud-degraded`, its hidden
+//                                             state and `data-degraded` on
+//                                             the run-status group
+//   TR-HUD-13  target-only row                the per-relic rarity metadata:
+//                                             `data-rarity` and the visually
+//                                             hidden tier label
 //
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
@@ -97,6 +104,37 @@ const STAGE_SELECTOR = '#hud-stage';
 /** Selector of the active-relic tray. */
 const RELIC_TRAY_SELECTOR = '#relic-tray';
 
+/**
+ * Class of the unconfirmed-status notice, which style/_hud.scss dresses.
+ *
+ * Written by this module and by nothing else, exactly as the two overlay state
+ * classes are.
+ */
+const DEGRADED_CLASS = 'hud-degraded';
+
+/**
+ * Attribute the run-status group carries while the engine reports the turn's
+ * terminal or stage status as unestablished. The stylesheet reads it, so the
+ * notice and the surface around it are dressed from one flag.
+ */
+const DEGRADED_ATTRIBUTE = 'data-degraded';
+
+/**
+ * Attribute one tray item carries its rarity tier on. style/_hud.scss draws one
+ * accent rule per `$rarity-tiers` entry off it, and style/_reward.scss reads the
+ * same tier vocabulary for the reward card.
+ */
+const RARITY_ATTRIBUTE = 'data-rarity';
+
+/**
+ * The visually-hidden utility of style/_a11y.scss, used for the rarity text
+ * beside the accent that states the same tier visually.
+ */
+const RARITY_TEXT_CLASS = 'visually-hidden';
+
+/** Counter naming a rarity resolver that raised. */
+const RARITY_FAULT_METRIC = 'ui.hud.relicRarity.faulted';
+
 /** Logical names of the three run-status mounts. */
 const HUD_MOUNT = 'hud';
 const STAGE_MOUNT = 'stage';
@@ -142,6 +180,24 @@ export const hudCopy = Object.freeze({
 
   /** Renders a relic's remaining charge budget. */
   relicCharges: (charges: number): string => `${charges} left`,
+
+  /**
+   * Renders a relic's rarity tier for assistive technology.
+   *
+   * Read as visually-hidden text rather than shown: the tier is carried visually
+   * by the accent style/_hud.scss draws on the item's leading edge, in both its
+   * colour and its thickness, so a second visible chip would state it twice.
+   */
+  relicRarity: (rarity: string): string => `Rarity: ${rarity}`,
+
+  /**
+   * Shown while a commit reports `degraded`: the engine could not establish
+   * whether the run is lost or the stage is cleared, so the verdict beside it is
+   * unconfirmed rather than settled. Read as text by a screen reader that
+   * reaches the run-status group; the once-per-transition announcement is
+   * src/ui/a11y/engine-announcer.ts's.
+   */
+  degradedNotice: 'Board status unconfirmed',
 });
 
 export type HudCopy = typeof hudCopy;
@@ -202,6 +258,14 @@ export interface HudSnapshot {
 
   /** Relic identifiers shown in the tray, in pickup order. */
   readonly relics: readonly string[];
+
+  /**
+   * Whether the commit reported its terminal or stage status as unestablished,
+   * as `StateCommitEvent.degraded` carries it. `true` means the notice is
+   * showing; the flag is recorded whether or not a run-status outlet resolved,
+   * so a caller reads the state rather than inferring it from the DOM.
+   */
+  readonly degraded: boolean;
 }
 
 /** Everything the factory accepts. Every member is optional. */
@@ -256,6 +320,22 @@ export interface HudOptions {
    * Absent, or returning a blank string, falls back to the identifier.
    */
   readonly relicName?: (relicId: string) => string;
+
+  /**
+   * Resolves a relic identifier to its rarity tier.
+   *
+   * WHY IT IS INJECTED, and why it is separate from `relicName`. The rarity is
+   * catalogue metadata, exactly as the name is: a commit's relic slice carries an
+   * identifier and a charge count and nothing else, and the catalogue lives in
+   * src/relics, which this module does not import. Without a resolver the tier
+   * reached neither the DOM nor assistive technology, so the rarity accent
+   * style/_hud.scss declares for every `$rarity-tiers` entry could never match
+   * and a screen-reader user was told a relic's name and budget but not its tier.
+   *
+   * Absent, or returning a blank string, leaves `data-rarity` unwritten and the
+   * item's accessible text unchanged.
+   */
+  readonly relicRarity?: (relicId: string) => string;
 
   /** Document a lookup runs against. Defaults to the ambient document. */
   readonly document?: Document;
@@ -346,6 +426,8 @@ function mergeCopy(overrides: Partial<HudCopy> | undefined): HudCopy {
     relicTrayLabel: overrides.relicTrayLabel ?? hudCopy.relicTrayLabel,
     relicTrayEmpty: overrides.relicTrayEmpty ?? hudCopy.relicTrayEmpty,
     relicCharges: overrides.relicCharges ?? hudCopy.relicCharges,
+    relicRarity: overrides.relicRarity ?? hudCopy.relicRarity,
+    degradedNotice: overrides.degradedNotice ?? hudCopy.degradedNotice,
   });
 }
 
@@ -487,6 +569,58 @@ export function createHud(options: HudOptions = {}): Hud {
   };
 
   /**
+   * The unconfirmed-status notice, built on first use and kept afterwards.
+   *
+   * Not part of the markup: index.html declares the three run-status outlets and
+   * the notice is a state this module writes, exactly as the overlay's verdict
+   * text is.
+   */
+  let degradedNotice: HTMLElement | null = null;
+
+  /**
+   * Shows or clears the unconfirmed-status notice.
+   *
+   * ONE FLAG, TWO CHANNELS. The group carries `data-degraded` so the stylesheet
+   * can mark the surface, and the notice carries the state as real text so a
+   * screen reader reaching the run-status group reads it; the once-per-transition
+   * announcement belongs to src/ui/a11y/engine-announcer.ts, so no live-region
+   * role is added here and the same state is not announced twice.
+   *
+   * @param degraded What the commit reported.
+   * @returns The flag, so the snapshot records what was asked for even where no
+   *   outlet resolved to write it into.
+   */
+  const renderDegraded = (degraded: boolean): boolean => {
+    if (hudGroup === null) {
+      return degraded;
+    }
+
+    if (degraded) {
+      revealGroup();
+      hudGroup.setAttribute(DEGRADED_ATTRIBUTE, 'true');
+    } else {
+      hudGroup.removeAttribute(DEGRADED_ATTRIBUTE);
+    }
+
+    if (degradedNotice === null) {
+      const doc = hudGroup.ownerDocument ?? owner;
+
+      if (doc === null) {
+        return degraded;
+      }
+
+      degradedNotice = doc.createElement('p');
+      degradedNotice.className = DEGRADED_CLASS;
+      degradedNotice.textContent = copy.degradedNotice;
+      hudGroup.append(degradedNotice);
+    }
+
+    degradedNotice.hidden = !degraded;
+
+    return degraded;
+  };
+
+  /**
    * Builds one labelled readout: a label above a value, which is the pattern
    * style/_hud.scss styles as `.hud-label` and `.hud-value`.
    */
@@ -606,6 +740,35 @@ export function createHud(options: HudOptions = {}): Hud {
    * @param relics The commit's relic slice, already in pickup order.
    * @returns The identifiers written.
    */
+  /**
+   * Reads one relic's rarity tier through the injected resolver.
+   *
+   * Contained and total, as every read of an injected collaborator here is: a
+   * resolver that raises, or answers with anything but a string, yields the empty
+   * string, which leaves the attribute unwritten and the accessible text
+   * unchanged rather than failing the commit.
+   *
+   * @param relicId Identifier to resolve.
+   * @returns The tier, or the empty string where none was resolved.
+   */
+  const readRarity = (relicId: string): string => {
+    const resolve = options.relicRarity;
+
+    if (resolve === undefined) {
+      return '';
+    }
+
+    try {
+      const resolved: unknown = resolve(relicId);
+
+      return typeof resolved === 'string' ? resolved : '';
+    } catch {
+      reporter.count(RARITY_FAULT_METRIC, { relicId });
+
+      return '';
+    }
+  };
+
   const renderRelics = (
     relics: RelicCommitContext,
   ): readonly string[] => {
@@ -620,8 +783,15 @@ export function createHud(options: HudOptions = {}): Hud {
     }
 
     const ids = relics.map((relic): string => relic.id);
+
+    // The rarity joins the signature the rebuild is skipped on: it is resolved
+    // through an injected reader, so a tier that became resolvable between two
+    // commits would otherwise never reach the DOM.
     const signature = relics
-      .map((relic): string => `${relic.id}:${relic.charges ?? ''}`)
+      .map(
+        (relic): string =>
+          `${relic.id}:${relic.charges ?? ''}:${readRarity(relic.id)}`,
+      )
       .join(',');
 
     revealGroup();
@@ -664,6 +834,16 @@ export function createHud(options: HudOptions = {}): Hud {
       item.className = 'relic-tray-item';
       item.setAttribute('data-relic-id', relic.id);
 
+      // The tier the stylesheet draws its leading-edge accent from, one rule per
+      // `$rarity-tiers` entry. Written only when a reader resolved one, so a tray
+      // with no catalogue behind it carries no attribute rather than an empty
+      // one that matches no rule.
+      const rarity = readRarity(relic.id);
+
+      if (rarity.length > 0) {
+        item.setAttribute(RARITY_ATTRIBUTE, rarity);
+      }
+
       // The stylesheet dims an exhausted relic off this attribute, and it is
       // written even at zero so the dimming is reachable.
       if (relic.charges !== undefined) {
@@ -698,6 +878,17 @@ export function createHud(options: HudOptions = {}): Hud {
       // announced in full.
       name.title = name.textContent;
       control.append(name);
+
+      // THE TIER, IN TEXT, for the reader the accent cannot reach. Visually
+      // hidden rather than shown, because the accent already states the tier
+      // twice over — by colour and by thickness — on the item's leading edge.
+      if (rarity.length > 0) {
+        const tier = doc.createElement('span');
+
+        tier.className = RARITY_TEXT_CLASS;
+        tier.textContent = copy.relicRarity(rarity);
+        control.append(tier);
+      }
 
       if (relic.charges !== undefined) {
         const charges = doc.createElement('span');
@@ -823,6 +1014,7 @@ export function createHud(options: HudOptions = {}): Hud {
           verdict: null,
           stage: null,
           relics: [],
+          degraded: commit.degraded,
         }
       );
     }
@@ -858,6 +1050,11 @@ export function createHud(options: HudOptions = {}): Hud {
     const stage = renderStage(commit.stage);
     const relics = renderRelics(commit.relics);
 
+    // Written after the stage and the tray, so the run-status group is revealed
+    // and populated before the notice joins it, and cleared again the moment a
+    // measurement succeeds — which is what `StateCommitEvent.degraded` reports.
+    const degraded = renderDegraded(commit.degraded);
+
     rendered = Object.freeze({
       score: commit.score,
       bestScore: commit.bestScore,
@@ -865,6 +1062,7 @@ export function createHud(options: HudOptions = {}): Hud {
       verdict,
       stage,
       relics,
+      degraded,
     });
 
     reporter.count(COMMIT_METRIC, {
@@ -914,6 +1112,13 @@ export function createHud(options: HudOptions = {}): Hud {
       subscriptions.length = 0;
 
       clearMessage();
+
+      // The notice is this module's own element, so it leaves with it, and the
+      // group is left carrying no state class of ours.
+      degradedNotice?.remove();
+      degradedNotice = null;
+      hudGroup?.removeAttribute(DEGRADED_ATTRIBUTE);
+
       scorePanel.destroy();
 
       if (relicTray !== null) {

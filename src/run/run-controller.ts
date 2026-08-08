@@ -74,6 +74,12 @@
  *   TR-RUNCTL-08  target-only row             the stage and relic commit
  *                                             context providers the engine
  *                                             reads
+ *   TR-RUNCTL-09  target-only row             `measureCommittedBoard()`, the
+ *                                             progress measurement taken while
+ *                                             a commit is assembled
+ *   TR-RUNCTL-10  target-only row             `projectRelic()`, the contained
+ *                                             per-relic copy every projection
+ *                                             of a held relic passes through
  *
  * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
  * only so the construct can be found from the log:
@@ -83,6 +89,13 @@
  *   DL-RUNCTL-03  goal derivation and evaluation delegated to
  *                 src/config/stage-config.ts
  *   DL-RUNCTL-04  the correlation identifier received by injection
+ *   DL-RUNCTL-05  both commit slices resolved at the PROVIDER CALL — the stage
+ *                 slice measured from the board the commit carries, the relic
+ *                 slice projected from the live registry — rather than from the
+ *                 envelope the commit listener refreshes afterwards
+ *   DL-RUNCTL-06  every projection that leaves this controller cloned and
+ *                 frozen, the stage goal and the board included, so no caller
+ *                 holds a reference the envelope's writer also writes
  */
 
 import type { RulesConfig } from '../config/rules-config';
@@ -100,6 +113,7 @@ import type {
 } from '../engine/engine-events';
 import type {
   CorrelationId,
+  CorrelationSource,
   RelicCommitContext,
   RelicCommitContextProvider,
   RelicCommitEntry,
@@ -107,6 +121,7 @@ import type {
   StageCommitContext,
   StageCommitContextProvider,
 } from '../engine/types';
+import { correlationReader } from '../engine/types';
 import {
   isAcceptableRunSeed,
   MAX_RUN_SEED_LENGTH,
@@ -116,6 +131,7 @@ import {
 import { RUN_STATE_KEY } from '../storage/storage-keys';
 import {
   classifyRunStateVersion,
+  cloneBoardSnapshot,
   cloneRelic,
   cloneRunState,
   cloneStageGoal,
@@ -1058,8 +1074,13 @@ export interface RunControllerOptions {
   /**
    * Correlation identifier every report from this controller carries.
    * Injected, never derived here.
+   *
+   * A READER IS ACCEPTED: pass a function and every report resolves the
+   * identifier at the moment it is made, so a run started without a reload —
+   * one this controller outlived the construction of — reports under its own
+   * identifier rather than under the first run of the page load.
    */
-  readonly correlationId?: CorrelationId;
+  readonly correlationId?: CorrelationSource;
 
   /**
    * The relic registry to round-trip charges and state through. Absent by
@@ -1164,7 +1185,15 @@ export class RunController {
 
   private readonly reporter: RunReporter;
 
-  private readonly runCorrelationId: CorrelationId;
+  /**
+   * Reads the correlation identifier every report from this controller carries.
+   *
+   * Resolved from a pinned string or a shared scope, and read at report time
+   * rather than once at construction, so a run started without a reload reports
+   * under its own identifier rather than under the run this controller was
+   * constructed for.
+   */
+  private readonly readRunCorrelationId: () => CorrelationId;
 
   private readonly registry: RelicRegistryPort | undefined;
 
@@ -1262,6 +1291,16 @@ export class RunController {
    */
   private adoptedBoard: SerializedGameState | null | undefined;
 
+  /**
+   * Reads the board of the engine being observed, or `null` before one is.
+   *
+   * Attached by `observe()` and released with it. `stageContext()` measures
+   * through it, so a commit reached without a `move:after` — a withdrawn move
+   * that reseated the board, a stage end that adopted a handler's score — still
+   * carries a stage slice measured from the board it commits.
+   */
+  private boardReader: (() => SerializedGameState) | null;
+
   constructor(options: RunControllerOptions) {
     this.store = options.store;
     this.identity = options.identity;
@@ -1270,7 +1309,7 @@ export class RunController {
     this.createToken =
       options.createToken ?? ((): string => this.identity.runId);
     this.reporter = options.reporter ?? NOOP_RUN_REPORTER;
-    this.runCorrelationId = options.correlationId ?? '';
+    this.readRunCorrelationId = correlationReader(options.correlationId);
     this.registry = options.relics;
     this.rewards = options.rewards;
     this.offerCount =
@@ -1291,6 +1330,7 @@ export class RunController {
     this.ended = false;
     this.finished = null;
     this.adoptedBoard = undefined;
+    this.boardReader = null;
   }
 
   /**
@@ -1395,8 +1435,18 @@ export class RunController {
     // envelope that was not adopted hands back the fresh, empty list.
     this.restoreRelics();
 
+    // The seed and the cursors the run will actually be played under are known
+    // only now, after the adoption decision: an adopted envelope resumes its
+    // own substreams mid-sequence, a fresh one starts them at zero.
+    //
+    // AHEAD OF THE FIRST REPORT. The scope a root rebuilds from this includes
+    // the run's correlation scope, so publishing it after the report below
+    // attributed this run's own opening report to whatever run the root was
+    // reporting under before it.
+    this.publishRunScope(this.identity.seedProvided);
+
     this.reporter.onRunStarted?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       runId: this.current.runId,
       stageIndex: this.current.stageIndex,
 
@@ -1407,11 +1457,6 @@ export class RunController {
       resumed: adopted,
       seedProvided: this.identity.seedProvided,
     });
-
-    // The seed and the cursors the run will actually be played under are known
-    // only now, after the adoption decision: an adopted envelope resumes its
-    // own substreams mid-sequence, a fresh one starts them at zero.
-    this.publishRunScope(this.identity.seedProvided);
 
     return result.outcome;
   }
@@ -1549,7 +1594,7 @@ export class RunController {
    * carries. Decision DL-RUNCTL-04.
    */
   correlationId(): CorrelationId {
-    return this.runCorrelationId;
+    return this.readRunCorrelationId();
   }
 
   /** The index of the stage in progress. */
@@ -1581,13 +1626,38 @@ export class RunController {
    *
    * Array order is the pickup order the hook bus dispatches in, so it is
    * returned as held and never sorted, filtered or re-keyed.
+   *
+   * TOTAL, PER RELIC. `cloneRelic()` reads the opaque `state` slot, which a
+   * registry supplies, so reading it can raise — an accessor that throws, a
+   * proxy that refuses. A relic whose state cannot be copied is reported and
+   * carried with its identifier and its remaining charges alone, which is what
+   * every consumer of this projection reads; the alternative was a query that
+   * raised, and this projection is also the one `state()` falls back on.
    */
   relics(): readonly PersistedRelic[] {
     return Object.freeze(
       this.current.relics.map((relic): PersistedRelic =>
-        Object.freeze(cloneRelic(relic)),
+        Object.freeze(this.projectRelic(relic)),
       ),
     );
+  }
+
+  /**
+   * Copies one held relic, dropping a state slot that cannot be read.
+   *
+   * @param relic Relic to copy.
+   * @returns A fresh copy, without `state` where copying it raised.
+   */
+  private projectRelic(relic: PersistedRelic): PersistedRelic {
+    try {
+      return cloneRelic(relic);
+    } catch (error) {
+      this.reportRegistryFault(error);
+
+      return relic.charges === undefined
+        ? { id: relic.id }
+        : { id: relic.id, charges: relic.charges };
+    }
   }
 
   /**
@@ -1613,7 +1683,10 @@ export class RunController {
    * it can copy without sharing. A query must not raise, so that case yields a
    * frozen shallow projection instead — which still shares no member a caller
    * can reach the envelope through, because every member it copies is either a
-   * primitive or replaced below.
+   * primitive or replaced below. `board` is COPIED there too: freezing the
+   * envelope's own snapshot would freeze the object this controller's next
+   * `refresh()` replaces, and handing it out unfrozen let a caller write into the
+   * board the writer reads.
    */
   state(): RunState {
     try {
@@ -1626,7 +1699,7 @@ export class RunController {
         rngCursor: this.cursors(),
         stageGoal: Object.freeze(cloneStageGoal(this.current.stageGoal)),
         relics: this.relics(),
-        board: this.current.board,
+        board: cloneBoardSnapshot(this.current.board),
       });
     }
   }
@@ -1636,11 +1709,30 @@ export class RunController {
    *
    * Bound as the engine's `stageContext` provider and therefore called once per
    * commit, so what it returns is read fresh each time rather than captured.
+   *
+   * IT MEASURES THE BOARD IT IS ABOUT TO DESCRIBE. The `move:after`
+   * subscription measures every turn that resolves, but a commit can also be
+   * reached by a turn that emits no `move:after` — a withdrawn move whose
+   * `onBeforeMove` handler reseated the board is one, and a stage end that
+   * adopted a handler's score is another — and the slice those commits carried
+   * then described an earlier board. The measurement is taken here, while the
+   * payload is being assembled and before any consumer or the write sees it, so
+   * every commit's stage slice describes the board that commit carries.
+   * `measureCommittedBoard()` is inert until a `stage:start` has attached the
+   * board reader, so a projection read before a run has opened a board still
+   * reports the progress the envelope recorded.
+   *
+   * The goal is COPIED AND FROZEN. It is the object this controller keeps in the
+   * envelope, and `readonly` in `StageCommitContext` binds the reference rather
+   * than the object, so a listener could otherwise retarget the goal the run is
+   * measured against and the goal that reaches storage.
    */
   stageContext(): StageCommitContext {
+    this.measureCommittedBoard();
+
     return {
       stageIndex: this.current.stageIndex,
-      goal: this.current.stageGoal,
+      goal: Object.freeze(cloneStageGoal(this.current.stageGoal)),
       goalProgress: this.current.goalProgress,
     };
   }
@@ -1648,13 +1740,22 @@ export class RunController {
   /**
    * The relic slice of a commit, IN PICKUP ORDER.
    *
-   * Projected from the envelope's `relics` in array order, which IS the pickup
-   * order, so the order the hook bus dispatches in and the order a HUD renders
-   * are one order. `state` is not carried: a commit's consumers show a relic
-   * and its remaining charges, and its private state is nobody else's.
+   * Projected in array order, which IS the pickup order, so the order the hook
+   * bus dispatches in and the order a HUD renders are one order. `state` is not
+   * carried: a commit's consumers show a relic and its remaining charges, and
+   * its private state is nobody else's.
+   *
+   * PROJECTED FROM THE REGISTRY, not from the envelope. The engine calls this
+   * provider while it assembles the commit payload, and the envelope's own
+   * relics are refreshed by the commit LISTENER — after that assembly — so a
+   * charge a relic handler spent during the turn reached the payload one commit
+   * late: the HUD showed the previous count and a reload restored the budget the
+   * envelope had. `projectRelics()` reads the registry when one is attached and
+   * falls back to the relics held otherwise, so a controller composed without a
+   * registry projects exactly what it did before.
    */
   relicContext(): RelicCommitContext {
-    return this.current.relics.map((relic): RelicCommitEntry =>
+    return this.projectRelics().map((relic): RelicCommitEntry =>
       relic.charges === undefined
         ? { id: relic.id }
         : { id: relic.id, charges: relic.charges },
@@ -1706,6 +1807,13 @@ export class RunController {
    */
   observe(engine: RunEnginePort, cursors: () => RngCursorMap): () => void {
     const stopStageStart = engine.events.on('stage:start', (event): void => {
+      // THE BOARD READER IS ATTACHED HERE, not at subscription. A stage start is
+      // the first moment the engine holds a board of this run — it is emitted
+      // before the commit `setup()` ends with — and until then the engine's
+      // lattice is the empty one it was constructed with, which is not a board
+      // this run's progress may be measured against.
+      this.boardReader = (): SerializedGameState => engine.serialize();
+
       // THE EVENT'S GOAL IS ADOPTED BEFORE THE MEASUREMENT IS TAKEN. `goal` is
       // the one transformable member of `onStageStart`, so a relic can replace
       // it, and the engine measures against what it adopted. Measuring against
@@ -1754,7 +1862,36 @@ export class RunController {
       stopMoveAfter();
       stopStageEnd();
       stopCommit();
+      this.boardReader = null;
     };
+  }
+
+  /**
+   * Measures the stage's progress from the board the engine holds right now.
+   *
+   * Called by `stageContext()`, which the engine calls while it assembles a
+   * commit, so the progress a commit reports is measured from the board that
+   * commit carries. Inert until a `stage:start` has attached the reader and
+   * again once the subscriptions are released, which leaves the progress last
+   * measured — a resumed envelope's own recorded progress, before any stage has
+   * started — in place.
+   *
+   * TOTAL. `serialize()` is another module's call, so a raise is reported
+   * through the contained fault path and the last good progress stands rather
+   * than a commit failing to assemble.
+   */
+  private measureCommittedBoard(): void {
+    const read = this.boardReader;
+
+    if (read === null) {
+      return;
+    }
+
+    try {
+      this.measureSnapshot(read());
+    } catch (error) {
+      this.reportRegistryFault(error);
+    }
   }
 
   /**
@@ -1810,7 +1947,7 @@ export class RunController {
     this.stageCleared = false;
 
     this.reporter.onStageAdvanced?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       fromStageIndex: from,
       toStageIndex: to,
       goal,
@@ -1860,7 +1997,7 @@ export class RunController {
       });
     } catch (error) {
       this.reporter.onWriteFailed?.({
-        correlationId: this.runCorrelationId,
+        correlationId: this.readRunCorrelationId(),
         key: RUN_STATE_KEY,
         byteLength: 0,
         error,
@@ -1886,7 +2023,7 @@ export class RunController {
     // offer drawn and never taken is exactly the case a bare selection counter
     // cannot see, and it is the one that says a reward screen was reached.
     this.reporter.onRewardOffered?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       stageIndex: this.offerStageIndex,
       offeredRelicIds: this.offeredRelicIds,
     });
@@ -1985,7 +2122,7 @@ export class RunController {
     this.write();
 
     this.reporter.onRewardDrawn?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       stageIndex: this.current.stageIndex,
       offeredRelicIds: offered,
       selectedRelicId: relicId,
@@ -2159,7 +2296,7 @@ export class RunController {
    */
   private reportRegistryFault(error: unknown): void {
     this.reporter.onWriteFailed?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       key: RUN_STATE_KEY,
       byteLength: 0,
       error,
@@ -2280,7 +2417,7 @@ export class RunController {
     outcome: RewardSelectionOutcome,
   ): RewardSelection {
     this.reporter.onRewardDrawn?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       stageIndex: this.current.stageIndex,
       offeredRelicIds: this.offeredRelicIds,
       selectedRelicId: `${relicId} (${outcome})`,
@@ -2320,7 +2457,7 @@ export class RunController {
       return { ...entry, id: relicId };
     } catch (error) {
       this.reporter.onWriteFailed?.({
-        correlationId: this.runCorrelationId,
+        correlationId: this.readRunCorrelationId(),
         key: RUN_STATE_KEY,
         byteLength: 0,
         error,
@@ -2348,7 +2485,7 @@ export class RunController {
         }
       } catch (error) {
         this.reporter.onWriteFailed?.({
-          correlationId: this.runCorrelationId,
+          correlationId: this.readRunCorrelationId(),
           key: RUN_STATE_KEY,
           byteLength: 0,
           error,
@@ -2418,19 +2555,21 @@ export class RunController {
     // must dispatch to rather than the previous run's.
     this.restoreRelics();
 
+    // BEFORE THE FIRST REPORT OF THE NEW RUN, and before the board opens, NOT
+    // AFTER. The substreams and the correlation scope are rebuilt against the
+    // new seed here, so the opening spawns come from the new sequence rather
+    // than from wherever the previous run's substreams had reached, AND every
+    // report below — this controller's own included — is attributed to the run
+    // that emitted it rather than to the ended run.
+    this.publishRunScope(options.seed !== undefined);
+
     this.reporter.onRunStarted?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       runId: this.current.runId,
       stageIndex: this.current.stageIndex,
       resumed: false,
       seedProvided: options.seed !== undefined,
     });
-
-    // BEFORE the board opens, NOT AFTER. The substreams and the correlation
-    // context are rebuilt against the new seed here, so the opening spawns come
-    // from the new sequence rather than from wherever the previous run's
-    // substreams had reached.
-    this.publishRunScope(options.seed !== undefined);
 
     this.openEngineBoard(engine);
 
@@ -2636,7 +2775,7 @@ export class RunController {
       return true;
     } catch (error) {
       this.reporter.onWriteFailed?.({
-        correlationId: this.runCorrelationId,
+        correlationId: this.readRunCorrelationId(),
         key: RUN_STATE_KEY,
         byteLength: 0,
         error,
@@ -2677,7 +2816,7 @@ export class RunController {
     }
 
     this.reporter.onWriteFailed?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       key: RUN_STATE_KEY,
       byteLength: measureBytes(this.current),
       error: WRITE_REFUSED_ON_COMMIT,
@@ -2701,7 +2840,7 @@ export class RunController {
       read = cursors();
     } catch (error) {
       this.reporter.onWriteFailed?.({
-        correlationId: this.runCorrelationId,
+        correlationId: this.readRunCorrelationId(),
         key: RUN_STATE_KEY,
         byteLength: 0,
         error,
@@ -2753,7 +2892,7 @@ export class RunController {
       return Array.isArray(projected) ? projected : this.current.relics;
     } catch (error) {
       this.reporter.onWriteFailed?.({
-        correlationId: this.runCorrelationId,
+        correlationId: this.readRunCorrelationId(),
         key: RUN_STATE_KEY,
         byteLength: 0,
         error,
@@ -2883,7 +3022,7 @@ export class RunController {
       accepted: boolean;
       refusal?: RewardRefusal;
     } = {
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       stageIndex: this.current.stageIndex,
       offeredRelicIds: this.offeredRelicIds,
       accepted,
@@ -3088,7 +3227,7 @@ export class RunController {
         : undefined;
     } catch (error) {
       this.reporter.onWriteFailed?.({
-        correlationId: this.runCorrelationId,
+        correlationId: this.readRunCorrelationId(),
         key: RUN_STATE_KEY,
         byteLength: 0,
         error,
@@ -3131,7 +3270,7 @@ export class RunController {
       registry.restoreRelics(this.current.relics);
     } catch (error) {
       this.reporter.onWriteFailed?.({
-        correlationId: this.runCorrelationId,
+        correlationId: this.readRunCorrelationId(),
         key: RUN_STATE_KEY,
         byteLength: 0,
         error,
@@ -3152,7 +3291,7 @@ export class RunController {
       restored = snapshot.call(registry);
     } catch (error) {
       this.reporter.onWriteFailed?.({
-        correlationId: this.runCorrelationId,
+        correlationId: this.readRunCorrelationId(),
         key: RUN_STATE_KEY,
         byteLength: 0,
         error,
@@ -3173,7 +3312,7 @@ export class RunController {
     });
 
     this.reporter.onRelicsNormalized?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       requested: requested.length,
       restored: restored.length,
       refused: Object.freeze(
@@ -3209,7 +3348,7 @@ export class RunController {
     this.offeredRelicIds = [];
 
     this.reporter.onRunEnded?.({
-      correlationId: this.runCorrelationId,
+      correlationId: this.readRunCorrelationId(),
       outcome,
       summary: redactRunSummary(summary),
     });

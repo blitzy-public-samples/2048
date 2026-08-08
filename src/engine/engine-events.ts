@@ -76,12 +76,13 @@ import type {
 import type {
   BestScoreValue,
   CorrelationId,
+  CorrelationSource,
   Direction,
   EngineReporter,
   RelicCommitContext,
   StageCommitContext,
 } from './types';
-import { NOOP_ENGINE_REPORTER } from './types';
+import { NOOP_ENGINE_REPORTER, correlationReader } from './types';
 import type { Tile } from './tile';
 
 
@@ -412,8 +413,12 @@ export interface EngineEventsOptions {
   /**
    * Correlation identifier carried into every report. Defaults to
    * `ANONYMOUS_CORRELATION_ID`; src/engine/engine.ts passes its own.
+   *
+   * A READER IS ACCEPTED as well as a value, and the engine passes one, so an
+   * emitter that outlives the run it was built for reports under the run in
+   * force rather than the run its construction happened in.
    */
-  readonly correlationId?: CorrelationId;
+  readonly correlationId?: CorrelationSource;
 
   /**
    * Sink the contained listener errors and the emission counters reach.
@@ -452,7 +457,14 @@ export function createEngineEvents(
   options: EngineEventsOptions = {},
 ): EngineEvents {
   const reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
-  const correlationId = options.correlationId ?? ANONYMOUS_CORRELATION_ID;
+
+  // Read on every report rather than captured, so a rotated correlation scope
+  // reaches the emissions of the run that follows it. Total: the reader answers
+  // with `ANONYMOUS_CORRELATION_ID` where nothing was injected.
+  const readCorrelationId = correlationReader(
+    options.correlationId,
+    ANONYMOUS_CORRELATION_ID,
+  );
   // One array per event name, appended to in registration order. Ported
   // from js/keyboard_input_manager.js L2, `this.events = {}`, which held
   // the same one-array-per-name table.
@@ -502,7 +514,12 @@ export function createEngineEvents(
    */
   const count = (metric: string, event: EngineEventName): void => {
     try {
-      reporter.onCount?.({ correlationId, metric, value: 1, event });
+      reporter.onCount?.({
+        correlationId: readCorrelationId(),
+        metric,
+        value: 1,
+        event,
+      });
     } catch {
       // A sink that throws is contained here for the same reason a
       // listener is: neither may abort an engine operation.
@@ -525,7 +542,7 @@ export function createEngineEvents(
   ): void => {
     try {
       reporter.onListenerError?.({
-        correlationId,
+        correlationId: readCorrelationId(),
         event,
         listenerIndex,
         error,

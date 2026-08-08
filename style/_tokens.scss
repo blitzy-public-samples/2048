@@ -119,7 +119,14 @@ $_token-fallbacks: (
 // default ramp and style/_themes.scss for each palette's ramp — already load
 // this file and interpolate their result into the same custom properties.
 // Provenance: moved here from style/helpers.scss, whose change boundary is the
-// Dart Sass migration of the vanilla helpers alone.
+// Dart Sass migration of the vanilla helpers alone. Decision DL-TOKEN-01.
+// Traceability row TR-TOKEN-01, a target-only row.
+//
+// THE ONE DECLARATION. A second, identical one stood at the end of this file and
+// silently superseded this one: Sass takes the last, so the two could drift with
+// nothing reporting it, one documented block was dead, the DL-TOKEN-01 /
+// TR-TOKEN-01 provenance was split across both, and a reader had no way to tell
+// which was authoritative. This is the declaration.
 //
 // @param {Color} $color - the colour to serialise.
 // @return {Color} the same colour with each RGB channel floored to an integer.
@@ -246,28 +253,3 @@ $diagnostics-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
 
 $tile-numeral-cell-ratio: 0.61 !default;
 $tile-numeral-min-size: 6px !default;
-
-// -----------------------------------------------------------------------------
-// Token serialisation: rebuilds a colour with each channel floored, which is
-// how Dart Sass serialises a colour in a `background` or `color` declaration.
-//
-// A colour interpolated into a custom property keeps its fractional channels
-// and is written as percentages instead, so a ramp colour published into a
-// custom property is passed through this first. src/theme/tile-ramp.ts floors,
-// and the compiled ramp is verified against it.
-//
-// Declared here, in the shared token layer, because style/main.scss and
-// style/_themes.scss both interpolate their ramps into the same custom
-// properties. Decision DL-TOKEN-01. Traceability row TR-TOKEN-01, a
-// target-only row.
-//
-// @param {Color} $color - colour to serialise.
-// @return {Color} the same colour with red, green and blue floored.
-// -----------------------------------------------------------------------------
-@function quantised($color) {
-  @return rgb(
-    math.floor(color.channel($color, "red", $space: rgb)),
-    math.floor(color.channel($color, "green", $space: rgb)),
-    math.floor(color.channel($color, "blue", $space: rgb))
-  );
-}

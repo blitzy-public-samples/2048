@@ -95,7 +95,9 @@ import type {
 import {
   EMPTY_RELIC_CONTEXT,
   NOOP_ENGINE_REPORTER,
+  correlationReader,
   type CorrelationId,
+  type CorrelationSource,
   type EngineReporter,
   type RelicCommitContext,
   type RelicCommitContextProvider,
@@ -1101,8 +1103,13 @@ export interface RelicRegistryOptions {
    * Correlation identifier of the run, carried on every report. Injected,
    * never derived here: the one authority is `deriveCorrelationId` in
    * src/observability/logger.ts. Defaults to the empty string.
+   *
+   * A READER IS ACCEPTED: pass a function and every report resolves the
+   * identifier at the moment it is made, so a registry that outlives one run of
+   * a page load — or one cleared and refilled for a second run — reports under
+   * the run that is actually playing rather than under the first.
    */
-  readonly correlationId?: CorrelationId;
+  readonly correlationId?: CorrelationSource;
 }
 
 /**
@@ -1128,7 +1135,28 @@ export class RelicRegistry {
 
   private readonly reporter: EngineReporter;
 
-  private readonly correlationId: CorrelationId;
+  /**
+   * Reads the run correlation identifier every report carries.
+   *
+   * Resolved from a pinned string or a shared scope, and read per report rather
+   * than once at construction, because a page load can play more than one run.
+   */
+  private readonly readCorrelationId: () => CorrelationId;
+
+  /**
+   * The correlation identifier every report from this registry carries, as it
+   * stands now.
+   *
+   * REPUBLISHED, NOT DERIVED, exactly as `RunController.correlationId()`
+   * republishes it: src/engine/types.ts names `deriveCorrelationId` in
+   * src/observability/logger.ts as the one deriver, and the empty string is what
+   * a registry constructed without one carries. Readable so the identifier a
+   * relic report will carry is verifiable without a report having to be
+   * provoked.
+   */
+  get correlationId(): CorrelationId {
+    return this.readCorrelationId();
+  }
 
   /** Held relics in pickup order, which is this array's own order. */
   private readonly held: ActiveRelic[] = [];
@@ -1157,7 +1185,7 @@ export class RelicRegistry {
     this.index = indexRelics(this.pool);
     this.bus = options.bus;
     this.reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
-    this.correlationId = options.correlationId ?? '';
+    this.readCorrelationId = correlationReader(options.correlationId);
 
     // A repeated catalogue identifier is REPORTED here, at construction, and
     // is never raised — neither here nor while this module is evaluated.
@@ -1187,7 +1215,7 @@ export class RelicRegistry {
 
     try {
       this.reporter.onCount({
-        correlationId: this.correlationId,
+        correlationId: this.readCorrelationId(),
         metric,
         value,
       });

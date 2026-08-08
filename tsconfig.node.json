@@ -91,7 +91,12 @@
     // collects and runs it, and it is type-checked here because it reads the
     // filesystem through `node:fs`. tsconfig.json excludes it for the same
     // reason.
-    "tests/unit/quality/formatting.test.ts"
+    "tests/unit/quality/formatting.test.ts",
+
+    // The read-only stylesheet-contract gate, here for the same reason: it reads
+    // the SCSS sources through `node:fs` and compiles the sheet through the
+    // `sass` API, which is a Node-context module.
+    "tests/unit/quality/stylesheet-contract.test.ts"
   ],
 
   "exclude": [
