@@ -28,21 +28,39 @@
 // A handler here reads every rule parameter from `HookContext.config` at use
 // time, writes only the payload it returns and its own `state` slot, and
 // never reads, compares or decrements a charge budget: src/engine/hook-bus.ts
-// owns the charge guard and the decrement. No handler suppresses an error, so
-// a throw reaches the bus, which reports it and marks the relic degraded.
+// owns the charge guard and the decrement. `frostbind` ASKS for its charge
+// through `HookContext.spendCharge()` on the merge its ledger toggles on, which
+// is the one path its effect takes hold on; without that call the budget it
+// declares was never spent and the relic fired for the whole run. No handler
+// suppresses an error, so a throw reaches the bus, which reports it and marks
+// the relic degraded.
 //
 // This module reads no DOM, performs no I/O, consumes no randomness, reads no
 // clock and holds no mutable module state.
 //
-// Target rows TR-MERGE-01 through TR-MERGE-04 of docs/TRACEABILITY_MATRIX.md,
-// one per relic in declaration order. Decisions behind this file are recorded
-// in docs/DECISION_LOG.md.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, in declaration
+// order, all target-only because no vanilla construct declared a relic:
+//   TR-MERGE-01  echo-chamber      onMerge
+//   TR-MERGE-02  alloy-forge       onMerge
+//   TR-MERGE-03  frostbind         onMerge
+//   TR-MERGE-04  chain-catalyst    onMerge
+//   TR-MERGE-05  the frozen `MERGE_MAGIC_FAMILY` export
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-MERGE-01  all four relics bound to `onMerge` alone
+//   DL-MERGE-02  `scoreDelta` transformed independently of `resultValue`,
+//                as the two are separate payload members
 
 import {
   defaultCanMerge,
   defaultProduceMergeValue,
 } from '../../config/default-config';
-import type { MergeProducer, MergeTileView } from '../../config/rules-config';
+import type {
+  MergePredicate,
+  MergeProducer,
+  MergeTileView,
+} from '../../config/rules-config';
 import type {
   HookContext,
   MergePayload,
@@ -73,22 +91,17 @@ const FROSTBIND_CHARGES = 8;
 const FROSTBIND_EMPTY_LEDGER: readonly Position[] = Object.freeze([]);
 
 /**
- * Fraction of a stage's goal target `frostbind` eases it by for each cell
- * still frosted as the stage begins.
+ * Marker property `frostbind`'s installed predicate carries, so a stage that
+ * begins against a predicate already wrapped installs no second wrapper.
  */
-const FROSTBIND_RELIEF_PER_CELL = 0.05;
-
-/** Ceiling on the total relief `FROSTBIND_RELIEF_PER_CELL` accumulates to. */
-const FROSTBIND_RELIEF_CEILING = 0.25;
-
-/** Lowest goal target `frostbind` eases a stage down to. */
-const FROSTBIND_MINIMUM_TARGET = 1;
+const FROSTBIND_PREDICATE_TAG = '__frostbindFrozenCells';
 
 /**
- * Which merges of a stage `chain-catalyst` catalyses: every third one,
- * counted from the first merge of the stage.
+ * Marker property `chain-catalyst`'s installed predicate carries. Distinct
+ * from `FROSTBIND_PREDICATE_TAG`, so each wrapper is idempotent on its own and
+ * the two compose.
  */
-const CHAIN_CATALYST_INTERVAL = 3;
+const CHAIN_CATALYST_PREDICATE_TAG = '__chainCatalystLadder';
 
 /* --------------------------------------------------------------------------
  * State-slot readers
@@ -155,18 +168,6 @@ function readFrostedCells(state: unknown): Position[] {
   return cells;
 }
 
-/**
- * Reads `chain-catalyst`'s merge count out of a state slot.
- *
- * @param state Slot as the bus handed it over.
- * @returns The count, or `0` where the slot carries no usable one.
- */
-function readMergeCount(state: unknown): number {
-  const counted: unknown = isRecord(state) ? state.merges : undefined;
-
-  return isNonNegativeInteger(counted) ? counted : 0;
-}
-
 /* --------------------------------------------------------------------------
  * Merge-rule access
  * ----------------------------------------------------------------------- */
@@ -192,6 +193,73 @@ function mergeOperand(value: number): MergeTileView {
  */
 function producerFor(context: HookContext): MergeProducer {
   return context.config.merge.produce ?? defaultProduceMergeValue;
+}
+
+/**
+ * The merge predicate in force, falling back to the default of
+ * src/config/default-config.ts where the rules carry none.
+ *
+ * The LIVE member is read rather than the default, so a wrapper installed over
+ * it delegates to whatever another relic installed before it and the two
+ * compose in pickup order.
+ *
+ * @param context Dispatch context, read for its rules view.
+ * @returns The predicate to delegate to.
+ */
+function predicateFor(context: HookContext): MergePredicate {
+  return context.config.merge.canMerge ?? defaultCanMerge;
+}
+
+/** One merge predicate carrying the marker property a wrapper writes. */
+type TaggedPredicate = MergePredicate & Record<string, unknown>;
+
+/**
+ * Marks a wrapper with `tag`, recording under that marker the predicate the
+ * wrapper delegates to, and hands the wrapper back.
+ *
+ * The marker travels with the function it describes rather than living in a
+ * state slot, because `createDefaultRulesConfig()` yields a fresh configuration
+ * per run: a slot flag would suppress the re-install a reload genuinely needs,
+ * while a marker on the predicate is absent exactly when the predicate is.
+ *
+ * The marker's VALUE is the delegate, which is what makes re-installation
+ * idempotent: `taggedDelegate` unwraps a wrapper already in force, so a second
+ * and a third installation replace the wrapper rather than nesting inside it.
+ *
+ * @param wrapper Wrapper to mark.
+ * @param tag Marker property to write.
+ * @param delegate Predicate the wrapper delegates to.
+ * @returns The same wrapper, now carrying the marker.
+ */
+function withTag(
+  wrapper: MergePredicate,
+  tag: string,
+  delegate: MergePredicate,
+): MergePredicate {
+  Object.defineProperty(wrapper, tag, {
+    value: delegate,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+
+  return wrapper;
+}
+
+/**
+ * The predicate a wrapper carrying `tag` should be built over: the delegate
+ * recorded on the predicate in force where that predicate is already such a
+ * wrapper, and the predicate in force itself otherwise.
+ *
+ * @param context Dispatch context, read for the predicate in force.
+ * @param tag Marker property to unwrap.
+ * @returns The predicate to delegate to.
+ */
+function taggedDelegate(context: HookContext, tag: string): MergePredicate {
+  const live = predicateFor(context);
+  const held: unknown = (live as TaggedPredicate)[tag];
+
+  return typeof held === 'function' ? (held as MergePredicate) : live;
 }
 
 /* --------------------------------------------------------------------------
@@ -265,14 +333,29 @@ function alloyForgeOnMerge(
 
 /**
  * Toggles the destination cell in the frosted-cell ledger: frosts a cell the
- * ledger does not hold, and thaws one it does.
+ * ledger does not hold, and thaws one it does — then re-records the frozen-cell
+ * merge rule over the ledger the toggle produced.
+ *
+ * The rule is re-recorded because `MergePredicate` reaches no state slot: its
+ * two operands are the merging tiles alone, so the ledger a predicate consults
+ * is the ledger it was built over. Re-recording through `installFrostbind`
+ * replaces the wrapper in force rather than wrapping it again, so the chain
+ * never grows however many merges a stage resolves.
  *
  * Writes the ledger back through the context's own slot, as `{ x, y }` number
  * pairs that survive the envelope's serialisation, and returns nothing, which
  * leaves the merge resolving exactly as it arrived.
  *
+ * ONE CHARGE PER TOGGLE. Frosting or thawing a cell is this relic's effect, so
+ * the charge is asked for here and src/engine/hook-bus.ts spends it once the
+ * handler's return has been accepted. `FROSTBIND_CHARGES` is therefore the
+ * number of merges the relic acts on; once it is spent the bus's guard skips
+ * both of the relic's bindings, so standing frost stops being traded for relief
+ * as well.
+ *
  * @param payload Merge being resolved, read for the destination cell.
- * @param context Dispatch context, whose `state` slot carries the ledger.
+ * @param context Dispatch context, whose `state` slot carries the ledger and
+ *   whose effect queue records the rule.
  */
 function frostbindOnMerge(payload: MergePayload, context: HookContext): void {
   const cells = readFrostedCells(context.state);
@@ -287,56 +370,135 @@ function frostbindOnMerge(payload: MergePayload, context: HookContext): void {
   }
 
   context.state = { frozen: cells };
+  installFrostbind(context, cells);
+
+  // ASKS FOR ITS CHARGE. The command recorded above would itself be enough for
+  // the bus to count the invocation, but the toggle's effect is carried on the
+  // state slot as much as on the rule, so the request is made explicitly rather
+  // than left to be inferred: an invocation that toggled the ledger has acted
+  // whether or not the rule was re-recordable. `spendCharge` is a request the bus
+  // fulfils once — accumulated, never doubled — and only if this return is
+  // accepted; this handler neither reads nor writes the budget.
+  context.spendCharge();
 }
 
 /**
- * Carries the ledger into a stage and eases that stage's goal by the frost
- * standing in it.
+ * Reads the cell a merge operand stands in.
+ *
+ * `MergePredicate` declares its operands as `MergeTileView`, which carries a
+ * face value and a merge record and no coordinates. The two callers supply
+ * different objects: src/engine/move-resolver.ts L324 passes the live `Tile`
+ * pair, whose `x` and `y` are the cells the merge resolves between, and
+ * src/engine/terminal-state.ts L154 passes `probeView` value projections, which
+ * carry none. The cell is therefore read structurally and is absent for a
+ * neighbour probe.
+ *
+ * @param operand Operand as the predicate received it.
+ * @returns A fresh cell, or `null` where the operand carries none.
+ */
+function operandCell(operand: MergeTileView): Position | null {
+  const candidate = operand as { x?: unknown; y?: unknown };
+
+  if (!isNonNegativeInteger(candidate.x)) {
+    return null;
+  }
+
+  if (!isNonNegativeInteger(candidate.y)) {
+    return null;
+  }
+
+  return { x: candidate.x, y: candidate.y };
+}
+
+/**
+ * Builds the predicate `frostbind` installs: the predicate in force, refusing
+ * in addition a merge whose destination cell stands in the ledger.
+ *
+ * `readCells` is called on every test rather than captured, so the rule the
+ * resolver applies reads the ledger as `frostbindOnMerge` most recently left
+ * it. A neighbour probe, whose operands carry no cell, is left to the
+ * delegate's verdict alone: the loss check would otherwise report no moves
+ * available on a board a later thaw reopens.
+ *
+ * The two operands arrive already existing — js/game_manager.js L156 kept the
+ * `next &&` guard outside the equality test and src/engine/move-resolver.ts
+ * keeps it outside `config.merge.canMerge` — so no operand-presence check is
+ * made here.
+ *
+ * @param delegate Predicate in force, whose verdict is required.
+ * @param readCells Reads the frosted-cell ledger.
+ * @returns The tagged predicate to install.
+ */
+function frostbindPredicate(
+  delegate: MergePredicate,
+  readCells: () => readonly Position[],
+): MergePredicate {
+  const wrapper: MergePredicate = (moving, target): boolean => {
+    if (!delegate(moving, target)) {
+      return false;
+    }
+
+    const destination = operandCell(target);
+
+    if (destination === null) {
+      return true;
+    }
+
+    return !readCells().some(
+      (cell) => cell.x === destination.x && cell.y === destination.y,
+    );
+  };
+
+  return withTag(wrapper, FROSTBIND_PREDICATE_TAG, delegate);
+}
+
+/**
+ * Records the frozen-cell merge rule over the ledger `cells` holds.
+ *
+ * Built over `taggedDelegate`, so the wrapper in force is REPLACED rather than
+ * wrapped again: however many times this runs, exactly one frostbind wrapper
+ * stands in the chain and the rules beneath it are untouched.
+ *
+ * @param context Dispatch context, whose effect queue records the predicate.
+ * @param cells Ledger the recorded predicate reads.
+ */
+function installFrostbind(
+  context: HookContext,
+  cells: readonly Position[],
+): void {
+  context.effects.setMergePredicate(
+    frostbindPredicate(
+      taggedDelegate(context, FROSTBIND_PREDICATE_TAG),
+      (): readonly Position[] => cells,
+    ),
+  );
+}
+
+/**
+ * Carries the ledger into a stage and installs the frozen-cell merge rule.
  *
  * Every coordinate outside the stage's reconciled board is dropped first, so a
- * board that shrank between stages leaves no unreachable cell in the ledger,
- * and the surviving cells then ease `goal.target` by
- * `FROSTBIND_RELIEF_PER_CELL` apiece, capped at `FROSTBIND_RELIEF_CEILING` and
- * floored at `FROSTBIND_MINIMUM_TARGET`. `goal.kind`, `stageIndex`, `seed` and
- * `boardSize` are carried across untouched, which is what
- * src/engine/hook-bus.ts holds a returned stage-start payload to.
+ * board that shrank between stages leaves no unreachable cell in the ledger.
+ * The predicate is recorded through `HookContext.effects.setMergePredicate`,
+ * which src/engine/board-effects.ts applies once this handler has returned.
  *
- * @param payload Stage being prepared.
- * @param context Dispatch context, whose `state` slot carries the ledger.
- * @returns The payload with an eased goal, or nothing where the ledger eases
- *   it by no whole point.
+ * Returns nothing, so the stage's goal resolves exactly as it arrived.
+ *
+ * @param payload Stage being prepared, read for the reconciled board size.
+ * @param context Dispatch context, whose `state` slot carries the ledger and
+ *   whose effect queue installs the predicate.
  */
 function frostbindOnStageStart(
   payload: StageStartPayload,
   context: HookContext,
-): StageStartPayload | void {
+): void {
   const size = payload.boardSize;
   const cells = readFrostedCells(context.state).filter(
     (cell) => cell.x < size && cell.y < size,
   );
 
   context.state = { frozen: cells };
-
-  const target = payload.goal.target;
-
-  if (cells.length === 0 || !Number.isFinite(target)) {
-    return;
-  }
-
-  const relief = Math.min(
-    FROSTBIND_RELIEF_CEILING,
-    cells.length * FROSTBIND_RELIEF_PER_CELL,
-  );
-  const eased = Math.max(
-    FROSTBIND_MINIMUM_TARGET,
-    Math.floor(target * (1 - relief)),
-  );
-
-  if (eased >= target) {
-    return;
-  }
-
-  return { ...payload, goal: { ...payload.goal, target: eased } };
+  installFrostbind(context, cells);
 }
 
 /* --------------------------------------------------------------------------
@@ -344,82 +506,111 @@ function frostbindOnStageStart(
  * ----------------------------------------------------------------------- */
 
 /**
- * Opens a stage with the merge count at zero, and returns nothing, so the
- * stage's goal resolves exactly as it arrived.
+ * Builds the predicate `chain-catalyst` installs: the predicate in force, ALSO
+ * accepting a pair whose values are adjacent on the doubling ladder — a pair
+ * for which the producer in force, applied to the smaller operand, yields the
+ * larger operand's value.
+ *
+ * The delegate's verdict is preserved as an OR and never replaced, so every
+ * merge the rules already accept is still accepted.
+ *
+ * The two operands arrive already existing — js/game_manager.js L156 kept the
+ * `next &&` guard outside the equality test and src/engine/move-resolver.ts
+ * keeps it outside `config.merge.canMerge` — so no operand-presence check is
+ * made here.
+ *
+ * @param delegate Predicate in force, whose acceptance is preserved.
+ * @param produce Producer the ladder step is measured with.
+ * @returns The tagged predicate to install.
+ */
+function chainCatalystPredicate(
+  delegate: MergePredicate,
+  produce: MergeProducer,
+): MergePredicate {
+  const wrapper: MergePredicate = (moving, target): boolean => {
+    if (delegate(moving, target)) {
+      return true;
+    }
+
+    const low = Math.min(moving.value, target.value);
+    const high = Math.max(moving.value, target.value);
+
+    if (!Number.isFinite(low) || low <= 0 || low === high) {
+      return false;
+    }
+
+    const operand = mergeOperand(low);
+
+    return produce(operand, operand) === high;
+  };
+
+  return withTag(wrapper, CHAIN_CATALYST_PREDICATE_TAG, delegate);
+}
+
+/**
+ * Opens a stage by installing the adjacent-ladder merge rule.
+ *
+ * Built over `taggedDelegate`, so a stage that begins against a rule this
+ * relic already wrapped replaces that wrapper rather than nesting inside it,
+ * and a reload — which yields a fresh configuration carrying the untagged
+ * default — installs it again. Returns nothing, so the stage's goal resolves
+ * exactly as it arrived.
  *
  * @param _payload Stage being prepared, read for nothing.
- * @param context Dispatch context, whose `state` slot carries the count.
+ * @param context Dispatch context, read for the rules in force and whose
+ *   effect queue records the predicate.
  */
 function chainCatalystOnStageStart(
   _payload: StageStartPayload,
   context: HookContext,
 ): void {
-  context.state = { merges: 0 };
+  context.effects.setMergePredicate(
+    chainCatalystPredicate(
+      taggedDelegate(context, CHAIN_CATALYST_PREDICATE_TAG),
+      producerFor(context),
+    ),
+  );
 }
 
 /**
- * The face value one merge resolves to under `chain-catalyst`.
+ * Corrects the produced value of a merge the adjacent-ladder rule admitted.
  *
- * A pair `defaultCanMerge` of src/config/default-config.ts does not accept —
- * two unequal values, which only a substituted predicate admits — resolves
- * from the LARGER of the two operands: L157 derived the value the resolver
- * dispatched from the moving tile alone. A pair it does accept
- * resolves one step up on every `CHAIN_CATALYST_INTERVAL`-th merge of the
- * stage, and to the value the merge already carries on every other.
+ * src/engine/move-resolver.ts derives the value it dispatches from the moving
+ * tile alone, which is what js/game_manager.js L157 did, so a pair of UNEQUAL
+ * operands arrives carrying the wrong result. The corrected value is the
+ * producer in force applied to the LARGER of the two operands.
  *
- * @param payload Merge being resolved.
- * @param produce Producer in force.
- * @param counted Position of this merge in the stage, counting from one.
- * @returns The face value the merge resolves to.
- */
-function chainCatalystResult(
-  payload: MergePayload,
-  produce: MergeProducer,
-  counted: number,
-): number {
-  const source = payload.source.value;
-  const target = payload.target.value;
-
-  if (!defaultCanMerge(mergeOperand(source), mergeOperand(target))) {
-    const larger = mergeOperand(Math.max(source, target));
-
-    return produce(larger, larger);
-  }
-
-  if (counted % CHAIN_CATALYST_INTERVAL === 0) {
-    const carried = mergeOperand(payload.resultValue);
-
-    return produce(carried, carried);
-  }
-
-  return payload.resultValue;
-}
-
-/**
- * Counts the merge into the stage's chain, and raises the merge where the
- * chain catalyses it.
+ * `scoreDelta` is raised BY the increment and never replaced by it, so what an
+ * earlier handler on this hook accumulated survives — which is what makes the
+ * pickup-order compounding of `echo-chamber` and this relic observable.
  *
- * The count is written back through the context's own slot on every merge,
- * including one the chain leaves alone. `resultValue` is raised only to a
- * finite value above the one the merge carried, and `scoreDelta` is raised BY
- * the increment rather than replaced by it.
+ * An equal-valued pair, which is the ordinary vanilla merge, returns nothing,
+ * so this relic alters no normal merge. A produced value that is not finite,
+ * not positive, or not above the value the merge already carries returns
+ * nothing too, which is the range src/engine/hook-bus.ts accepts a returned
+ * `resultValue` in.
+ *
+ * Crossing `config.winValue` needs no handling here:
+ * src/engine/terminal-state.ts owns that comparison against the live value.
  *
  * @param payload Merge being resolved.
- * @param context Dispatch context, read for the producer in force and for the
- *   slot carrying the count.
- * @returns The payload with `resultValue` and `scoreDelta` raised, or nothing
- *   where this merge resolves as it arrived.
+ * @param context Dispatch context, read for the producer in force.
+ * @returns The payload with `resultValue` and `scoreDelta` raised, or nothing.
  */
 function chainCatalystOnMerge(
   payload: MergePayload,
   context: HookContext,
 ): MergePayload | void {
-  const counted = readMergeCount(context.state) + 1;
+  const source = payload.source.value;
+  const target = payload.target.value;
 
-  context.state = { merges: counted };
+  if (source === target) {
+    return;
+  }
 
+  const larger = mergeOperand(Math.max(source, target));
   const current = payload.resultValue;
-  const raised = chainCatalystResult(payload, producerFor(context), counted);
+  const raised = producerFor(context)(larger, larger);
 
   if (!Number.isFinite(raised) || raised <= 0 || raised <= current) {
     return;
@@ -462,15 +653,14 @@ const alloyForge: Relic = Object.freeze({
   hooks: Object.freeze({ onMerge: alloyForgeOnMerge }),
 });
 
-/** Frosts the cells merges land on, and trades standing frost for relief. */
+/** Freezes the cells merges land on, refusing further merges there. */
 const frostbind: Relic = Object.freeze({
   id: 'frostbind',
   name: 'Frostbind',
   rarity: RARITIES[2],
   description:
-    'Each merge frosts the cell it lands on and a merge on a frosted cell ' +
-    'thaws it again; frost still standing as a stage begins lowers that ' +
-    "stage's goal.",
+    'Each merge freezes the cell it lands on, and no further merge resolves ' +
+    'on a frozen cell until another merge there thaws it. Limited charges.',
   hooks: Object.freeze({
     onStageStart: frostbindOnStageStart,
     onMerge: frostbindOnMerge,
@@ -479,20 +669,18 @@ const frostbind: Relic = Object.freeze({
   state: Object.freeze({ frozen: FROSTBIND_EMPTY_LEDGER }),
 });
 
-/** Catalyses every third merge of a stage and resolves unequal pairs. */
+/** Lets neighbours one step apart on the ladder merge into the larger. */
 const chainCatalyst: Relic = Object.freeze({
   id: 'chain-catalyst',
   name: 'Chain Catalyst',
   rarity: RARITIES[3],
   description:
-    'Every third merge of a stage is catalysed one step higher, and a merge ' +
-    'of unequal tiles yields from the larger of the pair; the value gained ' +
-    'is scored as well.',
+    'Tiles one step apart on the doubling ladder now merge, yielding from ' +
+    'the larger of the pair, and the value gained is scored as well.',
   hooks: Object.freeze({
     onStageStart: chainCatalystOnStageStart,
     onMerge: chainCatalystOnMerge,
   }),
-  state: Object.freeze({ merges: 0 }),
 });
 
 /**
@@ -507,4 +695,3 @@ export const MERGE_MAGIC_FAMILY: RelicFamily = Object.freeze({
   name: 'merge-magic',
   relics: Object.freeze([echoChamber, alloyForge, frostbind, chainCatalyst]),
 });
-

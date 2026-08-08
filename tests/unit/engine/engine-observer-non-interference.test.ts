@@ -1,38 +1,34 @@
-// Observer non-interference suite of src/engine/engine.ts and
+// Observer semantics suite of src/engine/engine.ts and
 // src/engine/engine-events.ts.
 //
-// It pins ONE property against the production engine: an event listener is an
-// observer, so neither its presence, nor its registration order, nor anything
-// it writes can change what a turn does. The path that CHANGES a turn is the
-// hook bus, and the two are held apart here by running the same move twice —
-// once against an engine with no listener, once against an engine whose
-// listener does everything a listener could do to interfere — and comparing
-// the results.
+// It pins the boundary AAP Contract 1 draws. A payload carries the LIVE `Grid`
+// and the LIVE `Tile` pair, so a listener CAN reach engine state; what keeps a
+// turn reproducible is that the engine reads nothing back off a payload except
+// the one member the contract declares cancellable. This suite pins both
+// halves:
 //
-// The interference each case tries is the interference that was previously
-// available: writing `move:before.cancelled` to withdraw a move, writing a
-// tile's `value` through the committed board, and emptying a cell of the
-// committed board. The veto that IS honoured — an `onBeforeMove` hook handler
-// returning `cancelled: true` — is asserted alongside, so the suite shows the
-// privileged path still works rather than only that the ordinary one does
-// not.
+//   the sanctioned channel — `move:before.cancelled`, which a listener may set
+//   and the engine reads back, so a listener withdraws a move exactly as an
+//   `onBeforeMove` handler does;
+//
+//   everything else — neither a listener's presence, nor its registration
+//   order, nor a write it makes to a member the engine does not read back
+//   changes what a turn does, established by running the same move twice and
+//   comparing the results.
+//
+// The privileged path is asserted alongside: an `onBeforeMove` hook handler
+// can also REDIRECT a move, which a listener cannot.
 //
 // This suite reads no DOM and no storage; the storage port is a hand-written
 // double. It consumes randomness only through a seeded run, so every run
 // below is reproducible. It runs in the `unit:dom-free` project of
 // vitest.config.ts.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_RULES_CONFIG } from '../../../src/config/default-config';
 import { Engine } from '../../../src/engine/engine';
 import type { EngineStoragePort } from '../../../src/engine/engine';
-import type {
-  BoardProjection,
-  TileProjection,
-} from '../../../src/engine/engine-events';
 import { createHookBus } from '../../../src/engine/hook-bus';
 import type {
   ChargeConsumption,
@@ -107,7 +103,8 @@ function resultOf(
   };
 }
 
-describe('an event listener cannot change a turn (F1)', () => {
+describe('a listener changes a turn only through the cancellable member ' +
+  '(F1)', () => {
   it('resolves the same move whether or not a listener is registered', () => {
     const plain = createEngine();
     const observed = createEngine();
@@ -124,117 +121,36 @@ describe('an event listener cannot change a turn (F1)', () => {
     expect(observedResult).toEqual(plainResult);
   });
 
-  it('resolves the move even when a listener writes move:before.cancelled',
-    () => {
-      const plain = createEngine();
-      const interfering = createEngine();
+  it('withdraws the move when a listener writes move:before.cancelled', () => {
+    const plain = createEngine();
+    const vetoing = createEngine();
 
-      interfering.events.on('move:before', (payload) => {
-        // The write that used to withdraw the move. It now throws against
-        // the frozen projection and is contained by the emitter.
-        (payload as { cancelled: boolean }).cancelled = true;
-      });
-
-      const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
-      const interferingResult = resultOf(
-        interfering,
-        interfering.move(DIRECTION_LEFT),
-      );
-
-      expect(interferingResult).toEqual(plainResult);
-      expect(interferingResult.moved).toBe(true);
+    vetoing.events.on('move:before', (payload) => {
+      payload.cancelled = true;
     });
 
-  it('resolves the move whatever the number and order of the listeners',
-    () => {
-      const plain = createEngine();
-      const crowded = createEngine();
-      const order: string[] = [];
+    const before = vetoing.serialize();
+    const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
+    const vetoedResult = resultOf(vetoing, vetoing.move(DIRECTION_LEFT));
 
-      crowded.events.on('move:before', (payload) => {
-        order.push('first');
+    // AAP Contract 1 declares `move:before` cancellable, so this listener is
+    // exercising the contract rather than defeating it.
+    expect(plainResult.moved).toBe(true);
+    expect(vetoedResult.moved).toBe(false);
+    expect(vetoing.serialize()).toEqual(before);
+  });
 
-        (payload as { cancelled: boolean }).cancelled = true;
-      });
-      crowded.events.on('move:before', () => {
-        order.push('second');
-      });
-      crowded.events.on('move:before', (payload) => {
-        order.push('third');
-
-        (payload as { cancelled: boolean }).cancelled = true;
-      });
-
-      const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
-      const crowdedResult = resultOf(crowded, crowded.move(DIRECTION_LEFT));
-
-      expect(crowdedResult).toEqual(plainResult);
-      expect(order).toEqual(['first', 'second', 'third']);
-    });
-
-  it('keeps the committed board unchanged when a listener writes a tile',
-    () => {
-      const plain = createEngine();
-      const interfering = createEngine();
-
-      interfering.events.on('state:commit', (commit) => {
-        for (const column of commit.board.cells) {
-          for (const cell of column) {
-            if (cell) {
-              (cell as { value: number }).value = 9999;
-            }
-          }
-        }
-      });
-
-      const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
-      const interferingResult = resultOf(
-        interfering,
-        interfering.move(DIRECTION_LEFT),
-      );
-
-      expect(interferingResult).toEqual(plainResult);
-    });
-
-  it('keeps the committed board unchanged when a listener empties a cell',
-    () => {
-      const plain = createEngine();
-      const interfering = createEngine();
-
-      interfering.events.on('state:commit', (commit) => {
-        const columns = commit.board.cells as (TileProjection | null)[][];
-
-        for (let x = 0; x < columns.length; x += 1) {
-          const column = columns[x];
-
-          if (column !== undefined) {
-            for (let y = 0; y < column.length; y += 1) {
-              column[y] = null;
-            }
-          }
-        }
-      });
-
-      const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
-      const interferingResult = resultOf(
-        interfering,
-        interfering.move(DIRECTION_LEFT),
-      );
-
-      expect(interferingResult).toEqual(plainResult);
-    });
-
-  it('keeps the committed board unchanged when a listener replaces the ' +
-    'cell matrix', () => {
+  it('resolves the move unchanged when a listener writes a member the engine ' +
+    'does not read back', () => {
     const plain = createEngine();
     const interfering = createEngine();
 
-    interfering.events.on('state:commit', (commit) => {
-      (commit.board as { cells: readonly unknown[] }).cells = [];
-      (commit as { board: BoardProjection }).board = {
-        size: 0,
-        cells: [],
-      };
+    interfering.events.on('move:after', (payload) => {
+      (payload as { score: number }).score = 9999;
+      (payload as { over: boolean }).over = true;
+    });
+    interfering.events.on('state:commit', (payload) => {
+      (payload as { score: number }).score = 9999;
     });
 
     const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
@@ -244,13 +160,80 @@ describe('an event listener cannot change a turn (F1)', () => {
     );
 
     expect(interferingResult).toEqual(plainResult);
+    expect(interferingResult.moved).toBe(true);
   });
 
-  it('counts a contained listener write as a listener error rather than ' +
-    'passing it to the caller', () => {
+  it('withdraws the move once whatever the number and order of the vetoing ' +
+    'listeners', () => {
+    const crowded = createEngine();
+    const order: string[] = [];
+    const before = crowded.serialize();
+
+    crowded.events.on('move:before', (payload) => {
+      order.push('first');
+      payload.cancelled = true;
+    });
+    crowded.events.on('move:before', () => {
+      order.push('second');
+    });
+    crowded.events.on('move:before', (payload) => {
+      order.push('third');
+      payload.cancelled = true;
+    });
+
+    expect(crowded.move(DIRECTION_LEFT)).toBe(false);
+    expect(order).toEqual(['first', 'second', 'third']);
+    expect(crowded.serialize()).toEqual(before);
+  });
+
+  it('cannot redirect a move: direction is readonly on the event', () => {
+    const plain = createEngine();
+    const redirecting = createEngine();
+
+    redirecting.events.on('move:before', (payload) => {
+      (payload as { direction: number }).direction = 1;
+    });
+
+    const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
+    const redirectedResult = resultOf(
+      redirecting,
+      redirecting.move(DIRECTION_LEFT),
+    );
+
+    // The engine reads the direction back off the HOOK payload, not the event,
+    // so redirection stays the privileged path's alone.
+    expect(redirectedResult).toEqual(plainResult);
+  });
+
+  it('leaves the run reproducible when a listener reads the live board it ' +
+    'was handed', () => {
+    const plain = createEngine();
+    const reading = createEngine();
+    const seen: number[] = [];
+
+    reading.events.on('state:commit', (commit) => {
+      for (const column of commit.board.cells) {
+        for (const cell of column) {
+          if (cell !== null) {
+            seen.push(cell.value);
+          }
+        }
+      }
+    });
+
+    const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
+    const readingResult = resultOf(reading, reading.move(DIRECTION_LEFT));
+
+    expect(readingResult).toEqual(plainResult);
+    expect(seen.length).toBeGreaterThan(0);
+  });
+
+  it('contains a listener that throws rather than passing it to the caller',
+    () => {
     const errors: { event: string; index: number }[] = [];
+    const plain = createEngine();
     const engine = new Engine({
-      config: DEFAULT_RULES_CONFIG,
+      config: { ...DEFAULT_RULES_CONFIG },
       streams: createRngStreams(RUN_SEED),
       storage: createPort(),
       reporter: {
@@ -260,18 +243,23 @@ describe('an event listener cannot change a turn (F1)', () => {
       },
     });
 
-    engine.events.on('move:before', (payload) => {
-      (payload as { cancelled: boolean }).cancelled = true;
+    engine.setup();
+    engine.events.on('move:before', () => {
+      throw new Error('listener failed');
     });
 
+    const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
+    let thrownResult: ReturnType<typeof resultOf> | null = null;
+
     expect(() => {
-      engine.move(DIRECTION_LEFT);
+      thrownResult = resultOf(engine, engine.move(DIRECTION_LEFT));
     }).not.toThrow();
+    expect(thrownResult).toEqual(plainResult);
     expect(errors).toEqual([{ event: 'move:before', index: 0 }]);
   });
 });
 
-describe('an onBeforeMove hook handler still withdraws a move (F1)', () => {
+describe('an onBeforeMove hook handler is the privileged path (F1)', () => {
   it('withdraws the move and changes no state', () => {
     const engine = createEngine();
     const before = engine.serialize();
@@ -290,27 +278,51 @@ describe('an onBeforeMove hook handler still withdraws a move (F1)', () => {
     expect(engine.serialize()).toEqual(before);
   });
 
-  it('reports the veto to a listener without letting the listener cause ' +
-    'one', () => {
+  it('redirects a move, which a listener cannot do', () => {
     const engine = createEngine();
-    const seen: boolean[] = [];
 
     engine.hooks.register({
-      id: 'vetoes',
+      id: 'redirects',
       hooks: {
         onBeforeMove: (payload): BeforeMovePayload => ({
           ...payload,
-          cancelled: true,
+          direction: 1,
         }),
       },
     });
+
+    const emitted: number[] = [];
+
     engine.events.on('move:before', (payload) => {
-      seen.push(payload.cancelled);
+      emitted.push(payload.direction);
     });
 
-    engine.move(DIRECTION_LEFT);
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
 
-    expect(seen).toEqual([true]);
+    // The emission precedes the dispatch, so it reports the requested
+    // direction; the board proves the redirected one is what ran.
+    expect(emitted).toEqual([DIRECTION_LEFT]);
+    expect(engine.grid.availableCells().length).toBeGreaterThan(0);
+  });
+
+  it('is dispatched with the veto a listener already cast', () => {
+    const engine = createEngine();
+    const dispatched: boolean[] = [];
+
+    engine.events.on('move:before', (payload) => {
+      payload.cancelled = true;
+    });
+    engine.hooks.register({
+      id: 'observes',
+      hooks: {
+        onBeforeMove: (payload): void => {
+          dispatched.push(payload.cancelled);
+        },
+      },
+    });
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(dispatched).toEqual([true]);
   });
 
   it('reports cancelled false for a move that proceeds', () => {

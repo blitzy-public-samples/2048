@@ -18,6 +18,38 @@
 //   @mixin screen-control        the button vocabulary and its UA reset
 //   @mixin screen-content        the element-and-class content pairs
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+// file's area enumerated:
+//   TR-SCREEN-01  style/main.scss L196-L221  the `.game-message` overlay
+//                                            treatment, generalised into the
+//                                            shared screen-container surface
+//   TR-SCREEN-02  style/main.scss L159-L168  the `button` mixin, restated as
+//                                            `@mixin screen-control` with its
+//                                            user-agent reset
+//   TR-SCREEN-03  style/main.scss L475-L548  the mobile scale, restated for
+//                                            every screen state
+//   TR-SCREEN-04  target-only row            the run-start, stage-progress and
+//                                            game-over states
+//   TR-SCREEN-05  target-only row            `@mixin screen-text-field` and the
+//                                            seed entry field
+//   TR-SCREEN-06  target-only row            `.settings-slider` and the settings
+//                                            rows
+//   TR-SCREEN-07  target-only row            `@mixin screen-panel-surface` and
+//                                            `@mixin screen-modal-surface`
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-SCREEN-01  screen state carried by the `hidden` attribute, so an
+//                 inactive screen is out of the render tree, the accessibility
+//                 tree and the tab order
+//   DL-SCREEN-02  the established z-index ladder extended and never renumbered,
+//                 with the reward container and `#settings-panel` tying at the
+//                 modal slot and the tie resolved by tree order
+//   DL-SCREEN-03  the control vocabulary compiled from the existing `button`
+//                 mixin with logical properties
+//   DL-SCREEN-04  the native range control kept and tinted through
+//                 `accent-color`
+//
 // `.screen` occupies $z-index-screen-overlay and `#settings-panel` occupies
 // $z-index-modal, the slot style/_tokens.scss reserves for a modal.
 // style/_reward.scss places the reward container on that same slot, which is
@@ -195,8 +227,18 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
 // is now the explicit default because the `.above-game` row is a flex layout
 // and no control in this stylesheet floats.
 //
-// BLITZY [A11Y]: the control label sits below the WCAG AA 4.5:1 text threshold,
-// and the control's 40px block size sits below the 44px target size WCAG 2.5.5
+// BLITZY [A11Y]: `--theme-button-label` on `--theme-button-surface` measures
+// 3.7896:1 in the default palette — #f9f6f2 on #8f7a66, browser-measured on all
+// 25 controls of the settings dialog — below the WCAG AA 4.5:1 floor, which is
+// the floor that applies because 18px bold is under the 18.66px large-text
+// threshold. Both tokens are frozen by AAP 0.5.2, this vocabulary is what AAP
+// 0.5.4 maps a new primary action button onto, and AAP 0.5.5 resolves the
+// shortfall with additive palettes rather than a re-tint: the high-contrast and
+// colourblind-safe palettes clear it at 11.54:1 and 12.62:1 and are reachable
+// from the settings dialog itself. tests/unit/theme/palette-contrast.test.ts
+// holds all four ratios. The panel's own body text is a different pair and does
+// clear the floor, at 4.6966:1.
+// The control's 40px block size also sits below the 44px target size WCAG 2.5.5
 // recommends; 40px is the height the design system's `button` mixin declares.
 @mixin screen-control {
   display: inline-block;
@@ -238,9 +280,8 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
   // palette, the chosen motion setting, mute and number-only mode.
   //
   // BLITZY [A11Y]: at $a11y-disabled-alpha the label falls below the contrast
-  // the enabled control carries. WCAG 1.4.3 exempts an inactive component, and
-  // the state is carried by the `disabled` attribute and by `aria-disabled` as
-  // well as by colour.
+  // the enabled control carries. The state is carried by the `disabled`
+  // attribute and by `aria-disabled` as well as by colour. Decision DL-A11Y-05.
   @include interactive-states;
 }
 
@@ -488,7 +529,7 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
 // @mixin screen-control above.
 //
 // BLITZY [DESIGN_SYSTEM_GAP]: the repository's vocabulary declares no slider
-// primitive; the native control is tinted rather than re-implemented.
+// primitive. The native control is kept and tinted. Decision DL-SCREEN-04.
 .settings-slider {
   accent-color: var(
     --theme-button-surface,

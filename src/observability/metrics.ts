@@ -7,7 +7,17 @@
 // call and no `console.*` call existed in the retired sources, so it carries no
 // ported construct.
 //
-// target-only rows TR-METRIC-01 through TR-METRIC-06 of
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated, all target-only because the retired sources
+// carried no counter, gauge or histogram:
+//   TR-METRIC-01  the counter, gauge and histogram primitives
+//   TR-METRIC-02  the series registry and the canonical metric-name contract
+//   TR-METRIC-03  the turn-boundary counters `turnsTotal`, `mergesTotal` and
+//                 `spawnsTotal`
+//   TR-METRIC-04  the engine-counter families `spawnAttemptsTotal` and
+//                 `spawnSuppressedTotal`
+//   TR-METRIC-05  the pull integration with the hook bus's dispatch counts
+//   TR-METRIC-06  the Prometheus text exposition and the snapshot `download`
 //
 // Boundaries the turn-boundary counters come from in the retired control flow:
 // `turnsTotal` from `move()` entry through the actuation push, `mergesTotal`
@@ -35,12 +45,16 @@
 // are disjoint, and `recordEngineEventCount` refuses a report that names an
 // event in the hook dimension rather than folding it under that hook.
 //
-// single source of truth for why each was taken:
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
 //   DL-METRIC-01  the `DEFAULT_DURATION_BUCKETS` boundaries
-//   DL-METRIC-02  the attempt and insertion spawn families being counted
+//   DL-METRIC-02  the attempt and the insertion spawn families both counted
 //   DL-METRIC-03  the pull-snapshot model for the hook bus's dispatch counts
-//   DL-METRIC-04  label-dimension series over name concatenation for the
-//   DL-METRIC-05  the substitution of this in-page registry, its Prometheus
+//   DL-METRIC-04  series carried on label dimensions
+//   DL-METRIC-05  this in-page registry, its Prometheus text and its snapshot
+//                 download as the delivered form of a metrics endpoint
+//   DL-METRIC-06  a hook-dispatch snapshot folded only when its correlation
+//                 identifier is present and agrees with this registry's
 //
 // The default duration buckets take each boundary from a timing the product
 // already holds: 16 ms is the frame budget of js/animframe_polyfill.js, and
@@ -1856,15 +1870,11 @@ export class MetricsRegistry {
    * the previous reading — a fresh bus under the same registry — is read as
    * the whole of a new lifetime.
    *
-   * REJECTED BEFORE FOLDED, NOT REPORTED AND FOLDED ANYWAY. A snapshot must
-   * carry a correlation identifier, and where this registry holds one of its
-   * own the two must agree. A snapshot carrying none cannot be reconciled at
-   * all: the reconciliation keys are namespaced by the source, so an absent
-   * identifier collapses every bus onto one key and the second bus's lifetime
-   * total is read as a delta against the first's. A snapshot carrying a
-   * FOREIGN identifier is another run's counts, and folding it would make
-   * this run's per-hook totals the sum of two runs. Both are reported and
-   * neither is folded, so nothing this registry exports mixes runs.
+   * IDENTIFIER RULE: a snapshot must carry a correlation identifier, and where
+   * this registry holds one of its own the two must agree. A snapshot carrying
+   * none, and a snapshot carrying a foreign one, are each reported and neither
+   * is folded, so nothing this registry exports mixes runs. Decision
+   * DL-METRIC-06.
    */
   foldHookDispatchCounts(view: HookDispatchCountsView): void {
     try {

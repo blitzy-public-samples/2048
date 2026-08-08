@@ -6,6 +6,37 @@
 // Dart Sass migration: divisions use math.div(), the colour and list functions
 // are namespaced (color.mix, color.adjust, list.nth), and the token block that
 // stood at the top of this file now lives in style/_tokens.scss.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+// file's area enumerated:
+//   TR-SHEET-01  style/main.scss L1-L2      the two legacy `@import` rules,
+//                                           converted to `@use`
+//   TR-SHEET-02  style/main.scss L4-L22     the token block, moved to
+//                                           style/_tokens.scss
+//   TR-SHEET-03  style/main.scss L7, L357,  the six slash divisions, converted
+//                L377, L380, L381, L480     to `math.div()`
+//   TR-SHEET-04  style/main.css             the committed generated stylesheet,
+//                                           deleted and now produced by the
+//                                           build from this entry point
+//   TR-SHEET-05  index.html L7              the `<link>` to that generated file,
+//                                           replaced by the import in
+//                                           src/main.ts
+//   TR-SHEET-06  style/main.scss L299-L313  the position-generation loop, whose
+//                                           per-cell rules the renderer now owns
+//   TR-SHEET-07  style/main.scss L334-L402  the tile-value generation loop,
+//                                           retained as the ramp's authority
+//   TR-SHEET-08  target-only row            the six screen partials loaded from
+//                                           here, and the diagnostics surface
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-SHEET-01  one entry point emitting the whole style layer, with each
+//                partial loading its own dependencies because `@use` is not
+//                transitive
+//   DL-SHEET-02  the generated stylesheet deleted and produced by the build
+//   DL-SHEET-03  the tile-value generation loop retained as the colour ramp's
+//                authority, mirrored by src/theme/tile-ramp.ts
+//   DL-A11Y-01   the button label's text contrast, noted at the mixin below
 
 // Intake for the authoritative token values. vite.config.ts renders
 // `sassTokenProjection` of src/theme/tokens.ts as a Sass map and prepends a
@@ -298,8 +329,6 @@ hr {
 //
 // BLITZY [A11Y]: the label text in this mixin sits below the WCAG AA 4.5:1 text
 // threshold. It applies to `.restart-button`, `.settings-button` and the two
-// `.game-message` controls.
-//
 // `.game-message` controls. Decision DL-A11Y-01.
 @mixin button {
   display: inline-block;

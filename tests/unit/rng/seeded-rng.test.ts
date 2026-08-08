@@ -17,8 +17,10 @@
 // clock, no environment variable and no ambient randomness. It touches no DOM
 // and no storage, writes no snapshot artifact and emits no log.
 //
-// Decisions this suite is the evidence for: DL-RNG-01 through DL-RNG-03 in
-// docs/DECISION_LOG.md. Traceability rows: TR-RNG-03 through TR-RNG-05 of
+// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
+// DL-RNG-01, DL-RNG-02, DL-RNG-03.
+// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-RNG-01,
+// TR-RNG-02, TR-RNG-03, TR-RNG-04, TR-RNG-05.
 
 import { describe, expect, it } from 'vitest';
 

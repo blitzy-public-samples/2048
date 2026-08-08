@@ -34,7 +34,7 @@ import {
   resolveInput,
   serializeKeymap,
 } from '../../../src/input/keymap';
-import type { InputReportFields } from '../../../src/input/keymap';
+import type { InputReportFields, Keymap } from '../../../src/input/keymap';
 import { createInputManager } from '../../../src/input/input-manager';
 
 /** A keydown carrying only the fields the resolver reads. */
@@ -671,5 +671,198 @@ describe('indexed actions resolve their payload from the binding', () => {
     expect(Object.isFrozen(slots)).toBe(true);
     expect(Object.isFrozen(slots[0])).toBe(true);
     expect(Object.isFrozen(slots[0]?.keys)).toBe(true);
+  });
+});
+
+/* ==========================================================================
+ * The single rebind api
+ * ========================================================================== */
+
+// One api validates, applies, persists and announces a rebind. Before it, the
+// settings dialog computed the table and checked the conflict itself and then
+// wrote the result in through `setKeymap`, so the validation lived outside the
+// owner of the table and two call sites had to agree for a rebind to take
+// effect (N2). These are the four properties that make one call sufficient.
+
+describe('remap is the one api a rebind goes through', () => {
+  it('validates, applies, persists and announces exactly once', () => {
+    const announced: { keymap: Keymap; reason: string }[] = [];
+    const persisted: Keymap[] = [];
+    const manager = createInputManager({
+      keymap: DEFAULT_KEY_BINDINGS,
+      onKeymapChange: (keymap, reason): void => {
+        announced.push({ keymap, reason });
+      },
+      persistKeymap: (keymap): boolean => {
+        persisted.push(keymap);
+
+        return true;
+      },
+    });
+
+    manager.detach();
+
+    const result = manager.remap('moveUp', { keys: ['t'], codes: ['KeyT'] });
+
+    expect(result.applied).toBe(true);
+    expect(result.conflict).toBeNull();
+
+    // APPLIED to the table the manager's own listener reads, so the binding is
+    // live without a second write.
+    expect(manager.getKeymap().moveUp.keys).toEqual(['t']);
+    expect(result.keymap).toBe(manager.getKeymap());
+
+    // PERSISTED before it was announced, and ANNOUNCED once.
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]?.moveUp.keys).toEqual(['t']);
+    expect(announced).toHaveLength(1);
+    expect(announced[0]?.reason).toBe('remap');
+    expect(announced[0]?.keymap.moveUp.keys).toEqual(['t']);
+
+    manager.destroy();
+  });
+
+  it('refuses a key another action holds in a shared context, changing nothing', () => {
+    const announced: string[] = [];
+    const persisted: Keymap[] = [];
+    const manager = createInputManager({
+      keymap: DEFAULT_KEY_BINDINGS,
+      onKeymapChange: (_keymap, reason): void => {
+        announced.push(reason);
+      },
+      persistKeymap: (keymap): boolean => {
+        persisted.push(keymap);
+
+        return true;
+      },
+    });
+
+    manager.detach();
+
+    // `r` restarts, and both actions are active in `'game'`.
+    const result = manager.remap('moveUp', { keys: ['r'], codes: ['KeyR'] });
+
+    expect(result.applied).toBe(false);
+    expect(result.conflict?.action).toBe('restart');
+
+    // The table in force is returned unchanged, and neither follower ran: a
+    // refusal must not persist or announce a binding that was not applied.
+    expect(result.keymap).toBe(manager.getKeymap());
+    expect(manager.getKeymap().moveUp).toEqual(DEFAULT_KEY_BINDINGS.moveUp);
+    expect(persisted).toHaveLength(0);
+    expect(announced).toHaveLength(0);
+
+    manager.destroy();
+  });
+
+  it('allows a key held only in a context the action is not active in', () => {
+    const manager = createInputManager({ keymap: DEFAULT_KEY_BINDINGS });
+
+    manager.detach();
+
+    // `selectReward` binds 1, 2 and 3 in `'overlay'` alone, and `moveUp` is a
+    // `'game'` action, so the digit is free where it would be read.
+    expect(DEFAULT_KEY_BINDINGS.selectReward.contexts).toEqual(['overlay']);
+    expect(DEFAULT_KEY_BINDINGS.moveUp.contexts).toContain('game');
+
+    const result = manager.remap('moveUp', { keys: ['1'], codes: ['Digit1'] });
+
+    expect(result.applied).toBe(true);
+    expect(manager.getKeymap().moveUp.keys).toEqual(['1']);
+    expect(manager.getKeymap().selectReward.keys).toEqual(['1', '2', '3']);
+
+    manager.destroy();
+  });
+
+  it('keeps the rebind when a follower or the writer throws', () => {
+    const failures: string[] = [];
+    const manager = createInputManager({
+      keymap: DEFAULT_KEY_BINDINGS,
+      reporter: {
+        log: (): void => {},
+        count: (): void => {},
+        failure: (_level, _message, _error, fields): void => {
+          failures.push(String(fields?.member ?? ''));
+        },
+      },
+      persistKeymap: (): boolean => {
+        throw new Error('storage is full');
+      },
+      onKeymapChange: (): void => {
+        throw new Error('the control layer threw');
+      },
+    });
+
+    manager.detach();
+
+    const result = manager.remap('moveUp', { keys: ['t'], codes: ['KeyT'] });
+
+    // Applied in memory, so neither collaborator may unwind it: the keystroke
+    // the player just bound has to work.
+    expect(result.applied).toBe(true);
+    expect(manager.getKeymap().moveUp.keys).toEqual(['t']);
+    expect(failures).toEqual(['persistKeymap', 'onKeymapChange']);
+
+    manager.destroy();
+  });
+
+  it('persists and announces a wholesale replacement once', () => {
+    const announced: string[] = [];
+    const persisted: Keymap[] = [];
+    const manager = createInputManager({
+      keymap: remapAction(DEFAULT_KEY_BINDINGS, 'moveUp', {
+        keys: ['t'],
+        codes: ['KeyT'],
+      }),
+      onKeymapChange: (_keymap, reason): void => {
+        announced.push(reason);
+      },
+      persistKeymap: (keymap): boolean => {
+        persisted.push(keymap);
+
+        return true;
+      },
+    });
+
+    manager.detach();
+    manager.setKeymap(createKeymap());
+
+    expect(manager.getKeymap().moveUp).toEqual(DEFAULT_KEY_BINDINGS.moveUp);
+    expect(announced).toEqual(['replace']);
+    expect(persisted).toHaveLength(1);
+
+    manager.destroy();
+  });
+
+  it('round-trips a persisted table through the serialisation guard', () => {
+    // The durable half: what `persistKeymap` is handed is what a later session
+    // reads back, and an unreadable payload answers with the defaults rather
+    // than throwing, which is what makes the load safe to do at construction.
+    let stored: unknown = null;
+    const first = createInputManager({
+      keymap: DEFAULT_KEY_BINDINGS,
+      persistKeymap: (keymap): boolean => {
+        stored = serializeKeymap(keymap);
+
+        return true;
+      },
+    });
+
+    first.detach();
+    first.remap('moveUp', { keys: ['t'], codes: ['KeyT'] });
+    first.destroy();
+
+    const second = createInputManager({
+      keymap: deserializeKeymap(stored),
+    });
+
+    second.detach();
+
+    expect(second.getKeymap().moveUp.keys).toEqual(['t']);
+    expect(deserializeKeymap('not a keymap').moveUp).toEqual(
+      DEFAULT_KEY_BINDINGS.moveUp,
+    );
+
+    second.destroy();
   });
 });

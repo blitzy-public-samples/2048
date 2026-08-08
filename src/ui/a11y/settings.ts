@@ -3,10 +3,13 @@
  * every other module under src/ui/ consumes from here: the injected report
  * sink and the guarded mount resolver.
  *
- * The leaf of the src/ui/ import graph. It imports one module outside its own
+ * The leaf of the src/ui/ import graph. It imports two modules outside its own
  * folder — src/theme/themes.ts, for the theme vocabulary and the activation
- * call — and nothing from src/render/, src/observability/, src/storage/,
- * src/audio/, or any sibling module under src/ui/.
+ * call, and src/config/audio-bounds.ts, for the four volume and mute bounds a
+ * preference is validated against — and nothing from src/render/,
+ * src/observability/, src/storage/, src/audio/, or any sibling module under
+ * src/ui/. Both are leaves themselves: neither imports anything from src/ui/,
+ * so neither edge can become a cycle.
  *
  * `resolveMount` closes the eight unguarded lookups the retired sources
  * performed: js/html_actuator.js read `.tile-container`, `.score-container`,
@@ -14,8 +17,6 @@
  * `.game-container`, `.retry-button`, `.restart-button` and
  * `.keep-playing-button`. None of the eight was null-checked, and each result
  * was dereferenced immediately.
- *
- * docs/TRACEABILITY_MATRIX.md, rows TR-SETTINGS-01 through TR-SETTINGS-06 in
  *
  * Subscription semantics are those of js/keyboard_input_manager.js — an
  * appended callback list iterated synchronously — with per-listener error
@@ -29,11 +30,47 @@
  * Preferences are held in memory for the session: this module reads and writes
  * no storage and declares no storage key.
  *
- * Decisions behind this file, all in docs/DECISION_LOG.md: DL-SETTINGS-01,
- * the locally declared report sink; DL-SETTINGS-02, the guarded mount
- * resolver; DL-SETTINGS-03, the session-scoped preferences; DL-SETTINGS-04,
- * a failed `matchMedia` resolving to reduced motion; DL-SETTINGS-05, the
- * three-state motion setting; and DL-THEME-01 and DL-THEME-02, the two
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-SETTINGS-01  js/html_actuator.js L2-L5     the four unguarded lookups,
+ *                                                 replaced by `resolveMount`
+ *   TR-SETTINGS-02  js/keyboard_input_manager.js  the four unguarded lookups,
+ *                   L96, L139-L141                replaced by `resolveMounts`
+ *                                                 and `isMountComplete`
+ *   TR-SETTINGS-03  js/keyboard_input_manager.js  the appended callback list
+ *                   L18-L32                       iterated synchronously,
+ *                                                 ported as `PreferenceStore`
+ *                                                 subscription with
+ *                                                 per-listener error isolation
+ *   TR-SETTINGS-04  js/local_storage_manager.js   the discarded caught value,
+ *                   L37                           replaced by the injected
+ *                                                 `UiReporter` and
+ *                                                 `createSafeUiReporter`
+ *   TR-SETTINGS-05  target-only row               the reduced-motion surface:
+ *                                                 `REDUCED_MOTION_QUERY`,
+ *                                                 `queryReducedMotionPreference`,
+ *                                                 `resolveEffectiveReducedMotion`
+ *                                                 and the three-state
+ *                                                 `MotionSetting`
+ *   TR-SETTINGS-06  target-only row               `UiPreferences`,
+ *                                                 `PREFERENCE_KEYS` and
+ *                                                 `createPreferenceStore`
+ *   TR-SETTINGS-07  target-only row               `reflectReducedMotion` and
+ *                                                 `readReflectedReducedMotion`
+ *   TR-SETTINGS-08  target-only row               `isValidVolume`,
+ *                                                 `clampVolume` and
+ *                                                 `NumberOnlyForce`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-SETTINGS-01  the locally declared report sink
+ *   DL-SETTINGS-02  the guarded mount resolver
+ *   DL-SETTINGS-03  the session-scoped preferences, with no storage key
+ *                   declared here
+ *   DL-SETTINGS-04  a failed `matchMedia` resolving to reduced motion
+ *   DL-SETTINGS-05  the three-state motion setting
+ *   DL-THEME-01     the high-contrast palette this module activates
+ *   DL-THEME-02     the colourblind-safe palette this module activates
  */
 
 import {
@@ -41,7 +78,7 @@ import {
   DEFAULT_VOLUME,
   MAX_VOLUME,
   MIN_VOLUME,
-} from '../../audio/sound-map';
+} from '../../config/audio-bounds';
 import type { ThemeId } from '../../theme/themes';
 import {
   DEFAULT_THEME_ID,
@@ -730,10 +767,7 @@ export function reducedMotionOverrideFor(
  * Attribute the effective reduced-motion value is reflected onto the document
  * element in.
  *
- * The stylesheet cannot read a `MotionSetting`, and `prefers-reduced-motion`
- * alone answers only the operating system, so `'reduce'` and `'allow'` would
- * otherwise reach the render layer and never the style layer. This attribute is
- * the one place both layers agree on: `style/_a11y.scss` selects on it, and
+ * Two consumers read it: `style/_a11y.scss` selects on it, and
  * `src/input/on-screen-controls.ts` reads it when it holds no override of its
  * own.
  */
@@ -811,15 +845,21 @@ export function readReflectedReducedMotion(
  * 4. Audio bounds and the number-only force
  * ----------------------------------------------------------------------- */
 
-// Re-exported, not redeclared: src/audio/sound-map.ts owns these four values.
-// This module published them first and keeps publishing them, so callers are
-// unaffected, but there is now exactly one declaration of each.
+// Re-exported, not redeclared: src/config/audio-bounds.ts holds the one
+// declaration of these four values. This module published them first and keeps
+// publishing them, so callers are unaffected.
+//
+// THE NEUTRAL MODULE IS THE POINT. They were read from src/audio/sound-map.ts,
+// which made this module — the leaf of the src/ui/ import graph — depend on the
+// audio subsystem for four numbers a PREFERENCE needs whether or not this build
+// ever plays a sound. src/config/ imports nothing from src/ui/ or src/audio/, so
+// both consumers reach the one declaration without either reaching the other.
 export {
   DEFAULT_MUTED,
   DEFAULT_VOLUME,
   MAX_VOLUME,
   MIN_VOLUME,
-} from '../../audio/sound-map';
+} from '../../config/audio-bounds';
 
 /** Whether number-only rendering is chosen before anything is chosen. */
 export const DEFAULT_NUMBER_ONLY_MODE = false;

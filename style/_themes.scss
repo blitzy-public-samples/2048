@@ -16,6 +16,27 @@
 //   "high-contrast"         the high-contrast palette
 //   "colorblind-safe"       the colourblind-safe palette
 // With no attribute present the rendered colours are the stylesheet's own.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THEME is one area
+// across the stylesheet and TypeScript halves, so these ordinals continue the
+// ones src/theme/themes.ts carries:
+//   TR-THEME-07  style/main.scss L4-L22     the established palette, restated as
+//                                           the default theme's entries
+//   TR-THEME-08  style/main.scss L334-L402  the tile-ramp loop, ported here once
+//                                           per palette with no compiled row
+//                                           restated as a table
+//   TR-THEME-09  target-only row            the `data-theme` activation contract
+//                                           and its three values
+//   TR-THEME-10  target-only row            the `diagnostics-*` and `focus-*`
+//                                           entries derived from the text tokens
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-THEME-05  the two accessibility palettes added beside the default rather
+//                 than replacing it, so no inherited value is altered
+//   DL-THEME-06  the ramp run once per palette from the same generative loop
+//   DL-THEME-07  every themed value published as a custom property consumed
+//                 with a token fallback
 
 @use "sass:color";
 @use "sass:list";

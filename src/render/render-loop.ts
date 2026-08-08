@@ -12,6 +12,41 @@
  * clock are all injected and all optional: the loop is fully functional with
  * none supplied. The injected reporter is contained once at construction, so no
  * report emitted from a frame can fail the loop.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-LOOP-01  js/html_actuator.js L11-L35   the outer
+ *                                             `requestAnimationFrame`, ported
+ *                                             as `createRenderLoop()` and its
+ *                                             scheduled frame
+ *   TR-LOOP-02  js/html_actuator.js L66-L69   the nested
+ *                                             `requestAnimationFrame`, ported
+ *                                             as the two-phase paint a
+ *                                             `FrameCallback` requests
+ *   TR-LOOP-03  js/animframe_polyfill.js      the shim's presence assumption,
+ *                                             replaced by
+ *                                             `isFrameSchedulingAvailable()`
+ *                                             and the guarded reads
+ *   TR-LOOP-04  target-only row               `FrameContext` and
+ *                                             `FrameSubscription`
+ *   TR-LOOP-05  target-only row               `onFrameBegin` and `onFrameEnd`,
+ *                                             the frame-callback seam a tracer
+ *                                             spans
+ *   TR-LOOP-06  target-only row               `FrameStats`,
+ *                                             `FrameDurationBucket` and
+ *                                             `getFrameStats()`
+ *   TR-LOOP-07  target-only row               `FrameScheduler`, the injected
+ *                                             scheduler and clock
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-LOOP-01  every collaborator — hooks, reporter, scheduler and clock —
+ *               injected and optional, so the loop runs with none supplied
+ *   DL-LOOP-02  the frame delta clamped to `DEFAULT_MAX_DELTA`
+ *   DL-LOOP-03  the synchronous re-request chain bounded by
+ *               `DEFAULT_MAX_SYNCHRONOUS_CHAIN`
+ *   DL-LOOP-04  the loop idling after `DEFAULT_IDLE_FRAMES` frames that
+ *               requested no further work
  */
 
 import {

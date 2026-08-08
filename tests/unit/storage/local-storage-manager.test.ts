@@ -21,9 +21,11 @@
 // tests/fixtures/boards.ts; this file declares neither a key literal nor a
 // board literal of its own.
 //
-// Decisions this suite is the evidence for: DL-STORE-02 through DL-STORE-04
-// in docs/DECISION_LOG.md. Traceability rows: TR-STORE-01 through
-// TR-STORE-08 of docs/TRACEABILITY_MATRIX.md.
+// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
+// DL-STORE-01, DL-STORE-02, DL-STORE-03, DL-STORE-04.
+// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-STORE-01,
+// TR-STORE-02, TR-STORE-03, TR-STORE-04, TR-STORE-05, TR-STORE-06, TR-STORE-07,
+// TR-STORE-08.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -107,9 +109,8 @@ const KEY_TRUNCATION_SUFFIX = '…';
  * Keys the product does not own, each with the label its test title quotes.
  *
  * `OwnedStorageKey` excludes all of them, so each is cast at the call site: the
- * adapter's ownership check is a runtime guard as well as a type-level one,
- * because a key can reach a call site out of persisted or parsed data where the
- * type no longer holds.
+ * adapter's ownership check is a runtime guard as well as a type-level one.
+ * Decision DL-STORE-01.
  */
 const UNOWNED_KEYS: readonly { label: string; key: string }[] = [
   { label: "another application's key", key: 'theme' },
@@ -638,12 +639,12 @@ describe('probeWebStorage() — the reused capability probe (L29-L40)', () => {
     expect(error?.quota).toBe(true);
 
     // The public message is authored by the module, not carried from the
-    // caught value: it is a field an export publishes (F12).
+    // caught value: it is a field an export publishes.
     expect(error?.message).not.toBe(quota.message);
     expect(error?.message).toBe('Storage is full; the operation was refused.');
 
     // The value that was thrown travels beside the description, unconverted,
-    // so its stack and its subclass survive for a logger (F5).
+    // so its stack and its subclass survive for a logger.
     expect(result.thrown).toBe(quota);
   });
 
@@ -722,7 +723,7 @@ describe('probeWebStorage() — the reused capability probe (L29-L40)', () => {
 
       // The failure channel carries the original alongside the description,
       // so the logger adapter records the thrown value and not a summary of
-      // it (F5).
+      // it.
       thrown: quota,
     });
   });
@@ -795,14 +796,14 @@ describe('getGameState() — guarded parse (L52-L55)', () => {
 
     // `SyntaxError` is not one of the names this module reports, so the
     // allowlist substitutes its own and the parser's text — which can quote
-    // the stored value — never reaches the description (F12).
+    // the stored value — never reaches the description.
     expect(failure.error.name).toBe('StorageError');
     expect(failure.error.message).toBe('Unknown storage error.');
     expect(failure.error.message).not.toContain(corrupt.text);
     expect(failure.error.quota).toBe(false);
 
     // The parse error itself is still delivered, so the logger records what
-    // was thrown (F5).
+    // was thrown.
     expect(failure.thrown).toBeInstanceOf(SyntaxError);
   });
 
@@ -1259,7 +1260,7 @@ describe('reporter fault containment (reporterFaults)', () => {
     expect(manager.reporterFailures).toBe(1);
     // A contained reporter fault is described by the same allowlist: a plain
     // `Error` is not one of the names this module reports, and the sink's own
-    // text is not carried into a field an export publishes (F12).
+    // text is not carried into a field an export publishes.
     expect(manager.lastReporterFault).toStrictEqual({
       name: 'StorageError',
       message: 'Unknown storage error.',
@@ -1318,9 +1319,9 @@ describe('reporter fault containment (reporterFaults)', () => {
 
 // `acceptKey()` runs before any store operation, so a key the product does not
 // own is refused, reported and never handed to the store. The static
-// `OwnedStorageKey` type already excludes such a key at a call site; the
-// assertions below defeat the type deliberately, because a key can arrive out
-// of persisted or parsed data where nothing enforces it.
+// `OwnedStorageKey` type already excludes such a key at a call site, and the
+// assertions below defeat the type deliberately to reach the runtime guard.
+// Decision DL-STORE-01.
 describe('the ownership guard refuses an unowned key before the store', () => {
   /**
    * Builds a manager over a store that records every operation it receives.
@@ -1446,8 +1447,8 @@ describe('the ownership guard refuses an unowned key before the store', () => {
     }
   );
 
-  it('reports the refusal without naming the refused key in the message ' +
-    '(F12)', () => {
+  it('reports the refusal without naming the refused key in the ' +
+    'message', () => {
     const { manager, collector } = createGuardedManager();
 
     expect(manager.readRaw('theme' as OwnedStorageKey)).toBeNull();

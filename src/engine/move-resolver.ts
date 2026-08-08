@@ -21,23 +21,20 @@
 // terminates on the bounds valve of src/engine/grid.ts's `cellContent`.
 //
 // THREE CHANGES TO THE PORTED BEHAVIOUR
-// The vanilla merge condition is split: the `next &&` existence guard
-// stays in this module and the two remaining tests are
-// `config.merge.canMerge`.
-// The face value the vanilla branch computed as `tile.value * 2` is
-// `config.merge.produce`.
 //
-// THREE CHANGES TO THE PORTED BEHAVIOUR, decisions DL-MOVE-01 through
-// DL-MOVE-03 in that order
+//   The vanilla merge condition is split: the `next &&` existence guard stays
+//   in this module and the two remaining tests are `config.merge.canMerge`.
+//   The face value the vanilla branch computed as `tile.value * 2` is
+//   `config.merge.produce`.
 //
-// The `onMerge` transformation reaches the merge branch through the callback
-// `resolveMove` takes in its options, which defaults to
-// `identityMergeDispatch`. This module names no hook bus.
+//   The `onMerge` transformation reaches the merge branch through the callback
+//   `resolveMove` takes in its options, which defaults to
+//   `identityMergeDispatch`. This module names no hook bus.
 //
-// The win test the vanilla merge branch performed inline is not performed
-// here. `MoveOutcome.merges` carries every tile a merge produced, and
-// src/engine/terminal-state.ts compares those values against
-// `RulesConfig.winValue`.
+//   The win test the vanilla merge branch performed inline is not performed
+//   here. `MoveOutcome.merges` carries every tile a merge produced, and
+//   src/engine/terminal-state.ts compares those values against
+//   `RulesConfig.winValue`.
 //
 // The vanilla post-move branch — the spawn, the loss check and the
 // actuation — belongs to src/engine/engine.ts.
@@ -45,17 +42,18 @@
 // This module reads no DOM, performs no I/O, consumes no randomness and reads
 // no clock.
 //
-// Decisions behind this file: DL-MOVE-01, the merge condition split
-// DL-MOVE-02, the `onMerge` transformation arriving as an injected
-// callback so this module names no bus; and DL-MOVE-03, the win test
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-MOVE-01  the merge condition split between the existence guard and
+//               `config.merge.canMerge`
+//   DL-MOVE-02  the `onMerge` transformation arriving as an injected callback,
+//               so this module names no bus
+//   DL-MOVE-03  the win test leaving this module for
+//               src/engine/terminal-state.ts
 
 import type { RulesConfig } from '../config/rules-config';
 import type { Grid } from './grid';
-import type {
-  MergeDispatchPayload,
-  MergePayload,
-  ReadonlyTileView,
-} from './hooks';
+import type { MergeDispatchPayload, MergePayload } from './hooks';
 import { Tile } from './tile';
 import type { Direction, Position, Vector } from './types';
 
@@ -194,51 +192,29 @@ export function moveTile(grid: Grid, tile: Tile, cell: Position): void {
  * Transforms one `onMerge` payload inside the merge branch, before the merged
  * tile is written to the board.
  *
- * Takes the DISPATCH-INPUT payload, carrying the two live tiles, and returns
- * the handler-visible payload, carrying their frozen views: substituting the
- * views is src/engine/hook-bus.ts's job, and this signature is what states
- * that the two shapes differ. `resolveMove` reads `resultValue` and
- * `scoreDelta` back from the returned payload and nothing else, so the views
- * it returns are never dereferenced here.
+ * Takes and returns the same payload shape, carrying the two live tiles:
+ * `resolveMove` reads `resultValue` and `scoreDelta` back from the returned
+ * payload and nothing else, so a dispatch that rewrites either changes the
+ * merge and a dispatch that rewrites neither leaves it as it stood.
  */
 export type MergeDispatch = (payload: MergeDispatchPayload) => MergePayload;
 
 /**
  * The `MergeDispatch` `resolveMove` uses when none is supplied: returns the
- * two transformable members unchanged, so the merge resolves on the values
- * `config.merge.produce` yielded. The two tiles are projected onto the
- * handler-visible shape without exposing a write, exactly as a real dispatch
- * would.
+ * payload's four members unchanged, so the merge resolves on the values
+ * `config.merge.produce` yielded. The dispatched payload and the handler's
+ * payload are one type — the live tiles travel through both — so this is the
+ * identity over a fresh shell.
  */
 export function identityMergeDispatch(
   payload: MergeDispatchPayload,
 ): MergePayload {
   return {
-    source: tileView(payload.source),
-    target: tileView(payload.target),
+    source: payload.source,
+    target: payload.target,
     resultValue: payload.resultValue,
     scoreDelta: payload.scoreDelta,
   };
-}
-
-/**
- * Projects one live tile onto the read-only shape a merge payload carries: the
- * three coordinates read at projection time and `previousPosition` copied into
- * a fresh frozen pair. `mergedFrom` and the two position writes are absent, so
- * nothing reachable through the result writes the board.
- */
-function tileView(tile: Tile): ReadonlyTileView {
-  const previous = tile.previousPosition;
-
-  return Object.freeze({
-    x: tile.x,
-    y: tile.y,
-    value: tile.value,
-    previousPosition:
-      previous === null
-        ? null
-        : Object.freeze({ x: previous.x, y: previous.y }),
-  });
 }
 
 /**

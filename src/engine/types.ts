@@ -7,6 +7,33 @@
 // This module names no sibling engine module, reads no DOM, performs no I/O,
 // consumes no randomness and reads no clock. Evaluating it creates the four
 // frozen neutral constants below and nothing else.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-TYPES-01  js/tile.js L19-L27       `SerializedTile`
+//   TR-TYPES-02  js/grid.js L102-L117     `SerializedGrid` and `CellMatrix`
+//   TR-TYPES-03  js/game_manager.js
+//                L226-L234                `SerializedGameState`
+//   TR-TYPES-04  js/game_manager.js
+//                L194-L204                `Direction` and `Vector`
+//   TR-TYPES-05  js/local_storage_manager.js
+//                L43-L45                  `BestScorePort` and
+//                                         `BestScoreValue`, the string-or-0
+//                                         return
+//   TR-TYPES-06  target-only row          `EngineReporter` and its three
+//                                         report shapes
+//   TR-TYPES-07  target-only row          `StageCommitContext`,
+//                                         `RelicCommitContext` and the four
+//                                         frozen neutral constants
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-TYPES-01  the persisted snapshot types reproducing the pre-migration
+//                `gameState` shape member for member
+//   DL-TYPES-02  `BestScoreValue` derived from the port's own return type
+//                rather than widened to `string | number`
+//   DL-TYPES-03  the neutral stage and relic contexts declared here as frozen
+//                constants, so the engine is constructible with no run system
 
 import type { StageGoal } from '../config/stage-config';
 

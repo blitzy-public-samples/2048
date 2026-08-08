@@ -3,6 +3,40 @@
 // reduced-motion overrides. Every length and duration derives from a token in
 // style/_tokens.scss. Sass `@use` is not transitive, so each sibling partial
 // that needs these mixins loads this file for itself.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+// file's area enumerated. A11Y is one area across every file that carries it, so
+// these ordinals are unique across this file, style/main.scss, style/_hud.scss,
+// style/_screens.scss, style/_summary.scss and src/ui/:
+//   TR-A11Y-01  style/main.scss (source branch)  the stylesheet's complete
+//                                                absence of any `:focus`,
+//                                                `:focus-visible` or `:hover`
+//                                                rule, closed by the focus and
+//                                                interaction-state vocabulary
+//                                                here
+//   TR-A11Y-02  style/main.scss (source branch)  the absence of any
+//                                                `prefers-reduced-motion`
+//                                                query, closed by the
+//                                                reduced-motion layer here
+//   TR-A11Y-03  index.html L70-L72               the empty `.tile-container`,
+//                                                whose accessible successor is
+//                                                the parallel board layer
+//                                                styled here
+//   TR-A11Y-04  target-only row                  the visually-hidden utility
+//   TR-A11Y-05  target-only row                  the mobile restatement of the
+//                                                parallel board's geometry
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-A11Y-03  the focus ring drawn as a two-band outline with a
+//               `:focus-visible` primary and a `:focus` fallback under
+//               `@supports not selector(:focus-visible)`
+//   DL-A11Y-04  the reduced-motion layer substituting a nonzero instant
+//               duration for every animation and transition
+//   DL-A11Y-05  the disabled treatment carried by the `disabled` attribute and
+//               `aria-disabled` as well as by alpha
+//   DL-A11Y-09  the visually-hidden utility collapsing the paint region while
+//               keeping the element's box
 
 @use "sass:color";
 @use "sass:math";
@@ -153,13 +187,12 @@ $a11y-motion-attribute: "data-reduced-motion" !default;
 // takes part in layout. The hover rule sits inside `@media (hover: hover)`, so
 // a touch pointer that emulates hover does not leave a control looking
 // pointed-at after a tap. `opacity` is applied to the control itself, which is
-// a leaf, so it creates no containing block. BLITZY [A11Y]: at
-// $a11y-disabled-alpha the label falls below the contrast the enabled control
-// measures. WCAG 1.4.3 exempts an inactive component from the contrast minimum,
-// and the state is also carried by the HTML `disabled` attribute and by
-// `aria-disabled`, so it does not rest on colour alone.
+// a leaf, so it creates no containing block.
 //
-// attribute and by `aria-disabled`. Decision DL-A11Y-05.
+// BLITZY [A11Y]: at $a11y-disabled-alpha the label falls below the contrast the
+// enabled control measures. The disabled state is carried by the HTML
+// `disabled` attribute and by `aria-disabled` as well as by colour. Decision
+// DL-A11Y-05.
 
 @mixin interactive-states {
   @media (hover: hover) {

@@ -25,7 +25,6 @@ import type {
   DiagnosticsOverlay,
   DiagnosticsSnapshot,
   HealthSurfaceView,
-  TracerView,
 } from '../../../src/observability/diagnostics-overlay';
 import {
   HEALTH_CHECK_IDS,
@@ -38,18 +37,21 @@ import type {
   ReadinessReport,
 } from '../../../src/observability/health';
 import type {
+  SpanName,
   SpanRecord,
+  Tracer,
   TraceSnapshot,
 } from '../../../src/observability/tracer';
 import {
   SPAN_NAMES,
-  TRACE_SNAPSHOT_SCHEMA_VERSION,
+  createBoundaryTracing,
+  createTracer,
 } from '../../../src/observability/tracer';
 import { monospaceStack, zIndex } from '../../../src/theme/tokens';
 import { METRIC_PREFIX, createMetricsRegistry } from '../../../src/observability/metrics';
 import type { MetricsRegistry } from '../../../src/observability/metrics';
 import { createLogger, deriveCorrelationId } from '../../../src/observability/logger';
-import type { LogRecord, Logger } from '../../../src/observability/logger';
+import type { Logger } from '../../../src/observability/logger';
 
 /** Selector the control row's buttons are read back by. */
 const CONTROL_QUERY = '.diagnostics-controls button';
@@ -58,6 +60,20 @@ const HOST_MARKUP =
   '<div class="diagnostics-overlay" id="diagnostics-overlay" hidden></div>';
 
 let overlay: DiagnosticsOverlay | null = null;
+
+/**
+ * The rendered text of the fixture host, whitespace collapsed.
+ *
+ * The `setup()` harness reports the same value for the overlay it built; this
+ * reads it for an overlay a case constructed itself.
+ *
+ * @returns The text, empty where the host is absent.
+ */
+const hostText = (): string => {
+  const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+
+  return (host?.textContent ?? '').replace(/\s+/g, ' ').trim();
+};
 
 beforeEach(() => {
   document.body.innerHTML = HOST_MARKUP;
@@ -193,6 +209,119 @@ describe('the surface lifecycle', () => {
       harness.overlay.destroy();
       harness.overlay.open();
     }).not.toThrow();
+  });
+
+  it('leaves EVERY read and export member inert after destroy', () => {
+    // The whole retained surface, not just the ones that touch the host.
+    // `destroy()` promises every member is inert, and the four readers and two
+    // exporters below went on working: a retained handle could keep probing
+    // health, folding the hook counts into the registry, reading the log buffer
+    // and the tracer, and creating download blobs after disposal.
+    const reads = {
+      health: 0,
+      hooks: 0,
+      tracer: 0,
+    };
+    const metrics = createMetricsRegistry();
+    const logger = createLogger({ consoleOutput: false });
+    const chain = traceOneChain();
+    const built = createDiagnosticsOverlay({
+      metrics,
+      logger,
+      document,
+
+      health: (): readonly { name: string; healthy: boolean }[] => {
+        reads.health += 1;
+
+        return [{ name: 'webgl', healthy: true }];
+      },
+
+      hookCounts: () => {
+        reads.hooks += 1;
+
+        return fabricatedHookCounts();
+      },
+
+      tracer: {
+        snapshot: (limit?: number) => {
+          reads.tracer += 1;
+
+          return chain.tracer.snapshot(limit);
+        },
+      },
+    });
+
+    overlay = built;
+    built.mount();
+    built.open();
+
+    expect(reads.health).toBeGreaterThan(0);
+    expect(reads.hooks).toBeGreaterThan(0);
+    expect(reads.tracer).toBeGreaterThan(0);
+
+    const seriesBefore = metrics.snapshot().series.length;
+
+    built.destroy();
+
+    const after = { ...reads };
+    const clicks: string[] = [];
+    const created: string[] = [];
+    const revoked: string[] = [];
+
+    // Any download would go through these three, so counting them is how a
+    // blob created after disposal is caught.
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(
+      function click(this: HTMLAnchorElement): void {
+        clicks.push(this.download);
+      },
+    );
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((): string => {
+      created.push('url');
+
+      return 'blob:diagnostics-after-destroy';
+    });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation((url: string): void => {
+      revoked.push(url);
+    });
+
+    const prometheus = built.toPrometheusText();
+    const snapshot = built.snapshot();
+    const json = built.snapshotJson();
+
+    expect(prometheus).toBe('');
+
+    // THE DOCUMENTED INERT VALUES, which are not a serialisation of the inert
+    // envelope: the exporter yields the empty string so a caller cannot mistake
+    // a disposed overlay's reading for a real one, while `snapshot()` yields the
+    // frozen empty envelope so a caller reading fields is not handed `null`.
+    expect(json).toBe('');
+    expect(built.exportPrometheusText()).toBe(false);
+    expect(built.exportSnapshotJson()).toBe(false);
+
+    // Documented inert values: an empty envelope with every source absent. The
+    // zero `schemaVersion` is what tells it from a real reading, which carries
+    // `DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION`.
+    expect(DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION).toBeGreaterThan(0);
+    expect(snapshot.schemaVersion).toBe(0);
+    expect(snapshot.correlationId).toBe('');
+    expect(snapshot.health.status).toBeNull();
+    expect(snapshot.health.checks).toHaveLength(0);
+    expect(snapshot.health.report).toBeNull();
+    expect(snapshot.health.readiness).toBeNull();
+    expect(snapshot.traces).toBeNull();
+    expect(snapshot.hooks).toHaveLength(0);
+    expect(snapshot.logs).toHaveLength(0);
+    expect(snapshot.metrics.series).toHaveLength(0);
+
+    // Zero provider reads, zero folds into the registry, zero object URLs and
+    // zero clicks.
+    expect(reads).toEqual(after);
+    expect(metrics.snapshot().series.length).toBe(seriesBefore);
+    expect(created).toHaveLength(0);
+    expect(revoked).toHaveLength(0);
+    expect(clicks).toHaveLength(0);
+    expect(document.body.querySelector('a')).toBeNull();
+    expect(built.lastSnapshot()).toBeNull();
   });
 });
 
@@ -917,6 +1046,91 @@ describe('the health panel', () => {
 
     expect(text).toContain('not-applicable');
   });
+
+  it('reads the three-state status a probe reader carries rather than its boolean', () => {
+    // The boolean cannot express the third state, so a reader collapsing to it
+    // presented an inapplicable check as an unqualified pass. The status member
+    // is what src/observability/health.ts now carries beside the boolean.
+    const metrics = createMetricsRegistry();
+    const built = createDiagnosticsOverlay({
+      metrics,
+      document,
+      health: (): readonly {
+        name: string;
+        status: HealthStatus;
+        healthy: boolean;
+        detail: string;
+      }[] =>
+        HEALTH_CHECK_IDS.map((id) => ({
+          name: id,
+          status:
+            id === 'pointerEvents'
+              ? 'not-applicable'
+              : id === 'webgl'
+                ? 'fail'
+                : 'pass',
+          healthy: id !== 'webgl',
+          detail: `observed ${id}`,
+        })),
+    });
+
+    overlay = built;
+    built.open();
+
+    const health = built.snapshot().health;
+    const row = health.checks.find((entry) => entry.id === 'pointerEvents');
+
+    expect(row?.status).toBe('not-applicable');
+    expect(health.counts['not-applicable']).toBe(1);
+    expect(health.counts.fail).toBe(1);
+    expect(health.counts.pass).toBe(HEALTH_CHECK_IDS.length - 2);
+  });
+
+  it('reconciles every rendered row with the gauge exported for it', () => {
+    const metrics = createMetricsRegistry();
+    const built = createDiagnosticsOverlay({
+      metrics,
+      document,
+
+      // One check reported, five unreported: the unreported rows are rendered
+      // as inapplicable and each has to carry its own gauge, or the panel and
+      // the export disagree about a check nobody reported.
+      health: (): readonly { name: string; healthy: boolean }[] => [
+        { name: 'webgl', healthy: false },
+      ],
+    });
+
+    overlay = built;
+    built.open();
+
+    const health = built.snapshot().health;
+    const gauges = new Map<string, number>();
+
+    for (const series of metrics.snapshot().series) {
+      if (series.name.includes('health_check') && series.kind === 'gauge') {
+        const check = series.labels.check;
+
+        if (typeof check === 'string') {
+          gauges.set(check, series.value);
+        }
+      }
+    }
+
+    expect(health.checks).toHaveLength(HEALTH_CHECK_IDS.length);
+    expect(gauges.size).toBe(HEALTH_CHECK_IDS.length);
+
+    const encoded: Readonly<Record<HealthStatus, number>> = {
+      pass: 1,
+      fail: 0,
+      'not-applicable': -1,
+    };
+
+    for (const row of health.checks) {
+      expect(gauges.get(row.id), `no gauge for "${row.id}"`).toBe(
+        encoded[row.status],
+      );
+    }
+  });
 });
 
 /* ==========================================================================
@@ -1082,78 +1296,126 @@ describe('the hook panel', () => {
  * Validation gate V8 requires the trace chain to be visible, frame-callback
  * seam included. The 16 ms reference is the budget js/animframe_polyfill.js L13
  * held and the tracer carries forward.
+ *
+ * DRIVEN BY A REAL `Tracer`. The records here carry the real identifier shape,
+ * `${correlationId}#${counter}`, in which every span of one run shares its head
+ * and only the counter differs. Fabricating identifiers with unique heads is
+ * what let the panel render every span and every parent identically without any
+ * case noticing.
  * ========================================================================== */
 
+/** Correlation identifier the traced runs below are keyed under. */
+const TRACED_CORRELATION_ID = deriveCorrelationId('trace-panel-seed', 'run-1');
+
+/** What `traceOneChain` built. */
+interface TracedChain {
+  readonly tracer: Tracer;
+
+  /** The span records it produced, oldest first. */
+  readonly records: readonly SpanRecord[];
+
+  /** The identifier of the span of one name, as the tracer issued it. */
+  idOf(name: SpanName): string;
+}
+
 /**
- * Builds one fabricated span record.
+ * Drives one whole chain through a real tracer: input, turn, hook dispatch,
+ * relic handler, render commit and the frame callback.
  *
- * @param name Span name.
- * @param id Span identifier.
- * @param parentId Parent identifier, or `undefined` for a root span.
- * @param durationMs Duration in milliseconds.
- * @returns The record.
+ * @param frames Frames to measure through the lifecycle hooks.
+ * @param frameMs Duration reported for each of them.
+ * @returns The tracer and the records it produced.
  */
-const spanRecord = (
-  name: SpanRecord['name'],
-  id: string,
-  parentId: string | undefined,
-  durationMs: number,
-): SpanRecord => ({
-  name,
-  id,
-  parentId,
-  startTime: 0,
-  durationMs,
-  attributes: {},
-  events: [],
-  correlationId: 'run-traced',
-  droppedAttributes: 0,
-  droppedEvents: 0,
-});
+const traceOneChain = (frames = 1, frameMs = 18): TracedChain => {
+  const tracer = createTracer({
+    logger: createLogger({
+      correlationId: TRACED_CORRELATION_ID,
+      consoleOutput: false,
+    }),
+    metrics: createMetricsRegistry(),
+    correlationId: TRACED_CORRELATION_ID,
+    frameBudgetMs: 16,
+  });
+  const boundary = createBoundaryTracing(tracer);
 
-/** A fabricated tracer snapshot spanning input through renderer. */
-const fabricatedTraces = (): TraceSnapshot => ({
-  schemaVersion: TRACE_SNAPSHOT_SCHEMA_VERSION,
-  correlationId: 'run-traced',
-  enabled: true,
-  capacity: 200,
-  started: 6,
-  ended: 6,
-  open: 0,
-  dropped: 0,
-  faults: 0,
-  anomalies: 0,
-  doubleEnds: 0,
-  outOfOrderEnds: 0,
-  frames: {
-    frames: 10,
-    overBudgetFrames: 3,
-    budgetMs: 16,
-    lastFrameMs: 12.5,
-    maxFrameMs: 41.25,
-    totalFrameMs: 150,
-  },
-  spans: [
-    spanRecord(SPAN_NAMES.inputDispatch, 'input001', undefined, 1),
-    spanRecord(SPAN_NAMES.engineTurn, 'turn0001', 'input001', 4),
-    spanRecord(SPAN_NAMES.hookDispatch, 'hook0001', 'turn0001', 2),
-    spanRecord(SPAN_NAMES.relicHandler, 'relic001', 'hook0001', 1),
-    spanRecord(SPAN_NAMES.renderCommit, 'commit01', 'turn0001', 3),
-    spanRecord(SPAN_NAMES.frameCallback, 'frame001', undefined, 18),
-  ],
-});
+  boundary.traceInput('move', (): void => {
+    tracer.withSpan(SPAN_NAMES.engineTurn, (): void => {
+      boundary.traceHookDispatch('onSpawn', (): void => {
+        boundary.traceRelicHandler(
+          'onSpawn',
+          'lucky-two',
+          (): void => undefined,
+        );
+      });
+      boundary.traceRenderCommit((): void => undefined);
+    });
+  });
 
-/** A tracer over the fabricated snapshot. */
-const fabricatedTracer = (): TracerView => ({
-  snapshot: (): TraceSnapshot => fabricatedTraces(),
-});
+  const hooks = tracer.frameLifecycleHooks();
+
+  for (let frame = 0; frame < frames; frame += 1) {
+    hooks.onFrameBegin();
+    hooks.onFrameEnd(undefined, frameMs);
+  }
+
+  const records = tracer.recent();
+
+  return {
+    tracer,
+    records,
+    idOf: (name): string => {
+      const found = records.find((record) => record.name === name);
+
+      expect(found, `no record for "${name}"`).toBeDefined();
+
+      return found?.id ?? '';
+    },
+  };
+};
+
+/**
+ * Reads the rendered table cells of the mounted overlay.
+ *
+ * `textContent` concatenates cells with no separator, so a rendered identifier
+ * cannot be recovered from it; the cells are read individually instead.
+ *
+ * @returns Every cell's trimmed text, in document order.
+ */
+const renderedCells = (): readonly string[] =>
+  [
+    ...(document
+      .querySelector('#diagnostics-overlay')
+      ?.querySelectorAll('td') ?? []),
+  ].map((cell) => (cell.textContent ?? '').trim());
+
+/**
+ * Reads the values of the cells carrying one prefix.
+ *
+ * @param prefix Cell prefix, as `'id '` or `'parent '`.
+ * @returns The value after the prefix, for every cell carrying it.
+ */
+const cellValues = (prefix: string): readonly string[] =>
+  renderedCells()
+    .filter((cell) => cell.startsWith(prefix))
+    .map((cell) => cell.slice(prefix.length));
+
+/**
+ * The form the panel is expected to render one real identifier as: a bounded
+ * tail of the correlation identifier, then the whole counter.
+ *
+ * @param id Identifier the tracer issued.
+ * @returns The rendered form.
+ */
+const renderedIdOf = (id: string): string =>
+  `…${TRACED_CORRELATION_ID.slice(-4)}${id.slice(id.lastIndexOf('#'))}`;
 
 describe('the trace panel', () => {
   it('summarises the frame budget and its exceedances', () => {
+    const chain = traceOneChain(3, 40);
     const built = createDiagnosticsOverlay({
       metrics: createMetricsRegistry(),
       document,
-      tracer: fabricatedTracer(),
+      tracer: chain.tracer,
     });
 
     overlay = built;
@@ -1164,15 +1426,17 @@ describe('the trace panel', () => {
 
     expect(text).toContain('frame budget');
     expect(text).toContain('16 ms');
-    expect(text).toContain('over budget 3 of 10');
-    expect(text).toContain('last 12.500 ms');
+    expect(text).toContain('over budget 3 of 3');
+    expect(text).toContain('last 40 ms');
   });
 
   it('shows the whole chain with its parent linkage', () => {
+    const chain = traceOneChain();
     const built = createDiagnosticsOverlay({
       metrics: createMetricsRegistry(),
       document,
-      tracer: fabricatedTracer(),
+      tracer: chain.tracer,
+      spanLimit: chain.records.length,
     });
 
     overlay = built;
@@ -1192,10 +1456,71 @@ describe('the trace panel', () => {
       expect(text).toContain(name);
     }
 
-    // The linkage is what makes the chain readable as a chain.
-    expect(text).toContain('parent input001');
-    expect(text).toContain('parent turn0001');
-    expect(text).toContain('parent hook0001');
+    // Every identifier of one run shares its head, so the rendered form has to
+    // carry the counter or the linkage below cannot be told apart at all.
+    const parents = cellValues('parent ');
+
+    for (const name of [
+      SPAN_NAMES.inputDispatch,
+      SPAN_NAMES.engineTurn,
+      SPAN_NAMES.hookDispatch,
+    ]) {
+      expect(parents).toContain(renderedIdOf(chain.idOf(name)));
+    }
+  });
+
+  it('renders every real identifier distinguishably rather than as one shared prefix', () => {
+    const chain = traceOneChain();
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      tracer: chain.tracer,
+      spanLimit: chain.records.length,
+    });
+
+    overlay = built;
+    built.open();
+
+    const rendered = cellValues('id ');
+
+    expect(rendered.length).toBe(chain.records.length);
+
+    // The defect this pins: truncating to the head alone rendered all six as
+    // the same string, so no two spans and no parent link could be told apart.
+    expect(new Set(rendered).size).toBe(rendered.length);
+
+    for (const record of chain.records) {
+      expect(record.id.startsWith(TRACED_CORRELATION_ID)).toBe(true);
+      expect(rendered).toContain(renderedIdOf(record.id));
+    }
+  });
+
+  it('links each rendered parent to a rendered identifier', () => {
+    const chain = traceOneChain();
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      tracer: chain.tracer,
+      spanLimit: chain.records.length,
+    });
+
+    overlay = built;
+    built.open();
+
+    const ids = new Set(cellValues('id '));
+    const parents = cellValues('parent ').filter(
+      (parent) => parent !== '—',
+    );
+
+    expect(parents.length).toBeGreaterThan(0);
+
+    // A chain is only readable as a chain if each parent resolves to a span the
+    // same panel shows.
+    for (const parent of parents) {
+      expect(ids.has(parent), `parent "${parent}" resolves to no span`).toBe(
+        true,
+      );
+    }
   });
 
   it('summarises both duration families off the recorded histograms', () => {
@@ -1265,7 +1590,69 @@ describe('the log panel', () => {
     expect(harness.host.querySelector('img')).toBeNull();
     expect(harness.host.textContent).toContain(hostile);
   });
+
+  it('carries no source location out of a full-stack logger', () => {
+    // A logger built for a private development sink, which is the one
+    // configuration that keeps stack text as it was thrown. The panel and the
+    // export both read the logger's `snapshot()` surface, which redacts
+    // whatever the logger's own `stackDetail` is, so neither carries a location.
+    const logger = createLogger({
+      correlationId: deriveCorrelationId('stack-seed', 'stack-run'),
+      subsystem: 'test',
+      consoleOutput: false,
+      stackDetail: 'full',
+    });
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry({ logger }),
+      logger,
+      document,
+    });
+
+    overlay = built;
+
+    const posix = '/home/agent/app/src/engine/engine.ts:120:14';
+    const windows = 'C:\\Users\\agent\\app\\src\\engine\\engine.ts:120:14';
+    const url = 'http://localhost:5173/src/engine/engine.ts:120:14';
+    const cause = new Error('the cause');
+
+    cause.stack = `Error: the cause\n    at spawn (${windows})`;
+
+    const thrown = new Error('the failure', { cause });
+
+    thrown.stack =
+      `Error: the failure\n    at move (${posix})\n    at commit (${url})`;
+
+    logger.error('a move failed', undefined, thrown);
+
+    // The sink DID receive the locations, so the assertions below measure the
+    // export boundary rather than a logger that never carried them.
+    const received = logger.recent(1)[0];
+
+    expect(received.error?.stack).toContain(posix);
+    expect(received.error?.cause?.stack).toContain(windows);
+
+    built.open();
+
+    const rendered = hostText();
+    const exported = built.snapshotJson();
+    const record = built.snapshot().logs.at(-1);
+
+    for (const location of [posix, windows, url]) {
+      expect(rendered).not.toContain(location);
+      expect(exported).not.toContain(location);
+    }
+
+    // The record itself is redacted rather than merely unrendered: the stack
+    // shape and the frame names survive, the locations do not.
+    expect(record?.error?.stack).toContain('at move');
+    expect(record?.error?.stack).not.toContain('/home/agent');
+    expect(record?.error?.cause?.stack).not.toContain('C:\\Users');
+    expect(exported).toContain('[redacted]');
+    expect(exported).toContain('a move failed');
+  });
 });
+
+
 
 /* ==========================================================================
  * 13. The combined snapshot, the dashboard template's input
@@ -1287,7 +1674,10 @@ describe('the combined snapshot', () => {
       logger,
       document,
       health: fabricatedSurface(),
-      tracer: fabricatedTracer(),
+
+      // A real tracer, driven over three frames of 40 ms so every one of them
+      // exceeds the 16 ms budget the snapshot below reads back.
+      tracer: traceOneChain(3, 40).tracer,
       hookCounts: fabricatedHookCounts,
     });
 
@@ -1653,8 +2043,10 @@ describe('a failing source', () => {
 
     const brittle = Object.create(logger) as Logger;
 
-    Object.defineProperty(brittle, 'recent', {
-      value: (): readonly LogRecord[] => {
+    // `snapshot` rather than `recent`: the log panel reads the export surface,
+    // because that is the surface that redacts.
+    Object.defineProperty(brittle, 'snapshot', {
+      value: (): never => {
         throw new Error('the buffer exploded');
       },
     });
@@ -1924,5 +2316,171 @@ describe('the focus across a render', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/* ==========================================================================
+ * A destroyed overlay is inert
+ *
+ * `destroy()` documents that it "leaves every member inert", and five members
+ * did not honour it: the three reads still walked the registry, the health
+ * surface and the tracer, and the two exports could still start a browser
+ * download and create an object URL for an overlay that no longer existed.
+ * ========================================================================== */
+
+describe('a destroyed overlay', () => {
+  it('reports itself unavailable and closed', () => {
+    const harness = setup();
+
+    harness.overlay.mount();
+    harness.overlay.open();
+    harness.overlay.destroy();
+
+    expect(harness.overlay.available).toBe(false);
+    expect(harness.overlay.isOpen()).toBe(false);
+  });
+
+  it('refuses to open, close or toggle', () => {
+    const harness = setup();
+
+    harness.overlay.mount();
+    harness.overlay.destroy();
+
+    harness.overlay.open();
+
+    expect(harness.overlay.isOpen()).toBe(false);
+    expect(harness.overlay.toggle()).toBe(false);
+    expect(harness.overlay.isOpen()).toBe(false);
+
+    harness.overlay.close();
+
+    expect(harness.overlay.isOpen()).toBe(false);
+  });
+
+  it('renders nothing on refresh', () => {
+    const harness = setup();
+
+    harness.overlay.mount();
+    harness.overlay.open();
+    harness.overlay.destroy();
+    harness.overlay.refresh();
+
+    expect(harness.host.textContent ?? '').toBe('');
+  });
+
+  it('reports no last snapshot', () => {
+    const harness = setup();
+
+    harness.overlay.mount();
+    harness.overlay.open();
+
+    expect(harness.overlay.lastSnapshot()).not.toBeNull();
+
+    harness.overlay.destroy();
+
+    expect(harness.overlay.lastSnapshot()).toBeNull();
+  });
+
+  it('exports no Prometheus text', () => {
+    const harness = setup();
+
+    harness.metrics.counter(`${METRIC_PREFIX}probe_total`).inc(3);
+
+    expect(harness.overlay.toPrometheusText().length).toBeGreaterThan(0);
+
+    harness.overlay.destroy();
+
+    // The registry is still perfectly readable; the overlay simply no longer
+    // reads it.
+    expect(harness.overlay.toPrometheusText()).toBe('');
+    expect(harness.metrics.toPrometheusText().length).toBeGreaterThan(0);
+  });
+
+  it('yields an inert snapshot rather than a live reading', () => {
+    const harness = setup();
+
+    harness.metrics.counter(`${METRIC_PREFIX}probe_total`).inc(3);
+
+    expect(harness.overlay.snapshot().metrics.series.length)
+      .toBeGreaterThan(0);
+
+    harness.overlay.destroy();
+
+    const snapshot = harness.overlay.snapshot();
+
+    // The zero `schemaVersion` is what distinguishes this from a real reading.
+    expect(snapshot.schemaVersion).toBe(0);
+    expect(snapshot.metrics.series).toEqual([]);
+    expect(snapshot.health.status).toBeNull();
+    expect(snapshot.traces).toBeNull();
+    expect(snapshot.hooks).toEqual([]);
+    expect(snapshot.logs).toEqual([]);
+  });
+
+  it('yields no snapshot JSON', () => {
+    const harness = setup();
+
+    expect(harness.overlay.snapshotJson().length).toBeGreaterThan(0);
+
+    harness.overlay.destroy();
+
+    expect(harness.overlay.snapshotJson()).toBe('');
+  });
+
+  it('starts no download from either export', () => {
+    const harness = setup();
+
+    harness.overlay.destroy();
+
+    // Both could still reach the document and create an object URL for an
+    // overlay that no longer exists.
+    expect(harness.overlay.exportPrometheusText()).toBe(false);
+    expect(harness.overlay.exportSnapshotJson()).toBe(false);
+  });
+
+  it('reads no health source once destroyed', () => {
+    let reads = 0;
+    const harness = setup({
+      health: () => {
+        reads += 1;
+
+        return [{ name: 'storage', healthy: true }];
+      },
+    });
+
+    harness.overlay.snapshot();
+
+    expect(reads).toBeGreaterThan(0);
+
+    const taken = reads;
+
+    harness.overlay.destroy();
+    harness.overlay.snapshot();
+    harness.overlay.refresh();
+    harness.overlay.snapshotJson();
+
+    // The source is RELEASED, so nothing the overlay does can reach it again.
+    expect(reads).toBe(taken);
+  });
+
+  it('mounts nothing once destroyed', () => {
+    const harness = setup();
+
+    harness.overlay.destroy();
+
+    expect(harness.overlay.mount()).toBe(false);
+    expect(harness.overlay.available).toBe(false);
+  });
+
+  it('is idempotent: a second destroy changes nothing', () => {
+    const harness = setup();
+
+    harness.overlay.mount();
+    harness.overlay.destroy();
+
+    expect(() => {
+      harness.overlay.destroy();
+    }).not.toThrow();
+    expect(harness.overlay.available).toBe(false);
   });
 });

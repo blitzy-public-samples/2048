@@ -11,15 +11,32 @@
 // handler runs, so `insertTile`, `removeTile`, the `cells` matrix and every
 // live `Tile` are absent from a handler's reach; it then measures a returned
 // payload against the exact member set its hook declares and against the
-// identity of the board it arrived with. The board is therefore READ here —
-// `availableCells`, `cellValue`, `cellsAvailable`, `withinBounds`,
-// `serialize` — and the effects below are carried by the payload members the
-// hooks declare transformable, `direction` and `cancelled`, and by each
-// relic's own persisted `state` slot.
+// identity of the board it arrived with. The board is therefore READ through
+// that facade — `availableCells`, `cellValue`, `cellsAvailable`,
+// `withinBounds`, `serialize` — and a handler's effects leave through three
+// channels and no others:
+//   the transformable payload members its hook declares, `direction` and
+//     `cancelled`;
+//   its own persisted `state` slot;
+//   `HookContext.effects`, the transactional command queue
+//     src/engine/board-effects.ts declares. A handler RECORDS `restoreBoard`,
+//     `moveTile` or `removeTile`; each command is validated against a
+//     projection of the live board as it is recorded, and the bus applies the
+//     recorded commands to the lattice once the handler has returned and its
+//     return has validated — so a refused or throwing handler changes nothing.
 //
-// Charges are DECLARED here and guarded in src/engine/hook-bus.ts, which
-// skips a handler whose budget is spent and owns the only path that deducts
-// from it: no handler below reads, compares or writes a charge budget.
+// Charges are DECLARED here and deducted in src/engine/hook-bus.ts, which
+// skips a handler whose budget is spent and owns the only path that writes a
+// budget. A handler that acted calls `HookContext.spendCharge()` to mark the
+// invocation successful; it never reads, compares or writes the count itself.
+//
+// Each handler ASKS for its charge, through `HookContext.spendCharge()`, on the
+// one path where its effect takes hold — the withdrawal for `temporal-anchor`,
+// the redirection for `tumbler`, the turn for `culling-blade`, the recorded
+// column for `scouring-wind` — and on no other path, so a dispatch that reached
+// a handler which then changed nothing spends nothing. Without those calls the
+// four budgets declared below were never spent and the relics fired for the
+// whole run.
 //
 // Randomness is drawn from the `relic-draw` substream alone, through the
 // per-handler fork src/engine/hooks.ts hands over on `HookContext.rng`.
@@ -28,10 +45,27 @@
 // module-level mutable state and takes no unseeded randomness: the substream
 // named above is the only source of draws it reaches for.
 //
-// A target row of docs/TRACEABILITY_MATRIX.md. The catalogue of families,
-// rarities, hooks and charge counts is docs/RELICS.md; the charge guard and
-// the compounding protocol are the named figure of
-// docs/architecture/hook-dispatch-sequence.md.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, in declaration
+// order, all target-only because no vanilla construct declared a relic:
+//   TR-BOARD-01  temporal-anchor   onBeforeMove
+//   TR-BOARD-02  tumbler           onBeforeMove
+//   TR-BOARD-03  culling-blade     onAfterMove
+//   TR-BOARD-04  scouring-wind     onAfterMove
+//   TR-BOARD-05  the frozen `BOARD_MANIPULATION_FAMILY` export
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-BOARD-01  the four charge-carrying relics declaring a budget and
+//                marking a successful invocation through
+//                `HookContext.spendCharge()` without reading, comparing or
+//                writing the count
+//   DL-BOARD-02  each effect carried by a transformable payload member, by the
+//                relic's own persisted state slot, or by a `context.effects`
+//                command the engine applies
+//
+// The catalogue of families, rarities, hooks and charge counts is
+// docs/RELICS.md; the charge guard and the compounding protocol are the named
+// figure of docs/architecture/hook-dispatch-sequence.md.
 
 import type {
   HookHandler,
@@ -39,16 +73,9 @@ import type {
   ReadonlyRulesView,
 } from '../../engine/hooks';
 import type {
-  Direction,
   Position,
   SerializedGrid,
   SerializedTile,
-} from '../../engine/types';
-import {
-  DIRECTION_DOWN,
-  DIRECTION_LEFT,
-  DIRECTION_RIGHT,
-  DIRECTION_UP,
 } from '../../engine/types';
 import type { StreamName } from '../../rng/rng-streams';
 import type { Relic, RelicFamily } from '../relic-types';
@@ -88,17 +115,6 @@ const TUMBLER_TRIGGER_FRACTION = 0.25;
  * Tiles at the lowest spawn value that arm `culling-blade`.
  */
 const CULLING_BLADE_ARMING_TILES = 6;
-
-/**
- * The four move directions, frozen, in the order a draw indexes them and a
- * tie between them resolves.
- */
-const MOVE_DIRECTIONS: readonly Direction[] = Object.freeze([
-  DIRECTION_UP,
-  DIRECTION_RIGHT,
-  DIRECTION_DOWN,
-  DIRECTION_LEFT,
-]);
 
 /** The one substream this module draws from. */
 const RELIC_DRAW_STREAM: StreamName = 'relic-draw';
@@ -353,74 +369,6 @@ function lowestSpawnValue(config: ReadonlyRulesView): number | null {
 }
 
 /**
- * The cell one step along one line of the board, in a direction's own
- * traversal order: the leading edge is step `0`, so the sequence a reader
- * collects is the sequence the move resolver would press the line into.
- *
- * @param direction Direction the line is read in.
- * @param line Index of the line: the fixed `x` on a vertical direction, the
- *   fixed `y` on a horizontal one.
- * @param step Distance from the leading edge, in cells.
- * @param size Edge length of the board.
- * @returns The cell at that step.
- */
-function lineCell(
-  direction: Direction,
-  line: number,
-  step: number,
-  size: number,
-): Position {
-  const last = size - 1;
-
-  switch (direction) {
-    case DIRECTION_UP: {
-      return { x: line, y: step };
-    }
-
-    case DIRECTION_RIGHT: {
-      return { x: last - step, y: line };
-    }
-
-    case DIRECTION_DOWN: {
-      return { x: line, y: last - step };
-    }
-
-    default: {
-      // DIRECTION_LEFT, the remaining member of `Direction`.
-      return { x: step, y: line };
-    }
-  }
-}
-
-/**
- * Face values one line holds, in the direction's traversal order and with its
- * empty cells left out.
- *
- * @param board The board in force.
- * @param direction Direction the line is read in.
- * @param line Index of the line.
- * @returns The occupied values, leading edge first.
- */
-function lineValues(
-  board: ReadonlyGridView,
-  direction: Direction,
-  line: number,
-): number[] {
-  const size = board.size;
-  const values: number[] = [];
-
-  for (let step = 0; step < size; step += 1) {
-    const value = board.cellValue(lineCell(direction, line, step, size));
-
-    if (value !== null) {
-      values.push(value);
-    }
-  }
-
-  return values;
-}
-
-/**
  * Tiles on the board carrying one face value.
  *
  * @param board The board in force.
@@ -446,88 +394,6 @@ function countTilesWithValue(
 }
 
 /**
- * Pairs of neighbouring equal values one pressed line would collapse.
- *
- * Walks the line's occupied values in order and pairs the first two adjacent
- * entries that both carry `target`, then resumes past them, which is the one
- * merge per pair js/game_manager.js L156 allowed.
- *
- * @param values Occupied values of one line, leading edge first.
- * @param target Face value the pairs are counted for.
- * @returns How many pairs of that value the line would collapse.
- */
-function countCollapsingPairs(
-  values: readonly number[],
-  target: number,
-): number {
-  let pairs = 0;
-  let index = 0;
-
-  while (index + 1 < values.length) {
-    if (values[index] === target && values[index + 1] === target) {
-      pairs += 1;
-      index += 2;
-    } else {
-      index += 1;
-    }
-  }
-
-  return pairs;
-}
-
-/**
- * Pairs of one value the whole board would collapse if it were pressed in one
- * direction.
- *
- * @param board The board in force.
- * @param direction Direction to measure.
- * @param target Face value the pairs are counted for.
- * @returns The board's total for that direction.
- */
-function countCullablePairs(
-  board: ReadonlyGridView,
-  direction: Direction,
-  target: number,
-): number {
-  let pairs = 0;
-
-  for (let line = 0; line < board.size; line += 1) {
-    pairs += countCollapsingPairs(lineValues(board, direction, line), target);
-  }
-
-  return pairs;
-}
-
-/**
- * The direction that collapses the most pairs of one value.
- *
- * Ties resolve to the earlier entry of `MOVE_DIRECTIONS`, so the choice is
- * fixed by the board alone and takes no draw.
- *
- * @param board The board in force.
- * @param target Face value to cull.
- * @returns The direction, or `null` where no direction collapses a pair.
- */
-function chooseCullingDirection(
-  board: ReadonlyGridView,
-  target: number,
-): Direction | null {
-  let chosen: Direction | null = null;
-  let best = 0;
-
-  for (const direction of MOVE_DIRECTIONS) {
-    const pairs = countCullablePairs(board, direction, target);
-
-    if (pairs > best) {
-      best = pairs;
-      chosen = direction;
-    }
-  }
-
-  return chosen;
-}
-
-/**
  * The first fully-occupied column of the board, scanning columns in ascending
  * `x` and each column in ascending `y`.
  *
@@ -535,14 +401,24 @@ function chooseCullingDirection(
  * x-major `cells[x][y]` store js/grid.js L88-L95 wrote through.
  *
  * @param board The board in force.
- * @returns The column and the values it held, or `null` where no column is
- *   fully occupied.
+ * @returns The row and the values it held, or `null` where no row is fully
+ *   occupied.
  */
 function firstFullColumn(board: ReadonlyGridView): ScouredColumn | null {
   const size = board.size;
 
   for (let x = 0; x < size; x += 1) {
-    const values = lineValues(board, DIRECTION_UP, x);
+    const values: number[] = [];
+
+    for (let y = 0; y < size; y += 1) {
+      const value = board.cellValue({ x, y });
+
+      if (value === null) {
+        break;
+      }
+
+      values.push(value);
+    }
 
     if (values.length === size) {
       return { x, values };
@@ -550,6 +426,33 @@ function firstFullColumn(board: ReadonlyGridView): ScouredColumn | null {
   }
 
   return null;
+}
+
+/**
+ * The cell holding the board's lowest face value.
+ *
+ * `occupiedCells` reports the board x-outer and y-inner, so a tie between two
+ * cells at the same value resolves to the earlier of that scan — the choice is
+ * fixed by the board alone and takes no draw.
+ *
+ * @param occupied Occupied cells of the board, in scan order.
+ * @returns The cell, or `null` where no cell is occupied.
+ */
+function lowestOccupiedCell(
+  occupied: readonly { readonly x: number; readonly y: number;
+    readonly value: number }[],
+): Position | null {
+  let chosen: Position | null = null;
+  let lowest = Number.POSITIVE_INFINITY;
+
+  for (const cell of occupied) {
+    if (cell.value < lowest) {
+      lowest = cell.value;
+      chosen = { x: cell.x, y: cell.y };
+    }
+  }
+
+  return chosen;
 }
 
 /**
@@ -604,28 +507,56 @@ function isOnLiveBoard(
   );
 }
 
+/* --------------------------------------------------------------------------
+ * Lattice transforms
+ * ----------------------------------------------------------------------- */
+
+// Each transform below takes the lattice `ReadonlyGridView.serialize()`
+// returned — a fresh `{ size, cells }` per call, so writing into it reaches no
+// board — and returns the lattice a `restoreBoard` effect is requested with.
+// src/engine/engine.ts is the only writer of a board: a handler asks, and the
+// engine applies the request once the handler has returned and its return has
+// been accepted.
+
+
+
+
 
 /* --------------------------------------------------------------------------
  * Handlers
  * ----------------------------------------------------------------------- */
 
-// Each handler returns the payload it resolves to. None reads a charge
-// budget. The three trigger conditions on `onBeforeMove` are disjoint:
-// `holdAnchor` acts on a board with no empty cell, `tumbleMove` inside the
-// scarcity band above that, and `cullSmallest` only above the band.
+// Each handler returns the payload it resolves to and records its board change
+// through `HookContext.effects`, which src/engine/board-effects.ts applies to
+// the live lattice once the handler has returned and its return has validated.
+// None reads or writes a charge budget: src/engine/hook-bus.ts guards the budget
+// and spends one charge for an invocation that recorded a command or asked
+// through `spendCharge`. The three trigger conditions on `onBeforeMove` are
+// disjoint: `holdAnchor` acts on a board with no empty cell, `tumbleMove` inside
+// the scarcity band above that, and `cullSmallest` only above the band.
 
 /**
  * `temporal-anchor` on `onAfterMove`: records the board the move settled on,
- * together with the score it settled at, replacing any anchor already held.
+ * together with the score it settled at, replacing any anchor already held —
+ * but only while that board still holds an empty cell.
  *
  * The anchor is taken AFTER the move, so it is the position the next
- * `onBeforeMove` measures.
+ * `onBeforeMove` rewinds to.
  *
  * @param payload The resolved move.
  * @param context The dispatch's collaborators and this relic's slot.
  * @returns The payload, unchanged.
  */
 const recordAnchor: HookHandler<'onAfterMove'> = (payload, context) => {
+  // THE LAST POSITION WITH ROOM, not simply the last position. A board with no
+  // empty cell is not anchored, because the undo arms on exactly that state: an
+  // anchor taken there would restore the board the player is already stuck on,
+  // and undoing would change nothing. Anchoring the last roomier position is
+  // what makes the undo restore something.
+  if (!payload.board.cellsAvailable()) {
+    return payload;
+  }
+
   const anchor: AnchorState = {
     board: payload.board.serialize(),
     score: payload.score,
@@ -637,16 +568,20 @@ const recordAnchor: HookHandler<'onAfterMove'> = (payload, context) => {
 };
 
 /**
- * `temporal-anchor` on `onBeforeMove`: while the board holds no empty cell
- * and an anchor is held, withdraws the move so the anchored position stands.
+ * `temporal-anchor` on `onBeforeMove`: while the board holds no empty cell and
+ * an anchor is held, REWINDS the board to the anchored position and withdraws
+ * the move.
  *
- * Withdrawing is the veto js/game_manager.js L134 expressed by returning
- * before the move resolved: a withdrawn move moves no tile, resolves no
- * merge, spawns nothing and changes no score.
+ * The rewind is recorded through `HookContext.effects.restoreBoard`, which
+ * clears the lattice and re-inserts every anchored tile inside the live bound;
+ * an anchored cell beyond that bound is dropped rather than written
+ * off-lattice. Withdrawing is the veto js/game_manager.js L134 expressed by
+ * returning before the move resolved: a withdrawn move moves no tile, resolves
+ * no merge, spawns nothing and changes no score.
  *
- * A slot that is absent, malformed, empty, or recorded at cells that no
- * longer fall on the live board holds nothing to stand on, and the move
- * proceeds untouched.
+ * A slot that is absent, malformed, empty, or recorded at cells that no longer
+ * fall on the live board holds nothing to rewind to, and the move proceeds
+ * untouched.
  *
  * @param payload The requested move.
  * @param context The dispatch's collaborators and this relic's slot.
@@ -673,25 +608,61 @@ const holdAnchor: HookHandler<'onBeforeMove'> = (payload, context) => {
     return payload;
   }
 
+  // A move another relic already withdrew is withdrawn: the anchor adds nothing
+  // to it, so it neither rewinds nor pays for it.
+  if (payload.cancelled) {
+    return payload;
+  }
+
+  // THE UNDO. The recorded lattice and the score recorded with it are restored
+  // before the move would have resolved, and the move itself is then withdrawn,
+  // so the turn ends on the anchored position rather than on a board the anchor
+  // no longer describes. The score travels with the lattice, or the points the
+  // withdrawn move scored would survive the position that scored them. Every
+  // tile outside the live bounds is dropped by the command's own validation
+  // rather than repositioned, so an anchor taken at a larger board is applied
+  // without corrupting a single surviving cell. Vetoes ONLY on success.
+  if (!context.effects.restoreBoard(held.board, held.score)) {
+    return payload;
+  }
+
+  // The anchor is consumed with the undo, so the next undo stands on the
+  // position this one restored rather than on a board two turns old.
+  context.state = { board: null, score: held.score };
+
   payload.cancelled = true;
+
+  // THE REWIND IS THE EFFECT, so the charge is asked for here and on no other
+  // path: a turn that found no jam, held no usable anchor, or had its restore
+  // refused pays nothing. `spendCharge` is a request the bus fulfils once this
+  // return has been accepted; this handler neither reads nor writes the budget.
+  context.spendCharge();
 
   return payload;
 };
 
 /**
  * `tumbler` on `onBeforeMove`: while the empty cells left are inside the
- * scarcity band, the board tumbles and the move comes out in a direction
- * drawn from the `relic-draw` substream instead of the one requested.
+ * scarcity band, the board tumbles — every tile relocates to a cell drawn from
+ * those standing empty at the moment it is placed.
  *
- * Never withdraws the move: the requested turn still resolves, along the
- * drawn axis, against the board as it stands.
+ * Tiles are walked in the x-outer, y-inner order
+ * `BoardEffectQueue.occupiedCells` reports them in, and each relocation frees
+ * the cell it left, so a later tile can take an earlier tile's origin. Tile
+ * identity is preserved by `moveTile` rather than being removed and
+ * re-inserted, which is what makes a view tween each tile to its new cell
+ * instead of popping it as a spawn.
  *
- * One draw per tumble. `pick` on an empty candidate list yields `undefined`
- * and takes no draw, and the move then proceeds untouched.
+ * One draw per tile placed. `pick` on an empty candidate list yields
+ * `undefined` and takes no draw, and the walk then stops with the tiles it has
+ * already placed standing where they were placed.
+ *
+ * Never withdraws the move: the requested turn still resolves, in the
+ * requested direction, against the tumbled board.
  *
  * @param payload The requested move.
- * @param context The dispatch's collaborators and this relic's substreams.
- * @returns The payload, redirected where the board tumbles.
+ * @param context The dispatch's collaborators and its effect queue.
+ * @returns The payload, unchanged.
  */
 const tumbleMove: HookHandler<'onBeforeMove'> = (payload, context) => {
   const empty = payload.board.availableCells().length;
@@ -700,31 +671,52 @@ const tumbleMove: HookHandler<'onBeforeMove'> = (payload, context) => {
     return payload;
   }
 
-  const drawn = context.rng.stream(RELIC_DRAW_STREAM).pick(MOVE_DIRECTIONS);
+  const effects = context.effects;
+  const stream = context.rng.stream(RELIC_DRAW_STREAM);
 
-  if (drawn === undefined) {
-    return payload;
+  // THE TUMBLE: one seeded relocation per tile, recorded before the walk resolves
+  // so the move the player pressed resolves against the tumbled board rather
+  // than being withdrawn or redirected. Recorded as `moveTile` rather than as a
+  // whole-board restore, so tile IDENTITY survives the throw and a view tweens
+  // each tile to its new cell instead of popping it as a fresh spawn.
+  let relocated = 0;
+
+  for (const tile of effects.occupiedCells()) {
+    const destination = stream.pick(effects.availableCells());
+
+    if (destination === undefined) {
+      break;
+    }
+
+    if (effects.moveTile({ x: tile.x, y: tile.y }, destination)) {
+      relocated += 1;
+    }
   }
 
-  return {
-    direction: drawn,
-    board: payload.board,
-    cancelled: payload.cancelled,
-  };
+  // THE TUMBLE IS THE EFFECT, and it is one effect however many tiles it moved,
+  // so one charge is asked for once at least one tile was actually relocated. A
+  // board that offered no destination relocated nothing and pays nothing — the
+  // draws it took are still consumed, which is what keeps the sequence a
+  // function of the seed alone.
+  if (relocated > 0) {
+    context.spendCharge();
+  }
+
+  return payload;
 };
 
 /**
  * `culling-blade` on `onBeforeMove`: while the board is still open and the
- * lowest spawn value has piled up on it, the blade turns the move onto the
- * axis that collapses the most tiles of that value.
+ * lowest spawn value has piled up on it, the blade EXCISES the single
+ * lowest-valued tile on the board.
  *
- * Takes no draw: the count is read off the board and a tie resolves by
- * direction order, so the same board yields the same axis every time. Never
- * withdraws the move and never touches the score.
+ * The tile is chosen by face value and, among equal values, by the x-outer,
+ * y-inner scan order, so the choice is fixed by the board alone and takes no
+ * draw. Never withdraws the move and never touches the score.
  *
  * @param payload The requested move.
- * @param context The dispatch's collaborators.
- * @returns The payload, turned where the blade acts.
+ * @param context The dispatch's collaborators and its effect queue.
+ * @returns The payload, unchanged.
  */
 const cullSmallest: HookHandler<'onBeforeMove'> = (payload, context) => {
   const empty = payload.board.availableCells().length;
@@ -743,24 +735,36 @@ const cullSmallest: HookHandler<'onBeforeMove'> = (payload, context) => {
     return payload;
   }
 
-  const direction = chooseCullingDirection(payload.board, lowest);
+  // THE EXCISION. The single lowest-valued tile is removed, chosen by face value
+  // and, among equal values, by the x-outer y-inner scan order — so the same
+  // board always yields the same excision and no draw is taken. Nothing is
+  // moved, so every surviving tile keeps the exact cell it occupied, and the
+  // direction the player pressed is untouched: the move resolves as pressed,
+  // against the thinned board.
+  const effects = context.effects;
+  const target = lowestOccupiedCell(effects.occupiedCells());
 
-  if (direction === null) {
+  if (target === null) {
     return payload;
   }
 
-  return {
-    direction,
-    board: payload.board,
-    cancelled: payload.cancelled,
-  };
+  // THE EXCISION IS THE EFFECT, so the charge is asked for only where the
+  // removal was actually recorded: a board the blade found nothing to take from
+  // pays nothing.
+  if (effects.removeTile(target)) {
+    context.spendCharge();
+  }
+
+  return payload;
 };
 
 /**
  * `scouring-wind` on `onAfterMove`: sweeps the settled board for the first
- * fully-occupied column and records it, with the running count of sweeps, on
- * the relic's own slot.
+ * fully-occupied row — one row being a single `x` across every `y`, which is
+ * the outer index of the x-major `cells[x][y]` store js/grid.js L88-L95 wrote
+ * through — and CLEARS every tile standing in it.
  *
+ * Every cell of the row is collected before a single removal is recorded.
  * Takes no draw, awards no score and returns the payload as it stands, so the
  * score, the win flag and the loss flag the move resolved to are the ones the
  * engine adopts.
@@ -776,13 +780,34 @@ const sweepColumn: HookHandler<'onAfterMove'> = (payload, context) => {
     return payload;
   }
 
+  // THE LINE CLEAR. The first fully-occupied column is emptied outright, one
+  // removal per cell, in ascending `y` and taking no draw. Nothing is moved, so
+  // every tile outside that column keeps the exact cell it occupied, and the
+  // loss probe that follows this dispatch reads the cleared board.
+  const effects = context.effects;
+  let cleared = 0;
+
+  for (let y = 0; y < column.values.length; y += 1) {
+    if (effects.removeTile({ x: column.x, y })) {
+      cleared += 1;
+    }
+  }
+
   const held: unknown = context.state;
-  const swept: ScourState = {
+  const record: ScourState = {
     scours: (isScourState(held) ? held.scours : 0) + 1,
     column,
   };
 
-  context.state = swept;
+  context.state = record;
+
+  // THE LINE CLEAR IS THE EFFECT, one effect however many cells it emptied, so
+  // one charge is asked for once a full column was found AND cleared. A move
+  // that settled on a board with no full column leaves nothing to clear and
+  // pays nothing.
+  if (cleared > 0) {
+    context.spendCharge();
+  }
 
   return payload;
 };
@@ -797,15 +822,15 @@ const sweepColumn: HookHandler<'onAfterMove'> = (payload, context) => {
 // bound in `hooks`. Each rarity is read from one ordinal position of
 // `RARITIES`, in the order the four are declared below.
 
-/** Undo, on the common tier: withdraws the move a full board would resolve. */
+/** Undo, on the common tier: rewinds a full board to its last record. */
 const TEMPORAL_ANCHOR: Relic = Object.freeze({
   id: 'temporal-anchor',
   name: 'Temporal Anchor',
   rarity: RARITIES[0],
   description:
-    'Records the board and score after every move. While the board holds ' +
-    'no empty cell, the anchor holds and your move is withdrawn instead ' +
-    'of resolved. Limited charges.',
+    'Records the last position that still had room, and the score with it. ' +
+    'Once the board holds no empty cell, the anchor pulls the board and your ' +
+    'score back to that position and withdraws the move. Limited charges.',
   hooks: Object.freeze({
     onAfterMove: recordAnchor,
     onBeforeMove: holdAnchor,
@@ -814,45 +839,45 @@ const TEMPORAL_ANCHOR: Relic = Object.freeze({
   state: INITIAL_ANCHOR_STATE,
 });
 
-/** Shuffle, on the uncommon tier: redraws the direction under scarcity. */
+/** Shuffle, on the uncommon tier: throws every tile under scarcity. */
 const TUMBLER: Relic = Object.freeze({
   id: 'tumbler',
   name: 'Tumbler',
   rarity: RARITIES[1],
   description:
-    'While a quarter of the board or less is empty, it tumbles: your move ' +
-    'comes out along a seeded direction rather than the one pressed. The ' +
-    'move still resolves. Limited charges.',
+    'While a quarter of the board or less is empty, it tumbles: every tile ' +
+    'is thrown to a seeded new cell before your move resolves against the ' +
+    'board it leaves. Limited charges.',
   hooks: Object.freeze({
     onBeforeMove: tumbleMove,
   }),
   charges: TUMBLER_CHARGES,
 });
 
-/** Excise, on the rare tier: turns the move onto the culling axis. */
+/** Excise, on the rare tier: removes the board's lowest tile. */
 const CULLING_BLADE: Relic = Object.freeze({
   id: 'culling-blade',
   name: 'Culling Blade',
   rarity: RARITIES[2],
   description:
     'While the board is still open and the smallest tiles have piled up, ' +
-    'the blade turns your move onto the axis that collapses the most of ' +
-    'them. Awards no score. Limited charges.',
+    'the blade excises the single lowest tile on the board. Awards no ' +
+    'score. Limited charges.',
   hooks: Object.freeze({
     onBeforeMove: cullSmallest,
   }),
   charges: CULLING_BLADE_CHARGES,
 });
 
-/** Row clear, on the legendary tier: sweeps for a fully-occupied column. */
+/** Row clear, on the legendary tier: clears a fully-occupied row. */
 const SCOURING_WIND: Relic = Object.freeze({
   id: 'scouring-wind',
   name: 'Scouring Wind',
   rarity: RARITIES[3],
   description:
-    'After every move, sweeps for the first fully-occupied column — one ' +
-    'column being a single x across every y — and records it on the relic. ' +
-    'Awards no score. Limited charges.',
+    'After every move, sweeps away the first fully-occupied column — one ' +
+    'column being a single x across every y — and clears every tile standing ' +
+    'in it. Awards no score. Limited charges.',
   hooks: Object.freeze({
     onAfterMove: sweepColumn,
   }),

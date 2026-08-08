@@ -39,11 +39,44 @@
 // geometry, texture and material this module creates is released by
 // `dispose()`.
 //
-// Decisions behind this file: DL-MESH-01, the extrusion depths expressed as
-// arithmetic on `gridSpacing`; DL-MESH-02, the outline and extrusion inset
-// DL-MESH-03, one shared geometry per shape and one shared numeral texture
-// per value; and DL-MESH-04, the mobile scale selected once per factory.
-// Traceability rows: TR-MESH-01 through TR-MESH-10, one per row of the table
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-MESH-01  index.html L43-L68            the sixteen static `.grid-cell`
+//                                             elements, replaced by the
+//                                             generated board
+//   TR-MESH-02  index.html L70-L72            the empty `.tile-container`,
+//                                             replaced by the tile layer of
+//                                             `BoardMeshes`
+//   TR-MESH-03  js/html_actuator.js L97-L104  `normalizePosition` and
+//                                             `positionClass`, ported as
+//                                             `cellToWorld()` and
+//                                             `cellToWorldIn()`
+//   TR-MESH-04  style/main.scss L171-L194     the field geometry, as
+//                                             `resolveBoardGeometry()`
+//   TR-MESH-05  style/main.scss L475-L548     the mobile scale, selected once
+//                                             per factory through
+//                                             `geometryScales`
+//   TR-MESH-06  style/main.scss L404-L430     the tile numeral sizes, as
+//                                             `resolveNumeralLayout()` and
+//                                             `NumeralLayout`
+//   TR-MESH-07  target-only row               the extruded block geometry and
+//                                             `tileOutlineSize()`
+//   TR-MESH-08  target-only row               `boardLayers`, the z-order the
+//                                             stylesheet's stacking replaced
+//   TR-MESH-09  target-only row               the numeral texture cache,
+//                                             `numeralCacheBounds` and
+//                                             `isDrawableTileValue()`
+//   TR-MESH-10  target-only row               `createTileMeshFactory()` and
+//                                             `cellArrayIndex()`
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-MESH-01  the extrusion depths expressed as arithmetic on `gridSpacing`
+//   DL-MESH-02  the outline and extrusion inset by the bevel, so a block's
+//               bounding box resolves to exactly `tileSize` by `depthScale.tile`
+//   DL-MESH-03  one shared geometry per shape and one shared numeral texture
+//               per value
+//   DL-MESH-04  the mobile scale selected once per factory
 
 import {
   CanvasTexture,

@@ -6,41 +6,46 @@
  * `stageClear` and `relicAcquired` accompany no single animation. The merge
  * pitch ramp follows the exponent shape of the tile colour ramp.
  *
- * tile colour ramp. Decision DL-AUDIO-01.
- *
  * Declarations and pure functions only: this module reads no platform state,
  * holds no mutable state, and does no work on load beyond freezing its two
- * tables. Nothing here is ported: js/ plays no sound, so both tables are
- * target-only rows TR-AUDIO-05 and TR-AUDIO-06 of
- * docs/TRACEABILITY_MATRIX.md.
+ * tables. Nothing here is ported: js/ plays no sound, so every row below is
+ * target-only.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece:
+ *   TR-AUDIO-05  the descriptor table and its per-event entries
+ *   TR-AUDIO-06  the pure resolvers that select a descriptor
+ *   TR-AUDIO-07  the audio bounds `MIN_VOLUME`, `MAX_VOLUME`,
+ *                `DEFAULT_VOLUME` and `DEFAULT_MUTED`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-AUDIO-01  the descriptor timings spanning the tile animations, with the
+ *                merge pitch ramp following the exponent shape of the tile
+ *                colour ramp
  */
 
 /* ==========================================================================
  * 0. Audio bounds
  * ========================================================================== */
 
-// The mute and volume bounds are declared HERE, in the audio domain that
-// defines them, and re-exported by src/ui/a11y/settings.ts so the preference
-// surface keeps its published names. Two independent declarations disagreed on
-// the starting volume, so the value a listener heard depended on which of the
-// two owners had last written the master gain.
-
-/** Lowest accepted volume: silence. */
-export const MIN_VOLUME = 0;
-
-/** Highest accepted volume: unattenuated. */
-export const MAX_VOLUME = 1;
-
-/**
- * The volume in force before anything is chosen.
- *
- * Unattenuated, so no volume is applied that the player did not ask for; the
- * accessibility surface is what lowers it.
- */
-export const DEFAULT_VOLUME: number = MAX_VOLUME;
-
-/** Whether the audio layer is muted before anything is chosen. */
-export const DEFAULT_MUTED = false;
+// Re-exported, not redeclared: src/config/audio-bounds.ts holds the one
+// declaration of these four values, and both this layer and the accessibility
+// surface read it from there. This module keeps publishing them under the same
+// names, so every caller is unaffected.
+//
+// WHY NOT HERE. The accessibility surface needs the same four values to validate
+// a preference, and it is the leaf of the src/ui/ import graph: declaring them
+// in the audio domain made that leaf depend on src/audio/, which its own
+// contract forbids. Declaring them twice is what came before, and the two
+// declarations disagreed on the starting volume — so the volume a player heard
+// depended on which owner had last written the master gain. src/config/ is
+// neutral to both and imports neither.
+export {
+  DEFAULT_MUTED,
+  DEFAULT_VOLUME,
+  MAX_VOLUME,
+  MIN_VOLUME,
+} from '../config/audio-bounds';
 
 /* ==========================================================================
  * 1. Descriptor vocabulary

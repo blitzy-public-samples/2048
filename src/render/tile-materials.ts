@@ -29,8 +29,6 @@
 // differs from `color` by one unit on the four accented values, is reachable
 // through the `fillPrecision` option.
 //
-// roughness scaled by `insetAlpha`. Decision DL-MATERIAL-01.
-//
 // The empty-cell plate is declared in the stylesheet as the tile colour at 35%
 // alpha. It is pre-composited over the board field and delivered as an opaque
 // material; the `emptyCellCompositing` option delivers it as a transparent
@@ -44,13 +42,44 @@
 // every mesh that carries it, and every material this module creates is
 // released by `dispose()`.
 //
-// reachable through the `fillPrecision` option. Decisions DL-RAMP-02 and
-// DL-RAMP-04 own that pair.
-// `emptyCellCompositing` option. Decision DL-MATERIAL-02.
-// Decisions behind this file: DL-MATERIAL-01 through DL-MATERIAL-03, and
-// DL-RAMP-02 and DL-RAMP-04 for the two fill precisions, in
-// docs/DECISION_LOG.md. Traceability rows: TR-MATERIAL-01 through
-// TR-MATERIAL-08, one per row of the table above.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-MATERIAL-01  style/main.scss L334-L402  the generated tile fill, read
+//                                              through src/theme/tile-ramp.ts
+//                                              and transferred by
+//                                              `resolveTileFill()`
+//   TR-MATERIAL-02  style/main.scss L334-L402  the bright-text threshold, as
+//                                              `resolveTileNumeralColor()`
+//   TR-MATERIAL-03  style/main.scss L360-L370  the outer halo shadow, as the
+//                                              emissive colour and intensity
+//   TR-MATERIAL-04  style/main.scss L360-L370  the inset white ring, as the
+//                                              roughness reduction scaled by
+//                                              `insetAlpha`
+//   TR-MATERIAL-05  style/main.scss L339-L349  the accent overlay's suppressed
+//                                              shadow, as the flat material
+//                                              `glowSuppressed` gates
+//   TR-MATERIAL-06  style/main.scss `.grid-cell`  the empty-cell plate at 35%
+//                                              alpha, as the pre-composited or
+//                                              transparent plate material
+//   TR-MATERIAL-07  target-only row             `createTileMaterialCache()`,
+//                                              one material per distinct value
+//   TR-MATERIAL-08  target-only row             the colour conversions
+//                                              `readThemeColor()`,
+//                                              `compositeOver()`,
+//                                              `toThreeColor()`,
+//                                              `fromThreeColor()` and
+//                                              `formatThreeColor()`
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-MATERIAL-01  the two stylesheet shadows mapped onto the emissive term
+//                   and the roughness reduction
+//   DL-MATERIAL-02  the empty-cell plate pre-composited by default, with
+//                   `emptyCellCompositing` delivering it transparent
+//   DL-MATERIAL-03  one material per distinct tile value, shared and released
+//                   by `dispose()`
+//   DL-RAMP-02      the `color` channel as the fill source
+//   DL-RAMP-04      the `colorHex` form reachable through `fillPrecision`
 
 import { Color, MeshStandardMaterial, SRGBColorSpace } from 'three';
 

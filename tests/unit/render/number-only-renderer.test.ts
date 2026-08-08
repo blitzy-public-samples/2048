@@ -86,6 +86,8 @@ const commitOf = (
   }
 
   return {
+    turn: 1,
+    degraded: false,
     board: grid,
     score: 0,
     bestScore: 0,

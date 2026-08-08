@@ -41,7 +41,11 @@
     // resolved declaration packages, which this list does not affect, and the
     // `/// <reference types="node" />` in vite's own declaration entry point is
     // covered by `skipLibCheck` below.
-    "types": [],
+    // `node` is listed for tests/unit/quality/formatting.test.ts, the read-only
+    // formatting gate, which opens files with `node:fs`. It is listed HERE and
+    // not in tsconfig.json so the application's own type universe stays
+    // browser-only: nothing under src/ can reach a Node global.
+    "types": ["node"],
 
     // Permits the explicit `.ts` specifier vite.config.ts uses to reach
     // src/theme/tokens.ts. Matches tsconfig.json, which declares the same
@@ -81,7 +85,13 @@
     "vite.config.ts",
     "vitest.config.ts",
     "vitest.snapshot.config.ts",
-    "playwright.config.ts"
+    "playwright.config.ts",
+
+    // The read-only formatting gate. It lives under tests/unit/ so `npm test`
+    // collects and runs it, and it is type-checked here because it reads the
+    // filesystem through `node:fs`. tsconfig.json excludes it for the same
+    // reason.
+    "tests/unit/quality/formatting.test.ts"
   ],
 
   "exclude": [

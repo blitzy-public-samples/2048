@@ -597,9 +597,11 @@ describe('recordEngineEvent', () => {
     expect(counterValue(snapshot, METRIC_NAMES.turnsTotal)).toBe(0);
   });
 
-  it('throws for no input', () => {
+  it('throws for NO input, absent payload and empty name included', () => {
     const registry = createMetricsRegistry();
 
+    // The claim is CONTAINMENT, not that anything raises: every call below is
+    // one a caller can make and none of them may throw.
     expect(() => {
       registry.recordEngineEvent('tile:spawn', { position: SPAWNED_CELL });
       registry.recordEngineEvent('tile:spawn');
@@ -4383,4 +4385,3 @@ describe('the exposition validator has teeth', () => {
     expectRejected(corrupted, 'carries trailing content');
   });
 });
-

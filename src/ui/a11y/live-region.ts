@@ -8,8 +8,18 @@
 // construction. A markup that declares a polite and an assertive region
 // instead is served by the two assertive options below.
 //
-// every row is target-only in docs/TRACEABILITY_MATRIX.md, rows TR-LIVE-01
-// through TR-LIVE-09 in the order of the table.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated, all target-only because the retired sources
+// announced nothing:
+//   TR-LIVE-01  `createLiveRegionAnnouncer` and the single `#live-region` host
+//   TR-LIVE-02  the announcement queue and its bound
+//   TR-LIVE-03  `composeAnnouncements` and the coalescing rules
+//   TR-LIVE-04  the clear-then-write sequence, one utterance per task
+//   TR-LIVE-05  the polite default and the two assertive options
+//   TR-LIVE-06  the move, merge and spawn announcement vocabulary
+//   TR-LIVE-07  the stage and score announcement vocabulary
+//   TR-LIVE-08  `TerminalVerdict` and its labels
+//   TR-LIVE-09  the injected report sink and the per-listener error isolation
 //
 // The region's visually-hidden treatment is the `.visually-hidden` class of
 // style/_a11y.scss, which clips the paint region and keeps the box. Nothing
@@ -25,10 +35,13 @@
 // spawn position, a refused subscription, a throwing listener and a failed DOM
 // write are each reported through the injected sink and the call continues.
 //
-// Decisions behind this file, all in docs/DECISION_LOG.md: DL-LIVE-01, the
-// coalescing rules; DL-LIVE-02, the clear-then-write sequence; DL-LIVE-03,
-// the polite default with two assertive options; DL-LIVE-04, the queue bound;
-// and DL-A11Y-08, the parallel DOM beside an `aria-hidden` canvas with a
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-LIVE-01  the coalescing rules
+//   DL-LIVE-02  the clear-then-write sequence
+//   DL-LIVE-03  the polite default with two assertive options
+//   DL-LIVE-04  the queue bound
+//   DL-A11Y-08  the parallel DOM beside an `aria-hidden` canvas
 
 import type {
   MountRoot,

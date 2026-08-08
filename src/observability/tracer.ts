@@ -16,16 +16,13 @@
 // `instrumentFrameCallback` wraps and whose `onFrameBegin`/`onFrameEnd` seam
 // `frameLifecycleHooks()` fills.
 //
-// Two further boundaries this module spans, and one it subscribes through:
-//   js/game_manager.js L130      `GameManager.prototype.move`, where the turn
-//                                span opens.
-//   js/game_manager.js L91-L97   the actuation push, where the turn span
-//                                closes.
-//   js/keyboard_input_manager.js L18-L23  `on()` appending to the listener
-//                                array, a property src/engine/
-//                                engine-events.ts preserves, and the whole of
-//                                how `attachEngineTracing` attaches without an
-//                                engine-side call site.
+// Two further boundaries this module spans, and one it subscribes through, are
+// js/game_manager.js L130 where the turn span opens, js/game_manager.js L91-L97
+// where it closes, and js/keyboard_input_manager.js L18-L23's appended listener
+// array, the property src/engine/engine-events.ts preserves and the one
+// `attachEngineTracing` attaches through with no engine-side call site. The
+// traced boundary chain is drawn as a named Mermaid figure in
+// docs/architecture/hook-dispatch-sequence.md.
 //
 // `DEFAULT_FRAME_BUDGET_MS` carries the 16 of js/animframe_polyfill.js L13,
 // `Math.max(0, 16 - (currTime - lastTime))`.
@@ -33,28 +30,48 @@
 // `performance` is invoked nowhere in the retired sources, so every call to it
 // here is an addition rather than a port.
 //
-// docs/TRACEABILITY_MATRIX.md:
-//   TR-TRACE-01  js/html_actuator.js L13
-//   TR-TRACE-02  js/html_actuator.js L69
-//   TR-TRACE-03  js/application.js L2
-//   TR-TRACE-04  js/animframe_polyfill.js L13
-//   TR-TRACE-05  js/game_manager.js L130 and L91-L97
-//   TR-TRACE-06  js/keyboard_input_manager.js L18-L23
-// Target-only rows, TR-TRACE-07 through TR-TRACE-10: the span vocabulary, the
-// bounded record buffer, the parent stack, and the boundary helpers.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-TRACE-01  js/html_actuator.js L13       the frame `actuate` wrapped
+//                                              every DOM write in
+//   TR-TRACE-02  js/html_actuator.js L69       the nested frame inside
+//                                              `addTile`
+//   TR-TRACE-03  js/application.js L2          the frame construction was
+//                                              deferred to
+//   TR-TRACE-04  js/animframe_polyfill.js L13  the 16ms budget, carried as
+//                                              `DEFAULT_FRAME_BUDGET_MS`
+//   TR-TRACE-05  js/game_manager.js L130,      the turn boundary, where the
+//                L91-L97                       turn span opens and closes
+//   TR-TRACE-06  js/keyboard_input_manager.js  the appended listener array
+//                L18-L23                       `attachEngineTracing` attaches
+//                                              through
+//   TR-TRACE-07  target-only row               the span vocabulary,
+//                                              `SPAN_NAMES`, `SPAN_NAME_LIST`
+//                                              and `BOUNDARY_SPAN_NAMES`
+//   TR-TRACE-08  target-only row               the bounded span-record buffer
+//   TR-TRACE-09  target-only row               the parent stack and the span
+//                                              identifier
+//   TR-TRACE-10  target-only row               `createBoundaryTracing` and the
+//                                              boundary helpers
 //
-// docs/DECISION_LOG.md is the single source of truth for why each of the
-// following was decided:
-//   DL-TRACE-01  module boundaries traced in place of service boundaries
-//   DL-TRACE-02  the counter-and-correlation-identifier span identifier
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-TRACE-01  module boundaries as the traced boundaries
+//   DL-TRACE-02  the span identifier composed from a counter and the
+//                correlation identifier
 //   DL-TRACE-03  span durations recorded into the metrics histograms
-//   DL-TRACE-04  span events rather than child spans for merge and spawn
+//   DL-TRACE-04  merge and spawn recorded as span events
 //   DL-TRACE-05  the closed span vocabulary bounding the histogram's series
-//   DL-TRACE-06  over-budget frames counted here and not as a metric family
+//   DL-TRACE-06  over-budget frames counted on the tracer's own snapshot
 //   DL-TRACE-07  marks and measures cleared as each span closes
 //   DL-TRACE-08  turn latency recorded on commit alone
-//   DL-TRACE-09  frame spans opened as roots rather than nested
-//   DL-TRACE-10  `performance` re-read per call rather than resolved once
+//   DL-TRACE-09  frame spans opened as roots
+//   DL-TRACE-10  `performance` re-read per call
+//   DL-TRACE-11  a commit arriving with no turn span open ACCOUNTED — against
+//                the lifecycle path that armed it, or against the stage span it
+//                itself opened — rather than reported as an orphan anomaly
+//   DL-TRACE-12  the stage span opened off the parent stack, and a span handle
+//                retained across `reset()` invalidated rather than reusable
 //
 // Imports are type-only apart from `serializeError`. The module names no
 // package, reads no DOM node and writes to no global: `performance` is reached
@@ -66,6 +83,7 @@ import type {
   EngineEventListener,
   EngineEventName,
   EngineEventSubscription,
+  StateCommitEvent,
 } from '../engine/engine-events';
 import type { HookName } from '../engine/hooks';
 import type { LogFields, Logger, SerializedError } from './logger';
@@ -145,9 +163,9 @@ export const SPAN_NAME_LIST: readonly SpanName[] = Object.freeze([
 ]);
 
 /**
- * The module-boundary chain, in the order one turn reaches it: input, engine
- * turn, move resolution, hook dispatch, relic handler, render commit, frame
- * callback. The list validation gate V8 is asserted against.
+ * The module-boundary chain, in the order one turn reaches it, and the list
+ * validation gate V8 is asserted against. The chain is drawn as a named Mermaid
+ * figure in docs/architecture/hook-dispatch-sequence.md.
  */
 export const BOUNDARY_SPAN_NAMES: readonly SpanName[] = Object.freeze([
   SPAN_NAMES.inputDispatch,
@@ -202,6 +220,12 @@ export const SPAN_ATTRIBUTES = Object.freeze({
   inserted: 'inserted',
   failed: 'failed',
   unwound: 'unwound',
+
+  /** Which of `COMMIT_PHASES` a commit with no turn span open belongs to. */
+  phase: 'phase',
+
+  /** Commits the turn observed: one for a turn, two where a stage resolved. */
+  commits: 'commits',
 } as const);
 
 /**
@@ -209,7 +233,9 @@ export const SPAN_ATTRIBUTES = Object.freeze({
  *
  * `committed` is the turn that reached `state:commit`, `cancelled` the move the
  * engine withdrew, `unmoved` the move whose position comparison changed
- * nothing, `superseded` the span a later span of the same kind replaced,
+ * nothing, `blocked` the move src/engine/engine.ts L965-L976 refused because
+ * play is terminated, which emits no event at all, `failed` the move whose call
+ * threw, `superseded` the span a later span of the same kind replaced,
  * `unwound` the span closed by its parent closing first, and `detached` the
  * span open when tracing was detached.
  */
@@ -217,13 +243,102 @@ export const SPAN_OUTCOMES = Object.freeze({
   committed: 'committed',
   cancelled: 'cancelled',
   unmoved: 'unmoved',
+  blocked: 'blocked',
+  failed: 'failed',
   superseded: 'superseded',
   unwound: 'unwound',
   detached: 'detached',
 } as const);
 
+/**
+ * Every phase a `state:commit` arriving with no turn span open belongs to,
+ * frozen.
+ *
+ * The four commit paths of src/engine/engine.ts that carry no move: `setup`
+ * for the commit L866 ends stage initialisation with, which `restart()` reaches
+ * through `setup()` too; `stage` for the commit `endStage()` makes at L1218
+ * after emitting `stage:end`, including the nested one the run controller
+ * triggers from inside a turn's own commit; and `continue` for the commit
+ * `continuePlaying()` makes at L893. `unknown` is the commit none of the three
+ * markers accounts for.
+ */
+export const COMMIT_PHASES = Object.freeze({
+  setup: 'setup',
+  stage: 'stage',
+  continue: 'continue',
+  unknown: 'unknown',
+} as const);
+
+/** One of the phases `COMMIT_PHASES` declares. */
+export type CommitPhase = (typeof COMMIT_PHASES)[keyof typeof COMMIT_PHASES];
+
 /** One of the outcomes `SPAN_OUTCOMES` declares. */
 export type SpanOutcome = (typeof SPAN_OUTCOMES)[keyof typeof SPAN_OUTCOMES];
+
+/**
+ * The value `settledStageIndex` carries while no closed stage span is standing.
+ *
+ * `null` rather than a number, because stage indices are non-negative whole
+ * numbers and `null` is already what "no stage" means in this module.
+ */
+const NO_SETTLED_STAGE: number | null = null;
+
+/**
+ * The engine paths that commit outside a turn, as the `path` field of the
+ * record each is reported under.
+ *
+ * Named after the emission that precedes the commit rather than after the
+ * method that makes it, because the emission is what this module observes.
+ */
+export const UNTRACED_COMMIT_PATHS = Object.freeze({
+  /** `setup()`: emits `stage:start`, then commits. */
+  stageStart: 'stage:start',
+
+  /** `endStage()`: emits `stage:end`, then commits. */
+  stageEnd: 'stage:end',
+} as const);
+
+/** One of the paths `UNTRACED_COMMIT_PATHS` declares. */
+export type UntracedCommitPath =
+  (typeof UNTRACED_COMMIT_PATHS)[keyof typeof UNTRACED_COMMIT_PATHS];
+
+/**
+ * How a `state:commit` is attributed.
+ *
+ * `turn` is a commit that closed an open turn span. `lifecycle` is a commit
+ * src/engine/engine.ts makes outside a move and this module can attribute: the
+ * commit `setup()` makes after emitting `stage:start`, the one `restart()`
+ * makes through `setup()`, the one `resolveMetStageGoal()` makes after emitting
+ * `stage:end`, and the one a method reached through the input boundary makes
+ * while that boundary's span is open — `continuePlaying()`, which
+ * js/game_manager.js L11 bound the `keepPlaying` event to. `unattributed` is
+ * every other commit: `state:commit` carries no commit source — AAP 0.6.1.1
+ * fixes its members — so a lifecycle commit made outside those four cases and
+ * a commit no engine method produced are one bucket.
+ *
+ * None of the three is an anomaly.
+ */
+export const COMMIT_ATTRIBUTIONS = Object.freeze({
+  turn: 'turn',
+  lifecycle: 'lifecycle',
+  unattributed: 'unattributed',
+} as const);
+
+/** One of the attributions `COMMIT_ATTRIBUTIONS` declares. */
+export type CommitAttribution =
+  (typeof COMMIT_ATTRIBUTIONS)[keyof typeof COMMIT_ATTRIBUTIONS];
+
+/** How many commits each attribution accounted for. */
+export interface CommitTraceCounts {
+  /** Commits that closed an open turn span. */
+  readonly turn: number;
+
+  /** Attributed non-turn commits. */
+  readonly lifecycle: number;
+
+  /** Commits neither a turn span nor an observed lifecycle signal explains. */
+  readonly unattributed: number;
+}
 
 /**
  * Names of the span events a turn's internal detail is recorded as. The two
@@ -233,7 +348,25 @@ export type SpanOutcome = (typeof SPAN_OUTCOMES)[keyof typeof SPAN_OUTCOMES];
 export const SPAN_EVENT_NAMES = Object.freeze({
   merge: 'tile:merge',
   spawn: 'tile:spawn',
+
+  /**
+   * A commit that belongs to a stage rather than to a turn, recorded on the
+   * stage span.
+   *
+   * `Engine` commits from five paths and only one of them is a turn: `setup()` —
+   * which is the commit js/game_manager.js L59 made before any move —
+   * `continuePlaying()`, `endStage()`, `startStage()` and `restart()` each commit
+   * outside any move. Naming the occurrence lets it be recorded where it happened
+   * rather than reported as an anomaly.
+   */
+  stageCommit: 'state:commit',
   error: 'error',
+
+  /**
+   * A `state:commit` that arrived with no turn span open, recorded on the open
+   * stage span and attributed by `SPAN_ATTRIBUTES.phase`.
+   */
+  commit: 'state:commit',
 } as const);
 
 /**
@@ -442,7 +575,8 @@ export interface TraceSnapshot {
   readonly faults: number;
 
   /**
-   * Caller anomalies reported: a double end, an orphan commit, and the like.
+   * Caller anomalies reported: a double end, a stage end with no stage open,
+   * and the like.
    */
   readonly anomalies: number;
 
@@ -451,6 +585,22 @@ export interface TraceSnapshot {
 
   /** Spans ended while a child of theirs was still open. */
   readonly outOfOrderEnds: number;
+
+  /**
+   * Spans discarded by `reset()` while still open, whose retained handles are
+   * inert.
+   */
+  readonly discarded: number;
+
+  /**
+   * Commits observed with no turn span open: the setup, stage and continue
+   * commits of src/engine/engine.ts, which are lifecycle commits rather than
+   * anomalies. Counted by `attachEngineTracing` through
+   * `recordLifecycleCommit`.
+   */
+  readonly lifecycleCommits: number;
+  /** How the `state:commit` emissions seen were attributed. */
+  readonly commits: CommitTraceCounts;
   readonly frames: FrameTraceStats;
 
   /** The retained records, oldest first. */
@@ -516,6 +666,42 @@ export interface StartSpanOptions {
 
   /** Relic the span is attributed to, under `SPAN_ATTRIBUTES.relic`. */
   readonly relicId?: string;
+
+  /**
+   * Keeps the span OFF the implicit-parent stack, for a span whose lifetime is
+   * event-driven rather than call-nested.
+   *
+   * WHY THIS EXISTS. The stack models one synchronous call nesting: a span
+   * closing while a span above it is still open closes that one too, as
+   * `unwound`, because a child cannot outlive its parent. A LIFECYCLE span —
+   * opened by one event and closed by a different one many turns later, as the
+   * stage span is — sits at the bottom of that stack for its whole life, and
+   * closing it mid-turn would unwind whatever the current call happens to have
+   * open: the turn being played, and the input dispatch that started it. Those
+   * are not its children; they merely began after it.
+   *
+   * A detached span is still counted as open, still recorded when it closes and
+   * still carries whatever parent it was given. It simply neither adopts the
+   * spans opened after it nor is adopted by the span open when it began.
+   * Defaults to `false`.
+   *
+   * The inverse of `stacked` below, which is the same decision stated the other
+   * way round: either spelling opens the same span, and `detached: true` and
+   * `stacked: false` are interchangeable. Decision DL-TRACE-12.
+   */
+  readonly detached?: boolean;
+
+  /**
+   * Whether the span joins the parent stack. Defaults to `true`.
+   *
+   * `false` opens a span that is neither the implicit parent of a span opened
+   * inside it nor unwound by an enclosing span closing first — the shape a
+   * span outliving many synchronous frames needs. `engine.stage` is opened this
+   * way: a stage spans every turn of that stage, and closing it while a turn is
+   * in flight must close the stage and nothing else. It is still counted among
+   * the open spans. Decision DL-TRACE-12.
+   */
+  readonly stacked?: boolean;
 }
 
 /**
@@ -534,11 +720,62 @@ export interface EngineEventSource {
 }
 
 /**
- * Detaches every listener `attachEngineTracing` registered and closes the turn
- * and stage spans it left open. Calling it more than once detaches nothing
- * further and throws nothing.
+ * The handle `attachEngineTracing` returns.
+ *
+ * CALLABLE. Calling it detaches every listener and closes the turn and stage
+ * spans it left open; calling it more than once detaches nothing further and
+ * throws nothing.
  */
-export type EngineTracingSubscription = () => void;
+export interface EngineTracingSubscription {
+  /** Detaches every listener and closes whatever span is still open. */
+  (): void;
+
+  /**
+   * Closes an open turn span that will never commit, as an IDLE turn.
+   *
+   * WHY A CALLER HAS TO SAY SO. A turn span opens on `move:before` and closes
+   * on `state:commit`. A move the resolver found changed nothing commits
+   * nothing and — unlike a withdrawn move, which reports itself through
+   * `cancelled`, and unlike a resolved move, which emits `move:after` — emits
+   * NO further event at all: `Engine.move()` counts it and returns `false`. The
+   * span would therefore stay open until the next input arrived and would
+   * measure the player's think time as turn latency.
+   *
+   * The engine cannot close it without emitting `move:after` for a move that
+   * did not happen, which five other subscribers would act on — the announcer
+   * would narrate it and the renderer would animate it. So the caller that
+   * KNOWS the move was idle, because `move()` returned `false`, closes it here.
+   *
+   * A MOVE WITHDRAWN BY AN `onBeforeMove` HANDLER ARRIVES HERE TOO. A veto a
+   * LISTENER cast is already on the emitted payload, so the `move:before`
+   * listener above closes that turn as `cancelled` on the spot. A veto a HOOK
+   * HANDLER cast is resolved after the emission and, like an idle move, ends
+   * the turn with no further event, so from the caller's side the two are one:
+   * `move()` returned `false` with a span open. Both are closed here, and the
+   * span's `direction` attribute plus the `engine.move.cancelled` counter are
+   * what separate them afterwards.
+   *
+   * Safe to call when no turn span is open, after detaching, and repeatedly:
+   * each does nothing. A move refused because the game is already over opens no
+   * span at all, so the call is a no-op there.
+   */
+  closeIdleTurn(): void;
+
+  /**
+   * Closes the turn span an attempt left open, under an outcome of the caller's
+   * choosing, and reports whether there was one.
+   *
+   * The general form of `closeIdleTurn`, which is this called with the default
+   * outcome. A caller that has the `move()` return value — the composition root —
+   * closes an idle attempt through either.
+   *
+   * @param outcome Outcome to close the span under; `'unmoved'` by default,
+   *   which is the outcome an idle attempt has.
+   * @returns `true` when a span was open and has been closed, and `false` when
+   *   there was none — after a committed turn, or once detached.
+   */
+  readonly settleTurn: (outcome?: SpanOutcome) => boolean;
+}
 
 /**
  * The `onFrameBegin`/`onFrameEnd` pair src/render/render-loop.ts accepts,
@@ -740,6 +977,9 @@ class LiveSpan implements Span {
   /** Mark written as the span opened, absent where marking was unavailable. */
   readonly startMark: string | undefined;
 
+  /** Whether the span joined the parent stack. */
+  readonly stacked: boolean;
+
   readonly attributes: Record<string, SpanAttributeValue> =
     Object.create(null) as Record<string, SpanAttributeValue>;
 
@@ -750,6 +990,15 @@ class LiveSpan implements Span {
   error: SerializedError | undefined = undefined;
 
   ended = false;
+
+  /**
+   * Whether `Tracer.reset()` discarded this span while it was still open.
+   *
+   * An invalidated span files no record, writes no duration and accepts no
+   * further attribute or event, so a handle a caller retained across a reset
+   * cannot reappear under an identifier the restarted counter has reissued.
+   */
+  invalidated = false;
 
   droppedAttributes = 0;
 
@@ -764,6 +1013,7 @@ class LiveSpan implements Span {
     parentId: string | undefined,
     startTime: number,
     startMark: string | undefined,
+    stacked: boolean,
   ) {
     this.host = host;
     this.name = name;
@@ -771,9 +1021,25 @@ class LiveSpan implements Span {
     this.parentId = parentId;
     this.startTime = startTime;
     this.startMark = startMark;
+    this.stacked = stacked;
+  }
+
+  /**
+   * Marks the span discarded: closed, invalidated, and never to be recorded.
+   *
+   * Called by `Tracer.reset()` alone, for every span the stack still held. The
+   * span's own marks are cleared by the caller, which owns the platform access.
+   */
+  discard(): void {
+    this.invalidated = true;
+    this.ended = true;
   }
 
   setAttribute(key: string, value: SpanAttributeValue): void {
+    if (this.invalidated) {
+      return;
+    }
+
     if (this.ended) {
       this.host.anomaly('attribute set on a closed span', {
         span: this.name,
@@ -832,6 +1098,10 @@ class LiveSpan implements Span {
   }
 
   addEvent(name: string, attributes?: SpanAttributes): void {
+    if (this.invalidated) {
+      return;
+    }
+
     if (this.ended) {
       this.host.anomaly('event added to a closed span', {
         span: this.name,
@@ -865,7 +1135,7 @@ class LiveSpan implements Span {
   }
 
   recordError(thrown: unknown): void {
-    if (this.error !== undefined) {
+    if (this.invalidated || this.error !== undefined) {
       return;
     }
 
@@ -1037,6 +1307,12 @@ export class Tracer {
   /** Open spans, innermost last. */
   private readonly stack: LiveSpan[] = [];
 
+  /**
+   * Open spans that did not join the stack, so an enclosing span closing does
+   * not unwind them. Counted among the open spans and discarded by `reset()`.
+   */
+  private readonly unstacked = new Set<LiveSpan>();
+
   private readonly host: SpanHost;
 
   private enabled: boolean;
@@ -1060,6 +1336,15 @@ export class Tracer {
   private doubleEnds = 0;
 
   private outOfOrderEnds = 0;
+
+  private discarded = 0;
+
+  private lifecycleCommits = 0;
+  /** `state:commit` emissions accounted to each attribution. */
+  private readonly commitCountsByAttribution: Record<
+    CommitAttribution,
+    number
+  > = { turn: 0, lifecycle: 0, unattributed: 0 };
 
   private frames = 0;
 
@@ -1108,13 +1393,17 @@ export class Tracer {
   }
 
   /**
-   * Turns span creation on or off.
+   * Turns span creation and every observation this tracer owns on or off.
    *
-   * Disabled, `startSpan` returns `INERT_SPAN` and allocates nothing, and
-   * `instrumentFrameCallback` returns the callback it was given. A span already
-   * open when tracing is disabled still closes normally.
+   * Disabled, `startSpan` returns `INERT_SPAN` and allocates nothing,
+   * `instrumentFrameCallback` returns the callback it was given, and
+   * `recordTurnLatency` observes nothing — so no series of
+   * src/observability/metrics.ts this tracer writes moves while it is off. Work
+   * the caller wrapped still runs; only the measurement stops. A span already
+   * open when tracing is disabled still closes normally, and its duration is
+   * observed with it.
    *
-   * @param next Whether to open spans.
+   * @param next Whether to open spans and take observations.
    */
   setEnabled(next: boolean): void {
     if (typeof next !== 'boolean') {
@@ -1132,6 +1421,16 @@ export class Tracer {
   }
 
   /**
+   * Spans open at this moment: those on the parent stack, and those opened with
+   * `stacked: false`.
+   *
+   * @returns The count.
+   */
+  private openSpanCount(): number {
+    return this.stack.length + this.unstacked.size;
+  }
+
+  /**
    * The innermost open span.
    *
    * @returns The span, or `undefined` when none is open.
@@ -1140,6 +1439,25 @@ export class Tracer {
     return this.stack.length === 0
       ? undefined
       : this.stack[this.stack.length - 1];
+  }
+
+  /**
+   * Whether a span of one name is open, at any depth of the stack.
+   *
+   * The query `attachEngineTracing` attributes a commit made inside the input
+   * boundary with: `activeSpan()` alone answers only for the innermost span.
+   *
+   * @param name Span name to look for.
+   * @returns `true` when a span of that name is open.
+   */
+  hasOpenSpan(name: SpanName): boolean {
+    for (const span of this.stack) {
+      if (span.name === name) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -1169,6 +1487,10 @@ export class Tracer {
       const id = `${this.correlationId}${SPAN_ID_SEPARATOR}${this.counter}`;
       const startMark = `${MARK_PREFIX}${id}${START_MARK_SUFFIX}`;
       const marked = this.marksEnabled && writeMark(startMark);
+      // BOTH SPELLINGS, ONE REPRESENTATION. `detached: true` and
+      // `stacked: false` are the same request, and every call site of either
+      // reaches the `unstacked` set below.
+      const stacked = options.stacked !== false && options.detached !== true;
       const span = new LiveSpan(
         this.host,
         name,
@@ -1176,6 +1498,7 @@ export class Tracer {
         this.resolveParentId(options),
         readNow(),
         marked ? startMark : undefined,
+        stacked,
       );
 
       span.applyAttributes(options.attributes);
@@ -1188,7 +1511,14 @@ export class Tracer {
         span.setAttribute(SPAN_ATTRIBUTES.relic, options.relicId);
       }
 
-      this.stack.push(span);
+      if (stacked) {
+        this.stack.push(span);
+      } else {
+        // Off the stack, so this span neither adopts what opens after it nor is
+        // unwound by what closes below it.
+        this.unstacked.add(span);
+      }
+
       this.startedSpans += 1;
 
       return span;
@@ -1236,9 +1566,18 @@ export class Tracer {
    * src/observability/metrics.ts. The boundary js/game_manager.js L130 opened
    * and L91-L97 closed. Decision DL-TRACE-08.
    *
+   * Observes NOTHING while tracing is disabled: `setEnabled(false)` stops every
+   * observation this tracer owns, not span creation alone, so a disabled tracer
+   * leaves the histograms of src/observability/metrics.ts where they stood. The
+   * caller's own work still runs — it is the measurement that stops.
+   *
    * @param durationMs Latency in milliseconds.
    */
   recordTurnLatency(durationMs: number): void {
+    if (!this.enabled) {
+      return;
+    }
+
     try {
       this.metrics.recordTurnLatency(durationMs);
     } catch (thrown) {
@@ -1249,8 +1588,88 @@ export class Tracer {
   }
 
   /**
+   * Records something worth seeing that is nonetheless correct, at debug level
+   * and without counting against `anomalies`.
+   *
+   * Separate from `reportAnomaly` because the two answer different questions.
+   * An anomaly is a condition that should not arise; this is one the engine's
+   * own contract produces — a commit outside a turn is the documented shape of
+   * `setup()` and of `endStage()`, so reporting it as an anomaly raised a
+   * warning on every page load and on every cleared stage and left nothing for
+   * a reader to act on.
+   *
+   * Debug is below the logger's default level, so at that level this reaches no
+   * console and no sink; lowering the level to `debug` is what surfaces it.
+   *
+   * @param message What was observed.
+   * @param fields Structured fields describing it.
+   */
+  reportExpected(message: string, fields?: LogFields): void {
+    try {
+      this.logger.debug(message, fields);
+    } catch {
+      this.faults += 1;
+    }
+  }
+
+  /**
+   * Accounts one `state:commit` to an attribution.
+   *
+   * A `turn` commit is not written to the log — its span record already
+   * carries it. The other two are written at DEBUG, because neither is a
+   * fault: `anomalies` is untouched by every attribution.
+   *
+   * @param attribution How the commit was attributed.
+   * @param fields Structured fields describing it.
+   */
+  recordCommitAttribution(
+    attribution: CommitAttribution,
+    fields?: LogFields,
+  ): void {
+    const counted = this.commitCountsByAttribution[attribution];
+
+    if (typeof counted !== 'number') {
+      this.reportAnomaly('commit attribution rejected', {
+        received: typeof attribution === 'string' ? attribution : '',
+      });
+
+      return;
+    }
+
+    this.commitCountsByAttribution[attribution] = counted + 1;
+
+    if (attribution === COMMIT_ATTRIBUTIONS.turn) {
+      return;
+    }
+
+    try {
+      // A MESSAGE OF ITS OWN, because `reportExpected` writes 'commit outside a
+      // turn' for the same commit from the accounting side: two records under
+      // one message would read as two commits.
+      this.logger.debug('commit attributed', {
+        ...fields,
+        attribution,
+      });
+    } catch {
+      this.faults += 1;
+    }
+  }
+
+  /**
+   * How the `state:commit` emissions seen were attributed.
+   *
+   * @returns A frozen count per attribution, built fresh on each call.
+   */
+  commitCounts(): CommitTraceCounts {
+    return Object.freeze({ ...this.commitCountsByAttribution });
+  }
+
+  /**
    * Reports a caller anomaly: a span ended twice, an attribute set after the
-   * end, a commit with no open turn span.
+   * end, a commit with no open turn span and nothing that accounts for it.
+   *
+   * Reports a caller anomaly: a span ended twice, an attribute set after the
+   * end, a stage end with no stage span open.
    *
    * @param message What was observed.
    * @param fields Structured fields describing it.
@@ -1351,12 +1770,15 @@ export class Tracer {
       capacity: this.buffer.length,
       started: this.startedSpans,
       ended: this.endedSpans,
-      open: this.stack.length,
+      open: this.openSpanCount(),
       dropped: this.dropped,
       faults: this.faults,
       anomalies: this.anomalies,
       doubleEnds: this.doubleEnds,
       outOfOrderEnds: this.outOfOrderEnds,
+      discarded: this.discarded,
+      lifecycleCommits: this.lifecycleCommits,
+      commits: this.commitCounts(),
       frames: this.frameStats(),
       spans: this.recent(limit),
     });
@@ -1382,10 +1804,46 @@ export class Tracer {
    * Discards every retained record, every open span and every counter, and
    * returns the span counter to its start: a replayed sequence yields the same
    * identifiers. Nothing is recorded for a span the stack still held.
+   *
+   * EVERY OPEN SPAN IS INVALIDATED BEFORE THE COUNTER RESTARTS, and its start
+   * mark is cleared with it. A handle a caller retained across this call is
+   * therefore inert: ending it files no record, writes no duration and reports
+   * one bounded anomaly, so the identifier the restarted counter reissues
+   * cannot be filed twice and no mark of a discarded span survives.
+   * `discardedSpanCount()` reports how many were taken down this way.
    */
   reset(): void {
+    this.discarded = 0;
+
+    for (const open of this.stack) {
+      this.discardSpan(open);
+    }
+
+    for (const open of this.unstacked) {
+      this.discardSpan(open);
+    }
+
+    const pending = this.pendingFrameSpan;
+
+    if (pending !== undefined && !pending.invalidated) {
+      this.discardSpan(pending);
+    }
+
+    // Held across the field wipe below: it describes THIS reset, and a caller
+    // reading it wants to know what this reset took down.
+    const discarded = this.discarded;
+
+    // THE MARKS GO WITH THEM. `closeMarks()` runs from `finishSpan()` alone, so
+    // a span the stack still held would otherwise leave its `performance.mark`
+    // behind — and because the counter returns to its start, the next span of a
+    // replayed sequence takes the same identifier and therefore the same mark
+    // name, which is how a leaked entry would contaminate the replay's measure.
+    // `discardSpan` above clears the mark of each span it takes down; this
+    // sweeps any the stack no longer references.
+    this.discardMarks();
     this.buffer.fill(undefined);
     this.stack.length = 0;
+    this.unstacked.clear();
     this.pendingFrameSpan = undefined;
     this.pendingFrameStart = 0;
     this.nextIndex = 0;
@@ -1398,11 +1856,60 @@ export class Tracer {
     this.anomalies = 0;
     this.doubleEnds = 0;
     this.outOfOrderEnds = 0;
+    this.discarded = discarded;
+    this.lifecycleCommits = 0;
+    this.commitCountsByAttribution.turn = 0;
+    this.commitCountsByAttribution.lifecycle = 0;
+    this.commitCountsByAttribution.unattributed = 0;
     this.frames = 0;
     this.overBudgetFrames = 0;
     this.lastFrameMs = 0;
     this.maxFrameMs = 0;
     this.totalFrameMs = 0;
+  }
+
+  /**
+   * Spans `reset()` discarded while they were still open, since that reset.
+   *
+   * @returns The count, which is `0` on a tracer whose resets found nothing
+   *   open.
+   */
+  discardedSpanCount(): number {
+    return this.discarded;
+  }
+
+  /**
+   * Counts one `state:commit` that arrived with no turn span open.
+   *
+   * The setup, stage and continue commit paths of src/engine/engine.ts, which
+   * `attachEngineTracing` classifies rather than reporting as anomalies.
+   *
+   * @param phase Which of `COMMIT_PHASES` the commit belongs to.
+   */
+  recordLifecycleCommit(phase: CommitPhase): void {
+    this.lifecycleCommits += 1;
+
+    try {
+      this.logger.debug('commit with no turn span open', { phase });
+    } catch {
+      this.faults += 1;
+    }
+  }
+
+  /**
+   * Takes one open span down without recording it, and clears its start mark.
+   *
+   * @param span The span to discard.
+   */
+  private discardSpan(span: LiveSpan): void {
+    span.discard();
+    this.discarded += 1;
+
+    const startMark = span.startMark;
+
+    if (startMark !== undefined) {
+      clearMark(startMark);
+    }
   }
 
   /* ------------------------------------------------------------------------
@@ -1616,6 +2123,19 @@ export class Tracer {
     durationMs: number | undefined,
   ): number {
     try {
+      // Read BEFORE `ended`: a discarded span is also closed, and the two
+      // states are reported differently. A stale handle ended after a reset is
+      // the caller keeping a reference across a reset, not a double end, and it
+      // must file nothing at all — the counter has reissued its identifier.
+      if (span.invalidated) {
+        this.reportAnomaly('span discarded by reset was ended', {
+          span: span.name,
+          spanId: span.id,
+        });
+
+        return 0;
+      }
+
       if (span.ended) {
         this.doubleEnds += 1;
         this.reportAnomaly('span ended more than once', {
@@ -1691,6 +2211,10 @@ export class Tracer {
     span.applyAttributes(attributes);
     span.ended = true;
     this.endedSpans += 1;
+
+    // Removed by identity, so a double close cannot take the open count below
+    // what is actually open.
+    this.unstacked.delete(span);
     this.store(span.toRecord(this.correlationId, measured));
     this.closeMarks(span);
 
@@ -1701,6 +2225,36 @@ export class Tracer {
     }
 
     return measured;
+  }
+
+  /**
+   * Clears the start mark of every span `reset()` is about to discard: those
+   * still on the stack and the one the frame hooks left pending.
+   *
+   * A span the stack holds twice — it cannot, `startSpan` pushes each once —
+   * and a span with no mark are both handled: `clearMark` names one entry and
+   * does nothing where none exists.
+   */
+  private discardMarks(): void {
+    const pending = this.pendingFrameSpan;
+
+    for (const span of this.stack) {
+      const mark = span.startMark;
+
+      if (mark !== undefined) {
+        clearMark(mark);
+      }
+    }
+
+    // Held outside the stack: `frameLifecycleHooks().onFrameBegin` opens a
+    // frame span as a root and keeps it here until the matching end.
+    if (pending !== undefined && !this.stack.includes(pending)) {
+      const mark = pending.startMark;
+
+      if (mark !== undefined) {
+        clearMark(mark);
+      }
+    }
   }
 
   /**
@@ -1766,18 +2320,18 @@ export function createTracer(options: TracerOptions): Tracer {
 
 // Attaches through `on` alone, which APPENDS — the property
 // js/keyboard_input_manager.js L18-L23 established and
-// src/engine/engine-events.ts preserves. No engine module is edited, no engine
-// module calls this, and no listener registered here writes to its payload.
-// Every engine payload is a detached frozen projection: a write would throw
-// inside the emitter's own containment.
+// src/engine/engine-events.ts preserves. No engine module is edited and no
+// engine module calls this. Every payload carries the live board, and no
+// listener registered here writes to one — `move:before.cancelled` included,
+// so tracing never withdraws a move.
 
 /**
  * Subscribes turn and stage spans to an engine emitter.
  *
  * A turn span opens on `move:before` and closes on `state:commit`, whose
  * duration reaches the turn-latency histogram. It closes without a commit in
- * three cases: a move the engine withdrew, which `move:before` reports through
- * its readonly `cancelled` flag; a `move:after` carrying `moved === false`; and
+ * three cases: a move the engine withdrew, which `move:before` carries in its
+ * `cancelled` flag; a `move:after` carrying `moved === false`; and
  * a `move:before` arriving while an earlier turn span is still open, which
  * supersedes it rather than leaking it. A `state:commit` with no turn span open
  * is reported and otherwise ignored.
@@ -1801,9 +2355,86 @@ export function attachEngineTracing(
   let turnSpan: Span | undefined;
   let turnStart = 0;
   let stageSpan: Span | undefined;
+
+  /**
+   * Index of the stage in force, or `null` before any `stage:start`.
+   *
+   * Held so a TURN span can carry the stage it belongs to as an attribute. The
+   * stage span is detached from the implicit-parent stack, so that association
+   * is no longer expressible as a parent link — and should not be one anyway:
+   * the turn's parent is the input dispatch that caused it, which is the chain
+   * a reader follows.
+   */
+  let stageIndex: number | null = null;
+
+  /**
+   * Index of the stage whose span has been CLOSED and not yet superseded, or
+   * `NO_SETTLED_STAGE` where none is.
+   *
+   * `endStage()` commits immediately after the emission that closes the span,
+   * and that commit still reports the stage it just resolved; this is what tells
+   * the commit handler the report belongs to a stage already accounted for
+   * rather than to one it should open a second span for.
+   */
+  let settledStageIndex: number | null = NO_SETTLED_STAGE;
   let merges = 0;
   let spawns = 0;
   let detached = false;
+
+  /**
+   * The engine path that is about to commit outside a turn, or `null` when
+   * none is.
+   *
+   * TWO ENGINE PATHS EMIT AND THEN COMMIT IMMEDIATELY, both by their own
+   * documented design: `setup()` emits `stage:start` and commits, and
+   * `endStage()` emits `stage:end` and commits. Neither is inside a turn, so
+   * neither has a turn span, and treating either as an anomaly warned once per
+   * page load and once per cleared stage about correct behaviour.
+   *
+   * Armed by those two emissions and consumed by the commit that follows, so a
+   * commit that arrives with no turn span AND nothing accounting for it is
+   * still reported as an anomaly. `continuePlaying()` commits outside a turn
+   * with no emission ahead of it and so remains in that second category: the
+   * engine offers no signal to arm this with, and a state change out of turn is
+   * worth surfacing.
+   */
+  let expectedUntracedCommit: string | null = null;
+
+  /**
+   * Classifies a `state:commit` that arrived with no turn span open.
+   *
+   * The classification `Tracer.recordLifecycleCommit` counts under, and the
+   * value the stage-span event carries as `SPAN_ATTRIBUTES.phase`. Read from
+   * the marker the preceding emission armed where there is one, and from the
+   * commit itself where there is not: `continuePlaying()` (src/engine/engine.ts
+   * L1162-L1166) emits nothing ahead of its commit, and a commit with the win
+   * reached and play NOT blocked is that path and no other — the winning turn's
+   * own commit blocks play, and a stage opening has not won.
+   *
+   * @param path Marker the preceding emission armed, or `null`.
+   * @param openedStage Whether this commit opened the stage span it landed on.
+   * @param commit The commit payload.
+   * @returns The phase it belongs to.
+   */
+  const commitPhaseFor = (
+    path: string | null,
+    openedStage: boolean,
+    commit: StateCommitEvent,
+  ): CommitPhase => {
+    if (path === UNTRACED_COMMIT_PATHS.stageEnd) {
+      return COMMIT_PHASES.stage;
+    }
+
+    if (path === UNTRACED_COMMIT_PATHS.stageStart || openedStage) {
+      return COMMIT_PHASES.setup;
+    }
+
+    if (commit.won && !commit.terminated) {
+      return COMMIT_PHASES.continue;
+    }
+
+    return COMMIT_PHASES.unknown;
+  };
 
   const endTurn = (outcome: SpanOutcome): void => {
     const span = turnSpan;
@@ -1835,7 +2466,76 @@ export function attachEngineTracing(
     }
 
     stageSpan = undefined;
+
+    // REMEMBERED SO THE COMMIT THAT FOLLOWS DOES NOT RE-OPEN IT. `endStage()`
+    // emits `stage:end` and then commits, and that commit still reports the
+    // stage that just ended — so following it blindly would open a second span
+    // for a stage nothing is playing and leave it open for the rest of the run.
+    // The next `stage:start`, or a commit reporting a DIFFERENT stage, opens the
+    // next one.
+    settledStageIndex = stageIndex;
     span.end({ ...extra, [SPAN_ATTRIBUTES.outcome]: outcome });
+  };
+
+  /**
+   * Opens the span for the stage now in force.
+   *
+   * @param index Index of that stage.
+   * @param boardSize Board dimension it runs on.
+   */
+  const beginStage = (index: number, boardSize: number): void => {
+    stageIndex = index;
+    settledStageIndex = NO_SETTLED_STAGE;
+    stageSpan = tracer.startSpan(SPAN_NAMES.engineStage, {
+      parent: null,
+
+      // DETACHED, because a stage outlives the call that started it: it is
+      // open across every turn of that stage and closes on an event of its
+      // own. On the stack it would sit beneath whatever the keypress in
+      // flight has open, and closing it — which happens INSIDE the commit
+      // of the turn that cleared the goal — would unwind that turn and its
+      // input dispatch as though they were its children.
+      detached: true,
+
+      attributes: {
+        [SPAN_ATTRIBUTES.stageIndex]: index,
+        [SPAN_ATTRIBUTES.boardSize]: boardSize,
+      },
+    });
+  };
+
+  /**
+   * Aligns the open stage span with the stage a commit reports.
+   *
+   * Opens one when none is open, and replaces one that belongs to a stage the
+   * run has left. Called on every commit, so the stage a turn span records and
+   * the stage a `stage:end` closes are the stage the engine says is in force
+   * rather than one inferred from an emission that fires once per run.
+   *
+   * @param index Stage index the commit reports.
+   * @param boardSize Board dimension the commit reports.
+   */
+  const followCommittedStage = (index: number, boardSize: number): boolean => {
+    if (stageSpan !== undefined && stageIndex === index) {
+      return false;
+    }
+
+    // The stage this index belongs to has already been resolved and its span
+    // closed; the commit that closes it is not a new stage.
+    if (stageSpan === undefined && settledStageIndex === index) {
+      return false;
+    }
+
+    // The stage this span belonged to is over: the run left it without the
+    // `stage:end` that would have closed it, which is what a restart into a
+    // different stage does.
+    endStage(SPAN_OUTCOMES.superseded);
+    beginStage(index, boardSize);
+
+    // OPENED HERE, which is itself an account for a commit outside a turn: the
+    // commit that opens a stage is the vanilla actuation of js/game_manager.js
+    // L59, which ran from `setup()` before any move.
+    return true;
   };
 
   /**
@@ -1861,13 +2561,10 @@ export function attachEngineTracing(
       'stage:start',
       guarded('stage:start', (payload): void => {
         endStage(SPAN_OUTCOMES.superseded);
-        stageSpan = tracer.startSpan(SPAN_NAMES.engineStage, {
-          parent: null,
-          attributes: {
-            [SPAN_ATTRIBUTES.stageIndex]: payload.stageIndex,
-            [SPAN_ATTRIBUTES.boardSize]: payload.boardSize,
-          },
-        });
+
+        // `setup()` commits immediately after this emission, outside any turn.
+        expectedUntracedCommit = UNTRACED_COMMIT_PATHS.stageStart;
+        beginStage(payload.stageIndex, payload.boardSize);
       }),
     ),
   );
@@ -1877,11 +2574,23 @@ export function attachEngineTracing(
       'move:before',
       guarded('move:before', (payload): void => {
         endTurn(SPAN_OUTCOMES.superseded);
+
+        // A turn supersedes a lifecycle emission awaiting a commit: the
+        // commit this turn ends with is the turn's own.
+        expectedUntracedCommit = null;
         turnStart = readNow();
         turnSpan = tracer.startSpan(SPAN_NAMES.engineTurn, {
           attributes: {
             [SPAN_ATTRIBUTES.direction]: payload.direction,
             [SPAN_ATTRIBUTES.cancelled]: payload.cancelled,
+
+            // The stage this turn belongs to, carried as an attribute rather
+            // than as a parent link: the stage span is detached, and the turn's
+            // parent is whatever opened the turn — the input dispatch, in the
+            // composed application.
+            ...(stageIndex === null
+              ? {}
+              : { [SPAN_ATTRIBUTES.stageIndex]: stageIndex }),
           },
         });
 
@@ -1951,14 +2660,124 @@ export function attachEngineTracing(
     events.on(
       'state:commit',
       guarded('state:commit', (payload): void => {
+        // THE STAGE A COMMIT REPORTS IS THE AUTHORITATIVE ONE, and this is
+        // the only event carrying it on every emission. `stage:start` is
+        // emitted by `setup()` alone, so within one run it fires ONCE while
+        // `stage:end` fires once per cleared stage: advancing a stage keeps
+        // the board and raises the goal rather than setting up again.
+        // Following the committed index is what keeps a span open for the
+        // stage actually in force — without it, stage 0 was the only stage
+        // ever spanned, every later turn carried stage 0 as its attribute,
+        // and every later `stage:end` reported an anomaly against a span
+        // that had never been opened.
+        const openedStage = followCommittedStage(
+          payload.stage.stageIndex,
+          payload.board.size,
+        );
+
         if (turnSpan === undefined) {
-          tracer.reportAnomaly('commit with no turn span open', {
-            score: payload.score,
-            terminated: payload.terminated,
-          });
+          // A NON-TURN COMMIT, WHICH IS ORDINARY: four of the engine's five
+          // commit paths are not moves — `setup()`, `continuePlaying()`,
+          // `endStage()` and `startStage()`, plus `restart()` through `setup()` —
+          // so every board a run opens on, every win continued and every stage
+          // resolved reaches here with no turn span open. Reporting those as
+          // anomalies would make the anomaly count a measure of how many stages
+          // had been played rather than of anything wrong.
+          //
+          // A commit with no turn span belongs to one of two boundaries. An
+          // ARMED lifecycle path — setup, a stage start, a stage end, a
+          // continue — is an expected commit outside a turn and is reported as
+          // such. Otherwise js/game_manager.js L59 actuated from `setup()`
+          // before any move, so the commit that opens a stage arrives with a
+          // stage span open and no turn span, and it is recorded on the stage
+          // span. A commit with NEITHER an armed path nor a stage span has no
+          // boundary to belong to and is reported as an anomaly.
+          const path = expectedUntracedCommit;
+          expectedUntracedCommit = null;
+
+          // KEPT WHERE IT HAPPENED, whatever accounts for it. The commit is an
+          // event on the stage span in force, so a reader following one stage
+          // sees every commit that landed inside it — the boards a stage opened
+          // on and the stage it resolved through included — rather than only the
+          // turns. Recorded before the accounting below, because the two answer
+          // different questions: this is WHERE it happened, that is WHETHER it
+          // should have.
+          const phase = commitPhaseFor(path, openedStage, payload);
+
+          // COUNTED, whichever path it belongs to. `lifecycleCommits` measures
+          // the commits made outside a turn, so a reader comparing it against
+          // the turn count sees the lifecycle traffic separately rather than
+          // having to read it out of the anomaly count.
+          tracer.recordLifecycleCommit(phase);
+
+          // AND INTO THE THREE-WAY BREAKDOWN, beside the turn commits accounted
+          // below: `lifecycle` for a commit an observed signal explains, and
+          // `unattributed` for one nothing does — which is the same commit this
+          // reports as an anomaly a few lines on. `state:commit` carries no
+          // commit source (AAP 0.6.1.1 fixes its members), so a lifecycle commit
+          // made outside the accounted paths and a commit no engine method
+          // produced share that bucket.
+          tracer.recordCommitAttribution(
+            phase === COMMIT_PHASES.unknown
+              ? COMMIT_ATTRIBUTIONS.unattributed
+              : COMMIT_ATTRIBUTIONS.lifecycle,
+            {
+              phase,
+              score: payload.score,
+              terminated: payload.terminated,
+            },
+          );
+
+          if (stageSpan !== undefined) {
+            stageSpan.addEvent(SPAN_EVENT_NAMES.stageCommit, {
+              [SPAN_ATTRIBUTES.phase]: phase,
+              [SPAN_ATTRIBUTES.score]: payload.score,
+              [SPAN_ATTRIBUTES.terminated]: payload.terminated,
+            });
+          }
+
+          // THE ACCOUNT, spent once. An ARMED lifecycle path — setup, a stage
+          // start, a stage end, a continue — accounts for exactly the next
+          // commit and is then consumed, so an arm cannot be carried over to a
+          // later commit it has no relationship to. A commit that OPENED the
+          // stage span it just landed on accounts for itself. A commit with
+          // neither has no boundary to belong to and is an anomaly.
+          if (path !== null) {
+            tracer.reportExpected('commit outside a turn', {
+              path,
+              score: payload.score,
+              terminated: payload.terminated,
+            });
+          } else if (openedStage) {
+            tracer.reportExpected('commit outside a turn', {
+              path: UNTRACED_COMMIT_PATHS.stageStart,
+              score: payload.score,
+              terminated: payload.terminated,
+            });
+          } else if (phase === COMMIT_PHASES.continue) {
+            // `continuePlaying()` commits with nothing emitted ahead of it, so
+            // no arm can account for it — but a win the player chose to play on
+            // from is ordinary, and reporting it as an anomaly made the anomaly
+            // count rise once per continued win.
+            tracer.reportExpected('commit outside a turn', {
+              path: COMMIT_PHASES.continue,
+              score: payload.score,
+              terminated: payload.terminated,
+            });
+          } else {
+            tracer.reportAnomaly('commit with no turn span open', {
+              score: payload.score,
+              terminated: payload.terminated,
+            });
+          }
 
           return;
         }
+
+        // A turn is committing, so nothing outside a turn is pending any more:
+        // an arm left standing here would be consumed by a later commit it has
+        // no relationship to.
+        expectedUntracedCommit = null;
 
         turnSpan.setAttribute(SPAN_ATTRIBUTES.score, payload.score);
         turnSpan.setAttribute(
@@ -1966,6 +2785,7 @@ export function attachEngineTracing(
           payload.terminated,
         );
         endTurn(SPAN_OUTCOMES.committed);
+        tracer.recordCommitAttribution(COMMIT_ATTRIBUTIONS.turn);
       }),
     ),
   );
@@ -1974,6 +2794,13 @@ export function attachEngineTracing(
     events.on(
       'stage:end',
       guarded('stage:end', (payload): void => {
+        // Armed ahead of the stage-span check, because `endStage()` commits
+        // immediately after this emission whether or not this tracer was
+        // attached in time to hold a span for the stage that just ended. The
+        // turn that cleared the goal has already committed and closed its own
+        // span, so that commit is outside any turn.
+        expectedUntracedCommit = UNTRACED_COMMIT_PATHS.stageEnd;
+
         if (stageSpan === undefined) {
           tracer.reportAnomaly('stage end with no stage span open', {
             stageIndex: payload.stageIndex,
@@ -1990,7 +2817,7 @@ export function attachEngineTracing(
     ),
   );
 
-  return (): void => {
+  const detach = (): void => {
     if (detached) {
       return;
     }
@@ -2009,6 +2836,32 @@ export function attachEngineTracing(
     endTurn(SPAN_OUTCOMES.detached);
     endStage(SPAN_OUTCOMES.detached);
   };
+
+  // THE ONE CLOSER. Both members below reach it, so an idle turn is closed the
+  // same way whichever a caller holds. Reported as `unmoved` by default, the
+  // outcome an idle turn already has, so the turn-latency histogram records only
+  // turns that actually resolved.
+  const settleTurn = (
+    outcome: SpanOutcome = SPAN_OUTCOMES.unmoved,
+  ): boolean => {
+    if (detached || turnSpan === undefined) {
+      return false;
+    }
+
+    endTurn(outcome);
+
+    return true;
+  };
+
+  // Attached to the detach function rather than returned beside it, so every
+  // existing caller — which calls the handle to detach — is unaffected.
+  return Object.assign(detach, {
+    settleTurn,
+
+    closeIdleTurn: (): void => {
+      settleTurn();
+    },
+  });
 }
 
 /* ==========================================================================

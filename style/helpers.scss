@@ -1,40 +1,35 @@
-// Dart Sass migration: exponent() divides with math.div(), and the keyframes
-// mixin interpolates the at-rule name.
-@use "sass:color";
-@use "sass:math";
-
-// Serialises a colour the way a `background` or `color` declaration serialises
-// it, so a colour published into a custom property carries the same channels as
-// one declared directly.
+// The vanilla Ruby Sass helpers, migrated to Dart Sass and otherwise unchanged.
+// Two edits, both of them required by the compiler change and nothing else:
 //
-// Dart Sass writes a declared colour as hex, flooring each channel; a colour
-// interpolated into a custom property keeps its fractional channels and is
-// written as percentages instead. src/theme/tile-ramp.ts floors, which is the
-// parity the compiled ramp is verified against, so each channel is floored here
-// before `rgb()` rebuilds the colour. Declared here rather than in
-// style/main.scss because style/_themes.scss interpolates its palettes' ramps
-// into the same custom properties.
-@function quantised($color) {
-  @return rgb(
-    math.floor(color.channel($color, "red", $space: rgb)),
-    math.floor(color.channel($color, "green", $space: rgb)),
-    math.floor(color.channel($color, "blue", $space: rgb))
-  );
-}
+//   exponent()   `$value / $base` became `math.div($value, $base)`; the
+//                `@use "sass:math"` below is what that call needs.
+//   keyframes()  `@keyframes $animation-name` became
+//                `@keyframes #{$animation-name}`. Ruby Sass evaluated the bare
+//                variable in an at-rule name; Dart Sass emits it literally, so
+//                without the interpolation every block compiles to the animation
+//                name `$animation-name` and every `animation:` reference to a
+//                real name finds no keyframes at all. The failure is silent —
+//                the compile succeeds — so it is repaired here rather than left.
+//
+// Nothing else lives in this file. A colour helper written for the ramp was
+// moved to style/_tokens.scss, the token layer that exists for that parity.
+@use "sass:math";
 
 // Exponent
 // From: https://github.com/Team-Sass/Sassy-math/blob/master/sass/math.scss#L36
 
 @function exponent($base, $exponent) {
+  // reset value
   $value: $base;
-  // positive integers get multiplied
+  // positive intergers get multiplied
   @if $exponent > 1 {
     @for $i from 2 through $exponent {
       $value: $value * $base; } }
-  // negative integers get divided. A number divided by itself is 1
+  // negitive intergers get divided. A number divided by itself is 1
   @if $exponent < 1 {
     @for $i from 0 through -$exponent {
       $value: math.div($value, $base); } }
+  // return the last value written
   @return $value;
 }
 
@@ -75,6 +70,8 @@
 }
 
 // Keyframe animations
+// Dart Sass does not interpolate a variable in an at-rule prelude, so an
+// uninterpolated $animation-name emits the literal text "$animation-name".
 @mixin keyframes($animation-name) {
   @-webkit-keyframes #{$animation-name} {
     @content;

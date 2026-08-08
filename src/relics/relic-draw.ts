@@ -26,8 +26,24 @@
 //   performs no I/O, reads no clock, and reaches no randomness beyond the two
 //   substreams above.
 //
-// Decisions behind this file are recorded in docs/DECISION_LOG.md, and its
-// rows in docs/TRACEABILITY_MATRIX.md.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-DRAW-01  js/game_manager.js L71  the weighted two-value choice,
+//                                       generalised into the rarity-weighted
+//                                       selection of a tier
+//   TR-DRAW-02  js/grid.js L37-L43      the uniform selection, generalised
+//                                       into the selection of one relic within
+//                                       the winning tier, and its
+//                                       nothing-to-select boundary
+//   TR-DRAW-03  target-only row         `drawRewardOffer`, which samples
+//                                       WITHOUT replacement
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-DRAW-01  sampling without replacement
+//   DL-DRAW-02  the two substreams consumed being `rarity-weight` and
+//               `relic-draw` and no others
+//   DL-DRAW-03  exactly one draw from each substream per offer RETURNED
 
 import {
   DEFAULT_RARITY_WEIGHTS,

@@ -512,3 +512,76 @@ describe('unmount restores the markup it was handed', () => {
     expect(host.log.published).toEqual([]);
   });
 });
+
+/* ===== 7. A repeat mount replaces the set it finds ===== */
+
+// The module's entry point is a factory, so nothing stopped a second call over
+// the same host from appending a second pad and a second action group: the host
+// then carried two of every generated control — two tab stops per action, two
+// accessible names, and two click listeners publishing the same action twice
+// from one press. Replacing what a previous mount left makes a repeat mount
+// idempotent in effect (N10).
+
+describe('mounting twice over one host leaves one set of controls', () => {
+  it('replaces the generated groups rather than appending to them', () => {
+    seedMarkup();
+
+    const root = control('#on-screen-controls');
+
+    mount(createHost());
+
+    const afterFirst = root.querySelectorAll('button').length;
+    const groupsAfterFirst = root.querySelectorAll(
+      '.on-screen-controls-group',
+    ).length;
+
+    expect(groupsAfterFirst).toBe(2);
+    expect(afterFirst).toBeGreaterThan(0);
+
+    mount(createHost());
+
+    // EXACTLY the same counts, not double them.
+    expect(root.querySelectorAll('.on-screen-controls-group')).toHaveLength(2);
+    expect(root.querySelectorAll('button')).toHaveLength(afterFirst);
+  });
+
+  it('publishes one action per press after a remount', () => {
+    seedMarkup();
+
+    const first = createHost();
+
+    mount(first);
+
+    const second = createHost();
+
+    mount(second);
+
+    const root = control('#on-screen-controls');
+    const up = root.querySelector<HTMLButtonElement>(
+      '[data-action="moveUp"]',
+    );
+
+    expect(up).not.toBeNull();
+    up?.click();
+
+    // The surviving set publishes to the host that created it, once. A stale
+    // duplicate would have published to the first host as well.
+    expect(second.log.moves).toHaveLength(1);
+    expect(first.log.moves).toHaveLength(0);
+  });
+
+  it('leaves the host clean after the surviving handle unmounts', () => {
+    seedMarkup();
+
+    const root = control('#on-screen-controls');
+
+    mount(createHost());
+
+    const handle = mount(createHost());
+
+    handle.unmount();
+
+    expect(root.querySelectorAll('.on-screen-controls-group')).toHaveLength(0);
+    expect(root.querySelectorAll('button')).toHaveLength(0);
+  });
+});

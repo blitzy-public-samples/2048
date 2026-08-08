@@ -71,6 +71,8 @@ const commitOf = (
     readonly terminated?: boolean;
   } = {},
 ): StateCommitEvent => ({
+  turn: 1,
+  degraded: false,
   board: new Grid(4),
   score: 0,
   bestScore: 0,

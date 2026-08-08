@@ -1,17 +1,12 @@
 // Contract suite for the contrast of the four text/surface pairs a code review
 // measured below WCAG 2.1 AA, across all three palettes.
 //
-// WHY THE DEFAULT PALETTE IS NOT RAISED HERE, AND WHY THAT IS THE CORRECT
-// OUTCOME RATHER THAN AN UNFIXED DEFECT:
+// EXTERNAL CONSTRAINT — THE DEFAULT PALETTE IS FROZEN AND IS NOT RAISED HERE
 //
-// The Agent Action Plan freezes this palette twice, in terms that speak to
-// exactly this change. Its design-system gap inventory (AAP 0.5.5) records the
-// palette as low-contrast "by design", against a design "documented as
-// intentionally fixed", and resolves the gap by ruling that high-contrast and
-// colourblind palettes are "additional themes, NEVER replacements of the
-// default". Its compliance summary (AAP 0.5.6) then requires "preservation of
-// the frozen palette, ramp and motion vocabulary as the default theme", so that
-// the product's visual identity survives the change of rendering technology.
+// AAP 0.5.5 records the palette as low-contrast by design and rules that the
+// high-contrast and colourblind palettes are additional themes and never
+// replacements of the default; AAP 0.5.6 requires the frozen palette, ramp and
+// motion vocabulary be preserved as the default theme. Decision DL-THEME-05.
 //
 // All four pairs resolve entirely through the fourteen frozen tokens of AAP
 // 0.5.2, whose values that section requires be kept:
@@ -21,28 +16,18 @@
 //   score value    white              on $game-container-background
 //   tile-8 numeral $bright-text-color on the generated ramp fill for value 8
 //
-// The last of those is doubly frozen: AAP 0.5.3 forbids hand-authoring the ramp
-// and requires the TypeScript ramp to reproduce the stylesheet's generative
-// function exactly, so moving tile-8's fill to reach 3:1 would break ramp parity
-// — which another suite in this directory asserts — rather than fix a palette.
+// The last of those is additionally constrained: AAP 0.5.3 forbids
+// hand-authoring the ramp and requires the TypeScript ramp to reproduce the
+// stylesheet's generative function exactly, so tile-8's fill is not moved here.
+// Decision DL-RAMP-01.
 //
-// So the accessibility obligation is met the way the AAP directs: the default
-// keeps the product's identity, and two palettes that DO clear AA are shipped
-// beside it and made reachable. This suite is what makes that position
-// auditable. It:
+// WHAT THIS SUITE ASSERTS
+//   1  the default palette's measured ratios, recorded as facts;
+//   2  that both additive palettes clear AA on all four pairs.
 //
-//   1  records the default's measured ratios as facts, so the shortfall is
-//      documented in the codebase rather than merely known;
-//   2  asserts both alternative palettes clear AA on all four pairs, so the
-//      compliant path cannot silently regress into being non-compliant, which
-//      would leave a user with no compliant option at all.
-//
-// Reachability of those palettes is the other half of the resolution and is
-// asserted where it belongs, against the settings surface, in
+// Reachability of those palettes is asserted against the settings surface, in
 // tests/unit/ui/settings-panel.test.ts and tests/unit/ui/composition-input.test.ts.
-//
-// The ratio is computed here rather than imported: the formula is WCAG 2.1's
-// own, and stating it in the suite is what makes the numbers checkable.
+// The ratio is computed here from WCAG 2.1's own formula and is not imported.
 //
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock library and writes no snapshot.
@@ -317,5 +302,113 @@ describe('the alternatives are additive', () => {
     expect(defaultTheme.palette.scoreSurface).toBe('#bbada0');
     expect(highContrastTheme.id).toBe('high-contrast');
     expect(colorblindSafeTheme.id).toBe('colorblind-safe');
+  });
+});
+
+/* ==========================================================================
+ * 5. The settings surface, measured in the browser
+ * ==========================================================================
+ *
+ * A later review reported the settings panel rendering `#776e65` on `#faf8ef` at
+ * approximately 4.04:1, below the 4.5 floor. The pair is real — the panel's
+ * reading surface is `pageBackground` and its body text is `text` — but the
+ * ratio is not: measured in a real browser over the composited ancestor stack,
+ * and re-derived by the formula at the top of this file, it is 4.6966:1, which
+ * CLEARS the floor. The ~4.0 figure is what `#776e65` measures against the
+ * scrim colour `#eee4da` with its 0.5 alpha ignored, and that scrim is painted
+ * BEHIND the panel's opaque surface, so it never composites into any text
+ * background.
+ *
+ * What the same measurement did find, across all 25 controls in the dialog, is
+ * `#f9f6f2` on `#8f7a66` at 3.7896:1 — the button pair section 2 already
+ * records, reaching the dialog because AAP 0.5.4 maps a new primary action
+ * button onto exactly those two frozen tokens. It stays in the default theme for
+ * the reason the rest of this suite states, and the two alternative palettes are
+ * where it clears AA.
+ *
+ * These cases lock both halves down: the pair that passes cannot be regressed by
+ * darkening the panel or lightening its text, and the pair that does not cannot
+ * be quietly re-tinted in the default while remaining unfixed in the palettes a
+ * user can actually reach.
+ */
+
+/** The panel body pair: what the review named, and what it really measures. */
+function panelBodyPair(theme: Theme): Pair {
+  return {
+    name: 'settings body text on the panel reading surface',
+    front: theme.palette.text,
+    back: theme.palette.pageBackground,
+    minimum: TEXT_MINIMUM,
+  };
+}
+
+describe('the settings surface', () => {
+  it('measures the reviewed pair at the ratio it actually renders', () => {
+    const pair = panelBodyPair(defaultTheme);
+
+    // Case-insensitively: the token layer spells this one in upper case.
+    expect(pair.front.toLowerCase()).toBe('#776e65');
+    expect(pair.back.toLowerCase()).toBe('#faf8ef');
+
+    // 4.6966, not 4.04. Recorded to four decimals because the claim it corrects
+    // is a numeric one.
+    expect(contrast(pair.front, pair.back)).toBeCloseTo(4.6966, 4);
+    expect(contrast(pair.front, pair.back)).toBeGreaterThanOrEqual(
+      TEXT_MINIMUM,
+    );
+  });
+
+  it('records where the ~4.0 figure comes from, and that it is not rendered', () => {
+    // The scrim colour with its alpha dropped. Kept as a fact so the correction
+    // above is checkable rather than asserted.
+    expect(contrast('#776e65', '#eee4da')).toBeCloseTo(3.9844, 4);
+
+    // The scrim as it is actually painted, composited over the page background,
+    // which is also not what any text sits on because the panel surface is
+    // opaque and in front of it.
+    expect(contrast('#776e65', '#f4eee4')).toBeCloseTo(4.3298, 4);
+  });
+
+  it.each([
+    ['default', defaultTheme],
+    ['high contrast', highContrastTheme],
+    ['colourblind safe', colorblindSafeTheme],
+  ])('clears AA for body text in the %s palette', (_name, theme) => {
+    const pair = panelBodyPair(theme);
+
+    expect(contrast(pair.front, pair.back)).toBeGreaterThanOrEqual(
+      TEXT_MINIMUM,
+    );
+  });
+
+  it('carries the frozen button pair into the dialog, as AAP 0.5.4 maps it', () => {
+    // Every control in the dialog is the button vocabulary, so the pair section
+    // 2 records is the pair the dialog's 25 labels render. Measured in the
+    // browser at 3.7896 on all of them, and 18px bold is not large text, so 4.5
+    // is the floor that applies.
+    const palette = defaultTheme.palette;
+
+    expect(contrast(palette.buttonLabel, palette.buttonSurface)).toBeCloseTo(
+      3.7896,
+      4,
+    );
+    expect(
+      contrast(palette.buttonLabel, palette.buttonSurface),
+    ).toBeLessThan(TEXT_MINIMUM);
+
+    // And the reachable compliant path: both alternatives clear it by a margin,
+    // and both are reachable from this very dialog.
+    expect(
+      contrast(
+        highContrastTheme.palette.buttonLabel,
+        highContrastTheme.palette.buttonSurface,
+      ),
+    ).toBeGreaterThanOrEqual(TEXT_MINIMUM);
+    expect(
+      contrast(
+        colorblindSafeTheme.palette.buttonLabel,
+        colorblindSafeTheme.palette.buttonSurface,
+      ),
+    ).toBeGreaterThanOrEqual(TEXT_MINIMUM);
   });
 });

@@ -17,8 +17,15 @@
 //                     dispatch is deferred until the walk returns.
 //   charge guard      a subscriber whose `charges` is present and not
 //                     above zero is skipped before its handler is
-//                     reached, and `consumeCharge` is the one path that
-//                     deducts a charge.
+//                     reached, and one deduction rule inside this module
+//                     is the only thing that writes a budget. It is
+//                     reached from `consumeCharge`, which a collaborator
+//                     calls, and from the per-handler commit below, which
+//                     spends what a handler asked for through
+//                     `HookContext.spendCharge` once its return has been
+//                     accepted. A handler never reads, compares or writes
+//                     a budget, and a dispatch that asked for nothing
+//                     spends nothing.
 //   error isolation   a handler that throws is caught, reported through
 //                     the injected reporter and its subscriber marked
 //                     degraded; the dispatch continues and returns the
@@ -57,6 +64,10 @@
 //                    reaches a copy. A slot taken over by reference — as it
 //                    was — left nested writes behind even though the
 //                    reassignment was rolled back.
+//   the charge       a spend is REQUESTED during the handler and deducted
+//                    only after its return validates, so a handler that
+//                    asked and then threw, or whose return was refused,
+//                    leaves the budget where it stood.
 //   the board and
 //   its tiles        the board reaches a handler as a query-only facade, and
 //                    the two merging tiles of `onMerge` reach it as frozen
@@ -92,6 +103,8 @@ import type {
   ReadonlyTileView,
 } from './hooks';
 import { HOOK_NAMES } from './hooks';
+import type { BoardEffect, BoardEffectTransaction } from './board-effects';
+import { INERT_BOARD_EFFECTS, openBoardEffects } from './board-effects';
 import type {
   CorrelationId,
   EngineReporter,
@@ -157,6 +170,18 @@ const REMOVED_METRIC = 'engine.hook.subscriber.removed';
 const CHARGE_METRIC = 'engine.hook.charge.consumed';
 
 /**
+ * Counter name for one injected tracing wrapper that failed and was
+ * contained.
+ */
+const TRACING_FAULT_METRIC = 'engine.hook.tracing.fault';
+
+/** Board and rules commands written after a handler's return was adopted. */
+const EFFECT_APPLIED_METRIC = 'engine.hook.effect.applied';
+
+/** Board and rules commands dropped with a refused or failed handler. */
+const EFFECT_DROPPED_METRIC = 'engine.hook.effect.dropped';
+
+/**
  * What is registered on the bus: the behavioural slice of the relic data
  * shape. The bus reads no member beyond these four.
  */
@@ -180,8 +205,9 @@ export interface HookSubscriber {
   /**
    * Charges remaining. Absent on a subscriber carrying no charge budget,
    * which is never charge-guarded; present and not above zero, every handler
-   * of the subscriber is skipped. Written by `consumeCharge` and by nothing
-   * else on the bus.
+   * of the subscriber is skipped. Written by `consumeCharge` and by the
+   * per-handler commit of a spend a handler requested through
+   * `HookContext.spendCharge`, and by nothing else on the bus.
    */
   readonly charges?: number;
 
@@ -201,6 +227,44 @@ export interface HookDispatchResult<K extends HookName> {
   readonly failed: number;
 
   readonly rejected: number;
+
+  /**
+   * Charges this dispatch spent, across every handler it invoked.
+   *
+   * A budget-carrying handler pays what it asked for through
+   * `HookContext.spendCharge`, and one charge where it asked for nothing but had
+   * a board command accepted. Zero for a dispatch that changed nothing.
+   */
+  readonly chargesConsumed: number;
+
+  /**
+   * Board and rules commands this dispatch wrote, across every handler whose
+   * return was accepted.
+   *
+   * Reported so a CALLER can tell a dispatch that reseated the board from one
+   * that only read it — the withdrawn-move-plus-undo pairing being the case that
+   * needs it — without reaching for the lattice itself.
+   */
+  readonly effectsApplied: number;
+
+  /**
+   * The commands this dispatch wrote, in the order they were written.
+   *
+   * The count above answers "did anything change"; this answers "what". Carried
+   * so the engine can account for the write it does not itself make — the score
+   * a restore reinstates, and the reconciliation a resize forces on the win and
+   * loss checks — without inspecting the lattice for a difference.
+   */
+  readonly effects: readonly BoardEffect[];
+
+  /**
+   * Commands this dispatch REFUSED, across every handler it invoked.
+   *
+   * A refusal is not an error: an off-lattice cell, an occupied destination, an
+   * unsupported edge length or an undrawable weight list each change nothing and
+   * are reported here instead of raising out of the turn.
+   */
+  readonly effectsRefused: number;
 }
 
 /**
@@ -329,8 +393,10 @@ export interface HookBus {
   ): HookDispatchResult<K>;
 
   /**
-   * Deducts charges from one subscriber, and is the only path that writes
-   * `charges`.
+   * Deducts charges from one subscriber: the path a COLLABORATOR spends a
+   * budget through, and one of the two callers of the module's single
+   * deduction rule — the other being the per-handler commit, which spends what
+   * a handler requested through `HookContext.spendCharge`.
    *
    * Deducts at most the charges the subscriber holds, so the budget never
    * falls below zero and a call against a spent budget deducts nothing. A
@@ -375,6 +441,38 @@ export interface HookBus {
   metrics(): HookBusMetrics;
 }
 
+/**
+ * The two wrappers a caller may inject to measure this bus's boundaries: one
+ * per dispatch, and one per handler invocation inside it.
+ *
+ * Declared HERE and satisfied structurally, so no module under src/engine imports
+ * src/observability: `BoundaryTracing` of src/observability/tracer.ts is
+ * assignable to this interface, and the composition root is what connects the
+ * two. Each wrapper receives a synchronous function it is expected to call
+ * exactly once and to return the value of, so a wrapper is a measurement and
+ * never a transformation. Either wrapper may be absent, in which case that
+ * boundary runs directly.
+ *
+ * A wrapper that throws, and one that returns without calling the function it was
+ * given, are both contained: this bus's no-throw guarantee does not depend on the
+ * caller's instrumentation behaving, and a contained fault is counted under
+ * `engine.hook.tracing.fault`. Decision DL-HOOKBUS-05.
+ */
+export interface HookDispatchTracing {
+  /** Wraps one whole dispatch of one hook. */
+  readonly traceHookDispatch?: <T>(hook: HookName, run: () => T) => T;
+
+  /** Wraps one subscriber's handler within a dispatch. */
+  readonly traceRelicHandler?: <T>(
+    hook: HookName,
+    relicId: string,
+    run: () => T,
+  ) => T;
+}
+
+/** The name src/engine's own suites use for `HookDispatchTracing`. */
+export type HookBusTracing = HookDispatchTracing;
+
 export interface HookBusOptions {
   /**
    * Correlation identifier of the run, carried into every report and
@@ -389,6 +487,14 @@ export interface HookBusOptions {
    * `NOOP_ENGINE_REPORTER`, so the bus is constructible with no argument.
    */
   readonly reporter?: EngineReporter;
+
+  /**
+   * Spans the dispatch and each handler are run inside. Absent by default, in
+   * which case the bus runs them directly, traces nothing and behaves exactly as
+   * it does uninstrumented — which is what keeps this module free of any
+   * observability dependency.
+   */
+  readonly tracing?: HookDispatchTracing;
 }
 
 type HandlerOutcome =
@@ -798,12 +904,19 @@ function isValidPayload<K extends HookName>(
 
     case 'onSpawn': {
       const position: unknown = candidate.position;
+      const count: unknown = candidate.count;
 
       return (
-        hasExactMembers(candidate, ['value'], ['position']) &&
+        hasExactMembers(candidate, ['value'], ['position', 'count']) &&
         (position === undefined || isCellPosition(position, size)) &&
         isFiniteNumber(candidate.value) &&
-        candidate.value > 0
+        candidate.value > 0 &&
+        // The count is the number of tiles the spawn inserts. A whole number at
+        // or above one, or absent; the engine clamps it to the cells the board
+        // has left, so an unreachably large count is legal and simply fills the
+        // board.
+        (count === undefined ||
+          (isFiniteNumber(count) && Number.isInteger(count) && count >= 1))
       );
     }
 
@@ -820,6 +933,13 @@ function isValidPayload<K extends HookName>(
           'terminated',
         ]) &&
         typeof candidate.moved === 'boolean' &&
+        // INVARIANT, exactly as src/engine/hooks.ts declares it. Without this a
+        // handler could return `moved: false` for a move that had already
+        // resolved and the engine would emit that on `move:after` — a granular
+        // event contradicting the commit beside it. Enforcing it here refuses
+        // the whole return, which is what keeps a handler to transforming what
+        // it is allowed to transform.
+        candidate.moved === original.moved &&
         candidate.board === original.board &&
         isFiniteNumber(candidate.score) &&
         typeof candidate.over === 'boolean' &&
@@ -1192,6 +1312,62 @@ function openRngTransaction(rng: EnvironmentRng): RngTransaction {
 }
 
 /**
+ * A transaction that records nothing and resolves to nothing, for a dispatch
+ * whose environment carries no usable board or no usable rules.
+ *
+ * A caller can force a malformed environment past the type system, and the
+ * board-effect queue would otherwise be the one context member able to raise
+ * on such a dispatch. This keeps every member of the context safe to call.
+ */
+const INERT_EFFECT_TRANSACTION: BoardEffectTransaction = Object.freeze({
+  queue: INERT_BOARD_EFFECTS,
+  commit: (): number => 0,
+  rollback: (): number => 0,
+});
+
+/**
+ * Opens one handler's board-effect transaction over the dispatch environment.
+ *
+ * The live board is BOTH the projection source and the write target: the queue
+ * projects it once, on the handler's first command or query, and writes back to
+ * it only on commit.
+ *
+ * @param environment The dispatch's live collaborators.
+ * @param hook Hook being dispatched, which decides which of the two write bands
+ *   the queue accepts.
+ * @returns The transaction, or the inert one where the environment carries no
+ *   board with a `serialize` member or no rules object.
+ */
+function openEffectTransaction(
+  environment: HookEnvironment,
+  hook: HookName,
+): BoardEffectTransaction {
+  const grid = environment.grid;
+  const config = environment.config;
+
+  if (
+    typeof grid !== 'object' ||
+    grid === null ||
+    typeof grid.serialize !== 'function' ||
+    typeof config !== 'object' ||
+    config === null
+  ) {
+    return INERT_EFFECT_TRANSACTION;
+  }
+
+  // `onMerge` is dispatched from inside the move walk, so its queue refuses
+  // every cell write and accepts the two rules commands alone. `onSpawn` is
+  // dispatched from `addRandomTile()` with a position already drawn, so it
+  // accepts the three cell-local commands — an extra tile is what a spawn relic
+  // is for — and refuses the two that rebuild the whole lattice underneath the
+  // spawn in flight. Every other hook writes freely.
+  return openBoardEffects(grid, grid, config, {
+    lattice: hook !== 'onMerge',
+    rebuild: hook !== 'onMerge' && hook !== 'onSpawn',
+  });
+}
+
+/**
  * Reads the pickup index a subscriber is registered at.
  *
  * @param requested Index the subscriber declared, where it declared one.
@@ -1354,6 +1530,7 @@ const UNLIMITED_CONSUMPTION: ChargeConsumption = Object.freeze({
 export function createHookBus(options: HookBusOptions = {}): HookBus {
   const correlationId = options.correlationId ?? '';
   const reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
+  const tracing = options.tracing;
 
   /**
    * Registrations held now, kept in pickup order by `byPickupOrder`.
@@ -1420,6 +1597,52 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     });
   };
 
+  /**
+   * Runs `body` inside an injected wrapper, or directly where none was
+   * injected.
+   *
+   * The wrapper is expected to call `body` once and to return its value. Where
+   * it throws, and where it returns without having called `body` at all, the
+   * outcome is recovered here: a completed body's value is returned, and a body
+   * that never ran is run directly. The work is therefore never lost, never
+   * performed twice, and never able to propagate a failure belonging to the
+   * instrumentation rather than to this bus.
+   *
+   * @param wrap The injected wrapper, or `undefined`.
+   * @param hook Hook the work belongs to, carried into the fault count.
+   * @param body The work to run.
+   * @returns Whatever `body` returned.
+   */
+  const traced = <T>(
+    wrap: ((run: () => T) => T) | undefined,
+    hook: HookName,
+    body: () => T,
+  ): T => {
+    if (wrap === undefined) {
+      return body();
+    }
+
+    let completed = false;
+    let held: T | undefined;
+
+    const inner = (): T => {
+      const value = body();
+
+      completed = true;
+      held = value;
+
+      return value;
+    };
+
+    try {
+      return wrap(inner);
+    } catch {
+      count(TRACING_FAULT_METRIC, hook);
+
+      return completed ? (held as T) : body();
+    }
+  };
+
   const hookRow = (hook: HookName): HookCounterRow => {
     const existing = hookRows.get(hook);
 
@@ -1472,6 +1695,61 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     reason: HookSkipReason,
   ): void => {
     note(hook, id, SKIP_OUTCOME[reason]);
+  };
+
+  /**
+   * Counts the board and rules commands one handler's transaction resolved to,
+   * and says nothing at all for a handler that recorded none — which is every
+   * handler that only reads.
+   *
+   * @param metric Counter the amount is added to.
+   * @param hook Hook the commands were recorded under.
+   * @param resolved How many commands were written or dropped.
+   */
+
+  /**
+   * Deducts charges from one registration, and is the ONE writer of `charges`.
+   *
+   * Both `consumeCharge()` and the dispatch walk's own spend go through here, so
+   * the ledger, the per-subscriber row and the counter cannot diverge between
+   * the two paths. Deducts at most what the registration holds, and normalises a
+   * stored budget that is not a whole number at or above zero to zero, so an
+   * invalid budget is spent rather than replenished.
+   *
+   * @param registration Registration to deduct from. Must carry a budget.
+   * @param amount Charges to deduct.
+   * @returns The number of charges actually deducted.
+   */
+  const spend = (registration: Registration, amount: number): number => {
+    const held = registration.charges;
+
+    if (held === undefined) {
+      return 0;
+    }
+
+    const available = normaliseCharges(held);
+    const taken = Math.min(available, normaliseCharges(amount));
+
+    registration.charges = available - taken;
+
+    if (taken > 0) {
+      chargesConsumed += taken;
+      subscriberRow(registration.id, registration.pickupIndex).chargesConsumed +=
+        taken;
+      count(CHARGE_METRIC, undefined, taken);
+    }
+
+    return taken;
+  };
+
+  const countEffects = (
+    metric: string,
+    hook: HookName,
+    resolved: number,
+  ): void => {
+    if (resolved > 0) {
+      count(metric, hook, resolved);
+    }
   };
 
   /**
@@ -1634,6 +1912,44 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       state: copyState(registration.state),
     });
 
+  /**
+   * THE ONE PATH THAT WRITES A CHARGE BUDGET.
+   *
+   * Reached from two callers and no others: `consumeCharge`, which a collaborator
+   * calls directly, and the dispatch's per-handler commit, which spends the
+   * charge a handler requested through `HookContext.spendCharge` once its return
+   * has been accepted. Both spend through here, so the deduction rule — at most
+   * the budget held, so it never falls below zero, and a stored budget that is
+   * not a whole number at or above zero read as ZERO — is written once.
+   *
+   * @param id Subscriber to deduct from.
+   * @param amount Charges to deduct.
+   * @returns What the deduction resolved to.
+   */
+  const deductCharge = (id: string, amount: number): ChargeConsumption => {
+    const registration = findRegistration(id);
+
+    if (registration === undefined) {
+      return UNHELD_CONSUMPTION;
+    }
+
+    if (registration.charges === undefined) {
+      return UNLIMITED_CONSUMPTION;
+    }
+
+    // Written by `spend` and by nothing else, so the ledger, the per-subscriber
+    // row and the counter cannot diverge between a manual activation and a
+    // handler's own request.
+    const taken = spend(registration, amount);
+
+    return Object.freeze({
+      held: true,
+      limited: true,
+      consumed: taken,
+      remaining: normaliseCharges(registration.charges ?? 0),
+    });
+  };
+
   return Object.freeze({
     register(subscriber: HookSubscriber): boolean {
       const id: unknown = subscriber.id;
@@ -1720,182 +2036,283 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       payload: HookDispatchPayloadMap[K],
       environment: HookEnvironment,
     ): HookDispatchResult<K> {
+      // The walk below is the dispatch; this member is the injected wrapper's
+      // seam around it. With no wrapper injected the call is direct.
+      const traceDispatchBoundary = tracing?.traceHookDispatch;
+      const wrap =
+        typeof traceDispatchBoundary === 'function'
+          ? (run: () => HookDispatchResult<K>): HookDispatchResult<K> =>
+              traceDispatchBoundary(hook, run)
+          : undefined;
 
-      hookRow(hook).dispatched += 1;
-      totals.dispatched += 1;
-      count(DISPATCH_METRIC, hook);
+      return traced(wrap, hook, (): HookDispatchResult<K> => {
 
-      // The rules and the board are projected once per dispatch and frozen,
-      // so each handler of one dispatch reads the same values and none can
-      // write through them. Randomness is per HANDLER rather than per
-      // dispatch, because it is transactional: each handler draws through
-      // its own forks and the run's substreams move only when that
-      // handler's return has been adopted.
-      const rules = readonlyRulesView(environment.config);
-      const board = readonlyGridView(environment.grid);
+        hookRow(hook).dispatched += 1;
+        totals.dispatched += 1;
+        count(DISPATCH_METRIC, hook);
 
-      // The payload as the last handler that returned and validated left
-      // it. A handler that throws, or returns something that is not this
-      // hook's payload, leaves it where it stood.
-      //
-      // The live board and the live merge tiles are replaced by the frozen
-      // views here, once, before any handler runs: from this point on nothing
-      // reachable through the payload can write engine state, so a handler
-      // that mutates and then throws has nothing left behind to roll back.
-      let accumulated = viewedPayload(hook, payload, board);
-      let invoked = 0;
-      let skipped = 0;
-      let failed = 0;
-      let rejected = 0;
+        // The board is projected once per dispatch and frozen: every member
+        // delegates to the live lattice, so one facade reports the board as it
+        // stands however many handlers have written to it.
+        //
+        // The rules are projected PER HANDLER, because `readonlyRulesView`
+        // copies its values rather than delegating and a handler's recorded
+        // effect can substitute the merge predicate, the spawn weights or the
+        // board size. A facade built once per dispatch would report the rules
+        // the dispatch opened with to every handler after the first one that
+        // changed them.
+        //
+        // Randomness and the board-effect queue are per handler for the same
+        // reason as each other: both are transactional, and both are resolved
+        // with the handler's return.
+        const board = readonlyGridView(environment.grid);
 
-      // Order and membership are read once, ahead of the walk. A
-      // registration added during the walk is reached by the next dispatch;
-      // one removed during it is skipped by this one.
-      const walking = ordered();
+        // The payload as the last handler that returned and validated left
+        // it. A handler that throws, or returns something that is not this
+        // hook's payload, leaves it where it stood.
+        //
+        // The live board and the live merge tiles are replaced by the frozen
+        // views here, once, before any handler runs: from this point on nothing
+        // reachable through the payload can write engine state, so a handler
+        // that mutates and then throws has nothing left behind to roll back.
+        let accumulated = viewedPayload(hook, payload, board);
+        let invoked = 0;
+        let skipped = 0;
+        let failed = 0;
+        let rejected = 0;
+        let chargesSpent = 0;
+        let effectsApplied = 0;
+        let effectsRefused = 0;
+        const appliedEffects: BoardEffect[] = [];
 
-      dispatchDepth += 1;
+        // Order and membership are read once, ahead of the walk. A
+        // registration added during the walk is reached by the next dispatch;
+        // one removed during it is skipped by this one.
+        const walking = ordered();
 
-      try {
-        for (const registration of walking) {
-          const subscription = subscriptionFor(registration, hook);
+        dispatchDepth += 1;
 
-          if (subscription === null) {
-            continue;
-          }
+        try {
+          for (const registration of walking) {
+            const subscription = subscriptionFor(registration, hook);
 
-          const id = subscription.subscriberId;
-
-          if (registration.removed) {
-            skipped += 1;
-            noteSkip(hook, id, 'detached');
-
-            continue;
-          }
-
-          if (registration.degraded) {
-            skipped += 1;
-            noteSkip(hook, id, 'degraded');
-
-            continue;
-          }
-
-          const charges = subscription.charges;
-
-          // The charge guard.
-          if (isChargeSpent(charges)) {
-            skipped += 1;
-            noteSkip(hook, id, 'exhausted');
-
-            continue;
-          }
-
-          // The handler's randomness transaction. Draws it takes go to forks
-          // and reach the run's substreams only if its return is adopted.
-          const draws = openRngTransaction(environment.rng);
-
-          const context: HookContext = {
-            config: rules,
-            rng: draws.view,
-            grid: board,
-            correlationId,
-            hook,
-            subscriberId: id,
-            pickupOrder: subscription.pickupOrder,
-            charges,
-
-            // A COPY of the slot, so a handler that writes into a nested
-            // member writes into its own copy. The bus's slot is replaced
-            // only by the commit below.
-            state: copyState(registration.state),
-          };
-
-          // The handler writes into a payload of its own. An in-place
-          // assignment therefore reaches this copy and not the payload the
-          // caller passed or the one the handler before it produced.
-          const working = copyPayload(hook, accumulated);
-
-          invoked += 1;
-          note(hook, id, 'invoked');
-
-          try {
-            const returned: unknown = subscription.handler(working, context);
-            const candidate: unknown =
-              returned === undefined || returned === null ? working : returned;
-
-            if (isValidPayload(hook, candidate, accumulated, environment)) {
-              accumulated = candidate as HookPayloadMap[K];
-
-              // The state slot and the draws are committed with the payload,
-              // so a handler's carried-over state, the randomness it
-              // consumed and the effect it produced are adopted together or
-              // not at all. The slot is copied again on the way in, so the
-              // bus keeps no object the handler still holds.
-              registration.state = copyState(context.state);
-              draws.commit();
-            } else {
-              rejected += 1;
-              note(hook, id, 'rejected');
-              draws.rollback();
+            if (subscription === null) {
+              continue;
             }
-          } catch (error: unknown) {
-            // Nothing the handler wrote or drew is kept: `accumulated` still
-            // holds the payload it was handed a copy of,
-            // `registration.state` still holds the slot it entered with, and
-            // the run's substreams still stand where they stood.
-            draws.rollback();
-            failed += 1;
-            noteThrow(registration, hook, error);
+
+            const id = subscription.subscriberId;
+
+            if (registration.removed) {
+              skipped += 1;
+              noteSkip(hook, id, 'detached');
+
+              continue;
+            }
+
+            if (registration.degraded) {
+              skipped += 1;
+              noteSkip(hook, id, 'degraded');
+
+              continue;
+            }
+
+            const charges = subscription.charges;
+
+            // The charge guard.
+            if (isChargeSpent(charges)) {
+              skipped += 1;
+              noteSkip(hook, id, 'exhausted');
+
+              continue;
+            }
+
+            // The handler's randomness transaction. Draws it takes go to forks
+            // and reach the run's substreams only if its return is adopted.
+            const draws = openRngTransaction(environment.rng);
+
+            // The handler's board-effect transaction. Commands it records are
+            // validated against a projection of the live board and reach the
+            // lattice and the rules only if its return is adopted.
+            const effects = openEffectTransaction(environment, hook);
+
+            // The handler's charge request, accumulated across however many times
+            // it asks and spent only by the commit below. Recording the request
+            // rather than applying it is what puts the decrement in the same
+            // transaction as the state slot, the randomness and the commands.
+            //
+            // The window CLOSES with the handler's return, on the returning path
+            // and on the throwing one: a handler that stashed its context and
+            // asked afterwards belongs to no transaction, and refusing that call
+            // is what keeps a request from reaching a commit it had no part in.
+            let requested = 0;
+            let requestsOpen = true;
+
+            const context: HookContext = {
+              config: readonlyRulesView(environment.config),
+              rng: draws.view,
+              grid: board,
+              effects: effects.queue,
+              correlationId,
+              hook,
+              subscriberId: id,
+              pickupOrder: subscription.pickupOrder,
+              charges,
+              spendCharge: (amount = 1): boolean => {
+                // A subscriber carrying no budget has nothing to spend, and a
+                // call arriving after the handler returned belongs to no
+                // transaction: both are refused rather than deferred.
+                if (!requestsOpen || charges === undefined) {
+                  return false;
+                }
+
+                const wanted = normaliseCharges(amount);
+
+                if (wanted === 0) {
+                  return false;
+                }
+
+                // Capped at the budget held, so repeated requests within one
+                // dispatch cannot ask for more than there is and the commit
+                // below can never underflow.
+                requested = Math.min(
+                  normaliseCharges(charges),
+                  requested + wanted,
+                );
+
+                return requested > 0;
+              },
+
+              // A COPY of the slot, so a handler that writes into a nested
+              // member writes into its own copy. The bus's slot is replaced
+              // only by the commit below.
+              state: copyState(registration.state),
+            };
+
+            // The handler writes into a payload of its own. An in-place
+            // assignment therefore reaches this copy and not the payload the
+            // caller passed or the one the handler before it produced.
+            const working = copyPayload(hook, accumulated);
+
+            invoked += 1;
+            note(hook, id, 'invoked');
+
+            try {
+              // The handler boundary's own seam. The wrapper rethrows what the
+              // handler threw, so the `catch` below still owns containment.
+              const traceHandlerBoundary = tracing?.traceRelicHandler;
+              const wrapHandler =
+                typeof traceHandlerBoundary === 'function'
+                  ? (run: () => unknown): unknown =>
+                      traceHandlerBoundary(hook, id, run)
+                  : undefined;
+              const returned: unknown = traced(
+                wrapHandler,
+                hook,
+                (): unknown => subscription.handler(working, context),
+              );
+              // The request window closes with the return, before the return is
+              // judged, so nothing a handler asks for after this point can join
+              // the commit below.
+              requestsOpen = false;
+
+              const candidate: unknown =
+                returned === undefined || returned === null ? working : returned;
+
+              if (isValidPayload(hook, candidate, accumulated, environment)) {
+                accumulated = candidate as HookPayloadMap[K];
+
+                // The state slot, the draws and the board effects are committed
+                // with the payload, so a handler's carried-over state, the
+                // randomness it consumed and the board and rules it wrote are
+                // adopted together or not at all. The slot is copied again on
+                // the way in, so the bus keeps no object the handler still
+                // holds.
+                registration.state = copyState(context.state);
+                draws.commit();
+
+                // Read BEFORE the commit, which empties the queue: the list is
+                // what reached the board, in the order it reached it.
+                const pending = effects.queue.requested();
+                const written = effects.commit();
+
+                if (written > 0) {
+                  appliedEffects.push(...pending);
+                }
+
+                effectsApplied += written;
+                countEffects(EFFECT_APPLIED_METRIC, hook, written);
+
+                // THE CHARGE SPEND, and the only one on the dispatch path. The
+                // HANDLER decides whether its trigger condition held, because only
+                // it knows, and it says so by ASKING through
+                // `HookContext.spendCharge`; the BUS decides what that costs and
+                // whether the budget can pay. A handler that asked pays what it
+                // asked for, accumulated across repeated requests and never taking
+                // the budget below zero. An invocation that did not ask pays
+                // nothing, whatever else it did: a transformed payload member and
+                // a written board command are both effects whose TRIGGER only the
+                // relic can judge, and a stage-start rule installation is the
+                // clearest case — it writes a command and must cost nothing,
+                // because it prepares the rule rather than using it. The request
+                // is therefore the whole rule, and nothing here is
+                // relic-specific.
+                if (requested > 0) {
+                  chargesSpent += spend(registration, requested);
+                }
+              } else {
+                rejected += 1;
+                note(hook, id, 'rejected');
+                draws.rollback();
+                countEffects(EFFECT_DROPPED_METRIC, hook, effects.rollback());
+              }
+            } catch (error: unknown) {
+              requestsOpen = false;
+
+              // Nothing the handler wrote, drew or recorded is kept:
+              // `accumulated` still holds the payload it was handed a copy of,
+              // `registration.state` still holds the slot it entered with, the
+              // run's substreams still stand where they stood, and not one
+              // recorded command reached the lattice or the rules.
+              draws.rollback();
+              countEffects(EFFECT_DROPPED_METRIC, hook, effects.rollback());
+              failed += 1;
+              noteThrow(registration, hook, error);
+            } finally {
+              // Counted once per handler, on every path out of it: a refused
+              // command is reported whether the handler went on to return, to
+              // have its return refused, or to throw.
+              effectsRefused += effects.queue.refused;
+            }
+          }
+        } finally {
+          dispatchDepth -= 1;
+
+          // The edits a handler made to the registration array were deferred
+          // for the length of the walk; they are applied here, oldest first.
+          if (dispatchDepth === 0) {
+            drainPending();
           }
         }
-      } finally {
-        dispatchDepth -= 1;
 
-        // The edits a handler made to the registration array were deferred
-        // for the length of the walk; they are applied here, oldest first.
-        if (dispatchDepth === 0) {
-          drainPending();
-        }
-      }
-
-      return Object.freeze({
-        payload: accumulated,
-        invoked,
-        skipped,
-        failed,
-        rejected,
+        return Object.freeze({
+          payload: accumulated,
+          invoked,
+          skipped,
+          failed,
+          rejected,
+          chargesConsumed: chargesSpent,
+          effectsApplied,
+          effects: Object.freeze([...appliedEffects]),
+          effectsRefused,
+        });
       });
     },
 
     consumeCharge(id: string, amount = 1): ChargeConsumption {
-      const registration = findRegistration(id);
-
-      if (registration === undefined) {
-        return UNHELD_CONSUMPTION;
-      }
-
-      if (registration.charges === undefined) {
-        return UNLIMITED_CONSUMPTION;
-      }
-
-      const available = normaliseCharges(registration.charges);
-      const taken = Math.min(available, normaliseCharges(amount));
-      const remaining = available - taken;
-
-      registration.charges = remaining;
-
-      if (taken > 0) {
-        chargesConsumed += taken;
-        subscriberRow(id, registration.pickupIndex).chargesConsumed +=
-          taken;
-        count(CHARGE_METRIC, undefined, taken);
-      }
-
-      return Object.freeze({
-        held: true,
-        limited: true,
-        consumed: taken,
-        remaining,
-      });
+      // Through the one deduction rule, which `HookContext.spendCharge`'s commit
+      // also reaches, so a manual activation and a handler's own request cannot
+      // diverge in the ledger, the per-subscriber row or the counter.
+      return deductCharge(id, amount);
     },
 
     degraded(): readonly string[] {

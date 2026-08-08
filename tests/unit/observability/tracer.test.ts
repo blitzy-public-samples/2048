@@ -10,8 +10,7 @@
 // PROVENANCE of the seams pinned below, as docs/TRACEABILITY_MATRIX.md rows
 // them. Each citation states what the cited lines are. docs/DECISION_LOG.md is
 // the single source of truth for why anything here was decided this way,
-// including the synchronous driving of the frame wrapper and the local
-// collaborator double the hook bus dispatches with.
+// including the synchronous driving of the frame wrapper.
 //   TR-TRACE-01  js/html_actuator.js L13, the frame `actuate` wrapped every
 //                DOM write in.
 //   TR-TRACE-02  js/html_actuator.js L69, the second frame, nested inside
@@ -37,7 +36,14 @@
 //   no assertion waits on an animation frame, a timer or the wall clock, and
 //     the frame wrapper is invoked directly and synchronously;
 //   a throw reaches the caller, and its span is closed and recorded;
-//   `setEnabled(false)` stops recording and leaves the wrapped work running;
+//   `setEnabled(false)` stops recording AND every observation this tracer
+//     owns, the turn latency included, and leaves the wrapped work running;
+//   the Performance API is reached through feature detection alone, so an
+//     absent, partial or throwing host degrades and never throws, and the
+//     tracer leaves none of its own marks or measures behind;
+//   a span identifier sequence is reproducible: one correlation identifier and
+//     one call sequence yield one identifier sequence, after a reset and from
+//     a second tracer;
 //   span durations reach the histograms of src/observability/metrics.ts, and
 //     the tracer holds no second aggregate of them.
 //
@@ -47,12 +53,17 @@
 // (tests/unit/observability/metrics.test.ts); the emitter's own `on`, `off` and
 // `emit` semantics (tests/unit/engine/engine-events.test.ts); and the hook
 // bus's protocol against the real engine collaborators
-// (tests/unit/engine/hook-bus.test.ts). The real bus is driven here; the
-// collaborator bundle it dispatches with is a local double.
+// (tests/unit/engine/hook-bus.test.ts). The real bus is driven here, and so is
+// the collaborator bundle it dispatches with: `createDefaultRulesConfig()`,
+// `Grid` and `createRngStreams()`, which is what makes `HookEnvironment`
+// satisfied by construction rather than by a cast.
 //
-// This suite reads no DOM node, writes no storage, awaits nothing, imports no
-// module beyond `vitest` and the modules under test, and writes no snapshot
-// artifact.
+// A real `Engine` is driven where the contract under test is between this
+// module and src/engine/engine.ts: the no-op turn's completion signal, and the
+// four places the engine commits from.
+//
+// This suite reads no DOM node, writes no storage, awaits nothing and writes no
+// snapshot artifact.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -61,7 +72,6 @@ import {
   createEngineEvents,
 } from '../../../src/engine/engine-events';
 import type {
-  BoardProjection,
   EngineEventName,
   EngineEvents,
   MoveAfterEvent,
@@ -70,9 +80,12 @@ import type {
   StageStartEvent,
   StateCommitEvent,
   TileMergeEvent,
-  TileProjection,
   TileSpawnEvent,
 } from '../../../src/engine/engine-events';
+import { Grid } from '../../../src/engine/grid';
+import { Tile } from '../../../src/engine/tile';
+import { createDefaultRulesConfig } from '../../../src/config/default-config';
+import { Engine } from '../../../src/engine/engine';
 import { createHookBus } from '../../../src/engine/hook-bus';
 import type {
   HookBus,
@@ -94,6 +107,7 @@ import type {
   EngineHookErrorReport,
   EngineListenerErrorReport,
   EngineReporter,
+  SerializedGameState,
 } from '../../../src/engine/types';
 import { createLogger } from '../../../src/observability/logger';
 import type { Logger } from '../../../src/observability/logger';
@@ -115,6 +129,7 @@ import {
   SPAN_NAME_LIST,
   SPAN_OUTCOMES,
   TRACE_SNAPSHOT_SCHEMA_VERSION,
+  UNTRACED_COMMIT_PATHS,
   attachEngineTracing,
   createBoundaryTracing,
   createTracer,
@@ -126,7 +141,14 @@ import type {
   SpanRecord,
   Tracer,
 } from '../../../src/observability/tracer';
+import { createRngStreams } from '../../../src/rng/rng-streams';
 import { OWNED_STORAGE_KEYS } from '../../../src/storage/storage-keys';
+import {
+  BLOCKED_BOARD,
+  NEAR_WIN_BOARD,
+  copyBoard,
+  createNearWinBoard,
+} from '../../fixtures/boards';
 
 /* ==========================================================================
  * Harness
@@ -164,6 +186,38 @@ const capturingReporter: EngineReporter = Object.freeze({
     listenerErrors.push(report);
   },
 });
+
+/**
+ * Reads the mark names the tracer wrote for one correlation identifier.
+ *
+ * Feature-detected: `performance.getEntriesByType` is absent on some hosts, and
+ * the two DOM libraries `vitest.config.ts` selects between differ. An absent
+ * reader yields an empty list, which the mark-hygiene case treats as nothing
+ * left behind.
+ *
+ * @param correlationId Identifier the marks are keyed under.
+ * @returns The mark names carrying it.
+ */
+const markNamesFor = (correlationId: string): readonly string[] => {
+  const clock: unknown = globalThis.performance;
+
+  if (typeof clock !== 'object' || clock === null) {
+    return [];
+  }
+
+  const reader: unknown = (clock as Record<string, unknown>).getEntriesByType;
+
+  if (typeof reader !== 'function') {
+    return [];
+  }
+
+  const entries = (reader as (type: string) => readonly { name: string }[])
+    .call(clock, 'mark');
+
+  return entries
+    .map((entry) => entry.name)
+    .filter((name) => name.includes(correlationId));
+};
 
 /**
  * Clears the marks and measures a closed span may have written. Each member is
@@ -220,90 +274,34 @@ afterEach(() => {
  * ========================================================================== */
 
 /**
- * The three collaborators `HookBus.dispatch` reads, as a local double.
+ * The three collaborators `HookBus.dispatch` reads, as the REAL modules that
+ * own them.
  *
- * The members it reaches, and the whole of them: `config.boardSize`,
- * `config.winValue`, `config.startTiles`, `config.spawn.values`,
- * `config.spawn.weights`, `config.merge.canMerge` and `config.merge.produce`;
- * the eight query members of `grid`, of which `size` is the one this suite's
- * dispatches cause to be read; and `rng.seed`, `rng.stream` and
- * `rng.snapshotCursors`.
+ * `createDefaultRulesConfig()` of src/config/default-config.ts supplies the
+ * rules — including the `merge.canMerge` whose operands are `MergeTileView`
+ * and not two numbers — `Grid` of src/engine/grid.ts supplies the lattice, and
+ * `createRngStreams()` of src/rng/rng-streams.ts supplies the seeded
+ * substreams. `HookEnvironment` is satisfied structurally by construction, so
+ * no assertion here is written through a cast: a drift between this bundle and
+ * the interface the bus reads becomes a compile error rather than a fake that
+ * keeps agreeing with itself.
+ *
+ * @param boardSize Edge length of the lattice. Defaults to `BOARD_SIZE`.
+ * @returns The environment one dispatch is driven with.
  */
-interface StreamDouble {
-  cursor: number;
-  next(): number;
-  fork(): StreamDouble;
-}
-
-const createStreamDouble = (): StreamDouble => {
-  const stream: StreamDouble = {
-    cursor: 0,
-    next(): number {
-      stream.cursor += 1;
-
-      return 0;
-    },
-    fork(): StreamDouble {
-      return createStreamDouble();
-    },
-  };
-
-  return stream;
-};
-
 const createHookEnvironment = (
   boardSize: number = BOARD_SIZE,
-): HookEnvironment => {
-  const environment = {
-    config: {
-      boardSize,
-      winValue: 2048,
-      startTiles: 2,
-      spawn: { values: [2, 4], weights: [0.9, 0.1] },
-      merge: {
-        canMerge: (left: number, right: number): boolean => left === right,
-        produce: (value: number): number => value * 2,
-      },
-    },
-    grid: {
-      size: boardSize,
-      withinBounds: (): boolean => true,
-      cellAvailable: (): boolean => true,
-      cellOccupied: (): boolean => false,
-      cellContent: (): null => null,
-      availableCells: (): readonly never[] => [],
-      cellsAvailable: (): boolean => true,
-      serialize: (): { size: number; cells: readonly never[] } => ({
-        size: boardSize,
-        cells: [],
-      }),
-    },
-    rng: {
-      seed: RUN_SEED,
-      stream: (): StreamDouble => createStreamDouble(),
-      snapshotCursors: (): Record<string, number> => ({}),
-    },
-  };
-
-  return environment as unknown as HookEnvironment;
-};
-
-const emptyBoard = (size: number = BOARD_SIZE): BoardProjection => ({
-  size,
-  cells: [],
+): HookEnvironment => ({
+  config: { ...createDefaultRulesConfig(), boardSize },
+  grid: new Grid(boardSize),
+  rng: createRngStreams(RUN_SEED),
 });
 
-const tileProjection = (
-  x: number,
-  y: number,
-  value: number,
-): TileProjection => ({
-  x,
-  y,
-  value,
-  previousPosition: null,
-  mergedFrom: null,
-});
+// The live board every payload carrying one travels with, per AAP Contract 1.
+const emptyBoard = (size: number = BOARD_SIZE): Grid => new Grid(size);
+
+const mergeTile = (x: number, y: number, value: number): Tile =>
+  new Tile({ x, y }, value);
 
 const stageStartEvent = (stageIndex: number): StageStartEvent => ({
   stageIndex,
@@ -319,18 +317,21 @@ const beforeEvent = (cancelled: boolean): MoveBeforeEvent => ({
 });
 
 const mergeEvent = (resultValue: number): TileMergeEvent => ({
-  source: tileProjection(0, 0, resultValue / 2),
-  target: tileProjection(1, 0, resultValue / 2),
+  turn: 1,
+  source: mergeTile(0, 0, resultValue / 2),
+  target: mergeTile(1, 0, resultValue / 2),
   resultValue,
   scoreDelta: resultValue,
 });
 
 const spawnEvent = (value: number): TileSpawnEvent => ({
+  turn: 1,
   position: { x: 2, y: 3 },
   value,
 });
 
 const afterEvent = (moved: boolean): MoveAfterEvent => ({
+  turn: 1,
   moved,
   board: emptyBoard(),
   score: 24,
@@ -345,14 +346,34 @@ const stageEndEvent = (stageIndex: number): StageEndEvent => ({
   score: 24,
 });
 
-const commitEvent = (score: number): StateCommitEvent => ({
+/**
+ * A commit, optionally reporting a stage other than the first.
+ *
+ * The stage index is a parameter because a commit is the only event that
+ * carries the stage on every emission, so it is how a suite expresses a run
+ * moving from one stage to the next. Defaulted to `EMPTY_STAGE_CONTEXT`'s own
+ * index, which leaves every existing case unchanged.
+ *
+ * @param score Score the commit reports.
+ * @param stageIndex Stage the commit reports, defaulting to the first.
+ * @returns The commit payload.
+ */
+const commitEvent = (
+  score: number,
+  stageIndex: number = EMPTY_STAGE_CONTEXT.stageIndex,
+): StateCommitEvent => ({
+  turn: 1,
+  degraded: false,
   board: emptyBoard(),
   score,
   bestScore: 0,
   over: false,
   won: false,
   terminated: false,
-  stage: EMPTY_STAGE_CONTEXT,
+  stage:
+    stageIndex === EMPTY_STAGE_CONTEXT.stageIndex
+      ? EMPTY_STAGE_CONTEXT
+      : { ...EMPTY_STAGE_CONTEXT, stageIndex },
   relics: EMPTY_RELIC_CONTEXT,
 });
 
@@ -410,6 +431,32 @@ const driveOneTurn = (target: EngineEvents): void => {
     ENGINE_EVENT_EMITTERS[name](target);
   }
 };
+
+/* ==========================================================================
+ * Real engine fixtures
+ * ========================================================================== */
+
+/**
+ * A real, set-up `Engine` on one of the shared fixture boards.
+ *
+ * The two contracts of finding M12 and finding M13 are between this module and
+ * src/engine/engine.ts, so the cases that pin them drive the engine itself
+ * rather than an emission fabricated to match. Everything the engine needs
+ * arrives through its options object, so no mocking library is involved.
+ *
+ * @param board Snapshot to restore.
+ * @returns The engine, ready for its first move.
+ */
+const engineOn = (board: SerializedGameState): Engine => {
+  const engine = new Engine({ streams: createRngStreams(RUN_SEED) });
+
+  engine.setup(copyBoard(board));
+
+  return engine;
+};
+
+/** An engine whose every move is a no-op. */
+const blockedEngine = (): Engine => engineOn(BLOCKED_BOARD);
 
 /* ==========================================================================
  * Record readers
@@ -699,6 +746,96 @@ describe('Tracer span lifecycle and the bounded record buffer', () => {
       tracer.correlationId,
     );
   });
+
+  it('invalidates a span handle retained across a reset, so no duplicate identifier is filed', () => {
+    const retained = tracer.startSpan(SPAN_NAMES.engineTurn);
+    const firstId = retained.id;
+
+    tracer.reset();
+
+    expect(tracer.discardedSpanCount()).toBe(1);
+    expect(tracer.snapshot().open).toBe(0);
+
+    // The counter has restarted, so this span takes the identifier the
+    // discarded one held.
+    const reissued = tracer.startSpan(SPAN_NAMES.renderCommit);
+
+    expect(reissued.id).toBe(firstId);
+
+    // Ending the stale handle must file nothing: a record here would carry an
+    // identifier the reissued span also carries.
+    retained.end();
+    retained.setAttribute(SPAN_ATTRIBUTES.score, 99);
+    retained.addEvent(SPAN_EVENT_NAMES.merge);
+    reissued.end();
+
+    const records = tracer.recent();
+
+    expect(records).toHaveLength(1);
+    expect(records[0].name).toBe(SPAN_NAMES.renderCommit);
+    expect(records[0].id).toBe(firstId);
+    expect(
+      records.filter((record) => record.name === SPAN_NAMES.engineTurn),
+    ).toHaveLength(0);
+
+    const snapshot = tracer.snapshot();
+
+    expect(snapshot.ended).toBe(1);
+
+    // Reported once, and as a discarded-handle anomaly rather than as a double
+    // end, which is a different caller mistake.
+    expect(snapshot.anomalies).toBe(1);
+    expect(snapshot.doubleEnds).toBe(0);
+    expect(snapshot.faults).toBe(0);
+  });
+
+  it('records no duration for a span handle ended after a reset', () => {
+    const turnSpans = registry.histogram(
+      METRIC_NAMES.spanDurationMilliseconds,
+      { [METRIC_LABELS.span]: SPAN_NAMES.engineTurn },
+    );
+    const retained = tracer.startSpan(SPAN_NAMES.engineTurn);
+
+    tracer.reset();
+    retained.end();
+
+    expect(turnSpans.count).toBe(0);
+    expect(tracer.frameStats().frames).toBe(0);
+  });
+
+  it('clears the marks of every span a reset discarded', () => {
+    const marked = createTracer({
+      logger,
+      metrics: registry,
+      correlationId: 'reset-mark-hygiene',
+    });
+
+    marked.startSpan(SPAN_NAMES.engineTurn);
+    marked.startSpan(SPAN_NAMES.hookDispatch);
+
+    expect(markNamesFor('reset-mark-hygiene')).toHaveLength(2);
+
+    marked.reset();
+
+    expect(markNamesFor('reset-mark-hygiene')).toHaveLength(0);
+    expect(marked.discardedSpanCount()).toBe(2);
+  });
+
+  it('discards a frame span the lifecycle hooks left pending across a reset', () => {
+    const hooks = tracer.frameLifecycleHooks();
+
+    hooks.onFrameBegin();
+    tracer.reset();
+
+    expect(tracer.snapshot().open).toBe(0);
+
+    // The pending frame span is gone, so the end reports rather than filing a
+    // record under an identifier the restarted counter has reissued.
+    hooks.onFrameEnd(undefined, 8);
+
+    expect(recordsFor(SPAN_NAMES.frameCallback)).toHaveLength(0);
+    expect(tracer.snapshot().anomalies).toBe(1);
+  });
 });
 
 /* ==========================================================================
@@ -751,6 +888,98 @@ describe('Tracer parent and child linkage', () => {
     expect(second.parentId).toBe(first.id);
     expect(explicit.parentId).toBe(first.id);
     expect(forcedRoot.parentId).toBeUndefined();
+  });
+
+  /* ---- A detached span: open, recorded, and outside the nesting ---- */
+
+  it('keeps a detached span off the implicit-parent stack', () => {
+    const lifecycle = tracer.startSpan(SPAN_NAMES.engineStage, {
+      parent: null,
+      detached: true,
+    });
+    const nested = tracer.startSpan(SPAN_NAMES.engineTurn);
+
+    // A span opened while a detached span is open is NOT its child: that
+    // detached
+    // one never joined the stack, so it never became the innermost open span.
+    expect(nested.parentId).toBeUndefined();
+    expect(tracer.activeSpan()).toBe(nested);
+
+    nested.end();
+    lifecycle.end();
+
+    expect(tracer.snapshot().outOfOrderEnds).toBe(0);
+    expect(tracer.snapshot().doubleEnds).toBe(0);
+  });
+
+  it('does not unwind the spans open above it when it closes', () => {
+    const lifecycle = tracer.startSpan(SPAN_NAMES.engineStage, {
+      parent: null,
+      detached: true,
+    });
+    const inFlight = tracer.startSpan(SPAN_NAMES.inputDispatch);
+    const inner = tracer.startSpan(SPAN_NAMES.engineTurn);
+
+    // The stage closing MID-TURN is the real sequence: the goal is met during a
+    // move, and the stage is resolved from inside that move's commit. The turn
+    // and the keypress that caused it are still running, and neither is the
+    // stage's child.
+    lifecycle.end();
+
+    expect(recordsFor(SPAN_NAMES.inputDispatch)).toHaveLength(0);
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(0);
+
+    inner.end();
+    inFlight.end();
+
+    // Both closed exactly once, with their own outcomes rather than as unwound
+    // orphans, and the tracer reports no anomaly of any kind.
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(1);
+    expect(
+      oneRecordFor(SPAN_NAMES.inputDispatch).attributes[
+        SPAN_ATTRIBUTES.unwound
+      ],
+    ).toBeUndefined();
+    expect(tracer.snapshot().doubleEnds).toBe(0);
+    expect(tracer.snapshot().outOfOrderEnds).toBe(0);
+    expect(tracer.snapshot().anomalies).toBe(0);
+  });
+
+  it('counts a detached span as open until it closes', () => {
+    const lifecycle = tracer.startSpan(SPAN_NAMES.engineStage, {
+      parent: null,
+      detached: true,
+    });
+
+    // Off the stack is not the same as invisible: a stage being played is an
+    // open span, and a surface reporting otherwise would hide it.
+    expect(tracer.snapshot().open).toBe(1);
+
+    const nested = tracer.startSpan(SPAN_NAMES.engineTurn);
+
+    expect(tracer.snapshot().open).toBe(2);
+
+    nested.end();
+
+    expect(tracer.snapshot().open).toBe(1);
+
+    lifecycle.end();
+
+    expect(tracer.snapshot().open).toBe(0);
+    expect(tracer.snapshot().ended).toBe(2);
+  });
+
+  it('records a detached span exactly once however it is closed', () => {
+    const lifecycle = tracer.startSpan(SPAN_NAMES.engineStage, {
+      detached: true,
+    });
+
+    lifecycle.end();
+    lifecycle.end();
+
+    expect(recordsFor(SPAN_NAMES.engineStage)).toHaveLength(1);
+    expect(tracer.snapshot().doubleEnds).toBe(1);
+    expect(tracer.snapshot().open).toBe(0);
   });
 
   it('reports the innermost open span and reverts to its parent as each closes', () => {
@@ -1382,7 +1611,14 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
     expect(Number.isFinite(turn.durationMs)).toBe(true);
     expect(turn.durationMs).toBeGreaterThanOrEqual(0);
     expect(latency.count).toBe(1);
-    expect(tracer.snapshot().open).toBe(0);
+
+    // ONE span remains open, and it is the STAGE, not the turn. A commit
+    // reports the stage in force, and the tracer follows it, so a stage span
+    // is open from the first commit until the stage ends or tracing detaches.
+    // The turn itself is closed: it has a record and the pair produced exactly
+    // one latency observation.
+    expect(tracer.snapshot().open).toBe(1);
+    expect(recordsFor(SPAN_NAMES.engineStage)).toHaveLength(0);
   });
 
   it('produces no span from a bare emitter and begins producing them only once tracing subscribes', () => {
@@ -1439,13 +1675,17 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
     expect(tracer.snapshot().doubleEnds).toBe(0);
   });
 
-  it('closes the turn span of a move that changed nothing without recording a latency', () => {
+  it('closes the turn span of a real engine move that changed nothing without recording a latency', () => {
+    // Driven through a REAL `Engine` on a blocked board rather than through a
+    // fabricated `move:after`: the completion signal this closure depends on
+    // has to be one src/engine/engine.ts actually emits, and the no-op branch
+    // is the branch that emits it.
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
+    const engine = blockedEngine();
 
-    attachEngineTracing(events, tracer);
+    attachEngineTracing(engine.events, tracer);
 
-    events.emit('move:before', beforeEvent(false));
-    events.emit('move:after', afterEvent(false));
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
 
     const turn = oneRecordFor(SPAN_NAMES.engineTurn);
 
@@ -1454,7 +1694,37 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
       SPAN_OUTCOMES.unmoved,
     );
     expect(latency.count).toBe(0);
+
+    const snapshot = tracer.snapshot();
+
+    expect(snapshot.open).toBe(0);
+    expect(snapshot.anomalies).toBe(0);
+    expect(snapshot.faults).toBe(0);
+  });
+
+  it('leaks no turn span across two consecutive real no-op moves', () => {
+    // Without the engine's no-op completion signal the first turn span stayed
+    // open and the second `move:before` superseded it, which is the leak this
+    // case measures the absence of: two turns, both `unmoved`, none superseded.
+    const engine = blockedEngine();
+
+    attachEngineTracing(engine.events, tracer);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+
+    const turns = recordsFor(SPAN_NAMES.engineTurn);
+
+    expect(turns).toHaveLength(2);
+
+    for (const turn of turns) {
+      expect(turn.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+        SPAN_OUTCOMES.unmoved,
+      );
+    }
+
     expect(tracer.snapshot().open).toBe(0);
+    expect(tracer.snapshot().anomalies).toBe(0);
   });
 
   it('supersedes a turn span still open when the next move begins', () => {
@@ -1474,7 +1744,11 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
       SPAN_OUTCOMES.committed,
     );
     expect(turns[1].id).not.toBe(turns[0].id);
-    expect(tracer.snapshot().open).toBe(0);
+
+    // The one span still open is the stage the commit reported, which the
+    // tracer follows; both turns are closed and neither was ended twice.
+    expect(tracer.snapshot().open).toBe(1);
+    expect(recordsFor(SPAN_NAMES.engineStage)).toHaveLength(0);
     expect(tracer.snapshot().doubleEnds).toBe(0);
   });
 
@@ -1577,7 +1851,21 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
     const turn = oneRecordFor(SPAN_NAMES.engineTurn);
     const snapshot = tracer.snapshot();
 
-    expect(turn.parentId).toBe(stage.id);
+    // NOT PARENTED TO THE STAGE, and deliberately. A stage span is opened by
+    // one event and closed by another many turns later, so it is a LIFECYCLE
+    // span rather than a call-nesting one: on the implicit-parent stack it
+    // would
+    // sit beneath whatever the keypress in flight has open, and closing it —
+    // which
+    // happens inside the commit of the turn that clears the goal — would unwind
+    // that turn and its input dispatch as though they were its children. It is
+    // therefore detached, and the association a reader wants travels as an
+    // attribute instead. The turn's parent is whatever opened it: nothing here,
+    // and the input dispatch in the composed application.
+    expect(turn.parentId).toBeUndefined();
+    expect(turn.attributes[SPAN_ATTRIBUTES.stageIndex]).toBe(
+      stage.attributes[SPAN_ATTRIBUTES.stageIndex],
+    );
     expect(turn.attributes[SPAN_ATTRIBUTES.moved]).toBe(true);
     expect(turn.attributes[SPAN_ATTRIBUTES.terminated]).toBe(false);
     expect(turn.attributes[SPAN_ATTRIBUTES.merges]).toBe(1);
@@ -1600,14 +1888,182 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
     expect(snapshot.outOfOrderEnds).toBe(0);
   });
 
-  it('reports a commit that arrives with no turn span open and opens no span for it', () => {
+  it("accounts the real engine's setup commit as a lifecycle commit, not an anomaly", () => {
+    // `setup()` emits `stage:start` and then commits. It is one of the four
+    // commit sites src/engine/engine.ts has and only one of them is a move, so
+    // treating a commit with no open turn span as a caller fault reported the
+    // engine's own lifecycle as broken.
+    const engine = new Engine({ streams: createRngStreams(RUN_SEED) });
+
+    attachEngineTracing(engine.events, tracer);
+    engine.setup(null);
+
+    const snapshot = tracer.snapshot();
+
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(0);
+    expect(snapshot.commits.lifecycle).toBe(1);
+    expect(snapshot.commits.turn).toBe(0);
+    expect(snapshot.commits.unattributed).toBe(0);
+    expect(snapshot.anomalies).toBe(0);
+
+    // The stage span the same `setup()` opened is still open — a stage spans
+    // the stage, not the commit — and it is the only span open. It is opened
+    // UNSTACKED, so it is not the ACTIVE span: on the stack it would sit beneath
+    // whatever the keypress in flight has open, and closing it inside a turn's
+    // commit would unwind that turn as though it were its child.
+    expect(snapshot.open).toBe(1);
+    expect(tracer.activeSpan()).toBeUndefined();
+  });
+
+  it("accounts the real engine's restart commit as a lifecycle commit", () => {
+    const engine = engineOn(BLOCKED_BOARD);
+
+    attachEngineTracing(engine.events, tracer);
+    engine.restart();
+
+    const snapshot = tracer.snapshot();
+
+    expect(snapshot.commits.lifecycle).toBe(1);
+    expect(snapshot.commits.unattributed).toBe(0);
+    expect(snapshot.anomalies).toBe(0);
+  });
+
+  it("accounts the real engine's stage-end commit as a lifecycle commit beside the turn's own", () => {
+    // A turn that clears the stage goal commits TWICE: once for the turn, and
+    // once from `resolveMetStageGoal()` after it emits `stage:end`. Under the
+    // `'engine'` resolution authority the engine takes that second path itself.
+    const engine = new Engine({
+      streams: createRngStreams(RUN_SEED),
+      stageResolution: 'engine',
+    });
+
+    // Attached BEFORE `setup()`, so the stage span the stage-end closes was
+    // opened by the same engine's own `stage:start`.
+    attachEngineTracing(engine.events, tracer);
+    engine.setup(createNearWinBoard(BOARD_SIZE, 32));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.stageProgress().cleared).toBe(true);
+
+    const snapshot = tracer.snapshot();
+
+    // The setup commit, then the turn's, then the stage-end's.
+    expect(snapshot.commits.turn).toBe(1);
+    expect(snapshot.commits.lifecycle).toBe(2);
+    expect(snapshot.commits.unattributed).toBe(0);
+    expect(snapshot.anomalies).toBe(0);
+    expect(oneRecordFor(SPAN_NAMES.engineStage).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.committed);
+  });
+
+  it("accounts continuePlaying's commit as a lifecycle commit when it is reached through the input boundary", () => {
+    // js/keyboard_input_manager.js L11 bound `keepPlaying` to this method, and
+    // src/main.ts wraps that subscription in an input-dispatch span. The open
+    // boundary span is what attributes the commit the method makes.
+    const engine = engineOn(NEAR_WIN_BOARD);
+
+    attachEngineTracing(engine.events, tracer);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.isGameTerminated()).toBe(true);
+
+    boundary.traceInput('keepPlaying', (): void => {
+      engine.continuePlaying();
+    });
+
+    const snapshot = tracer.snapshot();
+
+    expect(engine.continuedPlay).toBe(true);
+    expect(snapshot.commits.turn).toBe(1);
+    expect(snapshot.commits.lifecycle).toBe(1);
+    expect(snapshot.commits.unattributed).toBe(0);
+    expect(snapshot.anomalies).toBe(0);
+  });
+
+  it('accounts a commit that opens the stage it reports as a lifecycle commit', () => {
+    // js/game_manager.js L59 actuated from `setup()` before any move, so the
+    // first commit of a run arrives with no turn span and opens the span for the
+    // stage it reports — and THAT is what accounts for it.
     attachEngineTracing(events, tracer);
 
     events.emit('state:commit', commitEvent(4));
 
+    const snapshot = tracer.snapshot();
+
     expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(0);
-    expect(tracer.snapshot().anomalies).toBe(1);
-    expect(tracer.snapshot().open).toBe(0);
+    expect(snapshot.commits.lifecycle).toBe(1);
+    expect(snapshot.commits.unattributed).toBe(0);
+    expect(snapshot.commits.turn).toBe(0);
+    expect(snapshot.anomalies).toBe(0);
+
+    // The stage this commit opened, still open because nothing has ended it.
+    expect(snapshot.open).toBe(1);
+  });
+
+  it('accounts a commit no signal explains as unattributed, and reports it', () => {
+    // The genuinely orphaned case: a SECOND commit for a stage already spanned,
+    // with no turn span, no preceding lifecycle emission and no stage opened by
+    // it. `state:commit` carries no commit source — AAP 0.6.1.1 fixes its
+    // members — so this is where a lifecycle commit made outside the accounted
+    // paths lands too.
+    attachEngineTracing(events, tracer);
+
+    events.emit('state:commit', commitEvent(4));
+    events.emit('state:commit', commitEvent(8));
+
+    const snapshot = tracer.snapshot();
+
+    expect(snapshot.commits.lifecycle).toBe(1);
+    expect(snapshot.commits.unattributed).toBe(1);
+    expect(snapshot.commits.turn).toBe(0);
+
+    // COUNTED AND REPORTED, which are different questions: the bucket says what
+    // it was, and the anomaly says a state change arrived that nothing explains.
+    expect(snapshot.anomalies).toBe(1);
+  });
+
+  it('accounts a committed turn as a turn commit', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(8));
+
+    expect(tracer.snapshot().commits).toEqual({
+      turn: 1,
+      lifecycle: 0,
+      unattributed: 0,
+    });
+  });
+
+  it('discards a pending lifecycle attribution once a move begins', () => {
+    // A stage start followed by a turn: the turn's commit is the turn's own,
+    // and the stage start does not lend it an attribution.
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(8));
+    events.emit('state:commit', commitEvent(8));
+
+    expect(tracer.snapshot().commits).toEqual({
+      turn: 1,
+      lifecycle: 0,
+      unattributed: 1,
+    });
+  });
+
+  it('returns the commit counts to zero on reset', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('state:commit', commitEvent(4));
+    tracer.reset();
+
+    expect(tracer.snapshot().commits).toEqual({
+      turn: 0,
+      lifecycle: 0,
+      unattributed: 0,
+    });
   });
 
   it('reports a stage end that arrives with no stage span open', () => {
@@ -1619,7 +2075,220 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
     expect(tracer.snapshot().anomalies).toBe(1);
   });
 
-  it('produces its spans even when another listener of the same event throws', () => {
+  // TWO ENGINE PATHS COMMIT OUTSIDE A TURN BY DESIGN. `Engine.setup()` emits
+  // `stage:start` and commits; `Engine.endStage()` emits `stage:end` and
+  // commits, after the turn that cleared the goal has already committed and
+  // closed its own span. Reporting either as an anomaly warned once per page
+  // load and once per cleared stage about correct behaviour, which is what
+  // these
+  // cases pin shut.
+  it('accounts for the commit that closes a stage start', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+    events.emit('state:commit', commitEvent(0));
+
+    expect(tracer.snapshot().anomalies).toBe(0);
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(0);
+  });
+
+  it('accounts for the commit that follows a stage end', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+    events.emit('state:commit', commitEvent(0));
+
+    // The turn that cleared the goal: it commits and closes its own span, and
+    // the stage-end commit arrives after it.
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(56));
+
+    events.emit('stage:end', stageEndEvent(0));
+    events.emit('state:commit', commitEvent(56));
+
+    expect(tracer.snapshot().anomalies).toBe(0);
+    expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.committed);
+  });
+
+  it('names the path an accounted commit came from, at debug level', () => {
+    const records: { message: string; fields?: Record<string, unknown> }[] = [];
+
+    logger.setLevel('debug');
+    logger.subscribe((record) => {
+      records.push({ message: record.message, fields: record.fields });
+    });
+
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(2));
+    events.emit('state:commit', commitEvent(12));
+
+    const accounted = records.filter(
+      (record) => record.message === 'commit outside a turn',
+    );
+
+    expect(accounted).toHaveLength(1);
+    expect(accounted[0].fields?.path).toBe(UNTRACED_COMMIT_PATHS.stageStart);
+    expect(accounted[0].fields?.score).toBe(12);
+  });
+
+  it('emits nothing for an accounted commit at the default level', () => {
+    const records: string[] = [];
+
+    logger.subscribe((record) => {
+      records.push(record.message);
+    });
+
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+    events.emit('state:commit', commitEvent(0));
+
+    expect(records).not.toContain('commit outside a turn');
+    expect(tracer.snapshot().anomalies).toBe(0);
+  });
+
+  it('spends the account on one commit and no more', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+    events.emit('state:commit', commitEvent(0));
+
+    // A SECOND commit with no turn open and nothing left to account for it: the
+    // arm is consumed rather than standing until something else uses it.
+    events.emit('state:commit', commitEvent(0));
+
+    expect(tracer.snapshot().anomalies).toBe(1);
+  });
+
+  // A STAGE IS SPANNED FOR AS LONG AS IT IS IN FORCE, AND `stage:start` IS NOT
+  // ENOUGH TO KNOW THAT. `Engine.setup()` is the only emitter of `stage:start`,
+  // so within one run it fires once while `stage:end` fires once per cleared
+  // stage: advancing a stage keeps the board and raises the goal rather than
+  // setting up again. Following the stage each commit reports is what covers
+  // stages 1..N — before it, stage 0 was the only stage ever spanned, every
+  // later turn recorded stage 0 as its own, and every later `stage:end`
+  // reported
+  // an anomaly against a span that had never been opened.
+  it('spans each cleared stage in turn without a stage:start for each', () => {
+    attachEngineTracing(events, tracer);
+
+    // Stage 0 opens the way a boot opens it.
+    events.emit('stage:start', stageStartEvent(0));
+    events.emit('state:commit', commitEvent(0, 0));
+
+    // The turn that clears stage 0, then the stage resolving and the commit
+    // that reports stage 1 — which is the whole of what the engine emits.
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(56, 0));
+    events.emit('stage:end', stageEndEvent(0));
+    events.emit('state:commit', commitEvent(56, 1));
+
+    // The turn that clears stage 1, with NO `stage:start` for stage 1 anywhere.
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(176, 1));
+    events.emit('stage:end', stageEndEvent(1));
+    events.emit('state:commit', commitEvent(176, 2));
+
+    const stages = recordsFor(SPAN_NAMES.engineStage);
+
+    expect(stages).toHaveLength(2);
+    expect(stages[0].attributes[SPAN_ATTRIBUTES.stageIndex]).toBe(0);
+    expect(stages[0].attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.committed,
+    );
+    expect(stages[1].attributes[SPAN_ATTRIBUTES.stageIndex]).toBe(1);
+    expect(stages[1].attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.committed,
+    );
+
+    // NOT ONE ANOMALY across two cleared stages: this is the warning the
+    // running game produced on every stage clear after the first.
+    expect(tracer.snapshot().anomalies).toBe(0);
+
+    // Stage 2 is in force and open, and it is the only thing open.
+    expect(tracer.snapshot().open).toBe(1);
+  });
+
+  it('records each turn against the stage in force at the time', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+    events.emit('state:commit', commitEvent(0, 0));
+
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(56, 0));
+    events.emit('stage:end', stageEndEvent(0));
+    events.emit('state:commit', commitEvent(56, 1));
+
+    // A turn played entirely inside stage 1.
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(64, 1));
+
+    const turns = recordsFor(SPAN_NAMES.engineTurn);
+
+    expect(turns).toHaveLength(2);
+    expect(turns[0].attributes[SPAN_ATTRIBUTES.stageIndex]).toBe(0);
+    expect(turns[1].attributes[SPAN_ATTRIBUTES.stageIndex]).toBe(1);
+  });
+
+  it('replaces a stage span when a commit reports a stage it left', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(3));
+    events.emit('state:commit', commitEvent(0, 3));
+
+    // A restart into a different stage: no `stage:end` closes stage 3, so the
+    // span it left behind is superseded rather than abandoned open.
+    events.emit('state:commit', commitEvent(0, 0));
+
+    const stages = recordsFor(SPAN_NAMES.engineStage);
+
+    expect(stages).toHaveLength(1);
+    expect(stages[0].attributes[SPAN_ATTRIBUTES.stageIndex]).toBe(3);
+    expect(stages[0].attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.superseded,
+    );
+    expect(tracer.snapshot().open).toBe(1);
+    expect(tracer.snapshot().doubleEnds).toBe(0);
+    expect(tracer.snapshot().outOfOrderEnds).toBe(0);
+  });
+
+  it('opens one stage span across many commits of the same stage', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+
+    for (let index = 0; index < 5; index += 1) {
+      events.emit('move:before', beforeEvent(false));
+      events.emit('state:commit', commitEvent(index * 4, 0));
+    }
+
+    expect(recordsFor(SPAN_NAMES.engineStage)).toHaveLength(0);
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(5);
+    expect(tracer.snapshot().open).toBe(1);
+  });
+
+  it('does not let a stage arm outlive the turn that commits', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+
+    // The turn commits FIRST, so it — not the stage start — is what this commit
+    // belongs to, and the arm must not survive it.
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(8));
+    events.emit('state:commit', commitEvent(8));
+
+    expect(tracer.snapshot().anomalies).toBe(1);
+  });
+
+  it("produces its spans even when a listener the emitter's own containment catches throws", () => {
+    // The subject here is src/engine/engine-events.ts's containment, not this
+    // module's `guarded()` wrapper: the listener that throws is an unrelated
+    // one. The case below is the one that measures `guarded()`.
     events.on('move:before', (): never => {
       throw new Error('unrelated listener failed');
     });
@@ -1635,6 +2304,79 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
     expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
       SPAN_ATTRIBUTES.outcome
     ]).toBe(SPAN_OUTCOMES.committed);
+  });
+
+  it("contains a throw from a tracer method called inside its own attached listener", () => {
+    // `guarded()`'s actual subject: a tracer member invoked from INSIDE one of
+    // the listeners this function registers. `startSpan` is the member the
+    // `move:before` listener calls, so making it throw exercises the wrapper
+    // rather than the emitter's containment.
+    const seen: string[] = [];
+
+    attachEngineTracing(events, tracer);
+
+    // Registered after the tracing listeners, so its arrival proves the
+    // emission continued past the failure.
+    events.on('move:before', (): void => {
+      seen.push('listener after tracing');
+    });
+
+    const spy = vi
+      .spyOn(tracer, 'startSpan')
+      .mockImplementation((): never => {
+        throw new Error('the tracer refused to open a span');
+      });
+
+    expect(() => {
+      events.emit('move:before', beforeEvent(false));
+    }).not.toThrow();
+
+    spy.mockRestore();
+
+    // Nothing escaped: the emitter never saw a listener error, because the
+    // wrapper caught it before the emitter's own containment could.
+    expect(listenerErrors).toHaveLength(0);
+
+    // The failure was reported rather than swallowed.
+    expect(tracer.snapshot().faults).toBe(1);
+
+    // The later listener still ran.
+    expect(seen).toEqual(['listener after tracing']);
+
+    // And no turn state leaked: nothing is open, and the commit that follows is
+    // not mistaken for the failed turn's — it is accounted as a commit with no
+    // turn, and no span is recorded for it.
+    expect(tracer.snapshot().open).toBe(0);
+
+    events.emit('state:commit', commitEvent(8));
+
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(0);
+    expect(tracer.snapshot().anomalies).toBe(0);
+
+    // Accounted by the stage span it opened, not left as an orphan.
+    expect(tracer.snapshot().commits.lifecycle).toBe(1);
+    expect(tracer.snapshot().commits.unattributed).toBe(0);
+  });
+
+  it('contains a throw from a tracer method called inside the stage listener', () => {
+    attachEngineTracing(events, tracer);
+
+    const spy = vi
+      .spyOn(tracer, 'reportAnomaly')
+      .mockImplementation((): never => {
+        throw new Error('the tracer refused to report');
+      });
+
+    expect(() => {
+      // No stage span is open, so the listener reaches `reportAnomaly`.
+      events.emit('stage:end', stageEndEvent(0));
+    }).not.toThrow();
+
+    spy.mockRestore();
+
+    expect(listenerErrors).toHaveLength(0);
+    expect(tracer.snapshot().faults).toBe(1);
+    expect(tracer.snapshot().open).toBe(0);
   });
 
   it('stops producing spans once detached and leaves the other listeners in place', () => {
@@ -1656,10 +2398,18 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
     detach();
     detach();
 
+    // Detaching closes the stage span the commit above opened and that closure
+    // produces its record. Counted here rather than against `produced`, because
+    // what this case is about is the EMITTER: nothing emitted after detaching
+    // may produce a span, and the detach's own bookkeeping is not an emission.
+    const afterDetach = tracer.recent().length;
+
+    expect(afterDetach).toBeGreaterThanOrEqual(produced);
+
     events.emit('move:before', beforeEvent(false));
     events.emit('state:commit', commitEvent(8));
 
-    expect(tracer.recent()).toHaveLength(produced);
+    expect(tracer.recent()).toHaveLength(afterDetach);
     expect(scores).toEqual([4, 8]);
     expect(tracer.snapshot().faults).toBe(0);
   });
@@ -2081,8 +2831,18 @@ describe('Disabled tracing', () => {
     expect(tracer.snapshot().doubleEnds).toBe(0);
   });
 
-  it('keeps observing the turn latency the engine attachment measured while spans are disabled', () => {
+  it('observes no turn latency while disabled, and the application work still runs', () => {
+    // `setEnabled(false)` stops EVERY observation this tracer owns, not span
+    // creation alone: a disabled tracer must leave the histograms of
+    // src/observability/metrics.ts exactly where they stood. What must not stop
+    // is the application's own work, so the emitter's other listener runs.
     const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
+    const scores: number[] = [];
+
+    events.on('state:commit', (payload): void => {
+      scores.push(payload.score);
+    });
+
     const detach = attachEngineTracing(events, tracer);
 
     tracer.setEnabled(false);
@@ -2091,17 +2851,51 @@ describe('Disabled tracing', () => {
     events.emit('state:commit', commitEvent(8));
     detach();
 
-    // `Tracer.setEnabled` governs span creation, and `recordTurnLatency`
-    // carries no enabled guard: the duration it observes is measured between
-    // the two emissions rather than read off a span.
-    expect(latency.count).toBe(1);
-    expect(latency.sum).toBeGreaterThanOrEqual(0);
+    expect(latency.count).toBe(0);
+    expect(latency.sum).toBe(0);
+    expect(scores).toEqual([8]);
     expect(tracer.recent()).toHaveLength(0);
     expect(
       registry.histogram(METRIC_NAMES.spanDurationMilliseconds, {
         [METRIC_LABELS.span]: SPAN_NAMES.engineTurn,
       }).count,
     ).toBe(0);
+    expect(tracer.snapshot().frames.frames).toBe(0);
+  });
+
+  it('resumes observing the turn latency once re-enabled', () => {
+    const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
+    const detach = attachEngineTracing(events, tracer);
+
+    tracer.setEnabled(false);
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(8));
+
+    expect(latency.count).toBe(0);
+
+    tracer.setEnabled(true);
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(16));
+    detach();
+
+    expect(latency.count).toBe(1);
+    expect(latency.sum).toBeGreaterThanOrEqual(0);
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(1);
+  });
+
+  it('observes nothing for a direct recordTurnLatency call while disabled', () => {
+    const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
+
+    tracer.setEnabled(false);
+    tracer.recordTurnLatency(12.5);
+
+    expect(latency.count).toBe(0);
+
+    tracer.setEnabled(true);
+    tracer.recordTurnLatency(12.5);
+
+    expect(latency.count).toBe(1);
+    expect(latency.sum).toBe(12.5);
   });
 
   it('resumes recording on re-enable and leaves the records taken before it untouched', () => {
@@ -2161,3 +2955,355 @@ describe('Disabled tracing', () => {
   });
 });
 
+
+/* ==========================================================================
+ * 8. The Performance API boundary and identifier determinism
+ * ========================================================================== */
+
+/** Prefix every mark and measure this module writes carries. */
+const MARK_PREFIX = 'game2048.span:';
+
+/** One recorded call on a Performance-API double. */
+interface PerformanceCall {
+  readonly member: string;
+  readonly args: readonly unknown[];
+}
+
+/** A Performance-API double and the calls it received. */
+interface PerformanceDouble {
+  readonly calls: PerformanceCall[];
+
+  /** Names currently held, in the order they were written. */
+  readonly marks: string[];
+  readonly measures: string[];
+  readonly host: Record<string, unknown>;
+}
+
+/**
+ * Builds a Performance-API double carrying only the members named.
+ *
+ * `now` is always present because the tracer reads a clock through it and every
+ * duration assertion below depends on one; every other member is opt-in, which
+ * is how the absent and partial hosts are expressed.
+ *
+ * @param members Members to offer beside `now`.
+ * @param throwing Members that throw when called.
+ * @returns The double.
+ */
+const createPerformanceDouble = (
+  members: readonly string[],
+  throwing: readonly string[] = [],
+): PerformanceDouble => {
+  const calls: PerformanceCall[] = [];
+  const marks: string[] = [];
+  const measures: string[] = [];
+  const host: Record<string, unknown> = {};
+  let clock = 0;
+
+  host.now = (): number => {
+    clock += 1;
+
+    return clock;
+  };
+
+  const record = (member: string, args: readonly unknown[]): void => {
+    calls.push({ member, args });
+
+    if (throwing.includes(member)) {
+      throw new Error(`performance.${member} refused`);
+    }
+  };
+
+  if (members.includes('mark')) {
+    host.mark = (name: string): void => {
+      record('mark', [name]);
+      marks.push(name);
+    };
+  }
+
+  if (members.includes('measure')) {
+    host.measure = (name: string, start: string, end: string): void => {
+      record('measure', [name, start, end]);
+      measures.push(name);
+    };
+  }
+
+  if (members.includes('clearMarks')) {
+    host.clearMarks = (name?: string): void => {
+      record('clearMarks', [name]);
+
+      for (let index = marks.length - 1; index >= 0; index -= 1) {
+        if (name === undefined || marks[index] === name) {
+          marks.splice(index, 1);
+        }
+      }
+    };
+  }
+
+  if (members.includes('clearMeasures')) {
+    host.clearMeasures = (name?: string): void => {
+      record('clearMeasures', [name]);
+
+      for (let index = measures.length - 1; index >= 0; index -= 1) {
+        if (name === undefined || measures[index] === name) {
+          measures.splice(index, 1);
+        }
+      }
+    };
+  }
+
+  return { calls, marks, measures, host };
+};
+
+/** Every member the tracer reaches for on `performance`. */
+const EVERY_PERFORMANCE_MEMBER: readonly string[] = Object.freeze([
+  'mark',
+  'measure',
+  'clearMarks',
+  'clearMeasures',
+]);
+
+describe('The Performance API boundary', () => {
+  it('opens, closes and records spans with no Performance API at all', () => {
+    // The bare Node environment the `unit:dom-free` project runs in offers no
+    // `performance` at all in older hosts, and the tracer has to degrade rather
+    // than throw. `readNow()` falls back to the two clocks.
+    vi.stubGlobal('performance', undefined);
+
+    const bare = createTracer({ logger, metrics: registry });
+
+    expect(() => {
+      bare.withSpan(SPAN_NAMES.inputDispatch, (): void => undefined);
+    }).not.toThrow();
+
+    const records = bare.recent();
+
+    expect(records).toHaveLength(1);
+    expect(records[0].name).toBe(SPAN_NAMES.inputDispatch);
+    expect(Number.isFinite(records[0].durationMs)).toBe(true);
+    expect(records[0].durationMs).toBeGreaterThanOrEqual(0);
+    expect(bare.snapshot().faults).toBe(0);
+    expect(bare.snapshot().anomalies).toBe(0);
+  });
+
+  it('records a span where the host offers a clock but no mark', () => {
+    // A partial host: `now` alone. Nothing may be marked and nothing measured,
+    // and the span record must still be complete.
+    const host = createPerformanceDouble([]);
+
+    vi.stubGlobal('performance', host.host);
+
+    const partial = createTracer({ logger, metrics: registry });
+
+    partial.withSpan(SPAN_NAMES.renderCommit, (): void => undefined);
+
+    expect(host.calls).toHaveLength(0);
+    expect(partial.recent()).toHaveLength(1);
+    expect(partial.snapshot().faults).toBe(0);
+  });
+
+  it('clears the start mark where the host marks but cannot measure', () => {
+    // The other partial host: `mark` and `clearMarks` without `measure`. The
+    // start mark must still be cleared, or a span leaks a timeline entry on
+    // every turn.
+    const host = createPerformanceDouble(['mark', 'clearMarks']);
+
+    vi.stubGlobal('performance', host.host);
+
+    const partial = createTracer({ logger, metrics: registry });
+
+    partial.withSpan(SPAN_NAMES.engineTurn, (): void => undefined);
+
+    expect(host.marks).toEqual([]);
+    expect(host.measures).toEqual([]);
+    expect(partial.recent()).toHaveLength(1);
+    expect(partial.snapshot().faults).toBe(0);
+  });
+
+  it('records a span where every Performance member throws', () => {
+    const host = createPerformanceDouble(
+      EVERY_PERFORMANCE_MEMBER,
+      EVERY_PERFORMANCE_MEMBER,
+    );
+
+    vi.stubGlobal('performance', host.host);
+
+    const hostile = createTracer({ logger, metrics: registry });
+
+    expect(() => {
+      hostile.withSpan(SPAN_NAMES.hookDispatch, (): void => undefined);
+    }).not.toThrow();
+
+    expect(hostile.recent()).toHaveLength(1);
+    expect(hostile.snapshot().faults).toBe(0);
+    expect(hostile.snapshot().anomalies).toBe(0);
+
+    // The write was attempted and refused; nothing was retained for it.
+    expect(host.calls.some((call) => call.member === 'mark')).toBe(true);
+    expect(host.marks).toEqual([]);
+  });
+
+  it('leaves no mark or measure of its own behind after many closed spans', () => {
+    // The bound: the tracer's own entries after N spans is ZERO, because each
+    // span clears the two marks and the measure it wrote.
+    const host = createPerformanceDouble(EVERY_PERFORMANCE_MEMBER);
+
+    vi.stubGlobal('performance', host.host);
+
+    const marking = createTracer({ logger, metrics: registry });
+
+    for (let index = 0; index < 40; index += 1) {
+      marking.withSpan(SPAN_NAMES.frameCallback, (): void => undefined);
+    }
+
+    expect(marking.recent()).toHaveLength(40);
+    expect(host.marks).toEqual([]);
+    expect(host.measures).toEqual([]);
+
+    // Every entry it wrote carried the module's own prefix, so nothing outside
+    // its own namespace was cleared.
+    const cleared = host.calls.filter(
+      (call) => call.member === 'clearMarks' || call.member === 'clearMeasures',
+    );
+
+    expect(cleared.length).toBeGreaterThan(0);
+
+    for (const call of cleared) {
+      expect(String(call.args[0]).startsWith(MARK_PREFIX)).toBe(true);
+    }
+  });
+
+  it('clears the start mark of an open span discarded by reset', () => {
+    // The leak: `closeMarks()` runs from `finishSpan()` alone, so a span the
+    // stack still held when `reset()` ran left its mark behind — and because
+    // the identifier counter also returns to its start, the replayed span
+    // writes the SAME mark name and would measure against the leaked entry.
+    const host = createPerformanceDouble(EVERY_PERFORMANCE_MEMBER);
+
+    vi.stubGlobal('performance', host.host);
+
+    const marking = createTracer({ logger, metrics: registry });
+    const open = marking.startSpan(SPAN_NAMES.engineStage);
+
+    expect(host.marks).toHaveLength(1);
+    expect(host.marks[0]).toBe(`${MARK_PREFIX}${open.id}/start`);
+
+    marking.reset();
+
+    expect(host.marks).toEqual([]);
+    expect(host.measures).toEqual([]);
+  });
+
+  it('clears the pending frame mark the frame hooks left open on reset', () => {
+    const host = createPerformanceDouble(EVERY_PERFORMANCE_MEMBER);
+
+    vi.stubGlobal('performance', host.host);
+
+    const marking = createTracer({ logger, metrics: registry });
+    const hooks = marking.frameLifecycleHooks();
+
+    hooks.onFrameBegin(undefined);
+
+    expect(host.marks).toHaveLength(1);
+
+    marking.reset();
+
+    expect(host.marks).toEqual([]);
+  });
+
+  it('leaves no mark behind across repeated resets with spans open each time', () => {
+    const host = createPerformanceDouble(EVERY_PERFORMANCE_MEMBER);
+
+    vi.stubGlobal('performance', host.host);
+
+    const marking = createTracer({ logger, metrics: registry });
+
+    for (let round = 0; round < 5; round += 1) {
+      marking.startSpan(SPAN_NAMES.engineTurn);
+      marking.startSpan(SPAN_NAMES.hookDispatch);
+
+      expect(host.marks).toHaveLength(2);
+
+      marking.reset();
+
+      expect(host.marks).toEqual([]);
+    }
+
+    // A second reset with nothing open changes nothing and throws nothing.
+    expect(() => {
+      marking.reset();
+    }).not.toThrow();
+    expect(host.marks).toEqual([]);
+    expect(marking.snapshot().faults).toBe(0);
+  });
+});
+
+describe('Span identifier determinism', () => {
+  /**
+   * Drives one fixed call sequence and returns the identifiers it produced, in
+   * order.
+   *
+   * @param subject Tracer to drive.
+   * @returns Every identifier, oldest first.
+   */
+  const driveIdentifierSequence = (subject: Tracer): readonly string[] => {
+    subject.withSpan(SPAN_NAMES.inputDispatch, (): void => {
+      subject.withSpan(SPAN_NAMES.moveResolution, (): void => {
+        subject.withSpan(SPAN_NAMES.hookDispatch, (): void => {
+          subject.withSpan(SPAN_NAMES.relicHandler, (): void => undefined);
+        });
+      });
+      subject.withSpan(SPAN_NAMES.renderCommit, (): void => undefined);
+    });
+    subject.instrumentFrameCallback((): void => undefined)();
+
+    return subject.recent().map((record) => record.id);
+  };
+
+  it('replays the whole identifier sequence after a reset', () => {
+    const first = driveIdentifierSequence(tracer);
+
+    expect(first.length).toBeGreaterThan(1);
+
+    tracer.reset();
+
+    const second = driveIdentifierSequence(tracer);
+
+    expect(second).toEqual(first);
+  });
+
+  it('produces the same sequence from a second tracer on the same identifier', () => {
+    const first = driveIdentifierSequence(tracer);
+    const twin = createTracer({
+      logger,
+      metrics: registry,
+      correlationId: tracer.correlationId,
+    });
+
+    expect(driveIdentifierSequence(twin)).toEqual(first);
+  });
+
+  it('produces a different sequence under a different correlation identifier', () => {
+    const first = driveIdentifierSequence(tracer);
+    const other = createTracer({
+      logger,
+      metrics: registry,
+      correlationId: 'tracer-suite-other-correlation',
+    });
+    const second = driveIdentifierSequence(other);
+
+    expect(second).toHaveLength(first.length);
+    expect(second).not.toEqual(first);
+
+    // Every identifier still carries its own tracer's identifier as its prefix.
+    for (const id of second) {
+      expect(id.startsWith('tracer-suite-other-correlation')).toBe(true);
+    }
+  });
+
+  it('keeps every identifier of one sequence distinct', () => {
+    const ids = driveIdentifierSequence(tracer);
+
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});

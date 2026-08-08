@@ -71,6 +71,108 @@ exports[`a reward offer drawn from a fixed seed > reproduces its recorded three 
    3. common"
 `;
 
+exports[`a run played through the production reward path > reproduces its recorded offers and board for "reward-seed-alpha" 1`] = `
+"offers, in the order they were made
+  stage 1
+    TAKEN frostbind         rare        charges 8  hooks onStageStart, onMerge
+          tumbler           uncommon    charges 3  hooks onBeforeMove
+          chain-catalyst    legendary   charges -  hooks onStageStart, onMerge
+  stage 2
+          prospectors-eye   rare        charges -  hooks onStageStart, onSpawn
+    TAKEN loaded-dice       legendary   charges -  hooks onSpawn
+          fertile-ground    uncommon    charges -  hooks onSpawn
+  stage 3
+          echo-chamber      common      charges -  hooks onMerge
+          alloy-forge       uncommon    charges -  hooks onMerge
+    TAKEN twin-seed         common      charges -  hooks onSpawn
+
+relics held, in pickup order: frostbind, loaded-dice, twin-seed
+stage reached: 4
+moves played: 160
+
+run summary
+  none: the run was still in progress
+
+board as played
+size 4  score 436  over false  won false  keepPlaying false
+     4     4     4     4
+    16     2    16     4
+     2    64     8     4
+     4     8    16     8
+
+rngCursor
+  spawn-value     58
+  spawn-position  58
+  relic-draw      29
+  rarity-weight   9"
+`;
+
+exports[`a run played through the production reward path > reproduces its recorded offers and board for "reward-seed-bravo" 1`] = `
+"offers, in the order they were made
+  stage 1
+    TAKEN collapsing-vault  common      charges -  hooks onStageEnd
+          fertile-ground    uncommon    charges -  hooks onSpawn
+          twin-seed         common      charges -  hooks onSpawn
+  stage 2
+          alloy-forge       uncommon    charges -  hooks onMerge
+    TAKEN temporal-anchor   common      charges 3  hooks onBeforeMove, onAfterMove
+          gilded-rot        uncommon    charges -  hooks onMerge, onSpawn
+
+relics held, in pickup order: collapsing-vault, temporal-anchor
+stage reached: 3
+moves played: 39
+
+run summary
+  seed reward-seed-bravo
+  score 196
+  stage 3
+  relics collapsing-vault, temporal-anchor (2 left)
+
+board as played
+size 3  score 196  over true  won false  keepPlaying false
+     2    16     2
+     8    32     4
+     2     8     2
+
+rngCursor
+  spawn-value     35
+  spawn-position  35
+  relic-draw      9
+  rarity-weight   6"
+`;
+
+exports[`a run played through the production reward path > reproduces its recorded offers and board for "reward-seed-charlie" 1`] = `
+"offers, in the order they were made
+  stage 1
+    TAKEN frostbind         rare        charges 8  hooks onStageStart, onMerge
+          temporal-anchor   common      charges 3  hooks onBeforeMove, onAfterMove
+          collapsing-vault  common      charges -  hooks onStageEnd
+  stage 2
+          echo-chamber      common      charges -  hooks onMerge
+    TAKEN collapsing-vault  common      charges -  hooks onStageEnd
+          brittle-crown     rare        charges -  hooks onStageStart, onStageEnd
+
+relics held, in pickup order: frostbind, collapsing-vault
+stage reached: 3
+moves played: 160
+
+run summary
+  none: the run was still in progress
+
+board as played
+size 4  score 324  over false  won false  keepPlaying false
+     8     2     4     2
+    16     4    32     4
+     2    32     4     2
+     2     4     2     2
+
+rngCursor
+  spawn-value     57
+  spawn-position  57
+  relic-draw      6
+  rarity-weight   6"
+`;
+
 exports[`the draw tables > reproduces its recorded family order 1`] = `
 "spawn-control
 merge-magic

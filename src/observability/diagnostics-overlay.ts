@@ -1,9 +1,9 @@
 // The in-page diagnostics surface. AAP 0.2.4.7 and AAP 0.7.2.4.
 //
-// It renders four panels — the six capability-probe results, the frame-time
-// and turn-latency spans, the per-hook dispatch counts and the recent
-// structured log records — and exports the Prometheus text and a combined
-// JSON snapshot.
+// It renders six panels — the run identity, the six capability-probe results,
+// the frame-time and turn-latency spans, the per-hook dispatch counts, the
+// metric series with per-histogram quantiles, and the recent structured log
+// records — and exports the Prometheus text and a combined JSON snapshot.
 //
 // Provenance:
 //   js/local_storage_manager.js L25-L26  the construction-time capability probe
@@ -11,15 +11,22 @@
 //                                        consumed and reported nowhere. The
 //                                        health panel is where it is surfaced.
 //   js/html_actuator.js L13, L69         the two `requestAnimationFrame` sites
-//                                        the frame-callback span summarised by
-//                                        the trace panel succeeds.
+//                                        that the frame-callback span, which
+//                                        the trace panel summarises, succeeds.
 //   js/keyboard_input_manager.js L18-L32 the subscriber registry whose pull
-//                                        successors — `Logger.recent`,
+//                                        successors — `Logger.snapshot`,
 //                                        `MetricsRegistry.snapshot`,
 //                                        `Tracer.snapshot`,
 //                                        `HealthSurface.report` and
 //                                        `HookBus.metrics` — are the only
 //                                        sources this module reads.
+//
+// THE LOG PANEL READS `Logger.snapshot`, NOT `Logger.recent`. The snapshot is
+// the logger's export surface and redacts every source location in every stack
+// it carries whatever the logger's own `stackDetail` is; `recent()` reports the
+// records as the sinks received them, so reading it put the source URLs and
+// filesystem paths of a `stackDetail: 'full'` logger into this panel and into
+// the JSON this overlay downloads.
 //   style/main.scss L4-L22               the token block src/theme/tokens.ts
 //                                        mirrors and every style value below
 //                                        resolves to.
@@ -35,22 +42,46 @@
 //                                        the markup declares it and created
 //                                        programmatically when it does not.
 //
-// The module writes to the registry in one place only: the idempotent status
-// gauge that carries each rendered health verdict into the exported snapshot.
+// The module writes to the registry in two places: the idempotent status gauge
+// that carries each rendered health verdict into the exported snapshot, and the
+// fold of the hook bus's dispatch counts taken ahead of each snapshot.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-DIAG-01  js/local_storage_manager.js   the construction-time capability
+//               L25-L26                       probe, surfaced by the health
+//                                             panel
+//   TR-DIAG-02  js/html_actuator.js L13, L69  the two `requestAnimationFrame`
+//                                             sites, summarised by the trace
+//                                             panel
+//   TR-DIAG-03  js/keyboard_input_manager.js  the subscriber registry, whose
+//               L18-L32                       pull successors are the only
+//                                             sources this module reads
+//   TR-DIAG-04  style/main.scss L4-L22        the token block every style value
+//                                             below resolves to
+//   TR-DIAG-05  style/main.scss L217-L245     `.diagnostics-overlay:not([hidden])`,
+//                                             restated by the inline
+//                                             declarations from the same tokens
+//   TR-DIAG-06  style/_themes.scss L552-L562  the three diagnostics custom
+//                                             properties, each consumed with a
+//                                             token fallback
+//   TR-DIAG-07  index.html L105               `#diagnostics-overlay`, adopted
+//                                             where the markup declares it
+//   TR-DIAG-08  target-only row               the four panels, the Prometheus
+//                                             text export and the combined JSON
+//                                             snapshot
 //
 // Decisions originating here. Each is argued in docs/DECISION_LOG.md and named
 // here only so the construct can be found from the log:
-//   DL-DIAG-01  the runtime opt-in gate of `isDiagnosticsRequested`, over a
-//               build-time constant
-//   DL-DIAG-02  programmatic self-mounting with inline token-derived styles,
-//               over a declared container plus a stylesheet partial
-//   DL-DIAG-03  the throttled pull refresh, over per-event subscription
+//   DL-DIAG-01  the runtime opt-in gate of `isDiagnosticsRequested`
+//   DL-DIAG-02  the container adopted where index.html declares it and created
+//               programmatically where it does not, with inline token-derived
+//               styles restating the declarations of style/main.scss L217-L245
+//               from the same tokens
+//   DL-DIAG-03  the throttled pull refresh
 //   DL-DIAG-04  the hook counts pulled from the bus, never pushed to here
 //   DL-DIAG-05  one document fragment inserted per render
 //   DL-DIAG-06  the combined JSON snapshot as the dashboard template's input
-//
-// Traceability rows TR-DIAG-01 through TR-DIAG-08,
-// docs/TRACEABILITY_MATRIX.md.
 
 import type { HookBusMetrics, HookCounters } from '../engine/hook-bus';
 import {
@@ -91,14 +122,9 @@ import { METRIC_LABELS, METRIC_NAMES } from './metrics';
 import type { FrameTraceStats, SpanRecord, TraceSnapshot } from './tracer';
 import { DEFAULT_FRAME_BUDGET_MS, SPAN_NAMES } from './tracer';
 
-/* ==========================================================================
- * 1. Names, flags and defaults
- * ========================================================================== */
-
 /** Selector a host is adopted from where the caller supplies none. */
 export const DIAGNOSTICS_OVERLAY_SELECTOR = '#diagnostics-overlay';
 
-/** `id` a programmatically created host carries. */
 const DIAGNOSTICS_HOST_ID = 'diagnostics-overlay';
 
 /**
@@ -118,7 +144,6 @@ const NEGATIVE_FLAG_VALUES: ReadonlySet<string> = new Set<string>([
 /** Leading `?` and `#` characters of a query string or fragment. */
 const LEADING_DELIMITERS = /^[?#]+/;
 
-/** Separator between one flag and the next. */
 const PAIR_SEPARATOR = /[&;]/;
 
 /** `+` as a space, the form encoding a query string may carry. */
@@ -133,7 +158,6 @@ const HEADING_CLASS = 'diagnostics-heading';
 /** Class every panel table carries, styled by style/_screens.scss L541. */
 const TABLE_CLASS = 'diagnostics-table';
 
-/** Class the control row carries. */
 const CONTROLS_CLASS = 'diagnostics-controls';
 
 /** Class one control carries, shared with the screen-button vocabulary. */
@@ -148,34 +172,45 @@ const STATUS_CLASS = 'diagnostics-status';
 /** Class the inline error line of a panel that failed to render carries. */
 const PANEL_ERROR_CLASS = 'diagnostics-panel-error';
 
-/** Subsystem tag the panel-failure records are emitted under. */
 const LOGGER_SUBSYSTEM = 'diagnostics';
 
-/** Series whose value is zero are hidden by default. */
 const DEFAULT_HIDE_EMPTY = true;
 
 /** Quantiles reported for every histogram family. */
 const REPORTED_QUANTILES: readonly number[] = Object.freeze([0.5, 0.95, 0.99]);
 
-/** Records the log panel shows where the caller sets no limit. */
 const DEFAULT_LOG_LIMIT = 25;
 
-/** Spans the trace panel shows where the caller sets no limit. */
 const DEFAULT_SPAN_LIMIT = 12;
 
-/** Scale a quantile is rendered on. */
 const PERCENT_SCALE = 100;
 
-/** Characters of a span identifier the trace panel renders. */
 const SHORT_ID_LENGTH = 8;
+
+/**
+ * Separator between the correlation identifier and the counter in a span
+ * identifier. `Tracer.startSpan` of src/observability/tracer.ts builds every
+ * identifier as `${correlationId}#${counter}`.
+ */
+const SPAN_ID_SEPARATOR = '#';
+
+/**
+ * Characters of the correlation identifier kept in front of a span's counter.
+ *
+ * Short, because every span of one run shares that identifier: it is there to
+ * tell two tracers apart, not to identify a span. The counter after it is what
+ * makes a span unique, and it is never truncated.
+ */
+const SPAN_ID_TAIL_LENGTH = 4;
+
+/** Prefix marking a rendered identifier as having had its head elided. */
+const ELISION = '…';
 
 /** Decimal places a fractional millisecond figure is rendered to. */
 const MILLISECOND_PRECISION = 3;
 
-/** Indent of the exported JSON, in spaces. */
 const JSON_INDENT = 2;
 
-/** Media type the exported JSON blob carries. */
 const JSON_MEDIA_TYPE = 'application/json;charset=utf-8';
 
 /** Rendered in a cell that has no value. */
@@ -194,9 +229,8 @@ export const DEFAULT_DIAGNOSTICS_SNAPSHOT_FILENAME =
 /** Version the combined snapshot envelope carries. */
 export const DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION = 1;
 
-/* ==========================================================================
- * 2. Style values, every one a token of src/theme/tokens.ts
- * ========================================================================== */
+// Every style value below is a token of src/theme/tokens.ts or a custom
+// property style/_themes.scss publishes; none is a literal.
 
 /** Custom property style/_themes.scss L560 publishes for the surface. */
 const SURFACE_PROPERTY = '--theme-diagnostics-surface';
@@ -356,10 +390,6 @@ const STATUS_PRESENTATION: Readonly<Record<HealthStatus, StatusPresentation>> =
     },
   });
 
-/* ==========================================================================
- * 3. Types
- * ========================================================================== */
-
 /**
  * One capability probe's result in the shape the health panel reads: a name, a
  * verdict and a description. `HealthProbeView` of src/observability/health.ts
@@ -368,6 +398,16 @@ const STATUS_PRESENTATION: Readonly<Record<HealthStatus, StatusPresentation>> =
 export interface HealthCheckResult {
   /** Stable name of the probe, as `'webgl'`. */
   readonly name: string;
+
+  /**
+   * The three-state status, read in PREFERENCE to `healthy` wherever a provider
+   * carries it. `HealthProbeView` of src/observability/health.ts does.
+   *
+   * Optional, so a provider written against the boolean shape alone still
+   * satisfies this contract; such a provider cannot express
+   * `'not-applicable'`, and its `healthy` is read instead.
+   */
+  readonly status?: HealthStatus;
 
   /** Whether the capability is present. `false` only for a failure. */
   readonly healthy: boolean;
@@ -472,6 +512,11 @@ export interface DiagnosticsSnapshot {
   readonly traces: TraceSnapshot | null;
   readonly hooks: readonly DiagnosticsHookRow[];
   readonly metrics: MetricsSnapshot;
+  /**
+   * The recent log records, as the logger's `snapshot()` export surface reports
+   * them: every source location in every stack replaced, whatever the logger's
+   * own `stackDetail` is.
+   */
   readonly logs: readonly LogRecord[];
 }
 
@@ -480,7 +525,11 @@ export interface DiagnosticsOverlayOptions {
   /** The registry to read. */
   readonly metrics: MetricsRegistry;
 
-  /** The logger whose recent records the log panel shows. */
+  /**
+   * The logger whose recent records the log panel shows, read through its
+   * `snapshot()` export surface so every record rendered and exported carries
+   * redacted stack locations.
+   */
   readonly logger?: Logger;
 
   /**
@@ -511,20 +560,18 @@ export interface DiagnosticsOverlayOptions {
   /** Whether zero-valued series are hidden. Defaults to `true`. */
   readonly hideEmpty?: boolean;
 
-  /** Records the log panel shows. Defaults to 25. */
   readonly logLimit?: number;
 
-  /** Spans the trace panel shows. Defaults to 12. */
   readonly spanLimit?: number;
 
   /**
    * Cadence of the scheduled refresh while the overlay is shown, in ms.
-   * Defaults to ten times `$transition-speed`. Zero or a non-finite value
-   * leaves the overlay refreshing on demand only.
+   * Defaults to ten times `$transition-speed`. Every non-finite value and
+   * every value at or below zero — negatives included — leaves the overlay
+   * refreshing on demand only.
    */
   readonly refreshIntervalMs?: number;
 
-  /** Filename the combined snapshot downloads under. */
   readonly snapshotFilename?: string;
 }
 
@@ -534,15 +581,15 @@ export interface DiagnosticsOverlay {
   readonly available: boolean;
 
   /**
-   * Resolves a host, creating one on `document.body` where the markup declares
-   * none, and applies the token-derived styles. Idempotent: a second call
-   * creates no second host.
+   * Resolves a host and applies the token-derived styles. Where the markup
+   * declares none, one is created on `document.body`, or on
+   * `document.documentElement` where the document carries no body. Idempotent:
+   * a second call creates no second host.
    *
    * @returns Whether a host is available afterwards.
    */
   mount(): boolean;
 
-  /** Whether the overlay is currently shown. */
   isOpen(): boolean;
 
   /** Shows the overlay, renders it and starts the scheduled refresh. */
@@ -560,19 +607,33 @@ export interface DiagnosticsOverlay {
   /** The metrics snapshot the last render read, or `null` before the first. */
   lastSnapshot(): MetricsSnapshot | null;
 
-  /** The Prometheus text of the current registry state. */
+  /**
+   * The Prometheus text of the current registry state.
+   *
+   * @returns The exposition, or the empty string after `destroy()`.
+   */
   toPrometheusText(): string;
 
-  /** A freshly built combined snapshot. Requires no open overlay. */
+  /**
+   * A freshly built combined snapshot. Requires no open overlay.
+   *
+   * @returns The snapshot. After `destroy()`, an empty envelope carrying no
+   *   correlation identifier and no source, read from nothing.
+   */
   snapshot(): DiagnosticsSnapshot;
 
-  /** The combined snapshot as indented JSON. */
+  /**
+   * The combined snapshot as indented JSON.
+   *
+   * @returns The JSON of the reading, and the EMPTY STRING after `destroy()`.
+   */
   snapshotJson(): string;
 
   /**
    * Downloads the Prometheus text through the registry's own exporter.
    *
-   * @returns Whether the download was started.
+   * @returns Whether the download was started. `false` after `destroy()`, which
+   *   creates no object URL and clicks nothing.
    */
   exportPrometheusText(): boolean;
 
@@ -580,20 +641,24 @@ export interface DiagnosticsOverlay {
    * Downloads the combined snapshot as JSON. Any object URL it creates is
    * revoked before the call returns.
    *
-   * @returns Whether the download was started.
+   * @returns Whether the download was started. `false` after `destroy()`, which
+   *   creates no object URL and clicks nothing.
    */
   exportSnapshotJson(): boolean;
 
   /**
-   * Hides the overlay, stops the scheduled refresh, removes a host this module
-   * created, empties one it adopted, and leaves every member inert.
+   * Hides the overlay, stops the scheduled refresh, releases every listener it
+   * bound, removes a host this module created, empties one it adopted, drops the
+   * held metrics snapshot, and releases every source it was given. Idempotent.
+   *
+   * Afterwards `available` is `false`, `mount()` reports and returns `false`,
+   * `open()`, `close()`, `toggle()` and `refresh()` do nothing, `isOpen()`
+   * returns `false` and `lastSnapshot()` returns `null`. EVERY member is inert,
+   * the readers and the exporters included: a retained handle reads no source,
+   * folds no series and starts no download.
    */
   destroy(): void;
 }
-
-/* ==========================================================================
- * 4. Activation
- * ========================================================================== */
 
 /**
  * Decodes one query-string component.
@@ -720,18 +785,12 @@ export function isDiagnosticsRequested(
   }
 }
 
-/* ==========================================================================
- * 5. Rendering helpers
- * ========================================================================== */
-
-/** One cell of a panel table. */
 interface Cell {
   readonly text: string;
   readonly className?: string;
   readonly style?: Readonly<Record<string, string>>;
 }
 
-/** One row of a panel table. */
 type Row = readonly (string | Cell)[];
 
 /** The six hook names, as `HookBusMetrics` declares them. */
@@ -835,11 +894,6 @@ function removeStyle(
   }
 }
 
-/**
- * Empties an element.
- *
- * @param element Element to empty.
- */
 function clear(element: Element): void {
   while (element.firstChild !== null) {
     element.removeChild(element.firstChild);
@@ -991,7 +1045,16 @@ function countAbove(series: HistogramSeriesSnapshot, bound: number): number {
 }
 
 /**
- * Renders a span identifier short enough for a fixed-layout table.
+ * Renders a span identifier short enough for a fixed-layout table while keeping
+ * the segment that makes it unique.
+ *
+ * THE COUNTER IS THE UNIQUE SEGMENT. `Tracer.startSpan` of
+ * src/observability/tracer.ts builds every identifier as
+ * `${correlationId}#${counter}`, and one run has one correlation identifier, so
+ * keeping the head alone rendered every span and every parent in a session
+ * identically and made parent linkage impossible to read. The counter is kept
+ * whole and a bounded tail of the correlation identifier is kept in front of
+ * it.
  *
  * @param id Identifier to render, or `undefined` for a root span.
  * @returns The shortened identifier, or the missing-value marker.
@@ -1001,7 +1064,43 @@ function shortId(id: string | undefined): string {
     return MISSING_VALUE;
   }
 
-  return id.length <= SHORT_ID_LENGTH ? id : id.slice(0, SHORT_ID_LENGTH);
+  if (id.length <= SHORT_ID_LENGTH) {
+    return id;
+  }
+
+  const separator = id.lastIndexOf(SPAN_ID_SEPARATOR);
+
+  // No separator: an identifier this module did not shape, truncated from the
+  // front as before.
+  if (separator <= 0 || separator === id.length - 1) {
+    return `${id.slice(0, SHORT_ID_LENGTH)}${ELISION}`;
+  }
+
+  const head = id.slice(0, separator);
+  const counter = id.slice(separator);
+  const tail =
+    head.length <= SPAN_ID_TAIL_LENGTH
+      ? head
+      : `${ELISION}${head.slice(-SPAN_ID_TAIL_LENGTH)}`;
+
+  return `${tail}${counter}`;
+}
+
+/**
+ * Narrows an unvalidated member to one of the three health statuses.
+ *
+ * The keys of `HEALTH_GAUGE_VALUES` of src/observability/health.ts are the
+ * single declaration of the set, so a status added there is accepted here
+ * without a second list to keep in step.
+ *
+ * @param value Member to test, from a provider this module does not own.
+ * @returns `true` when it is one of the three.
+ */
+function isHealthStatus(value: unknown): value is HealthStatus {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(HEALTH_GAUGE_VALUES, value)
+  );
 }
 
 /**
@@ -1066,7 +1165,6 @@ function hookRowsOf(
   });
 }
 
-/** Panel headings. */
 const RUN_PANEL_TITLE = 'Run';
 
 const HEALTH_PANEL_TITLE = 'Health';
@@ -1077,25 +1175,18 @@ const HOOK_PANEL_TITLE = 'Hooks';
 
 const LOG_PANEL_TITLE = 'Recent records';
 
-/** Text of the overlay's own heading. */
 const OVERLAY_TITLE = 'Diagnostics';
 
-/** Accessible name of the host. */
 const HOST_LABEL = 'Diagnostics';
 
-/** Accessible name of the control row. */
 const CONTROLS_LABEL = 'Diagnostics controls';
 
-/** Rendered by a panel that read nothing. */
 const EMPTY_PANEL_TEXT = 'Nothing recorded.';
 
-/** Rendered by a panel whose row builder threw. */
 const PANEL_ERROR_TEXT = 'This panel failed to render.';
 
-/** Name a probe reader that threw is reported under. */
 const PROVIDER_FAILURE_NAME = 'health';
 
-/** Detail a probe reader that threw is reported with. */
 const PROVIDER_FAILURE_DETAIL = 'the provider threw';
 
 /** Detail a check the source did not report is rendered with. */
@@ -1104,13 +1195,10 @@ const UNREPORTED_CHECK_DETAIL = 'The source reported no result.';
 /** Name a probe view carrying no usable name is rendered under. */
 const UNNAMED_CHECK = 'unnamed';
 
-/** Rendered in the hook panel where no bus is attached. */
 const NO_BUS_TEXT = 'not attached';
 
-/** Rendered in the trace panel where no tracer is attached. */
 const NO_TRACER_TEXT = 'not attached';
 
-/** Labels of the four controls. */
 const REFRESH_CONTROL_LABEL = 'Refresh';
 
 const METRICS_EXPORT_CONTROL_LABEL = 'Export metrics';
@@ -1119,7 +1207,6 @@ const SNAPSHOT_EXPORT_CONTROL_LABEL = 'Export snapshot';
 
 const CLOSE_CONTROL_LABEL = 'Close diagnostics';
 
-/** Messages the panel-failure and mount records carry. */
 const PANEL_FAILURE_MESSAGE = 'A diagnostics panel failed to render.';
 
 const MOUNT_SKIPPED_MESSAGE = 'The diagnostics surface did not mount.';
@@ -1131,10 +1218,8 @@ const ANCHOR_STYLE: Readonly<Record<string, string>> = Object.freeze({
   display: 'none',
 });
 
-/** Health rows of a surface with no source. */
 const EMPTY_HEALTH_ROWS: readonly DiagnosticsHealthRow[] = Object.freeze([]);
 
-/** Every status at zero. */
 const ZERO_STATUS_COUNTS: Readonly<Record<HealthStatus, number>> =
   Object.freeze({
     pass: 0,
@@ -1154,6 +1239,40 @@ const UNAVAILABLE_METRICS: MetricsSnapshot = Object.freeze({
   rejected: 0,
   reporterFaults: 0,
   series: Object.freeze([]) as readonly MetricSeriesSnapshot[],
+});
+
+/** Hook rows of a snapshot carrying none. */
+const EMPTY_HOOK_ROWS: readonly DiagnosticsHookRow[] = Object.freeze([]);
+
+/** Log records of a snapshot carrying none. */
+const EMPTY_LOG_RECORDS: readonly LogRecord[] = Object.freeze([]);
+
+/**
+ * What a DESTROYED overlay reports from `snapshot()`.
+ *
+ * Every section is empty and every source is absent: `destroy()` promises the
+ * overlay is inert afterwards, and reading a live registry, health surface and
+ * tracer to answer is not inert. The type is kept
+ * — the member is not made nullable — so no caller needs a branch it did not
+ * need before; the zero `schemaVersion` of `UNAVAILABLE_METRICS` is what
+ * distinguishes this from a real reading, exactly as it does for a registry
+ * that could not be read.
+ */
+const INERT_DIAGNOSTICS_SNAPSHOT: DiagnosticsSnapshot = Object.freeze({
+  schemaVersion: 0,
+  correlationId: '',
+  generatedAt: '',
+  health: Object.freeze({
+    status: null,
+    checks: EMPTY_HEALTH_ROWS,
+    counts: ZERO_STATUS_COUNTS,
+    report: null,
+    readiness: null,
+  }),
+  traces: null,
+  hooks: EMPTY_HOOK_ROWS,
+  metrics: UNAVAILABLE_METRICS,
+  logs: EMPTY_LOG_RECORDS,
 });
 
 /**
@@ -1236,10 +1355,6 @@ function intervalOf(supplied: number | undefined): number {
   return supplied <= 0 ? 0 : supplied;
 }
 
-/* ==========================================================================
- * 6. Construction
- * ========================================================================== */
-
 /**
  * Builds the diagnostics surface.
  *
@@ -1267,9 +1382,14 @@ export function createDiagnosticsOverlay(
   const selector = options.selector ?? DIAGNOSTICS_OVERLAY_SELECTOR;
   const metrics = options.metrics;
   const logger = options.logger ?? null;
-  const healthSource = options.health ?? null;
-  const tracer = options.tracer ?? null;
-  const hookCounts = options.hookCounts ?? null;
+  // RELEASABLE, not `const`: `destroy()` nulls all three, so a retained handle
+  // cannot reach a health probe, a tracer or the hook bus after disposal, even
+  // by way of a member that was overlooked. `metrics` is non-optional and is
+  // reached from several helpers; gating every public member on `destroyed` is
+  // what makes it unreachable too.
+  let healthSource: HealthSource | null = options.health ?? null;
+  let tracer: TracerView | null = options.tracer ?? null;
+  let hookCounts: HookCountsReader | null = options.hookCounts ?? null;
   const hideEmpty = options.hideEmpty ?? DEFAULT_HIDE_EMPTY;
   const logLimit = limitOf(options.logLimit, DEFAULT_LOG_LIMIT);
   const spanLimit = limitOf(options.spanLimit, DEFAULT_SPAN_LIMIT);
@@ -1305,8 +1425,6 @@ export function createDiagnosticsOverlay(
   let host: Element | null = null;
   let createdHost: Element | null = null;
   let timer: number | null = null;
-
-  /* ----- 6a. Reporting ----- */
 
   /**
    * Records a contained failure.
@@ -1346,8 +1464,6 @@ export function createDiagnosticsOverlay(
       // A logger that throws is contained here.
     }
   };
-
-  /* ----- 6b. Host resolution and styling ----- */
 
   /**
    * Looks the host up. A selector the host rejects resolves to nothing.
@@ -1435,8 +1551,6 @@ export function createDiagnosticsOverlay(
       reportFailure(HOST_LABEL, thrown);
     }
   };
-
-  /* ----- 6c. Element construction ----- */
 
   /**
    * Builds one element. Text is assigned through `textContent`, so a value
@@ -1723,7 +1837,7 @@ export function createDiagnosticsOverlay(
     }
   };
 
-  /* ----- 6d. Reading the sources, all through their pull accessors ----- */
+  // Every source below is read through its own pull accessor; none pushes.
 
   /**
    * Writes one verdict to the status gauge. `'pass'` and `'fail'` go through
@@ -1772,6 +1886,11 @@ export function createDiagnosticsOverlay(
         status: 'not-applicable',
         detail: UNREPORTED_CHECK_DETAIL,
       });
+
+      // RECORDED like every other rendered row. Appending the row without its
+      // gauge left the panel showing a check the export carried no series for,
+      // so the two disagreed about a check nobody reported.
+      recordVerdict(id, 'not-applicable');
     }
   };
 
@@ -1811,7 +1930,15 @@ export function createDiagnosticsOverlay(
         typeof view.name === 'string' && view.name.length > 0
           ? view.name
           : UNNAMED_CHECK;
-      const status: HealthStatus = view.healthy === false ? 'fail' : 'pass';
+
+      // THE THREE-STATE STATUS WINS over the boolean. Reading `healthy` alone
+      // presented an inapplicable check as an unqualified pass and wrote `1`
+      // to its gauge instead of `-1`.
+      const status: HealthStatus = isHealthStatus(view.status)
+        ? view.status
+        : view.healthy === false
+          ? 'fail'
+          : 'pass';
 
       rows.push({
         id: name,
@@ -1929,8 +2056,8 @@ export function createDiagnosticsOverlay(
   /**
    * Reads the hook bus's dispatch counts, once per render.
    *
-   * PULL ONLY. The bus is asked; it is never given a subscriber, and no member
-   * of this module is reachable from src/engine. Decision DL-DIAG-04.
+   * Pull only: the bus is asked and is never given a subscriber. Decision
+   * DL-DIAG-04.
    *
    * @returns The view, or `null` where no bus is attached or it threw.
    */
@@ -1948,11 +2075,6 @@ export function createDiagnosticsOverlay(
     }
   };
 
-  /**
-   * Folds a dispatch-count view into the registry, ahead of the snapshot.
-   *
-   * @param view View to fold.
-   */
   const foldHookView = (view: HookDispatchCountsView): void => {
     try {
       metrics.foldHookDispatchCounts(view);
@@ -1961,12 +2083,6 @@ export function createDiagnosticsOverlay(
     }
   };
 
-  /**
-   * Takes the registry snapshot the whole render describes.
-   *
-   * @returns The snapshot, or the unavailable marker where it could not be
-   *   taken.
-   */
   const takeMetrics = (): MetricsSnapshot => {
     try {
       return metrics.snapshot();
@@ -1997,9 +2113,20 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * Reads the logger's ring buffer, oldest record first.
+   * Reads the logger's ring buffer THROUGH ITS EXPORT SURFACE, oldest record
+   * first.
    *
-   * @returns The records, empty where no logger is attached or it threw.
+   * `snapshot()` rather than `recent()`, because the two differ in exactly the
+   * way that matters here: `snapshot()` replaces every source location in every
+   * stack it carries — and in the stack of every cause behind it — whatever the
+   * logger's own `stackDetail` is, while `recent()` reports the records as the
+   * sinks received them. A logger built with `stackDetail: 'full'` for a private
+   * development sink therefore no longer puts source URLs and filesystem paths
+   * into what this overlay renders and, through `snapshotJson()`, into what it
+   * downloads.
+   *
+   * @returns The redacted records, empty where no logger is attached or it
+   *   threw.
    */
   const readLogs = (): readonly LogRecord[] => {
     if (logger === null) {
@@ -2007,7 +2134,7 @@ export function createDiagnosticsOverlay(
     }
 
     try {
-      const records = logger.recent(logLimit);
+      const records = logger.snapshot(logLimit).records;
 
       return Array.isArray(records) ? records : [];
     } catch (thrown) {
@@ -2016,8 +2143,6 @@ export function createDiagnosticsOverlay(
       return [];
     }
   };
-
-  /* ----- 6e. Row builders ----- */
 
   /**
    * Builds the status cell of one row.
@@ -2268,17 +2393,13 @@ export function createDiagnosticsOverlay(
       record.correlationId,
     ]);
 
-  /* ----- 6f. The render ----- */
-
   /**
    * Renders every panel from one reading.
    *
    * Read order: the health probes first, whose verdicts the status gauge then
-   * carries; the hook counts folded next; then ONE registry snapshot, which
-   * every panel below describes.
-   *
-   * The tree is built in a document fragment and inserted once per render.
-   * Decision DL-DIAG-05.
+   * carries; the hook counts folded next; then one registry snapshot, which
+   * every panel describes. The tree is built in a document fragment and
+   * inserted once per render. Decision DL-DIAG-05.
    */
   const render = (): void => {
     if (destroyed || host === null || owner === null) {
@@ -2366,8 +2487,6 @@ export function createDiagnosticsOverlay(
     target.appendChild(fragment);
     restoreControlFocus(focusedControl);
   };
-
-  /* ----- 6g. Visibility, scheduling and teardown ----- */
 
   /** Stops the scheduled refresh. */
   const stopTimer = (): void => {
@@ -2522,7 +2641,8 @@ export function createDiagnosticsOverlay(
     return true;
   };
 
-  /* ----- 6h. Exports, the substitute for a scrape ----- */
+  // These exports are the substitute for a scrape: the bundle has no server
+  // to serve a metrics endpoint from.
 
   /**
    * Builds the combined snapshot from a fresh reading of every source.
@@ -2688,14 +2808,26 @@ export function createDiagnosticsOverlay(
     },
 
     open(): void {
+      if (destroyed) {
+        return;
+      }
+
       show();
     },
 
     close(): void {
+      if (destroyed) {
+        return;
+      }
+
       hide();
     },
 
     toggle(): boolean {
+      if (destroyed) {
+        return false;
+      }
+
       if (shown) {
         hide();
       } else {
@@ -2706,16 +2838,28 @@ export function createDiagnosticsOverlay(
     },
 
     refresh(): void {
-      if (shown) {
-        render();
+      if (destroyed || !shown) {
+        return;
       }
+
+      render();
     },
 
     lastSnapshot(): MetricsSnapshot | null {
-      return lastMetrics;
+      return destroyed ? null : lastMetrics;
     },
 
+    // EVERY READ AND EVERY EXPORT BELOW IS GATED. `destroy()` promises the
+    // overlay is inert afterwards, and these five reached their collaborators
+    // regardless: a retained handle went on probing health, folding the hook
+    // counts into the registry and reading the log buffer and the tracer, and
+    // the two exports could still create an object URL and start a browser
+    // download for an overlay that no longer exists.
     toPrometheusText(): string {
+      if (destroyed) {
+        return '';
+      }
+
       try {
         return metrics.toPrometheusText();
       } catch (thrown) {
@@ -2726,19 +2870,23 @@ export function createDiagnosticsOverlay(
     },
 
     snapshot(): DiagnosticsSnapshot {
-      return buildSnapshot();
+      return destroyed ? INERT_DIAGNOSTICS_SNAPSHOT : buildSnapshot();
     },
 
+    // THE EMPTY STRING, not the JSON of the empty envelope: a caller that gets
+    // text back writes it to a file or a sink, and an envelope of zeroes is
+    // indistinguishable there from a reading of a healthy but idle session. An
+    // empty string cannot be mistaken for one.
     snapshotJson(): string {
-      return snapshotJson();
+      return destroyed ? '' : snapshotJson();
     },
 
     exportPrometheusText(): boolean {
-      return exportPrometheusText();
+      return destroyed ? false : exportPrometheusText();
     },
 
     exportSnapshotJson(): boolean {
-      return exportSnapshotJson();
+      return destroyed ? false : exportSnapshotJson();
     },
 
     destroy(): void {
@@ -2767,6 +2915,13 @@ export function createDiagnosticsOverlay(
       host = null;
       createdHost = null;
       lastMetrics = null;
+
+      // The optional collaborators are released, so a destroyed overlay keeps
+      // neither the health surface, the tracer nor the hook-count source alive,
+      // and nothing it was given stays reachable through it.
+      healthSource = null;
+      tracer = null;
+      hookCounts = null;
     },
   });
 }

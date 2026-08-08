@@ -26,11 +26,21 @@
 // Every duration in a descriptor is in milliseconds and every time handed
 // to the Web Audio API is in seconds.
 //
-// Decisions behind this file: DL-AUDIO-02, every voice synthesised from an
-// oscillator or a generated noise buffer; DL-AUDIO-03, the context created
-// and resumed on a user gesture; and DL-AUDIO-04, `getState()` as this
-// DL-AUDIO-01 for the descriptor timings.
-// are target-only rows TR-AUDIO-01 through TR-AUDIO-04 of
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated, all target-only because js/ plays no sound:
+//   TR-AUDIO-01  `createSoundEngine()` and the audio context created and
+//                resumed on a user gesture
+//   TR-AUDIO-02  the oscillator and noise-buffer voices
+//   TR-AUDIO-03  `subscribe()` and the per-event voice selection
+//   TR-AUDIO-04  the mute and volume surface, and `getState()`
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-AUDIO-01  the descriptor timings, declared in ./sound-map
+//   DL-AUDIO-02  every voice synthesised from an oscillator or a generated
+//                noise buffer, with no binary asset shipped
+//   DL-AUDIO-03  the context created and resumed on a user gesture
+//   DL-AUDIO-04  `getState()` as this module's whole readable state
 
 import {
   DEFAULT_MUTED,

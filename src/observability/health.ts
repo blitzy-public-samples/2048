@@ -41,20 +41,37 @@
 // js/animframe_polyfill.js are deleted with no code replacement, and their
 // three probe constructs are traced to this module.
 //
-// docs/TRACEABILITY_MATRIX.md:
-//   TR-HEALTH-01  js/bind_polyfill.js L1
-//   TR-HEALTH-02  js/classlist_polyfill.js L2-L5
-//   TR-HEALTH-03  js/animframe_polyfill.js L3-L10 and L23
-//   TR-HEALTH-04  js/keyboard_input_manager.js L4-L13
-//   TR-HEALTH-05  js/local_storage_manager.js L29-L40
-//   TR-HEALTH-06  target-only row: the added WebGL check
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-HEALTH-01  js/bind_polyfill.js L1                the `functionBind`
+//                                                       probe
+//   TR-HEALTH-02  js/classlist_polyfill.js L2-L5        the `classList` probe
+//   TR-HEALTH-03  js/animframe_polyfill.js L3-L10, L23  the
+//                                                       `requestAnimationFrame`
+//                                                       pair
+//   TR-HEALTH-04  js/keyboard_input_manager.js L4-L13   the `pointerEvents`
+//                                                       probe
+//   TR-HEALTH-05  js/local_storage_manager.js L29-L40   the `storage` probe
+//   TR-HEALTH-06  target-only row                       the added `webgl` check
+//   TR-HEALTH-07  target-only row                       the report roll-up and
+//                                                       the two readiness
+//                                                       verdicts
+//   TR-HEALTH-08  target-only row                       the per-check logger
+//                                                       record and status gauge
 //
-// Decisions behind this file: DL-HEALTH-01, the three-state check status
-// over a boolean; DL-HEALTH-02, three probes imported from the modules that
-// own them and three performed here; DL-HEALTH-03, the report roll-up rule
-// and how `not-applicable` participates in it; DL-HEALTH-04, the gauge
-// encoding of a status; DL-HEALTH-05, programmatic client-side self-checks
-// in place of externally pollable HTTP health and readiness endpoints.
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-HEALTH-01  the three-state check status
+//   DL-HEALTH-02  three probes imported from the modules that own them and
+//                 three performed here
+//   DL-HEALTH-03  the report roll-up rule and how `not-applicable`
+//                 participates in it
+//   DL-HEALTH-04  the gauge encoding of a status
+//   DL-HEALTH-05  programmatic client-side self-checks as the delivered form of
+//                 health and readiness
+//   DL-HEALTH-06  the three-state status carried unreduced through the
+//                 compatibility probe view, beside the boolean rather than
+//                 collapsed into it
 //
 // The imports are two sibling observability modules and the three probe
 // owners. No package is named, `three` included: the WebGL result arrives
@@ -350,7 +367,10 @@ export interface ReadinessReport {
    */
   readonly webglFailure?: string;
 
-  /** Whether the live store survives a reload. */
+  /**
+   * Whether the live store survives a reload. `'persistent'` requires BOTH
+   * that the strategy names Web Storage and that the storage check passed.
+   */
   readonly storage: StorageReadiness;
 
   /** The live strategy, as the storage layer names it. */
@@ -1011,8 +1031,20 @@ export interface HealthProbeView {
   readonly name: string;
 
   /**
-   * `false` only for a `'fail'`. A `'not-applicable'` result reads as
-   * healthy, matching the report roll-up, and names itself in `detail`.
+   * The result's own three-state status, carried through UNREDUCED.
+   *
+   * THE AUTHORITATIVE MEMBER. `healthy` beside it cannot express
+   * `'not-applicable'`, and a consumer reading the boolean alone presents an
+   * inapplicable check as an unqualified pass and writes the wrong gauge value
+   * for it. A consumer reads this and falls back to `healthy` only for a view
+   * that predates the member. Decision DL-HEALTH-06.
+   */
+  readonly status: HealthStatus;
+
+  /**
+   * `false` only for a `'fail'`. Retained beside `status` for a consumer
+   * written against the boolean shape; a `'not-applicable'` result reads as
+   * healthy here, matching the report roll-up, and names itself in `detail`.
    */
   readonly healthy: boolean;
 
@@ -1245,7 +1277,17 @@ export class HealthSurface {
     const storage = findCheck(report, 'storage');
     const mayMount = webgl !== undefined && webgl.status === 'pass';
     const strategy = readStringField(storage, 'strategy', MEMORY_STRATEGY);
-    const persistent = strategy === WEB_STORAGE_STRATEGY;
+
+    // BOTH halves are required. The named strategy alone is not enough: a
+    // `StorageStateView` is injected by the caller, so a view naming
+    // `'localStorage'` beside a probe result that did not pass is type-valid,
+    // and deriving persistence from the name alone reported that contradiction
+    // as `ready: true`. The check's own verdict decides, and the name says
+    // which store the verdict is about.
+    const persistent =
+      strategy === WEB_STORAGE_STRATEGY &&
+      storage !== undefined &&
+      storage.status === 'pass';
     const level = readStringField(webgl, 'level', 'none');
     const failure = readStringField(webgl, 'failure', '');
 
@@ -1562,8 +1604,9 @@ function readStringField(
 
 /**
  * @param result Result to convert.
- * @returns The probe view of it, naming the third state in `detail` so a
- *   panel reporting a boolean does not present it as an unqualified pass.
+ * @returns The probe view of it, carrying the three-state `status` verbatim and
+ *   naming the third state in `detail` as well, so a panel reading either
+ *   member does not present an inapplicable check as an unqualified pass.
  */
 function toProbeView(result: HealthCheckResult): HealthProbeView {
   const detail =
@@ -1573,6 +1616,7 @@ function toProbeView(result: HealthCheckResult): HealthProbeView {
 
   return Object.freeze({
     name: result.id,
+    status: result.status,
     healthy: result.status !== 'fail',
     detail,
   });

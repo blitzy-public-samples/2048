@@ -9,7 +9,8 @@
 // separate `R` test routed through `restart`, the swipe path, `restart()` and
 // `keepPlaying()`.
 //
-// traceability row of docs/TRACEABILITY_MATRIX.md:
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
 //   TR-INPUT-01  L1-L2      the event registry, held below as `listeners`
 //   TR-INPUT-02  L15        the constructor-time `listen()` call
 //   TR-INPUT-03  L18-L23    `on()`, appending to the array for its event name
@@ -22,6 +23,10 @@
 //   TR-INPUT-10  L76-L127   the swipe path, by way of src/input/touch-input.ts
 //   TR-INPUT-11  L130-L133  `restart()`
 //   TR-INPUT-12  L135-L138  `keepPlaying()`
+//   TR-INPUT-13  target-only row  `resolveDocumentContext` and the per-context
+//                                 binding resolution
+//   TR-INPUT-14  target-only row  `classifyKeyModality` and the report that
+//                                 carries no key or code
 //
 // Moved out of this module: the numeric-code table and the numeric `82` test
 // are bindings in src/input/keymap.ts, matched against `event.key` and
@@ -38,14 +43,22 @@
 // `classifyKeyModality` derives, whether a modifier was held and whether any
 // binding claims the key — never the key or the code itself.
 //
-//
-// Decisions behind this file: DL-INPUT-01, the `event.key` and `event.code`
-// DL-INPUT-02, the keymap, the gesture path and the control bindings living
-// in three sibling modules; and DL-INPUT-03, the appended listener list
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-INPUT-01  bindings resolved against `event.key` and `event.code`, where
+//                js/keyboard_input_manager.js L37-L50 read the deprecated
+//                `event.which`
+//   DL-INPUT-02  the keymap, the gesture path and the control bindings living
+//                in three sibling modules
+//   DL-INPUT-03  the appended listener list retained as the publish surface,
+//                walked in registration order
+//   DL-INPUT-04  no report carrying a character a keypress produced
 
 import type {
   Direction,
   InputAction,
+  InputBinding,
+  InputBindingOverride,
   InputContext,
   InputEventName,
   InputEventPayload,
@@ -63,6 +76,7 @@ import {
   findBindingConflict,
   hasMoveModifier,
   resolveInput,
+  remapAction,
 } from './keymap';
 import type { DetachTouchInput, PointerEventFamily } from './touch-input';
 import { attachTouchInput, detectPointerEventFamily } from './touch-input';
@@ -101,6 +115,15 @@ const ENABLEMENT_METRIC = 'input.enablement.changed';
 
 const KEYMAP_METRIC = 'input.keymap.replaced';
 
+/** Counter raised once per binding this manager applied. */
+const KEYMAP_REMAP_METRIC = 'input.keymap.remap';
+
+/** Counter raised once per binding refused because a key was occupied. */
+const KEYMAP_CONFLICT_METRIC = 'input.keymap.remap.conflict';
+
+/** Counter raised once per keymap this manager persisted, or failed to. */
+const KEYMAP_PERSIST_METRIC = 'input.keymap.persist';
+
 /** How a published move reached this module. */
 export type InputModality =
   | 'arrow'
@@ -138,10 +161,64 @@ export interface InputEmitter {
   ): number;
 }
 
+/** Why the binding table in force changed. */
+export type KeymapChangeReason = 'remap' | 'replace';
+
+/**
+ * The outcome of one `remap` call.
+ *
+ * Total rather than a discriminated union, so a caller reads `applied` and then
+ * either `keymap` or `conflict` without narrowing: `keymap` is always the table
+ * in force AFTERWARDS, which on a refusal is the table that was already in
+ * force.
+ */
+export interface RemapResult {
+  /** Whether the binding was applied. */
+  readonly applied: boolean;
+
+  /** The binding table in force after the call. */
+  readonly keymap: Keymap;
+
+  /**
+   * The binding already holding one of the requested keys in a context the
+   * remapped action is active in, or `null` where none did.
+   */
+  readonly conflict: InputBinding | null;
+}
+
 /** Construction parameters. Every member is optional. */
 export interface InputManagerOptions {
   readonly keymap?: Keymap;
   readonly reporter?: InputReporter;
+
+  /**
+   * Called ONCE per accepted change to the binding table, with the table in
+   * force afterwards and why it changed.
+   *
+   * This is the single notification of a rebind. Before it existed, a caller
+   * computed a new table itself, wrote it in with `setKeymap` and then told the
+   * control layer separately, so the validation lived outside the owner of the
+   * table and two call sites had to stay in step (N2). A remap now goes through
+   * `remap()` alone, and every follower — the generated controls, the persisted
+   * copy — hangs off this one callback.
+   *
+   * A throw is reported and contained: a follower that fails cannot leave the
+   * manager holding a table its own listeners are not using.
+   */
+  readonly onKeymapChange?: (
+    keymap: Keymap,
+    reason: KeymapChangeReason,
+  ) => void;
+
+  /**
+   * Writes the binding table durably, returning whether the write succeeded.
+   *
+   * Called by `remap()` and `setKeymap()` before `onKeymapChange`, so a rebind
+   * survives a reload without the caller remembering to save it. A throw is
+   * reported and contained, and a `false` return is counted: persistence is not
+   * allowed to fail a rebind that has already been applied in memory.
+   */
+  readonly persistKeymap?: (keymap: Keymap) => boolean;
 
   /**
    * Document the keydown listener binds to. Defaults to the ambient
@@ -375,11 +452,21 @@ export class InputManager implements InputEmitter {
   private activeContext: InputContext;
   private contextPinned: boolean;
 
+  /** The one notification of a change to the table, or `null`. */
+  private readonly onKeymapChange:
+    | ((keymap: Keymap, reason: KeymapChangeReason) => void)
+    | null;
+
+  /** Durable writer for the table, or `null` where nothing persists it. */
+  private readonly persistKeymap: ((keymap: Keymap) => boolean) | null;
+
   constructor(options: InputManagerOptions = {}) {
     this.reporter = createSafeInputReporter(
       options.reporter ?? NOOP_REPORTER,
     );
     this.keymap = options.keymap ?? DEFAULT_KEY_BINDINGS;
+    this.onKeymapChange = options.onKeymapChange ?? null;
+    this.persistKeymap = options.persistKeymap ?? null;
     this.ownerDocument = options.ownerDocument ?? readAmbientDocument();
     this.gestureHost = options.gestureHost;
 
@@ -783,13 +870,164 @@ export class InputManager implements InputEmitter {
     return this.suspended;
   }
 
+  /**
+   * Replaces the whole binding table, persists it and announces it once.
+   *
+   * The wholesale counterpart of `remap`: restoring the defaults is one call
+   * here rather than a table computed elsewhere and written in.
+   *
+   * @param keymap Table to hold.
+   */
   setKeymap(keymap: Keymap): void {
     this.keymap = keymap;
     this.reporter.count(KEYMAP_METRIC);
+    this.saveKeymap(keymap);
+    this.announceKeymap(keymap, 'replace');
   }
 
   getKeymap(): Keymap {
     return this.keymap;
+  }
+
+  /**
+   * Binds one action to one key, validating, persisting and announcing it.
+   *
+   * THE SINGLE ENTRY POINT FOR A REBIND. It performs, in order, the four steps
+   * that used to be spread across the settings dialog and the composition root:
+   *
+   *   1. VALIDATES. Every requested key is checked against every context the
+   *      action is active in, so a key already bound to another action in a
+   *      shared context is refused rather than shadowed. The occupying binding
+   *      is returned so the caller can name it.
+   *   2. APPLIES. The table this manager's own keydown listener reads is
+   *      replaced, so the new binding is live for the next keystroke with no
+   *      second write.
+   *   3. PERSISTS, through `persistKeymap`.
+   *   4. ANNOUNCES, exactly once, through `onKeymapChange`.
+   *
+   * A refusal does none of 2, 3 or 4 (N2).
+   *
+   * @param action Action to rebind.
+   * @param binding Keys and codes to bind it to.
+   * @returns Whether it was applied, the table in force afterwards, and the
+   *   occupying binding on a refusal.
+   */
+  remap(action: InputAction, binding: InputBindingOverride): RemapResult {
+    const requested = binding.keys ?? [];
+    const conflict = this.findRemapConflict(action, requested);
+
+    if (conflict !== null) {
+      this.reporter.count(KEYMAP_CONFLICT_METRIC, {
+        action,
+        occupant: conflict.action,
+      });
+
+      return Object.freeze({
+        applied: false,
+        keymap: this.keymap,
+        conflict,
+      });
+    }
+
+    const next = remapAction(this.keymap, action, binding);
+
+    this.keymap = next;
+    this.reporter.count(KEYMAP_REMAP_METRIC, { action });
+    this.saveKeymap(next);
+    this.announceKeymap(next, 'remap');
+
+    return Object.freeze({ applied: true, keymap: next, conflict: null });
+  }
+
+  /**
+   * Finds the binding already holding one of `keys` where it would collide.
+   *
+   * Only the contexts the rebound action is itself active in are searched: two
+   * actions may share a key when no context activates both, which is what lets
+   * a digit drive a reward choice in an overlay and nothing in the game.
+   *
+   * @param action Action being rebound, which never conflicts with itself.
+   * @param keys Keys requested for it.
+   * @returns The occupying binding, or `null` when every key is free.
+   */
+  private findRemapConflict(
+    action: InputAction,
+    keys: readonly string[],
+  ): InputBinding | null {
+    const declared = this.keymap[action].contexts;
+
+    // A binding that names no context is active in `'game'`, so that is where a
+    // key it requests has to be free.
+    const contexts: readonly InputContext[] =
+      declared.length > 0 ? declared : ['game'];
+
+    for (const key of keys) {
+      for (const context of contexts) {
+        const found = findBindingConflict(this.keymap, key, context);
+
+        if (found !== null && found.action !== action) {
+          return found;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /** Writes the table durably, containing every failure. */
+  private saveKeymap(keymap: Keymap): void {
+    const persist = this.persistKeymap;
+
+    if (persist === null) {
+      return;
+    }
+
+    let saved = false;
+
+    try {
+      saved = persist(keymap);
+    } catch (error: unknown) {
+      this.reportKeymapFailure('persistKeymap', error);
+    }
+
+    this.reporter.count(KEYMAP_PERSIST_METRIC, { saved });
+  }
+
+  /**
+   * Reports a throw from one of the two keymap collaborators.
+   *
+   * Contained the way a throwing listener is: neither the durable writer nor the
+   * follower may abort a rebind the manager has already applied.
+   *
+   * @param member Name of the collaborator that threw.
+   * @param error What it threw.
+   */
+  private reportKeymapFailure(member: string, error: unknown): void {
+    try {
+      this.reporter.failure?.(
+        'error',
+        'A keymap collaborator threw; the rebind still stands.',
+        error,
+        { member },
+      );
+    } catch {
+      // A throwing sink is contained here too.
+    }
+  }
+
+  /** Announces the table once, containing a follower's failure. */
+  private announceKeymap(keymap: Keymap, reason: KeymapChangeReason): void {
+    const announce = this.onKeymapChange;
+
+    if (announce === null) {
+      return;
+    }
+
+    try {
+      announce(keymap, reason);
+    } catch (error: unknown) {
+      this.reportKeymapFailure('onKeymapChange', error);
+    }
   }
 
   private readonly handleKeyDown = (event: KeyboardEvent): void => {

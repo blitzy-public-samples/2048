@@ -23,9 +23,11 @@
 // hand-written and the injected callbacks are vitest spies. It runs in the
 // `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
 //
-// Decisions this suite is the evidence for: DL-MOVE-01 through DL-MOVE-03
-// in docs/DECISION_LOG.md. Traceability rows: TR-MOVE-01 through
-// TR-MOVE-08 of docs/TRACEABILITY_MATRIX.md.
+// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
+// DL-MOVE-01, DL-MOVE-02, DL-MOVE-03.
+// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-MOVE-01,
+// TR-MOVE-02, TR-MOVE-03, TR-MOVE-04, TR-MOVE-05, TR-MOVE-06, TR-MOVE-07,
+// TR-MOVE-08.
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -1430,7 +1432,7 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
     expect(resolved.scoreDelta).toBe(LONE_VALUE * 2);
   });
 
-  it('projects the two tiles onto read-only views rather than passing them', () => {
+  it('passes the two live tiles straight through', () => {
     const source = new Tile({ x: 1, y: ROW_ZERO }, LONE_VALUE);
     const target = new Tile({ x: 0, y: ROW_ZERO }, LONE_VALUE);
 
@@ -1443,18 +1445,11 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
       scoreDelta: LONE_VALUE * 2,
     });
 
-    // The live tiles are NOT handed back: a handler receiving this payload
-    // cannot reach `savePosition`, `updatePosition` or `mergedFrom` through it.
-    expect(resolved.source).not.toBe(source);
-    expect(resolved.target).not.toBe(target);
-    expect(Object.isFrozen(resolved.source)).toBe(true);
-    expect(Object.isFrozen(resolved.target)).toBe(true);
-    expect(resolved.source).toEqual({
-      x: 1,
-      y: ROW_ZERO,
-      value: LONE_VALUE,
-      previousPosition: { x: 1, y: ROW_ZERO },
-    });
+    // AAP Contract 1: the payload carries the live tiles, so the identity
+    // dispatch hands back the very objects the merge branch assembled.
+    expect(resolved.source).toBe(source);
+    expect(resolved.target).toBe(target);
+    expect(resolved.source.previousPosition).toEqual({ x: 1, y: ROW_ZERO });
     expect(resolved.target.previousPosition).toBeNull();
   });
 
@@ -1545,9 +1540,8 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
 
     const payload = dispatchMerge.mock.calls[0][0];
 
-    // The two live tiles of the merge branch, and the produced value twice.
-    // Substituting the read-only views is src/engine/hook-bus.ts's job, which
-    // is why this seam carries the tiles themselves.
+    // The two live tiles of the merge branch, and the produced value twice:
+    // AAP Contract 1's collaborators, carried through the bus untouched.
     expect(payload.source).toBe(source);
     expect(payload.target).toBe(target);
     expect(payload.resultValue).toBe(produced);
@@ -1559,9 +1553,9 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
     const target = tileAt(grid, { x: 0, y: ROW_ZERO });
     const source = tileAt(grid, { x: 1, y: ROW_ZERO });
 
-    // A dispatch that returns foreign tile members changes nothing: the two
-    // views are never dereferenced by the resolver, so a handler cannot reach
-    // the board through them even by substitution.
+    // A dispatch that returns foreign tile members changes nothing: the
+    // resolver reads `resultValue` and `scoreDelta` back and dereferences
+    // neither tile, so a substituted tile reaches nothing.
     const outcome = resolveMove(
       grid,
       DIRECTION_LEFT,
@@ -1569,18 +1563,8 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
       {
         dispatchMerge: (payload): MergePayload => ({
           ...identityMergeDispatch(payload),
-          source: Object.freeze({
-            x: HUGE_VALUE,
-            y: HUGE_VALUE,
-            value: HUGE_VALUE,
-            previousPosition: null,
-          }),
-          target: Object.freeze({
-            x: HUGE_VALUE,
-            y: HUGE_VALUE,
-            value: HUGE_VALUE,
-            previousPosition: null,
-          }),
+          source: new Tile({ x: HUGE_VALUE, y: HUGE_VALUE }, HUGE_VALUE),
+          target: new Tile({ x: HUGE_VALUE, y: HUGE_VALUE }, HUGE_VALUE),
         }),
       },
     );
@@ -1591,12 +1575,11 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
     expect(outcome.scoreDelta).toBe(LONE_VALUE * 2);
   });
 
-  it('leaves the two merging tiles unchanged when a dispatch writes to the ' +
-    'projections it was handed (F2)', () => {
+  it('leaves the merged tile on the values the resolver produced even when ' +
+    'a dispatch writes the two consumed tiles (F2)', () => {
     const grid = rehydrate(createMergePairBoard());
     const target = tileAt(grid, { x: 0, y: ROW_ZERO });
     const source = tileAt(grid, { x: 1, y: ROW_ZERO });
-    const thrown: string[] = [];
 
     const outcome = resolveMove(
       grid,
@@ -1604,28 +1587,23 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
       createDefaultRulesConfig(),
       {
         dispatchMerge: (payload): MergePayload => {
-          // Projected exactly as src/engine/hook-bus.ts projects before it
-          // invokes a handler, so the write below meets the same boundary a
-          // relic handler meets.
-          const projected = identityMergeDispatch(payload);
+          // The payload carries the live tiles, so these writes reach them.
+          // Both are out of `grid.cells` by the time the resolver returns, and
+          // the resolver reads `resultValue` and `scoreDelta` back off the
+          // payload and nothing else, so the board is unaffected.
+          payload.source.value = HUGE_VALUE;
+          payload.target.value = HUGE_VALUE;
 
-          for (const view of [projected.source, projected.target]) {
-            try {
-              (view as { value: number }).value = HUGE_VALUE;
-            } catch (error: unknown) {
-              thrown.push(String((error as Error).name));
-            }
-          }
-
-          return projected;
+          return identityMergeDispatch(payload);
         },
       },
     );
 
-    expect(thrown).toEqual(['TypeError', 'TypeError']);
-    expect(source.value).toBe(LONE_VALUE);
-    expect(target.value).toBe(LONE_VALUE);
+    expect(source.value).toBe(HUGE_VALUE);
+    expect(target.value).toBe(HUGE_VALUE);
     expect(outcome.merges[0].merged.value).toBe(LONE_VALUE * 2);
+    expect(grid.cellContent({ x: 1, y: ROW_ZERO })).toBeNull();
+    expect(tileAt(grid, { x: 0, y: ROW_ZERO }).value).toBe(LONE_VALUE * 2);
   });
 
   it('writes the returned result value onto the merged tile (L157)', () => {

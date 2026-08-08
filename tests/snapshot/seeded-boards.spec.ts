@@ -15,11 +15,10 @@
 //   making every previously recorded run unreproducible. Any of those breaks a
 //   snapshot here on the next run.
 //
-// WHY THE RECORDED VALUES ARE NOT DERIVED FROM ANYTHING
+// THE RECORDED VALUES ARE DERIVED FROM NOTHING
 //   Nothing in this file computes an expected board. Each snapshot is whatever
 //   the engine produced when it was recorded, checked in, and thereafter
-//   compared byte for byte. That is the point: a recorded value cannot be
-//   rationalised into agreement with a regression.
+//   compared byte for byte. Decision DL-FIXTURE-03.
 //
 // RE-RECORDING IS DELIBERATE
 //   `npm run test:snapshot` passes no update flag, so an existing snapshot is

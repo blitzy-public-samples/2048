@@ -31,35 +31,37 @@
 //   TR-ENGINE-16  hookEnvironment()
 //   TR-ENGINE-17  throughPort()
 //
-// SEVEN CHANGES TO THE PORTED BEHAVIOUR, EACH REQUIRED BY THE SPLIT,
-// decisions DL-ENGINE-01 through DL-ENGINE-07 in that order
-//   The push call at L91-L97 becomes the `state:commit` event. The engine
-//   holds no view reference and calls no renderer.
+// SEVEN CHANGES TO THE PORTED BEHAVIOUR, EACH REQUIRED BY THE SPLIT. Each
+// carries its own decision identifier, argued in docs/DECISION_LOG.md and
+// named here only so the construct can be found from the log:
+//   DL-ENGINE-01  The push call at L91-L97 becomes the `state:commit` event.
+//   The engine holds no view reference and calls no renderer.
 //
-//   The two randomness call sites of the vanilla sources — L71 and
-//   js/grid.js L41 — become draws on the `spawn-value` and
+//   DL-ENGINE-02  The two randomness call sites of the vanilla sources — L71
+//   and js/grid.js L41 — become draws on the `spawn-value` and
 //   `spawn-position` substreams. Those two were the only ones.
 //
-//   The win literal (L170), the spawn distribution (L71), the start-tile
-//   count (L7) and the merge condition (L156-L157) are read from
+//   DL-ENGINE-03  The win literal (L170), the spawn distribution (L71), the
+//   start-tile count (L7) and the merge condition (L156-L157) are read from
 //   `RulesConfig`.
 //
-//   `keepPlaying` at L24-L27 assigned a boolean over the prototype method
-//   of the same name. The flag is `continuedPlay` and the method is
-//   `continuePlaying()`. The persisted member name is unchanged: it is
-//   still written as `keepPlaying` by `serialize()`.
+//   DL-ENGINE-04  `keepPlaying` at L24-L27 assigned a boolean over the
+//   prototype method of the same name. The flag is `continuedPlay` and the
+//   method is `continuePlaying()`. The persisted member name is unchanged: it
+//   is still written as `keepPlaying` by `serialize()`.
 //
-//   The snapshot L36 read from storage reaches `setup()` as an ARGUMENT.
-//   The port is read only where no argument was supplied.
+//   DL-ENGINE-05  The snapshot L36 read from storage reaches `setup()` as an
+//   ARGUMENT. The port is read only where no argument was supplied.
 //
-//   The persistence port L4 constructed is INJECTED and OPTIONAL, and its
-//   three snapshot calls are optional members, so a port carrying the
-//   best-score pair alone satisfies it and an engine built without one
-//   plays a complete game.
+//   DL-ENGINE-06  The persistence port L4 constructed is INJECTED and
+//   OPTIONAL, and its three snapshot calls are optional members, so a port
+//   carrying the best-score pair alone satisfies it and an engine built
+//   without one plays a complete game.
 //
-//   The stage goal is evaluated where `onAfterMove` is dispatched, through
-//   `evaluateStageGoal` of src/config/stage-config.ts, and a met goal is
-//   resolved through `endStage()`. Stage handling has no vanilla source.
+//   DL-ENGINE-07  The stage goal is evaluated where `onAfterMove` is
+//   dispatched, through `evaluateStageGoal` of src/config/stage-config.ts, and
+//   a met goal is resolved through `endStage()`. Stage handling has no vanilla
+//   source.
 //
 // TWO IDENTIFIERS, NOT ONE
 //   `runId` identifies the run instance and is the value `RunState.runId`
@@ -73,14 +75,8 @@
 // clock and touches no storage key of its own — every persistence call
 // goes through the injected port.
 //
-// Decisions behind this file: DL-ENGINE-01, the push call becoming the
-// `state:commit` event; DL-ENGINE-02, the two randomness sites becoming
-// named substream draws; DL-ENGINE-03, the four rule literals moving into
-// `RulesConfig`; DL-ENGINE-04, the forced `keepPlaying` repair;
-// DL-ENGINE-05, the run identifier and the correlation identifier being
-// separate; DL-ENGINE-06, the snapshot arriving as an argument and the
-// persistence port becoming optional; DL-ENGINE-07, the stage-resolution
-// authority being injected.
+// DL-ENGINE-08 is the run identifier and the correlation identifier being
+// separate values, described under TWO IDENTIFIERS, NOT ONE above.
 
 import {
   createDefaultRulesConfig,
@@ -105,10 +101,13 @@ import { Grid } from './grid';
 import type { HookBus } from './hook-bus';
 import { createHookBus } from './hook-bus';
 import type {
+  BoardEffect,
   HookEnvironment,
   MergeDispatchPayload,
   MergePayload,
+  StageStartPayload,
 } from './hooks';
+import type { MoveOutcome } from './move-resolver';
 import { resolveMove } from './move-resolver';
 import {
   highestTileValue,
@@ -149,6 +148,39 @@ import {
  * draw, so a substream's cursor is unaffected by the fallback.
  */
 const FALLBACK_SPAWN_VALUE = 2;
+
+/** Counter name for one board effect a hook handler asked for and got. */
+const EFFECT_APPLIED_METRIC = 'engine.effect.applied';
+
+/** Counter name for one board effect the engine refused as unusable. */
+const EFFECT_REFUSED_METRIC = 'engine.effect.refused';
+
+/** Counter name for one stage started through `startStage()`. */
+const STAGE_STARTED_METRIC = 'engine.stage.started';
+
+/** Counter name for a stage end refused because the stage had already ended. */
+const STAGE_END_REPEATED_METRIC = 'engine.stage.end.repeated';
+
+/**
+ * Counter name for a terminal-state or stage-goal measurement that could not
+ * be taken.
+ *
+ * Raised with the engine's `degraded` flag, so a turn whose terminal status is
+ * unknown is visible rather than silently committed as playable.
+ */
+const TERMINAL_UNKNOWN_METRIC = 'engine.terminal.unknown';
+
+/**
+ * `value` carried by the `tile:spawn` emission of a full-board attempt.
+ *
+ * Zero, because no value was drawn: the full-board branch dispatches no
+ * `onSpawn` and takes no draw from either substream, and a subscriber reading
+ * a spawn value of zero beside an absent position is reading an attempt that
+ * inserted nothing. Exported so a subscriber tests against the constant rather
+ * than a literal.
+ */
+export const SUPPRESSED_SPAWN_VALUE = 0;
+
 
 /** Counter name for a move refused because play is blocked. */
 const MOVE_BLOCKED_METRIC = 'engine.move.blocked';
@@ -194,6 +226,12 @@ const SIZE_RECONCILED_METRIC = 'engine.board.reconciled';
 
 /** Counter name for a stage goal the engine found met and resolved. */
 const STAGE_CLEARED_METRIC = 'engine.stage.cleared';
+
+/**
+ * Counter name for a loss the engine had declared and then withdrew, because an
+ * `onAfterMove` handler's board effect reopened the board it was declared on.
+ */
+const LOSS_REOPENED_METRIC = 'engine.move.lossReopened';
 
 /**
  * Counter name for a call to the injected persistence port that raised.
@@ -341,6 +379,39 @@ export interface EngineOptions {
    * returning `EMPTY_RELIC_CONTEXT`.
    */
   readonly relicContext?: RelicCommitContextProvider;
+
+  /**
+   * Span wrappers for the boundaries inside a turn. Absent, the turn runs
+   * exactly as it ran before tracing existed.
+   */
+  readonly tracing?: EngineTracing;
+}
+
+/**
+ * The span wrappers the engine runs its own internal boundary inside.
+ *
+ * DECLARED HERE, STRUCTURALLY, AND NEVER IMPORTED. src/engine names no module
+ * under src/observability — the engine is the DOM-free, dependency-free half of
+ * the split (AAP R1) — so the wrapper is injected in the same way the hook bus
+ * takes `HookBusTracing` and the run controller takes `RelicRegistryPort`.
+ * `BoundaryTracing` of src/observability/tracer.ts satisfies this shape without
+ * either module naming the other.
+ *
+ * The wrapper must run the function it is handed exactly once and return its
+ * value, and rethrow whatever it threw: it is a measurement, never a
+ * transformation.
+ */
+export interface EngineTracing {
+  /**
+   * Wraps the traversal walk and the merge resolution of one turn.
+   *
+   * INSIDE THE TURN, DELIBERATELY. It is opened after `move:before` has been
+   * emitted and the veto resolved, so a turn span opened by that emission
+   * ENCLOSES this one. Wrapping `Engine.move()` from the composition root
+   * instead would invert that nesting and make the resolution appear to
+   * contain the turn it is part of.
+   */
+  readonly traceMoveResolution?: <T>(run: () => T) => T;
 }
 
 /* --------------------------------------------------------------------------
@@ -572,6 +643,14 @@ export class Engine {
   private readonly relicContext: RelicCommitContextProvider;
 
   /**
+   * Runs the traversal walk and merge resolution of a turn inside its span.
+   *
+   * Identity where no wrapper was injected, so the untraced turn is exactly the
+   * turn that ran before tracing existed.
+   */
+  private readonly traceResolution: <T>(run: () => T) => T;
+
+  /**
    * The stage goal an `onStageStart` handler returned, and `null` while the
    * goal in force is the one the provider supplies.
    *
@@ -584,11 +663,44 @@ export class Engine {
   private stageGoalOverride: StageGoal | null;
 
   /**
+   * Whether the stage in progress has already been resolved.
+   *
+   * THE ONE-SHOT STAGE-END GUARD. A stage's goal stays satisfied for every turn
+   * after the one that met it — the highest tile does not fall and the score
+   * does not drop — so without this the engine would dispatch `onStageEnd` and
+   * emit `stage:end` again on every later commit. Set by `endStage()` and
+   * cleared only by `startStage()` and by the fresh-board paths of `setup()`.
+   */
+  private stageEnded: boolean;
+
+  /**
+   * Whether the last turn's terminal status could not be established.
+   *
+   * Read through `isDegraded()`. A measurement that raises leaves this set and
+   * raises `TERMINAL_UNKNOWN_METRIC`, so a turn whose loss state is unknown is
+   * surfaced rather than committed as playable and forgotten. Cleared by the
+   * next turn whose measurement succeeds, and by every board rebuild.
+   */
+  private terminalUnknown: boolean;
+
+  /**
+   * Monotonic turn counter, raised once for every commit the engine emits.
+   *
+   * Carried on `tile:merge`, `tile:spawn`, `move:after` and `state:commit`, so a
+   * view that buffers granular events can tell which commit they belong to and
+   * discard the ones orphaned by a restart, a stage transition or a lost
+   * rendering context. Never reset: a monotonic value is what makes an orphan
+   * detectable at all.
+   */
+  private turnCounter: number;
+
+  /**
    * @param options The substreams, and optionally the rules, the
    *   progression curve, the stage-resolution authority, the persistence
-   *   port, the emitter, the bus, the reporter, the correlation identifier
-   *   and the two context providers. Every member but `streams` carries a
-   *   default, so `new Engine({ streams })` plays a complete vanilla game.
+   *   port, the emitter, the bus, the reporter, the correlation identifier,
+   *   the two context providers and the tracing port. Every member but
+   *   `streams` carries a default, so `new Engine({ streams })` plays a
+   *   complete vanilla game.
    */
   constructor(options: EngineOptions) {
     this.config = options.config ?? createDefaultRulesConfig();
@@ -619,6 +731,16 @@ export class Engine {
     this.relicContext =
       options.relicContext ?? ((): RelicCommitContext => EMPTY_RELIC_CONTEXT);
 
+    // Read once and bound, rather than read per turn off the options object:
+    // the wrapper is a composition-time decision, and a turn must not pay a
+    // property lookup per move for a capability it may not have.
+    const traceMoveResolution = options.tracing?.traceMoveResolution;
+
+    this.traceResolution =
+      traceMoveResolution === undefined
+        ? <T>(run: () => T): T => run()
+        : traceMoveResolution;
+
     // Constructed empty so every field is initialised before `setup()`
     // decides whether the board is restored or fresh. js/game_manager.js
     // L13 called `setup()` from its constructor; here the caller does,
@@ -636,6 +758,45 @@ export class Engine {
     this.won = false;
     this.continuedPlay = false;
     this.stageGoalOverride = null;
+    this.stageEnded = false;
+    this.terminalUnknown = false;
+    this.turnCounter = 0;
+  }
+
+  /**
+   * Reports whether the last turn's terminal status could not be established.
+   *
+   * Has no vanilla source. `true` means a loss or stage-goal measurement raised:
+   * the board and the score are the ones the turn produced, and whether play is
+   * blocked is unknown. A caller surfaces this rather than treating the turn as
+   * playable.
+   *
+   * @returns `true` while the engine is in the degraded state.
+   */
+  isDegraded(): boolean {
+    return this.terminalUnknown;
+  }
+
+  /**
+   * The number of commits the engine has emitted.
+   *
+   * Has no vanilla source. The value carried on `tile:merge`, `tile:spawn`,
+   * `move:after` and `state:commit` as `turn`.
+   *
+   * @returns The monotonic turn counter.
+   */
+  currentTurn(): number {
+    return this.turnCounter;
+  }
+
+  /**
+   * Reports whether the stage in progress has already been resolved.
+   *
+   * @returns `true` once `endStage()` has run for this stage and until
+   *   `startStage()` or a fresh `setup()` opens the next one.
+   */
+  hasStageEnded(): boolean {
+    return this.stageEnded;
   }
 
   /**
@@ -834,6 +995,32 @@ export class Engine {
       this.continuedPlay = snapshot.keepPlaying;
     }
 
+    const started = this.beginStage();
+
+    if (!restored) {
+      this.addStartTiles();
+    }
+
+    this.events.emit('stage:start', started);
+
+    this.commit();
+  }
+
+  /**
+   * Dispatches `onStageStart` for the stage the provider now reports and
+   * adopts the goal the dispatch resolved.
+   *
+   * Has no vanilla source. Shared by `setup()` and `startStage()`, which are
+   * the two ways a stage begins; it emits nothing and commits nothing, so each
+   * caller owns the order its own emission and commit take. `setup()` inserts
+   * the start tiles between this dispatch and its emission, which is why the
+   * insertion is not done here: a spawn-affecting handler must be bound before
+   * the tiles it applies to are drawn.
+   *
+   * @returns The resolved `onStageStart` payload, which is what `stage:start`
+   *   carries.
+   */
+  private beginStage(): StageStartPayload {
     // A new stage starts from the provider's own goal, so a goal adopted for
     // the stage before this one is not carried into the dispatch below.
     this.stageGoalOverride = null;
@@ -854,17 +1041,90 @@ export class Engine {
         boardSize: this.grid.size,
       },
       this.hookEnvironment(),
-    ).payload;
+    );
 
-    this.stageGoalOverride = started.goal;
+    this.stageGoalOverride = started.payload.goal;
 
-    if (!restored) {
-      this.addStartTiles();
+    // Board commands the stage-start dispatch wrote reached the board DURING the
+    // dispatch and before the start tiles are inserted, so a relic that resized
+    // or reseated the board for the opening position has those tiles placed on
+    // the board it asked for. Accounted for here.
+    this.accountEffects(started.effects, started.effectsRefused);
+
+    // A board opened afresh — or reopened at another edge length — has its own
+    // terminal status and its own unresolved stage.
+    this.stageEnded = false;
+    this.terminalUnknown = false;
+
+    return started.payload;
+  }
+
+  /**
+   * Starts the next stage of the run in progress.
+   *
+   * Has no vanilla source. The counterpart of `endStage()`: `endStage()`
+   * resolves the stage that finished, and this begins the one that follows it,
+   * so a run advances through stages without the board being rebuilt. The
+   * grid, the score, the win flag and the continued-play flag are all left
+   * exactly as they stand — only the stage is new — which is what separates
+   * this from `setup()`, whose job is to build a board.
+   *
+   * No start tiles are inserted, for the same reason: the tiles in play carry
+   * over into the new stage.
+   *
+   * THE STAGE INDEX COMES FROM THE INJECTED PROVIDER, not from an argument.
+   * The provider is the authority for which stage is current — under the
+   * `'observer'` resolution src/run/run-controller.ts owns it — so a caller
+   * advances the provider and then calls this, and the two steps together are
+   * the stage transition. Calling this without having advanced restarts the
+   * same stage rather than raising.
+   *
+   * @param board Snapshot to REBUILD the board from for the stage that is
+   *   starting, or `null` to rebuild it fresh at the configured edge length.
+   *   Omitted — which is what a stage transition wants — the board in play is
+   *   carried into the new stage untouched.
+   */
+  startStage(board?: SerializedGameState | null): void {
+    this.reporter.onCount?.({
+      correlationId: this.correlationId,
+      metric: STAGE_STARTED_METRIC,
+      value: 1,
+    });
+
+    // Released before either path below runs, so the dispatch each makes and the
+    // commit it ends with both see an unresolved stage.
+    this.stageEnded = false;
+
+    // The REBUILDING path, for a caller that opens the stage on a board of its
+    // own: `setup()` installs the lattice, dispatches `onStageStart` through
+    // `beginStage()`, emits and commits, so nothing is done twice here.
+    if (board !== undefined) {
+      this.setup(board);
+
+      return;
     }
 
-    this.events.emit('stage:start', started);
+    this.events.emit('stage:start', this.beginStage());
 
     this.commit();
+  }
+
+  /**
+   * The goal the stage in progress is actually measured against.
+   *
+   * Has no vanilla source. THE ONE GOAL AUTHORITY. `goalInForce()` resolves
+   * three sources in precedence order — the goal an `onStageStart` handler
+   * adopted, the injected provider's own goal, then the configured curve — and
+   * this exposes that result so an observer measures against the same goal the
+   * engine does. A subscriber that measured against its own recorded goal
+   * instead would disagree with the engine whenever a handler replaced it.
+   *
+   * A query: it emits nothing, dispatches nothing and mutates nothing.
+   *
+   * @returns The goal in force, as `stage:start` carried it.
+   */
+  stageGoalInForce(): StageGoal {
+    return this.goalInForce();
   }
 
   /**
@@ -874,10 +1134,17 @@ export class Engine {
    * that cleared the win and loss message is not made here: the commit
    * `setup()` ends with carries `terminated` as `false`, which is what a
    * view clears the message on.
+   *
+   * `setup(null)` is called rather than `setup()`. The clear above goes
+   * through `throughPort`, so a port that raised leaves the stored snapshot
+   * in place and counts the failure; the argument-less form would then read
+   * that surviving snapshot back and restart onto the board being discarded.
+   * Passing `null` skips the port read entirely, so a restart is a fresh
+   * board whether or not the clear succeeded.
    */
   restart(): void {
     this.throughPort(() => this.storage.clearGameState?.(), undefined);
-    this.setup();
+    this.setup(null);
   }
 
   /**
@@ -955,7 +1222,9 @@ export class Engine {
    *
    * Ported from js/game_manager.js L130-L191, with the three hook
    * dispatches the split adds. A move that changes no cell spawns
-   * nothing and commits nothing, which is L182's behaviour.
+   * nothing and commits nothing, which is L182's behaviour; it does emit
+   * `move:after` carrying `moved: false`, which is the completion signal
+   * L182's silent return had no equivalent of.
    *
    * @param direction Direction to move in: 0 up, 1 right, 2 down, 3
    *   left.
@@ -974,39 +1243,51 @@ export class Engine {
       return false;
     }
 
-    // The board reaches the handler as its read-only facade rather than as
-    // the lattice, so a handler cannot rewrite the board through the payload
-    // and then throw. Reads through it are live.
+    // EMITTED BEFORE THE DECISION, and CANCELLABLE, which is what AAP
+    // Contract 1 declares `move:before` to be. `cancelled` is the one
+    // writable member on any event payload: a listener that sets it withdraws
+    // the move, and the value is read back below and carried into the hook
+    // dispatch, so an `onBeforeMove` handler sees a veto a listener already
+    // cast. Emitted for every requested move, vetoed or not, so a subscriber
+    // sees the attempt as well as its outcome.
+    const requested: MoveBeforeEvent = {
+      direction,
+      board: this.grid,
+      cancelled: false,
+    };
+
+    this.events.emit('move:before', requested);
+
+    // The hook path is the PRIVILEGED one: it is seeded with the veto a
+    // listener cast, and unlike a listener it can also redirect the move.
+    // `direction` is seeded from the REQUESTED direction rather than from the
+    // emitted payload, so `cancelled` is the only member a listener changes the
+    // turn through — which is the whole of what AAP Contract 1 declares
+    // cancellable.
     const before = this.hooks.dispatch(
       'onBeforeMove',
       {
         direction,
         board: this.grid,
-        cancelled: false,
+        cancelled: requested.cancelled === true,
       },
       this.hookEnvironment(),
     );
 
-    // THE VETO IS DECIDED ON THE HOOK PATH ALONE. `cancelled` is read off
-    // the resolved hook payload, which only an `onBeforeMove` handler can
-    // have written, and the decision is taken here — before anything is
-    // emitted. The emission below therefore REPORTS the decision to
-    // observers; it does not gather it. An event listener consequently
-    // cannot withdraw a move, cannot cause one to proceed, and cannot
-    // become gameplay-relevant through its registration order.
+    // Board commands the pre-move dispatch wrote reached the board DURING the
+    // dispatch and so before the walk: undo restoring an anchored position, a
+    // permutation and an excision are all recorded here, and each is on the board
+    // the move then resolves against — or, for a withdrawn move, is the board the
+    // turn leaves behind. Accounted for here, and whether anything was written is
+    // what decides that a withdrawn move still commits.
+    const reseated = this.accountEffects(
+      before.effects,
+      before.effectsRefused,
+    );
+
+    // The resolved veto: what a listener cast, as carried into the dispatch,
+    // and what any `onBeforeMove` handler cast on top of it.
     const cancelled = before.payload.cancelled;
-
-    // Emitted for every requested move, vetoed or not, so a subscriber sees
-    // the attempt and its outcome. src/engine/engine-events.ts projects the
-    // payload before any listener is reached, so the board inside it is a
-    // frozen copy rather than the live lattice.
-    const requested: MoveBeforeEvent = {
-      direction: before.payload.direction,
-      board: this.grid,
-      cancelled,
-    };
-
-    this.events.emit('move:before', requested);
 
     if (cancelled) {
       this.reporter.onCount?.({
@@ -1016,15 +1297,23 @@ export class Engine {
         value: 1,
       });
 
+      // A withdrawn move normally changes nothing and commits nothing, which is
+      // L134's behaviour. A withdrawn move that ALSO reseated the board — undo
+      // is exactly that pairing — has changed state, so it commits, or the board
+      // the engine holds and the board every view shows would diverge until the
+      // next resolved turn.
+      if (reseated) {
+        this.commit();
+      }
+
       return false;
     }
 
-    // The direction the move RESOLVES in is the one the payload carries, not
-    // the one the caller asked for: `direction` is a transformable member of
-    // `onBeforeMove`, so a handler that returned another direction redirects
-    // the move, and the direction emitted above is therefore the direction
-    // executed below.
-    const resolved = requested.direction;
+    // The direction the move RESOLVES in is the one the HOOK payload carries,
+    // not the one the caller asked for: `direction` is a transformable member
+    // of `onBeforeMove`, so a handler that returned another direction
+    // redirects the move.
+    const resolved = before.payload.direction;
 
     // Ported from L138-L143 and L146-L180, which
     // src/engine/move-resolver.ts owns: the vector, the two traversal
@@ -1032,11 +1321,15 @@ export class Engine {
     // change signal. The board is mutated in place, as those lines did.
     // The `onMerge` dispatch reaches the merge branch as a callback, and
     // a handler's `resultValue` is the value written to the board.
-    const outcome = resolveMove(this.grid, resolved, this.config, {
-      dispatchMerge: (payload: MergeDispatchPayload): MergePayload =>
-        this.hooks.dispatch('onMerge', payload, this.hookEnvironment())
-          .payload,
-    });
+    // Wrapped in the resolution span, which the turn span opened by the
+    // emission above encloses. Identity where no wrapper was injected.
+    const outcome = this.traceResolution((): MoveOutcome =>
+      resolveMove(this.grid, resolved, this.config, {
+        dispatchMerge: (payload: MergeDispatchPayload): MergePayload =>
+          this.hooks.dispatch('onMerge', payload, this.hookEnvironment())
+            .payload,
+      }),
+    );
 
     // Ported from L167: the sum of the additions each merge made, every
     // one of which an `onMerge` handler may have transformed.
@@ -1052,6 +1345,10 @@ export class Engine {
       // tiles are out of `grid.cells` by L161 and reach a subscriber as
       // live references alone.
       this.events.emit('tile:merge', {
+        // The commit this merge belongs to, which is the NEXT one the engine
+        // emits: a view buffering merge animations replays them against that
+        // commit and discards anything left over from an earlier turn.
+        turn: this.turnCounter + 1,
         source: merge.source,
         target: merge.target,
         resultValue: merge.merged.value,
@@ -1068,6 +1365,30 @@ export class Engine {
         value: 1,
       });
 
+      // THE COMPLETION SIGNAL OF A TURN THAT CHANGED NOTHING. Emitted from
+      // the state already in force, so nothing here writes engine state: no
+      // hook is dispatched, no tile is spawned, the loss check is not run,
+      // nothing is persisted and no commit is made. L182-L190's `if (moved)`
+      // block stays skipped exactly as it was; this emission is beside that
+      // block, not inside it.
+      //
+      // `moved` is `false`, and `score`, `over` and `won` are the values the
+      // turn began with because the resolver reported no change. A subscriber
+      // that opened work on `move:before` closes it here rather than holding
+      // it open until the next turn supersedes it.
+      this.events.emit('move:after', {
+        // The turn this emission ends, numbered as every granular event of a
+        // turn is: the counter advances only on a commit, and this turn makes
+        // none, so the number is the one the NEXT committed turn will carry.
+        turn: this.turnCounter + 1,
+        moved: false,
+        board: this.grid,
+        score: this.score,
+        over: this.over,
+        won: this.won,
+        terminated: this.isGameTerminated(),
+      });
+
       return false;
     }
 
@@ -1077,9 +1398,28 @@ export class Engine {
     // Ported from L185-L187. The live configuration travels with the
     // board, so the neighbour probe reads the merge predicate in force
     // rather than a comparison of its own.
-    if (!movesAvailable(this.grid, this.config)) {
+    //
+    // The probe reads an injected merge predicate, so it CAN raise. A raise no
+    // longer resolves to `over = false`: `measured()` records the engine as
+    // degraded and raises `TERMINAL_UNKNOWN_METRIC`, the loss flag is left
+    // exactly as it stood rather than being asserted, and the commit below
+    // carries `degraded: true` so a view and the diagnostics surface both see
+    // that this turn's terminal status could not be established.
+    const available = this.measured((): boolean =>
+      movesAvailable(this.grid, this.config),
+    );
+
+    if (available === false) {
       this.over = true;
     }
+
+    if (available !== null) {
+      this.terminalUnknown = false;
+    }
+
+    // The verdict as the ENGINE left it, kept so a handler that changed the
+    // board can be told apart from one that declared the run lost.
+    const lostBeforeDispatch = this.over;
 
     const after = this.hooks.dispatch(
       'onAfterMove',
@@ -1102,13 +1442,46 @@ export class Engine {
     // refuses a return that changes either. `terminated` is DERIVED from the
     // adopted `over` and `won` rather than read back, so a handler cannot
     // leave a flag that contradicts them.
+    const declaredOver = after.payload.over;
+
     this.score = after.payload.score;
-    this.over = after.payload.over;
+    this.over = declaredOver;
     this.won = after.payload.won;
+
+    // Board commands the post-move dispatch wrote — a line clear is the case
+    // this exists for — reached the board before the emission below, so the board
+    // `move:after` reports and the board the commit carries are the same board.
+    this.accountEffects(after.effects, after.effectsRefused);
+
+    // The loss was evaluated above, BEFORE the dispatch. An `onAfterMove`
+    // handler's board effect — a cleared row, an excised tile — is applied
+    // during the dispatch and can reopen the board the verdict was taken on,
+    // so the verdict is re-derived here against the board as it now stands.
+    //
+    // Re-derived ONLY where the handler left the flag as it found it. A handler
+    // that itself set `over` has declared the run lost, which is a decision the
+    // board cannot overturn.
+    if (
+      this.over &&
+      declaredOver === lostBeforeDispatch &&
+      // Through `measured()`, so a substituted merge predicate that raises leaves
+      // the engine degraded and the verdict as it stood rather than reopening a
+      // board that could not be probed.
+      this.measured((): boolean => movesAvailable(this.grid, this.config)) ===
+        true
+    ) {
+      this.over = false;
+      this.reporter.onCount?.({
+        correlationId: this.correlationId,
+        metric: LOSS_REOPENED_METRIC,
+        value: 1,
+      });
+    }
 
     // Emitted from what was applied, member for member, so `move:after` and
     // the `state:commit` below it cannot disagree.
     this.events.emit('move:after', {
+      turn: this.turnCounter + 1,
       moved: after.payload.moved,
       board: this.grid,
       score: this.score,
@@ -1147,20 +1520,32 @@ export class Engine {
       return;
     }
 
-    // `evaluateStageGoal` raises on a non-finite input. An `onAfterMove`
-    // handler writes `score` and an injected provider supplies `target`, so
-    // both are measured for finiteness first and a measurement that cannot
-    // be taken leaves the stage unresolved rather than raising out of the
-    // turn the commit above has already completed.
-    if (
-      !Number.isFinite(this.score) ||
-      !Number.isFinite(this.goalInForce().target) ||
-      !Number.isFinite(highestTileValue(this.grid))
-    ) {
+    // A stage already resolved is not resolved again; the guard lives in
+    // `endStage()` too, and checking here as well keeps the counters honest.
+    if (this.stageEnded) {
       return;
     }
 
-    if (!this.stageProgress().cleared) {
+    // `evaluateStageGoal` raises on a non-finite input. An `onAfterMove`
+    // handler writes `score` and an injected provider supplies `target`, so
+    // both are measured for finiteness first, and a measurement that cannot be
+    // taken is RECORDED as degraded rather than silently leaving the stage
+    // unresolved: the turn is already committed, and a caller has to be able to
+    // tell "goal not met" from "goal not measurable".
+    const measurable = this.measured(
+      (): boolean =>
+        Number.isFinite(this.score) &&
+        Number.isFinite(this.goalInForce().target) &&
+        Number.isFinite(highestTileValue(this.grid)),
+    );
+
+    if (measurable !== true) {
+      return;
+    }
+
+    const cleared = this.measured((): boolean => this.stageProgress().cleared);
+
+    if (cleared !== true) {
       return;
     }
 
@@ -1183,9 +1568,26 @@ export class Engine {
    * @param cleared Whether the stage's goal was met.
    */
   endStage(cleared: boolean): void {
+    // ONE END PER STAGE. A cleared goal stays cleared for every later turn, so
+    // without this guard `resolveMetStageGoal()` would dispatch `onStageEnd` and
+    // emit `stage:end` again on every commit that followed the clearing one —
+    // paying out a stage bounty repeatedly and offering a reward per turn.
+    // Released by `startStage()` and by every fresh `setup()`.
+    if (this.stageEnded) {
+      this.reporter.onCount?.({
+        correlationId: this.correlationId,
+        metric: STAGE_END_REPEATED_METRIC,
+        value: 1,
+      });
+
+      return;
+    }
+
+    this.stageEnded = true;
+
     const stage = this.resolveStage();
 
-    const resolved = this.hooks.dispatch(
+    const dispatched = this.hooks.dispatch(
       'onStageEnd',
       {
         stageIndex: stage.stageIndex,
@@ -1193,13 +1595,20 @@ export class Engine {
         score: this.score,
       },
       this.hookEnvironment(),
-    ).payload;
+    );
+    const resolved = dispatched.payload;
 
     // `score` is a transformable member of `onStageEnd`, so the score a
     // handler returned is ADOPTED before the commit below reads it. Without
     // this the emitted stage result and the commit that immediately follows it
     // reported two different scores.
     this.score = resolved.score;
+
+    // Board commands the stage-end dispatch wrote — a cursed relic collapsing the
+    // board is the case this exists for — reached the board before the emission,
+    // so a subscriber to `stage:end` and the commit below it both see the board
+    // the stage actually ended on. Accounted for here.
+    this.accountEffects(dispatched.effects, dispatched.effectsRefused);
 
     this.events.emit('stage:end', resolved);
 
@@ -1243,15 +1652,16 @@ export class Engine {
    * js/grid.js L45-L55 collects. The value is drawn before the cell, which
    * is the order L71 and js/grid.js L41 were reached in.
    *
-   * A full board spawns nothing and consumes no draw from either
-   * substream, which is the boundary js/grid.js L37-L43 expressed by
-   * returning no cell.
+   * A full board spawns nothing, dispatches no `onSpawn` and consumes no draw
+   * from either substream, which is the boundary js/grid.js L37-L43 expressed
+   * by returning no cell. It DOES emit `tile:spawn` with no position, which is
+   * what AAP Contract 1 specifies for that attempt.
    *
    * THE ATTEMPT IS COUNTED HERE, on entry, so `SPAWN_ATTEMPT_METRIC`
-   * measures every attempt including the full-board one that emits no
-   * event. `SPAWN_SUPPRESSED_METRIC` counts the attempts that inserted
-   * nothing, so attempts minus suppressions is the number of tiles
-   * inserted.
+   * measures every attempt, the full-board one included.
+   * `SPAWN_SUPPRESSED_METRIC` counts the attempts that inserted nothing, so
+   * attempts minus suppressions is the number of tiles inserted, and
+   * `tile:spawn` is emitted for every attempt whether or not it inserted.
    */
   private addRandomTile(): void {
     this.reporter.onCount?.({
@@ -1265,6 +1675,19 @@ export class Engine {
         correlationId: this.correlationId,
         metric: SPAWN_SUPPRESSED_METRIC,
         value: 1,
+      });
+
+      // AAP Contract 1: `tile:spawn` carries no position when the board is
+      // full. The attempt is therefore EMITTED, so a subscriber counting
+      // emissions counts attempts, while `onSpawn` is still not dispatched and
+      // neither substream is drawn from — the boundary js/grid.js L37-L43
+      // expressed by returning no cell, and the reason a full board leaves
+      // every seeded sequence exactly where it stood. `value` carries
+      // `SUPPRESSED_SPAWN_VALUE` because no value was drawn.
+      this.events.emit('tile:spawn', {
+        turn: this.turnCounter + 1,
+        position: undefined,
+        value: SUPPRESSED_SPAWN_VALUE,
       });
 
       return;
@@ -1319,9 +1742,84 @@ export class Engine {
     // board of js/grid.js L37-L43, a handler that returned no cell, and a
     // handler that returned one outside the lattice.
     this.events.emit('tile:spawn', {
+      turn: this.turnCounter + 1,
       position: inserted ? position : undefined,
       value: payload.value,
     });
+
+    // A TILE A SPAWN HANDLER INSERTED IS A SPAWN, so it is emitted as one. The
+    // bus applied the command already — an accepted board effect is written
+    // inside the dispatch transaction — and this is the emission that lets a
+    // renderer animate it as an appearance rather than discover it at the next
+    // full commit. Only `insertTile` is emitted: a remove or a move from this
+    // hook is not a spawn, and the two whole-lattice commands are refused here.
+    for (const effect of spawned.effects) {
+      if (effect.kind === 'insertTile') {
+        this.events.emit('tile:spawn', {
+          turn: this.turnCounter + 1,
+          position: { x: effect.cell.x, y: effect.cell.y },
+          value: effect.value,
+        });
+      }
+    }
+
+    this.accountEffects(spawned.effects, spawned.effectsRefused);
+
+    // `count` is the pre-spawn decision that changes how many tiles a turn
+    // adds; it is `1` unless an `onSpawn` handler raised it, so the vanilla
+    // turn draws exactly what it always drew and no recorded seeded board
+    // moves. Each further tile is drawn HERE rather than by re-dispatching
+    // `onSpawn`, which keeps the hook one dispatch per turn and keeps a
+    // handler from re-entering itself.
+    this.addExtraTiles(payload.count, inserted ? 1 : 0);
+  }
+
+  /**
+   * Inserts the tiles beyond the first that a raised `onSpawn` count asked for.
+   *
+   * Has no vanilla source. Each tile's value comes from `spawn-value` against
+   * the configured distribution and its cell from `spawn-position` over the
+   * cells still empty — the same two substreams and the same order as the first
+   * tile — so a raised count is reproducible under a fixed seed. A count that is
+   * not a finite number above one, and a board with no cell left, both insert
+   * nothing and consume no draw.
+   *
+   * @param count The count the resolved payload carried.
+   * @param already How many tiles this spawn has already inserted.
+   */
+  private addExtraTiles(count: number | undefined, already: number): void {
+    if (count === undefined || !Number.isFinite(count)) {
+      return;
+    }
+
+    const wanted = Math.floor(count);
+
+    for (let index = already; index < wanted; index += 1) {
+      if (!this.grid.cellsAvailable()) {
+        return;
+      }
+
+      const drawn = this.streams
+        .stream('spawn-value')
+        .pickWeighted(this.config.spawn.values, this.config.spawn.weights);
+      const cell = this.grid.randomAvailableCell(
+        this.streams.stream('spawn-position'),
+      );
+
+      if (cell === undefined) {
+        return;
+      }
+
+      const value = drawn ?? FALLBACK_SPAWN_VALUE;
+
+      this.grid.insertTile(new Tile({ x: cell.x, y: cell.y }, value));
+
+      this.events.emit('tile:spawn', {
+        turn: this.turnCounter + 1,
+        position: { x: cell.x, y: cell.y },
+        value,
+      });
+    }
   }
 
   /**
@@ -1372,8 +1870,12 @@ export class Engine {
 
     // Ported from L91-L97: the board travels by reference, as L91 passed
     // it, and the five metadata members L92-L96 carried are joined by the
-    // stage and relic slices the injected providers supply.
+    // stage and relic slices the injected providers supply, plus the
+    // monotonic turn a buffering view correlates granular events against.
+    this.turnCounter += 1;
+
     this.events.emit('state:commit', {
+      turn: this.turnCounter,
       board: this.grid,
       score: this.score,
       bestScore: this.throughPort(
@@ -1383,8 +1885,107 @@ export class Engine {
       over: this.over,
       won: this.won,
       terminated: this.isGameTerminated(),
+      degraded: this.terminalUnknown,
       stage: this.resolveStage(),
       relics: this.relicContext(),
     });
+  }
+
+  /* ----------------------------------------------------------------------
+   * Board effects
+   * ------------------------------------------------------------------- */
+
+  /**
+   * Accounts for the board and rules commands one dispatch wrote.
+   *
+   * Has no vanilla source. The WRITE itself is not made here: a handler records
+   * through `HookContext.effects`, src/engine/board-effects.ts validates each
+   * command against a projection of the live board, and the bus writes the
+   * recorded commands to the lattice and the rules in the same transaction that
+   * adopts the handler's return — so a handler that threw, or whose return was
+   * refused, has nothing applied. What is left to the engine is everything the
+   * board and the rules do not own:
+   *
+   * - the SCORE a restore reinstates, which an undo needs so the points a
+   *   withdrawn move scored are withdrawn with it;
+   * - the RECONCILIATION count a resize raises, because the win and loss checks
+   *   and the renderer's framing all follow the edge length;
+   * - the applied and refused COUNTS, so a refused command — an off-lattice
+   *   cell, an occupied destination, an unsupported edge length — is reported
+   *   rather than silently changing nothing.
+   *
+   * @param effects Commands the dispatch wrote, in the order it wrote them.
+   * @param refused How many commands the dispatch refused.
+   * @returns `true` when at least one command changed the board or the rules.
+   */
+  private accountEffects(
+    effects: readonly BoardEffect[],
+    refused: number,
+  ): boolean {
+    for (const effect of effects) {
+      this.reporter.onCount?.({
+        correlationId: this.correlationId,
+        metric: EFFECT_APPLIED_METRIC,
+        value: 1,
+      });
+
+      // The score travels with the lattice a restore installed. Bounded exactly
+      // as a restored snapshot's score is, so a handler cannot install a
+      // negative or fractional score through the channel.
+      if (
+        effect.kind === 'restoreBoard' &&
+        effect.score !== undefined &&
+        Number.isFinite(effect.score)
+      ) {
+        this.score = Math.max(0, Math.floor(effect.score));
+      }
+
+      // The rules already carry the new edge length — board-effects writes
+      // `boardSize` with the lattice — so this is the count, not the write.
+      if (effect.kind === 'resizeBoard') {
+        this.reporter.onCount?.({
+          correlationId: this.correlationId,
+          metric: SIZE_RECONCILED_METRIC,
+          value: 1,
+        });
+      }
+    }
+
+    for (let index = 0; index < refused; index += 1) {
+      this.reporter.onCount?.({
+        correlationId: this.correlationId,
+        metric: EFFECT_REFUSED_METRIC,
+        value: 1,
+      });
+    }
+
+    return effects.length > 0;
+  }
+
+  /**
+   * Takes a measurement that may raise, and records a raise as degraded.
+   *
+   * Has no vanilla source. `movesAvailable` reads the configured merge
+   * predicate and `evaluateStageGoal` reads an injected target, so both can be
+   * made to raise by a substituted rule. A raise leaves the engine degraded and
+   * counted rather than silently reported as playable: the caller decides what a
+   * measurement it could not take means for the turn.
+   *
+   * @param measure The measurement to take.
+   * @returns The measurement's value, or `null` where it raised.
+   */
+  private measured<T>(measure: () => T): T | null {
+    try {
+      return measure();
+    } catch {
+      this.terminalUnknown = true;
+      this.reporter.onCount?.({
+        correlationId: this.correlationId,
+        metric: TERMINAL_UNKNOWN_METRIC,
+        value: 1,
+      });
+
+      return null;
+    }
   }
 }

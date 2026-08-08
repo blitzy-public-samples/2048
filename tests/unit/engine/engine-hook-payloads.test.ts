@@ -35,10 +35,7 @@ import type {
   StageEndPayload,
   StageStartPayload,
 } from '../../../src/engine/hooks';
-import type {
-  BoardProjection,
-  TileProjection,
-} from '../../../src/engine/engine-events';
+import type { Grid } from '../../../src/engine/grid';
 import { Tile } from '../../../src/engine/tile';
 import type {
   Direction,
@@ -247,10 +244,11 @@ describe('onBeforeMove: the resolved direction is the one executed', () => {
 
     engine.move(DIRECTION_LEFT);
 
-    // The event reports the redirected direction...
-    expect(emitted).toEqual([DIRECTION_RIGHT]);
+    // The event is emitted BEFORE the hook resolves, so it reports the
+    // direction the caller asked for...
+    expect(emitted).toEqual([DIRECTION_LEFT]);
 
-    // ...and the board proves the redirected direction is what ran: the pair
+    // ...while the board proves the REDIRECTED direction is what ran: the pair
     // merged against the RIGHT wall, at column 3, not against the left one.
     const merged = engine.grid.cellContent({ x: 3, y: 0 });
 
@@ -278,14 +276,19 @@ describe('onBeforeMove: the resolved direction is the one executed', () => {
     expect(engine.grid.cellContent({ x: 1, y: 0 })?.value).toBe(2);
   });
 
-  it('hands the handler a board view and the subscriber a board projection', () => {
+  it('hands the handler a board view and the subscriber the live board', () => {
     const { engine } = createHarness(undefined, createPairSnapshot());
 
     engine.setup();
 
-    const seen: { hook: unknown; event: BoardProjection | null } = {
+    const seen: {
+      hook: unknown;
+      event: Grid | null;
+      valueAtEmission: number | undefined;
+    } = {
       hook: null,
       event: null,
+      valueAtEmission: undefined,
     };
 
     engine.hooks.register({
@@ -298,21 +301,24 @@ describe('onBeforeMove: the resolved direction is the one executed', () => {
     });
     engine.events.on('move:before', (payload): void => {
       seen.event = payload.board;
+      seen.valueAtEmission = payload.board.cells[0]?.[0]?.value;
     });
 
     engine.move(DIRECTION_LEFT);
 
-    // Neither path hands out the live lattice: the hook path carries the
-    // capability view and the observe path a frozen projection, so the board
-    // is readable from both and writable through neither.
-    expect(seen.event).not.toBe(engine.grid);
-    expect(Object.isFrozen(seen.event)).toBe(true);
+    // The two paths differ: AAP Contract 1 hands an event subscriber the LIVE
+    // board, while the hook path substitutes the capability view so a handler
+    // cannot write engine state through its payload.
+    expect(seen.event).toBe(engine.grid);
     expect(seen.event?.size).toBe(engine.grid.size);
-    expect(seen.event?.cells[0]?.[0]?.value).toBe(2);
 
-    expect(seen.hook).not.toBe(engine.grid);
-    expect(Object.isFrozen(seen.hook)).toBe(true);
-    expect(seen.hook).not.toHaveProperty('cells');
+    // Read inside the emission, before the move resolved the pair.
+    expect(seen.valueAtEmission).toBe(2);
+
+    // Read at the emission the board is pre-move; read now it is post-move,
+    // which is what carrying the object rather than a snapshot means.
+    expect(seen.valueAtEmission).toBe(2);
+    expect(seen.event?.cells[0]?.[0]?.value).toBe(4);
   });
 });
 
@@ -406,7 +412,7 @@ describe('onAfterMove: score, over and won are adopted; terminated is derived', 
   });
 });
 
-describe('onMerge: the two tiles reach hooks as views and events as live tiles', () => {
+describe('onMerge: the event carries the live tiles and the hook a projection of them', () => {
   it('adopts the resolved result value and score delta', () => {
     const { engine } = createHarness(undefined, createPairSnapshot());
 
@@ -434,7 +440,7 @@ describe('onMerge: the two tiles reach hooks as views and events as live tiles',
 
     engine.setup();
 
-    const seen: { hook: MergePayload | null; source: TileProjection | null } = {
+    const seen: { hook: MergePayload | null; source: Tile | null } = {
       hook: null,
       source: null,
     };
@@ -453,19 +459,25 @@ describe('onMerge: the two tiles reach hooks as views and events as live tiles',
 
     engine.move(DIRECTION_LEFT);
 
-    // The event's tiles are frozen projections that still carry
+    // The EVENT's tiles are the live `Tile`s, and they carry
     // `previousPosition` and `mergedFrom`, which is what the move and merge
-    // animations read; no tile method is reachable through them.
-    expect(seen.source).not.toBeInstanceOf(Tile);
-    expect(Object.isFrozen(seen.source)).toBe(true);
+    // animations read.
+    expect(seen.source).toBeInstanceOf(Tile);
     expect(seen.source?.previousPosition).not.toBeNull();
     expect(seen.source).toHaveProperty('mergedFrom');
-    expect(seen.source).not.toHaveProperty('savePosition');
 
-    // The hook's tiles are frozen projections with no write path at all.
+    // The HOOK is handed a projection of the same two tiles, read at the moment
+    // the merge resolved: the source still standing in the cell it merged out
+    // of, carrying the position it began the turn in. A relic reads that and
+    // writes the board through `context.effects`, so the objects the merge
+    // consumed stay the engine's own.
     expect(seen.hook?.source).not.toBe(seen.source);
-    expect(Object.isFrozen(seen.hook?.source)).toBe(true);
-    expect(seen.hook?.source).not.toHaveProperty('mergedFrom');
+    expect(seen.hook?.source.value).toBe(seen.source?.value);
+    expect(seen.hook?.source.x).toBe(1);
+    expect(seen.hook?.source.y).toBe(0);
+    expect(seen.hook?.source.previousPosition).toEqual({ x: 1, y: 0 });
+    expect(seen.hook?.target.x).toBe(0);
+    expect(seen.hook?.target.y).toBe(0);
   });
 });
 

@@ -37,11 +37,23 @@
 // than this configuration. Decision DL-TEST-02.
 //
 // `resolve.alias` is absent, matching vite.config.ts, so a test resolves a
-// module by the same relative specifier the application uses.
-//
+// module by the same relative specifier the application uses. Decision
 // DL-TEST-03.
-// Decisions behind this file: DL-TEST-01 through DL-TEST-03 above, in
-// TR-TEST-01 through TR-TEST-03 of docs/TRACEABILITY_MATRIX.md — the two
+//
+// This file carries no ported construct: the repository held no test suite of
+// any kind. One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every
+// row of this file's area enumerated, all target-only:
+//   TR-TEST-01  the two environment-split projects and their partitioning globs
+//   TR-TEST-02  the shared setup file and the persistence teardown it registers
+//   TR-TEST-03  the exclusions that keep the snapshot and Playwright trees out
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-TEST-01  the unit tree partitioned by environment, with an unlisted
+//               directory collected by unit:dom
+//   DL-TEST-02  no fake timer installed and no global replaced by this
+//               configuration
+//   DL-TEST-03  `resolve.alias` absent, matching vite.config.ts
 
 import { defineConfig } from 'vitest/config';
 

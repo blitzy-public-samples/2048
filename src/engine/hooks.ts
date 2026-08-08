@@ -7,15 +7,21 @@
 // This module reads no DOM, performs no I/O, consumes no randomness and reads
 // no clock.
 //
-// traceability row of docs/TRACEABILITY_MATRIX.md apiece:
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece:
 //   TR-HOOK-01  onStageStart  js/game_manager.js L35-L59   setup()
 //   TR-HOOK-02  onBeforeMove  js/game_manager.js L134      terminal guard
 //   TR-HOOK-03  onMerge       js/game_manager.js L156-L170 merge branch
 //   TR-HOOK-04  onSpawn       js/game_manager.js L69-L76   addRandomTile()
 //   TR-HOOK-05  onAfterMove   js/game_manager.js L185-L189 loss, actuation
-//   TR-HOOK-06  onStageEnd    no vanilla analogue
-// Decisions behind this file: DL-HOOK-01, the exact six names AAP R2
-// mandates as the whole hook surface, and DL-HOOK-02, the live
+//   TR-HOOK-06  onStageEnd    no vanilla analogue, target-only row
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-HOOK-01  the exact six names AAP R2 mandates as the whole hook surface
+//   DL-HOOK-02  the two payload families: `HookPayloadMap`, which a handler
+//               receives with each live collaborator replaced by a
+//               capability view, and `HookDispatchPayloadMap`, which the
+//               engine dispatches with the live `Grid` and `Tile`
 
 import type { RulesConfig } from '../config/rules-config';
 import type { StageGoal } from '../config/stage-config';
@@ -25,6 +31,7 @@ import type {
   RngStreams,
   StreamName,
 } from '../rng/rng-streams';
+import type { BoardEffectQueue } from './board-effects';
 import type { Grid } from './grid';
 import type {
   CorrelationId,
@@ -160,6 +167,20 @@ export interface MergePayload {
 export interface SpawnPayload {
   readonly position?: Position | undefined;
   readonly value: number;
+
+  /**
+   * How many tiles this spawn inserts. `1` on dispatch, which is the vanilla
+   * count js/game_manager.js L183 produced.
+   *
+   * TRANSFORMABLE, and the ONE pre-spawn decision that changes the number of
+   * tiles a turn adds. The first tile takes `position` and `value`; each
+   * further tile's cell and value are drawn by the engine from the
+   * `spawn-position` and `spawn-value` substreams over the cells still empty,
+   * so a raised count stays reproducible under a fixed seed. A count at or
+   * below one, a non-finite count and a count beyond the empty cells left all
+   * resolve to the tiles the board can actually take.
+   */
+  readonly count?: number | undefined;
 }
 
 /**
@@ -471,6 +492,33 @@ export interface ReadonlyRngView {
   snapshotCursors(): RngCursorMap;
 }
 
+/* --------------------------------------------------------------------------
+ * Board effects
+ * ----------------------------------------------------------------------- */
+
+/**
+ * The board-write vocabulary, RE-EXPORTED from where it is declared.
+ *
+ * TR-EFFECT-04. `src/engine/board-effects.ts` owns the commands, their
+ * validation and their projection; this module owns what a handler is handed, so
+ * a handler that imports its context from here also gets the command types from
+ * here and never has to know which of the two modules declares which.
+ *
+ * `BoardEffect` is one recorded command, `BoardEffectRequest` the same command
+ * in descriptor form, and `BoardEffectQueue` the channel itself. The channel is
+ * TRANSACTIONAL exactly as `state` and the randomness fork are: commands are
+ * held per handler and reach the lattice only once that handler has returned and
+ * its return has been accepted, so a handler that records and then throws — or
+ * whose return the bus refuses — changes nothing. It is also inert where the
+ * dispatch carries no live board, and refuses mid-resolution on `onMerge` and
+ * `onSpawn`, where replacing the lattice would invalidate the move walk.
+ */
+export type {
+  BoardEffect,
+  BoardEffectRequest,
+  BoardEffectQueue,
+} from './board-effects';
+
 /**
  * What a handler receives besides its payload: capability-limited views of
  * the three collaborators of `HookEnvironment`, the identity of the
@@ -499,6 +547,25 @@ export interface HookContext {
   readonly grid: ReadonlyGridView;
 
   /**
+   * The board and the rules a handler WRITES, as commands recorded now and
+   * applied by the bus once this handler has returned and its return has
+   * validated.
+   *
+   * `src/engine/board-effects.ts` declares the queue. The recorded commands
+   * are how the relic effects AAP requirement R3 names reach the lattice — the
+   * extra spawned tile, the undo, the shuffle, the excision, the row clear,
+   * the board shrink, the substituted merge predicate and the substituted
+   * spawn distribution — without a handler holding the live `Grid`, a live
+   * `Tile` or the live `RulesConfig`.
+   *
+   * TRANSACTIONAL, like `rng` and `state` beside it: the queue is opened per
+   * handler and resolved with them, so a handler that records and then throws,
+   * or whose return the bus refuses, changes neither the board nor the rules.
+   * Every member reports whether the command was accepted and none throws.
+   */
+  readonly effects: BoardEffectQueue;
+
+  /**
    * Correlation identifier of the run in progress, injected into the bus
    * and carried verbatim. Named `correlationId` because that is what it
    * is: the run instance identifier `RunState.runId` in
@@ -512,6 +579,50 @@ export interface HookContext {
   readonly subscriberId: string;
   readonly pickupOrder: number;
   readonly charges?: number | undefined;
+
+  /**
+   * Requests that a charge be spent for this dispatch, because the effect the
+   * handler was invoked for has been APPLIED.
+   *
+   * WHY THE HANDLER ASKS AND THE BUS DECIDES. AAP Contract 2 puts both the
+   * charge guard and the decrement in the bus, once, rather than sixteen times
+   * in handlers — so no handler reads, compares or writes a budget. But only the
+   * handler knows whether its effect actually TRIGGERED: `tumbler` shuffles
+   * nothing on an open board and `culling-blade` cuts nothing until the small
+   * tiles have piled up, and a dispatch that changed nothing must not cost a
+   * charge. This is the one-line signal that resolves that split: the handler
+   * says "that counted", the bus decides what it costs and whether the budget
+   * can pay.
+   *
+   * A HANDLER THAT DOES NOT ASK PAYS NOTHING, whatever else it did. A
+   * transformed payload member and a written board command are both effects
+   * whose TRIGGER only the relic can judge, and a stage-start rule installation
+   * is the clearest case — it writes a command and must cost nothing, because it
+   * prepares the rule rather than using it. The request is therefore the whole
+   * rule, and nothing in the bus is relic-specific.
+   *
+   * FULFILLED WITH THE REST OF THE TRANSACTION. The request is recorded, not
+   * applied: the bus spends the charge only once the handler has returned and
+   * its return has been ACCEPTED, in the same commit as the state slot, the
+   * randomness and the board effects. A handler that requests a charge and then
+   * throws, or whose return the bus refuses, spends nothing.
+   *
+   * ONE POOL PER SUBSCRIBER, SHARED ACROSS ITS HOOKS. `temporal-anchor` binds
+   * two hooks and draws on one budget, so a charge spent on `onAfterMove`
+   * leaves fewer for `onBeforeMove`.
+   *
+   * A subscriber carrying no budget is unlimited, and a request against it
+   * spends nothing and is not an error. Repeated requests within one dispatch
+   * accumulate, so a handler that triggered twice may ask twice.
+   *
+   * @param amount Charges to spend. Rounded towards zero, clamped to zero from
+   *   below, clamped to the budget the subscriber holds, and defaulting to `1`.
+   *   The budget never falls below zero however much is asked for.
+   * @returns Whether a charge will be spent: `false` for a subscriber carrying
+   *   no budget, for an amount that rounds to zero, and for a call made after
+   *   the handler has returned, which belongs to no transaction.
+   */
+  readonly spendCharge: (amount?: number) => boolean;
 
   /**
    * The subscriber's own state slot, mutable, and a COPY of the value the bus

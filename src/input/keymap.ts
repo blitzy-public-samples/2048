@@ -15,6 +15,41 @@
 // entries-per-list and string-length limits `deserializeKeymap` applies to a
 // parsed payload. `createSafeInputReporter` is the containment boundary every
 // report in src/input/ leaves through.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-KEYMAP-01  js/keyboard_input_manager.js  the `event.which` code map,
+//                 L37-L50                       ported as the default binding
+//                                               table keyed on
+//                                               `KeyboardEvent.key` and
+//                                               `KeyboardEvent.code`
+//   TR-KEYMAP-02  js/keyboard_input_manager.js  the three event names, ported
+//                 L9-L11, L54-L70               as `INPUT_EVENT_NAMES` and
+//                                               `InputEventPayload`
+//   TR-KEYMAP-03  js/game_manager.js L104-L116  the direction encoding
+//                                               0 up / 1 right / 2 down /
+//                                               3 left, declared here as
+//                                               `Direction`
+//   TR-KEYMAP-04  target-only row               `INPUT_ACTIONS`, `MoveAction`
+//                                               and `directionForAction`
+//   TR-KEYMAP-05  target-only row               `INPUT_CONTEXTS` and the
+//                                               per-context binding resolution
+//   TR-KEYMAP-06  target-only row               the remapping surface and the
+//                                               serialised keymap with its
+//                                               parse limits
+//   TR-KEYMAP-07  target-only row               `InputReporter` and
+//                                               `createSafeInputReporter`
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-KEYMAP-01  bindings keyed on `KeyboardEvent.key` and
+//                 `KeyboardEvent.code`, with no numeric code read
+//   DL-KEYMAP-02  the direction encoding kept as the bare number the engine
+//                 consumes
+//   DL-KEYMAP-03  the parse limits applied to a persisted keymap before and
+//                 after parsing
+//   DL-KEYMAP-04  the input layer's contracts declared in this leaf module, so
+//                 src/input/ imports nothing outside itself for them
 
 /* --------------------------------------------------------------------------
  * Directions
@@ -1135,14 +1170,24 @@ export function remapAction(
  * @param keymap Table to search.
  * @param key Key or code to look for.
  * @param context Context to search within.
+ * @param code `KeyboardEvent.code` of the same keystroke, where the caller has
+ *   it. Omitted, only `key` is looked for, which is what every caller that
+ *   passes a single string already means.
  * @returns The occupying binding, or `null` when the key is free.
  */
 export function findBindingConflict(
   keymap: Keymap,
   key: string,
-  context: InputContext
+  context: InputContext,
+  code?: string
 ): InputBinding | null {
   const lowerCasedKey = key.toLowerCase();
+
+  // A PHYSICAL COLLISION `key` ALONE CANNOT SEE. On an alternate layout the
+  // character a key produces differs from the character the bound key produced,
+  // while `KeyboardEvent.code` is identical — so a capture that reports a free
+  // `key` can still land on a key another action already holds by code.
+  const physicalCode = code === undefined ? '' : code;
 
   for (const action of INPUT_ACTIONS) {
     const binding = keymap[action];
@@ -1152,6 +1197,17 @@ export function findBindingConflict(
     }
 
     if (matchesBinding(binding, lowerCasedKey, key)) {
+      return binding;
+    }
+
+    // Only the code list, and only where the code says something `key` did not:
+    // the check above already compared `key` against both lists, so this adds
+    // conflicts rather than replacing any.
+    if (
+      physicalCode !== '' &&
+      physicalCode !== key &&
+      matchesBinding(binding, '', physicalCode)
+    ) {
       return binding;
     }
   }

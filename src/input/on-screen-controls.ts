@@ -7,10 +7,19 @@
 // `bindButtonPress`, its selector lookup, its `'click'` listener and its
 // resolved touch-end listener.
 //
-// traceability row of docs/TRACEABILITY_MATRIX.md:
-//   TR-CONTROL-01  L71-L74    the three control bindings — `.retry-button`
-//   TR-CONTROL-02  L140-L144  `bindButtonPress` — the selector lookup at
-// TR-CONTROL-03.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-CONTROL-01  L71-L74    the three control bindings — `.retry-button` and
+//                             `.restart-button` to `restart`,
+//                             `.keep-playing-button` to `keepPlaying`, in that
+//                             order
+//   TR-CONTROL-02  L140-L144  `bindButtonPress`, its selector lookup and its
+//                             `'click'` listener
+//   TR-CONTROL-03  L145-L149  `bindButtonPress`'s resolved touch-end listener
+//   TR-CONTROL-04  target-only row  the generated `<button>` per action of
+//                                   `INPUT_ACTIONS`
+//   TR-CONTROL-05  target-only row  `MarkupControlBinding.contexts` and the
+//                                   per-context availability of every control
 //
 // Retained from that port: `bindButtonPress` binds BOTH `'click'` and the
 // resolved touch-end event to one handler, so a tap can dispatch twice. Noted,
@@ -19,7 +28,7 @@
 // Changed against that port:
 //   - the lookup is null-checked, reported and skipped
 //
-// Changed against that port, decisions DL-CONTROL-01 through DL-CONTROL-04
+// Changed against that port:
 //   - a control the markup leaves unfocusable or unnamed is promoted, and the
 //     promotion is reported
 //   - `fn.bind(this)` becomes a lexically scoped handler; js/bind_polyfill.js
@@ -38,6 +47,16 @@
 // radius and duration it relies on is declared in style/_tokens.scss,
 // style/_a11y.scss and style/_screens.scss and reached through the class names
 // emitted below.
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-CONTROL-01  the selector lookup null-checked, reported and skipped
+//   DL-CONTROL-02  a control the markup leaves unfocusable or unnamed promoted,
+//                  and the promotion reported
+//   DL-CONTROL-03  `fn.bind(this)` replaced by a lexically scoped handler,
+//                  js/bind_polyfill.js being deleted
+//   DL-CONTROL-04  a generated `<button>` for every action of `INPUT_ACTIONS`,
+//                  each carrying `InputContext` availability
 
 import type {
   Direction,
@@ -73,6 +92,12 @@ const MOUNTED_METRIC = 'input.onScreen.mounted';
 const UNMOUNTED_METRIC = 'input.onScreen.unmounted';
 
 const HOST_MISSING_METRIC = 'input.onScreen.host.missing';
+
+/**
+ * Counter raised once per generated group this mount removed before building
+ * its own, which is how a repeat mount over one host is observable.
+ */
+const REPLACED_METRIC = 'input.onScreen.replaced';
 
 const CONTROL_MISSING_METRIC = 'input.onScreen.control.missing';
 
@@ -234,18 +259,6 @@ export interface OnScreenControlsHandle {
    */
   setContext(context: InputContext): void;
   setKeymap(keymap: Keymap): void;
-
-  /**
-   * Holds an effective reduced-motion value, overriding both the reflected
-   * attribute and the media query, and reapplies it.
-   *
-   * @param reduced The effective value, or `null` to resolve it from the
-   *   reflected attribute and then the media query again.
-   */
-  setReducedMotion(reduced: boolean | null): void;
-
-  /** The effective reduced-motion value now in force. */
-  isReducedMotion(): boolean;
 
   /**
    * Holds an effective reduced-motion value, overriding both the reflected
@@ -1529,6 +1542,27 @@ export function mountOnScreenControls(
     );
     reporter.count(HOST_MISSING_METRIC, fields);
   } else {
+    // OWNED NODES ARE REPLACED, NOT ADDED TO. A second mount over the same host
+    // used to append a second pad and a second action group, so the host carried
+    // two of every generated control: two tab stops per action, two accessible
+    // names, two click listeners publishing the same action twice. Removing what
+    // a previous mount left makes a repeat mount idempotent in effect — the host
+    // ends up holding exactly one set whichever number of times this runs (N10).
+    const stale = root.querySelectorAll(`:scope > .${GROUP_CLASS}`);
+
+    if (stale.length > 0) {
+      for (const group of stale) {
+        group.remove();
+      }
+
+      reporter.count(REPLACED_METRIC, { groups: stale.length });
+      reporter.log(
+        'debug',
+        'A previous on-screen control set was replaced.',
+        { groups: stale.length },
+      );
+    }
+
     padGroup = createGroup(ownerDocument, PAD_GROUP_CLASS, PAD_GROUP_LABEL);
     actionGroup = createGroup(
       ownerDocument,

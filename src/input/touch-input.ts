@@ -12,6 +12,33 @@
  * path nor any gesture handler. Module scope performs one guarded read of
  * `window.navigator` and touches no document, so the module imports cleanly
  * outside a browser.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-TOUCH-01  js/keyboard_input_manager.js  the pointer-event-family probe
+ *                L4-L13                        and its `msPointerEnabled`
+ *                                              branch, ported as
+ *                                              `detectPointerEventFamily` and
+ *                                              `POINTER_EVENT_FAMILY`
+ *   TR-TOUCH-02  js/keyboard_input_manager.js  the touchstart handler, ported as
+ *                L96-L112                      the gesture start
+ *   TR-TOUCH-03  js/keyboard_input_manager.js  the touchmove handler, ported as
+ *                L114-L117                     the default-prevention branch
+ *   TR-TOUCH-04  js/keyboard_input_manager.js  the touchend handler and its
+ *                L119-L137                     10px threshold, ported as the
+ *                                              resolved swipe and
+ *                                              `SWIPE_THRESHOLD_PX`
+ *   TR-TOUCH-05  target-only row               `attachTouchInput`, its guarded
+ *                                              host resolution and its detach
+ *                                              handle
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-TOUCH-01  the pointer family selected once at module scope, with the
+ *                three handlers branching on that value
+ *   DL-TOUCH-02  a resolved swipe leaving through the `onSwipe` callback, with
+ *                no event name emitted here
+ *   DL-TOUCH-03  the 10px threshold carried over unchanged
  */
 
 import {

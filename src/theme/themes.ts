@@ -20,9 +20,28 @@
  * reads no storage, queries no media feature, emits no log and performs no work
  * at import time beyond freezing its own declarations.
  *
- * Decisions behind this file: DL-THEME-01, the high-contrast palette;
- * DL-THEME-02, the colourblind-safe palette; DL-THEME-03, the attribute the
- * activation contract is carried on; and DL-THEME-04, the derivation the
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THEME is one area
+ * across both halves of the mirror, so these ordinals are unique across this
+ * module and style/_themes.scss:
+ *   TR-THEME-01  style/main.scss L4-L22   the existing palette, carried as the
+ *                                         default theme
+ *   TR-THEME-02  target-only row          the additive high-contrast palette
+ *   TR-THEME-03  target-only row          the additive colourblind-safe palette
+ *   TR-THEME-04  target-only row          `THEME_ATTRIBUTE`,
+ *                                         `themeAttributeValues` and
+ *                                         `applyTheme`
+ *   TR-THEME-05  target-only row          `resolveTileTheme`, the per-theme
+ *                                         resolver a renderer calls
+ *   TR-THEME-06  target-only row          `subscribeToThemeChange` and
+ *                                         `getActiveTheme`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-THEME-01  the high-contrast palette
+ *   DL-THEME-02  the colourblind-safe palette
+ *   DL-THEME-03  the attribute the activation contract is carried on
+ *   DL-THEME-04  a themed ramp supplied as input to `computeTileTheme`, which
+ *                stays the one generative implementation
  */
 
 import {

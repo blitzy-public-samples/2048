@@ -32,11 +32,24 @@
 // identically. Reporting leaves through the injected reporter and nothing here
 // imports src/observability/.
 //
-// Decisions behind this file: DL-PARTICLE-01, the fixed-capacity mote pool
-// allocated once; DL-PARTICLE-02, additive blending with depth writing off and
-// frustum culling off; and DL-PARTICLE-03, emission directions as a pure
-// particle. Its constructs are target-only rows TR-PARTICLE-01 through
-// TR-PARTICLE-03 of docs/TRACEABILITY_MATRIX.md — the pool, the burst and the
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated, all target-only because the deleted actuator
+// drew no particle:
+//   TR-PARTICLE-01  the fixed-capacity mote pool and its buffer geometry
+//   TR-PARTICLE-02  `createParticleSystem()` and one burst per merge
+//   TR-PARTICLE-03  `readBurstTint()`, the tint taken from the ramp fill
+//   TR-PARTICLE-04  the reduced-motion gate that suppresses a burst
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-PARTICLE-01  the fixed-capacity mote pool allocated once
+//   DL-PARTICLE-02  additive blending with depth writing off and frustum
+//                   culling off
+//   DL-PARTICLE-03  emission directions as a pure function of a mote's slot
+//   DL-PARTICLE-04  an option above a ceiling confined and reported, never
+//                   refused
+//   DL-PARTICLE-05  the four values with no token counterpart stated in
+//                   `particleDefaults` and overridable per construction
 
 import type { Object3D, Vector3Like } from 'three';
 import {
@@ -162,11 +175,11 @@ const BAND_CENTRE = 0.5;
 /**
  * Construction values with no counterpart in the token layer.
  *
- * style/main.scss declares flat fills, box-shadows and a scale curve, and no
- * particle vocabulary of any kind, so a mote count, a concurrency limit and
- * the mask's two parameters have no token to resolve against and are stated
- * here. The four lengths beside them are token-derived. Every entry is
- * overridable through `ParticleSystemOptions`.
+ * style/main.scss declares flat fills, box-shadows and a scale curve and no
+ * particle vocabulary of any kind, so the mote count, the concurrency limit and
+ * the mask's two parameters are stated here; the four lengths beside them are
+ * token-derived. Every entry is overridable through `ParticleSystemOptions`.
+ * Decision DL-PARTICLE-05.
  */
 export const particleDefaults = Object.freeze({
   particlesPerBurst: 12,
@@ -183,10 +196,9 @@ export const particleDefaults = Object.freeze({
  * The ceilings the two count parameters and the mask edge are confined to.
  *
  * Every buffer this module allocates is sized from `particlesPerBurst` times
- * `maxConcurrentBursts`, and the alpha mask from `maskResolution` squared, so
- * an unbounded parameter is an unbounded allocation. A request above a ceiling
- * is confined to it and reported rather than refused, because the burst it was
- * for is cosmetic and a smaller one is the right answer.
+ * `maxConcurrentBursts`, and the alpha mask from `maskResolution` squared. A
+ * request above a ceiling is confined to it and reported, never refused.
+ * Decision DL-PARTICLE-04.
  */
 export const particleLimits = Object.freeze({
   /** Motes one burst may emit. */
@@ -280,6 +292,11 @@ export interface ParticleSystem {
    *
    * A complete no-op while motion is to be reduced: no mote is emitted, no
    * attribute is written and no frame work is left outstanding.
+   *
+   * @returns `true` when a burst was claimed and its first keyframe written.
+   *   `false` after `dispose()`, while motion is to be reduced, and for an
+   *   origin that is not a finite point; each refusal is reported and nothing
+   *   is written.
    */
   burstAt(worldPosition: Vector3Like, tileValue: number): boolean;
 
@@ -290,15 +307,73 @@ export interface ParticleSystem {
    * parked frame loop leaves the pool exactly as the last step left it.
    */
   advance(context: ParticleFrameContext): void;
+
+  /**
+   * Adds the pooled point cloud to `parent`.
+   *
+   * The caller owns `parent`; this system owns the point cloud and every
+   * resource behind it. Adding it to a second parent moves it, as three.js
+   * does for any object.
+   *
+   * @param parent Object the point cloud becomes a child of.
+   */
   attachTo(parent: Object3D): void;
+
+  /**
+   * The pooled point cloud, the same instance on every call.
+   *
+   * Handed out so a caller can position or parent it. Its geometry, material
+   * and texture belong to `dispose()`: a caller that disposes them itself
+   * leaves this system holding released resources.
+   *
+   * @returns The point cloud.
+   */
   getObject(): Points<BufferGeometry, PointsMaterial>;
+
+  /** @returns Whether at least one burst is running. */
   isActive(): boolean;
+
+  /**
+   * @returns Motes the running bursts hold — the burst count multiplied by the
+   *   configured motes per burst, not a count of visible motes.
+   */
   activeParticleCount(): number;
+
+  /** @returns Bursts currently running, from zero to the concurrency budget. */
   activeBurstCount(): number;
+
+  /** @returns The reduced-motion preference in force, read at the call. */
   isReducedMotion(): boolean;
+
+  /**
+   * Retires every running burst and clears the mote buffers.
+   *
+   * Releases nothing: the pool, its buffers and the point cloud stay
+   * allocated, so the system remains usable and the next `burstAt()` runs
+   * against the buffers it always had. Leaves the cumulative counters alone.
+   */
   reset(): void;
+
+  /**
+   * Releases every resource this system allocated and detaches the point cloud.
+   *
+   * Retires running bursts, removes the point cloud from its parent, disposes
+   * the geometry, the material and the alpha-mask texture — none of which
+   * three.js releases for a caller — and releases the preference
+   * subscription. Idempotent, and afterwards `burstAt()` refuses.
+   */
   dispose(): void;
+
+  /**
+   * @returns A frozen snapshot of the cumulative counters, the pool's budget
+   *   and the preference in force. Safe to hold; it tracks nothing.
+   */
   readStats(): ParticleSystemStats;
+
+  /**
+   * Zeroes the cumulative counters and re-arms the one-shot invalid-delta
+   * warning. Running bursts, the pool and the preference are untouched.
+   */
   resetStats(): void;
 }
 
@@ -600,8 +675,8 @@ function resolveCount(
   }
 
   if (floored > ceiling) {
-    // Confined rather than refused: the caller asked for more of a cosmetic
-    // effect than the system allocates for, and the ceiling is the answer.
+    // Confined to the ceiling and reported, never refused. Decision
+    // DL-PARTICLE-04.
     reportConfinedOption(context, option, supplied, ceiling);
 
     return ceiling;

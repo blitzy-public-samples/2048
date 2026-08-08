@@ -18,8 +18,12 @@
 // global; the one test double below is hand-written. It runs in the
 // `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
 //
-// Decisions this suite is the evidence for: DL-GRID-01 and DL-GRID-02 in
-// docs/DECISION_LOG.md. Traceability rows: TR-GRID-01 through TR-GRID-14
+// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
+// DL-GRID-01, DL-GRID-02.
+// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-GRID-01,
+// TR-GRID-02, TR-GRID-03, TR-GRID-04, TR-GRID-05, TR-GRID-06, TR-GRID-07,
+// TR-GRID-08, TR-GRID-09, TR-GRID-10, TR-GRID-11, TR-GRID-12, TR-GRID-13,
+// TR-GRID-14.
 
 import { describe, expect, it } from 'vitest';
 

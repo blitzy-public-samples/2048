@@ -22,8 +22,10 @@
 // literal declared here, and this suite reads no clock, no environment and no
 // document.
 //
-// Decisions this suite is the evidence for: DL-RNG-04 and DL-RNG-05 in
-// docs/DECISION_LOG.md. Traceability rows: TR-RNG-06 through TR-RNG-09 of
+// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
+// DL-RNG-04, DL-RNG-05.
+// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-RNG-06,
+// TR-RNG-07, TR-RNG-08, TR-RNG-09.
 
 import { describe, expect, it } from 'vitest';
 
@@ -83,14 +85,14 @@ interface Cell {
 }
 
 /**
- * Candidates for the weighted walk, distinct from the spawn distribution: three
- * of them rather than two, so the walk's middle branch is reached.
+ * Candidates for the weighted walk, distinct from the spawn distribution. Three
+ * of them, so the walk's middle branch is reached.
  */
 const UNEVEN_CANDIDATES: readonly string[] = ['common', 'rare', 'legendary'];
 
 /**
- * Weights of `UNEVEN_CANDIDATES`. They total 8 rather than 1, so a selection
- * that read the raw draw without scaling it by the total would not match.
+ * Weights of `UNEVEN_CANDIDATES`. They total 8, so a selection that read the raw
+ * draw without scaling it by the total would not match.
  */
 const UNEVEN_WEIGHTS: readonly number[] = [5, 2, 1];
 
@@ -201,12 +203,11 @@ describe('RNG_STREAM_NAMES', () => {
     expect(new Set(RNG_STREAM_NAMES).size).toBe(4);
   });
 
-  it('is frozen at run time, not only readonly at compile time (F9)', () => {
+  it('is frozen at run time, not only readonly at compile time', () => {
     expect(Object.isFrozen(RNG_STREAM_NAMES)).toBe(true);
   });
 
-  it('refuses a runtime write to an entry and keeps its contents exact ' +
-    '(F9)', () => {
+  it('refuses a runtime write to an entry and keeps its contents exact', () => {
     // The cast is how a caller reaching the tuple through a widened type
     // would arrive at it; compile-time readonly does not stop that caller.
     const mutable = RNG_STREAM_NAMES as unknown as string[];
@@ -226,7 +227,7 @@ describe('RNG_STREAM_NAMES', () => {
   });
 
   it('refuses a runtime push, pop, splice, sort, reverse and length ' +
-    'change (F9)', () => {
+    'change', () => {
     const mutable = RNG_STREAM_NAMES as unknown as string[];
 
     expect(() => {
@@ -257,7 +258,7 @@ describe('RNG_STREAM_NAMES', () => {
   });
 
   it('keeps deriving the same four substreams after a refused mutation ' +
-    'attempt (F9)', () => {
+    'attempt', () => {
     const mutable = RNG_STREAM_NAMES as unknown as string[];
     const reference = createRngStreams(RUN_SEED);
     const expected = reference.stream(SPAWN_VALUE).next();
@@ -1430,7 +1431,7 @@ describe('RngStream.pick declines a list it cannot index', () => {
   });
 });
 
-/* ===== The checkpoint primitive of the substream layer (F2) ===== */
+// The transactional fork: the checkpoint primitive of the substream layer.
 
 // `RngStream.fork()` is what src/engine/hook-bus.ts opens a hook handler's
 // randomness transaction over. The substream layer adds one property to

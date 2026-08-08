@@ -3,8 +3,10 @@
 //
 // Validation gate V8 bullet 4 — "Health reports all six checks: the five
 // capability probes the product already performs but never reports, plus the
-// new WebGL probe" — is measured here. Implicit requirement I6's non-WebGL
-// fallback path is exercised here and nowhere else automatically.
+// new WebGL probe" — is measured here. Of implicit requirement I6, this suite
+// covers one branch: the health and readiness verdict a missing WebGL context
+// produces. The renderer, composition and settings suites cover the
+// no-context and number-only rendering paths.
 //
 // Provenance of the five reused probes, from the deleted vanilla sources, in
 // HEALTH_CHECK_IDS order:
@@ -19,13 +21,23 @@
 // js/local_storage_manager.js L26,
 // `this.storage = supported ? window.localStorage : window.fakeStorage`.
 //
-// docs/TRACEABILITY_MATRIX.md rows this suite is the executable evidence for:
-// TR-HEALTH-01 through TR-HEALTH-06. Each `describe` below is named after the
-// HealthCheckId it covers, so a matrix reader locates the proof by id.
+// Rows of docs/TRACEABILITY_MATRIX.md this suite is the executable evidence
+// for, one apiece. Each `describe` below is named after the HealthCheckId it
+// covers, so a matrix reader locates the proof by id:
+//   TR-HEALTH-01  the `functionBind` check
+//   TR-HEALTH-02  the `classList` check
+//   TR-HEALTH-03  the `requestAnimationFrame` pair
+//   TR-HEALTH-04  the `pointerEvents` check
+//   TR-HEALTH-05  the `storage` check
+//   TR-HEALTH-06  the added `webgl` check
+//   TR-HEALTH-07  the report roll-up and the two readiness verdicts
+//   TR-HEALTH-08  the per-check logger record and status gauge
 //
-// Decisions behind this file: DL-HEALTH-TEST-01, the WebGL probe's negative
-// branch as the fixture over a mocked positive one; DL-HEALTH-TEST-02, the
-// unit boundary of this suite. Both are in docs/DECISION_LOG.md.
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-HEALTH-06  the WebGL probe's negative branch as this suite's fixture
+//   DL-HEALTH-07  the unit boundary of this suite: health.ts alone, with
+//                 src/observability/diagnostics-overlay.ts not exercised here
 //
 // Subject: src/observability/health.ts.
 // src/observability/diagnostics-overlay.ts is not exercised here.
@@ -57,6 +69,14 @@ import type {
   StorageStateView,
   WebGLProbeView,
 } from '../../../src/observability/health';
+import {
+  createDiagnosticsOverlay,
+} from '../../../src/observability/diagnostics-overlay';
+import type {
+  DiagnosticsOverlay,
+  HealthCheckResult as HealthCheckResultView,
+  HealthSource,
+} from '../../../src/observability/diagnostics-overlay';
 import { createLogger } from '../../../src/observability/logger';
 import type { Logger, LogRecord } from '../../../src/observability/logger';
 import {
@@ -81,9 +101,7 @@ import * as touchInputModule from '../../../src/input/touch-input';
 import * as webglModule from '../../../src/render/webgl-support';
 import { resetWebGLSupportProbe } from '../../../src/render/webgl-support';
 
-/* ==========================================================================
- * 1. Status and identity constants, named through the imported unions
- * ========================================================================== */
+// Status and identity constants, named through the imported unions
 
 // Typed through the imported union: a renamed member is a compile error here.
 // Every status assertion below names one of these three and negates none.
@@ -104,9 +122,19 @@ const CORRELATION_ID = 'health-suite-correlation';
 /** Message src/observability/health.ts records every check under. */
 const CHECK_RECORD_MESSAGE = 'capability probe reported';
 
-/* ==========================================================================
- * 2. Local doubles, built without a mocking library
- * ========================================================================== */
+// Local doubles, built without a mocking library
+
+/**
+ * A WebGL probe reporting no context, so a surface built with it creates no
+ * probe canvas. jsdom implements no `getContext`, and every real probe there
+ * writes one virtual-console line.
+ */
+const NO_CONTEXT_PROBE = (): WebGLProbeView => ({
+  supported: false,
+  level: 'none',
+  failure: 'no-context',
+  reason: 'The probe was answered by a double.',
+});
 
 /**
  * A `StorageLike` whose `setItem` throws the quota rejection a full store
@@ -136,9 +164,6 @@ function createQuotaExhaustedStorage(): StorageLike {
  * A `Logger` whose every emitting member throws, and whose `child()` returns
  * itself so the surface's own child is faulty too.
  *
- * Built as an object literal rather than by spying, because `createLogger`
- * returns a logger whose members are not redefinable.
- *
  * @returns The logger. The non-emitting members delegate to a real logger, so
  *   the correlation identifier and the level behave normally.
  */
@@ -161,6 +186,12 @@ function createThrowingLogger(): Logger {
     error: refuse,
     failure: refuse,
     child: (): Logger => faulty,
+
+    // Delegated with the rest of the non-emitting members: this double refuses
+    // to EMIT, and behaves normally everywhere else.
+    setCorrelationId: (correlationId): void => {
+      base.setCorrelationId(correlationId);
+    },
 
     setLevel: (level): void => {
       base.setLevel(level);
@@ -216,9 +247,8 @@ function createContextCanvas(level: string): ContextCanvas {
 /**
  * Reads the status gauge series the surface wrote, keyed by check id.
  *
- * Read from the snapshot rather than through `MetricsRegistry.gauge()`,
- * because that accessor creates a series it does not find and would
- * therefore report every id as present.
+ * Read from the snapshot: `MetricsRegistry.gauge()` creates a series it does not
+ * find, so it would report every id as present. Decision DL-HEALTH-07.
  *
  * @param metrics Registry to read.
  * @returns Gauge value per check id, for the health status family only.
@@ -304,9 +334,7 @@ function readData(result: HealthCheckResult, key: string): unknown {
   return result.data[key];
 }
 
-/* ==========================================================================
- * 3. Captured originals and per-test wiring
- * ========================================================================== */
+// Captured originals and per-test wiring
 
 // Captured once, before any test runs, and compared for identity after
 // probing: the vanilla probes were installers, the ported ones are readers.
@@ -369,14 +397,10 @@ afterEach(() => {
   clearProductStorage();
 });
 
-/* ==========================================================================
- * 4. All six checks are reported — validation gate V8 bullet 4
- * ========================================================================== */
+// All six checks are reported — validation gate V8 bullet 4
 
 describe('the six-check contract', () => {
   it('declares six check ids, each one distinct', () => {
-    // Derived from the exported tuple; a seventh probe or a renamed id
-    // changes this expectation.
     expect(HEALTH_CHECK_IDS).toHaveLength(6);
     expect(HEALTH_CHECK_COUNT).toBe(HEALTH_CHECK_IDS.length);
     expect(new Set(HEALTH_CHECK_IDS).size).toBe(HEALTH_CHECK_IDS.length);
@@ -454,8 +478,6 @@ describe('the six-check contract', () => {
     ]);
     expect(added).toStrictEqual([WEBGL]);
 
-    // A reused check cites the vanilla line it came from; the added one has
-    // no vanilla origin to cite.
     for (const id of reused) {
       expect(HEALTH_CHECK_SOURCES[id].origin).not.toBeNull();
     }
@@ -494,9 +516,7 @@ describe('the six-check contract', () => {
   });
 });
 
-/* ==========================================================================
- * 5. One block per HealthCheckId, in HEALTH_CHECK_IDS order
- * ========================================================================== */
+// One block per HealthCheckId, in HEALTH_CHECK_IDS order
 
 describe('functionBind', () => {
   // js/bind_polyfill.js L1
@@ -519,8 +539,6 @@ describe('functionBind', () => {
 describe('classList', () => {
   // js/classlist_polyfill.js L2-L5
   it('reports pass where classList is present on the root element', () => {
-    // The two preconditions of the expectation below: the host offers
-    // Element, and the capability is native.
     expect(typeof window.Element).not.toBe('undefined');
     expect('classList' in document.documentElement).toBe(true);
 
@@ -539,7 +557,6 @@ describe('classList', () => {
     const result = surface.checkOne(CLASS_LIST);
 
     expect(result.status).toBe(NOT_APPLICABLE);
-    expect(result.status).not.toBe(FAIL);
     expect(readData(result, 'window')).toBe(true);
     expect(readData(result, 'element')).toBe(false);
   });
@@ -591,7 +608,6 @@ describe('pointerEvents', () => {
     expect(result.status).toBe(PASS);
     expect(readData(result, 'resolved')).toBe(true);
 
-    // The three selected names travel in the report, not a bare boolean.
     expect(readData(result, 'touchstart')).toBe('touchstart');
     expect(readData(result, 'touchmove')).toBe('touchmove');
     expect(readData(result, 'touchend')).toBe('touchend');
@@ -607,7 +623,6 @@ describe('pointerEvents', () => {
   });
 
   it('reports the MSPointer family the flag selects', () => {
-    // Resolved by the owning module, from a navigator-like carrying the flag.
     const withFlag = createHealthSurface({
       logger,
       metrics,
@@ -672,7 +687,6 @@ describe('storage', () => {
     const result = absent.checkOne(STORAGE);
 
     expect(result.status).toBe(NOT_APPLICABLE);
-    expect(result.status).not.toBe(FAIL);
     expect(readData(result, 'supported')).toBe(false);
     expect(readData(result, 'errorName')).toBeUndefined();
   });
@@ -706,9 +720,7 @@ describe('webgl', () => {
 });
 
 
-/* ==========================================================================
- * 6. The reuse is real, asserted by wiring rather than by outcome
- * ========================================================================== */
+// The reuse is real, asserted by wiring rather than by outcome
 
 describe('reuse of the probes their owners perform', () => {
   it('routes the storage check through probeWebStorage', () => {
@@ -853,9 +865,7 @@ describe('probing reads a capability and installs none', () => {
 });
 
 
-/* ==========================================================================
- * 7. HealthStatus has three states, and the report roll-up over them
- * ========================================================================== */
+// HealthStatus has three states, and the report roll-up over them
 
 describe('the three-state check status', () => {
   it('names three distinct states', () => {
@@ -954,7 +964,6 @@ describe('the report roll-up', () => {
         }),
       }),
 
-      // A live context, so every check passes.
       createHealthSurface({
         logger,
         metrics,
@@ -1006,9 +1015,7 @@ describe('the report roll-up', () => {
   });
 });
 
-/* ==========================================================================
- * 8. The WebGL negative branch and the number-only fallback (I6)
- * ========================================================================== */
+// The WebGL negative branch and the number-only fallback (I6)
 
 describe('webgl support in a host that offers no context', () => {
   it('reports no context, and a reason rather than a bare false', () => {
@@ -1048,10 +1055,8 @@ describe('webgl support in a host that offers no context', () => {
   it('carries both consequential verdicts, not one', () => {
     const verdicts: ReadinessReport = surface.readiness();
 
-    // The renderer decision.
     expect(verdicts.renderer).toBe('number-only');
 
-    // And, in the same report, which store is live.
     expect(verdicts.storage).toBe('persistent');
     expect(verdicts.storageStrategy).toBe('localStorage');
 
@@ -1154,9 +1159,7 @@ describe('webgl support in a host that offers no context', () => {
 });
 
 
-/* ==========================================================================
- * 9. The storage strategy in the readiness verdict, both branches
- * ========================================================================== */
+// The storage strategy in the readiness verdict, both branches
 
 describe('the live storage strategy in the readiness verdict', () => {
   it('reports the persistent strategy of a Web Storage manager', () => {
@@ -1298,11 +1301,56 @@ describe('the live storage strategy in the readiness verdict', () => {
     expect(result.status).toBe(FAIL);
     expect(readData(result, 'supported')).toBe(false);
   });
+
+  it('refuses persistence where the strategy names a failed store', () => {
+    // The contradiction boundary. `StorageStateView` is injected, so a view
+    // naming `'localStorage'` beside a probe result that did not pass is
+    // type-valid — and deriving persistence from the NAME alone reported that
+    // state as persistent and ready. Both halves are required.
+    const contradictory: StorageStateView = {
+      probe: {
+        supported: false,
+        strategy: 'localStorage',
+        error: {
+          name: 'QuotaExceededError',
+          message: 'Storage is full; the operation was refused.',
+          quota: true,
+        },
+      },
+      strategy: 'localStorage',
+    };
+    const verdicts = createHealthSurface({
+      logger,
+      metrics,
+      storage: contradictory,
+    }).readiness();
+
+    expect(verdicts.storageStrategy).toBe('localStorage');
+    expect(verdicts.storageStatus).toBe(FAIL);
+    expect(verdicts.storage).toBe('ephemeral');
+    expect(verdicts.ready).toBe(false);
+  });
+
+  it('refuses persistence for a not-applicable Web Storage strategy', () => {
+    // The third status is not a pass either: a host offering no store at all
+    // yields `'not-applicable'`, which must not read as persistent.
+    const inapplicable: StorageStateView = {
+      probe: { supported: false, strategy: 'localStorage' },
+      strategy: 'localStorage',
+    };
+    const verdicts = createHealthSurface({
+      logger,
+      metrics,
+      storage: inapplicable,
+    }).readiness();
+
+    expect(verdicts.storageStatus).toBe(NOT_APPLICABLE);
+    expect(verdicts.storage).toBe('ephemeral');
+    expect(verdicts.ready).toBe(false);
+  });
 });
 
-/* ==========================================================================
- * 10. The report lifecycle
- * ========================================================================== */
+// The report lifecycle
 
 describe('checkOne', () => {
   it('returns only the named check, for every declared id', () => {
@@ -1404,7 +1452,6 @@ describe('subscribers', () => {
 
     expect(delivered).toHaveLength(1);
 
-    // Calling the handle again is a no-op rather than an error.
     expect(() => unsubscribe()).not.toThrow();
   });
 
@@ -1458,6 +1505,35 @@ describe('probe views', () => {
     expect(inapplicable?.detail).toContain('not applicable');
   });
 
+  it('carry the three-state status unreduced beside the boolean', () => {
+    vi.stubGlobal('Element', undefined);
+
+    const mixed = createHealthSurface({
+      logger,
+      metrics,
+      webglProbe: NO_CONTEXT_PROBE,
+    });
+    const report = mixed.check();
+
+    for (const view of mixed.probeViews()) {
+      const result = requireCheck(report, view.name as HealthCheckId);
+
+      // The authoritative member. `healthy` cannot express the third state, so
+      // a consumer reading it alone presents an inapplicable check as a pass.
+      expect(view.status).toBe(result.status);
+    }
+
+    const views = mixed.probeViews();
+
+    expect(views.find((view) => view.name === CLASS_LIST)?.status).toBe(
+      NOT_APPLICABLE,
+    );
+    expect(views.find((view) => view.name === FUNCTION_BIND)?.status).toBe(
+      PASS,
+    );
+    expect(views.find((view) => view.name === WEBGL)?.status).toBe(FAIL);
+  });
+
   it('are produced on every call of a bound reader', () => {
     const read = surface.probeReader();
 
@@ -1468,9 +1544,7 @@ describe('probe views', () => {
 });
 
 
-/* ==========================================================================
- * 11. Every result is reported: one status gauge and one log record
- * ========================================================================== */
+// Every result is reported: one status gauge and one log record
 
 describe('the status gauge every check is recorded on', () => {
   it('carries one series per check, labelled with the check id', () => {
@@ -1508,8 +1582,6 @@ describe('the status gauge every check is recorded on', () => {
     expect(gauges.get(FUNCTION_BIND)).toBe(HEALTH_GAUGE_VALUES[PASS]);
     expect(gauges.get(WEBGL)).toBe(HEALTH_GAUGE_VALUES[FAIL]);
 
-    // Three distinct values on one family: the inapplicable case is not
-    // written as the failing one.
     expect(
       new Set([
         gauges.get(CLASS_LIST),
@@ -1629,7 +1701,6 @@ describe('the log record every check is reported through', () => {
     expect(report?.checks).toHaveLength(HEALTH_CHECK_COUNT);
     expect(report?.correlationId).toBe(CORRELATION_ID);
 
-    // One contained throw per check: reporting failed, the checks did not.
     expect(resilient.reporterFaults).toBe(HEALTH_CHECK_COUNT);
     expect(readHealthGauges(metrics).size).toBe(HEALTH_CHECK_COUNT);
   });
@@ -1642,6 +1713,351 @@ describe('the log record every check is reported through', () => {
     expect(report.correlationId).toBe(CORRELATION_ID);
     expect(verdicts.correlationId).toBe(CORRELATION_ID);
     expect(metrics.correlationId).toBe(CORRELATION_ID);
+  });
+});
+
+// Construction, and the state a surface holds before it is used
+/* ==========================================================================
+ * 11a. The failure matrix: one branch driven at a time
+ * ========================================================================== */
+
+describe('a probe that throws, driven one check at a time', () => {
+  /**
+   * Asserts the shape every contained probe throw produces, and that no other
+   * check moved.
+   *
+   * @param report The report the throwing surface produced.
+   * @param affected The check whose probe threw.
+   * @param message Message the probe threw.
+   */
+  const expectOnlyOneThrew = (
+    report: HealthReport,
+    affected: HealthCheckId,
+    message: string,
+  ): void => {
+    // All six still return: a probe that throws costs its own result, not the
+    // report.
+    expect(report.checks).toHaveLength(HEALTH_CHECK_COUNT);
+    expect(report.checks.map((result) => result.id)).toStrictEqual([
+      ...HEALTH_CHECK_IDS,
+    ]);
+
+    const failed = requireCheck(report, affected);
+
+    expect(failed.status).toBe(FAIL);
+    expect(readData(failed, 'threw')).toBe(true);
+
+    // The serialised error details survive into the result.
+    expect(failed.error?.message).toBe(message);
+    expect(failed.error?.name).toBe('Error');
+    expect(typeof failed.error?.stack).toBe('string');
+
+    // Every other check carries no throw marker, and the affected one is the
+    // only one whose data bag is the throw bag.
+    for (const result of report.checks) {
+      if (result.id === affected) {
+        continue;
+      }
+
+      expect(readData(result, 'threw'), `${result.id} threw`).toBeUndefined();
+      expect(result.error, `${result.id} carried an error`).toBeUndefined();
+    }
+  };
+
+  it('contains a throwing pointer probe, leaving the other five intact', () => {
+    const message = 'The pointer probe threw.';
+    const throwing = createHealthSurface({
+      logger,
+      metrics,
+      pointerProbe: (): PointerFamilyView => {
+        throw new Error(message);
+      },
+    });
+    let report: HealthReport | undefined;
+
+    expect(() => {
+      report = throwing.check();
+    }).not.toThrow();
+
+    expectOnlyOneThrew(report as HealthReport, POINTER_EVENTS, message);
+
+    // The reused probes that did not throw still reported their own verdicts.
+    expect(requireCheck(report as HealthReport, FUNCTION_BIND).status).toBe(
+      PASS,
+    );
+    expect(requireCheck(report as HealthReport, CLASS_LIST).status).toBe(PASS);
+    expect(readHealthGauges(metrics).get(POINTER_EVENTS)).toBe(
+      HEALTH_GAUGE_VALUES[FAIL],
+    );
+    expect(readHealthGauges(metrics).size).toBe(HEALTH_CHECK_COUNT);
+  });
+
+  it('contains a throwing storage probe, leaving the other five intact', () => {
+    const message = 'The storage probe threw.';
+    const throwing = createHealthSurface({
+      logger,
+      metrics,
+      storageProbe: (): StorageProbeView => {
+        throw new Error(message);
+      },
+    });
+    let report: HealthReport | undefined;
+
+    expect(() => {
+      report = throwing.check();
+    }).not.toThrow();
+
+    expectOnlyOneThrew(report as HealthReport, STORAGE, message);
+
+    // The readiness verdict follows the failed check rather than throwing.
+    const verdicts = throwing.readiness();
+
+    expect(verdicts.storageStatus).toBe(FAIL);
+    expect(verdicts.storage).toBe('ephemeral');
+    expect(verdicts.ready).toBe(false);
+  });
+
+  it('contains a throwing WebGL probe and leaves the other five intact', () => {
+    const message = 'The WebGL probe threw.';
+    const throwing = createHealthSurface({
+      logger,
+      metrics,
+      webglProbe: (): WebGLProbeView => {
+        throw new Error(message);
+      },
+    });
+    let report: HealthReport | undefined;
+
+    expect(() => {
+      report = throwing.check();
+    }).not.toThrow();
+
+    expectOnlyOneThrew(report as HealthReport, WEBGL, message);
+    expect(throwing.readiness().requiresNumberOnlyFallback).toBe(true);
+  });
+
+  it('reports a throwing probe at warn and the passing ones at info', () => {
+    const throwing = createHealthSurface({
+      logger,
+      metrics,
+      pointerProbe: (): PointerFamilyView => {
+        throw new Error('The pointer probe threw.');
+      },
+    });
+
+    throwing.check();
+
+    const records = readCheckRecords(logger);
+
+    expect(records.size).toBe(HEALTH_CHECK_COUNT);
+    expect(records.get(POINTER_EVENTS)?.level).toBe('warn');
+    expect(records.get(FUNCTION_BIND)?.level).toBe('info');
+  });
+});
+
+describe('the capability branches no probe injection reaches', () => {
+  it('reports rAF not-applicable where no window is present', () => {
+    // js/animframe_polyfill.js ran against `window`; with none present the
+    // question does not arise, so the verdict is the third state, not a fail.
+    vi.stubGlobal('window', undefined);
+
+    const result = createHealthSurface({ logger, metrics }).checkOne(
+      REQUEST_ANIMATION_FRAME,
+    );
+
+    expect(result.status).toBe(NOT_APPLICABLE);
+    expect(readData(result, 'window')).toBe(false);
+    expect(readData(result, 'requestAnimationFrame')).toBeUndefined();
+    expect(readHealthGauges(metrics).get(REQUEST_ANIMATION_FRAME)).toBe(
+      HEALTH_GAUGE_VALUES[NOT_APPLICABLE],
+    );
+  });
+
+  it('reports fail where only the request half is missing', () => {
+    // The complement of the cancel-half case: the pair is what the polyfill
+    // installed, so either half missing is a failure and the data bag names
+    // which.
+    vi.stubGlobal('requestAnimationFrame', undefined);
+
+    const result = createHealthSurface({ logger, metrics }).checkOne(
+      REQUEST_ANIMATION_FRAME,
+    );
+
+    expect(result.status).toBe(FAIL);
+    expect(readData(result, 'requestAnimationFrame')).toBe(false);
+    expect(readData(result, 'cancelAnimationFrame')).toBe(true);
+  });
+
+  it('reports classList fail where Element is present, the API absent', () => {
+    // The one branch that is a genuine FAIL rather than the third state: the
+    // host offers window, Element and a document, and `classList` is absent
+    // from the root element — which is exactly the condition
+    // js/classlist_polyfill.js L2-L5 shimmed.
+    const root = document.documentElement;
+    const shimmed = Object.create(null) as Record<string, unknown>;
+
+    shimmed.tagName = root.tagName;
+
+    vi.spyOn(document, 'documentElement', 'get').mockReturnValue(
+      shimmed as unknown as HTMLElement,
+    );
+
+    const result = createHealthSurface({ logger, metrics }).checkOne(
+      CLASS_LIST,
+    );
+
+    expect(result.status).toBe(FAIL);
+    expect(readData(result, 'window')).toBe(true);
+    expect(readData(result, 'element')).toBe(true);
+    expect(readData(result, 'document')).toBe(true);
+    expect(readData(result, 'documentElement')).toBe(true);
+    expect(readData(result, 'classList')).toBe(false);
+    expect(readHealthGauges(metrics).get(CLASS_LIST)).toBe(
+      HEALTH_GAUGE_VALUES[FAIL],
+    );
+  });
+
+  it('reports classList not-applicable for an unreadable root element', () => {
+    vi.spyOn(document, 'documentElement', 'get').mockReturnValue(
+      null as unknown as HTMLElement,
+    );
+
+    const result = createHealthSurface({ logger, metrics }).checkOne(
+      CLASS_LIST,
+    );
+
+    expect(result.status).toBe(NOT_APPLICABLE);
+    expect(readData(result, 'documentElement')).toBe(false);
+  });
+
+  it('changes only the affected check when one capability is withdrawn', () => {
+    vi.stubGlobal('cancelAnimationFrame', undefined);
+
+    const report = createHealthSurface({ logger, metrics }).check();
+
+    expect(report.checks).toHaveLength(HEALTH_CHECK_COUNT);
+    expect(requireCheck(report, REQUEST_ANIMATION_FRAME).status).toBe(FAIL);
+    expect(requireCheck(report, FUNCTION_BIND).status).toBe(PASS);
+    expect(requireCheck(report, CLASS_LIST).status).toBe(PASS);
+    expect(requireCheck(report, POINTER_EVENTS).status).toBe(PASS);
+    expect(requireCheck(report, STORAGE).status).toBe(PASS);
+  });
+});
+
+describe('a metrics registry whose write paths throw', () => {
+  /**
+   * A registry whose two health write paths throw and whose every other member
+   * delegates to a real one.
+   *
+   * `recordHealthCheck` carries `'pass'` and `'fail'`; `gauge` carries the
+   * third state. Both are made to throw here, because a surface that reports
+   * one status through a working path and another through a throwing one would
+   * hide half the containment.
+   *
+   * @returns The registry.
+   */
+  const createThrowingMetrics = (): MetricsRegistry => {
+    const base = createMetricsRegistry({ logger });
+
+    // Spied rather than rebuilt: `MetricsRegistry` is a class, so an object
+    // literal cannot satisfy it, and `restoreMocks` in vitest.config.ts undoes
+    // both replacements after every test.
+    vi.spyOn(base, 'gauge').mockImplementation((): never => {
+      throw new Error('The registry refused a gauge.');
+    });
+    vi.spyOn(base, 'recordHealthCheck').mockImplementation((): never => {
+      throw new Error('The registry refused a health check.');
+    });
+
+    return base;
+  };
+
+  it('returns every check from check() and counts one fault per write', () => {
+    const resilient = createHealthSurface({
+      logger,
+      metrics: createThrowingMetrics(),
+    });
+    let report: HealthReport | undefined;
+
+    expect(() => {
+      report = resilient.check();
+    }).not.toThrow();
+
+    expect(report?.checks).toHaveLength(HEALTH_CHECK_COUNT);
+    expect(report?.checks.map((result) => result.id)).toStrictEqual([
+      ...HEALTH_CHECK_IDS,
+    ]);
+
+    // Exactly one contained fault per check: the gauge write failed six times
+    // and nothing else did.
+    expect(resilient.reporterFaults).toBe(HEALTH_CHECK_COUNT);
+  });
+
+  it('keeps the logger records available when the registry refuses', () => {
+    const resilient = createHealthSurface({
+      logger,
+      metrics: createThrowingMetrics(),
+    });
+
+    resilient.check();
+
+    const records = readCheckRecords(logger);
+
+    expect(records.size).toBe(HEALTH_CHECK_COUNT);
+
+    for (const id of HEALTH_CHECK_IDS) {
+      expect(records.get(id)?.subsystem, id).toBe('health');
+    }
+  });
+
+  it('returns a result from checkOne and counts exactly one fault', () => {
+    const resilient = createHealthSurface({
+      logger,
+      metrics: createThrowingMetrics(),
+    });
+    let result: HealthCheckResult | undefined;
+
+    expect(() => {
+      result = resilient.checkOne(FUNCTION_BIND);
+    }).not.toThrow();
+
+    expect(result?.id).toBe(FUNCTION_BIND);
+    expect(result?.status).toBe(PASS);
+    expect(resilient.reporterFaults).toBe(1);
+  });
+
+  it('counts the third-state write path as well, and still returns', () => {
+    // `'not-applicable'` goes through `gauge` rather than `recordHealthCheck`,
+    // so this drives the other of the two write paths.
+    vi.stubGlobal('Element', undefined);
+
+    const resilient = createHealthSurface({
+      logger,
+      metrics: createThrowingMetrics(),
+    });
+    let result: HealthCheckResult | undefined;
+
+    expect(() => {
+      result = resilient.checkOne(CLASS_LIST);
+    }).not.toThrow();
+
+    expect(result?.status).toBe(NOT_APPLICABLE);
+    expect(resilient.reporterFaults).toBe(1);
+  });
+
+  it('leaves readiness derivable when every write refuses', () => {
+    const resilient = createHealthSurface({
+      logger,
+      metrics: createThrowingMetrics(),
+    });
+    let verdicts: ReadinessReport | undefined;
+
+    expect(() => {
+      verdicts = resilient.readiness();
+    }).not.toThrow();
+
+    expect(verdicts?.requiresNumberOnlyFallback).toBe(true);
+    expect(verdicts?.correlationId).toBe(CORRELATION_ID);
   });
 });
 
@@ -1706,8 +2122,178 @@ describe('construction', () => {
 
 
 /* ==========================================================================
+ * 12b. The health panel a diagnostics surface renders from this one
+ * ========================================================================== */
+
+// CROSS-MODULE, on purpose. Every case above verifies this surface in
+// isolation, and isolation is exactly what let the three-state status be lost
+// at the boundary: the compatibility reader collapsed `not-applicable` into a
+// boolean, and the panel that consumed the boolean showed a pass. These cases
+// pass a REAL surface and a REAL reader into the real diagnostics overlay and
+// reconcile what is rendered, what the snapshot carries, and what the exported
+// gauge says.
+
+describe('the health panel rendered from a real surface', () => {
+  let host: HTMLElement;
+  let overlay: DiagnosticsOverlay | null = null;
+
+  beforeEach(() => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+  });
+
+  afterEach(() => {
+    overlay?.destroy();
+    overlay = null;
+    host.remove();
+  });
+
+  /**
+   * Builds an overlay over one health source, sharing this suite's registry so
+   * the gauges the panel writes are the gauges asserted on.
+   *
+   * @param health The source: a probe reader or the surface itself.
+   * @returns The mounted, opened overlay.
+   */
+  const openOverlay = (health: HealthSource): DiagnosticsOverlay => {
+    const built = createDiagnosticsOverlay({
+      metrics,
+      logger,
+      host,
+      document,
+      health,
+
+      // Rendered on demand: no scheduled refresh, so nothing races the
+      // assertions below.
+      refreshIntervalMs: 0,
+    });
+
+    overlay = built;
+    built.mount();
+    built.open();
+
+    return built;
+  };
+
+  /** The panel text, whitespace collapsed. */
+  const panelText = (): string => (host.textContent ?? '').replace(/\s+/g, ' ');
+
+  it('renders the third state as itself when read through the compatibility reader', () => {
+    vi.stubGlobal('Element', undefined);
+
+    const mixed = createHealthSurface({
+      logger,
+      metrics,
+      webglProbe: NO_CONTEXT_PROBE,
+    });
+    const built = openOverlay(mixed.probeReader());
+    const health = built.snapshot().health;
+    const row = health.checks.find((entry) => entry.id === CLASS_LIST);
+
+    // The panel used to show `pass` here: the reader answered `healthy: true`
+    // for an inapplicable check and the panel had nothing else to read.
+    expect(row?.status).toBe(NOT_APPLICABLE);
+    expect(panelText()).toContain(NOT_APPLICABLE);
+    expect(health.counts[NOT_APPLICABLE]).toBeGreaterThan(0);
+
+    // And the exported gauge agrees with the rendered row.
+    expect(readHealthGauges(metrics).get(CLASS_LIST)).toBe(
+      HEALTH_GAUGE_VALUES[NOT_APPLICABLE],
+    );
+  });
+
+  it('reconciles every rendered row with the gauge exported for it', () => {
+    vi.stubGlobal('Element', undefined);
+
+    const mixed = createHealthSurface({
+      logger,
+      metrics,
+      webglProbe: NO_CONTEXT_PROBE,
+    });
+    const built = openOverlay(mixed.probeReader());
+    const health = built.snapshot().health;
+    const gauges = readHealthGauges(metrics);
+
+    expect(health.checks).toHaveLength(HEALTH_CHECK_COUNT);
+
+    for (const row of health.checks) {
+      expect(gauges.get(row.id), `no gauge for "${row.id}"`).toBe(
+        HEALTH_GAUGE_VALUES[row.status],
+      );
+    }
+  });
+
+  it('carries the report and the readiness verdicts when given the surface itself', () => {
+    const built = openOverlay(surface);
+    const health = built.snapshot().health;
+
+    // The function-shaped reader leaves both of these null; the surface does
+    // not, which is what makes readiness reachable at all.
+    expect(health.report).not.toBeNull();
+    expect(health.readiness).not.toBeNull();
+    expect(health.report?.checks).toHaveLength(HEALTH_CHECK_COUNT);
+    expect(health.status).toBe(health.report?.status);
+    expect(panelText()).toContain('ready');
+
+    const gauges = readHealthGauges(metrics);
+
+    for (const row of health.checks) {
+      expect(gauges.get(row.id)).toBe(HEALTH_GAUGE_VALUES[row.status]);
+    }
+  });
+
+  it('writes a gauge for a check the source did not report at all', () => {
+    // A partial source: one row, five checks unreported. The panel appends the
+    // five as inapplicable, and each has to carry its own gauge or the panel
+    // and the export disagree about a check nobody reported.
+    const built = openOverlay(
+      (): readonly HealthCheckResultView[] => [
+        { name: WEBGL, status: FAIL, healthy: false, detail: 'no context' },
+      ],
+    );
+    const health = built.snapshot().health;
+    const gauges = readHealthGauges(metrics);
+
+    expect(health.checks).toHaveLength(HEALTH_CHECK_COUNT);
+    expect(gauges.size).toBe(HEALTH_CHECK_COUNT);
+    expect(gauges.get(WEBGL)).toBe(HEALTH_GAUGE_VALUES[FAIL]);
+
+    for (const id of HEALTH_CHECK_IDS) {
+      if (id === WEBGL) {
+        continue;
+      }
+
+      expect(gauges.get(id), `no gauge for unreported "${id}"`).toBe(
+        HEALTH_GAUGE_VALUES[NOT_APPLICABLE],
+      );
+    }
+  });
+
+  it('still reads a boolean-only provider, which cannot express the third state', () => {
+    const built = openOverlay(
+      (): readonly HealthCheckResultView[] =>
+        HEALTH_CHECK_IDS.map((id) => ({
+          name: id,
+          healthy: id !== WEBGL,
+          detail: 'legacy provider',
+        })),
+    );
+    const health = built.snapshot().health;
+
+    expect(health.checks.find((row) => row.id === WEBGL)?.status).toBe(FAIL);
+    expect(health.checks.find((row) => row.id === FUNCTION_BIND)?.status).toBe(
+      PASS,
+    );
+    expect(health.counts[NOT_APPLICABLE]).toBe(0);
+  });
+});
+
+
+/* ==========================================================================
  * 13. Leak audit: this suite leaves the host as it found it
  * ========================================================================== */
+
+// Leak audit: this suite leaves the host as it found it
 
 describe('isolation from the suites that follow', () => {
   it('leaves the five stubbed globals at their original references', () => {
@@ -1759,4 +2345,3 @@ describe('isolation from the suites that follow', () => {
     expect(window.localStorage.getItem(GAME_STATE_KEY)).toBeNull();
   });
 });
-

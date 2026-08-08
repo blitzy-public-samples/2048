@@ -3,31 +3,32 @@
 // The single project `gameplay-recording` runs in headless Chromium against the
 // built static bundle. `testMatch` names one path,
 // tests/e2e/gameplay-recording.spec.ts, so no other spec placed under
-// tests/e2e/ can be collected into the video gate. THAT SPEC IS NOT PRESENT
-// YET: this config is the gate's configuration, not evidence that the gate has
-// passed. Three settings carry the proof and are load-bearing:
+// tests/e2e/ can be collected into the video gate. The unit suite and the
+// seeded snapshot gate run under their own Vitest configs and are ignored here.
 //
-// decision DL-PW-01:
+// EXTERNAL CONSTRAINTS THE RECORDING SETTINGS SATISFY
 //   - `video.mode: 'on'` records every test, passing or failing, and
-//     `video.size` repeats the viewport, which keeps the frame out of
-//     Playwright's default 800x800 box. The 1280x960 viewport records the
-//     desktop layout unscaled: style/_tokens.scss declares $field-width as
-//     500px and $mobile-threshold as 520px, and style/main.scss consumes both
-//     through @use.
-//   - the WebM is written when the browser context closes, and nothing here
-//     creates a context of its own; the built-in `page` fixture owns and
-//     closes it.
+//     `video.size` repeats the viewport; Playwright otherwise scales the frame
+//     into an 800x800 box. The 1280x960 viewport records the desktop layout
+//     unscaled: style/_tokens.scss declares $field-width as 500px and
+//     $mobile-threshold as 520px, and style/main.scss consumes both through
+//     @use.
+//   - the WebM is written when the browser context closes. Nothing here creates
+//     a context of its own; the built-in `page` fixture owns and closes it.
 //   - the ANGLE/SwiftShader launch arguments below make WebGL 2.0 available
 //     with no GPU present.
-// The unit suite and the seeded snapshot gate run under their own Vitest
-// configs and are ignored here.
 //
-// Decisions behind this file: DL-PW-01, the recording settings that carry the
-// proof, and DL-PW-02, the loopback-origin assertion evaluated at config load.
-// Both are in docs/DECISION_LOG.md. This file carries no ported construct: the
-// repository held no automation of any kind, so its constructs are target-only
-// rows TR-PW-01 through TR-PW-03 of docs/TRACEABILITY_MATRIX.md — the
-// project, the recording settings and the preview web server.
+// This file carries no ported construct: the repository held no automation of
+// any kind. One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every
+// row of this file's area enumerated, all target-only:
+//   TR-PW-01  the `gameplay-recording` project and its single `testMatch`
+//   TR-PW-02  the recording settings and the software-GL launch arguments
+//   TR-PW-03  the preview web server and its loopback-origin assertion
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-PW-01  the recording settings that carry the proof
+//   DL-PW-02  the loopback-origin assertion evaluated at config load
 //
 import { defineConfig, devices } from '@playwright/test';
 
@@ -69,9 +70,9 @@ function assertPreviewPort(port: number): number {
  * Asserts that `origin` is an HTTP or HTTPS URL on a loopback host, and returns
  * it in parsed form.
  *
- * Runs when this config is loaded, before any browser is launched and before
- * any server is started, so a target that is not this machine's own preview
- * server stops the run instead of being recorded. Decision DL-PW-02.
+ * Runs when this config is loaded, before any browser is launched and before any
+ * server is started. A target that is not this machine's own preview server
+ * throws here and no run begins. Decision DL-PW-02.
  *
  * @param origin Origin to check.
  * @returns The parsed form of `origin`.
@@ -191,10 +192,11 @@ export default defineConfig({
     },
 
     launchOptions: {
-      // Sandbox configuration through Playwright's own option rather than a
-      // launch argument. The browser only ever navigates to the loopback
-      // origin asserted above, served by the preview server this project
-      // starts itself.
+      // The Chromium sandbox is disabled, expressed through Playwright's own
+      // option rather than a launch argument, because the CI container runs
+      // unprivileged and cannot grant the sandbox the namespaces it needs.
+      // Nothing here restricts the origins a spec or a page script may
+      // navigate to.
       chromiumSandbox: false,
 
       args: [

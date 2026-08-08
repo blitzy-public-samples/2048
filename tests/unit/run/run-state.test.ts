@@ -1,7 +1,13 @@
 // Schema suite of src/run/run-state.ts: the nine-member run-state envelope,
-// the board snapshot it wraps, its version classification and its cursor
-// normalisation. AAP Contract 5 (0.6.1.5), requirement R6, and the
-// schema-versioning half of implicit requirement I5.
+// the board snapshot it wraps, its version classification, its cursor
+// normalisation and its correlation-identifier derivation. AAP Contract 5
+// (0.6.1.5), requirement R6, and the schema-versioning half of implicit
+// requirement I5.
+//
+// `runCorrelationId()` is pinned byte-equal to `deriveCorrelationId()` of
+// src/observability/logger.ts here, which is the only place the two separate
+// implementations of that one algorithm are compared. src/run/ reaches no
+// observability module, so nothing else can hold them together.
 //
 // Superseded constructs this suite is the named verification target for:
 //   Tile.prototype.serialize         js/tile.js         L19-L27
@@ -49,6 +55,7 @@ import {
   RNG_STREAM_NAMES,
 } from '../../../src/rng/rng-streams';
 import type { RngCursorMap, StreamName } from '../../../src/rng/rng-streams';
+import { deriveCorrelationId } from '../../../src/observability/logger';
 import * as runStateModule from '../../../src/run/run-state';
 import {
   MAX_PERSISTED_RELICS,
@@ -56,6 +63,7 @@ import {
   NOOP_RUN_REPORTER,
   RUN_STATE_SCHEMA_VERSION,
   RUN_STATE_SCHEMA_VERSION_HISTORY,
+  RUN_STATE_VERSION_POLICY,
   classifyRunStateVersion,
   createFreshRunState,
   describeRunStateProblems,
@@ -65,6 +73,8 @@ import {
   normalizeRngCursor,
   projectCurrentRunState,
   redactRunSummary,
+  resolveRunStateVersionPolicy,
+  runCorrelationId,
   summarizeRunState,
   summarizeRunStateForReport,
 } from '../../../src/run/run-state';
@@ -74,6 +84,7 @@ import type {
   PersistedRelic,
   RunReporter,
   RunState,
+  RunStateVersionPolicy,
   RunStateVersionVerdict,
   RunSummary,
 } from '../../../src/run/run-state';
@@ -164,6 +175,7 @@ const REPORTER_CHANNELS: readonly string[] = [
   'onWriteFailed',
   'onRunStarted',
   'onStageAdvanced',
+  'onRewardOffered',
   'onRewardDrawn',
   'onRunEnded',
 ];
@@ -1153,17 +1165,45 @@ describe('classifyRunStateVersion reports current for this build', () => {
 });
 
 describe('classifyRunStateVersion separates older from unknown', () => {
-  it('reports older for every recorded version below the current one', () => {
-    const recordedOlder = RUN_STATE_SCHEMA_VERSION_HISTORY.filter(
-      (version) => version < RUN_STATE_SCHEMA_VERSION
-    );
-
-    for (const version of recordedOlder) {
-      expect(classifyRunStateVersion({ schemaVersion: version })).toBe(
-        'older'
+  it('records no version below the current one, so none classifies older',
+    () => {
+      const recordedOlder = RUN_STATE_SCHEMA_VERSION_HISTORY.filter(
+        (version) => version < RUN_STATE_SCHEMA_VERSION
       );
-    }
-  });
+
+      // Stated as an EQUALITY rather than driven as a loop. The shipped history
+      // holds one entry, so a loop over this set would iterate zero times and
+      // assert nothing while reading as coverage of the 'older' branch. The
+      // branch is exercised for real against an injected policy in section 23.
+      expect(recordedOlder).toEqual([]);
+
+      for (const version of recordedOlder) {
+        expect(classifyRunStateVersion({ schemaVersion: version })).toBe(
+          'older'
+        );
+      }
+    });
+
+  it('reports older for a version an injected policy places below current',
+    () => {
+      // The same claim the empty set above cannot make, made against a policy
+      // naming a genuine prior version.
+      const policy: RunStateVersionPolicy = {
+        current: RUN_STATE_SCHEMA_VERSION + 1,
+        history: [RUN_STATE_SCHEMA_VERSION, RUN_STATE_SCHEMA_VERSION + 1],
+      };
+      const older = policy.history.filter(
+        (version) => version < policy.current
+      );
+
+      expect(older.length).toBeGreaterThan(0);
+
+      for (const version of older) {
+        expect(
+          classifyRunStateVersion({ schemaVersion: version }, policy)
+        ).toBe('older');
+      }
+    });
 
   it('reports unknown for an integer above the current version', () => {
     for (const offset of [1, 2, 99]) {
@@ -1640,14 +1680,24 @@ describe('a run summary is producible from an envelope', () => {
 
 /* ===== 14. Correlation identity and the injected report sink ===== */
 
-describe('the run layer carries correlation identity without deriving it',
+describe('the run layer derives correlation identity from what it persists',
   () => {
-    it('exports no correlation-identifier derivation of its own', () => {
+    it('exports the derivation its own contract requires', () => {
       const surface = Object.keys(runStateModule);
 
-      expect(surface).not.toContain('runCorrelationId');
-      expect(surface).not.toContain('deriveCorrelationId');
+      expect(surface).toContain('runCorrelationId');
+      expect(typeof runCorrelationId).toBe('function');
     });
+
+    it('does not re-export the observability derivation under its own name',
+      () => {
+        // The two are separate implementations of one algorithm, pinned equal
+        // below. A re-export would put an import from src/observability/ in
+        // src/run/, which this module's constraints forbid.
+        expect(Object.keys(runStateModule)).not.toContain(
+          'deriveCorrelationId'
+        );
+      });
 
     it('persists both derivation inputs, the seed and the run identifier',
       () => {
@@ -2338,3 +2388,434 @@ describe('a report summary carries every member except the seed', () => {
   });
 });
 
+
+/* ===== 22. runCorrelationId, and its equality with the logger's ===== */
+
+// Every pair the two derivations are compared over: ordinary values, the
+// boundaries, and the inputs a hand-rolled hash is most likely to disagree on
+// — an empty string, a NUL byte inside a member, a member whose text is the
+// other member's, and text outside the BMP whose UTF-16 units the two loops
+// must walk identically.
+type CorrelationInput = readonly [string, string];
+
+const CORRELATION_INPUTS: readonly CorrelationInput[] = Object.freeze(
+  [
+    ['seed-42', 'run-1'],
+    ['run-seed-2048', 'instance-a'],
+    ['', ''],
+    ['', 'lonely-run'],
+    ['lonely-seed', ''],
+    ['a', 'b'],
+    ['b', 'a'],
+    ['same', 'same'],
+    ['with\u0000nul', 'plain'],
+    ['plain', 'with\u0000nul'],
+    ['\u{1F600}\u{1F601}', '\u{1F602}'],
+    ['seed with spaces and, punctuation!', 'run/id?with=chars'],
+    ['0', '0'],
+    ['9007199254740993', '-1'],
+    ['x'.repeat(64), 'y'.repeat(64)],
+  ]
+);
+
+describe('runCorrelationId derives the identifier from what is persisted',
+  () => {
+    it('is deterministic across repeated calls', () => {
+      for (const [seed, runId] of CORRELATION_INPUTS) {
+        expect(runCorrelationId(seed, runId)).toBe(
+          runCorrelationId(seed, runId)
+        );
+      }
+    });
+
+    it('reads no clock: the same inputs survive a real delay', async () => {
+      const before = runCorrelationId('timed-seed', 'timed-run');
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 2);
+      });
+
+      expect(runCorrelationId('timed-seed', 'timed-run')).toBe(before);
+    });
+
+    it('derives the seed-grouping form when the run identifier is omitted',
+      () => {
+        const grouped = runCorrelationId('grouped-seed');
+
+        expect(grouped).toBe(runCorrelationId('grouped-seed', ''));
+        expect(grouped).toHaveLength(18);
+        expect(grouped.startsWith('run-')).toBe(true);
+      });
+
+    it('derives the 26-character run-instance form when one is supplied',
+      () => {
+        const instance = runCorrelationId('grouped-seed', 'instance');
+
+        expect(instance).toHaveLength(26);
+        expect(instance.startsWith(runCorrelationId('grouped-seed'))).toBe(
+          true
+        );
+      });
+
+    it('groups every run of one seed under one prefix', () => {
+      const grouped = runCorrelationId('shared-seed');
+      const first = runCorrelationId('shared-seed', 'run-a');
+      const second = runCorrelationId('shared-seed', 'run-b');
+
+      expect(first.startsWith(grouped)).toBe(true);
+      expect(second.startsWith(grouped)).toBe(true);
+      expect(first).not.toBe(second);
+    });
+
+    it('separates two seeds that share a run identifier', () => {
+      expect(runCorrelationId('seed-a', 'shared-run')).not.toBe(
+        runCorrelationId('seed-b', 'shared-run')
+      );
+    });
+
+    it('is not the bare hash of the run identifier alone', () => {
+      // The instance segment is hashed over the run identifier AND the seed,
+      // so it cannot be read back as a hash of `runId`.
+      const withSeed = runCorrelationId('a-seed', 'the-run');
+      const withoutSeed = runCorrelationId('', 'the-run');
+
+      expect(withSeed.slice(-7)).not.toBe(withoutSeed.slice(-7));
+    });
+
+    it('carries the seed text in neither form', () => {
+      const seed = 'a-very-distinctive-seed-text';
+
+      expect(runCorrelationId(seed)).not.toContain(seed);
+      expect(runCorrelationId(seed, 'run')).not.toContain(seed);
+    });
+
+    it('is non-empty and base36 after the prefix for every input', () => {
+      for (const [seed, runId] of CORRELATION_INPUTS) {
+        for (const derived of [
+          runCorrelationId(seed),
+          runCorrelationId(seed, runId),
+        ]) {
+          expect(derived.length).toBeGreaterThan(0);
+          expect(derived).toMatch(/^run-[0-9a-z]{14}(-[0-9a-z]{7})?$/);
+        }
+      }
+    });
+
+    it('never throws, coercing every argument it is handed', () => {
+      const hostile = [
+        undefined,
+        null,
+        0,
+        Number.NaN,
+        true,
+        [],
+        {},
+      ] as unknown[];
+
+      for (const value of hostile) {
+        expect(() =>
+          runCorrelationId(value as string, value as string)
+        ).not.toThrow();
+        expect(
+          typeof runCorrelationId(value as string, value as string)
+        ).toBe('string');
+      }
+    });
+
+    it('re-derives from a reloaded envelope alone', () => {
+      const input = buildInput();
+      const restored = JSON.parse(
+        JSON.stringify(createFreshRunState(input))
+      ) as RunState;
+
+      expect(runCorrelationId(restored.seed, restored.runId)).toBe(
+        runCorrelationId(input.seed, input.runId)
+      );
+    });
+  });
+
+describe('runCorrelationId is byte-equal to the logger derivation', () => {
+  it('agrees on the run-instance form for every input pair', () => {
+    for (const [seed, runId] of CORRELATION_INPUTS) {
+      expect(runCorrelationId(seed, runId)).toBe(
+        deriveCorrelationId(seed, runId)
+      );
+    }
+  });
+
+  it('agrees on the seed-grouping form for every seed', () => {
+    for (const [seed] of CORRELATION_INPUTS) {
+      expect(runCorrelationId(seed)).toBe(deriveCorrelationId(seed));
+      expect(runCorrelationId(seed, '')).toBe(deriveCorrelationId(seed, ''));
+    }
+  });
+
+  it('agrees character for character, not merely in length', () => {
+    for (const [seed, runId] of CORRELATION_INPUTS) {
+      const mine = runCorrelationId(seed, runId);
+      const theirs = deriveCorrelationId(seed, runId);
+
+      expect(mine.split('')).toEqual(theirs.split(''));
+    }
+  });
+
+  it('agrees for hostile arguments both coerce', () => {
+    const hostile = [undefined, null, 0, Number.NaN, true] as unknown[];
+
+    for (const value of hostile) {
+      expect(runCorrelationId(value as string, value as string)).toBe(
+        deriveCorrelationId(value as string, value as string)
+      );
+    }
+  });
+
+  it('agrees over a generated sweep of seeds and run identifiers', () => {
+    for (let index = 0; index < 64; index += 1) {
+      const seed = `sweep-seed-${index}`;
+      const runId = `sweep-run-${index * 7 + 1}`;
+
+      expect(runCorrelationId(seed, runId)).toBe(
+        deriveCorrelationId(seed, runId)
+      );
+    }
+  });
+});
+
+/* ===== 23. The injectable version policy ===== */
+
+// A policy naming a genuine prior version. `RUN_STATE_SCHEMA_VERSION_HISTORY`
+// holds one entry in this build, so without an injected policy the 'older'
+// verdict is unreachable and every assertion over it is vacuous.
+const PRIOR_VERSION = RUN_STATE_SCHEMA_VERSION;
+
+const NEXT_VERSION = RUN_STATE_SCHEMA_VERSION + 1;
+
+const TWO_VERSION_POLICY: RunStateVersionPolicy = Object.freeze({
+  current: NEXT_VERSION,
+  history: Object.freeze([PRIOR_VERSION, NEXT_VERSION]),
+});
+
+describe('the shipped version policy mirrors the module constants', () => {
+  it('names the current version and the whole history', () => {
+    expect(RUN_STATE_VERSION_POLICY.current).toBe(RUN_STATE_SCHEMA_VERSION);
+    expect(RUN_STATE_VERSION_POLICY.history).toEqual(
+      RUN_STATE_SCHEMA_VERSION_HISTORY
+    );
+  });
+
+  it('is what an omitted policy resolves to', () => {
+    expect(resolveRunStateVersionPolicy()).toBe(RUN_STATE_VERSION_POLICY);
+    expect(resolveRunStateVersionPolicy(undefined)).toBe(
+      RUN_STATE_VERSION_POLICY
+    );
+  });
+
+  it('leaves classification unchanged when it is the one supplied', () => {
+    const stored = { schemaVersion: RUN_STATE_SCHEMA_VERSION };
+
+    expect(classifyRunStateVersion(stored, RUN_STATE_VERSION_POLICY)).toBe(
+      classifyRunStateVersion(stored)
+    );
+  });
+});
+
+describe('resolveRunStateVersionPolicy is total over a hostile policy', () => {
+  it('replaces a non-integer current version with the shipped one', () => {
+    for (const current of [
+      'two',
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      undefined,
+      null,
+    ] as unknown[]) {
+      const resolved = resolveRunStateVersionPolicy({
+        current,
+        history: [1],
+      } as unknown as RunStateVersionPolicy);
+
+      expect(resolved.current).toBe(RUN_STATE_SCHEMA_VERSION);
+    }
+  });
+
+  it('drops every non-integer history entry', () => {
+    const resolved = resolveRunStateVersionPolicy({
+      current: NEXT_VERSION,
+      history: [1, 'two', 2.5, Number.NaN, NEXT_VERSION],
+    } as unknown as RunStateVersionPolicy);
+
+    expect(resolved.history).toEqual([1, NEXT_VERSION]);
+  });
+
+  it('adds the current version to a history that omits it', () => {
+    const resolved = resolveRunStateVersionPolicy({
+      current: NEXT_VERSION,
+      history: [PRIOR_VERSION],
+    });
+
+    expect(resolved.history).toContain(NEXT_VERSION);
+    expect(resolved.history).toContain(PRIOR_VERSION);
+  });
+
+  it('returns an ascending, frozen history', () => {
+    const resolved = resolveRunStateVersionPolicy({
+      current: 9,
+      history: [9, 3, 7, 1],
+    });
+
+    expect(resolved.history).toEqual([1, 3, 7, 9]);
+    expect(Object.isFrozen(resolved.history)).toBe(true);
+    expect(Object.isFrozen(resolved)).toBe(true);
+  });
+
+  it('does not mutate the history it was handed', () => {
+    const history = [3, 1, 2];
+    const policy: RunStateVersionPolicy = { current: 2, history };
+
+    resolveRunStateVersionPolicy(policy);
+
+    expect(history).toEqual([3, 1, 2]);
+  });
+
+  it('degrades to the shipped policy when a member accessor throws', () => {
+    const hostile = {
+      get current(): number {
+        throw new Error('current refused');
+      },
+      get history(): readonly number[] {
+        throw new Error('history refused');
+      },
+    } as RunStateVersionPolicy;
+
+    expect(() => resolveRunStateVersionPolicy(hostile)).not.toThrow();
+    expect(resolveRunStateVersionPolicy(hostile)).toBe(
+      RUN_STATE_VERSION_POLICY
+    );
+  });
+
+  it('degrades for a policy that is not an object at all', () => {
+    for (const value of [null, 0, 'policy', true] as unknown[]) {
+      expect(() =>
+        resolveRunStateVersionPolicy(value as RunStateVersionPolicy)
+      ).not.toThrow();
+    }
+  });
+});
+
+describe('classifyRunStateVersion reaches older through a policy', () => {
+  it('exercises a NON-EMPTY set of versions below the current one', () => {
+    const resolved = resolveRunStateVersionPolicy(TWO_VERSION_POLICY);
+    const older = resolved.history.filter(
+      (version) => version < resolved.current
+    );
+
+    // The assertion the shipped constants cannot satisfy: without it, every
+    // loop below would pass over an empty set and prove nothing.
+    expect(older.length).toBeGreaterThan(0);
+
+    for (const version of older) {
+      expect(
+        classifyRunStateVersion({ schemaVersion: version }, TWO_VERSION_POLICY)
+      ).toBe('older');
+    }
+  });
+
+  it("reports 'current' for the policy's own current version", () => {
+    expect(
+      classifyRunStateVersion(
+        { schemaVersion: NEXT_VERSION },
+        TWO_VERSION_POLICY
+      )
+    ).toBe('current');
+  });
+
+  it("reports 'unknown' above the policy's current version", () => {
+    expect(
+      classifyRunStateVersion(
+        { schemaVersion: NEXT_VERSION + 1 },
+        TWO_VERSION_POLICY
+      )
+    ).toBe('unknown');
+  });
+
+  it("reports 'unknown' for a lower version the history omits", () => {
+    expect(
+      classifyRunStateVersion(
+        { schemaVersion: PRIOR_VERSION - 1 },
+        TWO_VERSION_POLICY
+      )
+    ).toBe('unknown');
+  });
+
+  it('reclassifies one stored payload under two policies', () => {
+    const stored = { schemaVersion: RUN_STATE_SCHEMA_VERSION };
+
+    expect(classifyRunStateVersion(stored)).toBe('current');
+    expect(classifyRunStateVersion(stored, TWO_VERSION_POLICY)).toBe('older');
+  });
+
+  it('still reports absent, malformed and non-object verdicts', () => {
+    expect(classifyRunStateVersion({}, TWO_VERSION_POLICY)).toBe('absent');
+    expect(classifyRunStateVersion(null, TWO_VERSION_POLICY)).toBe('absent');
+    expect(
+      classifyRunStateVersion({ schemaVersion: 1.5 }, TWO_VERSION_POLICY)
+    ).toBe('malformed');
+    expect(classifyRunStateVersion([], TWO_VERSION_POLICY)).toBe('malformed');
+  });
+
+  it('never throws for a hostile policy, whatever the payload', () => {
+    const hostile = {
+      get current(): number {
+        throw new Error('refused');
+      },
+      get history(): readonly number[] {
+        return [];
+      },
+    } as RunStateVersionPolicy;
+
+    for (const stored of [
+      { schemaVersion: RUN_STATE_SCHEMA_VERSION },
+      { schemaVersion: 99 },
+      {},
+      null,
+      [],
+      'stored',
+    ] as unknown[]) {
+      expect(() => classifyRunStateVersion(stored, hostile)).not.toThrow();
+    }
+
+    expect(
+      classifyRunStateVersion({ schemaVersion: RUN_STATE_SCHEMA_VERSION },
+        hostile)
+    ).toBe('current');
+  });
+
+  it('leaves what this build WRITES at the module constant', () => {
+    // A policy changes what a reader accepts, never what a writer stamps.
+    const state = createFreshRunState(buildInput());
+
+    expect(state.schemaVersion).toBe(RUN_STATE_SCHEMA_VERSION);
+    expect(projectCurrentRunState(state).schemaVersion).toBe(
+      RUN_STATE_SCHEMA_VERSION
+    );
+    expect(isCurrentRunState(state)).toBe(true);
+  });
+
+  it('stamps a supplied target version when one is given', () => {
+    const state = createFreshRunState(buildInput());
+
+    expect(projectCurrentRunState(state, NEXT_VERSION).schemaVersion).toBe(
+      NEXT_VERSION
+    );
+  });
+
+  it('ignores a non-integer target version', () => {
+    const state = createFreshRunState(buildInput());
+
+    for (const target of [1.5, Number.NaN, 'two'] as unknown[]) {
+      expect(
+        projectCurrentRunState(state, target as number).schemaVersion
+      ).toBe(RUN_STATE_SCHEMA_VERSION);
+    }
+  });
+});

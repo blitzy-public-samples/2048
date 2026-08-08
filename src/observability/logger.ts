@@ -20,12 +20,24 @@
 // unguarded `setItem` and an unguarded `JSON.parse` — report through
 // `createStorageReporter`.
 //
-// docs/TRACEABILITY_MATRIX.md:
-//   TR-LOG-01  js/local_storage_manager.js L37-L39  the discarded-error
-//   TR-LOG-02  js/local_storage_manager.js L47-L49  the unguarded `setItem`
-//   TR-LOG-03  js/local_storage_manager.js L54      the unguarded
-// Everything else in this module is a target-only row, TR-LOG-04 through
-// TR-LOG-08: the correlation identifier, the log record, the level filter,
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-LOG-01  js/local_storage_manager.js  the discarded-error `catch`, whose
+//              L37-L39                      target is `serializeError`
+//   TR-LOG-02  js/local_storage_manager.js  the unguarded `setItem`, reported
+//              L47-L49                      through `createStorageReporter`
+//   TR-LOG-03  js/local_storage_manager.js  the unguarded `JSON.parse`,
+//              L54                          reported through the same adapter
+//   TR-LOG-04  target-only row              `deriveCorrelationId` and its
+//                                           two-hash rendering
+//   TR-LOG-05  target-only row              the log record, its level filter
+//                                           and the sink registry
+//   TR-LOG-06  target-only row              the bounded recent-record buffer
+//                                           and `Logger.recent`
+//   TR-LOG-07  target-only row              the JSON-lines export
+//   TR-LOG-08  target-only row              the three reporter adapters for
+//                                           src/engine, src/input and
+//                                           src/storage
 //
 // The module's only imports are the three reporter contracts, imported as types
 // and therefore erased at build time. It names no package, no sibling
@@ -33,10 +45,16 @@
 // through `globalThis`, and every access to them is guarded. Exported members
 // report rather than throw.
 //
-// Decisions behind this file: DL-LOG-01, the correlation identifier being a
-// deterministic hash of the run seed and run identifier; DL-LOG-02, the
-// two-hash rendering of that identifier; DL-LOG-03, the bounded
-// backend; and DL-LOG-04, the three reporter adapters living in this
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-LOG-01  the correlation identifier as a deterministic hash of the run
+//              seed and the run identifier
+//   DL-LOG-02  the two-hash rendering of that identifier
+//   DL-LOG-03  the bounded recent-record buffer as the pull backend
+//   DL-LOG-04  the three reporter adapters living in this module
+//   DL-LOG-05  a throwable identified by its argument position, never by its
+//              type
+//   DL-LOG-06  a field bag deep-sanitised on the way into a record
 
 import type {
   CorrelationId,
@@ -1063,6 +1081,25 @@ export interface Logger {
   child(subsystem: string): Logger;
 
   /**
+   * Replaces the correlation identifier every later record carries, on this
+   * logger and on every logger sharing its state.
+   *
+   * WHY THIS EXISTS. The identifier is derived from the run — its seed and its
+   * instance — so a page that starts a second run without reloading is emitting
+   * records for a run that is not the one this logger was constructed for. A
+   * stream partitioned by correlation identifier would then attribute the new
+   * run's records to the old run. Records already emitted are NOT rewritten:
+   * they were true when they were written.
+   *
+   * The one deriver of the value is still `deriveCorrelationId`; this only
+   * carries a value that function produced. A blank or non-string value leaves
+   * the current identifier unchanged.
+   *
+   * @param correlationId The identifier later records carry.
+   */
+  setCorrelationId(correlationId: CorrelationId): void;
+
+  /**
    * Sets the level below which records are discarded. A value that is not one
    * of the four level names leaves the current level unchanged.
    */
@@ -1088,7 +1125,11 @@ interface SinkRegistration {
 }
 
 interface LoggerState {
-  readonly correlationId: CorrelationId;
+  /**
+   * Rotated by `setCorrelationId` when a second run starts in one page load, so
+   * every logger sharing this state carries the identifier of the run in force.
+   */
+  correlationId: CorrelationId;
   level: LogLevel;
   readonly registrations: SinkRegistration[];
   readonly buffer: (LogRecord | undefined)[];
@@ -1781,7 +1822,12 @@ function emit(
 
 function createBoundLogger(state: LoggerState, subsystem: string): Logger {
   const logger: Logger = {
-    correlationId: state.correlationId,
+    // A GETTER, not a captured value: `setCorrelationId` rotates the identifier
+    // when a second run starts in one page load, and a captured value would go
+    // on reporting the identifier this logger was built with.
+    get correlationId(): CorrelationId {
+      return state.correlationId;
+    },
 
     subsystem,
 
@@ -1829,6 +1875,14 @@ function createBoundLogger(state: LoggerState, subsystem: string): Logger {
 
     child(nextSubsystem: string): Logger {
       return createBoundLogger(state, toSubsystem(nextSubsystem));
+    },
+
+    setCorrelationId(correlationId: CorrelationId): void {
+      if (typeof correlationId !== 'string' || correlationId.length === 0) {
+        return;
+      }
+
+      state.correlationId = correlationId;
     },
 
     setLevel(level: LogLevel): void {

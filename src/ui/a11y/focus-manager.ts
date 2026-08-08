@@ -17,8 +17,6 @@
  * js/html_actuator.js's, and the cell geometry comes from style/main.scss
  * through ../../theme/tokens.
  *
- * TR-FOCUS-01 through TR-FOCUS-07 in the order of the table.
- *
  * The three controls the trap cycles were `<a>` elements with no `href` in the
  * retired markup, so none was a tab stop; index.html now declares them as
  * `<button>` elements and src/input/on-screen-controls.ts owns their bindings.
@@ -44,11 +42,33 @@
  * layer, and to style/_reward.scss, which owns the dialog surface. The only
  * style properties written here are the position and size of a cell
  * counterpart, and every one of their values comes from ../../theme/tokens.
- //
- * Decisions behind this file, all in docs/DECISION_LOG.md: DL-FOCUS-01, the
- * single-tab-stop grid; DL-FOCUS-02, the explicit per-cell geometry;
- * DL-FOCUS-03, `aria-disabled` elements retained in the focus cycle; and
- * DL-A11Y-08, the parallel DOM beside an `aria-hidden` canvas, which
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-FOCUS-01  index.html L31, L38, L39      the three hrefless `<a>`
+ *                                              controls, now `<button>`
+ *                                              elements this module orders and
+ *                                              contains
+ *   TR-FOCUS-02  js/keyboard_input_manager.js  the unguarded control lookups,
+ *                L139-L141                     resolved here through the
+ *                                              guarded resolver of ./settings
+ *   TR-FOCUS-03  target-only row               `collectFocusable`,
+ *                                              `FOCUSABLE_SELECTORS` and the
+ *                                              focus cycle
+ *   TR-FOCUS-04  target-only row               the focus trap and its
+ *                                              restoration target
+ *   TR-FOCUS-05  target-only row               the parallel board layer, its
+ *                                              single tab stop and `focusCell`
+ *   TR-FOCUS-06  target-only row               the per-cell counterpart geometry
+ *   TR-FOCUS-07  target-only row               `ScreenName`, `SCREEN_NAMES` and
+ *                                              `isScreenName`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-FOCUS-01  the single-tab-stop grid
+ *   DL-FOCUS-02  the explicit per-cell geometry
+ *   DL-FOCUS-03  `aria-disabled` elements retained in the focus cycle
+ *   DL-A11Y-08   the parallel DOM beside an `aria-hidden` canvas
  */
 
 import {
@@ -108,6 +128,12 @@ const METRIC_RESTORE_DETACHED = 'ui.focus.trap.restore_detached';
  * container, which is not a place focus can be returned to.
  */
 const METRIC_RESTORE_INSIDE = 'ui.focus.trap.restore_inside';
+
+/**
+ * Counted when nothing held focus as the trap engaged, so the document body was
+ * the recorded target and the fallback serves the release instead.
+ */
+const METRIC_RESTORE_BODY = 'ui.focus.trap.restore_body';
 
 /**
  * Counter raised where a restore target was present and connected but did not
@@ -1329,21 +1355,45 @@ function engageTrap(
     container === element ||
     (typeof container.contains === 'function' && container.contains(element));
 
+  /**
+   * Whether the recorded element is the document body.
+   *
+   * THE BODY IS "NOTHING HAD FOCUS", NOT A PLACE TO RETURN TO. A document with
+   * no focused element reports its body as `activeElement`, and the body is
+   * structurally an element while being unfocusable without a `tabindex` — so
+   * recording it produced a restore target that could never succeed, and every
+   * release from a trap opened while nothing held focus logged a failure that
+   * described a state rather than a fault. Which is the ordinary case here: this
+   * product binds its keys on the document, so a player who has only ever moved
+   * with the arrow keys has focus on the body when the first dialog opens.
+   *
+   * Skipping it hands the release straight to the fallback, which is what should
+   * have served it in the first place.
+   */
+  const isDocumentBody = (element: unknown): boolean =>
+    doc !== null && element === doc.body;
+
   // Rule: a recorded target inside the container is not a restore target. A
   // caller that moved focus into the dialog before engaging reaches this
   // branch, and the fallback below serves the release.
-  const restoreTarget: FocusableElement | null =
-    recorded !== null && isElementLike(recorded) && heldByContainer(recorded)
-      ? null
-      : recorded;
+  const insideContainer =
+    recorded !== null && isElementLike(recorded) && heldByContainer(recorded);
+  const bodyRecorded = recorded !== null && isDocumentBody(recorded);
 
-  if (recorded !== null && restoreTarget === null) {
+  const restoreTarget: FocusableElement | null =
+    insideContainer || bodyRecorded ? null : recorded;
+
+  if (insideContainer) {
     reporter.log(
       'warn',
       'focus trap restore target lies inside the trapped container',
       { ...fields, target: describeElement(recorded) },
     );
     reporter.count(METRIC_RESTORE_INSIDE, fields);
+  } else if (bodyRecorded) {
+    // Counted, not warned: nothing held focus, which is a state rather than a
+    // fault, and the fallback is the correct route for it.
+    reporter.count(METRIC_RESTORE_BODY, fields);
   }
   const inerted = applyInertBackground(
     options.inertBackground,

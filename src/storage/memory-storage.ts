@@ -1,11 +1,19 @@
 // In-memory Web Storage double: no persistence, no DOM reference and no
 // imports. Exported as a class; it installs no global.
 //
-// Ported from js/local_storage_manager.js L1-L19, the `window.fakeStorage`
-// object literal that file already shipped: traceability row TR-STORE-09 of
-// docs/TRACEABILITY_MATRIX.md. Decision DL-STORE-05, the double exported as a
-// class that installs no global where L1 assigned onto `window`, is in
-// docs/DECISION_LOG.md.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row this
+// module carries:
+//   TR-STORE-09  js/local_storage_manager.js L1-L19  the `window.fakeStorage`
+//                object literal that file already shipped, ported as this
+//                class
+//   TR-STORE-10  target-only row                     `StorageLike`, the
+//                structural surface both stores satisfy
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-STORE-05  the double exported as a class that installs no global, where
+//                L1 assigned onto `window`
+//   DL-STORE-06  the entries held in a `Map` keyed by string
 
 /**
  * The persistence surface storage consumers type against. Both the browser's
@@ -33,12 +41,9 @@ export interface StorageLike {
  */
 export class MemoryStorage implements StorageLike {
   /**
-   * Backing map. A `Map`, not an object literal: `'__proto__'` is a valid Web
-   * Storage key, and assigning it on an object literal reaches
-   * `Object.prototype`'s inherited accessor instead of creating an own string
-   * entry, so `setItem` then `getItem` would not round-trip that key. Map keys
-   * are plain strings with no inherited member of any name, so every key
-   * behaves identically.
+   * Backing map. Every key is a plain string with no inherited member of any
+   * name, so `'__proto__'` round-trips through `setItem` and `getItem` exactly
+   * as any other key does. Decision DL-STORE-06.
    */
   private data = new Map<string, string>();
 

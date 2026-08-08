@@ -10,6 +10,29 @@
  * This module reads no DOM and no storage, consumes no randomness and takes no
  * spawn draw: it declares the distribution the engine's seeded draw resolves
  * against.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-DEFAULT-01  js/application.js L3    `DEFAULT_BOARD_SIZE`, the board-size
+ *                                          literal
+ *   TR-DEFAULT-02  js/game_manager.js L170 `winValue`
+ *   TR-DEFAULT-03  js/game_manager.js L7   `startTiles`
+ *   TR-DEFAULT-04  js/game_manager.js L71  `spawn.values` and `spawn.weights`
+ *   TR-DEFAULT-05  js/game_manager.js L156 `defaultCanMerge`
+ *   TR-DEFAULT-06  js/game_manager.js L157 `defaultProduceMergeValue`
+ *   TR-DEFAULT-07  target-only row         `MAX_BOARD_SIZE` and
+ *                                          `isSupportedBoardSize`
+ *   TR-DEFAULT-08  target-only row         `createDefaultRulesConfig` and
+ *                                          `DEFAULT_RULES_CONFIG`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-DEFAULT-01  the five default values reproducing vanilla behaviour
+ *                  exactly, so a Phase 1 board is comparable move for move
+ *   DL-DEFAULT-02  `MAX_BOARD_SIZE` at 16, as the one board-edge ceiling every
+ *                  allocating module measures against
+ *   DL-DEFAULT-03  a factory returning an unfrozen config beside a deeply
+ *                  frozen template
  */
 
 // The specifier carries its `.ts` extension because this module is reached
@@ -27,6 +50,8 @@ import type {
  * into when the two carry the same value and the target has not already merged
  * this turn. Reads `moving.value`, `target.value` and `target.mergedFrom` only,
  * and mutates neither operand.
+ *
+ * From js/game_manager.js L156, `next.value === tile.value && !next.mergedFrom`.
  */
 export function defaultCanMerge(
   moving: MergeTileView,
@@ -40,6 +65,8 @@ export function defaultCanMerge(
  * tile's value. Returns a face value only and constructs nothing. The engine
  * adds this value to the score, so this module declares no separate score rule
  * and a replaced producer changes scoring with it.
+ *
+ * From js/game_manager.js L157, `new Tile(positions.next, tile.value * 2)`.
  */
 export function defaultProduceMergeValue(
   moving: MergeTileView,
@@ -51,7 +78,9 @@ export function defaultProduceMergeValue(
 /**
  * Default edge length of the square board, in cells. The single board-size
  * value: it supersedes the stylesheet's own cell count and the static cell
- * elements the markup used to declare.
+ * elements the markup used to declare. Traceability row TR-DEFAULT-01.
+ *
+ * From js/application.js L3, the literal `4` handed to `new GameManager(...)`.
  */
 export const DEFAULT_BOARD_SIZE = 4;
 
@@ -71,7 +100,7 @@ export const DEFAULT_BOARD_SIZE = 4;
  * src/engine/hook-bus.ts measures a payload's board size against the live
  * grid's own `size` instead, so the engine folder reads no constant from here.
  *
- * Recorded in docs/DECISION_LOG.md.
+ * Decision DL-DEFAULT-02.
  */
 export const MAX_BOARD_SIZE = 16;
 
@@ -102,15 +131,24 @@ export function isSupportedBoardSize(value: unknown): value is number {
  * Default tile value that wins the game. How a tile value is compared against it
  * belongs to src/engine/terminal-state.ts, and the visual band above it to
  * src/theme/tile-ramp.ts.
+ *
+ * From js/game_manager.js L170, `tile.value === 2048`.
  */
 const DEFAULT_WIN_VALUE = 2048;
 
+/**
+ * Default number of tiles the board opens with.
+ *
+ * From js/game_manager.js L7, `this.startTiles = 2`.
+ */
 const DEFAULT_START_TILES = 2;
 
 /**
  * Default tile values a spawn draws from, paired with `DEFAULT_SPAWN_WEIGHTS`
  * by index in the order the selection convention walks; this order is not
  * reversed.
+ *
+ * From js/game_manager.js L71, `Math.random() < 0.9 ? 2 : 4`.
  */
 const DEFAULT_SPAWN_VALUES: readonly number[] = [2, 4];
 
@@ -118,6 +156,8 @@ const DEFAULT_SPAWN_VALUES: readonly number[] = [2, 4];
  * Default selection probability of each entry of `DEFAULT_SPAWN_VALUES`, in the
  * same index order; the two members sum to 1. One draw `r` in [0, 1) therefore
  * selects 2 when `r` is below 0.9 and 4 otherwise.
+ *
+ * From the same expression at js/game_manager.js L71.
  */
 const DEFAULT_SPAWN_WEIGHTS: readonly number[] = [0.9, 0.1];
 

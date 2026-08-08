@@ -64,6 +64,12 @@
     "vite.config.ts",
     "vitest.config.ts",
     "vitest.snapshot.config.ts",
-    "playwright.config.ts"
+    "playwright.config.ts",
+
+    // The read-only formatting gate reads the tree through `node:fs`, so it is
+    // checked under tsconfig.node.json with the `node` types. Excluding it here
+    // keeps this project's `types` at `vite/client` alone, which is what stops
+    // an application module reaching a Node global.
+    "tests/unit/quality/formatting.test.ts"
   ]
 }

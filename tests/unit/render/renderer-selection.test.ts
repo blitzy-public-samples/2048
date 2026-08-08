@@ -18,15 +18,15 @@
 // Both are covered here, in both directions, plus the third case the probe
 // cannot predict: a context reported available that then fails to be acquired.
 //
-// WHY THE MARKUP IS BUILT HERE
+// THE MARKUP IS BUILT BY THIS SUITE
 //   `start()` looks up eight elements and guards every lookup, so it runs
 //   against an empty document. The fixture below carries the four the board
 //   needs, in the nesting index.html declares, so the assertions read the
-//   surfaces a player would see rather than the guarded-miss path.
+//   surfaces a player sees and not the guarded-miss path. Decision DL-MAIN-04.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { start } from '../../../src/main';
+import { CONTEXT_RESTORE_GRACE_MS, start } from '../../../src/main';
 import type { Application } from '../../../src/main';
 import { resetWebGLSupportProbe } from '../../../src/render/webgl-support';
 import { applyTheme } from '../../../src/theme/themes';
@@ -56,6 +56,8 @@ const BOARD_MARKUP = `
     </div>
   </div>
   <div class="on-screen-controls" id="on-screen-controls"></div>
+  <div class="visually-hidden live-region" id="live-region" role="status"
+       aria-live="polite" aria-atomic="true"></div>
 `;
 
 const nativeGetContext = HTMLCanvasElement.prototype.getContext;
@@ -336,6 +338,134 @@ describe('switching modes from the preference', () => {
 });
 
 /* ==========================================================================
+ * The settings dialog is what a player reaches the mode through
+ * ========================================================================== */
+
+// Every case above drives `preferences.setNumberOnlyMode()` directly, which
+// pins the store-to-renderer half of the chain. A player never calls that: they
+// press a control in the settings dialog. The dialog's own suite asserts the
+// press writes the store, and the cases above assert the store moves the
+// renderer — but a control wired to nothing, or a dialog the root never built,
+// satisfies both and still leaves the mode unreachable. These close that join.
+//
+// The dialog markup is appended in this block alone, so the fixture the rest of
+// the file starts from is unchanged.
+describe('reaching the mode through the settings dialog', () => {
+  beforeEach(() => {
+    document.body.insertAdjacentHTML(
+      'beforeend',
+      `<main id="game-main"></main>
+       <button type="button" class="settings-button" id="settings-button"
+               aria-haspopup="dialog" aria-controls="settings-panel">Settings</button>
+       <div class="screen-layer" id="screen-layer">
+         <div class="settings-panel" id="settings-panel" role="dialog"
+              aria-modal="true" aria-label="Settings" hidden></div>
+       </div>
+       <div class="visually-hidden live-region" id="live-region" role="status"
+            aria-live="polite" aria-atomic="true"></div>`,
+    );
+  });
+
+  /** A control in the rendered dialog, addressed by its visible name. */
+  const panelButton = (name: string): HTMLButtonElement => {
+    const found = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('#settings-panel button'),
+    ).find((candidate) => candidate.textContent === name);
+
+    if (found === undefined) {
+      throw new Error(`the dialog has no control named ${name}`);
+    }
+
+    return found;
+  };
+
+  const openSettings = (): void => {
+    document.querySelector<HTMLElement>('#settings-button')?.click();
+  };
+
+  it('moves to the number-only board from the dialog s own control', async () => {
+    installWebGL();
+    resetWebGLSupportProbe();
+
+    application = start(document);
+    await settleFrames();
+
+    expect(application.renderer.mode).toBe('three');
+
+    openSettings();
+
+    const toggle = panelButton('Numbers only');
+
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(toggle.disabled).toBe(false);
+
+    toggle.click();
+    await settleFrames();
+
+    // A chosen mode, not a fallback: the machine can draw, and the player asked
+    // for numbers anyway.
+    expect(application.preferences.isNumberOnlyMode()).toBe(true);
+    expect(application.renderer.mode).toBe('number-only');
+    expect(application.renderer.chosen).toBe(true);
+    expect(application.renderer.fallback).toBe(false);
+    expect(numberOnlyTiles()).toBeGreaterThan(0);
+    expect(
+      document.querySelector<HTMLElement>('#board-canvas')?.hidden,
+    ).toBe(true);
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('moves back to the 2.5D board from the same control', async () => {
+    installWebGL();
+    resetWebGLSupportProbe();
+
+    application = start(document);
+    openSettings();
+    panelButton('Numbers only').click();
+    await settleFrames();
+
+    expect(application.renderer.mode).toBe('number-only');
+
+    panelButton('Numbers only').click();
+    await settleFrames();
+
+    expect(application.renderer.mode).toBe('three');
+    expect(numberOnlyTiles()).toBe(0);
+    expect(
+      document.querySelector<HTMLElement>('#board-canvas')?.hidden,
+    ).toBe(false);
+    expect(gridCells()).toBe(16);
+  });
+
+  it('offers the control disabled, with the reason, when the machine cannot draw', () => {
+    // No WebGL installed, so the probe fails for real and the root forces the
+    // mode. The dialog has to refuse turning it off AND say why, which is the
+    // whole purpose of forcing rather than comparing at each use.
+    application = start(document);
+    openSettings();
+
+    const toggle = panelButton('Numbers only');
+
+    expect(application.renderer.fallback).toBe(true);
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.getAttribute('aria-disabled')).toBe('true');
+
+    const hintId = toggle.getAttribute('aria-describedby') ?? '';
+    const hint = document.querySelector<HTMLElement>(
+      `#settings-panel #${hintId.split(/\s+/u).filter(Boolean).at(-1) ?? 'none'}`,
+    );
+
+    expect(hint?.hidden).toBe(false);
+    expect(hint?.textContent).toContain('no WebGL context is available');
+
+    toggle.click();
+
+    expect(application.renderer.mode).toBe('number-only');
+  });
+});
+
+/* ==========================================================================
  * A context reported available that cannot be acquired
  * ========================================================================== */
 
@@ -368,5 +498,152 @@ describe('when the context cannot be acquired', () => {
     expect(application.renderer.fallback).toBe(true);
     expect(application.preferences.isNumberOnlyForced()).toBe(true);
     expect(numberOnlyTiles()).toBeGreaterThan(0);
+  });
+});
+
+/* ==========================================================================
+ * A context acquired and then taken away
+ * ========================================================================== */
+
+/** Fires the browser's own loss or restoration event on the board canvas. */
+const fireContextEvent = (type: string): void => {
+  document
+    .querySelector('#board-canvas')
+    ?.dispatchEvent(new Event(type, { cancelable: true }));
+};
+
+/** Waits past the bounded restoration window. */
+const waitOutGrace = async (): Promise<void> => {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, CONTEXT_RESTORE_GRACE_MS + 120);
+  });
+};
+
+describe('when the context is lost after mounting', () => {
+  beforeEach(() => {
+    installWebGL();
+    resetWebGLSupportProbe();
+  });
+
+  it('keeps the 2.5D board when the browser restores it inside the window', async () => {
+    application = start(document);
+    await settleFrames();
+
+    expect(application.renderer.mode).toBe('three');
+
+    fireContextEvent('webglcontextlost');
+    fireContextEvent('webglcontextrestored');
+    await waitOutGrace();
+
+    // A loss the browser restores is common — a driver reset, a tab returning
+    // from the background — and swapping renderers on every one of them would
+    // replace a board that recovers in two frames with a different board.
+    expect(application.renderer.mode).toBe('three');
+    expect(application.preferences.isNumberOnlyForced()).toBe(false);
+  });
+
+  it('serves the number-only board when it is never restored', async () => {
+    application = start(document);
+    await settleFrames();
+
+    // A turn first, so there is a commit to replay into the board that takes
+    // over. Without the replay the fallback board stands empty until the next
+    // turn is played.
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        code: 'ArrowDown',
+        bubbles: true,
+      }),
+    );
+    await settleFrames();
+
+    fireContextEvent('webglcontextlost');
+    await waitOutGrace();
+    await settleFrames();
+
+    // The defect this closes: the renderer suspends drawing on a loss and waits
+    // for a restoration that may never come, so the board simply froze for the
+    // rest of the session.
+    expect(application.renderer.mode).toBe('number-only');
+    expect(application.renderer.fallback).toBe(true);
+    expect(application.preferences.isNumberOnlyForced()).toBe(true);
+
+    // Populated, not empty: the last commit was replayed into it.
+    expect(numberOnlyTiles()).toBeGreaterThan(0);
+    expect(gridCells()).toBe(0);
+  });
+
+  it('reports the LIVE WebGL verdict while the context stands lost', async () => {
+    application = start(document);
+    await settleFrames();
+
+    const before = application.health
+      .report({ refresh: true })
+      .checks.find((check) => check.id === 'webgl');
+
+    expect(before?.status).toBe('pass');
+
+    fireContextEvent('webglcontextlost');
+
+    const during = application.health
+      .report({ refresh: true })
+      .checks.find((check) => check.id === 'webgl');
+
+    // `probeWebGLSupport` holds its startup result and hands the same one to
+    // every later caller, so a surface reading it alone would report the
+    // capability the machine had at boot for the rest of the session.
+    expect(during?.status).toBe('fail');
+    expect(during?.data.failure).toBe('context-lost');
+    expect(application.health.readiness().requiresNumberOnlyFallback).toBe(
+      true,
+    );
+  });
+
+  it('announces the change of board through the live region', async () => {
+    application = start(document);
+    await settleFrames();
+
+    fireContextEvent('webglcontextlost');
+    await waitOutGrace();
+
+    // The queue coalesces, then clears and writes on separate zero-delay tasks,
+    // so several turns of the event loop are awaited before the region is read.
+    for (let turn = 0; turn < 6; turn += 1) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    }
+
+    // Read across BOTH regions: this notice is assertive, and the announcer
+    // creates an `role="alert"` region beside the polite one on first assertive
+    // use rather than writing an interrupting message into `role="status"`.
+    const announced = Array.from(document.querySelectorAll('[aria-live]'))
+      .map((region) => region.textContent ?? '')
+      .join(' ')
+      .toLowerCase();
+
+    // A player who cannot see the board changing renderer is otherwise given no
+    // signal that anything happened at all.
+    expect(announced).toContain('number board');
+    expect(
+      document.querySelector('[aria-live="assertive"]'),
+    ).not.toBeNull();
+  });
+
+  it('abandons the pending wait when the application is disposed', async () => {
+    application = start(document);
+    await settleFrames();
+
+    fireContextEvent('webglcontextlost');
+    application.dispose();
+    application = null;
+
+    await waitOutGrace();
+
+    // Nothing to assert on the application, which is gone; the property is that
+    // the timer fired into a disposed composition without throwing, which an
+    // unhandled rejection or a listener error would surface as a failure here.
+    expect(document.querySelector('#board-canvas')).not.toBeNull();
   });
 });

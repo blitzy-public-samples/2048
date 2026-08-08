@@ -7,39 +7,42 @@
  * reads no DOM, holds no clock and consumes no randomness, and it neither
  * originates a seed nor a run identifier: both arrive as arguments.
  *
- * PROVENANCE
- *   The pre-migration loader handed the stored snapshot to `JSON.parse` with
- *   no guard, so a corrupted value threw during startup. `load()` replaces
- *   that read and returns a result for every input.
- *
- * docs/TRACEABILITY_MATRIX.md in the order below, TR-RUNSTORE-01 through
- * TR-RUNSTORE-06
- *
- *   It called `setItem` with no handler, so a failed write — an exhausted
- *   quota included — left the commit path as an exception. `save()` returns
- *   `false`.
- *
- *   Its only `catch` discarded the caught value. Every caught value below
- *   reaches the injected `RunReporter`.
- *
- *   It rebuilt the lattice from the size the snapshot recorded.
- *   `reconcileBoardSize()` runs before any grid is constructed.
- *
- *   It cleared the stored state when the game was over and wrote it
- *   otherwise. `clear()` and `save()` are those two branches as separate
- *   methods.
- *
  * FROZEN KEYS
  *   `bestScore` and `gameState` are neither read, written nor removed here.
  *   `RUN_STATE_KEY` from src/storage/storage-keys.ts is the only key this
  *   module names, and that module is where every key is declared.
  *
- * Decisions behind this file: DL-RUNSTORE-01, the board-size
- * reconciliation policy and its precedence order; DL-RUNSTORE-02, the
- * matrix index as the authoritative tile position; DL-RUNSTORE-03, the
- * structural persistence port; DL-RUNSTORE-04, the migration implemented
- * as a re-stamp; and DL-RUNSTORE-05, the board size an active relic
- * docs/DECISION_LOG.md, together with DL-RUN-03, the persisted RNG cursor.
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-RUNSTORE-01  js/local_storage_manager.js L47-L50  the unguarded
+ *                   `JSON.parse` of the stored snapshot, replaced by `load()`,
+ *                   which returns a result for every input
+ *   TR-RUNSTORE-02  js/local_storage_manager.js L57-L59  the handler-free
+ *                   `setItem`, replaced by `save()`, which returns `false` on
+ *                   a failed write including an exhausted quota
+ *   TR-RUNSTORE-03  js/local_storage_manager.js L33-L39  the `catch` that
+ *                   discarded its caught value; every caught value here
+ *                   reaches the injected `RunReporter`
+ *   TR-RUNSTORE-04  js/game_manager.js L36-L45           the lattice rebuilt
+ *                   from the size the snapshot recorded, replaced by
+ *                   `reconcileBoardSize()`, which runs before any grid is
+ *                   constructed
+ *   TR-RUNSTORE-05  js/game_manager.js L88-L89           the over-or-write
+ *                   branch, split into `clear()` and `save()`
+ *   TR-RUNSTORE-06  target-only row                      `RunStatePersistencePort`,
+ *                   `NULL_PERSISTENCE_PORT` and `migrateRunState()`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-RUNSTORE-01  the board-size reconciliation policy and its precedence
+ *                   order
+ *   DL-RUNSTORE-02  the matrix index as the authoritative tile position
+ *   DL-RUNSTORE-03  the structural persistence port
+ *   DL-RUNSTORE-04  the migration implemented as a re-stamp
+ *   DL-RUNSTORE-05  the board size an active relic implies, read from the
+ *                   relic's own persisted state slot
+ *   DL-RUN-03       the persisted RNG cursor, which this module carries
+ *                   through unmodified
  */
 
 import { isSupportedBoardSize } from '../config/default-config';
@@ -59,19 +62,19 @@ import {
   classifyRunStateVersion,
   cloneRunState,
   describeRunStateProblems,
-  isCurrentRunState,
   isRunStateShape,
   MAX_SUPPORTED_BOARD_SIZE,
   normalizeRngCursor,
   NOOP_RUN_REPORTER,
   projectCurrentRunState,
-  RUN_STATE_SCHEMA_VERSION,
-  RUN_STATE_SCHEMA_VERSION_HISTORY,
+  resolveRunStateVersionPolicy,
   type BoardSizeReconciliationReport,
+  type PersistedRelic,
   type RunReporter,
   type RunState,
   type RunStateCorruptionReport,
   type RunStateMigrationReport,
+  type RunStateVersionPolicy,
   type RunStateVersionVerdict,
   type RunStateWriteFailureReport,
 } from './run-state';
@@ -82,6 +85,9 @@ import {
  * smallest value `isBoardSize()` in src/run/run-state.ts accepts.
  */
 const FALLBACK_BOARD_SIZE = 1;
+
+/** The empty result `peekRelics()` returns for every envelope it cannot read. */
+const NO_PERSISTED_RELICS: readonly PersistedRelic[] = Object.freeze([]);
 
 /**
  * Bytes per UTF-16 code unit, the measure
@@ -173,9 +179,12 @@ function diagnose(value: unknown): string[] {
   }
 }
 
-function classify(value: unknown): RunStateVersionVerdict {
+function classify(
+  value: unknown,
+  policy?: RunStateVersionPolicy
+): RunStateVersionVerdict {
   try {
-    return classifyRunStateVersion(value);
+    return classifyRunStateVersion(value, policy);
   } catch {
     return 'malformed';
   }
@@ -195,8 +204,7 @@ function measureJsonBytes(value: unknown): number {
  * The four members of src/storage/local-storage-manager.ts this module calls,
  * as a structural port. `LocalStorageManager` satisfies it structurally, so a
  * unit test drives the store with a four-method object and no mocking library.
- *
- * mocking library. Decision DL-RUNSTORE-03.
+ * Decision DL-RUNSTORE-03.
  *
  * `readRaw` powers `exists()` and separates an absent key from a stored value
  * that is not valid JSON, which `readJson` alone reports identically as `null`.
@@ -451,6 +459,55 @@ function emptyMatrix(size: number): CellMatrix<SerializedTile> {
  * @param input The stored grid and the two candidate sizes.
  * @returns The reconciled grid and the record of what was done.
  */
+/**
+ * The edge length the held relics declare, taken as the SMALLEST declaration.
+ *
+ * A relic that changes the board records the edge length it applied on its own
+ * state slot as `{ boardSize }`; this reads that convention back so a resumed
+ * run opens on the board it was last played on. Generic by construction: the
+ * member name is the whole contract, no identifier is looked at, and a slot
+ * carrying anything else contributes nothing.
+ *
+ * TOTAL. Every input — absent, not an array, an entry that is not an object, a
+ * slot that is not an object, a size that is not a usable edge — yields a value
+ * and nothing raises.
+ *
+ * @param relics The envelope's relic entries.
+ * @returns The smallest declared edge length, or `undefined` where none is
+ *   declared.
+ */
+function declaredRelicBoardSize(relics: unknown): number | undefined {
+  if (!Array.isArray(relics)) {
+    return undefined;
+  }
+
+  let smallest: number | undefined;
+
+  for (const entry of relics) {
+    if (entry === null || typeof entry !== 'object') {
+      continue;
+    }
+
+    const state: unknown = (entry as { state?: unknown }).state;
+
+    if (state === null || typeof state !== 'object') {
+      continue;
+    }
+
+    const declared: unknown = (state as { boardSize?: unknown }).boardSize;
+
+    if (!isBoardEdgeLength(declared)) {
+      continue;
+    }
+
+    if (smallest === undefined || declared < smallest) {
+      smallest = declared;
+    }
+  }
+
+  return smallest;
+}
+
 export function reconcileBoardSize(
   input: BoardSizeReconciliationInput
 ): BoardSizeReconciliationResult {
@@ -655,14 +712,21 @@ function boardCandidate(value: unknown): unknown {
  * version. `rngCursor` passes through `normalizeRngCursor()`, so a cursor map
  * missing a substream name, carrying an unusable draw count, or carrying a name
  * this build does not know is completed rather than refused.
+ *
+ * @param value Stored payload.
+ * @param targetVersion Version the candidate is stamped at, which is the
+ *   resolved policy's `current`.
  */
-function envelopeCandidate(value: unknown): RunStateCandidate | null {
+function envelopeCandidate(
+  value: unknown,
+  targetVersion: number
+): RunStateCandidate | null {
   if (!isRecord(value)) {
     return null;
   }
 
   return {
-    schemaVersion: RUN_STATE_SCHEMA_VERSION,
+    schemaVersion: targetVersion,
     runId: readSafely(value, 'runId'),
     seed: readSafely(value, 'seed'),
     rngCursor: normalizeRngCursor(readSafely(value, 'rngCursor')),
@@ -685,11 +749,11 @@ function readStoredVersion(value: unknown): number | undefined {
 /**
  * Assembles a candidate from an envelope stored at an earlier schema version.
  *
- * The stored version is re-read here and checked against
- * `RUN_STATE_SCHEMA_VERSION_HISTORY`, not taken from the verdict:
- * `migrateRunState()` is exported, and a caller may pass a verdict that was not
- * derived from the value it accompanies. A version the history does not list is
- * refused here as it is by `classifyRunStateVersion()`.
+ * The stored version is re-read here and checked against the resolved policy's
+ * history, not taken from the verdict: `migrateRunState()` is exported, and a
+ * caller may pass a verdict that was not derived from the value it accompanies.
+ * A version the history does not list is refused here as it is by
+ * `classifyRunStateVersion()`.
  *
  * `load()` is keyed on the verdict alone. Decision DL-RUNSTORE-04.
  *
@@ -697,18 +761,22 @@ function readStoredVersion(value: unknown): number | undefined {
  * given the current version, then validated by the caller. A future schema
  * version whose members differ adds its own branch to this function; `load()`
  * is keyed on the verdict alone and does not change with it.
+ *
+ * @param value Stored payload.
+ * @param policy Resolved version policy whose history admits the stored
+ *   version and whose `current` the candidate is re-stamped to.
  */
-function olderEnvelopeCandidate(value: unknown): RunStateCandidate | null {
+function olderEnvelopeCandidate(
+  value: unknown,
+  policy: RunStateVersionPolicy
+): RunStateCandidate | null {
   const version = readStoredVersion(value);
 
-  if (
-    version === undefined ||
-    !RUN_STATE_SCHEMA_VERSION_HISTORY.includes(version)
-  ) {
+  if (version === undefined || !policy.history.includes(version)) {
     return null;
   }
 
-  return envelopeCandidate(value);
+  return envelopeCandidate(value, policy.current);
 }
 
 /**
@@ -723,17 +791,26 @@ function olderEnvelopeCandidate(value: unknown): RunStateCandidate | null {
  * `0`, whose `relics` is empty, whose `rngCursor` is zeroed, and whose `runId`,
  * `seed` and `stageGoal` come from the caller. A payload that is neither shape,
  * and a wrap with no identity supplied, are refused.
+ *
+ * @param value Stored payload.
+ * @param identity Seed, run identifier and stage goal a wrap adopts.
+ * @param targetVersion Version the candidate is stamped at, which is the
+ *   resolved policy's `current`. The wrap is described as version 1 because
+ *   that is the version the member was introduced at; the value written is the
+ *   target, so a build whose current version has moved on re-stamps rather than
+ *   producing a payload its own next load would call `'older'`.
  */
 function unversionedCandidate(
   value: unknown,
-  identity: RunStateMigrationIdentity | undefined
+  identity: RunStateMigrationIdentity | undefined,
+  targetVersion: number
 ): RunStateCandidate | null {
   if (!isRecord(value)) {
     return null;
   }
 
   if (isRecord(readSafely(value, 'board'))) {
-    return envelopeCandidate(value);
+    return envelopeCandidate(value, targetVersion);
   }
 
   if (identity === undefined || !isRecord(readSafely(value, 'grid'))) {
@@ -741,7 +818,7 @@ function unversionedCandidate(
   }
 
   return {
-    schemaVersion: RUN_STATE_SCHEMA_VERSION,
+    schemaVersion: targetVersion,
     runId: identity.runId,
     seed: identity.seed,
     rngCursor: normalizeRngCursor(undefined),
@@ -755,21 +832,27 @@ function unversionedCandidate(
 
 /**
  * Assembles a candidate for one verdict. The chain is keyed on the verdict, so
- * a schema version added to `RUN_STATE_SCHEMA_VERSION_HISTORY` is absorbed by
+ * a schema version added to a policy's history is absorbed by
  * `olderEnvelopeCandidate()` without a change here or in `load()`.
+ *
+ * @param value Stored payload.
+ * @param verdict Classification of that payload.
+ * @param identity Seed, run identifier and stage goal a wrap adopts.
+ * @param policy Resolved version policy.
  */
 function toRunStateCandidate(
   value: unknown,
   verdict: RunStateVersionVerdict,
-  identity: RunStateMigrationIdentity | undefined
+  identity: RunStateMigrationIdentity | undefined,
+  policy: RunStateVersionPolicy
 ): RunStateCandidate | null {
   switch (verdict) {
     case 'current':
-      return envelopeCandidate(value);
+      return envelopeCandidate(value, policy.current);
     case 'older':
-      return olderEnvelopeCandidate(value);
+      return olderEnvelopeCandidate(value, policy);
     case 'absent':
-      return unversionedCandidate(value, identity);
+      return unversionedCandidate(value, identity, policy.current);
     case 'unknown':
     // A payload from a newer build is not salvaged: its members are not
     // this build's members, and a partial read would half-load a run.
@@ -796,13 +879,25 @@ function toRunStateCandidate(
  * matrix whose dimensions disagree with its recorded size is repaired rather
  * than refused. Called directly, this function validates the payload's matrix
  * as stored.
+ *
+ * @param value Stored payload.
+ * @param verdict Classification of that payload, normally from
+ *   `classifyRunStateVersion(value, policy)` under the same policy.
+ * @param identity Seed, run identifier and stage goal a wrap adopts.
+ * @param policy Version set the migration re-stamps against, resolved through
+ *   `resolveRunStateVersionPolicy()`. Defaults to `RUN_STATE_VERSION_POLICY`,
+ *   under which the target version is `RUN_STATE_SCHEMA_VERSION`. Supplying a
+ *   policy naming a genuine prior version is what makes the `'older'` branch
+ *   reachable in a build whose history holds one entry.
  */
 export function migrateRunState(
   value: unknown,
   verdict: RunStateVersionVerdict,
-  identity?: RunStateMigrationIdentity
+  identity?: RunStateMigrationIdentity,
+  policy?: RunStateVersionPolicy
 ): RunState | null {
-  const candidate = toRunStateCandidate(value, verdict, identity);
+  const resolved = resolveRunStateVersionPolicy(policy);
+  const candidate = toRunStateCandidate(value, verdict, identity, resolved);
 
   if (candidate === null || !isRunStateShape(candidate)) {
     return null;
@@ -931,6 +1026,22 @@ export interface RunStateStoreOptions {
    * Defaults to the empty string, which reports no correlation.
    */
   readonly correlationId?: CorrelationId;
+
+  /**
+   * The version set every load classifies and re-stamps against. Defaults to
+   * `RUN_STATE_VERSION_POLICY`, this build's own current version and history,
+   * so a store constructed with no arguments behaves exactly as it did before
+   * the option existed.
+   *
+   * Injected because `RUN_STATE_SCHEMA_VERSION_HISTORY` holds exactly one
+   * entry in this build, which leaves the `'older'` verdict — and therefore
+   * the whole migration path this class implements — unreachable through the
+   * module constants alone. A policy naming a genuine prior version is what
+   * exercises it. Resolved through `resolveRunStateVersionPolicy()`, so a
+   * hostile policy degrades to the shipped one rather than making `load()`
+   * throw.
+   */
+  readonly versionPolicy?: RunStateVersionPolicy;
 }
 
 /**
@@ -952,14 +1063,21 @@ export class RunStateStore {
   private readonly correlationId: CorrelationId;
 
   /**
-   * @param options Port, reporter, configuration and correlation
-   *   identifier, each optional.
+   * Version set every load classifies and re-stamps against, resolved once at
+   * construction so no later read can be handed a hostile policy.
+   */
+  private readonly versionPolicy: RunStateVersionPolicy;
+
+  /**
+   * @param options Port, reporter, configuration, correlation identifier and
+   *   version policy, each optional.
    */
   constructor(options: RunStateStoreOptions = {}) {
     this.storage = options.storage ?? NULL_PERSISTENCE_PORT;
     this.reporter = options.reporter ?? NOOP_RUN_REPORTER;
     this.config = options.config;
     this.correlationId = options.correlationId ?? '';
+    this.versionPolicy = resolveRunStateVersionPolicy(options.versionPolicy);
   }
 
   /**
@@ -989,9 +1107,75 @@ export class RunStateStore {
 
       return this.resolve(observed, options);
     } catch (error) {
-      return this.refuse(classify(observed), observed, undefined, {
-        caught: error,
-      });
+      return this.refuse(
+        classify(observed, this.versionPolicy),
+        observed,
+        undefined,
+        { caught: error }
+      );
+    }
+  }
+
+  /**
+   * Reads the persisted relic entries out of the stored envelope WITHOUT
+   * reconciling anything.
+   *
+   * The board-size reconciliation `load()` performs needs to know the edge
+   * length an active board-mutating relic implies, and that value lives inside
+   * the very envelope being loaded — a relic's own `state` slot. This is the
+   * pre-read that breaks the cycle: the caller peeks at the entries, derives the
+   * size from them, and passes it to `load()` as `relicBoardSize`.
+   *
+   * NEVER THROWS and validates nothing beyond the shape it returns. Every entry
+   * is carried across exactly as it was stored, `state` included, and an
+   * envelope that is absent, unreadable, of another shape, or carrying no
+   * `relics` array yields an empty list.
+   *
+   * @returns A fresh array of the stored entries, in the order they were
+   *   stored, which is pickup order.
+   */
+  peekRelics(): readonly PersistedRelic[] {
+    try {
+      const raw = this.storage.readRaw(RUN_STATE_KEY);
+
+      if (raw === null || raw.length === 0) {
+        return NO_PERSISTED_RELICS;
+      }
+
+      const observed: unknown = this.storage.readJson(RUN_STATE_KEY);
+
+      if (typeof observed !== 'object' || observed === null) {
+        return NO_PERSISTED_RELICS;
+      }
+
+      const held: unknown = (observed as { relics?: unknown }).relics;
+
+      if (!Array.isArray(held)) {
+        return NO_PERSISTED_RELICS;
+      }
+
+      const entries: PersistedRelic[] = [];
+
+      for (const entry of held as readonly unknown[]) {
+        if (typeof entry !== 'object' || entry === null) {
+          continue;
+        }
+
+        const id: unknown = (entry as { id?: unknown }).id;
+
+        if (typeof id !== 'string' || id.length === 0) {
+          continue;
+        }
+
+        entries.push(entry as PersistedRelic);
+      }
+
+      return entries;
+    } catch {
+      // A peek is an optimisation over the authoritative `load()`, so a port
+      // that raises here yields no entries and the load proceeds without a
+      // relic-implied size rather than failing the run.
+      return NO_PERSISTED_RELICS;
     }
   }
 
@@ -1007,13 +1191,16 @@ export class RunStateStore {
    */
   save(state: RunState): boolean {
     try {
-      if (!isCurrentRunState(state)) {
+      if (!this.isWritable(state)) {
         this.reportWriteFailure(state, ENVELOPE_REFUSED);
 
         return false;
       }
 
-      const payload = projectCurrentRunState(state);
+      const payload = projectCurrentRunState(
+        state,
+        this.versionPolicy.current
+      );
 
       if (!this.storage.writeJson(RUN_STATE_KEY, payload)) {
         this.reportWriteFailure(payload, WRITE_REFUSED);
@@ -1114,11 +1301,12 @@ export class RunStateStore {
     observed: unknown,
     options: RunStateLoadOptions
   ): RunStateLoadResult {
-    const verdict = classify(observed);
+    const verdict = classify(observed, this.versionPolicy);
     const candidate = toRunStateCandidate(
       observed,
       verdict,
-      identityFrom(options)
+      identityFrom(options),
+      this.versionPolicy
     );
 
     if (candidate === null) {
@@ -1138,7 +1326,19 @@ export class RunStateStore {
     const reconciled = reconcileBoardSize({
       savedGrid,
       configuredSize: options.boardSize ?? this.config?.boardSize,
-      relicBoardSize: options.relicBoardSize,
+
+      // The caller's declaration wins where it supplied one; otherwise the
+      // envelope's OWN relic slots are read for a declared edge length. That
+      // read is what makes a board-mutating relic survive a reload: a relic
+      // records the edge length it collapsed the board to on its own state slot,
+      // and without applying it here the configured size would win and the run
+      // would spring back to a board it is no longer being played on.
+      //
+      // Generic, not relic-specific: any slot carrying a usable `boardSize`
+      // contributes a declaration and the SMALLEST of them is applied, so this
+      // module still names no relic and no relic identifier.
+      relicBoardSize:
+        options.relicBoardSize ?? declaredRelicBoardSize(candidate.relics),
     });
     const { reconciliation } = reconciled;
 
@@ -1230,7 +1430,7 @@ export class RunStateStore {
     const report: RunStateMigrationReport = {
       correlationId: this.correlationId,
       fromVersion,
-      toVersion: RUN_STATE_SCHEMA_VERSION,
+      toVersion: this.versionPolicy.current,
     };
 
     this.emit(() => {
@@ -1295,6 +1495,26 @@ export class RunStateStore {
     this.emit(() => {
       this.reporter.onWriteFailed?.(report);
     });
+  }
+
+  /**
+   * Reports whether `state` is an envelope this store may write: structurally
+   * complete, and carrying the version its own next load classifies as
+   * `'current'`.
+   *
+   * Decided against `this.versionPolicy` rather than against
+   * `RUN_STATE_SCHEMA_VERSION`, so a store reading under an injected policy
+   * writes back what it just read instead of refusing it. Identical to
+   * `isCurrentRunState()` under the shipped policy.
+   *
+   * @param state Envelope offered for writing.
+   * @returns `true` when the envelope may be written.
+   */
+  private isWritable(state: RunState): boolean {
+    return (
+      classify(state, this.versionPolicy) === 'current' &&
+      isRunStateShape(state)
+    );
   }
 
   /**

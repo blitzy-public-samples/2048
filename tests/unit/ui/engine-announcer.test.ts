@@ -132,6 +132,8 @@ const commit = (
     terminated?: boolean;
   } = {},
 ): StateCommitEvent => ({
+  turn: 1,
+  degraded: false,
   board: new Grid(4),
   score,
   bestScore: 0,
@@ -143,6 +145,7 @@ const commit = (
 });
 
 const moveAfter = (moved: boolean, score: number): MoveAfterEvent => ({
+  turn: 1,
   moved,
   board: new Grid(4),
   score,
@@ -228,6 +231,7 @@ describe('merges and spawns reach the region', () => {
     const harness = setup();
 
     harness.events.emit('tile:merge', {
+      turn: 1,
       source: new Tile({ x: 0, y: 0 }, 4),
       target: new Tile({ x: 1, y: 0 }, 4),
       resultValue: 8,
@@ -246,12 +250,14 @@ describe('merges and spawns reach the region', () => {
       cancelled: false,
     });
     harness.events.emit('tile:merge', {
+      turn: 1,
       source: new Tile({ x: 0, y: 0 }, 4),
       target: new Tile({ x: 1, y: 0 }, 4),
       resultValue: 8,
       scoreDelta: 8,
     });
     harness.events.emit('tile:merge', {
+      turn: 1,
       source: new Tile({ x: 0, y: 1 }, 8),
       target: new Tile({ x: 1, y: 1 }, 8),
       resultValue: 16,
@@ -270,7 +276,11 @@ describe('merges and spawns reach the region', () => {
   it('announces a spawn with its cell', () => {
     const harness = setup();
 
-    harness.events.emit('tile:spawn', { position: { x: 2, y: 1 }, value: 4 });
+    harness.events.emit('tile:spawn', {
+      turn: 1,
+      position: { x: 2, y: 1 },
+      value: 4,
+    });
 
     const text = harness.read();
 
@@ -284,7 +294,7 @@ describe('merges and spawns reach the region', () => {
   it('states no cell for a spawn that resolved without one', () => {
     const harness = setup();
 
-    harness.events.emit('tile:spawn', { value: 2 });
+    harness.events.emit('tile:spawn', { turn: 1, value: 2 });
 
     expect(() => harness.read()).not.toThrow();
     expect(harness.read()).not.toContain('undefined');
@@ -369,7 +379,11 @@ describe('the translator lifecycle', () => {
 
     // The first subscription from `setup` is still live, so this proves the
     // release is scoped to its own subscription rather than global.
-    harness.events.emit('tile:spawn', { position: { x: 0, y: 0 }, value: 2 });
+    harness.events.emit('tile:spawn', {
+      turn: 1,
+      position: { x: 0, y: 0 },
+      value: 2,
+    });
 
     expect(harness.read()).not.toBe('');
   });
@@ -380,7 +394,11 @@ describe('the translator lifecycle', () => {
     harness.translator.destroy();
 
     expect(() => {
-      harness.events.emit('tile:spawn', { position: { x: 0, y: 0 }, value: 2 });
+      harness.events.emit('tile:spawn', {
+      turn: 1,
+      position: { x: 0, y: 0 },
+      value: 2,
+    });
       harness.events.emit('state:commit', commit(9, {
         over: true,
         terminated: true,

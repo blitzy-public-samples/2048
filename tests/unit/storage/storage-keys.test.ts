@@ -17,6 +17,7 @@ import {
   BEST_SCORE_KEY,
   GAME_STATE_KEY,
   isOwnedStorageKey,
+  KEYMAP_KEY,
   namespacedKey,
   OWNED_STORAGE_KEYS,
   RUN_STATE_KEY,
@@ -195,6 +196,7 @@ const EXPECTED_OWNED_KEYS: readonly OwnedStorageKey[] = [
   BEST_SCORE_KEY,
   GAME_STATE_KEY,
   RUN_STATE_KEY,
+  KEYMAP_KEY,
 ];
 
 const DECLARED_KEYS: readonly OwnedStorageKey[] = [
@@ -350,6 +352,11 @@ describe('OWNED_STORAGE_KEYS registry completeness', () => {
       expect(OWNED_STORAGE_KEYS).toContain(BEST_SCORE_KEY);
       expect(OWNED_STORAGE_KEYS).toContain(GAME_STATE_KEY);
       expect(OWNED_STORAGE_KEYS).toContain(RUN_STATE_KEY);
+
+      // The remapped bindings, which a rebind persists through the input
+      // manager's own single api. Teardown has to reach it, or a remap made by
+      // one test would still be in force in the next (N2).
+      expect(OWNED_STORAGE_KEYS).toContain(KEYMAP_KEY);
       expect(OWNED_STORAGE_KEYS.length).toBe(EXPECTED_OWNED_KEYS.length);
     }
   );

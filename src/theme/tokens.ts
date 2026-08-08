@@ -16,6 +16,38 @@
  * to Dart Sass as `$blitzy-token-projection`, and style/_tokens.scss resolves
  * each of its tokens through it and raises a Sass `@error` where a projected
  * value and that file's own fallback disagree.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece. TOKEN is one area
+ * across both halves of the mirror, so these ordinals continue the ones
+ * style/_tokens.scss carries:
+ *   TR-TOKEN-02  style/main.scss L4-L22   the fourteen-token block, mirrored
+ *                                        here name for name and value for value
+ *   TR-TOKEN-03  style/main.scss L6-L7    `$grid-row-cells` and `$tile-size`,
+ *                                        mirrored as `gridRowCells` and the
+ *                                        geometry scales, with the board size
+ *                                        read from src/config/default-config.ts
+ *   TR-TOKEN-04  style/main.scss L475-L548 the mobile scale, mirrored as the
+ *                                        second `GeometryScale`
+ *   TR-TOKEN-05  style/main.scss L404-L430 the tile numeral sizes, mirrored as
+ *                                        `tileNumeralSize`
+ *   TR-TOKEN-06  style/helpers.scss       the Sass colour derivations, carried
+ *                                        here in their compiled form as
+ *                                        `derivedColors`
+ *   TR-TOKEN-07  target-only row          `depthScale`, the extrusion depths
+ *                                        expressed as arithmetic on
+ *                                        `gridSpacing`
+ *   TR-TOKEN-08  target-only row          `sassTokenProjection`, the map
+ *                                        vite.config.ts passes to Dart Sass
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-TOKEN-02  the token layer mirrored in TypeScript, with the projection
+ *                and the stylesheet's own fallbacks cross-checked by a Sass
+ *                `@error`
+ *   DL-TOKEN-03  colours the stylesheet computes with a Sass function carried
+ *                here in compiled form
+ *   DL-TOKEN-04  exactly one import, so the module stays importable with no
+ *                DOM, no WebGL and no browser
  */
 
 // The specifier carries its `.ts` extension because vite.config.ts imports this

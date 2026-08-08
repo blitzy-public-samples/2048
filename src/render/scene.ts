@@ -18,6 +18,10 @@
 // is re-invoked at style/main.scss L530 against `$field-width: 280px` and
 // `$grid-spacing: 10px` — frames through this same code with no branch.
 //
+// Figures 1 and 2 of docs/architecture/ARCHITECTURE.md are the two states this
+// subsystem moved between, and Figure 3 of
+// docs/architecture/component-interaction.md places this module among its peers.
+//
 // WHAT THIS MODULE OWNS
 //   The scene graph, the board group, the camera and the lights. It builds no
 //   output surface of any kind and holds no canvas: three-renderer.ts owns the
@@ -38,10 +42,31 @@
 //   src/theme/themes.ts, or on the board size. The bare numerals below are
 //   structural arithmetic alone: a half, a unit and a last index.
 //
-// Decisions behind this file: DL-SCENE-01, the camera projection; DL-SCENE-02,
-// the tilt; DL-SCENE-03, the lighting rig's tuning; DL-SCENE-04, the stage
-// progression; DL-SCENE-05, the background. Traceability rows: TR-SCENE-01
-// through TR-SCENE-09.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-SCENE-01  style/main.scss L171-L194  `@mixin game-field`, reproduced as
+//                                           the board surface
+//   TR-SCENE-02  style/main.scss L254       the `.grid-container` layer, which
+//                                           the scene replaces
+//   TR-SCENE-03  style/main.scss L288       the `.tile-container` layer, which
+//                                           the scene replaces
+//   TR-SCENE-04  style/main.scss L475-L548  the mobile scale, framed through
+//                                           this code with no branch
+//   TR-SCENE-05  target-only row            `createScene()` and `BoardScene`
+//   TR-SCENE-06  target-only row            `frameBoard()`, `BoardFraming` and
+//                                           `CameraRestPose`
+//   TR-SCENE-07  target-only row            `LightingRig` and `RigTuning`
+//   TR-SCENE-08  target-only row            `sceneOptics`
+//   TR-SCENE-09  target-only row            `SceneStats` and the injected
+//                                           reporter
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-SCENE-01  the camera projection
+//   DL-SCENE-02  the tilt
+//   DL-SCENE-03  the lighting rig's tuning
+//   DL-SCENE-04  the stage progression
+//   DL-SCENE-05  the background
 
 import {
   Color,
@@ -113,6 +138,38 @@ const REFUSED_METRIC = 'render.scene.refused';
 
 /** Counter raised once per disposal. */
 const DISPOSED_METRIC = 'render.scene.disposed';
+
+/**
+ * Parents `wouldCycle` walks before giving up.
+ *
+ * A scene graph is a tree, so the walk from the board group to the root is a
+ * handful of steps; the bound only exists so a graph another caller has already
+ * made cyclic cannot make the walk itself unbounded.
+ */
+const MAX_ANCESTOR_WALK = 64;
+
+/**
+ * Widest aspect ratio a viewport may resolve to, and the reciprocal of the
+ * narrowest.
+ *
+ * Every frustum plane is `halfExtent` scaled by the aspect or its reciprocal, so
+ * a ratio outside this band is what turns a finite viewport into an infinite —
+ * or vanishing — plane. `Number.MAX_VALUE / Number.MIN_VALUE` overflows to
+ * `Infinity`, and the reverse underflows to zero, whose reciprocal is `Infinity`
+ * again; either poisons the orthographic projection matrix and the canvas draws
+ * nothing from then on. The bound is far wider than any real display: a 32768:1
+ * viewport is not a viewport.
+ */
+const MAX_VIEWPORT_ASPECT = 32_768;
+
+/**
+ * Largest frustum half-extent a projection may carry, in world units.
+ *
+ * `halfExtent` is derived from the board's own span and `MAX_VIEWPORT_ASPECT`
+ * scales it, so this ceiling is what keeps the product of the two inside the
+ * range a projection matrix resolves usefully.
+ */
+const MAX_FRUSTUM_EXTENT = Number.MAX_SAFE_INTEGER;
 
 /* ==========================================================================
  * 2. Optics — arithmetic on src/theme/tokens.ts
@@ -419,6 +476,12 @@ export interface BoardScene {
   /**
    * Parents one object to the board group.
    *
+   * REFUSES A MOUNT THAT WOULD MAKE THE GRAPH CYCLIC: the board group itself and
+   * every ancestor of it — `scene` among them, since it is exposed here — are
+   * refused, because `add` reparents and a cycle exhausts the stack on the next
+   * traversal. A parenting the graph itself refuses is contained, so the board
+   * group is never left half-mounted.
+   *
    * @param object The mesh factory's board group.
    * @returns Whether the object was mounted.
    */
@@ -441,10 +504,13 @@ export interface BoardScene {
    *
    * @param width CSS width, in px.
    * @param height CSS height, in px.
-   * @returns Whether the size was adopted. `false` where it is the size
-   *   already held, and where either length is not a positive finite number.
-   *   A size whose aspect ratio matches the one held is adopted and reported
-   *   even though it re-derives the same frustum.
+   * @returns Whether the size was adopted. `false` where it is the size already
+   *   held, where either length is not a positive finite number, and where the
+   *   RATIO between them resolves to no usable frustum — two finite lengths can
+   *   still overflow or underflow the aspect, and a refusal on that ground
+   *   leaves the held size and the camera exactly as they were. A size whose
+   *   aspect ratio matches the one held is adopted and reported even though it
+   *   re-derives the same frustum.
    */
   resize(width: number, height: number): boolean;
 
@@ -675,6 +741,40 @@ function isObject3D(value: unknown): value is Object3D {
   );
 }
 
+/** The two half-extents one viewport resolves the orthographic frustum to. */
+interface FrustumProjection {
+  readonly halfWidth: number;
+  readonly halfHeight: number;
+}
+
+/**
+ * Reports whether `candidate` is `descendant` itself or an ancestor of it.
+ *
+ * WHY THIS EXISTS: `Object3D.add` REPARENTS, so adding an ancestor of the board
+ * group to the board group makes the graph cyclic — and both the scene and the
+ * board group are exposed on `BoardScene`, so `mountBoard(scene)` was reachable
+ * from any caller. A later matrix update or render traversal then recurses until
+ * the stack is exhausted. The walk is up the parent chain, which is finite in an
+ * acyclic graph and bounded by `MAX_ANCESTOR_WALK` in one that is already cyclic.
+ *
+ * @param candidate Object being mounted.
+ * @param descendant Group it would be mounted into.
+ * @returns `true` where mounting would create a cycle.
+ */
+function wouldCycle(candidate: Object3D, descendant: Object3D): boolean {
+  let walked: Object3D | null = descendant;
+
+  for (let step = 0; step < MAX_ANCESTOR_WALK && walked !== null; step += 1) {
+    if (walked === candidate) {
+      return true;
+    }
+
+    walked = walked.parent;
+  }
+
+  return false;
+}
+
 /**
  * The tuning one stage index and theme resolve to.
  *
@@ -902,6 +1002,57 @@ export function createScene(options: SceneOptions = {}): BoardScene {
   };
 
   /**
+   * The frustum one viewport resolves to, or `null` where it resolves to none.
+   *
+   * DERIVES WITHOUT WRITING, which is what makes a refusal atomic: the aspect
+   * and both planes are computed and measured here, and the camera is written
+   * only once all three have passed. `resize` calls this BEFORE it adopts the
+   * dimensions it was given, so a viewport whose ratio overflows or underflows
+   * leaves both the held dimensions and the projection exactly as they were.
+   *
+   * @param width Candidate viewport width.
+   * @param height Candidate viewport height.
+   * @returns The half-extents, or `null` for a viewport that resolves to a
+   *   non-finite, non-positive or out-of-range plane.
+   */
+  const projectionFor = (
+    width: number,
+    height: number,
+  ): FrustumProjection | null => {
+    const aspect = width > 0 && height > 0 ? width / height : 1;
+
+    // Measured BEFORE either plane is derived from it, so an aspect that
+    // overflowed or underflowed cannot reach the arithmetic below.
+    if (
+      !Number.isFinite(aspect) ||
+      aspect <= 0 ||
+      aspect > MAX_VIEWPORT_ASPECT ||
+      aspect < 1 / MAX_VIEWPORT_ASPECT
+    ) {
+      return null;
+    }
+
+    const half = framing.halfExtent;
+    const halfWidth = aspect >= 1 ? half * aspect : half;
+    const halfHeight = aspect >= 1 ? half : half / aspect;
+
+    // Each DERIVED value is measured too: a finite aspect inside the band still
+    // has to produce planes a projection matrix can carry.
+    if (
+      !Number.isFinite(halfWidth) ||
+      !Number.isFinite(halfHeight) ||
+      halfWidth <= 0 ||
+      halfHeight <= 0 ||
+      halfWidth > MAX_FRUSTUM_EXTENT ||
+      halfHeight > MAX_FRUSTUM_EXTENT
+    ) {
+      return null;
+    }
+
+    return { halfWidth, halfHeight };
+  };
+
+  /**
    * Writes the frustum for the framing in force and the viewport last seen.
    *
    * The square half-extent is inscribed in whichever axis is shorter, so the
@@ -910,13 +1061,16 @@ export function createScene(options: SceneOptions = {}): BoardScene {
    * @returns Whether the projection changed.
    */
   const applyFrustum = (): boolean => {
-    const aspect =
-      viewportWidth > 0 && viewportHeight > 0
-        ? viewportWidth / viewportHeight
-        : 1;
-    const half = framing.halfExtent;
-    const halfWidth = aspect >= 1 ? half * aspect : half;
-    const halfHeight = aspect >= 1 ? half : half / aspect;
+    const projection = projectionFor(viewportWidth, viewportHeight);
+
+    // The held dimensions are only ever written by a caller that has already
+    // resolved a projection, so this is unreachable in practice; refusing rather
+    // than writing keeps the camera intact if it ever is reached.
+    if (projection === null) {
+      return false;
+    }
+
+    const { halfWidth, halfHeight } = projection;
 
     if (
       camera.left === -halfWidth &&
@@ -1112,7 +1266,7 @@ export function createScene(options: SceneOptions = {}): BoardScene {
         return false;
       }
 
-      if (!isObject3D(object) || object === boardGroup) {
+      if (!isObject3D(object)) {
         reportRefused(
           'A board that is not a mountable object was refused; the board ' +
             'group stands as it was.',
@@ -1122,7 +1276,51 @@ export function createScene(options: SceneOptions = {}): BoardScene {
         return false;
       }
 
-      boardGroup.add(object);
+      // THE BOARD GROUP ITSELF AND EVERY ANCESTOR OF IT ARE REFUSED. `add`
+      // reparents, so mounting an ancestor would move that ancestor beneath its
+      // own descendant and make the graph cyclic — and `scene`, which IS such an
+      // ancestor, is exposed on this record, so `mountBoard(scene)` was
+      // reachable. A cycle is not a rendering artefact: the next matrix update
+      // or render traversal recurses until the stack is exhausted.
+      if (wouldCycle(object, boardGroup)) {
+        reportRefused(
+          'A board that is the board group or an ancestor of it was refused; ' +
+            'mounting it would make the scene graph cyclic.',
+          Object.freeze({
+            boardSize: framing.boardSize,
+            objects: mountedObjects,
+          }),
+          'error',
+        );
+
+        return false;
+      }
+
+      // `add` is contained: a hostile or damaged object whose own hooks raise
+      // leaves the board group as it was rather than half-mounted.
+      try {
+        boardGroup.add(object);
+      } catch (error: unknown) {
+        refused += 1;
+        reporter.onCount({
+          name: REFUSED_METRIC,
+          value: 1,
+          detail: Object.freeze({ boardSize: framing.boardSize }),
+        });
+        reporter.onDiagnostic({
+          level: 'error',
+          source: DIAGNOSTIC_SOURCE,
+          message:
+            'A board the scene graph refused to parent was refused; the ' +
+            'board group stands as it was.',
+          detail: Object.freeze({ boardSize: framing.boardSize }),
+          error: describeRenderError(error),
+          thrown: error,
+        });
+
+        return false;
+      }
+
       mountedObjects = boardGroup.children.length;
 
       reporter.onCount({
@@ -1172,6 +1370,22 @@ export function createScene(options: SceneOptions = {}): BoardScene {
       }
 
       if (width === viewportWidth && height === viewportHeight) {
+        return false;
+      }
+
+      // THE DERIVED VALUES ARE MEASURED BEFORE ANYTHING IS WRITTEN. Two lengths
+      // can each be finite and positive while the ratio between them is not:
+      // `Number.MAX_VALUE / Number.MIN_VALUE` overflows to `Infinity` and the
+      // reverse underflows to zero, and either would have been assigned straight
+      // onto the camera's planes and poisoned its projection matrix. Refusing
+      // here leaves the held dimensions and the camera exactly as they were.
+      if (projectionFor(width, height) === null) {
+        reportRefused(
+          'A canvas size whose aspect ratio resolves to no usable frustum ' +
+            'was refused; the frustum stands as it was.',
+          Object.freeze({ width: String(width), height: String(height) }),
+        );
+
         return false;
       }
 
@@ -1317,4 +1531,3 @@ export function createScene(options: SceneOptions = {}): BoardScene {
     },
   });
 }
-

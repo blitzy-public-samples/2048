@@ -60,6 +60,7 @@ import type { RulesConfig } from '../../../src/config/rules-config';
 import {
   DEFAULT_STAGE_CONFIG,
   createDefaultStageConfig,
+  stageGoalForIndex,
 } from '../../../src/config/stage-config';
 import type { StageGoal } from '../../../src/config/stage-config';
 import { Engine } from '../../../src/engine/engine';
@@ -68,11 +69,18 @@ import {
   ENGINE_EVENT_NAMES,
   createEngineEvents,
 } from '../../../src/engine/engine-events';
-import type { StateCommitEvent } from '../../../src/engine/engine-events';
+import type {
+  BoardProjection,
+  MoveAfterEvent,
+  StateCommitEvent,
+} from '../../../src/engine/engine-events';
 import { Grid } from '../../../src/engine/grid';
 import { createHookBus } from '../../../src/engine/hook-bus';
 import type { BeforeMovePayload } from '../../../src/engine/hooks';
 import { Tile } from '../../../src/engine/tile';
+import { InputManager } from '../../../src/input/input-manager';
+import { INPUT_EVENT_NAMES } from '../../../src/input/keymap';
+import type { InputEventPayload } from '../../../src/input/keymap';
 import {
   DIRECTION_DOWN,
   DIRECTION_LEFT,
@@ -88,9 +96,23 @@ import type {
   Direction,
   EngineCountReport,
   EngineReporter,
+  Position,
   SerializedGameState,
   SerializedTile,
+  StageCommitContext,
 } from '../../../src/engine/types';
+import { createLogger } from '../../../src/observability/logger';
+import {
+  METRIC_NAMES,
+  createMetricsRegistry,
+} from '../../../src/observability/metrics';
+import {
+  SPAN_ATTRIBUTES,
+  SPAN_NAMES,
+  SPAN_OUTCOMES,
+  attachEngineTracing,
+  createTracer,
+} from '../../../src/observability/tracer';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import type { RngStreams } from '../../../src/rng/rng-streams';
 import {
@@ -111,6 +133,13 @@ const RUN_SEED = 'engine-suite-seed-1';
 
 /** A second run seed, for the cases that compare two runs. */
 const OTHER_SEED = 'engine-suite-seed-2';
+
+/**
+ * Correlation identifier the tracer-integration cases key their spans on.
+ * Supplied rather than derived: src/observability/logger.ts owns the one
+ * derivation and no engine module reads this value.
+ */
+const TRACED_CORRELATION_ID = 'run-engine-suite-traced';
 
 /** The win value js/game_manager.js L170 compared against. */
 const VANILLA_WIN_VALUE = 2048;
@@ -271,6 +300,83 @@ function createRecordingReporter(): RecordingReporter {
 }
 
 /**
+ * Correlation identifier the counter assertions pin every report to. Distinct
+ * from the default empty one, so a report that carried no identifier at all
+ * cannot pass.
+ */
+const CORRELATION_ID_UNDER_TEST = 'run-correlation-metrics';
+
+/**
+ * Every counter src/engine/engine.ts raises itself, as literals.
+ *
+ * Written out rather than imported because only two of the eleven are exported;
+ * a literal is also the stronger contract, since a rename inside the engine
+ * fails here rather than following the constant silently. A dashboard and an
+ * alert both key on these exact strings.
+ *
+ * src/engine/engine-events.ts and src/engine/hook-bus.ts raise their own
+ * counters through the SAME injected sink, and each has its own suite, so the
+ * assertions below read the engine's share rather than the whole stream.
+ */
+const ENGINE_OWNED_METRICS: readonly string[] = Object.freeze([
+  'engine.move.blocked',
+  'engine.move.cancelled',
+  'engine.move.idle',
+  'engine.move.resolved',
+  'engine.spawn.attempt',
+  'engine.spawn.suppressed',
+  'engine.snapshot.rejected',
+  'engine.snapshot.restored',
+  'engine.board.reconciled',
+  'engine.stage.cleared',
+  'engine.storage.failed',
+]);
+
+/**
+ * The counter names captured, in arrival order.
+ *
+ * @param counts Reports the sink captured.
+ * @returns The `metric` of each, in order.
+ */
+function metricNamesOf(counts: readonly EngineCountReport[]): string[] {
+  return counts.map((count) => count.metric);
+}
+
+/**
+ * The engine's own counter names, in arrival order, with the emitter's and the
+ * bus's removed.
+ *
+ * @param counts Reports the sink captured.
+ * @returns The `metric` of each engine-owned report, in order.
+ */
+function engineMetricNamesOf(
+  counts: readonly EngineCountReport[],
+): string[] {
+  return metricNamesOf(counts).filter((metric) =>
+    ENGINE_OWNED_METRICS.includes(metric),
+  );
+}
+
+/**
+ * Sums the values captured under one counter name.
+ *
+ * A sum rather than an occurrence count, so a report carrying a value other
+ * than 1 is measured rather than hidden.
+ *
+ * @param counts Reports the sink captured.
+ * @param metric Counter name to total.
+ * @returns The total recorded under `metric`.
+ */
+function countOf(
+  counts: readonly EngineCountReport[],
+  metric: string,
+): number {
+  return counts
+    .filter((count) => count.metric === metric)
+    .reduce((total, count) => total + count.value, 0);
+}
+
+/**
  * Reads the report sink the engine holds.
  *
  * js/game_manager.js L1-L5 held its collaborators as ordinary members; the
@@ -292,6 +398,19 @@ function reporterOf(engine: Engine): EngineReporter {
  */
 function boardValues(engine: Engine): (number | null)[][] {
   return engine.grid.cells.map((column) =>
+    column.map((tile) => (tile === null ? null : tile.value)),
+  );
+}
+
+/**
+ * Projects an emitted board to face values, in the same order
+ * `boardValues` reads the live lattice in.
+ *
+ * @param board The projection an event carried.
+ * @returns `values[x][y]`, with `null` in every empty cell.
+ */
+function boardValuesOf(board: BoardProjection): (number | null)[][] {
+  return board.cells.map((column) =>
     column.map((tile) => (tile === null ? null : tile.value)),
   );
 }
@@ -634,6 +753,7 @@ describe('constructor (js/game_manager.js L1-L14)', () => {
     const engine = new Engine({
       streams: streamsFor(),
       reporter: recording.reporter,
+      correlationId: 'run-correlation-counted',
     });
 
     expect(reporterOf(engine)).toBe(recording.reporter);
@@ -641,11 +761,163 @@ describe('constructor (js/game_manager.js L1-L14)', () => {
     engine.setup(null);
     engine.move(DIRECTION_LEFT);
 
-    expect(recording.counts.length).toBeGreaterThan(0);
+    // Named exactly and in order, not merely typed. `typeof metric ===
+    // 'string'` held for any name at all, so a renamed or misspelled counter
+    // passed and a branch that stopped counting passed too.
+    expect(engineMetricNamesOf(recording.counts)).toEqual([
+      // `setup(null)` restores nothing, which the engine counts as a refused
+      // snapshot whether one was unreadable or none was offered.
+      'engine.snapshot.rejected',
+      // The two start tiles of js/game_manager.js L7.
+      'engine.spawn.attempt',
+      'engine.spawn.attempt',
+      // The move's own spawn, then the resolution.
+      'engine.spawn.attempt',
+      'engine.move.resolved',
+    ]);
+    expect(countOf(recording.counts, 'engine.spawn.attempt')).toBe(3);
+    expect(countOf(recording.counts, 'engine.move.resolved')).toBe(1);
+    expect(countOf(recording.counts, 'engine.spawn.suppressed')).toBe(0);
+    expect(countOf(recording.counts, 'engine.storage.failed')).toBe(0);
 
     for (const count of recording.counts) {
-      expect(count.correlationId).toBe('');
-      expect(typeof count.metric).toBe('string');
+      expect(count.correlationId).toBe('run-correlation-counted');
+      expect(count.value).toBe(1);
+    }
+  });
+
+  it('names the counter of every branch one move can take', () => {
+    // One case per counted branch, each pinned to its canonical name and to a
+    // count of exactly one, so a branch that stops counting or starts counting
+    // twice is caught rather than absorbed into a total.
+    const blocked = createRecordingReporter();
+    const blockedEngine = new Engine({
+      streams: streamsFor(),
+      reporter: blocked.reporter,
+      correlationId: CORRELATION_ID_UNDER_TEST,
+    });
+
+    blockedEngine.setup(copyBoard(NEAR_LOSS_BOARD));
+    play(blockedEngine, [
+      DIRECTION_LEFT,
+      DIRECTION_UP,
+      DIRECTION_RIGHT,
+      DIRECTION_DOWN,
+      DIRECTION_LEFT,
+      DIRECTION_UP,
+      DIRECTION_RIGHT,
+      DIRECTION_DOWN,
+    ]);
+
+    expect(blockedEngine.isGameTerminated()).toBe(true);
+
+    blocked.counts.length = 0;
+
+    expect(blockedEngine.move(DIRECTION_LEFT)).toBe(false);
+
+    // The refusal is the FIRST thing the move does, so nothing else counts:
+    // no hook is dispatched and no event is emitted.
+    expect(metricNamesOf(blocked.counts)).toEqual(['engine.move.blocked']);
+
+    const cancelled = createRecordingReporter();
+    const hooks = createHookBus({ correlationId: CORRELATION_ID_UNDER_TEST });
+
+    hooks.register({
+      id: 'veto',
+      hooks: {
+        onBeforeMove: (payload: BeforeMovePayload): BeforeMovePayload => ({
+          ...payload,
+          cancelled: true,
+        }),
+      },
+    });
+
+    const cancelledEngine = new Engine({
+      streams: streamsFor(),
+      reporter: cancelled.reporter,
+      correlationId: CORRELATION_ID_UNDER_TEST,
+      hooks,
+    });
+
+    cancelledEngine.setup(copyBoard(MERGE_PAIR_BOARD));
+    cancelled.counts.length = 0;
+
+    expect(cancelledEngine.move(DIRECTION_LEFT)).toBe(false);
+    expect(engineMetricNamesOf(cancelled.counts)).toEqual([
+      'engine.move.cancelled',
+    ]);
+    expect(countOf(cancelled.counts, 'engine.spawn.attempt')).toBe(0);
+    expect(countOf(cancelled.counts, 'engine.move.resolved')).toBe(0);
+
+    const idle = createRecordingReporter();
+    const idleEngine = new Engine({
+      streams: streamsFor(),
+      reporter: idle.reporter,
+      correlationId: CORRELATION_ID_UNDER_TEST,
+    });
+
+    idleEngine.setup(copyBoard(BLOCKED_BOARD));
+    idle.counts.length = 0;
+
+    expect(idleEngine.move(DIRECTION_LEFT)).toBe(false);
+    expect(engineMetricNamesOf(idle.counts)).toEqual(['engine.move.idle']);
+
+    // The no-op branch spawns nothing and resolves nothing, and after the
+    // move:after it now emits it still commits nothing.
+    expect(countOf(idle.counts, 'engine.spawn.attempt')).toBe(0);
+    expect(countOf(idle.counts, 'engine.move.resolved')).toBe(0);
+
+    for (const count of [
+      ...blocked.counts,
+      ...cancelled.counts,
+      ...idle.counts,
+    ]) {
+      expect(count.correlationId).toBe(CORRELATION_ID_UNDER_TEST);
+      expect(count.value).toBe(1);
+    }
+  });
+
+  it('names the snapshot counters of a restored and a refused load', () => {
+    const restored = createRecordingReporter();
+    const restoringPort: EngineStoragePort = {
+      getBestScore: (): string | 0 => 0,
+      setBestScore: (): unknown => undefined,
+      getGameState: (): unknown => copyBoard(MERGE_PAIR_BOARD),
+      setGameState: (): unknown => undefined,
+      clearGameState: (): unknown => undefined,
+    };
+
+    new Engine({
+      streams: streamsFor(),
+      reporter: restored.reporter,
+      correlationId: CORRELATION_ID_UNDER_TEST,
+      storage: restoringPort,
+    }).setup();
+
+    expect(engineMetricNamesOf(restored.counts)[0]).toBe(
+      'engine.snapshot.restored'
+    );
+    expect(countOf(restored.counts, 'engine.snapshot.restored')).toBe(1);
+    expect(countOf(restored.counts, 'engine.snapshot.rejected')).toBe(0);
+
+    const rejected = createRecordingReporter();
+    const rejectingPort: EngineStoragePort = {
+      ...restoringPort,
+      getGameState: (): unknown => ({ grid: 'not a grid' }),
+    };
+
+    new Engine({
+      streams: streamsFor(),
+      reporter: rejected.reporter,
+      correlationId: CORRELATION_ID_UNDER_TEST,
+      storage: rejectingPort,
+    }).setup();
+
+    expect(countOf(rejected.counts, 'engine.snapshot.rejected')).toBe(1);
+    expect(countOf(rejected.counts, 'engine.snapshot.restored')).toBe(0);
+
+    for (const count of [...restored.counts, ...rejected.counts]) {
+      expect(count.correlationId).toBe(CORRELATION_ID_UNDER_TEST);
     }
   });
 
@@ -1001,7 +1273,8 @@ describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
     }
   });
 
-  it('attempts no spawn on a full board and does not throw (L70)', () => {
+  it('inserts no tile on a full board, does not throw, and emits the attempt ' +
+    'with no position (L70)', () => {
     // js/grid.js L37-L43 returned no cell on a full board, which is the
     // boundary the guard at L70 kept the spawn away from. Six start tiles on
     // a four-cell board reach the guard twice.
@@ -1011,10 +1284,10 @@ describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
     config.startTiles = 6;
 
     const engine = new Engine({ streams: streamsFor(), config });
-    const spawned: number[] = [];
+    const spawned: (Position | undefined)[] = [];
 
     engine.events.on('tile:spawn', (payload) => {
-      spawned.push(payload.value);
+      spawned.push(payload.position);
     });
 
     expect(() => {
@@ -1022,7 +1295,36 @@ describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
     }).not.toThrow();
 
     expect(tileCount(engine)).toBe(4);
-    expect(spawned).toHaveLength(4);
+
+    // AAP Contract 1: every attempt is emitted, and the two that found no cell
+    // carry no position. Four insertions then two full-board attempts.
+    expect(spawned).toHaveLength(6);
+    expect(spawned.filter((cell) => cell !== undefined)).toHaveLength(4);
+    expect(spawned.slice(4)).toEqual([undefined, undefined]);
+  });
+
+  it('takes no draw for a full-board attempt, so the sequence is unmoved ' +
+    '(L70)', () => {
+    const config = createDefaultRulesConfig();
+
+    config.boardSize = 2;
+    config.startTiles = 6;
+
+    const streams = streamsFor();
+    const engine = new Engine({ streams, config });
+
+    engine.setup(null);
+
+    const afterSix = streams.snapshotCursors();
+
+    const reference = streamsFor();
+    const referenceConfig = createDefaultRulesConfig();
+
+    referenceConfig.boardSize = 2;
+    referenceConfig.startTiles = 4;
+    new Engine({ streams: reference, config: referenceConfig }).setup(null);
+
+    expect(afterSix).toEqual(reference.snapshotCursors());
   });
 
   it('spawns nothing further once a move leaves the board full', () => {
@@ -1185,9 +1487,97 @@ describe('move(): the moved? decision (js/game_manager.js L182-L190)', () => {
     expect(tileCount(engine)).toBe(4);
     expect(engine.score).toBe(0);
     expect(events).not.toContain('tile:spawn');
-    expect(events).not.toContain('move:after');
     expect(events).not.toContain('state:commit');
     expect(recording.calls).toEqual([]);
+  });
+
+  it('completes the turn through move:after carrying moved as false', () => {
+    // The completion signal of the no-op branch. Without it a subscriber that
+    // opened work on `move:before` has nothing to close it on and holds that
+    // work open until the next turn supersedes it — which is the leak the
+    // Performance-API tracer of src/observability/tracer.ts exhibited, since
+    // `move:after { moved: false }` is its only unmoved-turn closure.
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const after: MoveAfterEvent[] = [];
+    const events: string[] = [];
+
+    recordEvents(engine, events);
+    engine.events.on('move:after', (payload) => {
+      after.push(payload);
+    });
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(events).toContain('move:after');
+    expect(after).toHaveLength(1);
+    expect(after[0].moved).toBe(false);
+    expect(after[0].score).toBe(0);
+    expect(after[0].over).toBe(false);
+    expect(after[0].won).toBe(false);
+    expect(after[0].terminated).toBe(false);
+    expect(boardValuesOf(after[0].board)).toEqual(boardValues(engine));
+
+    // The emission is beside L182-L190's skipped block, not inside it.
+    expect(events).not.toContain('tile:spawn');
+    expect(events).not.toContain('state:commit');
+  });
+
+  it('dispatches no hook for the turn that changed nothing', () => {
+    // `onAfterMove` belongs to the branch that changed the board. The no-op
+    // emission is an event alone: no handler runs, so no relic can rescore,
+    // end or win a turn that resolved nothing.
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const dispatched: string[] = [];
+
+    recordHooks(engine, dispatched);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(dispatched).toEqual(['onBeforeMove']);
+  });
+
+  it('closes an unmoved turn span on the real Performance-API tracer', () => {
+    // The cross-module contract of finding M12, driven end to end: a real
+    // `Engine`, a real `Tracer`, and no fabricated event anywhere. The turn
+    // span must be CLOSED after the no-op and must carry `unmoved`, with no
+    // turn latency observed because nothing committed.
+    const logger = createLogger({ correlationId: TRACED_CORRELATION_ID });
+    const registry = createMetricsRegistry({ logger });
+    const tracer = createTracer({ logger, metrics: registry, marks: false });
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(BLOCKED_BOARD));
+
+    const detach = attachEngineTracing(engine.events, tracer);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+
+    const turns = tracer
+      .recent()
+      .filter((record) => record.name === SPAN_NAMES.engineTurn);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0].attributes[SPAN_ATTRIBUTES.moved]).toBe(false);
+    expect(turns[0].attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.unmoved,
+    );
+
+    const snapshot = tracer.snapshot();
+
+    expect(snapshot.open).toBe(0);
+    expect(snapshot.anomalies).toBe(0);
+    expect(snapshot.faults).toBe(0);
+    expect(
+      registry.histogram(METRIC_NAMES.turnLatencyMilliseconds).count,
+    ).toBe(0);
+
+    detach();
+
+    expect(tracer.snapshot().open).toBe(0);
   });
 
   it('spawns exactly one tile and commits once when a position changed', () => {
@@ -1476,6 +1866,100 @@ describe('the six hooks dispatch at their mapped points', () => {
     expect(dispatched).toEqual(['onStageEnd']);
   });
 
+  it('completes the stage transition: end, advance, then start', () => {
+    let stageIndex = 0;
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageContext: (): StageCommitContext =>
+        Object.freeze({
+          stageIndex,
+          goal: stageGoalForIndex(stageIndex, DEFAULT_STAGE_CONFIG),
+          goalProgress: 0,
+        }),
+    });
+
+    engine.setup(null);
+
+    const dispatched: string[] = [];
+    const events: string[] = [];
+
+    recordHooks(engine, dispatched);
+    engine.events.on('stage:end', () => {
+      events.push('stage:end');
+    });
+    engine.events.on('stage:start', () => {
+      events.push('stage:start');
+    });
+
+    // The three steps of the transition: the engine resolves the stage that
+    // finished, the observer authority advances the provider, and the engine
+    // begins the stage that follows.
+    engine.endStage(true);
+    stageIndex = 1;
+    engine.startStage();
+
+    expect(dispatched).toEqual(['onStageEnd', 'onStageStart']);
+    expect(events).toEqual(['stage:end', 'stage:start']);
+    expect(engine.stageGoalInForce()).toEqual(
+      stageGoalForIndex(1, DEFAULT_STAGE_CONFIG),
+    );
+  });
+
+  it('starts the next stage on the board already in play', () => {
+    let stageIndex = 0;
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageContext: (): StageCommitContext =>
+        Object.freeze({
+          stageIndex,
+          goal: stageGoalForIndex(stageIndex, DEFAULT_STAGE_CONFIG),
+          goalProgress: 0,
+        }),
+    });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const board = boardValues(engine);
+    const tiles = tileCount(engine);
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+
+    const played = boardValues(engine);
+    const score = engine.score;
+
+    engine.endStage(true);
+    stageIndex = 1;
+    engine.startStage();
+
+    // No rebuild and no start tiles: the board, the score and the tile count
+    // are exactly what the stage before them left.
+    expect(boardValues(engine)).toEqual(played);
+    expect(engine.score).toBe(score);
+    expect(boardValues(engine)).not.toEqual(board);
+    expect(tileCount(engine)).toBeGreaterThanOrEqual(tiles);
+  });
+
+  it('reports the goal an onStageStart handler adopted as in force', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const adopted: StageGoal = Object.freeze({
+      kind: 'score-threshold',
+      target: 4242,
+    });
+
+    engine.hooks.register({
+      id: 'goal-replacer',
+      hooks: {
+        onStageStart: (payload) => ({ ...payload, goal: adopted }),
+      },
+    });
+
+    engine.setup(null);
+
+    // The engine's own measurement and the goal it publishes are the same
+    // object, so an observer adopting this cannot disagree with the engine.
+    expect(engine.stageGoalInForce()).toEqual(adopted);
+  });
+
   it('resolves the stage itself under the engine authority', () => {
     const engine = new Engine({
       streams: streamsFor(),
@@ -1576,8 +2060,39 @@ describe('the six hooks dispatch at their mapped points', () => {
       },
     });
 
+    // The emission precedes the hook dispatch, so the subscriber sees the flag
+    // as it stood before the veto was cast, and the move is still withdrawn.
     expect(engine.move(DIRECTION_LEFT)).toBe(false);
-    expect(cancelled).toEqual([true]);
+    expect(cancelled).toEqual([false]);
+  });
+
+  it('withdraws the move a move:before LISTENER vetoed (AAP Contract 1)',
+    () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const dispatched: boolean[] = [];
+
+    engine.events.on('move:before', (payload) => {
+      payload.cancelled = true;
+    });
+    engine.hooks.register({
+      id: 'observes-the-veto',
+      hooks: {
+        onBeforeMove: (payload): void => {
+          dispatched.push(payload.cancelled);
+        },
+      },
+    });
+
+    const before = engine.serialize();
+
+    // `move:before` is cancellable, and the veto reaches the hook dispatch, so
+    // an `onBeforeMove` handler sees a veto a listener already cast.
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+    expect(dispatched).toEqual([true]);
+    expect(engine.serialize()).toEqual(before);
   });
 });
 
@@ -1733,7 +2248,7 @@ describe('the seven engine events (js/game_manager.js L91-L97)', () => {
     expect(ends).toEqual([{ stageIndex: 0, cleared: false, score: 0 }]);
   });
 
-  it('carries the eight members of the commit payload', () => {
+  it('carries the ten members of the commit payload', () => {
     // Successor to L91-L97's `actuate(grid, {score, over, won, bestScore,
     // terminated})`, extended with the stage and relic slices.
     const engine = new Engine({ streams: streamsFor() });
@@ -1745,11 +2260,13 @@ describe('the seven engine events (js/game_manager.js L91-L97)', () => {
     expect(Object.keys(commits[0]).sort()).toEqual([
       'bestScore',
       'board',
+      'degraded',
       'over',
       'relics',
       'score',
       'stage',
       'terminated',
+      'turn',
       'won',
     ]);
   });
@@ -1816,27 +2333,25 @@ describe('the seven engine events (js/game_manager.js L91-L97)', () => {
     ]);
   });
 
-  it('commits a detached frozen board rather than the live lattice', () => {
-    // The logged deviation from L91's by-reference hand-off, which
-    // js/html_actuator.js L16-L22 read `grid.cells` straight out of: the
-    // emitter projects the board before any listener is reached, so a
-    // subscriber holds a snapshot and not the engine's own lattice.
+  it('commits the live lattice, as L91 handed it over', () => {
+    // L91's by-reference hand-off, which js/html_actuator.js L16-L22 read
+    // `grid.cells` straight out of: a subscriber receives the engine's own
+    // board and treats it as read-only.
     const engine = new Engine({ streams: streamsFor() });
     const commits = captureCommits(engine);
 
     engine.setup(copyBoard(MERGE_PAIR_BOARD));
 
     expect(commits).toHaveLength(1);
-    expect(commits[0].board as unknown).not.toBe(engine.grid as unknown);
-    expect(commits[0].board.cells as unknown).not.toBe(
+    expect(commits[0].board as unknown).toBe(engine.grid as unknown);
+    expect(commits[0].board.cells as unknown).toBe(
       engine.grid.cells as unknown,
     );
-    expect(Object.isFrozen(commits[0])).toBe(true);
-    expect(Object.isFrozen(commits[0].board)).toBe(true);
-    expect(Object.isFrozen(commits[0].board.cells)).toBe(true);
+    expect(Object.isFrozen(commits[0])).toBe(false);
+    expect(Object.isFrozen(commits[0].board)).toBe(false);
   });
 
-  it('projects the members js/html_actuator.js L16-L22 read', () => {
+  it('carries the members js/html_actuator.js L16-L22 read', () => {
     const engine = new Engine({ streams: streamsFor() });
     const commits = captureCommits(engine);
 
@@ -1854,7 +2369,7 @@ describe('the seven engine events (js/game_manager.js L91-L97)', () => {
     expect(merged?.mergedFrom).not.toBeUndefined();
   });
 
-  it('leaves the live board untouched by a projection a listener holds', () => {
+  it('follows the live board a listener holds across a later move', () => {
     const engine = new Engine({ streams: streamsFor() });
     const commits = captureCommits(engine);
 
@@ -1865,8 +2380,12 @@ describe('the seven engine events (js/game_manager.js L91-L97)', () => {
 
     expect(engine.move(DIRECTION_LEFT)).toBe(true);
     expect(boardValues(engine)).not.toEqual(before);
-    expect(held.cells[0][0]?.value).toBe(2);
-    expect(held.cells[1][0]?.value).toBe(2);
+
+    // The commit carried the board by reference, so the reference a
+    // subscriber kept is the board the move mutated in place.
+    expect(held).toBe(engine.grid);
+    expect(held.cells[0][0]?.value).toBe(4);
+    expect(held.cells[1][0]).toBeNull();
   });
 });
 
@@ -1942,46 +2461,91 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
     expect(commits[0].terminated).toBe(false);
   });
 
-  it('keeps the frozen input event name of L11 reaching the method', () => {
-    // js/keyboard_input_manager.js L18-L32's bus dispatched by name, and L11
-    // subscribed under `keepPlaying`. The three names L9-L11 registered still
-    // reach the engine methods they reached then.
-    const engine = new Engine({ streams: streamsFor() });
-
-    engine.setup(copyBoard(NEAR_WIN_BOARD));
-
-    const subscriptions: Record<string, (data?: unknown) => void> = {
-      move: (data) => {
-        engine.move(data as Direction);
-      },
-      restart: () => {
-        engine.restart();
-      },
-      keepPlaying: () => {
-        engine.continuePlaying();
-      },
-    };
-
-    expect(Object.keys(subscriptions)).toEqual([
+  it('declares the three frozen names L9-L11 subscribed, in that order', () => {
+    // Read off the product's own `INPUT_EVENT_NAMES` rather than restated, so a
+    // rename in src/input/keymap.ts fails here. js/keyboard_input_manager.js
+    // L9-L11 registered exactly these three, in exactly this order, and the
+    // eight names after them are this feature's additions.
+    expect(INPUT_EVENT_NAMES.slice(0, 3)).toEqual([
       'move',
       'restart',
       'keepPlaying',
     ]);
+  });
 
-    subscriptions.move(DIRECTION_LEFT);
+  it('reaches the method through the REAL input manager bus', () => {
+    // The whole point of the case: the subscription, the dispatch and the
+    // engine are all real. `InputManager` is constructible with no document —
+    // it resolves an absent one and binds no listener — so the real bus is
+    // driven here without leaving the dom-free project.
+    const engine = new Engine({ streams: streamsFor() });
+    const input = new InputManager();
 
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+
+    input.on('move', (direction) => {
+      engine.move(direction);
+    });
+    input.on('restart', () => {
+      engine.restart();
+    });
+    input.on('keepPlaying', () => {
+      engine.continuePlaying();
+    });
+
+    // Emitted through the manager's own public entry points, so the name each
+    // one dispatches under is the manager's choice and not this test's.
+    expect(input.emitMove(DIRECTION_LEFT)).toBe(1);
     expect(engine.won).toBe(true);
     expect(engine.isGameTerminated()).toBe(true);
 
-    subscriptions.keepPlaying();
+    input.keepPlaying();
 
     expect(engine.continuedPlay).toBe(true);
     expect(engine.isGameTerminated()).toBe(false);
 
-    subscriptions.restart();
+    input.restart();
 
     expect(engine.won).toBe(false);
     expect(engine.continuedPlay).toBe(false);
+
+    input.destroy();
+  });
+
+  it('is reached by no OTHER name the input layer emits', () => {
+    // `continuePlaying()` must be reachable from `keepPlaying` and from
+    // nothing else, so a later input event cannot silently resume a won run.
+    const engine = new Engine({ streams: streamsFor() });
+    const input = new InputManager();
+
+    engine.setup(copyBoard(NEAR_WIN_BOARD));
+    input.on('keepPlaying', () => {
+      engine.continuePlaying();
+    });
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.isGameTerminated()).toBe(true);
+
+    for (const name of INPUT_EVENT_NAMES) {
+      if (name === 'keepPlaying') {
+        continue;
+      }
+
+      // Every other name dispatches to zero subscribers here, so none of them
+      // can reach the method.
+      expect(
+        input.emit(name, undefined as InputEventPayload[typeof name])
+      ).toBe(0);
+    }
+
+    expect(engine.continuedPlay).toBe(false);
+    expect(engine.isGameTerminated()).toBe(true);
+
+    input.keepPlaying();
+
+    expect(engine.continuedPlay).toBe(true);
+
+    input.destroy();
   });
 });
 
@@ -2196,7 +2760,48 @@ describe('restart() (js/game_manager.js L17-L21)', () => {
     engine.restart();
 
     expect(recording.calls[0]).toBe('clearGameState');
-    expect(recording.calls).toContain('getGameState');
+
+    // `restart()` passes `null` to `setup()`, so the port is never read back.
+    // Reading it back would restore the snapshot the clear just discarded
+    // whenever the clear failed, which is the board a restart exists to leave.
+    expect(recording.calls).not.toContain('getGameState');
+    expect(engine.score).toBe(0);
+  });
+
+  it('restarts onto a fresh board even when the clear failed', () => {
+    const snapshot = snapshotFromRows([
+      [1024, null, null, null],
+      [null, null, null, null],
+      [null, null, null, null],
+      [null, null, null, null],
+    ], { score: 4096, won: true, keepPlaying: true });
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: {
+        getBestScore: (): 0 => 0,
+        setBestScore: (): void => undefined,
+
+        // The snapshot survives the clear, which is what a port that raises
+        // on `clearGameState` leaves behind.
+        getGameState: (): SerializedGameState => snapshot,
+        clearGameState: (): void => {
+          throw new Error('quota');
+        },
+        setGameState: (): void => undefined,
+      },
+    });
+
+    engine.setup();
+
+    expect(engine.score).toBe(4096);
+
+    engine.restart();
+
+    // Fresh board, fresh score, fresh flags — the surviving snapshot is not
+    // read back.
+    expect(engine.score).toBe(0);
+    expect(engine.won).toBe(false);
+    expect(tileCount(engine)).toBe(VANILLA_START_TILES);
   });
 
   it('resets to a fresh board, score and flags', () => {
@@ -2452,6 +3057,12 @@ describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
     expect(recording.written[0].grid.size).toBe(DEFAULT_BOARD_SIZE);
   });
 
+  // THE STORAGE PORT, not the terminal-state probe. Every member raises, and the
+  // turn still completes, because AAP Contract 5 requires the commit path never
+  // to throw out of a move whose board has already changed. A terminal-state
+  // measurement that cannot be taken is a different case with a different
+  // answer — a surfaced degraded state — and is asserted in
+  // tests/unit/engine/engine-capabilities.test.ts.
   it('completes the turn when every port call raises', () => {
     const failing: EngineStoragePort = {
       getBestScore: (): string | 0 => {
@@ -2470,20 +3081,141 @@ describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
         throw new Error('quota');
       },
     };
-    const engine = new Engine({ streams: streamsFor(), storage: failing });
+    const recording = createRecordingReporter();
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: failing,
+      reporter: recording.reporter,
+      correlationId: CORRELATION_ID_UNDER_TEST,
+    });
 
     expect(() => {
       engine.setup();
     }).not.toThrow();
 
+    // Every raise is ACCOUNTED, not merely survived. js/game_manager.js
+    // L79-L99 made all five port calls bare, so a quota exhaustion left the
+    // commit path by raising and nothing recorded that it had happened.
+    const setupFailures = countOf(recording.counts, 'engine.storage.failed');
+
+    // Setup reads the snapshot, then the commit reads the best score, promotes
+    // it and writes the snapshot: four port calls, four raises, four counts.
+    expect(setupFailures).toBe(4);
+
+    for (const count of recording.counts) {
+      expect(count.correlationId).toBe(CORRELATION_ID_UNDER_TEST);
+      expect(count.value).toBe(1);
+    }
+
     const commits = captureCommits(engine);
 
+    recording.counts.length = 0;
+
+    // Measured ONE TURN AT A TIME, so the number is attributable rather than a
+    // total whose composition is unknown. A resolved turn makes three port
+    // calls that raise — the best-score read of the promotion, the best-score
+    // read of the commit payload, and the snapshot write — plus a fourth, the
+    // promotion write, only on a turn that scored.
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+
+    const firstTurn = recording.counts.filter(
+      (count) => count.metric === 'engine.storage.failed',
+    );
+
+    expect(firstTurn).toHaveLength(engine.score > 0 ? 4 : 3);
+
+    recording.counts.length = 0;
+
     expect(() => {
-      play(engine, [DIRECTION_LEFT, DIRECTION_UP]);
+      play(engine, [DIRECTION_UP]);
     }).not.toThrow();
+
+    const secondTurn = recording.counts.filter(
+      (count) => count.metric === 'engine.storage.failed',
+    );
+
+    expect(secondTurn.length).toBeGreaterThanOrEqual(3);
+    expect(secondTurn.length).toBeLessThanOrEqual(4);
+
+    for (const report of [...firstTurn, ...secondTurn]) {
+      expect(report.metric).toBe('engine.storage.failed');
+      expect(report.value).toBe(1);
+      expect(report.correlationId).toBe(CORRELATION_ID_UNDER_TEST);
+
+      // The counter is not hook-scoped and not event-scoped: it is raised
+      // inside the port wrapper, outside any dispatch.
+      expect(report.hook).toBeUndefined();
+      expect(report.event).toBeUndefined();
+    }
+
+    // No OTHER counter reports the failure, so a consumer alerting on this one
+    // name sees every port failure and nothing double-counts it.
+    expect(
+      engineMetricNamesOf(recording.counts).filter(
+        (metric) =>
+          metric !== 'engine.storage.failed' &&
+          metric !== 'engine.move.resolved' &&
+          metric !== 'engine.spawn.attempt',
+      ),
+    ).toEqual([]);
 
     for (const commit of commits) {
       expect(commit.bestScore).toBe(0);
+    }
+
+    // The turn still resolved, so the failure was contained rather than
+    // swallowing the move.
+    expect(countOf(recording.counts, 'engine.move.resolved')).toBe(1);
+  });
+
+  it('raises the port counter for each of the five calls in turn', () => {
+    // One hostile call at a time, so the counter is attributed to the call
+    // that actually raised rather than to a total over all five.
+    const calls = [
+      'getBestScore',
+      'setBestScore',
+      'getGameState',
+      'setGameState',
+      'clearGameState',
+    ] as const;
+
+    for (const hostile of calls) {
+      const recording = createRecordingReporter();
+      const port: EngineStoragePort = {
+        getBestScore: (): string | 0 => 0,
+        setBestScore: (): unknown => undefined,
+        getGameState: (): unknown => null,
+        setGameState: (): unknown => undefined,
+        clearGameState: (): unknown => undefined,
+        [hostile]: (): never => {
+          throw new Error(`${hostile} raised`);
+        },
+      };
+      const engine = new Engine({
+        streams: streamsFor(),
+        storage: port,
+        reporter: recording.reporter,
+        correlationId: CORRELATION_ID_UNDER_TEST,
+      });
+
+      expect(() => {
+        // The board is supplied, so this setup consults no port; the second one
+        // OMITS it, which is the call that reads `getGameState` — the read
+        // js/game_manager.js L36 performed. Both are driven, so every one of the
+        // five hostile members is actually reached.
+        engine.setup(copyBoard(NEAR_WIN_BOARD));
+        engine.move(DIRECTION_LEFT);
+        engine.restart();
+        engine.setup();
+      }).not.toThrow();
+
+      const failures = countOf(recording.counts, 'engine.storage.failed');
+
+      expect(failures).toBeGreaterThanOrEqual(1);
+
+      for (const count of recording.counts) {
+        expect(count.correlationId).toBe(CORRELATION_ID_UNDER_TEST);
+      }
     }
   });
 });

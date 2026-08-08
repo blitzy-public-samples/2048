@@ -20,11 +20,20 @@
  *
  * This module introduces no source of randomness of its own: a seed reaches it
  * only as an argument, and nothing here reads, wraps or assigns to
- *
- * Decisions behind this file: DL-RNG-04, the seed fanned into four named
- * substreams, and DL-RNG-05, each substream reporting its own cursor. Both
- * target-only rows TR-RNG-06 through TR-RNG-09 of
  * `Math.random`.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, all target-only
+ * because no vanilla construct fanned a seed out:
+ *   TR-RNG-06  `STREAM_NAMES` and the four named substreams
+ *   TR-RNG-07  `createRngStreams` and the per-substream seed derivation
+ *   TR-RNG-08  `snapshotCursors` and the cursor restore walk
+ *   TR-RNG-09  `forkStreams`, the per-handler transaction's substream forks
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-RNG-04  the run seed fanned into four named substreams
+ *   DL-RNG-05  each substream reporting its own cursor, so a resumed run
+ *              continues the sequence it interrupted
  */
 
 import {

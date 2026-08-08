@@ -6,11 +6,15 @@
 // isGameTerminated(). hasReachedWinValue and highestTileValue are additions
 // and are marked as such at their declarations.
 //
-// traceability row of docs/TRACEABILITY_MATRIX.md:
-//   TR-TERM-01  L170      the win test the merge branch performed inline
-//   TR-TERM-02  L238-L240 movesAvailable()
-//   TR-TERM-03  L243-L268 tileMatchesAvailable()
-//   TR-TERM-04  L30-L32   isGameTerminated()
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-TERM-01  js/game_manager.js L170      the win test the merge branch
+//                                            performed inline
+//   TR-TERM-02  js/game_manager.js L238-L240 movesAvailable()
+//   TR-TERM-03  js/game_manager.js L243-L268 tileMatchesAvailable()
+//   TR-TERM-04  js/game_manager.js L30-L32   isGameTerminated()
+//   TR-TERM-05  hasReachedWinValue           target-only row
+//   TR-TERM-06  highestTileValue             target-only row
 //
 // The win value and the board's edge length are read from the arguments at
 // every call: no binding in this module holds either. The vanilla flag
@@ -18,17 +22,19 @@
 // src/engine/engine.ts; the input event name and the persisted member name
 // keep the vanilla spelling.
 //
-// declarations: hasReachedWinValue, target-only row TR-TERM-05, and
-// highestTileValue, target-only row TR-TERM-06.
-//
 // Every export is a query that mutates no grid and no tile. This module reads
 // no DOM, performs no I/O, consumes no randomness, reads no clock, memoises
 // nothing and reports nothing.
 //
-// Decisions behind this file: DL-TERM-01, relocating the win evaluation
-// out of the merge branch into this module; DL-TERM-02, preserving strict
-// equality against `config.winValue`; DL-TERM-03, reading the win value,
-// the merge predicate and the board size at use time; and DL-TERM-04, the
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-TERM-01  relocating the win evaluation out of the merge branch into
+//               this module
+//   DL-TERM-02  strict equality against `config.winValue`
+//   DL-TERM-03  reading the win value, the merge predicate and the board size
+//               at use time
+//   DL-TERM-04  the loss probe reading the configured merge predicate rather
+//               than an equality comparison of its own
 
 import type { MergeTileView, RulesConfig } from '../config/rules-config';
 import type { Grid } from './grid';
@@ -114,11 +120,13 @@ export function hasReachedWinValue(
  * ONE CHANGE TO THE PORTED BEHAVIOUR. L259 wrote the match test inline as
  * `other.value === tile.value`. It is `config.merge.canMerge` here, the
  * same member src/engine/move-resolver.ts resolves a merge through, read
- * off the argument at every probe. Both tiles reach it as
- * `probeView` projections, so the predicate sees the face values
- * L259 compared and the cleared merge state L113-L120 produced; under the
- * default predicate in src/config/default-config.ts the two tests agree
- * for every pair.
+ * off the argument at every probe. Both operands reach it as `probeView`
+ * projections, which supply cleared merge-history views: each carries the
+ * face value L259 compared and a `mergedFrom` fixed to `null` whatever the
+ * live tile holds, which is the cleared merge state L113-L120 produced. A
+ * tile whose `mergedFrom` is set therefore still counts as a match, and
+ * under the default predicate in src/config/default-config.ts the two tests
+ * agree for every pair.
  *
  * The walked tile is the moving operand and the probed neighbour the
  * target, which is the operand order src/engine/move-resolver.ts passes
@@ -131,9 +139,7 @@ export function hasReachedWinValue(
  * such a cell rather than raising, and the probe relies on that valve and
  * adds no bounds test of its own.
  *
- * The comparison reads face values alone and reads no merge state: a tile
- * whose `mergedFrom` is set counts as a match. Each adjacent pair is probed
- * twice, once from each of its two cells. `grid.size` is read at call time.
+ * `grid.size` is read at call time.
  */
 export function tileMatchesAvailable(
   grid: Grid,

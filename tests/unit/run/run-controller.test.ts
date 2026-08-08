@@ -1,20 +1,21 @@
 /**
  * The run lifecycle, composed.
  *
- * WHY THIS SUITE EXISTS
- *   The nine-member envelope and its store both shipped complete and neither
- *   was ever joined to a running game: the runtime persisted the legacy board
- *   snapshot alone and handed the engine the neutral stage and relic contexts.
- *   The defect was therefore in the COMPOSITION, not in either module, so most
- *   of what follows drives a real `Engine` against a real `RunStateStore` over
- *   an injected store rather than exercising the controller against fakes.
+ * WHAT IS UNDER TEST
+ *   The COMPOSITION of the run layer: most of what follows drives a real
+ *   `Engine` against a real `RunStateStore` over an injected store, not the
+ *   controller against fakes. Decisions of docs/DECISION_LOG.md it is the
+ *   evidence for, one apiece: DL-RUNCTL-01, DL-RUNCTL-02, DL-RUNCTL-03,
+ *   DL-RUNCTL-04. Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece:
+ *   TR-RUNCTL-01, TR-RUNCTL-02, TR-RUNCTL-03, TR-RUNCTL-04, TR-RUNCTL-05,
+ *   TR-RUNCTL-06, TR-RUNCTL-07, TR-RUNCTL-08.
  *
- * WHY THE STORE IS INJECTED
+ * THE STORE IS INJECTED
  *   `tests/unit/run/` runs in both the `unit:dom-free` project, which has no
  *   Web Storage at all, and the `unit:dom` project, which has jsdom's. A
  *   `MemoryStorage` handed to `LocalStorageManager` makes every case below
  *   behave identically in both, and keeps one test's storage out of the next
- *   test's reach without depending on teardown.
+ *   test's reach without depending on teardown. Decision DL-TEST-01.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -35,7 +36,16 @@ import {
   type SerializedGameState,
 } from '../../../src/engine/types';
 import { createRngStreams } from '../../../src/rng/rng-streams';
-import { RunController, resolveRunIdentity } from '../../../src/run/run-controller';
+import {
+  RunController,
+  resolveRunIdentity,
+  type RunScope,
+} from '../../../src/run/run-controller';
+import {
+  RELIC_CATALOGUE,
+  RelicRegistry,
+} from '../../../src/relics/relic-registry';
+import type { Relic } from '../../../src/relics/relic-types';
 import {
   RUN_STATE_SCHEMA_VERSION,
   createFreshRunState,
@@ -232,6 +242,11 @@ function play(engine: Engine, moves: readonly Direction[]): void {
   for (const direction of moves) {
     engine.move(direction);
   }
+}
+
+/** An empty board snapshot, for engine doubles that only need a shape. */
+function emptySnapshot(): SerializedGameState {
+  return boardWith(0);
 }
 
 /** A board snapshot holding one tile of `value`, for goal-driven cases. */
@@ -842,7 +857,13 @@ describe('stage advancement', () => {
     });
     expect(ends[0]?.cleared).toBe(true);
     expect(controller.state().stageIndex).toBe(1);
-    expect(controller.state().goalProgress).toBe(0);
+
+    // A stage transition CARRIES the board, so the stage now in force opens
+    // measured against the tiles still in play rather than at zero: the 16 that
+    // cleared stage 0 is already part of the way to stage 1's target.
+    expect(controller.state().goalProgress).toBe(
+      16 / (stages.ladder[1]?.target ?? 1),
+    );
     expect(readStored(backing)?.stageIndex).toBe(1);
   });
 
@@ -1060,5 +1081,1097 @@ describe('detaching the controller', () => {
     // The engine keeps writing `gameState`; the envelope stops changing.
     expect(readStored(backing)?.rngCursor['spawn-value']).toBe(before);
     expect(read(backing, GAME_STATE_KEY)).not.toBeNull();
+  });
+});
+
+/* ==========================================================================
+ * 9. The relic registry, bound
+ *
+ * The port and the registry shipped with DIFFERENT MEMBER NAMES, so nothing
+ * could satisfy the port and no production wiring existed. Every case below
+ * binds the REAL `RelicRegistry` as the port, which is what makes the naming
+ * assertion mechanical rather than a matter of reading two files: if the names
+ * disagreed again this section would not compile.
+ * ========================================================================== */
+
+/** One composed run with a real registry over the engine's own hook bus. */
+interface ComposedWithRelics extends Composed {
+  readonly registry: RelicRegistry;
+}
+
+/**
+ * Composes as `compose()` does, and additionally builds a real registry over
+ * the engine's hook bus and binds it to the controller.
+ *
+ * The engine is constructed FIRST so the registry can attach to its live bus,
+ * then the controller's registry member is supplied — which is the order
+ * src/main.ts must use for the same reason.
+ */
+function composeWithRelics(
+  options: ComposeOptions & { readonly catalogue?: readonly Relic[] } = {},
+): ComposedWithRelics {
+  const backing = options.backing ?? new MemoryStorage();
+  const manager = new LocalStorageManager({ storage: backing });
+  const config = createDefaultRulesConfig();
+  const stages = createDefaultStageConfig();
+  const { reports, reporter } = createRecorder();
+
+  const issued: string[] = [];
+  let next = 0;
+  const createToken = (): string => {
+    const token = options.tokens?.[next] ?? `token-${String(next)}`;
+
+    next += 1;
+    issued.push(token);
+
+    return token;
+  };
+
+  const identity = resolveRunIdentity({
+    storage: manager,
+    createToken,
+    seed: options.seed,
+  });
+
+  // A holder, because the engine needs the controller's providers and the
+  // registry needs the engine's bus.
+  const holder: { controller: RunController | null } = { controller: null };
+
+  const engine = new Engine({
+    config,
+    streams: createRngStreams(identity.seed, {}),
+    storage: manager,
+    stageContext: () => holder.controller?.stageContext() ?? {
+      stageIndex: 0,
+      goal: stages.ladder[0],
+      goalProgress: 0,
+    },
+    relicContext: () => holder.controller?.relicContext() ?? [],
+  });
+
+  const registry = new RelicRegistry({
+    bus: engine.hooks,
+    ...(options.catalogue === undefined
+      ? {}
+      : { catalogue: options.catalogue }),
+  });
+
+  const controller = new RunController({
+    store: new RunStateStore({ storage: manager, config, reporter }),
+    identity,
+    config,
+    stages,
+    createToken,
+    reporter,
+
+    // THE BINDING UNDER TEST. The real registry, passed as the port.
+    relics: registry,
+  });
+
+  holder.controller = controller;
+  controller.begin();
+
+  const streams = createRngStreams(controller.seed(), controller.cursors());
+  const stop = controller.observe(engine, () => streams.snapshotCursors());
+
+  if (options.setup !== false) {
+    engine.setup(controller.openingBoard());
+  }
+
+  return {
+    backing,
+    manager,
+    config,
+    stages,
+    controller,
+    engine,
+    reports,
+    tokens: issued,
+    stop,
+    registry,
+  };
+}
+
+/** The identifier of the first relic in the real catalogue. */
+const FIRST_RELIC: string = RELIC_CATALOGUE[0].id;
+
+/** The identifier of the second relic in the real catalogue. */
+const SECOND_RELIC: string = RELIC_CATALOGUE[1].id;
+
+describe('the relic registry port', () => {
+  it('is satisfied by the real RelicRegistry', () => {
+    const { registry } = composeWithRelics();
+
+    // Every member the port names, resolved on the registry itself.
+    expect(registry.serialize).toBeTypeOf('function');
+    expect(registry.restore).toBeTypeOf('function');
+    expect(registry.persistedEntry).toBeTypeOf('function');
+    expect(registry.knows).toBeTypeOf('function');
+    expect(registry.pickUp).toBeTypeOf('function');
+    expect(registry.activate).toBeTypeOf('function');
+  });
+
+  it('calls every registry member through its owner, keeping this', () => {
+    const { controller, engine, registry } = composeWithRelics();
+
+    // `RelicRegistry` supplies these as CLASS METHODS reading private fields.
+    // A member extracted into a local and invoked bare would enter with `this`
+    // undefined and raise on the first field read, so every one of these
+    // completing is the assertion.
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    expect(controller.resolveReward(FIRST_RELIC).accepted).toBe(true);
+    expect(controller.persist(engine, () => ({}) as never)).toBe(true);
+    expect(controller.relics().map((relic) => relic.id)).toEqual([
+      FIRST_RELIC,
+    ]);
+    expect(registry.ownedIds()).toEqual([FIRST_RELIC]);
+  });
+
+  it('registers a picked-up relic with the live hook bus', () => {
+    const { controller, engine } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.resolveReward(FIRST_RELIC);
+
+    // THE POINT OF THE PICKUP. A relic recorded in the envelope but never
+    // registered was displayed and never fired.
+    expect(
+      engine.hooks.subscribers().map((subscriber) => subscriber.id),
+    ).toContain(FIRST_RELIC);
+  });
+
+  it('hands a restored envelope s relics back to the registry', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRelics({ backing, seed: 'relic-resume-seed' });
+
+    first.controller.recordRewardOffer([FIRST_RELIC, SECOND_RELIC]);
+    first.controller.resolveReward(FIRST_RELIC);
+    first.controller.recordRewardOffer([SECOND_RELIC]);
+    first.controller.resolveReward(SECOND_RELIC);
+    first.controller.persist(first.engine, () => ({}) as never);
+    first.stop();
+
+    const second = composeWithRelics({ backing, seed: 'relic-resume-seed' });
+
+    // Pickup order survives the round trip, and the bus dispatches in it.
+    expect(second.registry.ownedIds()).toEqual([FIRST_RELIC, SECOND_RELIC]);
+    expect(
+      second.engine.hooks.subscribers().map((subscriber) => subscriber.id),
+    ).toEqual([FIRST_RELIC, SECOND_RELIC]);
+  });
+});
+
+/* ==========================================================================
+ * 10. Reward selection is validated
+ * ========================================================================== */
+
+describe('resolving a reward', () => {
+  it('accepts a relic that was offered and is known', () => {
+    const { controller } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC, SECOND_RELIC]);
+
+    const resolution = controller.resolveReward(SECOND_RELIC);
+
+    expect(resolution.accepted).toBe(true);
+    expect(resolution.refusal).toBeNull();
+    expect(controller.relics().map((relic) => relic.id)).toEqual([
+      SECOND_RELIC,
+    ]);
+  });
+
+  it('refuses a relic that was never offered', () => {
+    const { controller, registry } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    const resolution = controller.resolveReward(SECOND_RELIC);
+
+    expect(resolution.accepted).toBe(false);
+    expect(resolution.refusal).toBe('not-offered');
+    expect(controller.relics()).toEqual([]);
+    expect(registry.ownedIds()).toEqual([]);
+  });
+
+  it('refuses a relic when nothing was offered at all', () => {
+    const { controller } = composeWithRelics();
+
+    expect(controller.resolveReward(FIRST_RELIC).refusal).toBe('not-offered');
+    expect(controller.relics()).toEqual([]);
+  });
+
+  it('refuses an identifier the catalogue does not carry', () => {
+    const { controller } = composeWithRelics();
+
+    // REFUSED AT THE OFFER, which is the earlier of the two gates that measure
+    // catalogue membership: an identifier no catalogue carries is one no seeded
+    // draw could have produced, so the whole offer is refused rather than
+    // recorded and then declined a step later.
+    expect(controller.recordRewardOffer(['no-such-relic'])).toBe(false);
+
+    // Nothing stands, so the selection is refused with it.
+    expect(controller.resolveReward('no-such-relic').refusal).toBe(
+      'not-offered',
+    );
+    expect(controller.relics()).toEqual([]);
+  });
+
+  it('refuses a selection the catalogue stopped carrying', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    let asked = 0;
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      relics: {
+        // Carried while the offer is admitted and gone by the time it is
+        // chosen, which is the one way the selection-side catalogue gate is
+        // reached: the offer gate is the same measurement taken earlier.
+        knows: (): boolean => {
+          asked += 1;
+
+          return asked === 1;
+        },
+        pickUp: (): unknown => ({}),
+      },
+    });
+
+    controller.begin();
+
+    expect(controller.recordRewardOffer([FIRST_RELIC])).toBe(true);
+
+    const resolution = controller.resolveReward(FIRST_RELIC);
+
+    expect(resolution.accepted).toBe(false);
+    expect(resolution.refusal).toBe('unknown');
+    expect(controller.relics()).toEqual([]);
+  });
+
+  it('refuses an empty identifier', () => {
+    const { controller } = composeWithRelics();
+
+    controller.recordRewardOffer(['']);
+
+    expect(controller.resolveReward('').refusal).toBe('not-offered');
+  });
+
+  it('refuses a relic the run already holds', () => {
+    const { controller } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.resolveReward(FIRST_RELIC);
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    expect(controller.resolveReward(FIRST_RELIC).refusal).toBe('held');
+    expect(controller.relics()).toHaveLength(1);
+  });
+
+  it('retains the offer when the selection was refused', () => {
+    const { controller } = composeWithRelics();
+    const offer = [FIRST_RELIC, SECOND_RELIC];
+
+    controller.recordRewardOffer(offer);
+    controller.resolveReward('no-such-relic');
+
+    // THE OFFER STANDS. Clearing it either way stranded the reward screen with
+    // nothing left to present, so a refused pick could not be retried.
+    expect(controller.resolveReward(FIRST_RELIC).accepted).toBe(true);
+  });
+
+  it('clears the offer once a selection was accepted', () => {
+    const { controller } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC, SECOND_RELIC]);
+
+    expect(controller.resolveReward(FIRST_RELIC).accepted).toBe(true);
+
+    // The set is spent; a second pick from it is no longer on offer.
+    expect(controller.resolveReward(SECOND_RELIC).refusal).toBe(
+      'not-offered',
+    );
+  });
+
+  it('reports the offer and the selection whether or not it was taken', () => {
+    const offered: string[][] = [];
+    const selected: string[] = [];
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      reporter: {
+        onRewardDrawn(report): void {
+          offered.push([...report.offeredRelicIds]);
+          selected.push(report.selectedRelicId ?? '');
+        },
+      },
+    });
+
+    controller.begin();
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.resolveReward('no-such-relic');
+    controller.resolveReward(FIRST_RELIC);
+
+    expect(selected).toEqual(['no-such-relic', FIRST_RELIC]);
+    expect(offered[0]).toEqual([FIRST_RELIC]);
+  });
+
+  it('refuses a pickup the registry declined', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      relics: {
+        knows: (): boolean => true,
+        pickUp: (): undefined => undefined,
+      },
+    });
+
+    controller.begin();
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    const resolution = controller.resolveReward(FIRST_RELIC);
+
+    expect(resolution.accepted).toBe(false);
+    expect(resolution.refusal).toBe('refused');
+    expect(controller.relics()).toEqual([]);
+  });
+
+  it('contains a registry that raises during a pickup', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      relics: {
+        knows: (): boolean => true,
+        pickUp: (): never => {
+          throw new Error('registry down');
+        },
+      },
+    });
+
+    controller.begin();
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    expect(() => controller.resolveReward(FIRST_RELIC)).not.toThrow();
+    expect(controller.relics()).toEqual([]);
+  });
+
+  it('accepts any offered identifier when no registry can be asked', () => {
+    const { controller } = compose();
+
+    controller.recordRewardOffer(['whatever-was-drawn']);
+
+    // No registry publishes `knows`, so the catalogue gate cannot be applied
+    // and the identifier is persisted bare.
+    expect(controller.resolveReward('whatever-was-drawn').accepted).toBe(true);
+    expect(controller.relics()).toEqual([{ id: 'whatever-was-drawn' }]);
+  });
+});
+
+/* ==========================================================================
+ * 11. The stage transition completes
+ * ========================================================================== */
+
+describe('completing a reward', () => {
+  it('starts the stage the advance moved to', () => {
+    const { controller, engine } = composeWithRelics();
+    const started: number[] = [];
+
+    engine.events.on('stage:start', (event) => {
+      started.push(event.stageIndex);
+    });
+
+    controller.advanceStage();
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.completeReward(engine, FIRST_RELIC);
+
+    // NOTHING ELSE STARTS THAT STAGE. A run that only advanced its index never
+    // dispatched `onStageStart` again.
+    expect(started).toEqual([1]);
+    expect(controller.stageIndex()).toBe(1);
+  });
+
+  it('dispatches onStageStart for the new stage', () => {
+    const { controller, engine } = composeWithRelics();
+    const dispatched: number[] = [];
+
+    engine.hooks.register({
+      id: 'stage-watcher',
+      hooks: {
+        onStageStart: (payload) => {
+          dispatched.push(payload.stageIndex);
+
+          return payload;
+        },
+      },
+    });
+
+    controller.advanceStage();
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.completeReward(engine, FIRST_RELIC);
+
+    expect(dispatched).toEqual([1]);
+  });
+
+  it('persists the relic through the stage start s own commit', () => {
+    const { backing, controller, engine } = composeWithRelics();
+
+    controller.advanceStage();
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.completeReward(engine, FIRST_RELIC);
+
+    // The pickup and the stage it was won in reach storage TOGETHER, with no
+    // separate write and no move required in between.
+    const stored = readStored(backing);
+
+    expect(stored?.relics.map((relic) => relic.id)).toEqual([FIRST_RELIC]);
+    expect(stored?.stageIndex).toBe(1);
+  });
+
+  it('starts the stage even when the selection was refused', () => {
+    const { controller, engine } = composeWithRelics();
+    const started: number[] = [];
+
+    engine.events.on('stage:start', (event) => {
+      started.push(event.stageIndex);
+    });
+
+    controller.advanceStage();
+
+    const resolution = controller.completeReward(engine, 'no-such-relic');
+
+    // Withholding the start would strand the run between stages.
+    expect(resolution.accepted).toBe(false);
+    expect(started).toEqual([1]);
+  });
+
+  it('leaves the board in play across the transition', () => {
+    const { controller, engine } = composeWithRelics();
+
+    play(engine, MOVES);
+
+    const before = engine.serialize();
+
+    controller.advanceStage();
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.completeReward(engine, FIRST_RELIC);
+
+    // A stage transition is not a restart.
+    expect(engine.serialize().grid).toEqual(before.grid);
+    expect(engine.score).toBe(before.score);
+  });
+});
+
+/* ==========================================================================
+ * 12. One goal authority
+ * ========================================================================== */
+
+describe('the stage goal authority', () => {
+  it('adopts the goal a stage:start carried', () => {
+    const { controller, engine } = composeWithRelics();
+
+    engine.hooks.register({
+      id: 'goal-replacer',
+      hooks: {
+        onStageStart: (payload) => ({
+          ...payload,
+          goal: { kind: 'score-threshold', target: 7777 },
+        }),
+      },
+    });
+
+    engine.setup(null);
+
+    // THE ENGINE'S GOAL, NOT THE CONTROLLER'S OWN. Measuring against a
+    // separately recorded goal left two authorities that disagreed the moment a
+    // relic replaced one of them.
+    expect(controller.stageGoal()).toEqual({
+      kind: 'score-threshold',
+      target: 7777,
+    });
+    expect(engine.stageGoalInForce()).toEqual(controller.stageGoal());
+  });
+
+  it('carries the adopted goal into the commit and into storage', () => {
+    const { backing, controller, engine } = composeWithRelics();
+
+    engine.hooks.register({
+      id: 'goal-replacer',
+      hooks: {
+        onStageStart: (payload) => ({
+          ...payload,
+          goal: { kind: 'score-threshold', target: 12345 },
+        }),
+      },
+    });
+
+    engine.setup(null);
+
+    expect(controller.stageContext().goal.target).toBe(12345);
+    expect(readStored(backing)?.stageGoal.target).toBe(12345);
+  });
+
+  it('keeps its own goal when no handler replaced one', () => {
+    const { controller, engine, stages } = composeWithRelics();
+
+    engine.setup(null);
+
+    expect(controller.stageGoal()).toEqual(stages.ladder[0]);
+  });
+
+  it('adopts the stage index alongside the goal', () => {
+    const { controller, engine } = composeWithRelics();
+
+    controller.advanceStage();
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.completeReward(engine, FIRST_RELIC);
+
+    // The index and the goal describe the SAME stage; a mismatch would record
+    // one stage's goal against another's number.
+    expect(controller.stageIndex()).toBe(1);
+    expect(controller.stageGoal()).toEqual(engine.stageGoalInForce());
+  });
+});
+
+/* ==========================================================================
+ * 13. A new run replaces everything scoped to it
+ * ========================================================================== */
+
+describe('run-scoped rebuild', () => {
+  it('publishes the scope of the run begin() adopted', () => {
+    const scopes: RunScope[] = [];
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager, seed: 'scope-seed' }),
+      config,
+      onRunScope: (scope): void => {
+        scopes.push(scope);
+      },
+    });
+
+    controller.begin();
+
+    expect(scopes).toHaveLength(1);
+    expect(scopes[0].seed).toBe(controller.seed());
+    expect(scopes[0].runId).toBe(controller.runId());
+    expect(scopes[0].cursors['spawn-value']).toBe(0);
+  });
+
+  it('publishes the new scope before the engine opens a board', () => {
+    const order: string[] = [];
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      onRunScope: (): void => {
+        order.push('scope');
+      },
+    });
+
+    controller.begin();
+    order.length = 0;
+
+    controller.startRun(
+      {
+        events: { on: () => (): void => undefined },
+        serialize: () => emptySnapshot(),
+        endStage: () => undefined,
+        startStage: () => undefined,
+        setup: () => {
+          order.push('setup');
+        },
+        restart: () => undefined,
+        move: () => false,
+        isGameTerminated: () => false,
+        continuePlaying: () => undefined,
+      },
+      { seed: 'brand-new-seed' },
+    );
+
+    // THE ORDER IS THE POINT. Rebuilding after `setup()` would draw the opening
+    // spawns from the previous run's substreams.
+    expect(order).toEqual(['scope', 'setup']);
+  });
+
+  it('publishes the fresh seed, run id and zeroed cursors', () => {
+    const scopes: RunScope[] = [];
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    let issued = 0;
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      createToken: (): string => {
+        issued += 1;
+
+        return `run-${String(issued)}`;
+      },
+      onRunScope: (scope): void => {
+        scopes.push(scope);
+      },
+    });
+
+    controller.begin();
+    scopes.length = 0;
+
+    controller.startRun(
+      {
+        events: { on: () => (): void => undefined },
+        serialize: () => emptySnapshot(),
+        endStage: () => undefined,
+        startStage: () => undefined,
+        setup: () => undefined,
+        restart: () => undefined,
+        move: () => false,
+        isGameTerminated: () => false,
+        continuePlaying: () => undefined,
+      },
+      { seed: 'a-supplied-seed' },
+    );
+
+    expect(scopes).toHaveLength(1);
+    expect(scopes[0].seed).toBe('a-supplied-seed');
+    expect(scopes[0].runId).toBe(controller.runId());
+    expect(scopes[0].seedProvided).toBe(true);
+    expect(scopes[0].cursors['spawn-value']).toBe(0);
+  });
+
+  it('still starts the run when the root raises while rebuilding', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      onRunScope: (): never => {
+        throw new Error('rebuild failed');
+      },
+    });
+
+    // A half-rebuilt root is recoverable; a half-started run is not.
+    expect(() => controller.begin()).not.toThrow();
+    expect(controller.seed().length).toBeGreaterThan(0);
+  });
+});
+
+/* ==========================================================================
+ * 14. The board a run opens on
+ * ========================================================================== */
+
+describe('the opening board', () => {
+  it('is null for a fresh run, so start tiles are inserted', () => {
+    const { controller, engine } = composeWithRelics();
+
+    expect(controller.openingBoard()).toBeNull();
+
+    // Two start tiles, which an empty supplied snapshot would have suppressed.
+    expect(
+      engine.serialize().grid.cells.flat().filter((cell) => cell !== null),
+    ).toHaveLength(2);
+  });
+
+  it('is the reconciled board of an adopted envelope', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRelics({ backing, seed: 'opening-seed' });
+
+    play(first.engine, MOVES);
+    first.controller.persist(first.engine, () => ({}) as never);
+    first.stop();
+
+    const stored = readStored(backing);
+    const second = composeWithRelics({ backing, seed: 'opening-seed' });
+
+    expect(second.controller.openingBoard()).toEqual(stored?.board);
+    expect(second.engine.score).toBe(stored?.board.score);
+  });
+
+  it('opens a fresh playable board for an unreadable payload', () => {
+    const backing = new MemoryStorage();
+
+    backing.setItem(RUN_STATE_KEY, '{not json at all');
+
+    const { controller, engine } = composeWithRelics({ backing });
+
+    // `store.exists()` reported SUCCESS for this key, and the run then opened
+    // on the envelope's own empty board — which suppressed the start tiles and
+    // left an unplayable board.
+    expect(controller.openingBoard()).toBeNull();
+    expect(
+      engine.serialize().grid.cells.flat().filter((cell) => cell !== null),
+    ).toHaveLength(2);
+  });
+
+  it('opens a fresh playable board when the seed is another run s', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRelics({ backing, seed: 'seed-one' });
+
+    play(first.engine, MOVES);
+    first.controller.persist(first.engine, () => ({}) as never);
+    first.stop();
+
+    const second = composeWithRelics({ backing, seed: 'seed-two' });
+
+    expect(second.controller.openingBoard()).toBeNull();
+    expect(
+      second.engine.serialize().grid.cells.flat()
+        .filter((cell) => cell !== null),
+    ).toHaveLength(2);
+  });
+
+  it('resumeRun opens a playable board for an unreadable payload', () => {
+    const backing = new MemoryStorage();
+
+    backing.setItem(RUN_STATE_KEY, '{not json at all');
+
+    const { controller, engine } = composeWithRelics({
+      backing,
+      setup: false,
+    });
+
+    controller.resumeRun(engine);
+
+    // `store.exists()` reports SUCCESS for a key that is present and
+    // unreadable, and `resumeRun` then handed the engine the envelope's own
+    // EMPTY board. A supplied snapshot tells the engine the board was restored,
+    // so no start tiles were inserted and the run opened unplayable.
+    expect(
+      engine.serialize().grid.cells.flat().filter((cell) => cell !== null),
+    ).toHaveLength(2);
+    expect(engine.score).toBe(0);
+  });
+
+  it('resumeRun opens a playable board when the stored seed differs', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRelics({ backing, seed: 'seed-alpha' });
+
+    play(first.engine, MOVES);
+    first.controller.persist(first.engine, () => ({}) as never);
+    first.stop();
+
+    const second = composeWithRelics({
+      backing,
+      seed: 'seed-beta',
+      setup: false,
+    });
+
+    second.controller.resumeRun(second.engine);
+
+    // The envelope is present and READABLE but belongs to another seed, so it
+    // is not adopted; `exists()` reported success for it all the same.
+    expect(
+      second.engine.serialize().grid.cells.flat()
+        .filter((cell) => cell !== null),
+    ).toHaveLength(2);
+  });
+
+  it('resumeRun opens on the reconciled board', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRelics({ backing, seed: 'resume-seed' });
+
+    play(first.engine, MOVES);
+    first.controller.persist(first.engine, () => ({}) as never);
+    first.stop();
+
+    const stored = readStored(backing);
+    const second = composeWithRelics({
+      backing,
+      seed: 'resume-seed',
+      setup: false,
+    });
+
+    second.controller.resumeRun(second.engine);
+
+    expect(second.engine.score).toBe(stored?.board.score);
+  });
+});
+
+/* ==========================================================================
+ * 15. Projections are detached
+ * ========================================================================== */
+
+describe('state ownership', () => {
+  it('freezes the goal it hands back', () => {
+    const { controller } = composeWithRelics();
+    const goal = controller.stageGoal() as { target: number };
+
+    expect(Object.isFrozen(goal)).toBe(true);
+    expect(() => {
+      goal.target = 1;
+    }).toThrow();
+    expect(controller.stageGoal().target).not.toBe(1);
+  });
+
+  it('hands back a different goal object each call', () => {
+    const { controller } = composeWithRelics();
+
+    expect(controller.stageGoal()).not.toBe(controller.stageGoal());
+  });
+
+  it('freezes the relic list and every entry in it', () => {
+    const { controller } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.resolveReward(FIRST_RELIC);
+
+    const held = controller.relics();
+
+    expect(Object.isFrozen(held)).toBe(true);
+    expect(Object.isFrozen(held[0])).toBe(true);
+    expect(() => {
+      (held as unknown as PersistedRelic[]).push({ id: 'injected' });
+    }).toThrow();
+    expect(controller.relics()).toHaveLength(1);
+  });
+
+  it('detaches a relic s state slot from the envelope', () => {
+    const { controller } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.resolveReward(FIRST_RELIC);
+
+    const first = controller.relics();
+    const second = controller.relics();
+
+    expect(first[0]).not.toBe(second[0]);
+  });
+
+  it('freezes the envelope it hands back', () => {
+    const { controller } = composeWithRelics();
+    const state = controller.state();
+
+    expect(Object.isFrozen(state)).toBe(true);
+    expect(() => {
+      (state as { stageIndex: number }).stageIndex = 99;
+    }).toThrow();
+    expect(controller.state().stageIndex).toBe(0);
+  });
+
+  it('does not let a write through state() reach the envelope', () => {
+    const { controller } = composeWithRelics();
+    const state = controller.state();
+
+    const escaped = state as unknown as {
+      relics: PersistedRelic[];
+      board: { grid: { cells: (unknown | null)[][] } };
+    };
+
+    escaped.relics.push({ id: 'injected' });
+    escaped.board.grid.cells[0][0] = null;
+
+    expect(controller.state().relics).toEqual([]);
+    expect(controller.relics()).toEqual([]);
+  });
+
+  it('hands back a different envelope object each call', () => {
+    const { controller } = composeWithRelics();
+
+    expect(controller.state()).not.toBe(controller.state());
+    expect(controller.state().board).not.toBe(controller.state().board);
+  });
+});
+
+/* ==========================================================================
+ * 16. Charge activation, and the write that follows it
+ * ========================================================================== */
+
+/** The first catalogue relic carrying a charge budget. */
+const CHARGED_RELIC: string = (
+  RELIC_CATALOGUE.find((relic): boolean => relic.charges !== undefined) as Relic
+).id;
+
+/** That relic's declared budget. */
+const CHARGED_BUDGET: number = (
+  RELIC_CATALOGUE.find((relic): boolean => relic.charges !== undefined) as Relic
+).charges as number;
+
+describe('activating a relic', () => {
+  it('spends a charge and persists the budget that remains', () => {
+    const { backing, controller, engine } = composeWithRelics();
+
+    controller.recordRewardOffer([CHARGED_RELIC]);
+    controller.resolveReward(CHARGED_RELIC);
+
+    const outcome = controller.activateRelic(
+      engine,
+      () => ({}) as never,
+      CHARGED_RELIC,
+    );
+
+    expect(outcome.held).toBe(true);
+    expect(outcome.limited).toBe(true);
+    expect(outcome.consumed).toBe(1);
+    expect(outcome.remaining).toBe(CHARGED_BUDGET - 1);
+
+    // AN ACTIVATION IS NOT A MOVE, so no commit follows it on its own; the
+    // write is part of the transaction or the spend is lost on reload.
+    expect(outcome.persisted).toBe(true);
+    expect(
+      readStored(backing)?.relics.find((relic) => relic.id === CHARGED_RELIC)
+        ?.charges,
+    ).toBe(CHARGED_BUDGET - 1);
+  });
+
+  it('spends an explicit amount', () => {
+    const { controller, engine } = composeWithRelics();
+
+    controller.recordRewardOffer([CHARGED_RELIC]);
+    controller.resolveReward(CHARGED_RELIC);
+
+    expect(
+      controller.activateRelic(engine, () => ({}) as never, CHARGED_RELIC, 2)
+        .remaining,
+    ).toBe(CHARGED_BUDGET - 2);
+  });
+
+  it('stops spending once the budget is exhausted, and writes nothing', () => {
+    const { controller, engine } = composeWithRelics();
+    const cursors = (): never => ({}) as never;
+
+    controller.recordRewardOffer([CHARGED_RELIC]);
+    controller.resolveReward(CHARGED_RELIC);
+
+    for (let spent = 0; spent < CHARGED_BUDGET; spent += 1) {
+      expect(
+        controller.activateRelic(engine, cursors, CHARGED_RELIC).consumed,
+      ).toBe(1);
+    }
+
+    const exhausted = controller.activateRelic(engine, cursors, CHARGED_RELIC);
+
+    expect(exhausted.held).toBe(true);
+    expect(exhausted.consumed).toBe(0);
+    expect(exhausted.remaining).toBe(0);
+    expect(exhausted.persisted).toBe(false);
+  });
+
+  it('reports an unheld relic and writes nothing', () => {
+    const { controller, engine } = composeWithRelics();
+
+    const outcome = controller.activateRelic(
+      engine,
+      () => ({}) as never,
+      CHARGED_RELIC,
+    );
+
+    expect(outcome.held).toBe(false);
+    expect(outcome.consumed).toBe(0);
+    expect(outcome.persisted).toBe(false);
+  });
+
+  it('reports nothing spent on a relic with no budget', () => {
+    const { controller, engine } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+    controller.resolveReward(FIRST_RELIC);
+
+    const outcome = controller.activateRelic(
+      engine,
+      () => ({}) as never,
+      FIRST_RELIC,
+    );
+
+    expect(outcome.limited).toBe(false);
+    expect(outcome.consumed).toBe(0);
+    expect(outcome.persisted).toBe(false);
+  });
+
+  it('reports nothing when no registry publishes an activation', () => {
+    const { controller, engine } = compose();
+
+    const outcome = controller.activateRelic(
+      engine,
+      () => ({}) as never,
+      CHARGED_RELIC,
+    );
+
+    expect(outcome.consumed).toBe(0);
+    expect(outcome.persisted).toBe(false);
+  });
+
+  it('contains a registry that raises during an activation', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      relics: {
+        activate: (): never => {
+          throw new Error('registry down');
+        },
+      },
+    });
+
+    controller.begin();
+
+    const port = {
+      events: { on: () => (): void => undefined },
+      serialize: () => emptySnapshot(),
+      endStage: () => undefined,
+      startStage: () => undefined,
+    };
+
+    expect(() =>
+      controller.activateRelic(port, () => ({}) as never, CHARGED_RELIC),
+    ).not.toThrow();
+    expect(
+      controller.activateRelic(port, () => ({}) as never, CHARGED_RELIC)
+        .consumed,
+    ).toBe(0);
+  });
+
+  it('refuses a registry report of the wrong shape', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager }),
+      config,
+      relics: {
+        // A structural port, so its return is measured rather than trusted: a
+        // non-finite count must not reach the write path.
+        activate: () =>
+          ({ held: true, limited: true, consumed: Number.NaN }) as never,
+      },
+    });
+
+    controller.begin();
+
+    const outcome = controller.activateRelic(
+      {
+        events: { on: () => (): void => undefined },
+        serialize: () => emptySnapshot(),
+        endStage: () => undefined,
+        startStage: () => undefined,
+      },
+      () => ({}) as never,
+      CHARGED_RELIC,
+    );
+
+    expect(outcome.consumed).toBe(0);
+    expect(outcome.persisted).toBe(false);
   });
 });

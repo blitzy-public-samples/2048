@@ -74,7 +74,6 @@ import type {
   EngineCountReport,
   EngineHookErrorReport,
   EngineReporter,
-  Position,
 } from '../../../src/engine/types';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import { createMergePairBoard } from '../../fixtures/boards';
@@ -122,6 +121,14 @@ const SPAWN_VALUE_STREAM = 'spawn-value';
 
 /** A board edge no view below may be talked into. */
 const HUGE_BOARD_SIZE = 1_000_000;
+
+/**
+ * An edge length a `resizeBoard` command is actually accepted at, which
+ * `HUGE_BOARD_SIZE` deliberately is not: src/engine/board-effects.ts bounds a
+ * resize, so a case proving the channel WRITES has to ask for a size inside
+ * those bounds.
+ */
+const EFFECT_BOARD_EDGE = 3;
 
 /* ===== 2. Type-level assertion helper ===== */
 
@@ -222,37 +229,25 @@ function createPayloadsByHook(board: Grid): HookDispatchPayloadMap {
 }
 
 /**
- * The three hooks whose dispatch-input payload carries a live engine object and
- * whose handler-visible payload therefore carries a frozen view of it instead.
- */
-const PROJECTED_HOOKS: ReadonlySet<HookName> = new Set<HookName>([
-  'onBeforeMove',
-  'onMerge',
-  'onAfterMove',
-]);
-
-/**
- * A board view that is not the one the bus built for a dispatch, used to prove
- * a return substituting the board is refused.
+ * A board that is not the one the dispatch carried, used to prove a return
+ * substituting the board is refused.
  */
 function createForeignGridView(): BeforeMovePayload['board'] {
-  const grid = createBoard();
+  const foreign = createBoard();
 
   return Object.freeze({
-    get size(): number {
-      return grid.size;
-    },
-    withinBounds: (position: Position) => grid.withinBounds(position),
-    cellAvailable: (cell: Position) => grid.cellAvailable(cell),
-    cellOccupied: (cell: Position) => grid.cellOccupied(cell),
-    cellValue: (cell: Position) => {
-      const tile = grid.cellContent(cell);
-
-      return tile === null ? null : tile.value;
-    },
-    availableCells: () => grid.availableCells(),
-    cellsAvailable: () => grid.cellsAvailable(),
-    serialize: () => grid.serialize(),
+    size: foreign.size,
+    withinBounds: (position: { x: number; y: number }): boolean =>
+      foreign.withinBounds(position),
+    cellAvailable: (cell: { x: number; y: number }): boolean =>
+      foreign.cellAvailable(cell),
+    cellOccupied: (cell: { x: number; y: number }): boolean =>
+      !foreign.cellAvailable(cell),
+    cellValue: (cell: { x: number; y: number }): number | null =>
+      foreign.cellContent(cell)?.value ?? null,
+    availableCells: () => foreign.availableCells(),
+    cellsAvailable: (): boolean => foreign.cellsAvailable(),
+    serialize: () => foreign.serialize(),
   });
 }
 
@@ -444,17 +439,14 @@ describe('dispatch accepts every one of the six names (AAP Contract 2)', () => {
     for (const hook of HOOK_NAMES) {
       const result = bus.dispatch(hook, payloads[hook], environment);
 
-      // A dispatch with no subscriber returns the payload it projected. The
-      // three plain-data hooks project to the very object the caller passed;
-      // the three carrying a live engine object project to a payload whose
-      // board or tile pair is the frozen view of it, so identity with the
-      // caller's object is deliberately NOT preserved for those.
-      if (PROJECTED_HOOKS.has(hook)) {
-        expect(result.payload).not.toBe(payloads[hook]);
-      } else {
-        expect(result.payload).toBe(payloads[hook]);
-      }
-
+      // A dispatch with no subscriber returns the caller's payload MEMBER FOR
+      // MEMBER, for all six: nothing is substituted between the caller and the
+      // handler, which is the contract AAP 0.6.1.1 states. The live board and
+      // the live tiles are replaced by their frozen facades — once, before any
+      // handler could run — so identity is not the assertion; the values are.
+      expect(Object.keys(result.payload as object).sort()).toEqual(
+        Object.keys(payloads[hook] as object).sort(),
+      );
       expect(result.invoked).toBe(0);
     }
 
@@ -576,8 +568,8 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
     expect(typeof bus.metrics).toBe('function');
   });
 
-  it('hands a frozen, capability-limited view of each collaborator to a ' +
-    'handler', () => {
+  it('hands PROJECTIONS of the live rules and the live board to a handler, and ' +
+    'a per-handler randomness fork', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const environment = createEnvironment();
     const seen: HookContext[] = [];
@@ -597,33 +589,33 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
 
     expect(seen).toHaveLength(1);
 
-    // Never the live collaborators themselves.
+    // AAP 0.6.1.2. The collaborators are READ through frozen facades and WRITTEN
+    // through the command queue, so a handler that mutates and then throws has
+    // nothing left behind to roll back. The facades are not the live objects and
+    // they report what the live objects hold.
     expect(context.config).not.toBe(environment.config);
-    expect(context.rng).not.toBe(environment.rng);
-    expect(context.grid).not.toBe(environment.grid);
-
-    // Every view is frozen, so an assignment through one throws under the
-    // strict mode ES modules run in.
     expect(Object.isFrozen(context.config)).toBe(true);
-    expect(Object.isFrozen(context.rng)).toBe(true);
-    expect(Object.isFrozen(context.grid)).toBe(true);
-
-    // Reads agree with the live collaborators.
     expect(context.config.boardSize).toBe(environment.config.boardSize);
     expect(context.config.winValue).toBe(environment.config.winValue);
-    expect(context.config.startTiles).toBe(environment.config.startTiles);
-    expect(context.config.spawn.values).toEqual(
-      environment.config.spawn.values,
+
+    expect(context.grid).not.toBe(environment.grid);
+    expect(Object.isFrozen(context.grid)).toBe(true);
+    expect(context.grid.size).toBe(environment.grid.size);
+    expect(context.grid.cellValue({ x: PAIR_X, y: PAIR_Y })).toBe(
+      environment.grid.cellContent({ x: PAIR_X, y: PAIR_Y })?.value ?? null,
     );
-    expect(context.config.merge.canMerge).toBe(
-      environment.config.merge.canMerge,
-    );
+
+    // The write channel, on the same context.
+    expect(typeof context.effects.removeTile).toBe('function');
+
+    // Randomness stays transactional, so it is NOT the live table.
+    expect(context.rng).not.toBe(environment.rng);
+    expect(Object.isFrozen(context.rng)).toBe(true);
     expect(context.rng.seed).toBe(environment.rng.seed);
 
-    // Never the live substream either: the facade hands back a fork standing
-    // where the substream stands, so the draws a handler takes are the
-    // handler's own until they are committed. The fork is memoised, so one
-    // name resolves to one fork within a dispatch.
+    // A fork standing where the substream stands, so the draws a handler takes
+    // are the handler's own until they are committed. The fork is memoised, so
+    // one name resolves to one fork within a dispatch.
     const fork = context.rng.stream(SPAWN_VALUE_STREAM);
 
     expect(fork).not.toBe(environment.rng.stream(SPAWN_VALUE_STREAM));
@@ -632,38 +624,23 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
     expect(fork.cursor).toBe(
       environment.rng.stream(SPAWN_VALUE_STREAM).cursor,
     );
-
-    expect(context.grid.size).toBe(environment.grid.size);
-    expect(context.grid.cellValue({ x: PAIR_X, y: PAIR_Y })).toBe(PAIR_VALUE);
-    expect(context.grid.serialize()).toEqual(environment.grid.serialize());
   });
 
-  it('refuses a write through a collaborator view and leaves the live ' +
-    'collaborators unchanged', () => {
+  it('lets a handler write the rules and the lattice, which is the relic ' +
+    'mutation channel AAP 0.8.6 requires', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const environment = createEnvironment();
-    const thrown: string[] = [];
 
     register(
       bus,
-      createSubscriber('tries-to-write', {
+      createSubscriber('writes-through', {
         onStageEnd: (_payload, context): void => {
-          const writable = context.config as unknown as { boardSize: number };
-          const swappable = context.grid as unknown as {
-            serialize: () => unknown;
-          };
-
-          try {
-            writable.boardSize = HUGE_BOARD_SIZE;
-          } catch (error: unknown) {
-            thrown.push(String((error as Error).name));
-          }
-
-          try {
-            swappable.serialize = (): unknown => null;
-          } catch (error: unknown) {
-            thrown.push(String((error as Error).name));
-          }
+          // THROUGH THE COMMAND QUEUE, which is the one write channel: `config`
+          // and `grid` on the context are frozen projections, so neither the
+          // rules nor the lattice can be written through them. The commands are
+          // applied by the bus once this return has been accepted.
+          context.effects.resizeBoard(EFFECT_BOARD_EDGE);
+          context.effects.removeTile({ x: PAIR_X, y: PAIR_Y });
         },
       }),
     );
@@ -674,15 +651,17 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
       environment,
     );
 
-    expect(thrown).toEqual(['TypeError', 'TypeError']);
-    expect(environment.config.boardSize).toBe(BOARD_SIZE);
-    expect(environment.grid.size).toBe(BOARD_SIZE);
+    // Both commands reached the live rules and the live lattice, applied in the
+    // order they were recorded and only because the return was accepted.
+    expect(environment.config.boardSize).toBe(EFFECT_BOARD_EDGE);
+    expect(environment.grid.size).toBe(EFFECT_BOARD_EDGE);
+    expect(environment.grid.cellContent({ x: PAIR_X, y: PAIR_Y })).toBeNull();
+    expect(result.effectsApplied).toBe(2);
     expect(result.invoked).toBe(1);
     expect(result.failed).toBe(0);
   });
 
-  it('exposes the board through queries alone, with no write and no live ' +
-    'tile', () => {
+  it('exposes the whole READING board surface, and no writer', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const seen: HookContext['grid'][] = [];
 
@@ -697,13 +676,23 @@ describe('createHookBus (js/keyboard_input_manager.js L1-L16)', () => {
 
     dispatchStageEnd(bus);
 
-    const view = seen[0] as unknown as Record<string, unknown>;
+    const board = seen[0] as unknown as Record<string, unknown>;
 
-    expect(view.insertTile).toBeUndefined();
-    expect(view.removeTile).toBeUndefined();
-    expect(view.cells).toBeUndefined();
-    expect(view.cellContent).toBeUndefined();
-    expect(typeof view.cellValue).toBe('function');
+    // Every reader of `ReadonlyGridView`...
+    expect(typeof board.withinBounds).toBe('function');
+    expect(typeof board.cellAvailable).toBe('function');
+    expect(typeof board.cellOccupied).toBe('function');
+    expect(typeof board.cellValue).toBe('function');
+    expect(typeof board.availableCells).toBe('function');
+    expect(typeof board.cellsAvailable).toBe('function');
+    expect(typeof board.serialize).toBe('function');
+
+    // ...and not one writer, nor the lattice itself: a write goes through
+    // `context.effects`, which is transactional.
+    expect(board.insertTile).toBeUndefined();
+    expect(board.removeTile).toBeUndefined();
+    expect(board.cellContent).toBeUndefined();
+    expect(board.cells).toBeUndefined();
   });
 
   it('identifies the dispatch on the context it builds', () => {
@@ -2316,11 +2305,14 @@ describe(
       expect(result.payload).not.toBe(original);
       expect(original.cancelled).toBe(false);
 
-      // The board is the frozen view rather than the live board: the live
-      // board reaches a renderer through the event the engine emits, never
-      // through a hook payload.
+      // The board is the FACADE over the live board, carried by reference
+      // through the copy: it reads what the live lattice holds, and the channel a
+      // board-manipulation relic WRITES through is `context.effects`.
       expect(result.payload.board).not.toBe(board);
       expect(result.payload.board.size).toBe(board.size);
+      expect(result.payload.board.cellValue({ x: PAIR_X, y: PAIR_Y })).toBe(
+        board.cellContent({ x: PAIR_X, y: PAIR_Y })?.value ?? null,
+      );
     });
 
     it('carries a freshly returned object through to the caller', () => {
@@ -2347,7 +2339,6 @@ describe(
       expect(result.payload).not.toBe(original);
       expect(result.payload.cancelled).toBe(true);
       expect(original.cancelled).toBe(false);
-      expect(result.payload.board).not.toBe(board);
       expect(result.payload.board.size).toBe(board.size);
       expect(result.payload.direction).toBe(DIRECTION_UP);
     });
@@ -2798,6 +2789,7 @@ describe(
         board: null,
       };
 
+
       register(
         before,
         createSubscriber('swaps-the-board', {
@@ -2873,7 +2865,8 @@ describe(
       expect(result.payload.target).toBe(seen.payload?.target);
     });
 
-    it('hands handlers views of the board and the merged tiles, never the live objects', () => {
+    it('hands handlers facades that read the live board and the live merged ' +
+      'tiles', () => {
       const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
       const original = createMergePayload();
@@ -2894,32 +2887,45 @@ describe(
         }),
       );
 
+      const environment: HookEnvironment = {
+        config: createDefaultRulesConfig(),
+        rng: createRngStreams(RUN_SEED),
+        grid: board,
+      };
+
       bus.dispatch('onMerge', original, createEnvironment());
-      bus.dispatch(
-        'onBeforeMove',
-        createBeforeMovePayload(board),
-        createEnvironment(),
-      );
+      bus.dispatch('onBeforeMove', createBeforeMovePayload(board), environment);
 
       const merge = seen.merge;
-      const seenBoard = seen.board;
 
-      // The live tiles and the live board never reach a handler, so a handler
-      // that mutates and then throws has nothing to leave behind.
+      // AAP Contract 1, as the adopted projection expresses it: the facades read
+      // the live tiles, member for member, and carry no writer.
       expect(merge?.source).not.toBe(original.source);
       expect(merge?.target).not.toBe(original.target);
-      expect(Object.isFrozen(merge?.source)).toBe(true);
-      expect(Object.isFrozen(merge?.target)).toBe(true);
-      expect(merge?.source).toEqual({
-        x: PAIR_X,
+      expect(merge?.source.x).toBe(PAIR_X);
+      expect(merge?.source.y).toBe(PAIR_Y);
+      expect(merge?.source.value).toBe(PAIR_VALUE);
+      expect(merge?.source.previousPosition).toEqual({
+        x: PAIR_NEXT_X,
         y: PAIR_Y,
-        value: PAIR_VALUE,
-        previousPosition: { x: PAIR_NEXT_X, y: PAIR_Y },
       });
-      expect(seenBoard).not.toBe(board);
-      expect(Object.isFrozen(seenBoard)).toBe(true);
-      expect(seenBoard).not.toHaveProperty('cells');
-      expect(seenBoard).not.toHaveProperty('insertTile');
+      // The board is a FACADE OVER the live lattice rather than the lattice
+      // itself: it answers every read from the board as it stands, and carries
+      // no writer, so a handler's board change travels through
+      // `context.effects` and the dispatch transaction instead of straight into
+      // `grid.cells`.
+      const carried = seen.board as unknown as Record<string, unknown>;
+
+      expect(carried).not.toBe(board);
+      expect(Object.isFrozen(carried)).toBe(true);
+      expect(carried['insertTile']).toBeUndefined();
+      expect(carried['removeTile']).toBeUndefined();
+      expect(carried['cells']).toBeUndefined();
+      expect(seen.board?.cellValue({ x: PAIR_X, y: PAIR_Y })).toBe(PAIR_VALUE);
+
+      board.removeTile(new Tile({ x: PAIR_X, y: PAIR_Y }, PAIR_VALUE));
+
+      expect(seen.board?.cellValue({ x: PAIR_X, y: PAIR_Y })).toBeNull();
     });
 
     it('rejects a stage start that misreports the board it began on', () => {
@@ -2991,26 +2997,15 @@ describe(
         expect(original.cancelled).toBe(false);
       });
 
-    it('leaves no board mutation behind when a handler writes through the ' +
-      'payload and then throws', () => {
+    it('leaves no board mutation behind when a handler records a command and ' +
+      'then throws', () => {
       const bus = createHookBus({ correlationId: CORRELATION_ID });
       const board = createBoard();
-      const before = JSON.stringify(board.serialize());
-
       register(
         bus,
         createSubscriber('mutates-the-board-then-throws', {
-          onBeforeMove: (payload): BeforeMovePayload => {
-            // Every write a handler could reach the board through is absent
-            // from the view, so each of these is a no-op or a throw, and the
-            // handler ends by throwing either way.
-            const reachable = payload.board as unknown as Record<
-              string,
-              unknown
-            >;
-
-            reachable.cells = [];
-            reachable.size = HUGE_BOARD_SIZE;
+          onBeforeMove: (_payload, context): BeforeMovePayload => {
+            context.effects.removeTile({ x: PAIR_X, y: PAIR_Y });
 
             throw new Error('relic handler failed after writing');
           },
@@ -3023,13 +3018,18 @@ describe(
         createEnvironment(),
       );
 
+      // NOTHING RECORDED REACHED THE BOARD. The commands are held per handler
+      // and written only once that handler's return has been accepted, so a
+      // handler that records and then throws leaves the lattice exactly as it
+      // stood — and is marked degraded, so it is never dispatched to again.
       expect(result.failed).toBe(1);
-      expect(board.size).toBe(BOARD_SIZE);
-      expect(JSON.stringify(board.serialize())).toBe(before);
+      expect(result.effectsApplied).toBe(0);
+      expect(board.cellContent({ x: PAIR_X, y: PAIR_Y })).not.toBeNull();
+      expect(bus.degraded()).toContain('mutates-the-board-then-throws');
     });
 
-    it('leaves no tile mutation behind when a handler writes through the ' +
-      'merge payload and then throws', () => {
+    it('leaves no tile mutation behind when a handler writes at the merge ' +
+      'payload and then throws', () => {
       const bus = createHookBus({ correlationId: CORRELATION_ID });
       const original = createMergePayload();
       const sourceValue = original.source.value;
@@ -3056,11 +3056,13 @@ describe(
       const result = bus.dispatch('onMerge', original, createEnvironment());
 
       expect(result.failed).toBe(1);
-      // The live tiles the caller still holds are untouched, and neither
-      // carries a write path a handler could have reached them through.
+
+      // The tiles a handler holds are FROZEN FACADES, so a write at them reaches
+      // the facade and never the engine's own tiles — which is why there is
+      // nothing to roll back. The subscriber is marked degraded either way.
       expect(original.source.value).toBe(sourceValue);
       expect(original.target.x).toBe(targetX);
-      expect(original.source.mergedFrom).toBeNull();
+      expect(bus.degraded()).toContain('mutates-a-tile-then-throws');
     });
 
     it('adopts a successful in-place mutation, compounds it and still ' +
@@ -3185,8 +3187,13 @@ describe(
 
       expect(result.payload.cancelled).toBe(true);
       expect(result.payload.direction).toBe(DIRECTION_UP);
+
+      // The board member survives the adoption as the ONE view this dispatch
+      // built, so a later handler and the caller read the same facade rather
+      // than a rebuild — and never the live lattice.
       expect(result.payload.board).not.toBe(board);
-      expect(result.payload.board.size).toBe(board.size);
+      expect(result.payload.board.size).toBe(BOARD_SIZE);
+      expect(Object.isFrozen(result.payload.board)).toBe(true);
     });
 
     it('keeps a veto set by an early subscriber past later ones that do ' +
@@ -4738,6 +4745,11 @@ describe('a reporter that throws while counting is contained', () => {
     expect(result.invoked).toBe(2);
     expect(result.failed).toBe(1);
     expect(result.skipped).toBe(1);
+
+    // The transforming handler asked for no charge and recorded no command, so
+    // the dispatch spent nothing: the spend is effect-coupled. The thrower
+    // carries no budget and the spent subscriber was never reached.
+    expect(result.chargesConsumed).toBe(0);
     expect(errors).toHaveLength(1);
     expect(bus.degraded()).toEqual(['thrower']);
 
@@ -4748,6 +4760,9 @@ describe('a reporter that throws while counting is contained', () => {
     expect(metrics.acceptedRegistrations).toBe(3);
     expect(metrics.rejectedRegistrations).toBe(1);
     expect(metrics.removedSubscribers).toBe(1);
+
+    // None spent by the dispatch, and one by the explicit
+    // `consumeCharge('counted', 1)` the exercise makes afterwards.
     expect(metrics.chargesConsumed).toBe(1);
     expect(metrics.hooks.onStageEnd.dispatched).toBe(1);
     expect(metrics.hooks.onStageEnd.invoked).toBe(2);
@@ -5076,57 +5091,96 @@ describe('a handler that throws leaves no nested state behind (F2)', () => {
   });
 });
 
-describe('a handler cannot reach a live tile through onMerge (F2)', () => {
-  it('carries frozen projections and refuses a write to either', () => {
+describe('a handler reads both merged tiles through onMerge', () => {
+  it('carries each tile settled, coordinate for coordinate', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const payload = createMergePayload();
-    const thrown: string[] = [];
 
     register(
       bus,
-      createSubscriber('tries-to-write-a-tile', {
-        onMerge: (merge): MergePayload => {
-          for (const view of [merge.source, merge.target]) {
-            try {
-              (view as { value: number }).value = HUGE_BOARD_SIZE;
-            } catch (error: unknown) {
-              thrown.push(String((error as Error).name));
-            }
-          }
+      createSubscriber('reads-the-tiles', {
+        onMerge: (merge): MergePayload => merge,
+      }),
+    );
 
-          return merge;
+    const result = bus.dispatch('onMerge', payload, createEnvironment());
+
+    // Both tiles are already out of `grid.cells` when `onMerge` dispatches, so
+    // their coordinates and values are SETTLED and the projection cannot go
+    // stale within the dispatch. It is read for exactly that reason, and it is
+    // not the tile: a merge handler that wants the board changed records a
+    // command on `context.effects`, which the bus applies once the handler has
+    // returned and its payload has validated.
+    expect(result.payload.source).not.toBe(payload.source);
+    expect(result.payload.source.x).toBe(PAIR_X);
+    expect(result.payload.source.y).toBe(PAIR_Y);
+    expect(result.payload.source.value).toBe(PAIR_VALUE);
+    expect(result.payload.source.previousPosition).toEqual({
+      x: PAIR_NEXT_X,
+      y: PAIR_Y,
+    });
+    expect(result.payload.target.value).toBe(PAIR_VALUE);
+    expect(result.payload.target.previousPosition).toEqual({
+      x: PAIR_X,
+      y: PAIR_Y,
+    });
+  });
+
+  it('freezes each projection, so a handler write reaches neither tile', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const payload = createMergePayload();
+
+    register(
+      bus,
+      createSubscriber('writes-a-tile', {
+        onMerge: (merge): void => {
+          // A cast, because the projection's type refuses the write outright;
+          // the case is here to prove the refusal holds at RUN time too.
+          const writable = merge.source as unknown as { value: number };
+
+          try {
+            writable.value = HUGE_BOARD_SIZE;
+          } catch {
+            // A frozen target throws under strict mode, which is the refusal
+            // this case is asserting. Either way nothing changed.
+          }
         },
       }),
     );
 
-    // The bus substitutes the frozen projections before the first handler is
-    // invoked, so the live payload the resolver assembles is what is
-    // dispatched and the write is refused on the view the handler was given.
-    const result = bus.dispatch('onMerge', payload, createEnvironment());
+    bus.dispatch('onMerge', payload, createEnvironment());
 
-    expect(thrown).toEqual(['TypeError', 'TypeError']);
-    expect(result.payload.source.value).toBe(PAIR_VALUE);
-    expect(result.payload.target.value).toBe(PAIR_VALUE);
+    expect(payload.source.value).toBe(PAIR_VALUE);
   });
 
-  it('exposes no tile method through the payload it carries', () => {
+  it('exposes exactly the four data members the projection declares', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const members: string[] = [];
+    const writers: unknown[] = [];
 
     register(
       bus,
-      createSubscriber('reads-the-projection', {
+      createSubscriber('reads-the-tile', {
         onMerge: (merge): void => {
           members.push(...Object.keys(merge.source).sort());
+
+          const surface = merge.source as unknown as Record<string, unknown>;
+
+          writers.push(
+            surface['savePosition'],
+            surface['updatePosition'],
+            surface['mergedFrom'],
+          );
         },
       }),
     );
 
     bus.dispatch('onMerge', createMergePayload(), createEnvironment());
 
-    // The four data members of the projection, and no tile method: neither
-    // `savePosition`, `updatePosition` nor `serialize` is reachable.
+    // The four members a handler is given, and none of the three a live `Tile`
+    // would also carry: two writers and the merge chain a relic has no use for.
     expect(members).toEqual(['previousPosition', 'value', 'x', 'y']);
+    expect(writers).toEqual([undefined, undefined, undefined]);
   });
 });
 
@@ -5328,8 +5382,8 @@ describe('a handler that throws consumes no randomness (F2)', () => {
   });
 });
 
-describe('a handler cannot reach the lattice through a payload (F2)', () => {
-  it('carries the read-only facade on onBeforeMove, not the live board', () => {
+describe('a handler reads the live lattice through a payload', () => {
+  it('carries a reading facade over the live board on onBeforeMove', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const board = createBoard();
     const seen: unknown[] = [];
@@ -5351,18 +5405,29 @@ describe('a handler cannot reach the lattice through a payload (F2)', () => {
 
     const carried = seen[0] as Record<string, unknown>;
 
+    // Every READ the board answers, and not one WRITER: the four members below
+    // are the whole reading surface, and `insertTile`, `removeTile` and the raw
+    // `cells` array are absent by construction.
     expect(carried).not.toBe(board);
-    expect(Object.isFrozen(carried)).toBe(true);
+    expect(typeof carried['cellValue']).toBe('function');
+    expect(typeof carried['cellAvailable']).toBe('function');
+    expect(typeof carried['availableCells']).toBe('function');
+    expect(typeof carried['serialize']).toBe('function');
     expect(carried['insertTile']).toBeUndefined();
     expect(carried['removeTile']).toBeUndefined();
     expect(carried['cells']).toBeUndefined();
     expect(carried['cellContent']).toBeUndefined();
   });
 
-  it('carries the read-only facade on onAfterMove, not the live board', () => {
+  it('carries a reading facade over the live board on onAfterMove', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const board = createBoard();
-    const seen: unknown[] = [];
+    const seen: AfterMovePayload['board'][] = [];
+    const environment: HookEnvironment = {
+      config: createDefaultRulesConfig(),
+      rng: createRngStreams(RUN_SEED),
+      grid: board,
+    };
 
     register(
       bus,
@@ -5373,22 +5438,20 @@ describe('a handler cannot reach the lattice through a payload (F2)', () => {
       }),
     );
 
-    bus.dispatch(
-      'onAfterMove',
-      createAfterMovePayload(board),
-      createEnvironment(),
-    );
+    bus.dispatch('onAfterMove', createAfterMovePayload(board), environment);
 
-    const carried = seen[0] as Record<string, unknown>;
+    // Same facade on the post-move hook, over the same live lattice: the read
+    // tracks the board, and the write channel stays `context.effects`.
+    expect(seen[0]).not.toBe(board);
+    expect(seen[0]?.size).toBe(BOARD_SIZE);
+    expect(seen[0]?.cellValue({ x: PAIR_X, y: PAIR_Y })).toBe(PAIR_VALUE);
 
-    expect(carried).not.toBe(board);
-    expect(Object.isFrozen(carried)).toBe(true);
-    expect(carried['insertTile']).toBeUndefined();
-    expect(carried['cells']).toBeUndefined();
+    board.removeTile(new Tile({ x: PAIR_X, y: PAIR_Y }, PAIR_VALUE));
+
+    expect(seen[0]?.cellValue({ x: PAIR_X, y: PAIR_Y })).toBeNull();
   });
 
-  it('reads live through the facade, so the board it reports is the board ' +
-    'as it stands', () => {
+  it('reads live, so the board it reports is the board as it stands', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const board = createBoard();
     const seen: (number | null)[] = [];
@@ -5403,10 +5466,6 @@ describe('a handler cannot reach the lattice through a payload (F2)', () => {
     );
 
     const payload = createBeforeMovePayload(board);
-
-    // One environment across both dispatches, holding the board the removal
-    // below is made on: the facade the bus hands a handler is built over
-    // `environment.grid`, so that is the board a live read has to observe.
     const environment: HookEnvironment = {
       config: createDefaultRulesConfig(),
       rng: createRngStreams(RUN_SEED),
@@ -5420,33 +5479,21 @@ describe('a handler cannot reach the lattice through a payload (F2)', () => {
     expect(seen).toEqual([PAIR_VALUE, null]);
   });
 
-  it('leaves the lattice unchanged when a handler writes through the ' +
-    'facade and then throws', () => {
+  it('discards a lattice write made by a handler that then throws, and ' +
+    'marks that handler degraded', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const board = createBoard();
-    const thrown: string[] = [];
-    const before = board.serialize();
+    const environment: HookEnvironment = {
+      config: createDefaultRulesConfig(),
+      rng: createRngStreams(RUN_SEED),
+      grid: board,
+    };
 
     register(
       bus,
-      createSubscriber('tries-to-write-then-throws', {
-        onBeforeMove: (payload): BeforeMovePayload => {
-          const writable = payload.board as unknown as {
-            size: number;
-            cellValue: unknown;
-          };
-
-          try {
-            writable.size = HUGE_BOARD_SIZE;
-          } catch (error: unknown) {
-            thrown.push(String((error as Error).name));
-          }
-
-          try {
-            writable.cellValue = (): null => null;
-          } catch (error: unknown) {
-            thrown.push(String((error as Error).name));
-          }
+      createSubscriber('writes-then-throws', {
+        onBeforeMove: (_payload, context): BeforeMovePayload => {
+          context.effects.removeTile({ x: PAIR_X, y: PAIR_Y });
 
           throw new Error('relic handler failed');
         },
@@ -5456,11 +5503,679 @@ describe('a handler cannot reach the lattice through a payload (F2)', () => {
     const result = bus.dispatch(
       'onBeforeMove',
       createBeforeMovePayload(board),
+      environment,
+    );
+
+    // The command was RECORDED, never applied: the queue commits only after the
+    // handler has returned and its payload has validated, so a throw discards
+    // the whole plan and the lattice stands exactly as the handler found it.
+    // Containment is the degradation mark — the subscriber is never dispatched
+    // to again.
+    expect(result.failed).toBe(1);
+    expect(result.effectsApplied).toBe(0);
+    expect(board.cellContent({ x: PAIR_X, y: PAIR_Y })).not.toBeNull();
+    expect(board.cellContent({ x: PAIR_X, y: PAIR_Y })?.value).toBe(PAIR_VALUE);
+    expect(bus.degraded()).toContain('writes-then-throws');
+  });
+});
+
+/* ==========================================================================
+ * The charge spend, and the board-effect channel
+ * ========================================================================== */
+
+describe('the charge spend (AAP Contract 2, gate V6)', () => {
+  // THE SPEND IS EFFECT-COUPLED, NOT TURN-COUPLED. A charge is spent when the
+  // relic's effect is ACCEPTED: the handler asked for it through
+  // `HookContext.spendCharge`, or a board command it recorded was written. A
+  // handler that merely transformed a payload member has not declared that its
+  // trigger condition held — only it knows — so it pays nothing, which is what
+  // keeps a relic from being exhausted by turns it sat out.
+  it('spends nothing for an invocation that only transformed the payload', () => {
+    const bus = createHookBus();
+
+    register(
+      bus,
+      createSubscriber(
+        'spender',
+        {
+          onStageEnd: (payload): StageEndPayload => ({
+            ...payload,
+            score: payload.score + 1,
+          }),
+        },
+        { charges: 2 },
+      ),
+    );
+
+    const first = dispatchStageEnd(bus);
+
+    expect(first.payload.score).toBe(STAGE_SCORE + 1);
+    expect(first.chargesConsumed).toBe(0);
+    expect(bus.subscribers()[0]?.charges).toBe(2);
+
+    const second = dispatchStageEnd(bus);
+
+    expect(second.chargesConsumed).toBe(0);
+    expect(bus.subscribers()[0]?.charges).toBe(2);
+  });
+
+  it('stops firing once the budget is exhausted', () => {
+    const bus = createHookBus();
+    const handler = vi.fn(
+      (payload: StageEndPayload, context: HookContext): StageEndPayload => {
+        context.spendCharge();
+
+        return { ...payload, score: payload.score + 1 };
+      },
+    );
+
+    register(
+      bus,
+      createSubscriber('spender', { onStageEnd: handler }, { charges: 1 }),
+    );
+
+    const first = dispatchStageEnd(bus);
+    const second = dispatchStageEnd(bus);
+    const third = dispatchStageEnd(bus);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(first.invoked).toBe(1);
+    expect(first.chargesConsumed).toBe(1);
+    expect(second.invoked).toBe(0);
+    expect(second.skipped).toBe(1);
+    expect(third.skipped).toBe(1);
+    expect(second.chargesConsumed).toBe(0);
+  });
+
+  it('spends nothing for an invocation that changed nothing', () => {
+    const bus = createHookBus();
+
+    register(
+      bus,
+      createSubscriber(
+        'idle',
+        {
+          // Returns the payload it was handed, which is what a relic whose
+          // trigger condition did not hold does.
+          onStageEnd: (payload): StageEndPayload => payload,
+        },
+        { charges: 3 },
+      ),
+    );
+
+    for (let turn = 0; turn < 5; turn += 1) {
+      expect(dispatchStageEnd(bus).chargesConsumed).toBe(0);
+    }
+
+    expect(bus.subscribers()[0]?.charges).toBe(3);
+  });
+
+  it('spends nothing when the handler throws', () => {
+    const bus = createHookBus();
+
+    register(
+      bus,
+      createSubscriber(
+        'thrower',
+        {
+          onStageEnd: (): StageEndPayload => {
+            throw new Error('relic handler failed');
+          },
+        },
+        { charges: 2 },
+      ),
+    );
+
+    const result = expectNoDispatchThrow(() => dispatchStageEnd(bus));
+
+    expect(result.failed).toBe(1);
+    expect(result.chargesConsumed).toBe(0);
+    expect(bus.subscribers()[0]?.charges).toBe(2);
+  });
+
+  it('spends nothing when the return is refused', () => {
+    const bus = createHookBus();
+
+    register(
+      bus,
+      createSubscriber(
+        'liar',
+        {
+          // A non-finite score is refused by `isValidPayload`, so the whole
+          // transaction — payload, state, draws and effects — is rolled back.
+          onStageEnd: (payload): StageEndPayload => ({
+            ...payload,
+            score: Number.NaN,
+          }),
+        },
+        { charges: 2 },
+      ),
+    );
+
+    const result = dispatchStageEnd(bus);
+
+    expect(result.rejected).toBe(1);
+    expect(result.chargesConsumed).toBe(0);
+    expect(bus.subscribers()[0]?.charges).toBe(2);
+  });
+
+  it('accumulates the spends a handler declared itself', () => {
+    const bus = createHookBus();
+
+    register(
+      bus,
+      createSubscriber(
+        'declarer',
+        {
+          onStageEnd: (payload, context: HookContext): StageEndPayload => {
+            context.spendCharge();
+            context.spendCharge();
+
+            return payload;
+          },
+        },
+        { charges: 3 },
+      ),
+    );
+
+    // Twice declared, twice spent: `spendCharge` is a REQUEST for an amount,
+    // accumulated across however many times one invocation asks, and the bus
+    // fulfils the total once — inside the same transaction that adopts the
+    // return, so a handler that then threw would pay nothing.
+    expect(dispatchStageEnd(bus).chargesConsumed).toBe(2);
+    expect(bus.subscribers()[0]?.charges).toBe(1);
+  });
+
+  it('never spends from a subscriber carrying no budget', () => {
+    const bus = createHookBus();
+
+    register(
+      bus,
+      createSubscriber('unlimited', {
+        onStageEnd: (payload, context: HookContext): StageEndPayload => {
+          context.spendCharge();
+
+          return { ...payload, score: payload.score + 1 };
+        },
+      }),
+    );
+
+    const result = dispatchStageEnd(bus);
+
+    expect(result.chargesConsumed).toBe(0);
+    expect(bus.subscribers()[0]?.charges).toBeUndefined();
+  });
+
+  it('never invokes a handler that starts at zero charges, and never ' +
+    'throws', () => {
+    const bus = createHookBus();
+    const handler = vi.fn((): void => undefined);
+
+    register(
+      bus,
+      createSubscriber('spent', { onStageEnd: handler }, { charges: 0 }),
+    );
+
+    const result = expectNoDispatchThrow(() => dispatchStageEnd(bus));
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(1);
+    expect(result.chargesConsumed).toBe(0);
+    expect(bus.subscribers()[0]?.charges).toBe(0);
+  });
+});
+
+describe('the board-effect channel', () => {
+  it('returns the effects an accepted handler requested, in request order', () => {
+    const bus = createHookBus();
+
+    register(
+      bus,
+      createSubscriber('shrinker', {
+        onStageEnd: (payload, context: HookContext): StageEndPayload => {
+          context.effects.request({ kind: 'resizeBoard', boardSize: 3 });
+          context.effects.request({ kind: 'resizeBoard', boardSize: 2 });
+
+          return payload;
+        },
+      }),
+    );
+
+    const result = dispatchStageEnd(bus);
+
+    // Recorded in the CANONICAL form, whichever spelling the descriptor used:
+    // `request()` resolves a descriptor to the same named member the handler
+    // could have called, so the two forms cannot diverge.
+    expect(result.effects).toHaveLength(2);
+    expect(result.effects[0]).toEqual({ kind: 'resizeBoard', size: 3 });
+    expect(result.effects[1]).toEqual({ kind: 'resizeBoard', size: 2 });
+  });
+
+  it('discards the effects of a handler that threw', () => {
+    const bus = createHookBus();
+
+    register(
+      bus,
+      createSubscriber('thrower', {
+        onStageEnd: (_payload, context: HookContext): StageEndPayload => {
+          context.effects.request({ kind: 'resizeBoard', boardSize: 3 });
+
+          throw new Error('relic handler failed');
+        },
+      }),
+    );
+
+    const result = expectNoDispatchThrow(() => dispatchStageEnd(bus));
+
+    expect(result.failed).toBe(1);
+    expect(result.effects).toHaveLength(0);
+  });
+
+  it('discards the effects of a handler whose return was refused', () => {
+    const bus = createHookBus();
+
+    register(
+      bus,
+      createSubscriber('liar', {
+        onStageEnd: (payload, context: HookContext): StageEndPayload => {
+          context.effects.request({ kind: 'resizeBoard', boardSize: 3 });
+
+          return { ...payload, score: Number.NaN };
+        },
+      }),
+    );
+
+    const result = dispatchStageEnd(bus);
+
+    expect(result.rejected).toBe(1);
+    expect(result.effects).toHaveLength(0);
+  });
+
+  it('refuses an unusable effect and reports the refusal to its requester', () => {
+    const bus = createHookBus();
+    const accepted: boolean[] = [];
+
+    register(
+      bus,
+      createSubscriber('bad', {
+        onStageEnd: (payload, context: HookContext): StageEndPayload => {
+          accepted.push(
+            context.effects.request({
+              kind: 'nope',
+            } as unknown as Parameters<HookContext['effects']['request']>[0]),
+          );
+          accepted.push(
+            context.effects.request({ kind: 'resizeBoard', boardSize: -1 }),
+          );
+
+          return payload;
+        },
+      }),
+    );
+
+    const result = dispatchStageEnd(bus);
+
+    expect(accepted).toEqual([false, false]);
+    expect(result.effects).toHaveLength(0);
+  });
+
+  it('refuses a LATTICE command from the mid-walk hook and accepts a rules ' +
+    'one', () => {
+    const bus = createHookBus();
+    const environment = createEnvironment();
+    const accepted: boolean[] = [];
+
+    register(
+      bus,
+      createSubscriber('mid-walk', {
+        onMerge: (payload, context: HookContext) => {
+          // `onMerge` is dispatched from INSIDE the move walk, which holds tile
+          // references and traversal state, so a lattice command there would
+          // invalidate the walk.
+          accepted.push(
+            context.effects.request({ kind: 'resizeBoard', boardSize: 3 }),
+          );
+          accepted.push(context.effects.removeTile({ x: PAIR_X, y: PAIR_Y }));
+
+          // A RULES command changes a comparison rather than a cell, so it is
+          // accepted: this is the channel `frostbind` re-records its
+          // frozen-cell predicate through.
+          accepted.push(
+            context.effects.setMergePredicate((): boolean => false),
+          );
+
+          return payload;
+        },
+      }),
+    );
+
+    const result = bus.dispatch(
+      'onMerge',
+      createMergePayload(),
+      environment,
+    );
+
+    expect(accepted).toEqual([false, false, true]);
+    expect(result.effects).toEqual([
+      { kind: 'setMergePredicate', predicate: expect.any(Function) },
+    ]);
+    expect(environment.config.merge.canMerge).not.toBe(
+      createDefaultRulesConfig().merge.canMerge,
+    );
+  });
+
+  it('accepts a lattice command from onSpawn, which follows the walk', () => {
+    const bus = createHookBus();
+    const environment = createEnvironment();
+    const accepted: boolean[] = [];
+
+    register(
+      bus,
+      createSubscriber('sprouts', {
+        onSpawn: (payload, context: HookContext) => {
+          // `addRandomTile()` dispatches this AFTER the walk has resolved, so
+          // inserting a second tile is safe — and is how `fertile-ground`
+          // sprouts one.
+          accepted.push(context.effects.insertTile({ x: 3, y: 3 }, 2));
+
+          return payload;
+        },
+      }),
+    );
+
+    const result = bus.dispatch(
+      'onSpawn',
+      { position: { x: 0, y: 1 }, value: 2 },
+      environment,
+    );
+
+    expect(accepted).toEqual([true]);
+    expect(result.effectsApplied).toBe(1);
+    expect(environment.grid.cellContent({ x: 3, y: 3 })?.value).toBe(2);
+  });
+
+  it('reports the effects it requested back to the handler', () => {
+    const bus = createHookBus();
+    const seen: number[] = [];
+
+    register(
+      bus,
+      createSubscriber('reader', {
+        onStageEnd: (payload, context: HookContext): StageEndPayload => {
+          seen.push(context.effects.requested().length);
+          context.effects.request({ kind: 'resizeBoard', boardSize: 3 });
+          seen.push(context.effects.requested().length);
+
+          return payload;
+        },
+      }),
+    );
+
+    dispatchStageEnd(bus);
+
+    expect(seen).toEqual([0, 1]);
+  });
+});
+
+/* ==========================================================================
+ * The board-effect channel: the WRITE half of the handler transaction
+ * ========================================================================== */
+
+describe('a handler writes the board through recorded effects', () => {
+  it('carries a queue on the context that starts empty', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const seen: HookContext['effects'][] = [];
+
+    register(
+      bus,
+      createSubscriber('reads-the-queue', {
+        onStageEnd: (_payload, context): void => {
+          seen.push(context.effects);
+        },
+      }),
+    );
+
+    bus.dispatch(
+      'onStageEnd',
+      createStageEndPayload(),
       createEnvironment(),
     );
 
+    expect(seen).toHaveLength(1);
+    expect(seen[0].length).toBe(0);
+    expect(seen[0].size).toBe(BOARD_SIZE);
+    expect(Object.isFrozen(seen[0])).toBe(true);
+  });
+
+  it('writes an accepted handler s effects onto the live lattice', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const environment = createEnvironment();
+    const board = environment.grid;
+
+    register(
+      bus,
+      createSubscriber('inserts-a-tile', {
+        onStageEnd: (_payload, context): void => {
+          expect(context.effects.insertTile({ x: 3, y: 3 }, 8)).toBe(true);
+        },
+      }),
+    );
+
+    bus.dispatch('onStageEnd', createStageEndPayload(), environment);
+
+    expect(board.cellContent({ x: 3, y: 3 })?.value).toBe(8);
+  });
+
+  it('keeps a THROWN handler s effects off the lattice entirely (F2)', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const environment = createEnvironment();
+    const board = environment.grid;
+    const before = board.serialize();
+
+    register(
+      bus,
+      createSubscriber('writes-then-throws', {
+        onStageEnd: (_payload, context): void => {
+          context.effects.insertTile({ x: 3, y: 3 }, 8);
+          context.effects.removeTile({ x: PAIR_X, y: PAIR_Y });
+          context.effects.resizeBoard(2);
+
+          throw new Error('relic handler failed');
+        },
+      }),
+    );
+
+    const result = bus.dispatch(
+      'onStageEnd',
+      createStageEndPayload(),
+      environment,
+    );
+
     expect(result.failed).toBe(1);
-    expect(thrown).toEqual(['TypeError', 'TypeError']);
     expect(board.serialize()).toEqual(before);
+    expect(board.size).toBe(BOARD_SIZE);
+    expect(environment.config.boardSize).toBe(BOARD_SIZE);
+  });
+
+  it('keeps a REFUSED return s effects off the lattice entirely', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const environment = createEnvironment();
+    const board = environment.grid;
+    const before = board.serialize();
+
+    register(
+      bus,
+      createSubscriber('writes-then-returns-a-bad-payload', {
+        onStageEnd: (payload, context): StageEndPayload => {
+          context.effects.insertTile({ x: 3, y: 3 }, 8);
+
+          // `score` must be a finite number, so the bus refuses this return.
+          return { ...payload, score: Number.NaN };
+        },
+      }),
+    );
+
+    const result = bus.dispatch(
+      'onStageEnd',
+      createStageEndPayload(),
+      environment,
+    );
+
+    expect(result.rejected).toBe(1);
+    expect(board.serialize()).toEqual(before);
+  });
+
+  it('lets a later handler read what an earlier one wrote', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const environment = createEnvironment();
+    const seen: (number | null)[] = [];
+
+    register(
+      bus,
+      createSubscriber('writes-first', {
+        onStageEnd: (_payload, context): void => {
+          context.effects.insertTile({ x: 3, y: 3 }, 8);
+        },
+      }),
+    );
+    register(
+      bus,
+      createSubscriber('reads-second', {
+        onStageEnd: (_payload, context): void => {
+          seen.push(context.grid.cellValue({ x: 3, y: 3 }));
+        },
+      }),
+    );
+
+    bus.dispatch('onStageEnd', createStageEndPayload(), environment);
+
+    expect(seen).toEqual([8]);
+  });
+
+  it('projects the rules per handler, so a rules effect compounds', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const environment = createEnvironment();
+    const seen: number[] = [];
+    const installed = [0.25, 0.75];
+
+    register(
+      bus,
+      createSubscriber('installs-weights', {
+        onStageEnd: (_payload, context): void => {
+          expect(context.effects.setSpawnWeights(installed)).toBe(true);
+        },
+      }),
+    );
+    register(
+      bus,
+      createSubscriber('reads-weights', {
+        onStageEnd: (_payload, context): void => {
+          seen.push(...context.config.spawn.weights);
+        },
+      }),
+    );
+
+    bus.dispatch('onStageEnd', createStageEndPayload(), environment);
+
+    expect(seen).toEqual(installed);
+    expect(environment.config.spawn.weights).toEqual(installed);
+  });
+
+  it('counts what it wrote and what it dropped', () => {
+    const counted: EngineCountReport[] = [];
+    const reporter: EngineReporter = {
+      onCount: (report): void => {
+        counted.push(report);
+      },
+    };
+    const bus = createHookBus({ correlationId: CORRELATION_ID, reporter });
+    const environment = createEnvironment();
+
+    register(
+      bus,
+      createSubscriber('writes-one', {
+        onStageEnd: (_payload, context): void => {
+          context.effects.insertTile({ x: 3, y: 3 }, 8);
+        },
+      }),
+    );
+    register(
+      bus,
+      createSubscriber('writes-two-then-throws', {
+        onStageEnd: (_payload, context): void => {
+          context.effects.insertTile({ x: 3, y: 2 }, 8);
+          context.effects.insertTile({ x: 3, y: 1 }, 8);
+
+          throw new Error('relic handler failed');
+        },
+      }),
+    );
+
+    bus.dispatch('onStageEnd', createStageEndPayload(), environment);
+
+    const applied = counted.find(
+      (report): boolean => report.metric === 'engine.hook.effect.applied',
+    );
+    const dropped = counted.find(
+      (report): boolean => report.metric === 'engine.hook.effect.dropped',
+    );
+
+    expect(applied?.value).toBe(1);
+    expect(applied?.hook).toBe('onStageEnd');
+    expect(dropped?.value).toBe(2);
+  });
+
+  it('says nothing at all for a handler that records no effect', () => {
+    const counted: EngineCountReport[] = [];
+    const reporter: EngineReporter = {
+      onCount: (report): void => {
+        counted.push(report);
+      },
+    };
+    const bus = createHookBus({ correlationId: CORRELATION_ID, reporter });
+
+    register(
+      bus,
+      createSubscriber('reads-only', {
+        onStageEnd: (): void => undefined,
+      }),
+    );
+
+    bus.dispatch(
+      'onStageEnd',
+      createStageEndPayload(),
+      createEnvironment(),
+    );
+
+    expect(
+      counted.filter((report): boolean =>
+        report.metric.startsWith('engine.hook.effect.'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('hands an inert queue to a dispatch carrying no usable board', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const recorded: boolean[] = [];
+    const environment = {
+      config: createDefaultRulesConfig(),
+      rng: createRngStreams(RUN_SEED),
+      grid: undefined,
+    } as unknown as HookEnvironment;
+
+    register(
+      bus,
+      createSubscriber('tries-to-write', {
+        onStageEnd: (_payload, context): void => {
+          recorded.push(context.effects.insertTile({ x: 0, y: 0 }, 2));
+          recorded.push(context.effects.resizeBoard(2));
+        },
+      }),
+    );
+
+    expect(() => {
+      bus.dispatch('onStageEnd', createStageEndPayload(), environment);
+    }).not.toThrow();
+    expect(recorded).toEqual([false, false]);
   });
 });

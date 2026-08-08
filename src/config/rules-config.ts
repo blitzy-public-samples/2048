@@ -1,12 +1,40 @@
 /**
- //
- * member. Decisions behind this file: DL-CONFIG-01, the merge rule expressed
- * as a replaceable predicate and producer pair, and DL-CONFIG-02, every
- * Traceability rows: TR-CONFIG-01, js/application.js L3's board-size literal
- * -> `boardSize`; TR-CONFIG-02, js/game_manager.js L170's `2048`
- * -> `winValue`; TR-CONFIG-03, js/game_manager.js L7's `2` -> `startTiles`;
- * TR-CONFIG-04, js/game_manager.js L71's `Math.random() < 0.9 ? 2 : 4`
- * -> `spawn`; and TR-CONFIG-05, js/game_manager.js L156-L157's merge
+ * Rules schema for the configuration-driven game rules.
+ *
+ * Type declarations only. This module imports nothing, declares no runtime
+ * binding, performs no work at load, and touches no DOM or Web Storage. It
+ * contributes nothing to the emitted bundle; consumers reference it with
+ * `import type`.
+ *
+ * The vanilla-equivalent values that populate a `RulesConfig` are declared in
+ * src/config/default-config.ts, and stage goals and the progression curve in
+ * src/config/stage-config.ts. The engine and the relics read the same
+ * `RulesConfig` instance; members are mutable and are read at each use.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-CONFIG-01  js/application.js L3          the board-size literal, as
+ *                                               `boardSize`
+ *   TR-CONFIG-02  js/game_manager.js L170       `2048`, as `winValue`
+ *   TR-CONFIG-03  js/game_manager.js L7         `2`, as `startTiles`
+ *   TR-CONFIG-04  js/game_manager.js L71        `Math.random() < 0.9 ? 2 : 4`,
+ *                                               as `spawn` and
+ *                                               `SpawnDistribution`
+ *   TR-CONFIG-05  js/game_manager.js L156-L157  the merge condition and the
+ *                                               doubled value, as
+ *                                               `MergePredicate` and
+ *                                               `MergeProducer`
+ *   TR-CONFIG-06  target-only row               `MergeTileView`, the structural
+ *                                               operand both merge members read
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-CONFIG-01  the merge rule expressed as a replaceable predicate and
+ *                 producer pair
+ *   DL-CONFIG-02  every member declared mutable and read at each use
+ */
+
+/**
  * Structural view of a tile as the merge rules see it. A tile declaring
  * `value: number` and `mergedFrom: Tile[] | null` satisfies it structurally and
  * needs no adapter. Both members are readonly: a predicate and a producer read

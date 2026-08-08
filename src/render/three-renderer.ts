@@ -6,39 +6,59 @@
 // docs/architecture/ARCHITECTURE.md are the two states. Every choice named
 // below is logged in docs/DECISION_LOG.md.
 //
-// PROVENANCE MAP — every member of js/html_actuator.js to its target, no
-// gaps in either direction. Rows TR-THREE-01 through TR-THREE-16 of
-// docs/TRACEABILITY_MATRIX.md, in that order.
-//   01 actuate            L10-L36   `render()` queues, `frame()` draws
-//   02 the x-major walk   L16-L22   `planCommit()`
-//   03 clearContainer     L43-L47   `clearLiveTiles()`
-//   04 addTile            L49-L91   `planTile()` and `addTile()`
-//   05 previousPosition   L54       `PlannedTile.from`
-//   06 super threshold    L60       `resolveTileTheme().isSuper`
-//   07 nested-frame move  L67-L72   `createMoveTween` of ./animations
-//   08 the mergedFrom     L73-L80   `PlannedTile.merged`, `addTile(_, true)`
-//                                   recursion
-//   09 the tile-new       L82       `createSpawnTween` of ./animations
-//                                   branch
-//   10 applyClasses       L93-L95   material and mesh acquisition; no class
-//                                   attribute is written and the classList
-//                                   workaround is not carried forward
-//   11 normalizePosition  L97-L99   `cellToWorldIn` of ./tile-mesh-factory
-//   12 positionClass      L101-L104 `cellToWorldIn` of ./tile-mesh-factory
-//   13 updateScore        L106-L121 src/ui/components/score-panel.ts. NOT
-//                                   here: this module carries the difference
-//                                   as `PaintPlan.scoreDelta` into
-//                                   `readRenderedBoard()` and writes no
-//                                   score outlet and no rising-delta node
-//   14 updateBestScore    L123-L125 src/ui/screens/hud.ts. Not here
-//   15 message L127-L133, clearMessage L135-L139
-//                                   src/ui/screens/hud.ts. Not here
-//   16 continueGame       L39-L41   src/ui/screens/hud.ts. Not here
+// PROVENANCE MAP — every member of js/html_actuator.js to its target, no gaps
+// in either direction. One traceability row of docs/TRACEABILITY_MATRIX.md
+// apiece, every row of this module's area enumerated:
+//   TR-THREE-01  actuate            L10-L36   `render()` queues, `frame()`
+//                                             draws
+//   TR-THREE-02  the x-major walk   L16-L22   `planCommit()`
+//   TR-THREE-03  clearContainer     L43-L47   `clearLiveTiles()`
+//   TR-THREE-04  addTile            L49-L91   `planTile()` and `addTile()`
+//   TR-THREE-05  previousPosition   L54       `PlannedTile.from`
+//   TR-THREE-06  super threshold    L60       `resolveTileTheme().isSuper`
+//   TR-THREE-07  nested-frame move  L67-L72   `createMoveTween` of
+//                                             ./animations
+//   TR-THREE-08  the mergedFrom     L73-L80   `PlannedTile.merged`,
+//                                             `addTile(_, true)` recursion
+//   TR-THREE-09  the tile-new       L82       `createSpawnTween` of
+//                                             ./animations
+//   TR-THREE-10  applyClasses       L93-L95   material and mesh acquisition;
+//                                             no class attribute is written
+//                                             and the classList workaround is
+//                                             not carried forward
+//   TR-THREE-11  normalizePosition  L97-L99   `cellToWorldIn` of
+//                                             ./tile-mesh-factory
+//   TR-THREE-12  positionClass      L101-L104 `cellToWorldIn` of
+//                                             ./tile-mesh-factory
+//   TR-THREE-13  updateScore        L106-L121 src/ui/components/score-panel.ts.
+//                                             NOT here: this module carries the
+//                                             difference as
+//                                             `PaintPlan.scoreDelta` into
+//                                             `readRenderedBoard()` and writes
+//                                             no score outlet and no
+//                                             rising-delta node
+//   TR-THREE-14  updateBestScore    L123-L125 src/ui/screens/hud.ts. Not here
+//   TR-THREE-15  message            L127-L133 src/ui/screens/hud.ts. Not here
+//   TR-THREE-16  clearMessage       L135-L139 src/ui/screens/hud.ts. Not here
+//   TR-THREE-17  continueGame       L39-L41   src/ui/screens/hud.ts. Not here
+//   TR-THREE-18  target-only row              the hook-free subscription
+//                                             surface
+//   TR-THREE-19  target-only row              the WebGL surface and its
+//                                             context-loss handling
+//   TR-THREE-20  target-only row              the parallel accessibility board
+//   TR-THREE-21  target-only row              the stage lighting and the
+//                                             stage-clear punch
 //
-// Target-only rows, which have no vanilla source: TR-THREE-17 the hook-free
-// subscription surface, TR-THREE-18 the WebGL surface and its context-loss
-// handling, TR-THREE-19 the parallel accessibility board, TR-THREE-20 the
-// stage lighting and the stage-clear punch.
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-THREE-01  the lighting rig re-tuned at most once per stage index, from
+//                either `stage:start` or the stage slice a commit carries
+//   DL-THREE-02  unmount leaving the canvas hidden and restoring the
+//                number-only host to its shipped state
+//   DL-THREE-03  `aria-hidden` restored on unmount to the state the canvas was
+//                found in
+//   DL-THREE-04  the spawn tween applying scale alone, with no per-block
+//                opacity
 //
 // SURFACES THIS MODULE HOLDS
 //   The canvas, the `WebGLRenderer` built on it, its pixel ratio, its clear
@@ -60,13 +80,13 @@
 //   move:after    the cells a move repositioned, and their origins
 //   stage:start   `boardSize` to re-frame for, `stageIndex` to light for
 //   stage:end     the stage-clear punch
-//   move:before   NOT subscribed. src/engine/engine-events.ts reports the
-//                 engine's decision there rather than taking it, and a
-//                 withdrawn move changes no state
+//   move:before   NOT subscribed. It is the cancellable event, and a renderer
+//                 never withdraws a move; a withdrawn move changes no state
+//                 and reaches this module as no commit at all
 //
-//   Payloads are frozen snapshots taken at emission, per the `TileProjection`
-//   and `BoardProjection` contract of src/engine/engine-events.ts, and are
-//   planned synchronously all the same.
+//   Every payload carries the LIVE board and the LIVE tiles, per AAP
+//   Contract 1, so each listener plans its paint synchronously INSIDE the
+//   emission and holds no engine object past it.
 //
 // TIMING TAKEN FROM style/main.scss THROUGH ./animations
 //   move 100ms ease-in-out; spawn `appear` 200ms ease after a 100ms hold at
@@ -141,7 +161,11 @@ import type {
 } from './tile-mesh-factory';
 import type { RenderedBoard, RenderedCell } from './number-only-renderer';
 import { numberOnlyRendererCopy } from './number-only-renderer';
-import type { RenderDetail, RenderReporter } from './webgl-support';
+import type {
+  RenderDetail,
+  RenderReporter,
+  WebGLContextLossInfo,
+} from './webgl-support';
 import {
   NOOP_RENDER_REPORTER,
   attachContextLossHandlers,
@@ -199,6 +223,12 @@ const SPAWN_METRIC = 'render.three.spawn';
 
 /** Counter raised once per spawn that resolved to no cell. */
 const SPAWN_SUPPRESSED_METRIC = 'render.three.spawn.suppressed';
+
+/**
+ * Counter raised per animation trigger discarded for belonging to a turn other
+ * than the one being drawn.
+ */
+const ORPHANED_TRIGGERS_METRIC = 'render.three.orphaned_triggers';
 
 /** Counter raised once per resolved move whose origins were recorded. */
 const MOVE_METRIC = 'render.three.move';
@@ -436,6 +466,29 @@ export interface ThreeRendererOptions {
    * stops when idle is woken. Defaults to doing nothing.
    */
   readonly onWork?: () => void;
+
+  /**
+   * Called once the browser has taken this renderer's WebGL context away,
+   * after the loss has been reported and restoration requested.
+   *
+   * WHY THE COMPOSITION ROOT HAS TO BE TOLD. This renderer's own response to a
+   * loss is to stop drawing until the context comes back, which is correct for
+   * a loss the browser then restores and leaves the board FROZEN for one it
+   * never does. Only the root can serve the number-only board instead, because
+   * only the root owns the preference store and the renderer selection. So the
+   * state is surfaced rather than kept, and the root decides how long to wait
+   * (implicit requirement I6).
+   *
+   * Defaults to doing nothing, which leaves the wait-for-restoration behaviour
+   * a renderer built without it has always had.
+   */
+  readonly onContextLost?: (info: WebGLContextLossInfo) => void;
+
+  /**
+   * Called once the browser has restored the context, after the renderer has
+   * resumed drawing. Defaults to doing nothing.
+   */
+  readonly onContextRestored?: () => void;
 }
 
 /** What one renderer has done and where it stands. */
@@ -477,6 +530,22 @@ export interface ThreeRendererStats {
   /** `stage:end` emissions presented. */
   readonly stagesEnded: number;
   readonly refusedSizes: number;
+
+  /**
+   * Animation triggers discarded for belonging to a turn other than the one
+   * being drawn. Non-zero means granular events and commits arrived interleaved,
+   * which the turn key is what protects the board from.
+   */
+  readonly orphanedTriggers: number;
+
+  /** Contexts lost since the mount. */
+  readonly contextLosses: number;
+
+  /** Restorations whose GPU resources were rebuilt. */
+  readonly contextRestores: number;
+
+  /** The turn the armed triggers belong to, and `null` while none are armed. */
+  readonly pendingTurn: number | null;
   readonly contextLost: boolean;
   readonly disposed: boolean;
 }
@@ -622,7 +691,8 @@ function readCell(board: CommitBoard, x: number, y: number): CommitTile | null {
  * plain data one paint reads.
  *
  * `previousPosition` and `mergedFrom` are read inside the emission that carried
- * the tile, which is where src/engine/engine-events.ts took the projection.
+ * the tile, which is the only point the live tile still reports the move it
+ * just made.
  */
 function planTile(tile: CommitTile): PlannedTile {
   const previous = tile.previousPosition;
@@ -853,6 +923,16 @@ export function createThreeRenderer(
   let releaseResize: (() => void) | null = null;
 
   let numberOnlyWasHidden: HiddenState = false;
+
+  /**
+   * Whether the host swap has run, so a teardown knows the recorded host states
+   * are real and may be restored.
+   *
+   * A mount that failed before the swap must NOT restore, because
+   * `numberOnlyWasHidden` would then hold a state from an earlier mount and the
+   * teardown would unhide a number-only host the caller is about to use.
+   */
+  let hostsSwapped = false;
   let parallelBoardClaimed = false;
   let parallelBoardState: {
     readonly hidden: HiddenState;
@@ -866,17 +946,34 @@ export function createThreeRenderer(
    * Cells `tile:spawn` resolved this turn, keyed by `cellKey`.
    *
    * Consumed by `addTile`: a planned tile standing in one of these cells takes
-   * the spawn tween whatever its projected origin says.
+   * the spawn tween whatever origin the plan carries.
    */
   const pendingSpawns = new Set<string>();
 
   /**
    * Origins `move:after` reported this turn, keyed by destination `cellKey`.
    *
-   * Consumed by `addTile` as the move tween's origin where the commit's own
-   * projection carries none.
+   * Consumed by `addTile` as the move tween's origin where the plan taken from
+   * the commit carries none.
    */
   const pendingMoveOrigins = new Map<string, PlannedPosition>();
+
+  /**
+   * The turn the armed triggers belong to, and `null` while none are armed.
+   *
+   * WHY THE BUFFERS ARE KEYED AT ALL. `tile:merge`, `tile:spawn` and
+   * `move:after` arm animation triggers that are drained by the NEXT
+   * `state:commit`. Without a transaction identifier a trigger armed by one turn
+   * can be drained against a later board — a nested commit, a stage transition
+   * that commits between the arming and the paint, or an emission a subscriber
+   * deferred all produce that ordering — and the tween then plays a merge or a
+   * spawn in a cell that now holds something else.
+   *
+   * Every granular event and every commit carries a monotonic `turn`
+   * (src/engine/engine-events.ts), so the buffers admit triggers for ONE turn and
+   * a commit drains only the triggers belonging to its own.
+   */
+  let pendingTurn: number | null = null;
 
   const subscriptions: EngineEventSubscription[] = [];
   const worldScratch: Vector3[] = [];
@@ -912,6 +1009,13 @@ export function createThreeRenderer(
   let refusedSizes = 0;
   let spawnsAnnounced = 0;
   let spawnsSuppressed = 0;
+
+  /** Animation triggers discarded for belonging to a superseded turn. */
+  let orphanedTriggers = 0;
+
+  /** Contexts lost, and contexts whose resources were rebuilt after a restore. */
+  let contextLosses = 0;
+  let contextRestores = 0;
   let movesAnnounced = 0;
   let stagesStarted = 0;
   let stagesEnded = 0;
@@ -1404,19 +1508,19 @@ export function createThreeRenderer(
     // js/html_actuator.js L82 took a tile carrying neither a previous position
     // nor a merge pair for a new one. `tile:spawn` names the cell the engine
     // resolved a spawn into, and a tile standing in one of those cells is new
-    // whatever its projected origin says. A merge source is never new.
+    // whatever origin the plan carries. A merge source is never new.
     const isNew =
       !isMerged &&
       !retireOnArrival &&
       (planned.from === null || pendingSpawns.has(key));
 
     // Where a tile came from, in three cases and in this order:
-    //   a merge source keeps its projected origin, and takes its own cell where
-    //   the projection reports it did not move, so the move tween below always
+    //   a merge source keeps its planned origin, and takes its own cell where
+    //   the plan reports it did not move, so the move tween below always
     //   exists to hold it on screen;
     //   a new tile has no origin;
-    //   every other tile takes its projected origin, or the one `move:after`
-    //   reported for its destination cell where the projection carries none.
+    //   every other tile takes its planned origin, or the one `move:after`
+    //   reported for its destination cell where the plan carries none.
     const from: PlannedPosition | null = retireOnArrival
       ? planned.from ?? target
       : isNew
@@ -1540,6 +1644,107 @@ export function createThreeRenderer(
     pendingMerges.length = 0;
     pendingSpawns.clear();
     pendingMoveOrigins.clear();
+    pendingTurn = null;
+  };
+
+  /**
+   * Admits a granular event's triggers to the buffers, discarding an older turn's
+   * if a newer turn has begun arming.
+   *
+   * The three granular events of one turn arrive in engine order — merge, then
+   * spawn, then move — so the first of them opens the turn and the rest join it.
+   * An event carrying a HIGHER turn means the previous turn's triggers were never
+   * drained, so they are dropped rather than mixed into the new turn's set. An
+   * event carrying a LOWER turn is a late arrival from a turn already superseded
+   * and is refused outright.
+   *
+   * @param turn The turn the arriving event belongs to.
+   * @returns Whether the event may arm a trigger.
+   */
+  const admitTurn = (turn: number): boolean => {
+    if (!Number.isFinite(turn)) {
+      // An emitter that carries no usable turn falls back to the unkeyed
+      // behaviour rather than dropping the animation altogether.
+      return true;
+    }
+
+    if (pendingTurn === null) {
+      pendingTurn = turn;
+
+      return true;
+    }
+
+    if (turn === pendingTurn) {
+      return true;
+    }
+
+    if (turn > pendingTurn) {
+      const orphaned =
+        pendingMerges.length + pendingSpawns.size + pendingMoveOrigins.size;
+
+      pendingMerges.length = 0;
+      pendingSpawns.clear();
+      pendingMoveOrigins.clear();
+      pendingTurn = turn;
+
+      if (orphaned > 0) {
+        orphanedTriggers += orphaned;
+
+        reporter.onCount({
+          name: ORPHANED_TRIGGERS_METRIC,
+          value: orphaned,
+          detail: Object.freeze({ turn, discarded: orphaned }),
+        });
+      }
+
+      return true;
+    }
+
+    orphanedTriggers += 1;
+
+    reporter.onCount({
+      name: ORPHANED_TRIGGERS_METRIC,
+      value: 1,
+      detail: Object.freeze({ turn, pendingTurn }),
+    });
+
+    return false;
+  };
+
+  /**
+   * Whether a commit may drain the armed triggers.
+   *
+   * A commit whose turn is not the buffers' turn discards them instead: the
+   * board it carries is not the board they were armed against.
+   *
+   * @param turn The commit's turn.
+   * @returns Whether the triggers belong to this commit.
+   */
+  const triggersBelongTo = (turn: number): boolean => {
+    if (pendingTurn === null) {
+      return true;
+    }
+
+    if (!Number.isFinite(turn) || turn === pendingTurn) {
+      return true;
+    }
+
+    const orphaned =
+      pendingMerges.length + pendingSpawns.size + pendingMoveOrigins.size;
+
+    clearPendingTriggers();
+
+    if (orphaned > 0) {
+      orphanedTriggers += orphaned;
+
+      reporter.onCount({
+        name: ORPHANED_TRIGGERS_METRIC,
+        value: orphaned,
+        detail: Object.freeze({ commitTurn: turn, discarded: orphaned }),
+      });
+    }
+
+    return false;
   };
 
   /** Projects one plan into the shape a consumer reads the board through. */
@@ -1657,7 +1862,23 @@ export function createThreeRenderer(
 
   /** Draws one plan. */
   const paint = (plan: PaintPlan): void => {
+    // BEFORE THE GPU GUARD, DELIBERATELY. The parallel accessibility board is
+    // DOM and `lastPlan` is plain data, so neither depends on a board standing:
+    // both follow the commit even on a frame that cannot draw one. While a
+    // context is lost `ensureBoard` reports no board, because
+    // `parkForContextLoss` released the factory and the scene while the lost
+    // context still owned them, so a commit that lands during the outage would
+    // otherwise leave the screen reader's grid showing a pre-loss board and
+    // leave the restoration reconciling to that same stale board.
+    updateParallelBoard(plan);
+    lastPlan = plan;
+
     if (!ensureBoard(plan.size)) {
+      // No board stands, so no trigger armed for this plan can ever play.
+      // Dropped for the reason the refused-size path drops them: a trigger held
+      // past the plan it belongs to would fire at a cell of a later board.
+      clearPendingTriggers();
+
       return;
     }
 
@@ -1690,8 +1911,6 @@ export function createThreeRenderer(
       camera?.shake();
     }
 
-    updateParallelBoard(plan);
-    lastPlan = plan;
     rendered = projectRendered(plan);
     paints += 1;
 
@@ -1885,6 +2104,218 @@ export function createThreeRenderer(
     releaseResize = null;
   };
 
+  /* ------------------------------------------------------------------
+   * Context loss and restoration
+   * --------------------------------------------------------------- */
+
+  /**
+   * Parks rendering for a lost context.
+   *
+   * `webglcontextlost` already has its `preventDefault()` called in
+   * src/render/webgl-support.ts, which is what makes restoration possible at all.
+   * This is the renderer's own half, and three of its four steps were missing:
+   *
+   *   1. The loss flag is raised, which stops `frame()` issuing a draw call. That
+   *      part existed.
+   *   2. THE LOOP IS PARKED. `frame()` went on advancing tweens, particles and the
+   *      camera rig against a context that cannot draw, and went on returning
+   *      `true` for outstanding work — so an idle-stopping loop kept spinning
+   *      frames for animations nobody could see, for as long as the context stayed
+   *      lost.
+   *   3. PENDING EFFECTS ARE CLEARED. Every GPU object belonging to the lost
+   *      context is invalid, so a queued plan and the triggers armed for it
+   *      describe resources that no longer exist.
+   *   4. THE FALLBACK IS ANNOUNCED, at `error` level, so the diagnostics surface
+   *      and the log both carry it rather than the board simply freezing.
+   */
+  const parkForContextLoss = (): void => {
+    contextLost = true;
+    contextLosses += 1;
+
+    // Read before the release, which zeroes it: the diagnostic reports the board
+    // the loss interrupted, not the absence left behind.
+    const lostSize = boardSize;
+
+    // Every tween, burst and camera displacement in flight targets a mesh whose
+    // GPU resources have just been invalidated. Stopping them is what parks the
+    // loop: `frame()` reports outstanding work from these three, so with them
+    // cleared it reports none and an idle-stopping loop settles.
+    tweens?.clear();
+    particles?.reset();
+    camera?.reset();
+
+    queued = null;
+    clearPendingTriggers();
+
+    // RELEASED HERE, NOT AT RESTORATION. `webglcontextrestored` fires only after
+    // the browser has already put a NEW context on the canvas, so a delete issued
+    // from the restore handler targets that new context with a handle belonging to
+    // the destroyed one — twenty `INVALID_OPERATION: object does not belong to
+    // this context` warnings per restoration, one per geometry, texture and vertex
+    // array. Releasing while the context is still the lost one is a no-op at the
+    // driver: calls on a lost context are ignored without raising. `lastPlan` and
+    // the parallel board are deliberately left alone — `paint` keeps both current
+    // through the outage, and `lastPlan` is what the restoration reconciles from.
+    releaseGpuResources();
+
+    reporter.onDiagnostic({
+      level: 'error',
+      source: DIAGNOSTIC_SOURCE,
+      message:
+        'The WebGL context was lost, so the 2.5D board has stopped drawing ' +
+        'and is waiting for restoration. The game itself keeps running: every ' +
+        'move still resolves, the board\'s accessible grid and the live region ' +
+        'stay current, and drawing resumes when the context comes back.',
+      detail: Object.freeze({ boardSize: lostSize, losses: contextLosses }),
+    });
+  };
+
+  /**
+   * Releases every collaborator that owns a GPU resource, leaving the mount,
+   * the hosts, the parallel board, the resize observer and the theme
+   * subscription in place.
+   *
+   * Shared by the context-loss park and the restoration rebuild, so the release
+   * order is stated once: the reverse of the order a mount takes them.
+   */
+  const releaseGpuResources = (): void => {
+    clearLiveTiles();
+    particles?.dispose();
+    particles = null;
+    camera?.destroy();
+    camera = null;
+    tweens?.dispose();
+    tweens = null;
+    factory?.dispose();
+    factory = null;
+    materials?.destroy();
+    materials = null;
+    scene?.dispose();
+    scene = null;
+    webgl?.dispose();
+    webgl = null;
+    board = null;
+    geometry = null;
+    boardSize = 0;
+    litStageIndex = null;
+  };
+
+  /**
+   * Rebuilds the renderer-owned GPU resources after a restored context and
+   * reconciles the board that was last committed.
+   *
+   * A restored context is a NEW context: every buffer, texture, program and
+   * material uploaded to the old one is gone. Clearing the flag alone — which is
+   * all this used to do — left the scene holding invalid handles, so the board
+   * either drew nothing or drew whatever the driver made of dead resources.
+   *
+   * The scene graph, the material cache, the mesh factory, the particle system
+   * and the camera rig are therefore all rebuilt, the board is regenerated at the
+   * size in force, and the plan the board last showed is queued again so the next
+   * frame reconciles the LATEST committed state rather than an empty board.
+   *
+   * @param surface The canvas the restored context belongs to.
+   * @param size Board size to rebuild at.
+   * @param scale Scale the geometry is resolved for.
+   */
+  const rebuildAfterContextRestore = (
+    surface: HTMLCanvasElement,
+    size: number,
+    scale: ScaleName,
+  ): void => {
+    contextLost = false;
+
+    if (disposed || !mounted) {
+      return;
+    }
+
+    const carried = lastPlan;
+
+    try {
+      // Normally a no-op: `parkForContextLoss` already released everything while
+      // the lost context still owned it. Kept for the path where a restoration
+      // arrives without a recorded loss, so the rebuild never stacks a second set
+      // of resources on top of a live one.
+      releaseGpuResources();
+
+      webgl = openSurface(surface);
+      scene = createScene({
+        boardSize: size,
+        geometry: resolveBoardGeometry(size, scale),
+        theme: readPinnedTheme(),
+        reporter,
+      });
+      materials = createTileMaterialCache({
+        theme: options.theme,
+        followActiveTheme: options.theme === undefined,
+        reporter,
+      });
+      factory = createTileMeshFactory({
+        config: { boardSize: size },
+        materials,
+        scale,
+        reporter,
+      });
+      tweens = createTweenGroup({ reporter });
+      particles = createParticleSystem({ reporter });
+      camera = createCameraEffects(scene.camera, { reporter });
+
+      applyClearColor(readPinnedTheme() ?? getActiveTheme());
+      ensureBoard(carried?.size ?? size);
+    } catch (error: unknown) {
+      // A restoration that cannot be completed leaves the renderer mounted but
+      // not drawing, rather than half-built: the flag goes back up so `frame()`
+      // stays parked, and the caller's number-only fallback keeps the game
+      // readable.
+      contextLost = true;
+
+      reporter.onCount({ name: CONTEXT_FAILED_METRIC, value: 1 });
+      reporter.onDiagnostic({
+        level: 'error',
+        source: DIAGNOSTIC_SOURCE,
+        message:
+          'The WebGL context was restored but its resources could not be ' +
+          'rebuilt, so the 2.5D board stays parked. The number-only board ' +
+          'carries the same information.',
+        detail: Object.freeze({ boardSize: size, scale }),
+        error: describeRenderError(error),
+      });
+
+      return;
+    }
+
+    contextRestores += 1;
+
+    // The LATEST committed state, re-queued so the next frame reconciles in
+    // full. Drawn from the retained plan rather than from a remembered event, so
+    // no engine emission has to be replayed, and `paint` keeps that plan current
+    // through the outage, so a turn resolved while the context was dead is the
+    // turn the board comes back showing.
+    //
+    // Queued at REST, the way the scale change queues it: the lattice has just
+    // been generated again outside a turn, so every block is placed where it
+    // stands rather than sliding in from a position whose mesh no longer exists,
+    // and a terminal board does not shake a second time.
+    if (carried !== null) {
+      queued = restPlan(carried);
+    }
+
+    reporter.onDiagnostic({
+      level: 'info',
+      source: DIAGNOSTIC_SOURCE,
+      message:
+        'The WebGL context was restored and the 2.5D board rebuilt its ' +
+        'resources.',
+      detail: Object.freeze({
+        boardSize,
+        reconciled: carried !== null,
+        restores: contextRestores,
+      }),
+    });
+
+    options.onWork?.();
+  };
+
   const mount = (target?: Element | null): boolean => {
     if (disposed) {
       reporter.onDiagnostic({
@@ -1922,6 +2353,14 @@ export function createThreeRenderer(
     const scale = resolveScale();
     const size = readConfiguredSize();
 
+    // EVERY initialisation step is inside this guard, not just the context and
+    // the scene. Nine of them used to sit outside it — the material cache, the
+    // mesh factory, the context-loss handlers, the tween group, the particle
+    // system, the camera rig, the board build, the parallel-board claim and the
+    // theme subscription — and a throw from any of them escaped this function,
+    // escaped the composition root's renderer selection, and took down
+    // application startup instead of falling back to number-only rendering.
+    // `teardown()` releases whatever was reached (M7).
     try {
       // The context is acquired here and nowhere else, so a caller that has
       // already probed for support decides whether to mount at all.
@@ -1932,11 +2371,111 @@ export function createThreeRenderer(
         theme: readPinnedTheme(),
         reporter,
       });
+
+      materials = createTileMaterialCache({
+        theme: options.theme,
+        followActiveTheme: options.theme === undefined,
+        reporter,
+      });
+
+      factory = createTileMeshFactory({
+        config: { boardSize: size },
+        materials,
+        scale,
+        reporter,
+      });
+
+      applyClearColor(readPinnedTheme() ?? getActiveTheme());
+
+      // The context-loss handler the product has never had: WebGL is a hard
+      // runtime prerequisite of this renderer, and a lost context is silent
+      // without one.
+      releaseContextLoss = attachContextLossHandlers(
+        surface,
+        {
+          onContextLost: (info: WebGLContextLossInfo): void => {
+            parkForContextLoss();
+
+            // SURFACED TO WHOEVER BUILT THIS RENDERER, after this renderer's own
+            // response, so a handler that reads `readStats().contextLost` sees
+            // the loss the call is telling it about. Parking is all a renderer
+            // can do about a lost context; ending the wait and serving another
+            // board instead is a decision only the composition root can make,
+            // and without this forwarding it never learned there was a wait.
+            options.onContextLost?.(info);
+          },
+          onContextRestored: (): void => {
+            rebuildAfterContextRestore(surface, size, scale);
+            options.onContextRestored?.();
+          },
+        },
+        reporter,
+      );
+
+      tweens = createTweenGroup({ reporter });
+      particles = createParticleSystem({ reporter });
+      camera = createCameraEffects(scene.camera, { reporter });
+
+      // The number-only layer and the canvas are mutually exclusive: exactly one
+      // of the two draws the board, and index.html ships the number-only host
+      // hidden.
+      const numberOnly = asHtmlElement(options.numberOnlyHost);
+
+      if (numberOnly !== null) {
+        numberOnlyWasHidden = numberOnly.hidden;
+        numberOnly.hidden = true;
+      }
+
+      const canvasElement = asHtmlElement(surface);
+
+      if (canvasElement !== null) {
+        canvasElement.hidden = false;
+      }
+
+      markCanvasAria(surface);
+
+      // Recorded the moment the swap completes, so a failure after this point
+      // restores both hosts and a failure before it leaves them untouched.
+      hostsSwapped = true;
+
+      mounted = true;
+      ensureBoard(size);
+      claimParallelBoard(boardSize > 0 ? boardSize : size);
+      openResize();
+
+      releaseTheme = subscribeToThemeChange((theme: Theme): void => {
+        // The material cache, the mesh factory and the scene's lighting rig each
+        // follow the theme through their own subscription; this repaints so the
+        // change reaches the screen without waiting for a turn, refreshes the
+        // projection's theme id, and carries the palette into the clear colour,
+        // which belongs to the renderer this module owns.
+        applyClearColor(theme);
+
+        reporter.onCount({
+          name: THEME_CHANGE_METRIC,
+          value: 1,
+          detail: Object.freeze({ theme: theme.id }),
+        });
+
+        if (lastPlan !== null) {
+          rendered = projectRendered(lastPlan);
+        }
+
+        options.onWork?.();
+      });
+
+      reporter.onCount({
+        name: MOUNT_METRIC,
+        value: 1,
+        detail: Object.freeze({ boardSize, scale }),
+      });
     } catch (error: unknown) {
-      canvas = null;
-      webgl?.dispose();
-      webgl = null;
-      scene = null;
+      // The mount is UNWOUND, not abandoned. `mounted` is cleared first so every
+      // guarded member refuses during the teardown, then `teardown()` releases
+      // whatever the try block reached and restores both hosts if the swap ran.
+      mounted = false;
+
+      teardown();
       closeScale();
 
       reporter.onCount({ name: CONTEXT_FAILED_METRIC, value: 1 });
@@ -1944,8 +2483,10 @@ export function createThreeRenderer(
         level: 'error',
         source: DIAGNOSTIC_SOURCE,
         message:
-          'A WebGL context could not be acquired, so the 2.5D board did ' +
-          'not mount. A caller selects the number-only renderer instead.',
+          'The 2.5D board did not mount: a WebGL context or one of the ' +
+          'renderer resources could not be created. Every partial resource ' +
+          'was released and a caller selects the number-only renderer ' +
+          'instead, which keeps the game playable.',
         detail: Object.freeze({ boardSize: size, scale }),
         error: describeRenderError(error),
       });
@@ -1953,112 +2494,45 @@ export function createThreeRenderer(
       return false;
     }
 
-    materials = createTileMaterialCache({
-      theme: options.theme,
-      followActiveTheme: options.theme === undefined,
-      reporter,
-    });
-
-    factory = createTileMeshFactory({
-      config: { boardSize: size },
-      materials,
-      scale,
-      reporter,
-    });
-
-    applyClearColor(readPinnedTheme() ?? getActiveTheme());
-
-    // The context-loss handler the product has never had: WebGL is a hard
-    // runtime prerequisite of this renderer, and a lost context is silent
-    // without one.
-    releaseContextLoss = attachContextLossHandlers(
-      surface,
-      {
-        onContextLost: (): void => {
-          contextLost = true;
-        },
-        onContextRestored: (): void => {
-          contextLost = false;
-          options.onWork?.();
-        },
-      },
-      reporter,
-    );
-
-    tweens = createTweenGroup({ reporter });
-    particles = createParticleSystem({ reporter });
-    camera = createCameraEffects(scene.camera, { reporter });
-
-    // The number-only layer and the canvas are mutually exclusive: exactly one
-    // of the two draws the board, and index.html ships the number-only host
-    // hidden.
-    const numberOnly = asHtmlElement(options.numberOnlyHost);
-
-    if (numberOnly !== null) {
-      numberOnlyWasHidden = numberOnly.hidden;
-      numberOnly.hidden = true;
-    }
-
-    const canvasElement = asHtmlElement(surface);
-
-    if (canvasElement !== null) {
-      canvasElement.hidden = false;
-    }
-
-    markCanvasAria(surface);
-
-    mounted = true;
-    ensureBoard(size);
-    claimParallelBoard(boardSize > 0 ? boardSize : size);
-    openResize();
-
-    releaseTheme = subscribeToThemeChange((theme: Theme): void => {
-      // The material cache, the mesh factory and the scene's lighting rig each
-      // follow the theme through their own subscription; this repaints so the
-      // change reaches the screen without waiting for a turn, refreshes the
-      // projection's theme id, and carries the palette into the clear colour,
-      // which belongs to the renderer this module owns.
-      applyClearColor(theme);
-
-      reporter.onCount({
-        name: THEME_CHANGE_METRIC,
-        value: 1,
-        detail: Object.freeze({ theme: theme.id }),
-      });
-
-      if (lastPlan !== null) {
-        rendered = projectRendered(lastPlan);
-      }
-
-      options.onWork?.();
-    });
-
-    reporter.onCount({
-      name: MOUNT_METRIC,
-      value: 1,
-      detail: Object.freeze({ boardSize, scale }),
-    });
-
     options.onWork?.();
 
     return true;
   };
 
-  const unmount = (): void => {
-    if (!mounted) {
-      return;
-    }
-
-    mounted = false;
-
+  /**
+   * Releases every resource a mount may have taken, in the reverse of the order
+   * it takes them, and restores every host it may have written.
+   *
+   * SEPARATE FROM `unmount()` BECAUSE A FAILED MOUNT HAS TO RUN IT TOO. `unmount`
+   * refuses when `mounted` is false, and a mount that threw part-way through
+   * never set that flag — so before this existed a partial mount leaked its
+   * scene, its material cache, its mesh factory, its tween group, its particle
+   * system, its camera rig, its context-loss handlers, its resize observer and
+   * its theme subscription, and left the canvas shown over a number-only host it
+   * had already hidden. Every member is null-guarded, so running it against a
+   * mount that got nowhere is a no-op.
+   */
+  const teardown = (): void => {
     releaseTheme?.();
     releaseTheme = null;
     closeResize();
     closeScale();
 
     clearLiveTiles();
-    pendingMerges.length = 0;
+
+    // EVERY TRIGGER, not just the merge list. `pendingSpawns` and
+    // `pendingMoveOrigins` are armed by the granular events and used to survive a
+    // teardown, so a remount drained the previous mount's triggers into its own
+    // first paint — a spawn tween on a cell that had merely been repositioned, and
+    // a slide from an origin on a board that no longer existed.
+    // `clearPendingTriggers` also releases the turn key, which is what makes the
+    // next commit reconcile in full (N5, M9).
+    clearPendingTriggers();
     queued = null;
+
+    // Any plan not yet drawn is abandoned: a remount reconciles from the next
+    // commit rather than repainting a board this mount never finished showing.
+    lastScore = 0;
 
     particles?.dispose();
     particles = null;
@@ -2074,7 +2548,14 @@ export function createThreeRenderer(
     scene = null;
     releaseContextLoss?.();
     releaseContextLoss = null;
+
+    // The loss state belongs to the context this mount held, so a remount starts
+    // from "not lost" and its own loss/restore tallies rather than inheriting the
+    // previous mount's (N5).
     contextLost = false;
+    contextLosses = 0;
+    contextRestores = 0;
+    orphanedTriggers = 0;
     webgl?.dispose();
     webgl = null;
     board = null;
@@ -2088,19 +2569,26 @@ export function createThreeRenderer(
     // `role="grid"`, and only the attributes this renderer wrote are restored.
     releaseParallelBoard();
 
-    const numberOnly = asHtmlElement(options.numberOnlyHost);
+    // Restored only where the swap actually ran. A mount that failed before it
+    // leaves both hosts exactly as it found them, so the caller's fallback finds
+    // a number-only host in its shipped state.
+    if (hostsSwapped) {
+      const numberOnly = asHtmlElement(options.numberOnlyHost);
 
-    if (numberOnly !== null) {
-      numberOnly.hidden = numberOnlyWasHidden;
-    }
+      if (numberOnly !== null) {
+        numberOnly.hidden = numberOnlyWasHidden;
+      }
 
-    // The canvas is left HIDDEN rather than restored to the shown state
-    // index.html ships it in. The number-only host above is restored to its
-    // shipped state instead. DL-THREE-02.
-    const canvasElement = asHtmlElement(canvas);
+      // The canvas is left HIDDEN rather than restored to the shown state
+      // index.html ships it in. The number-only host above is restored to its
+      // shipped state instead. DL-THREE-02.
+      const canvasElement = asHtmlElement(canvas);
 
-    if (canvasElement !== null) {
-      canvasElement.hidden = true;
+      if (canvasElement !== null) {
+        canvasElement.hidden = true;
+      }
+
+      hostsSwapped = false;
     }
 
     // Released with the scene: a remount builds a new rig, which stands at the
@@ -2112,6 +2600,18 @@ export function createThreeRenderer(
     restoreCanvasAria(canvas);
 
     canvas = null;
+  };
+
+  const unmount = (): void => {
+    if (!mounted) {
+      return;
+    }
+
+    // Set FIRST, so `frame()` and every other guarded member refuses while the
+    // teardown runs and a remount starts from a known state (N5).
+    mounted = false;
+
+    teardown();
 
     reporter.onCount({ name: UNMOUNT_METRIC, value: 1 });
   };
@@ -2153,6 +2653,12 @@ export function createThreeRenderer(
       return;
     }
 
+    // Triggers armed by a turn other than this commit's are DISCARDED before the
+    // plan is built, so a merge pop or a spawn tween can never play against a
+    // board it was not armed for. `planCommit` reads the buffers, so the check
+    // has to precede it.
+    triggersBelongTo(commit.turn);
+
     const delta = Math.max(0, commit.score - lastScore);
 
     lastScore = commit.score;
@@ -2162,7 +2668,7 @@ export function createThreeRenderer(
     // here, and the rig is tuned for it.
     lightForStage(commit.stage.stageIndex);
 
-    // Planned here, inside the emission that carried the projection, and drawn
+    // Planned here, inside the emission that carried the live board, and drawn
     // on the next frame.
     queued = planCommit(commit, delta);
     commits += 1;
@@ -2188,7 +2694,7 @@ export function createThreeRenderer(
    * the target, so its position is the target's.
    */
   const onMerge = (merge: TileMergeEvent): void => {
-    if (disposed) {
+    if (disposed || !admitTurn(merge.turn)) {
       return;
     }
 
@@ -2216,7 +2722,7 @@ export function createThreeRenderer(
    * arms nothing and is counted apart.
    */
   const onSpawn = (spawn: TileSpawnEvent): void => {
-    if (disposed) {
+    if (disposed || !admitTurn(spawn.turn)) {
       return;
     }
 
@@ -2253,10 +2759,10 @@ export function createThreeRenderer(
    * into, keyed by destination.
    *
    * Read from the same `previousPosition` member js/html_actuator.js L54 read,
-   * off the projection `move:after` carries.
+   * off the live board `move:after` carries.
    */
   const onMoveAfter = (move: MoveAfterEvent): void => {
-    if (disposed || !move.moved) {
+    if (disposed || !move.moved || !admitTurn(move.turn)) {
       return;
     }
 
@@ -2426,6 +2932,20 @@ export function createThreeRenderer(
 
       released = true;
       releaseTaken();
+
+      // REMOVED FROM THE SHARED COLLECTION, not merely called. `subscriptions`
+      // outlives a mount, so a release that only invoked its callbacks left them
+      // in the array: a mount/unmount/mount cycle grew it every time and
+      // `dispose()` then re-invoked every already-released callback. Splicing
+      // the exact entries keeps the array equal to what is actually subscribed
+      // (N4).
+      for (const release of taken) {
+        const index = subscriptions.indexOf(release);
+
+        if (index >= 0) {
+          subscriptions.splice(index, 1);
+        }
+      }
     };
   };
 
@@ -2481,6 +3001,10 @@ export function createThreeRenderer(
         pendingMerges: pendingMerges.length,
         pendingSpawns: pendingSpawns.size,
         pendingMoves: pendingMoveOrigins.size,
+        orphanedTriggers,
+        contextLosses,
+        contextRestores,
+        pendingTurn,
         spawnsAnnounced,
         spawnsSuppressed,
         movesAnnounced,

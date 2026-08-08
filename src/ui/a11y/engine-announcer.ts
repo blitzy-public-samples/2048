@@ -18,8 +18,25 @@
 // nothing, and lets a verdict supersede the gameplay items beside it. Adding a
 // second opinion here would fight it.
 //
-// The one piece of state it does keep is the last verdict announced, because
+// The one piece of state it does keep is the last verdict announced:
 // `state:commit` fires on every commit while a verdict is news exactly once.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated, all target-only because the retired sources
+// announced nothing:
+//   TR-ANNOUNCE-01  `createEngineAnnouncer` and its subscription to the seven
+//                   event names
+//   TR-ANNOUNCE-02  the per-event translation into the `Announcement`
+//                   vocabulary of ./live-region
+//   TR-ANNOUNCE-03  the last-verdict record and the once-per-verdict rule
+//   TR-ANNOUNCE-04  `EngineAnnouncer.dispose` and the released subscriptions
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-ANNOUNCE-01  composition, ordering and deduplication left to
+//                   `composeAnnouncements`
+//   DL-ANNOUNCE-02  the last verdict announced held here, so a verdict is
+//                   announced once per run
 
 import type { EngineEventName, EngineEvents } from '../../engine/engine-events';
 import type { AnnouncedDirection, LiveRegionAnnouncer, TerminalVerdict } from './live-region';
@@ -204,6 +221,14 @@ export function createEngineAnnouncer(
         }),
 
         events.on('tile:spawn', (payload): void => {
+          // An attempt that inserted nothing carries no position: the full
+          // board of AAP Contract 1, a suppressing `onSpawn` handler, or a
+          // handler that named a cell off the lattice. There is no tile to
+          // narrate, so nothing is announced.
+          if (payload.position === undefined) {
+            return;
+          }
+
           announcer.announce({
             kind: 'spawn',
             value: payload.value,

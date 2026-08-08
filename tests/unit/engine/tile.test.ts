@@ -12,8 +12,11 @@
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock and writes no snapshot.
 //
-// Decisions this suite is the evidence for: DL-TILE-01 in
-// docs/DECISION_LOG.md. Traceability rows: TR-TILE-01 through TR-TILE-08
+// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
+// DL-TILE-01.
+// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-TILE-01,
+// TR-TILE-02, TR-TILE-03, TR-TILE-04, TR-TILE-05, TR-TILE-06, TR-TILE-07,
+// TR-TILE-08.
 
 import { describe, expect, it } from 'vitest';
 

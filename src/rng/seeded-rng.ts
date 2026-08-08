@@ -18,13 +18,22 @@
  * platform's own randomness keeps its stock behaviour for the lifetime of the
  * process.
  *
- * lifetime of the process. Decision DL-RNG-01.
- * Decisions behind this file: DL-RNG-01, the generator always a local
- * instance and never installed onto `Math.random`; DL-RNG-02, the
- * replaceable; and DL-RNG-03, the bounded seed length and resume cursor.
- * All three are in docs/DECISION_LOG.md. Traceability rows: TR-RNG-01,
- * js/game_manager.js L71's `Math.random()`, and TR-RNG-02, js/grid.js
- * TR-RNG-03 through TR-RNG-05.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece:
+ *   TR-RNG-01  js/game_manager.js L71  the spawn-value `Math.random()` call
+ *   TR-RNG-02  js/grid.js L41          the spawn-position `Math.random()` call
+ *   TR-RNG-03  target-only row         `createSeededRng` and the `SeededRng`
+ *                                      interface
+ *   TR-RNG-04  target-only row         the bounded seed and resume cursor
+ *   TR-RNG-05  target-only row         `pick`, `weighted` and `int`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-RNG-01  the generator always a local instance, never installed onto
+ *              `Math.random`
+ *   DL-RNG-02  the generator declared behind a thin interface, so the
+ *              implementation is replaceable
+ *   DL-RNG-03  the bounded seed length and the bounded resume cursor
  *
  * Both inputs are bounded. A seed longer than `MAX_RNG_SEED_LENGTH` and a
  * resume cursor outside `[0, MAX_RNG_CURSOR]` are rejected before a generator

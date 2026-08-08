@@ -7,8 +7,9 @@
  * `string | 0` contract. The two unprefixed legacy keys live in
  * ./storage-keys, and the in-memory fallback store in ./memory-storage.
  *
- * Ported from js/local_storage_manager.js, which is deleted. Each row is one
- * traceability row of docs/TRACEABILITY_MATRIX.md:
+ * Ported from js/local_storage_manager.js, which is deleted. One traceability
+ * row of docs/TRACEABILITY_MATRIX.md apiece, every row of this module's area
+ * enumerated:
  *   TR-STORE-01  L22-L23  the two unprefixed key literals
  *   TR-STORE-02  L25-L26  the construction-time strategy selection
  *   TR-STORE-03  L29-L40  the writability probe
@@ -18,14 +19,17 @@
  *                         guarded
  *   TR-STORE-07  L57-L59  setGameState()
  *   TR-STORE-08  L61-L63  clearGameState()
+ * TR-STORE-09 is the in-memory double, in ./memory-storage.
  *
- * Decisions behind this file: DL-STORE-02, the best-score accessor keeping
- * the raw stored string so the relational promotion comparison of
- * js/game_manager.js L80-L82 behaves identically; DL-STORE-03, every
- * operation reporting failure by return value through an injected sink; and
- * DL-STORE-04, the probe running once at construction as L25-L26 did. All
- * three are in docs/DECISION_LOG.md, alongside DL-STORE-01 for the
- * key-minting validation.
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-STORE-01  the key-minting validation every accepted key passes
+ *   DL-STORE-02  the best-score accessor keeping the raw stored string, so the
+ *                relational promotion comparison of js/game_manager.js
+ *                L80-L82 behaves identically
+ *   DL-STORE-03  every operation reporting failure by return value through an
+ *                injected sink
+ *   DL-STORE-04  the probe running once at construction, as L25-L26 did
  */
 
 import {

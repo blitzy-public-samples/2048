@@ -20,21 +20,93 @@ Please follow the house rules to have a bigger chance of your contribution being
    TypeScript `strict` is the gate, configured in `tsconfig.json` for the sources and `tsconfig.node.json` for the build tooling. `npm run typecheck` runs both.
  - Please test your modification thoroughly before submitting your Pull Request. Run `npm run typecheck`, `npm test` and `npm run test:snapshot` before you open it; at this commit those are the three gates with a suite to run.
 
-   `npm run test:snapshot` is its own command because the seeded snapshot suite is a separate regression gate, with its own configuration in `vitest.snapshot.config.ts`; it collects `tests/snapshot/**/*.spec.ts` and `npm test` collects `tests/unit/**/*.test.ts`, and neither picks up the other's specs. Snapshots are never rewritten by a normal run: re-recording is the explicit `vitest run --config vitest.snapshot.config.ts -u`, which declares every previously recorded run unreproducible, so please do it deliberately and say why. `npm run test:e2e` is still configured ahead of its suite and exits reporting that it found no tests until `tests/e2e/gameplay-recording.spec.ts` lands; from that change onwards please run it whenever you touch the renderer or the run flow, and `npm run e2e:install` fetches the browser it needs the first time. The observability surfaces ARE exercisable: `src/observability/` carries the structured logger, the metrics registry, the diagnostics overlay, the tracer and the health surface, the first three are wired into `src/main.ts`, and `npm run dev` then `__blitzy2048.diagnostics.open()` in the browser console opens the overlay. `README.md` records what the source tree can satisfy at this commit.
+   `npm run test:snapshot` is its own command because the seeded snapshot suite is a separate regression gate, with its own configuration in `vitest.snapshot.config.ts`; it collects `tests/snapshot/**/*.spec.ts` and `npm test` collects `tests/unit/**/*.test.ts`, and neither picks up the other's specs. Snapshots are never rewritten by a normal run: re-recording is the explicit `vitest run --config vitest.snapshot.config.ts -u`, which declares every previously recorded run unreproducible, so please do it deliberately and say why. `npm run test:e2e` is still configured ahead of its suite and exits reporting that it found no tests until `tests/e2e/gameplay-recording.spec.ts` lands; from that change onwards please run it whenever you touch the renderer or the run flow, and `npm run e2e:install` fetches the browser it needs the first time. The observability surfaces are exercisable: `src/observability/` carries the structured logger, the metrics registry, the diagnostics overlay, the tracer and the health surface, `src/main.ts` constructs all five, and `npm run dev` then `__blitzy2048.diagnostics.open()` in the browser console opens the overlay — `__blitzy2048.tracer.snapshot()` and `__blitzy2048.health.report()` answer from the same object. `README.md` records what the source tree can satisfy at this commit.
  - The architecture is documented in diagrams rather than prose, so please read them before changing how the pieces fit together. `docs/architecture/ARCHITECTURE.md` carries Figure 1, *As-Is Architecture: Layered Globals with a Push-Based Actuator*, and Figure 2, *To-Be Architecture: Event-Driven Engine with Subscribed Renderer and Hook Bus*; `docs/architecture/component-interaction.md`, `docs/architecture/data-flow.md` and `docs/architecture/hook-dispatch-sequence.md` carry the component-interaction, data-flow and hook-dispatch figures.
 
    Please keep rationale out of code comments and put it in `docs/DECISION_LOG.md`, the single place the reasoning behind a non-obvious change is recorded; `docs/OBSERVABILITY.md` covers the observability surfaces. Each of these documents lands with the code it describes. A code comment carries a contract, an invariant, an external constraint, an ordering or timing constraint, or the provenance of a ported behaviour — not the reasoning behind a choice.
- - Two identifier namespaces join the code to those two documents, and a comment cites an identifier rather than repeating what it stands for. `DL-<AREA>-<NN>` names one decision in `docs/DECISION_LOG.md` — for example `DL-TERM-04` or `DL-RNG-01`. A comment states *what* was decided and cites the identifier; the alternatives, the reasoning and the risks belong to the log row alone. `TR-<AREA>-<NN>` names one row of `docs/TRACEABILITY_MATRIX.md`, pairing a construct of the retired `js/` sources with the module that carries it now; a row with no `js/` source is marked target-only. `<AREA>` is the module area — `ENGINE`, `GRID`, `TILE`, `MOVE`, `TERM`, `EVENT`, `HOOK`, `HOOKBUS`, `CONFIG`, `STAGE`, `RNG`, `RUN`, `RUNSTORE`, `STORE`, `RELIC`, `LOG`, `METRIC`, `RAMP`, `THEME`, `TOKEN`, `MATERIAL`, `MESH`, `ANIM`, `CAMERA`, `PARTICLE`, `LOOP`, `NUMBER`, `INPUT`, `CONTROL`, `SCORE`, `LIVE`, `FOCUS`, `SETTINGS`, `A11Y`, `AUDIO`, `MAIN`, `TEST`, `PW`, `FIXTURE` — and `<NN>` is a two-digit ordinal within it. Numbers are never reused once assigned, and a new decision takes the next free ordinal in its area.
+ - Two identifier namespaces join the code to those two documents, and a comment cites an identifier rather than repeating what it stands for. `DL-<AREA>-<NN>` names one decision in `docs/DECISION_LOG.md` — for example `DL-TERM-04` or `DL-RNG-01`. A comment states *what* was decided and cites the identifier; the alternatives, the reasoning and the risks belong to the log row alone. `TR-<AREA>-<NN>` names one row of `docs/TRACEABILITY_MATRIX.md`, pairing a construct of the retired `js/` sources with the module that carries it now; a row with no `js/` source is marked target-only. `<NN>` is a two-digit ordinal, unique within its area and never reused once assigned; a new decision or row takes the next free ordinal in its area.
+
+   `<AREA>` names one CONCERN, and the table below is the complete registry of them: every `DL-*` and `TR-*` identifier in the tree resolves to one of these, and a new area is added here in the same change that first uses it. A concern that spans a TypeScript module and the stylesheet mirroring it — accessibility, the HUD, the tokens, the themes — is ONE area, so its ordinals are unique across both files.
+
+   | Area | Owner |
+   |---|---|
+   | `ENGINE` | `src/engine/engine.ts` |
+   | `GRID` | `src/engine/grid.ts` |
+   | `TILE` | `src/engine/tile.ts` |
+   | `MOVE` | `src/engine/move-resolver.ts` |
+   | `TERM` | `src/engine/terminal-state.ts` |
+   | `EVENT` | `src/engine/engine-events.ts` |
+   | `HOOK` | `src/engine/hooks.ts` |
+   | `HOOKBUS` | `src/engine/hook-bus.ts` |
+   | `TYPES` | `src/engine/types.ts` |
+   | `CONFIG` | `src/config/rules-config.ts` |
+   | `DEFAULT` | `src/config/default-config.ts` |
+   | `STAGE` | `src/config/stage-config.ts` |
+   | `RNG` | `src/rng/seeded-rng.ts`, `src/rng/rng-streams.ts` |
+   | `RUN` | `src/run/run-state.ts` |
+   | `RUNSTORE` | `src/run/run-state-store.ts` |
+   | `RUNCTL` | `src/run/run-controller.ts` |
+   | `STORE` | `src/storage/local-storage-manager.ts`, `src/storage/memory-storage.ts` |
+   | `KEYS` | `src/storage/storage-keys.ts` |
+   | `RELIC` | `src/relics/relic-types.ts` |
+   | `REGISTRY` | `src/relics/relic-registry.ts` |
+   | `DRAW` | `src/relics/relic-draw.ts` |
+   | `SPAWN` | `src/relics/families/spawn-control.ts` |
+   | `MERGE` | `src/relics/families/merge-magic.ts` |
+   | `BOARD` | `src/relics/families/board-manipulation.ts` |
+   | `RISK` | `src/relics/families/risk-reward-cursed.ts` |
+   | `THREE` | `src/render/three-renderer.ts` |
+   | `SCENE` | `src/render/scene.ts` |
+   | `MESH` | `src/render/tile-mesh-factory.ts` |
+   | `MATERIAL` | `src/render/tile-materials.ts` |
+   | `ANIM` | `src/render/animations.ts` |
+   | `PARTICLE` | `src/render/particles.ts` |
+   | `CAMERA` | `src/render/camera-effects.ts` |
+   | `NUMBER` | `src/render/number-only-renderer.ts` |
+   | `WEBGL` | `src/render/webgl-support.ts` |
+   | `LOOP` | `src/render/render-loop.ts` |
+   | `TOKEN` | `src/theme/tokens.ts`, `style/_tokens.scss` |
+   | `THEME` | `src/theme/themes.ts`, `style/_themes.scss` |
+   | `RAMP` | `src/theme/tile-ramp.ts` |
+   | `INPUT` | `src/input/input-manager.ts` |
+   | `KEYMAP` | `src/input/keymap.ts` |
+   | `TOUCH` | `src/input/touch-input.ts` |
+   | `CONTROL` | `src/input/on-screen-controls.ts` |
+   | `ROUTER` | `src/ui/screen-router.ts` |
+   | `HUD` | `src/ui/screens/hud.ts`, `style/_hud.scss` |
+   | `SCORE` | `src/ui/components/score-panel.ts` |
+   | `PANEL` | `src/ui/components/settings-panel.ts` |
+   | `LIVE` | `src/ui/a11y/live-region.ts` |
+   | `FOCUS` | `src/ui/a11y/focus-manager.ts` |
+   | `ANNOUNCE` | `src/ui/a11y/engine-announcer.ts` |
+   | `SETTINGS` | `src/ui/a11y/settings.ts` |
+   | `A11Y` | `src/ui/a11y/**`, `style/_a11y.scss` |
+   | `AUDIO` | `src/audio/sound-engine.ts`, `src/audio/sound-map.ts` |
+   | `LOG` | `src/observability/logger.ts` |
+   | `METRIC` | `src/observability/metrics.ts` |
+   | `TRACE` | `src/observability/tracer.ts` |
+   | `HEALTH` | `src/observability/health.ts` |
+   | `DIAG` | `src/observability/diagnostics-overlay.ts` |
+   | `MAIN` | `src/main.ts` |
+   | `SHEET` | `style/main.scss` |
+   | `HELPER` | `style/helpers.scss` |
+   | `SCREEN` | `style/_screens.scss` |
+   | `REWARD` | `style/_reward.scss` |
+   | `SUMMARY` | `style/_summary.scss` |
+   | `BUILD` | `vite.config.ts` |
+   | `TEST` | `vitest.config.ts`, `vitest.snapshot.config.ts` |
+   | `PW` | `playwright.config.ts` |
+   | `FIXTURE` | `tests/fixtures/**` |
 
 ### Changes that might not be accepted
 The five categories this section used to name — undo/redo features, save/reload features, changes to how the tiles look or their contents, changes to the layout, and changes to the grid size — are superseded, because the run-based roguelike feature set deliberately does all five. That list no longer describes what will be declined.
 
 That feature set is landing in stages, so here is what each of the five categories now covers, and how much of it the game carries at this commit:
 
- - Undo/redo features — the accepted change is an undo relic, one of the charge-based board-manipulation relics; redo is not part of it. `src/relics/` carries the relic vocabulary, all sixteen relics across the four families, the registry and the seeded 1-of-3 draw. Nothing outside that folder constructs them yet, so no relic is in play
- - Save/reload features — the board and the best score persist as they always did, and run state now persists beside them: `src/run/` carries the versioned envelope, its guarded store and the run controller, and the controller resumes the seed, the RNG cursors and the stage on reload. The active-relic list it carries stays empty until relics are in play
+ - Undo/redo features — the accepted change is an undo relic, one of the charge-based board-manipulation relics; redo is not part of it. `src/relics/` carries the relic vocabulary, all sixteen relics across the four families, the registry and the seeded 1-of-3 draw, and `src/main.ts` composes them: relics are in play, they fire on the six named hooks, and a charge-based one spends its charges through the hook bus
+ - Save/reload features — the board and the best score persist as they always did, and run state now persists beside them: `src/run/` carries the versioned envelope, its guarded store and the run controller, and the controller resumes the seed, the RNG cursors, the stage and the active relics on reload
  - Changes to how the tiles look or their contents — the accepted change renders tiles as extruded, emissive blocks, and it is in the game: `src/render/three-renderer.ts` draws the board where a WebGL context is available, and `src/render/number-only-renderer.ts` draws it where one is not or where the number-only preference is set
- - Changes to the layout — the accepted change is a screen flow: run start, in-run HUD, reward screen, stage progress and run summary. The in-run HUD has landed as `src/ui/screens/hud.ts`, and `src/ui/screen-router.ts` owns the game region and the settings overlay; the other four screens have markup roots in `index.html` and no module yet
+ - Changes to the layout — the accepted change is a screen flow: run start, in-run HUD, reward screen, stage progress and run summary. The in-run HUD has landed as `src/ui/screens/hud.ts`, and `src/ui/screen-router.ts` owns the game region and the settings overlay; the other four screens have markup roots in `index.html` and no module yet. The reward *moment* behind one of them is composed even though its screen is not: a cleared stage draws its seeded 1-of-3 offer, announces it and exposes it on the application handle, so the screen that lands later renders a decision that is already being made
  - Changes to the grid size — the board dimension is configuration-driven rather than a literal, and this is the one of the five already in the game: `src/config/default-config.ts` carries the size, the engine reads it, and the renderer builds the board from the size each committed state carries
 
 We are still conservative with the core game, so these will have to be evaluated carefully before being merged:
@@ -53,4 +125,4 @@ And these are out of scope, so please don't send them: a true 4×4×4 six-axis m
 
 Compatibility improvements are measured against the current baseline: a browser with ES modules, which the page needs because it loads a single module graph. The legacy polyfills are gone.
 
-WebGL is not part of that baseline. It is the prerequisite for the 2.5D board that arrives with `src/render/three-renderer.ts`, and where a WebGL context is unavailable the number-only rendering mode is the supported path. That mode is also a first-class accessible way to read the board, and it is what draws the board at this commit whether or not a context is available; `src/render/webgl-support.ts` probes for one and reports the result either way.
+WebGL is not part of that baseline. It is the prerequisite for the 2.5D board `src/render/three-renderer.ts` draws, and where a WebGL context is unavailable the number-only rendering mode is the supported path. `src/render/webgl-support.ts` probes for a context at startup and reports the result either way, and `src/main.ts` selects accordingly: the Three.js board where a context is available and the number-only preference is not set, the number-only board otherwise. That mode is therefore both the WebGL fallback and a first-class accessible way to read the board, and switching the preference swaps the renderer without a reload.

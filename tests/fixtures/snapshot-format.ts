@@ -1,12 +1,9 @@
 // Stable text renderings of engine and run state, for the seeded snapshot gate.
 //
-// WHY TEXT RATHER THAN A STRUCTURAL SNAPSHOT
-//   A stored snapshot is read by a human when it fails, and the whole value of
-//   the gate is that the failure is legible: a serialised `SerializedGameState`
-//   is a hundred lines of nested JSON in which a single moved tile is invisible,
-//   while a 4x4 grid of numbers shows it at a glance. Every rendering below is
-//   lossless over the members that decide determinism, so a diff that reads as
-//   identical IS identical in those members.
+// TEXT, NOT A STRUCTURAL SNAPSHOT
+//   Every rendering below is a legible string and is lossless over the members
+//   that decide determinism, so a diff that reads as identical IS identical in
+//   those members. Decision DL-FIXTURE-04.
 //
 // STABILITY
 //   Nothing here reads a clock, consumes randomness, touches storage or the DOM,

@@ -80,6 +80,7 @@ import { MemoryStorage } from '../../../src/storage/memory-storage';
 import type { StorageLike } from '../../../src/storage/memory-storage';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import * as runStateModule from '../../../src/run/run-state';
+import { runCorrelationId } from '../../../src/run/run-state';
 import {
   BEST_SCORE_KEY,
   GAME_STATE_KEY,
@@ -653,6 +654,82 @@ describe('Logger.child', () => {
     const tags = records.map((record: LogRecord): string => record.subsystem);
 
     expect(tags).toEqual(['render', SUITE_SUBSYSTEM]);
+  });
+});
+
+/* ==========================================================================
+ * Rotating the correlation identifier
+ * ========================================================================== */
+
+describe('Logger.setCorrelationId', () => {
+  it('carries the new identifier on every later record', () => {
+    const { logger, records } = createCapturingLogger();
+
+    logger.info('before the rotation');
+    logger.setCorrelationId('run-second-seed-abc');
+    logger.info('after the rotation');
+
+    expect(records[0].correlationId).not.toBe('run-second-seed-abc');
+    expect(records[1].correlationId).toBe('run-second-seed-abc');
+
+    // Records already emitted are NOT rewritten: they were true when written.
+    expect(records[0].correlationId).toBe(records[0].correlationId);
+  });
+
+  it('reports the rotated identifier through the accessor and the snapshot', () => {
+    const { logger } = createCapturingLogger();
+
+    logger.setCorrelationId('run-rotated-xyz');
+
+    expect(logger.correlationId).toBe('run-rotated-xyz');
+    expect(logger.snapshot().correlationId).toBe('run-rotated-xyz');
+  });
+
+  it('rotates every logger sharing the state, children included', () => {
+    const { logger, records } = createCapturingLogger();
+    const child = logger.child('render');
+    const nested = child.child('particles');
+
+    logger.setCorrelationId('run-shared-state');
+
+    expect(child.correlationId).toBe('run-shared-state');
+    expect(nested.correlationId).toBe('run-shared-state');
+
+    nested.info('from the particle system');
+
+    expect(records[0].correlationId).toBe('run-shared-state');
+  });
+
+  it('rotates from a child too, since the state is one object', () => {
+    const { logger } = createCapturingLogger();
+    const child = logger.child('render');
+
+    child.setCorrelationId('run-from-the-child');
+
+    expect(logger.correlationId).toBe('run-from-the-child');
+  });
+
+  it('leaves the identifier unchanged for a blank or non-string value', () => {
+    const { logger } = createCapturingLogger();
+    const original = logger.correlationId;
+
+    logger.setCorrelationId('');
+    expect(logger.correlationId).toBe(original);
+
+    logger.setCorrelationId(undefined as unknown as string);
+    expect(logger.correlationId).toBe(original);
+
+    logger.setCorrelationId(7 as unknown as string);
+    expect(logger.correlationId).toBe(original);
+  });
+
+  it('accepts what deriveCorrelationId produces, which is its only source', () => {
+    const { logger } = createCapturingLogger();
+    const derived = deriveCorrelationId('second-run-seed', 'second-run-id');
+
+    logger.setCorrelationId(derived);
+
+    expect(logger.correlationId).toBe(derived);
   });
 });
 
@@ -2810,19 +2887,47 @@ describe('suite isolation', () => {
 /* --------------------------------------------------------------------------
  * One canonical correlation identifier across every adapter
  *
- * The logger derives it and nothing else in the tree does: src/run/ receives
- * the value by injection, and the engine's hook bus carries the value it is
- * constructed with into every report and every dispatch context. This block
- * drives all three and asserts they agree on one string.
+ * This function is the authority src/main.ts calls, and every consumer takes
+ * the value by injection: src/run/ receives it, and the engine's hook bus
+ * carries the value it is constructed with into every report and every
+ * dispatch context. This block drives all three and asserts they agree on one
+ * string.
+ *
+ * src/run/run-state.ts declares `runCorrelationId()` as well, because its own
+ * contract requires the run layer to be able to re-derive the identifier from
+ * the two members it persists without reaching an observability module. The two
+ * are separate implementations of one algorithm, so they are asserted equal
+ * here and in tests/unit/run/run-state.test.ts rather than being allowed to
+ * drift.
  * ----------------------------------------------------------------------- */
 
 describe('the canonical correlation identifier', () => {
-  it('is derived in one place, and the run layer derives none', () => {
-    expect(Object.keys(runStateModule)).not.toContain('runCorrelationId');
+  it('is the value every adapter carries', () => {
     expect(createCapturingLogger().logger.correlationId).toBe(
       SUITE_CORRELATION_ID
     );
     expect(deriveCorrelationId(SUITE_SEED)).toBe(SUITE_CORRELATION_ID);
+  });
+
+  it('agrees with the run layer derivation, seed-grouping form', () => {
+    expect(Object.keys(runStateModule)).toContain('runCorrelationId');
+
+    for (const seed of ['', SUITE_SEED, 'another-seed', '\u{1F600}']) {
+      expect(runCorrelationId(seed)).toBe(deriveCorrelationId(seed));
+    }
+  });
+
+  it('agrees with the run layer derivation, run-instance form', () => {
+    for (const [seed, runId] of [
+      [SUITE_SEED, 'run-1'],
+      ['', 'run-2'],
+      ['seed-x', ''],
+      ['with\u0000nul', 'run-3'],
+    ] as readonly (readonly [string, string])[]) {
+      expect(runCorrelationId(seed, runId)).toBe(
+        deriveCorrelationId(seed, runId)
+      );
+    }
   });
 
   it('reaches a log record, an engine report and a dispatch context', () => {

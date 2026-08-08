@@ -29,6 +29,11 @@
 // docs/architecture/data-flow.md, whose COMMIT to PERSIST edge is labelled
 // "Run state written under namespaced key".
 //
+// The migration path is exercised against an INJECTED version policy naming a
+// genuine prior version, because `RUN_STATE_SCHEMA_VERSION_HISTORY` holds one
+// entry in this build: decided against the module constants alone, the 'older'
+// verdict is unreachable and every assertion over it passes over an empty set.
+//
 // Coverage boundaries this suite stays inside: the reconciliation policy
 // arithmetic is tests/unit/run/board-size-reconciliation.test.ts, end-to-end
 // cursor resume is tests/unit/run/rng-cursor-persistence.test.ts, the schema
@@ -48,9 +53,12 @@ import type { StreamName } from '../../../src/rng/rng-streams';
 import {
   RUN_STATE_SCHEMA_VERSION,
   RUN_STATE_SCHEMA_VERSION_HISTORY,
+  RUN_STATE_VERSION_POLICY,
   classifyRunStateVersion,
   createFreshRunState,
   isRunStateShape,
+  projectCurrentRunState,
+  resolveRunStateVersionPolicy,
 } from '../../../src/run/run-state';
 import type {
   BoardSizeReconciliationReport,
@@ -58,6 +66,7 @@ import type {
   RunState,
   RunStateCorruptionReport,
   RunStateMigrationReport,
+  RunStateVersionPolicy,
   RunStateVersionVerdict,
   RunStateWriteFailureReport,
 } from '../../../src/run/run-state';
@@ -300,6 +309,13 @@ interface WorldOptions {
 
   /** Correlation identifier every report from the store carries. */
   readonly correlationId?: string;
+
+  /**
+   * Version set the store classifies and re-stamps against. Omitted for the
+   * shipped policy, supplied by the migration section below so a genuine prior
+   * version is reachable.
+   */
+  readonly versionPolicy?: RunStateVersionPolicy;
 }
 
 /**
@@ -356,6 +372,7 @@ function createWorld(options: WorldOptions = {}): World {
     reporter: sink.reporter,
     config: options.config,
     correlationId: options.correlationId ?? CORRELATION_ID,
+    versionPolicy: options.versionPolicy,
   });
 
   return {
@@ -837,15 +854,22 @@ describe('the version history decides which payload migrates', () => {
     }
   });
 
-  it("reports 'migrated' for a listed version below the current one", () => {
-    for (const version of RUN_STATE_SCHEMA_VERSION_HISTORY) {
-      if (version === RUN_STATE_SCHEMA_VERSION) {
-        continue;
-      }
+  it("lists no version below the current one, so none reports 'migrated'",
+    () => {
+      const listedOlder = RUN_STATE_SCHEMA_VERSION_HISTORY.filter(
+        (version) => version !== RUN_STATE_SCHEMA_VERSION
+      );
 
-      expect(loadStampedAt(version).outcome).toBe('migrated');
-    }
-  });
+      // Stated as an EQUALITY rather than driven as a loop with a `continue`.
+      // The shipped history holds one entry, so such a loop skips its only
+      // iteration and asserts nothing while reading as coverage of the
+      // migration path. Section 16 drives that path against an injected policy.
+      expect(listedOlder).toEqual([]);
+
+      for (const version of listedOlder) {
+        expect(loadStampedAt(version).outcome).toBe('migrated');
+      }
+    });
 
   it("reports 'loaded' for the current version", () => {
     expect(loadStampedAt(RUN_STATE_SCHEMA_VERSION).outcome).toBe('loaded');
@@ -1338,6 +1362,10 @@ describe('migrateRunState resolves one verdict at a time', () => {
   it("returns an envelope for 'older' at a version the history lists", () => {
     const stored = loosenEnvelope();
 
+    // The version here is the CURRENT one, which the shipped history lists: the
+    // claim is that the 'older' verdict admits any listed version, not that the
+    // payload predates this build. Section 16 supplies a genuine prior version
+    // through an injected policy.
     expect(RUN_STATE_SCHEMA_VERSION_HISTORY).toContain(stored.schemaVersion);
 
     const migrated = migrateRunState(stored, 'older');
@@ -2176,5 +2204,733 @@ describe('the teardown removes the best score the game never did', () => {
       clearOwnedKeysOf(storage);
       clearOwnedKeysOf(storage);
     }).not.toThrow();
+  });
+});
+
+/* ==========================================================================
+ * A relic that declared a board size is applied on load (gate V6)
+ * ========================================================================== */
+
+describe('a relic slot that declares a board size is applied on load', () => {
+  /**
+   * An envelope whose board was saved at the configured edge length and whose
+   * relic slot declares a smaller one.
+   *
+   * The convention is the member name alone: any relic slot carrying a usable
+   * `boardSize` declares one, and the store names no relic and no identifier.
+   *
+   * @param declared Edge length the relic slot declares.
+   * @returns The envelope.
+   */
+  const envelopeDeclaring = (declared: number): RunState => ({
+    ...buildEnvelope(),
+    relics: [{ id: 'collapsing-vault', state: { boardSize: declared } }],
+  });
+
+  it('reconciles the board to the declared size, keeping in-bounds tiles', () => {
+    const declared = 3;
+    const world = createWorld({
+      seed: {
+        [RUN_STATE_KEY]: JSON.stringify(envelopeDeclaring(declared)),
+      },
+    });
+
+    const saved = buildBoard().grid;
+    const result = world.store.load({ boardSize: saved.size });
+    const grid = result.state?.board.grid;
+
+    // The load is reported as reconciled rather than plainly loaded, because a
+    // board size was applied and tiles outside it were dropped.
+    expect(result.outcome).toBe('reconciled');
+    expect(grid?.size).toBe(declared);
+    expect(grid?.cells).toHaveLength(declared);
+    expect(grid?.cells[0]).toHaveLength(declared);
+
+    // Every tile inside the declared bounds kept its exact cell, and every
+    // recorded position matches the cell it occupies, so no position is
+    // corrupted by the shrink.
+    for (let x = 0; x < declared; x += 1) {
+      for (let y = 0; y < declared; y += 1) {
+        const before = saved.cells[x]?.[y] ?? null;
+        const after = grid?.cells[x]?.[y] ?? null;
+
+        expect(after?.value ?? null).toBe(before?.value ?? null);
+
+        if (after !== null) {
+          expect(after.position).toEqual({ x, y });
+        }
+      }
+    }
+  });
+
+  it('takes the smallest declaration when several relics declare one', () => {
+    const world = createWorld({
+      seed: {
+        [RUN_STATE_KEY]: JSON.stringify({
+          ...buildEnvelope(),
+          relics: [
+            { id: 'a', state: { boardSize: 3 } },
+            { id: 'b', state: { boardSize: 2 } },
+          ],
+        }),
+      },
+    });
+
+    expect(world.store.load({ boardSize: 4 }).state?.board.grid.size).toBe(2);
+  });
+
+  it('ignores a slot whose declaration is not a usable edge length', () => {
+    for (const declared of [0, -1, 1.5, 4096, 'three', null]) {
+      const world = createWorld({
+        seed: {
+          [RUN_STATE_KEY]: JSON.stringify({
+            ...buildEnvelope(),
+            relics: [{ id: 'a', state: { boardSize: declared } }],
+          }),
+        },
+      });
+
+      expect(world.store.load({ boardSize: 4 }).state?.board.grid.size).toBe(4);
+    }
+  });
+
+  it('lets the caller override the declaration the envelope carries', () => {
+    const world = createWorld({
+      seed: {
+        [RUN_STATE_KEY]: JSON.stringify(envelopeDeclaring(2)),
+      },
+    });
+
+    expect(
+      world.store.load({ boardSize: 4, relicBoardSize: 3 }).state?.board.grid
+        .size,
+    ).toBe(3);
+  });
+});
+
+/* ===== 16. A GENUINE prior version, end to end ===== */
+
+// This build's current version, read here as the version a stored payload
+// carries so the fixture is a real one rather than a hand-written integer.
+const PRIOR_STORED_VERSION = RUN_STATE_SCHEMA_VERSION;
+
+// The version the injected policy calls current, so `PRIOR_STORED_VERSION`
+// classifies 'older' and the migration path is entered for real.
+const NEXT_CURRENT_VERSION = RUN_STATE_SCHEMA_VERSION + 1;
+
+const TWO_VERSION_POLICY: RunStateVersionPolicy = Object.freeze({
+  current: NEXT_CURRENT_VERSION,
+  history: Object.freeze([PRIOR_STORED_VERSION, NEXT_CURRENT_VERSION]),
+});
+
+/**
+ * Builds a world whose stored payload is at `PRIOR_STORED_VERSION` and whose
+ * store reads under `TWO_VERSION_POLICY`.
+ *
+ * @param stored Payload to write, defaulting to the loosened fixture envelope
+ *   stamped at the prior version.
+ * @returns The world, fixture already written.
+ */
+function priorVersionWorld(stored?: Record<string, unknown>): World {
+  const payload = stored ?? loosenEnvelope();
+
+  payload.schemaVersion = PRIOR_STORED_VERSION;
+
+  return createWorld({
+    seed: { [RUN_STATE_KEY]: JSON.stringify(payload) },
+    config: createDefaultRulesConfig(),
+    versionPolicy: TWO_VERSION_POLICY,
+  });
+}
+
+describe('the injected policy makes a prior version genuinely older', () => {
+  it('exercises a NON-EMPTY set of versions below the current one', () => {
+    const resolved = resolveRunStateVersionPolicy(TWO_VERSION_POLICY);
+    const older = resolved.history.filter(
+      (version) => version < resolved.current
+    );
+
+    // Guards every loop below. Under the shipped policy this set is empty and
+    // an assertion inside such a loop proves nothing.
+    expect(older).not.toHaveLength(0);
+    expect(older).toContain(PRIOR_STORED_VERSION);
+  });
+
+  it("is classified 'older' rather than 'current'", () => {
+    const stored = { schemaVersion: PRIOR_STORED_VERSION };
+
+    expect(classifyRunStateVersion(stored)).toBe('current');
+    expect(classifyRunStateVersion(stored, TWO_VERSION_POLICY)).toBe('older');
+  });
+
+  it("reports the load verdict 'older' and the outcome 'migrated'", () => {
+    const result = priorVersionWorld().store.load();
+
+    expect(result.verdict).toBe('older');
+    expect(result.outcome).toBe('migrated');
+    expect(result.state).not.toBeNull();
+  });
+
+  it('re-stamps the loaded envelope at the policy current version', () => {
+    const result = priorVersionWorld().store.load();
+
+    expect(result.state?.schemaVersion).toBe(NEXT_CURRENT_VERSION);
+    expect(isRunStateShape(result.state)).toBe(true);
+  });
+
+  it('reports the migration with both real versions', () => {
+    const world = priorVersionWorld();
+
+    world.store.load();
+
+    const migrations = recordsOn(world.records, 'onVersionMigrated');
+
+    expect(migrations).toHaveLength(1);
+    expect(migrations[0].fromVersion).toBe(PRIOR_STORED_VERSION);
+    expect(migrations[0].toVersion).toBe(NEXT_CURRENT_VERSION);
+    expect(migrations[0].fromVersion).not.toBe(migrations[0].toVersion);
+    expect(migrations[0].correlationId).toBe(CORRELATION_ID);
+  });
+
+  it('reports no corruption and no failure for a real migration', () => {
+    const world = priorVersionWorld();
+
+    world.store.load();
+
+    expect(failures(world.records)).toHaveLength(0);
+  });
+
+  it('carries the board through the migration verbatim', () => {
+    const result = priorVersionWorld().store.load();
+
+    expect(result.state?.board).toEqual(buildBoard());
+  });
+
+  it('carries the run identity and the cursor through unchanged', () => {
+    const result = priorVersionWorld().store.load();
+
+    expect(result.state?.runId).toBe(FIXTURE_RUN_ID);
+    expect(result.state?.seed).toBe(FIXTURE_SEED);
+    expect(result.state?.stageIndex).toBe(FIXTURE_STAGE_INDEX);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(result.state?.rngCursor[name]).toBe(
+        buildEnvelope().rngCursor[name]
+      );
+    }
+  });
+
+  it('completes a cursor map an older payload never carried', () => {
+    const stored = loosenEnvelope();
+
+    stored.rngCursor = { 'spawn-value': 11 };
+
+    const result = priorVersionWorld(stored).store.load();
+
+    expect(result.outcome).toBe('migrated');
+    expect(result.state?.rngCursor['spawn-value']).toBe(11);
+
+    for (const name of RNG_STREAM_NAMES.filter((n) => n !== 'spawn-value')) {
+      expect(result.state?.rngCursor[name]).toBe(0);
+    }
+  });
+
+  it('writes back what it just migrated, rather than refusing it', () => {
+    // The seam has to be coherent in both directions: a store reading under a
+    // policy must accept the version it itself produced.
+    const world = priorVersionWorld();
+    const loaded = world.store.load();
+
+    expect(loaded.state).not.toBeNull();
+    expect(world.store.save(loaded.state as RunState)).toBe(true);
+
+    const written = JSON.parse(
+      readRunStateRaw(world.storage) ?? 'null'
+    ) as RunState;
+
+    expect(written.schemaVersion).toBe(NEXT_CURRENT_VERSION);
+    expect(recordsOn(world.records, 'onWriteFailed')).toHaveLength(0);
+  });
+
+  it('reloads what it wrote as current, not as older again', () => {
+    const world = priorVersionWorld();
+    const loaded = world.store.load();
+
+    world.store.save(loaded.state as RunState);
+
+    const second = world.store.load();
+
+    expect(second.verdict).toBe('current');
+    expect(second.outcome).toBe('loaded');
+  });
+
+  it("still refuses a version above the policy's current one", () => {
+    const stored = loosenEnvelope();
+
+    stored.schemaVersion = NEXT_CURRENT_VERSION + 1;
+
+    const world = createWorld({
+      seed: { [RUN_STATE_KEY]: JSON.stringify(stored) },
+      config: createDefaultRulesConfig(),
+      versionPolicy: TWO_VERSION_POLICY,
+    });
+    const result = world.store.load();
+
+    expect(result.verdict).toBe('unknown');
+    expect(result.outcome).toBe('fresh-fallback');
+    expect(result.state).toBeNull();
+  });
+
+  it('still refuses a lower version the policy history omits', () => {
+    const stored = loosenEnvelope();
+
+    stored.schemaVersion = PRIOR_STORED_VERSION - 1;
+
+    const world = createWorld({
+      seed: { [RUN_STATE_KEY]: JSON.stringify(stored) },
+      config: createDefaultRulesConfig(),
+      versionPolicy: TWO_VERSION_POLICY,
+    });
+
+    expect(world.store.load().verdict).toBe('unknown');
+  });
+
+  it('behaves exactly as before when the shipped policy is supplied', () => {
+    const payload = loosenEnvelope();
+    const world = createWorld({
+      seed: { [RUN_STATE_KEY]: JSON.stringify(payload) },
+      config: createDefaultRulesConfig(),
+      versionPolicy: RUN_STATE_VERSION_POLICY,
+    });
+    const result = world.store.load();
+
+    expect(result.verdict).toBe('current');
+    expect(result.outcome).toBe('loaded');
+    expect(result.state?.schemaVersion).toBe(RUN_STATE_SCHEMA_VERSION);
+  });
+
+  it('never throws under a hostile policy, and reads as the shipped one',
+    () => {
+      const hostile = {
+        get current(): number {
+          throw new Error('policy refused');
+        },
+        get history(): readonly number[] {
+          throw new Error('policy refused');
+        },
+      } as RunStateVersionPolicy;
+      const world = createWorld({
+        seed: { [RUN_STATE_KEY]: envelopeJson() },
+        config: createDefaultRulesConfig(),
+        versionPolicy: hostile,
+      });
+
+      expect(() => world.store.load()).not.toThrow();
+      expect(world.store.load().verdict).toBe('current');
+    });
+});
+
+describe('migrateRunState reaches its older branch under a policy', () => {
+  it("migrates a genuine prior version for 'older'", () => {
+    const stored = loosenEnvelope();
+
+    stored.schemaVersion = PRIOR_STORED_VERSION;
+
+    const migrated = migrateRunState(
+      stored,
+      'older',
+      undefined,
+      TWO_VERSION_POLICY
+    );
+
+    expect(migrated).not.toBeNull();
+    expect(migrated?.schemaVersion).toBe(NEXT_CURRENT_VERSION);
+    expect(migrated?.board).toEqual(buildBoard());
+  });
+
+  it("refuses 'older' at a version the supplied history omits", () => {
+    const stored = loosenEnvelope();
+
+    stored.schemaVersion = PRIOR_STORED_VERSION - 1;
+
+    expect(
+      migrateRunState(stored, 'older', undefined, TWO_VERSION_POLICY)
+    ).toBeNull();
+  });
+
+  it("stamps the policy current version for 'current' too", () => {
+    const stored = loosenEnvelope();
+
+    stored.schemaVersion = NEXT_CURRENT_VERSION;
+
+    expect(
+      migrateRunState(stored, 'current', undefined, TWO_VERSION_POLICY)
+        ?.schemaVersion
+    ).toBe(NEXT_CURRENT_VERSION);
+  });
+
+  it("stamps the policy current version for an 'absent' wrap", () => {
+    const wrapped = migrateRunState(
+      buildBoard() as unknown,
+      'absent',
+      MIGRATION_IDENTITY,
+      TWO_VERSION_POLICY
+    );
+
+    expect(wrapped?.schemaVersion).toBe(NEXT_CURRENT_VERSION);
+    expect(wrapped?.board).toEqual(buildBoard());
+  });
+
+  it('falls back to the module constant with no policy supplied', () => {
+    expect(
+      migrateRunState(loosenEnvelope(), 'current')?.schemaVersion
+    ).toBe(RUN_STATE_SCHEMA_VERSION);
+  });
+
+  it('never throws for a hostile policy on any verdict', () => {
+    const hostile = {
+      get current(): number {
+        throw new Error('refused');
+      },
+      get history(): readonly number[] {
+        throw new Error('refused');
+      },
+    } as RunStateVersionPolicy;
+
+    for (const verdict of VERSION_VERDICTS) {
+      expect(() =>
+        migrateRunState(loosenEnvelope(), verdict, MIGRATION_IDENTITY, hostile)
+      ).not.toThrow();
+    }
+  });
+
+  it('leaves the projection at the module constant by default', () => {
+    expect(projectCurrentRunState(buildEnvelope()).schemaVersion).toBe(
+      RUN_STATE_SCHEMA_VERSION
+    );
+  });
+});
+
+/* ===== 17. A report sink that throws, contained by every operation ===== */
+
+const SINK_FAILURE_TEXT = 'the report sink refused';
+
+/**
+ * A `RunReporter` whose every member throws, plus a per-channel count of the
+ * calls that reached it.
+ *
+ * The point of the fixture: `RunStateStore.emit()` is the only containment
+ * between an injected sink and the no-throw guarantee of `load()`, `save()`,
+ * `clear()` and `exists()`. A sink is third-party code from the store's point
+ * of view — src/observability/ supplies the real one — so a throw from it must
+ * neither escape nor suppress the operation's documented return value.
+ */
+interface ThrowingSink {
+  readonly reporter: RunReporter;
+  readonly calls: Record<string, number>;
+}
+
+function createThrowingSink(): ThrowingSink {
+  const calls: Record<string, number> = {
+    onLoadCorrupted: 0,
+    onVersionMigrated: 0,
+    onBoardSizeReconciled: 0,
+    onWriteFailed: 0,
+  };
+
+  const refuse = (channel: string): never => {
+    calls[channel] += 1;
+
+    throw new Error(`${SINK_FAILURE_TEXT}: ${channel}`);
+  };
+
+  const reporter: RunReporter = {
+    onLoadCorrupted: () => refuse('onLoadCorrupted'),
+    onVersionMigrated: () => refuse('onVersionMigrated'),
+    onBoardSizeReconciled: () => refuse('onBoardSizeReconciled'),
+    onWriteFailed: () => refuse('onWriteFailed'),
+  };
+
+  return { reporter, calls };
+}
+
+/**
+ * Builds a store whose sink throws on every channel.
+ *
+ * @param options Fixture, configuration and version policy.
+ * @returns The store, the backing storage and the sink's call counts.
+ */
+function createThrowingSinkWorld(options: WorldOptions = {}): {
+  readonly store: RunStateStore;
+  readonly storage: MemoryStorage;
+  readonly calls: Record<string, number>;
+} {
+  const storage = new MemoryStorage();
+
+  trackedStorages.push(storage);
+
+  for (const [key, value] of Object.entries(options.seed ?? {})) {
+    storage.setItem(key, value);
+  }
+
+  const sink = createThrowingSink();
+  const port = new LocalStorageManager({ storage });
+
+  const store = new RunStateStore({
+    storage: port,
+    reporter: sink.reporter,
+    config: options.config,
+    correlationId: options.correlationId ?? CORRELATION_ID,
+    versionPolicy: options.versionPolicy,
+  });
+
+  return { store, storage, calls: sink.calls };
+}
+
+describe('a throwing report sink is contained by load', () => {
+  it('returns the fresh fallback for an unparsable payload', () => {
+    const world = createThrowingSinkWorld({
+      seed: { [RUN_STATE_KEY]: UNPARSABLE_RAW },
+      config: createDefaultRulesConfig(),
+    });
+    let result: RunStateLoadResult | undefined;
+
+    expect(() => {
+      result = world.store.load();
+    }).not.toThrow();
+
+    expect(result?.state).toBeNull();
+    expect(result?.outcome).toBe('fresh-fallback');
+    expect(world.calls.onLoadCorrupted).toBe(1);
+  });
+
+  it('returns the fresh fallback for a structurally wrong payload', () => {
+    for (const payload of structurallyWrongPayloads()) {
+      const world = createThrowingSinkWorld({
+        seed: { [RUN_STATE_KEY]: JSON.stringify(payload) },
+        config: createDefaultRulesConfig(),
+      });
+
+      expect(() => world.store.load()).not.toThrow();
+      expect(world.store.load().outcome).toBe('fresh-fallback');
+    }
+  });
+
+  it('returns the fresh fallback for a primitive payload', () => {
+    for (const raw of PRIMITIVE_RAW) {
+      const world = createThrowingSinkWorld({
+        seed: { [RUN_STATE_KEY]: raw },
+        config: createDefaultRulesConfig(),
+      });
+
+      expect(() => world.store.load()).not.toThrow();
+      expect(world.store.load().state).toBeNull();
+    }
+  });
+
+  it('still loads and still reports migrated when the sink refuses', () => {
+    const payload = loosenEnvelope();
+
+    payload.schemaVersion = PRIOR_STORED_VERSION;
+
+    const world = createThrowingSinkWorld({
+      seed: { [RUN_STATE_KEY]: JSON.stringify(payload) },
+      config: createDefaultRulesConfig(),
+      versionPolicy: TWO_VERSION_POLICY,
+    });
+    let result: RunStateLoadResult | undefined;
+
+    expect(() => {
+      result = world.store.load();
+    }).not.toThrow();
+
+    // The migration report was refused; the migration itself still happened.
+    expect(world.calls.onVersionMigrated).toBe(1);
+    expect(result?.outcome).toBe('migrated');
+    expect(result?.state?.schemaVersion).toBe(NEXT_CURRENT_VERSION);
+  });
+
+  it('still reconciles a board size when the sink refuses', () => {
+    const payload = loosenEnvelope();
+    const config: RulesConfig = {
+      ...createDefaultRulesConfig(),
+      boardSize: 5,
+    };
+    const world = createThrowingSinkWorld({
+      seed: { [RUN_STATE_KEY]: JSON.stringify(payload) },
+      config,
+    });
+    let result: RunStateLoadResult | undefined;
+
+    expect(() => {
+      result = world.store.load();
+    }).not.toThrow();
+
+    expect(world.calls.onBoardSizeReconciled).toBe(1);
+    expect(result?.outcome).toBe('reconciled');
+    expect(result?.state?.board.grid.size).toBe(5);
+  });
+
+  it('returns the absent result with no report attempted', () => {
+    const world = createThrowingSinkWorld({
+      config: createDefaultRulesConfig(),
+    });
+
+    expect(() => world.store.load()).not.toThrow();
+    expect(world.store.load().outcome).toBe('absent');
+    expect(world.calls.onLoadCorrupted).toBe(0);
+  });
+});
+
+describe('a throwing report sink is contained by save and clear', () => {
+  it('returns false for a malformed envelope', () => {
+    const world = createThrowingSinkWorld({
+      config: createDefaultRulesConfig(),
+    });
+    let saved: boolean | undefined;
+
+    expect(() => {
+      saved = world.store.save({} as RunState);
+    }).not.toThrow();
+
+    expect(saved).toBe(false);
+    expect(world.calls.onWriteFailed).toBe(1);
+  });
+
+  it('returns true for a good envelope and attempts no report', () => {
+    const world = createThrowingSinkWorld({
+      config: createDefaultRulesConfig(),
+    });
+
+    expect(world.store.save(buildEnvelope())).toBe(true);
+    expect(world.calls.onWriteFailed).toBe(0);
+    expect(readRunStateRaw(world.storage)).not.toBeNull();
+  });
+
+  it('returns false when the port refuses the write', () => {
+    const sink = createThrowingSink();
+    const store = new RunStateStore({
+      storage: REFUSING_PORT,
+      reporter: sink.reporter,
+      correlationId: CORRELATION_ID,
+    });
+    let saved: boolean | undefined;
+
+    expect(() => {
+      saved = store.save(buildEnvelope());
+    }).not.toThrow();
+
+    expect(saved).toBe(false);
+    expect(sink.calls.onWriteFailed).toBe(1);
+  });
+
+  it('returns false when the port throws on write', () => {
+    const sink = createThrowingSink();
+    const store = new RunStateStore({
+      storage: THROWING_PORT,
+      reporter: sink.reporter,
+      correlationId: CORRELATION_ID,
+    });
+
+    expect(() => store.save(buildEnvelope())).not.toThrow();
+    expect(store.save(buildEnvelope())).toBe(false);
+    expect(sink.calls.onWriteFailed).toBe(2);
+  });
+
+  it('returns false when the port refuses the removal', () => {
+    const sink = createThrowingSink();
+    const store = new RunStateStore({
+      storage: REFUSING_PORT,
+      reporter: sink.reporter,
+      correlationId: CORRELATION_ID,
+    });
+    let cleared: boolean | undefined;
+
+    expect(() => {
+      cleared = store.clear();
+    }).not.toThrow();
+
+    expect(cleared).toBe(false);
+    expect(sink.calls.onWriteFailed).toBe(1);
+  });
+
+  it('returns false when the port throws on removal', () => {
+    const sink = createThrowingSink();
+    const store = new RunStateStore({
+      storage: THROWING_PORT,
+      reporter: sink.reporter,
+      correlationId: CORRELATION_ID,
+    });
+
+    expect(() => store.clear()).not.toThrow();
+    expect(store.clear()).toBe(false);
+  });
+
+  it('returns true for a real removal and attempts no report', () => {
+    const world = createThrowingSinkWorld({
+      seed: { [RUN_STATE_KEY]: envelopeJson() },
+      config: createDefaultRulesConfig(),
+    });
+
+    expect(world.store.clear()).toBe(true);
+    expect(world.calls.onWriteFailed).toBe(0);
+    expect(readRunStateRaw(world.storage)).toBeNull();
+  });
+});
+
+describe('a throwing report sink is contained by exists', () => {
+  it('answers for a stored envelope and for none', () => {
+    const seeded = createThrowingSinkWorld({
+      seed: { [RUN_STATE_KEY]: envelopeJson() },
+      config: createDefaultRulesConfig(),
+    });
+    const empty = createThrowingSinkWorld({
+      config: createDefaultRulesConfig(),
+    });
+
+    expect(() => seeded.store.exists()).not.toThrow();
+    expect(seeded.store.exists()).toBe(true);
+    expect(() => empty.store.exists()).not.toThrow();
+    expect(empty.store.exists()).toBe(false);
+  });
+
+  it('answers false against a port that throws', () => {
+    const sink = createThrowingSink();
+    const store = new RunStateStore({
+      storage: THROWING_PORT,
+      reporter: sink.reporter,
+      correlationId: CORRELATION_ID,
+    });
+    let exists: boolean | undefined;
+
+    expect(() => {
+      exists = store.exists();
+    }).not.toThrow();
+
+    expect(exists).toBe(false);
+  });
+});
+
+describe('a throwing report sink leaves the frozen keys alone', () => {
+  it('touches neither bestScore nor gameState across every operation', () => {
+    const world = createThrowingSinkWorld({
+      seed: {
+        [RUN_STATE_KEY]: UNPARSABLE_RAW,
+        [BEST_SCORE_KEY]: BEST_SCORE_SENTINEL,
+        [GAME_STATE_KEY]: GAME_STATE_SENTINEL,
+      },
+      config: createDefaultRulesConfig(),
+    });
+
+    expect(() => {
+      world.store.load();
+      world.store.save({} as RunState);
+      world.store.save(buildEnvelope());
+      world.store.exists();
+      world.store.clear();
+    }).not.toThrow();
+
+    expect(world.storage.getItem(BEST_SCORE_KEY)).toBe(BEST_SCORE_SENTINEL);
+    expect(world.storage.getItem(GAME_STATE_KEY)).toBe(GAME_STATE_SENTINEL);
   });
 });

@@ -23,6 +23,13 @@
 
 import { describe, expect, it } from 'vitest';
 
+// Vite's `?raw` query hands a module's own text to the suite. Read this way
+// rather than through a Node builtin: this suite runs in the jsdom project,
+// where `import.meta.url` is a served URL and not a file path, and the
+// browser-context tsconfig types `*?raw` through vite/client while declaring
+// no Node types at all.
+import a11ySettingsSource from '../../../src/ui/a11y/settings.ts?raw';
+
 import { createEngineEvents } from '../../../src/engine/engine-events';
 import type {
   EngineEventName,
@@ -41,6 +48,12 @@ import {
   MIN_VOLUME,
   effectNameForEvent,
 } from '../../../src/audio/sound-map';
+import {
+  DEFAULT_MUTED as CONFIG_DEFAULT_MUTED,
+  DEFAULT_VOLUME as CONFIG_DEFAULT_VOLUME,
+  MAX_VOLUME as CONFIG_MAX_VOLUME,
+  MIN_VOLUME as CONFIG_MIN_VOLUME,
+} from '../../../src/config/audio-bounds';
 import {
   DEFAULT_MUTED as SETTINGS_DEFAULT_MUTED,
   DEFAULT_VOLUME as SETTINGS_DEFAULT_VOLUME,
@@ -342,13 +355,33 @@ describe('a disposed sound engine is detached from its sources', () => {
 /* ===== 2. One owner for mute and volume (F-27) ===== */
 
 describe('the mute and volume defaults have exactly one owner', () => {
-  it('publishes the same four values from both modules', () => {
-    // The accessibility surface re-exports the audio module's declarations, so
-    // these are the same bindings and cannot drift.
+  it('publishes the same four values from all three modules', () => {
+    // One declaration, in src/config/audio-bounds.ts, re-exported by the audio
+    // module and by the accessibility surface: these are the same bindings and
+    // cannot drift. Two independent declarations came before, and they DISAGREED
+    // on the starting volume, so the volume a player heard depended on which
+    // owner had last written the master gain.
     expect(SETTINGS_MIN_VOLUME).toBe(MIN_VOLUME);
     expect(SETTINGS_MAX_VOLUME).toBe(MAX_VOLUME);
     expect(SETTINGS_DEFAULT_VOLUME).toBe(DEFAULT_VOLUME);
     expect(SETTINGS_DEFAULT_MUTED).toBe(DEFAULT_MUTED);
+
+    expect(MIN_VOLUME).toBe(CONFIG_MIN_VOLUME);
+    expect(MAX_VOLUME).toBe(CONFIG_MAX_VOLUME);
+    expect(DEFAULT_VOLUME).toBe(CONFIG_DEFAULT_VOLUME);
+    expect(DEFAULT_MUTED).toBe(CONFIG_DEFAULT_MUTED);
+  });
+
+  it('leaves the accessibility leaf with no edge into the audio layer', () => {
+    const source = a11ySettingsSource;
+
+    // A DIRECTION, not a preference. src/ui/a11y/settings.ts is the leaf of the
+    // src/ui/ import graph, and a volume bound is something a PREFERENCE has to
+    // validate whether or not this build ever plays a sound — so the leaf must
+    // not reach into the audio subsystem for it. The panel is where preferences
+    // are adapted into audio, and the panel is not the leaf.
+    expect(source).not.toMatch(/from\s+'\.\.\/\.\.\/audio\//);
+    expect(source).toMatch(/from\s+'\.\.\/\.\.\/config\/audio-bounds'/);
   });
 
   it('defaults to unattenuated and unmuted', () => {
@@ -619,7 +652,11 @@ describe('the audio port is the engine event contract, not a paraphrase', () => 
     // Every one of the five names it registers for is emitted by the same
     // emitter, so an event renamed on one side no longer compiles on the other.
     expect(() => {
-      events.emit('tile:spawn', { position: { x: 0, y: 0 }, value: 2 });
+      events.emit('tile:spawn', {
+        turn: 1,
+        position: { x: 0, y: 0 },
+        value: 2,
+      });
     }).not.toThrow();
 
     engine.dispose();
@@ -644,13 +681,13 @@ describe('the audio port is the engine event contract, not a paraphrase', () => 
     // A spawn with no position means NO TILE WAS INSERTED: the engine emits the
     // event either way, and announcing the second case announced a tile the
     // player never saw appear.
-    events.emit('tile:spawn', { value: 2 });
+    events.emit('tile:spawn', { turn: 1, value: 2 });
 
     const afterSuppressed = counted.filter(
       (name) => name === 'audio.play.requested',
     ).length;
 
-    events.emit('tile:spawn', { position: { x: 1, y: 2 }, value: 4 });
+    events.emit('tile:spawn', { turn: 1, position: { x: 1, y: 2 }, value: 4 });
 
     const afterRealSpawn = counted.filter(
       (name) => name === 'audio.play.requested',

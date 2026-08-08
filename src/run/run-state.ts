@@ -15,16 +15,15 @@
  *   one seed within it. Because the run identifier is persisted, a resumed run
  *   re-derives the identifier it was already reporting under.
  *
- *   This module derives none of its own: the single derivation lives in
- *   src/observability/logger.ts and the value arrives by injection.
- *
- * RUN IDENTIFIER VERSUS CORRELATION IDENTIFIER
- *   `RunState.runId` identifies the run instance and is persisted with the
- *   envelope. The correlation identifier is derived from the seed and that
- *   run identifier together, is not persisted, and is what the
- *   observability layer keys records on. This module declares no derivation of
- *   its own: `deriveCorrelationId()` in src/observability/logger.ts is the
- *   single one, and the value reaches the run layer by injection.
+ *   `runCorrelationId()` below is this module's derivation of it, and is what
+ *   the run layer calls when no identifier was injected. It is byte-identical
+ *   to `deriveCorrelationId(seed, runId)` in src/observability/logger.ts, which
+ *   remains the single authority src/main.ts calls: this module reaches no
+ *   observability module, so the two derivations are separate implementations
+ *   of one algorithm, pinned equal by
+ *   tests/unit/run/run-state.test.ts rather than by a shared import. Every
+ *   store, controller and reporter in this folder still takes the identifier by
+ *   injection; nothing here calls this function on its own behalf.
  *
  * WRAPPED BOARD SNAPSHOT
  *   `RunState.board` carries the pre-migration board snapshot unchanged, in
@@ -60,13 +59,42 @@
  *   and `cloneRelicState()` carries nothing outside it, so the round-trip
  *   holds for that member too.
  *
- * Decisions behind this file: DL-RUN-01, the `schemaVersion` member and the
- * classification it is read through; DL-RUN-02, wrapping the pre-migration
- * board snapshot verbatim; and DL-RUN-03, persisting the RNG cursor map.
- * Traceability rows: TR-RUN-01, js/game_manager.js L102-L110's manager
- * projection wrapped as `RunState.board`; TR-RUN-02, js/grid.js L102-L117's
- * grid projection; TR-RUN-03, js/tile.js L19-L27's tile projection; and
- * target-only rows TR-RUN-04 through TR-RUN-06 for the version member, the
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-RUN-01  js/game_manager.js L102-L110  the manager projection, wrapped
+ *                                            unchanged as `RunState.board`
+ *   TR-RUN-02  js/grid.js L102-L117          the grid projection, aliased as
+ *                                            `SerializedGrid`
+ *   TR-RUN-03  js/tile.js L19-L27            the tile projection, aliased as
+ *                                            `SerializedTile`
+ *   TR-RUN-04  target-only row               `schemaVersion`,
+ *                                            `RUN_STATE_SCHEMA_VERSION`,
+ *                                            its history and
+ *                                            `classifyRunStateVersion()`
+ *   TR-RUN-05  target-only row               `rngCursor` and
+ *                                            `normalizeRngCursor()`
+ *   TR-RUN-06  target-only row               `relics`, `PersistedRelic` and
+ *                                            `PersistedRelicState`
+ *   TR-RUN-07  target-only row               the stage slice: `stageIndex`,
+ *                                            `stageGoal`, `goalProgress`
+ *   TR-RUN-08  target-only row               `isRunStateShape()`,
+ *                                            `isCurrentRunState()` and
+ *                                            `describeRunStateProblems()`
+ *   TR-RUN-09  target-only row               `summarizeRunState()`,
+ *                                            `redactRunSummary()` and
+ *                                            `summarizeRunStateForReport()`
+ *   TR-RUN-10  target-only row               `RunReporter` and
+ *                                            `NOOP_RUN_REPORTER`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-RUN-01  the `schemaVersion` member and the classification it is read
+ *              through
+ *   DL-RUN-02  wrapping the pre-migration board snapshot verbatim
+ *   DL-RUN-03  persisting the RNG cursor map
+ *   DL-RUN-04  a payload breaking a bound refused, never clamped
+ *   DL-RUN-05  the seed omitted from the reported summary by
+ *              `redactRunSummary()`
  */
 
 import {
@@ -103,9 +131,8 @@ import {
  *
  * The member name `keepPlaying` is FROZEN ON THE WIRE. The in-class flag it
  * projects is `continuedPlay`; renaming it inside `board` would make a save
- * written by the pre-migration game unreadable.
- *
- * the persisted name did not change with it. Decision DL-ENGINE-04.
+ * written by the pre-migration game unreadable. The in-class flag was renamed
+ * and the persisted name was not. Decision DL-ENGINE-04.
  */
 export type LegacyBoardSnapshot = SerializedGameState;
 
@@ -251,6 +278,97 @@ export type RunStateVersionVerdict =
   | 'absent'
   | 'malformed';
 
+/**
+ * The version set a classification is decided against: which version is
+ * current, and which versions this build reads.
+ *
+ * Exists as an argument rather than only as the two module constants because
+ * `RUN_STATE_SCHEMA_VERSION_HISTORY` holds exactly one entry in this build, so
+ * a classification decided only against the constants can never reach its
+ * `'older'` branch, and neither can any loader keyed on that verdict. A caller
+ * — the store, and every suite covering the migration path — supplies a policy
+ * naming a genuine prior version, which is what makes the branch reachable and
+ * the three-way distinction between a current, an older and an unreadable
+ * payload decidable in fact rather than only in principle.
+ *
+ * `RUN_STATE_VERSION_POLICY` is the shipped one. A supplied policy changes
+ * nothing about what this build WRITES: `createFreshRunState()` and
+ * `isCurrentRunState()` read `RUN_STATE_SCHEMA_VERSION` directly, so the
+ * written version is the module constant whatever a reader was told.
+ */
+export interface RunStateVersionPolicy {
+  /** Version treated as current, and the version a migration re-stamps to. */
+  readonly current: number;
+
+  /**
+   * Every version this build reads, `current` included. A stored integer this
+   * list does not contain is `'unknown'`.
+   */
+  readonly history: readonly number[];
+}
+
+/**
+ * The shipped version policy: this build's own current version and history.
+ */
+export const RUN_STATE_VERSION_POLICY: RunStateVersionPolicy = Object.freeze({
+  current: RUN_STATE_SCHEMA_VERSION,
+  history: RUN_STATE_SCHEMA_VERSION_HISTORY,
+});
+
+/**
+ * Reduces a supplied policy to a usable one, falling back to
+ * `RUN_STATE_VERSION_POLICY` member by member.
+ *
+ * TOTAL AND NON-THROWING for every input, including a policy whose members are
+ * absent, hostile types or accessors that throw. The classifier's no-throw
+ * guarantee — which the guarded loader is built on — must not become
+ * conditional on the policy a caller passes, so a hostile policy degrades to
+ * the shipped one rather than escaping.
+ *
+ * `current` is taken only when it is an integer. `history` is taken only when
+ * it is an array, and is then reduced to its integer entries with `current`
+ * included, so a history that omits its own current version still classifies
+ * that version `'current'`.
+ *
+ * @param policy Policy to resolve, or `undefined` for the shipped one.
+ * @returns A policy whose `current` is an integer and whose `history` is a
+ *   frozen array of integers containing `current`.
+ */
+export function resolveRunStateVersionPolicy(
+  policy?: RunStateVersionPolicy
+): RunStateVersionPolicy {
+  if (policy === undefined || policy === null) {
+    return RUN_STATE_VERSION_POLICY;
+  }
+
+  let current: unknown;
+  let history: unknown;
+
+  try {
+    current = policy.current;
+    history = policy.history;
+  } catch {
+    return RUN_STATE_VERSION_POLICY;
+  }
+
+  const resolvedCurrent = isSchemaVersion(current)
+    ? current
+    : RUN_STATE_SCHEMA_VERSION;
+  const declared = Array.isArray(history)
+    ? (history as readonly unknown[]).filter(isSchemaVersion)
+    : [];
+  const resolvedHistory = declared.includes(resolvedCurrent)
+    ? declared
+    : [...declared, resolvedCurrent];
+
+  return Object.freeze({
+    current: resolvedCurrent,
+    history: Object.freeze(
+      [...resolvedHistory].sort((left, right) => left - right)
+    ),
+  });
+}
+
 type MemberRead =
   | { readonly readable: true; readonly value: unknown }
   | { readonly readable: false };
@@ -325,9 +443,16 @@ function isSchemaVersion(value: unknown): value is number {
  * non-throwing for every input — `null`, `undefined`, arrays, primitives and
  * objects whose accessors throw included — so the guarded loader's no-throw
  * guarantee rests on this function.
+ *
+ * @param value Stored value to classify.
+ * @param policy Version set to decide against, resolved through
+ *   `resolveRunStateVersionPolicy()`. Defaults to
+ *   `RUN_STATE_VERSION_POLICY`. A hostile policy degrades to the shipped one
+ *   rather than making this function throw.
  */
 export function classifyRunStateVersion(
-  value: unknown
+  value: unknown,
+  policy?: RunStateVersionPolicy
 ): RunStateVersionVerdict {
   if (value === undefined || value === null) {
     return 'absent';
@@ -352,15 +477,13 @@ export function classifyRunStateVersion(
   }
 
   const version = member.value;
+  const resolved = resolveRunStateVersionPolicy(policy);
 
-  if (version === RUN_STATE_SCHEMA_VERSION) {
+  if (version === resolved.current) {
     return 'current';
   }
 
-  if (
-    version < RUN_STATE_SCHEMA_VERSION &&
-    RUN_STATE_SCHEMA_VERSION_HISTORY.includes(version)
-  ) {
+  if (version < resolved.current && resolved.history.includes(version)) {
     return 'older';
   }
 
@@ -1647,7 +1770,7 @@ function cloneRelicStateMembers(
  * @throws RangeError when `relic.state` nests deeper than
  *   `MAX_RELIC_STATE_DEPTH`.
  */
-function cloneRelic(relic: PersistedRelic): PersistedRelic {
+export function cloneRelic(relic: PersistedRelic): PersistedRelic {
   const copy: { id: string; charges?: number; state?: unknown } = {
     id: relic.id,
   };
@@ -1667,7 +1790,7 @@ function cloneRelic(relic: PersistedRelic): PersistedRelic {
   return copy;
 }
 
-function cloneStageGoal(goal: StageGoal): StageGoal {
+export function cloneStageGoal(goal: StageGoal): StageGoal {
   switch (goal.kind) {
     case 'highest-tile':
       return { kind: 'highest-tile', target: goal.target };
@@ -1746,18 +1869,28 @@ export function cloneRunState(value: RunState): RunState {
  * `schemaVersion` through as it stands. Every member is named literally
  * below and no other is copied, so a member a caller added to its own
  * object does not reach the store, and the version written is always the one
- * this build's loader classifies as `'current'`.
+ * the writing build's loader classifies as `'current'`.
  *
  * Deep throughout, on `cloneRunState()`'s terms: the cursor map is rebuilt
  * through `normalizeRngCursor()`, and the goal, the relics and every cell
  * are fresh objects, so the projection shares nothing with `value`.
  *
  * @param value Envelope to project.
- * @returns A fresh envelope at the current schema version.
+ * @param targetVersion Version to stamp, defaulting to
+ *   `RUN_STATE_SCHEMA_VERSION`. Supplied by a caller reading and writing under
+ *   an injected `RunStateVersionPolicy`, so what it writes is what its own
+ *   loader will classify as `'current'` rather than as `'older'`. A
+ *   non-integer is ignored in favour of the default.
+ * @returns A fresh envelope at the target schema version.
  */
-export function projectCurrentRunState(value: RunState): RunState {
+export function projectCurrentRunState(
+  value: RunState,
+  targetVersion?: number
+): RunState {
   return {
-    schemaVersion: RUN_STATE_SCHEMA_VERSION,
+    schemaVersion: isSchemaVersion(targetVersion)
+      ? targetVersion
+      : RUN_STATE_SCHEMA_VERSION,
     runId: value.runId,
     seed: value.seed,
     rngCursor: normalizeRngCursor(value.rngCursor),
@@ -1952,13 +2085,66 @@ export interface StageAdvancedReport {
   readonly goal: StageGoal;
 }
 
+/**
+ * A loaded envelope whose relics the registry made something different of.
+ *
+ * Raised only when hydration actually changed the set, so a clean load reports
+ * nothing. `refused` names the identifiers that did not survive, which is what
+ * distinguishes a save from an older catalogue from a tampered one.
+ */
+export interface RelicsNormalizedReport {
+  readonly correlationId: CorrelationId;
+
+  /** How many entries the envelope carried. */
+  readonly requested: number;
+
+  /** How many the registry holds after hydration. */
+  readonly restored: number;
+
+  /** Identifiers the registry refused, in the order the envelope carried them. */
+  readonly refused: readonly string[];
+}
+
+export interface RewardOfferedReport {
+  readonly correlationId: CorrelationId;
+
+  /** Stage index the offer was drawn at. */
+  readonly stageIndex: number;
+
+  /** The identifiers offered, in the order they were drawn. */
+  readonly offeredRelicIds: readonly string[];
+}
+
+/**
+ * A selection measured against the offer that was standing.
+ */
 export interface RewardDrawnReport {
   readonly correlationId: CorrelationId;
 
   /** Stage index the offer was made at. */
   readonly stageIndex: number;
+
+  /**
+   * The offer standing when the report was made: the identifiers admitted by
+   * `recordRewardOffer()`, which is empty on a refused offer and once a
+   * selection has been taken on.
+   */
   readonly offeredRelicIds: readonly string[];
   readonly selectedRelicId?: string;
+
+  /**
+   * Whether the relic was taken on: registered live and appended to the run's
+   * relics. Absent on a report from a caller that does not distinguish the two
+   * outcomes.
+   */
+  readonly accepted?: boolean;
+
+  /**
+   * The step that refused an offer or a selection, as
+   * `RewardRefusal` of src/run/run-controller.ts names it. Absent where nothing
+   * was refused.
+   */
+  readonly refusal?: string;
 }
 
 /**
@@ -2001,7 +2187,9 @@ export interface RunReporter {
   readonly onWriteFailed?: (report: RunStateWriteFailureReport) => void;
   readonly onRunStarted?: (report: RunStartedReport) => void;
   readonly onStageAdvanced?: (report: StageAdvancedReport) => void;
+  readonly onRewardOffered?: (report: RewardOfferedReport) => void;
   readonly onRewardDrawn?: (report: RewardDrawnReport) => void;
+  readonly onRelicsNormalized?: (report: RelicsNormalizedReport) => void;
   readonly onRunEnded?: (report: RunEndedReport) => void;
 }
 
@@ -2028,6 +2216,9 @@ export const NOOP_RUN_REPORTER: RunReporter = Object.freeze({
   onStageAdvanced(): void {
     return;
   },
+  onRewardOffered(): void {
+    return;
+  },
   onRewardDrawn(): void {
     return;
   },
@@ -2036,3 +2227,109 @@ export const NOOP_RUN_REPORTER: RunReporter = Object.freeze({
   },
 });
 
+/* ===== 12. Correlation-identifier derivation ===== */
+
+/** Prefix every derived correlation identifier carries. */
+const CORRELATION_ID_PREFIX = 'run-';
+
+/** Separates the seed-grouping prefix from the run-instance segment. */
+const CORRELATION_ID_INSTANCE_SEPARATOR = '-';
+
+const FNV_OFFSET_BASIS = 0x811c9dc5;
+
+const FNV_PRIME = 0x01000193;
+
+const DJB2_BASIS = 5381;
+
+const DJB2_MULTIPLIER = 33;
+
+const HASH_RADIX = 36;
+
+const HASH_WIDTH = 7;
+
+function fnv1a32(text: string): number {
+  let hash = FNV_OFFSET_BASIS;
+
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, FNV_PRIME);
+  }
+
+  return hash >>> 0;
+}
+
+function djb2Hash32(text: string): number {
+  let hash = DJB2_BASIS;
+
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (Math.imul(hash, DJB2_MULTIPLIER) + text.charCodeAt(index)) | 0;
+  }
+
+  return hash >>> 0;
+}
+
+function renderHash(hash: number): string {
+  return (hash >>> 0).toString(HASH_RADIX).padStart(HASH_WIDTH, '0');
+}
+
+/**
+ * Derives the run correlation identifier from the two members this envelope
+ * persists.
+ *
+ * Byte-identical to `deriveCorrelationId(seed, runId)` in
+ * src/observability/logger.ts, which is the single authority src/main.ts calls.
+ * This is a separate implementation of the same algorithm rather than a
+ * re-export: this module reaches no observability module, and the two are
+ * pinned equal by tests/unit/run/run-state.test.ts, which compares their
+ * output character by character over a shared input table.
+ *
+ * PURE. It reads no clock, consumes no randomness, touches no storage and
+ * mutates nothing, so the same `(seed, runId)` yields the same string in this
+ * process and in any later one — which is what lets a resumed run report under
+ * the identifier it was already reporting under, from the persisted envelope
+ * alone.
+ *
+ * TWO FORMS, ONE DERIVATION. Omitting `runId`, or passing an empty one, yields
+ * the seed-grouping form: `run-` followed by two fixed-width base36 hashes of
+ * the seed, FNV-1a then djb2. Supplying one appends a third hyphen-separated
+ * hash taken over the run instance AND the seed, so two runs of one seed are
+ * distinguishable while the seed-derived prefix still groups them.
+ *
+ * PSEUDONYMOUS, NOT ANONYMOUS. The derivation is unsalted and deterministic,
+ * so a party holding candidate seeds can hash each one and match it against an
+ * identifier. What it guarantees is that the seed TEXT is not carried in the
+ * value and cannot be read back out by inversion; it does not guarantee the
+ * seed cannot be identified by search. A run seed is therefore treated as data
+ * that may be published, and no caller may put personal data in one.
+ *
+ * Neither form is unique by construction — each concatenates 32-bit hashes — so
+ * distinct inputs can collide, and a consumer needing exact identity compares
+ * `seed` and `runId` themselves.
+ *
+ * @param seed Seed of the run. Coerced with `String`, so any value is accepted
+ *   and none throws.
+ * @param runId Run instance identifier. Omit it, or pass an empty value, for
+ *   the seed-grouping form.
+ * @returns An 18-character identifier for the seed-grouping form and a
+ *   26-character one for the run-instance form, non-empty for every input,
+ *   the empty string included.
+ */
+export function runCorrelationId(seed: string, runId?: string): CorrelationId {
+  const runSeed = String(seed);
+  const grouped =
+    CORRELATION_ID_PREFIX +
+    renderHash(fnv1a32(runSeed)) +
+    renderHash(djb2Hash32(runSeed));
+
+  if (runId === undefined || String(runId) === '') {
+    return grouped;
+  }
+
+  // Hashed over the run instance AND the seed rather than the run instance
+  // alone, so the segment cannot be read back as a bare hash of `runId`.
+  const instance = `${String(runId)}\u0000${runSeed}`;
+
+  return `${grouped}${CORRELATION_ID_INSTANCE_SEPARATOR}${renderHash(
+    fnv1a32(instance) ^ djb2Hash32(instance),
+  )}`;
+}

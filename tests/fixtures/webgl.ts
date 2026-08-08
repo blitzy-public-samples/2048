@@ -1,16 +1,14 @@
 // A WebGL 2 context and a canvas, mocked far enough that Three.js runs.
 //
-// WHY THIS EXISTS
+// EXTERNAL CONSTRAINT
 //   jsdom implements no canvas rendering context at all — `getContext()` warns
 //   "Not implemented" and returns `null` — so `WebGLRenderer` cannot be
 //   constructed under the unit environment, and every path in
-//   src/render/three-renderer.ts past its `WebGLRenderer` would be unreachable
-//   without a stand-in. Playwright covers the real GPU path
-//   (tests/e2e/), which is the right place for a pixel to be asserted on; this
-//   fixture is for asserting on the RENDERER'S OWN behaviour — that a board is
-//   generated at the committed size, that a merge queues a burst, that the
-//   parallel accessibility board is mounted and updated — none of which depends
-//   on what the driver actually draws.
+//   src/render/three-renderer.ts past its `WebGLRenderer` is unreachable
+//   without a stand-in. This fixture reaches the RENDERER'S OWN behaviour: that
+//   a board is generated at the committed size, that a merge queues a burst,
+//   that the parallel accessibility board is mounted and updated. Pixels are
+//   asserted on the real GPU path under tests/e2e/. Decision DL-WEBGL-01.
 //
 // WHAT IT DOES AND DOES NOT GUARANTEE
 //   It guarantees that Three.js constructs, resizes and renders without

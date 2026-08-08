@@ -24,22 +24,42 @@
 // tween, the `.tile-merged` class carrying `pop`, the `.tile-new` class
 // carrying `appear`, and the `.score-addition` element carrying `move-up`.
 //
-// Each row is one traceability row of docs/TRACEABILITY_MATRIX.md:
-//   TR-ANIM-01  js/html_actuator.js L54, L67-L72  previousPosition and
-//   TR-ANIM-02  js/html_actuator.js L73-L80       the .tile-merged class
-//   TR-ANIM-03  js/html_actuator.js L82           the .tile-new class
-//   TR-ANIM-04  js/html_actuator.js L114-L120     the .score-addition
-//   TR-ANIM-05  style/main.scss `.game-message`, with `&.game-won` and
-//               `&.game-over`  the terminal overlay's
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-ANIM-01  js/html_actuator.js L54, L67-L72  the `previousPosition` and
+//                                                 `position` pair, ported as
+//                                                 `createMoveTween`
+//   TR-ANIM-02  js/html_actuator.js L73-L80       the `.tile-merged` class
+//                                                 carrying `pop`, ported as
+//                                                 `createMergeTween`
+//   TR-ANIM-03  js/html_actuator.js L82           the `.tile-new` class
+//                                                 carrying `appear`, ported as
+//                                                 `createSpawnTween`
+//   TR-ANIM-04  js/html_actuator.js L114-L120     the `.score-addition` element
+//                                                 carrying `move-up`, ported as
+//                                                 `createScoreDeltaTween`
+//   TR-ANIM-05  style/main.scss `.game-message`   the terminal overlay's
+//                with `&.game-won`, `&.game-over` `fade-in`, ported as
+//                                                 `createOverlayFadeTween`
+//   TR-ANIM-06  target-only row                   `createTween`, `TweenStop`
+//                                                 and the delay that yields the
+//                                                 0% keyframe
+//   TR-ANIM-07  target-only row                   `CSS_EASING_CURVES`,
+//                                                 `createCubicBezierEasing`
+//                                                 and `easingFor`
 //
 // This module holds no mesh, element or engine reference, touches no DOM, reads
 // no clock — every step is driven by a caller-supplied delta — consumes no
 // randomness and performs no I/O. It interpolates numbers, and the renderer
 // applies them.
 //
-// Decisions behind this file: DL-ANIM-01, the five CSS timings reproduced in
-// JavaScript; DL-ANIM-02, a delay yielding the 0% keyframe to match
-// `animation-fill-mode: backwards`; and DL-ANIM-03, the three-stop `pop`
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-ANIM-01  the five CSS timings reproduced in JavaScript
+//   DL-ANIM-02  a delay yielding the 0% keyframe, matching
+//               `animation-fill-mode: backwards`
+//   DL-ANIM-03  the three-stop `pop` eased across each adjacent pair of
+//               keyframes
 
 import type { Position } from '../engine/types';
 import type { MotionEasing } from '../theme/tokens';

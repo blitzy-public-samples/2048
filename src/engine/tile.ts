@@ -4,7 +4,8 @@
 // Ported member for member and method for method from js/tile.js, which is
 // deleted; nothing here was added to that source.
 //
-// docs/TRACEABILITY_MATRIX.md:
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
 //   TR-TILE-01  js/tile.js L1-L8   constructor
 //   TR-TILE-02  js/tile.js L2-L3   position flattened onto x and y
 //   TR-TILE-03  js/tile.js L4      value, falsy argument coerced to 2
@@ -17,7 +18,10 @@
 // This module reads no DOM, performs no I/O, consumes no randomness and reads
 // no clock.
 //
-// Decisions behind this file: DL-TILE-01, the flattened `x` and `y`
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-TILE-01  `x` and `y` flattened onto the tile, as js/tile.js L2-L3 did,
+//               rather than held as a nested position object
 
 import type { Position, SerializedTile } from './types';
 

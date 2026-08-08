@@ -20,7 +20,10 @@
 // Math.random is asserted solely by tests/unit/rng/math-random-guard.test.ts,
 // and section 8 evidences this layer's purity by repeating a whole sweep.
 //
-// Decisions this suite is the evidence for: DL-STAGE-01 and DL-STAGE-02 in
+// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
+// DL-STAGE-01, DL-STAGE-02, DL-STAGE-03.
+// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-STAGE-01,
+// TR-STAGE-02, TR-STAGE-03, TR-STAGE-04.
 
 import { describe, expect, expectTypeOf, it } from 'vitest';
 

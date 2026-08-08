@@ -7,7 +7,8 @@
 // the `spawn-position` substream `randomAvailableCell` receives as an
 // argument.
 //
-// row is one traceability row of docs/TRACEABILITY_MATRIX.md:
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
 //   TR-GRID-01  js/grid.js L1-L4     constructor, empty-or-restore
 //   TR-GRID-02  js/grid.js L7-L19    empty()
 //   TR-GRID-03  js/grid.js L21-L34   fromState()
@@ -26,11 +27,17 @@
 // This module reads no DOM, performs no I/O, owns no source of randomness and
 // reads no clock.
 //
-// Two of those lines changed rather than moved:
-//   js/grid.js L29, inside TR-GRID-03, constructed `Tile` through the
-//   js/grid.js L41, inside TR-GRID-04, drew from the global random source.
-// Decisions behind this file: DL-GRID-01, the injected spawn-position
-// substream, and DL-GRID-02, the restore walk bounded by this grid's own
+// The two lines that changed rather than moved:
+//   js/grid.js L29, inside TR-GRID-03, constructed `Tile` through the ambient
+//   global that load order supplied; it is the imported binding here.
+//   js/grid.js L41, inside TR-GRID-04, drew from the global random source; the
+//   draw comes from the injected `spawn-position` substream here.
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-GRID-01  the spawn-position substream injected into
+//               `randomAvailableCell` rather than reached as a module binding
+//   DL-GRID-02  the restore walk bounded by this grid's own edge length
 
 import { Tile } from './tile';
 import type {

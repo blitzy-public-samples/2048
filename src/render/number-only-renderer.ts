@@ -4,58 +4,79 @@
 // also selectable while a context is available. It reads no capability probe:
 // `mount()` takes no probe argument and consults none.
 //
-// PRODUCED STRUCTURE
-// style/main.scss names this module as the producer of four class names
-// index.html no longer contains, and this module builds them into the
-// `#board-number-only` layer at the configured size:
-//   .grid-container  the empty-cell layer, one .grid-row per row
-//   .grid-row        one row of the lattice
-//   .grid-cell       one cell of the lattice
-//   .tile-container  the tile layer
-//   .tile            one tile, holding one .tile-inner
+// PRODUCED STRUCTURE — CONTRACT
+// This module is the producer of the five class names style/main.scss styles
+// and index.html no longer contains: `.grid-container`, `.grid-row`,
+// `.grid-cell`, `.tile-container` and `.tile` with its `.tile-inner`. All of
+// them are generated into the `#board-number-only` layer at the size a commit
+// carries, where index.html previously held sixteen static `.grid-cell`
+// elements and an empty `.tile-container`. The lattice carries the grid
+// semantics — `role="grid"`, `role="row"`, `role="gridcell"`, the four ARIA
+// position attributes and one accessible name per cell — and the tile layer
+// carries `aria-hidden="true"`. The produced tree is drawn as a named Mermaid
+// figure in docs/architecture/component-interaction.md.
 //
-// index.html held sixteen `.grid-cell` elements and an empty `.tile-container`;
-// both were removed, and every element above is generated from the board size a
-// commit carries.
-//
-// The lattice carries the grid semantics — `role="grid"`, `role="row"`,
-// `role="gridcell"`, the four ARIA position attributes and one accessible name
-// per cell — and the tile layer carries `aria-hidden="true"`. The live region
-// and the parallel board that index.html declares belong to src/ui/a11y/; this
-// module announces nothing and builds neither, and `readRenderedBoard()` is
-// what it exposes for them to read.
+// The live region and the parallel board that index.html declares belong to
+// src/ui/a11y/; this module announces nothing and builds neither, and
+// `readRenderedBoard()` is what it exposes for them to read.
 //
 // SUPERSEDES js/html_actuator.js, which is deleted. It is a SUBSCRIBER, not a
 // callee: the vanilla manager pushed to the actuator, and this module reads the
 // `state:commit` event instead.
-//
-// FOUR CHANGES TO THE PORTED BEHAVIOUR
-//   1. Every element lookup is guarded. The vanilla actuator held four
-//      unchecked `querySelector` results, dereferenced them throughout, and
-//      indexed `getElementsByTagName("p")` without checking the result. An
-//      absent element is reported once through the injected reporter and the
-//      remaining surfaces still render.
-//   2. Its two nested `requestAnimationFrame` calls become `render()` and
-//      `frame()`, which src/render/render-loop.ts drives. The two-phase paint
-//      they produced is preserved: a tile that moved is drawn at its previous
-//      cell on one frame and moved to its new cell on the next.
-//   3. `applyClasses` uses `classList` rather than the wholesale
-//      `setAttribute("class", …)` the actuator used, whose own comment cited
-//      js/classlist_polyfill.js. That file is deleted.
-//   4. The fill, the numeral colour and the numeral size of each tile are
-//      resolved through `resolveTileTheme` of src/theme/themes.ts and
-//      `tileNumeralSize` of src/theme/tokens.ts and published as custom
-//      properties, where the actuator emitted a value class alone.
 //
 // This module consumes no randomness, touches no storage, reads no clock,
 // imports no rendering library and holds no engine reference. It reads the
 // `state:commit` event, and it retains no part of a payload after the event
 // that carried it.
 //
-// Decisions behind this file: DL-NUMBER-01, the number-only mode being a
-// DL-NUMBER-02, `classList` as the class-mutation surface; and
-// DL-NUMBER-03, the tile appearance published as custom properties. All
-// Traceability rows: TR-NUMBER-01 through TR-NUMBER-04, one per numbered
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-NUMBER-01  js/html_actuator.js L10-L36   `actuate`, ported as `render()`
+//                                               queueing and `frame()` drawing,
+//                                               which src/render/render-loop.ts
+//                                               drives in place of the two
+//                                               nested `requestAnimationFrame`
+//                                               calls
+//   TR-NUMBER-02  js/html_actuator.js L43-L47   `clearContainer`, ported as
+//                                               `clearElement()` and the
+//                                               tile-layer reconciliation
+//   TR-NUMBER-03  js/html_actuator.js L49-L91   `addTile`, ported as
+//                                               `planTile()` and `drawTile()`
+//   TR-NUMBER-04  js/html_actuator.js L93-L95   `applyClasses`, ported onto
+//                                               `classList` where the actuator
+//                                               wrote the whole class
+//                                               attribute and cited
+//                                               js/classlist_polyfill.js,
+//                                               which is deleted
+//   TR-NUMBER-05  js/html_actuator.js L97-L104  `normalizePosition` and
+//                                               `positionClass`, ported as
+//                                               `positionClass()` and
+//                                               `positionTransform()`
+//   TR-NUMBER-06  js/html_actuator.js L1-L8     the four unchecked
+//                                               `querySelector` results, ported
+//                                               as guarded lookups that report
+//                                               an absent element once
+//   TR-NUMBER-07  target-only row               the generated lattice and its
+//                                               grid semantics
+//   TR-NUMBER-08  target-only row               `readRenderedBoard()`
+//   TR-NUMBER-09  target-only row               the fill, numeral colour and
+//                                               numeral size published as
+//                                               custom properties, resolved
+//                                               through `resolveTileTheme` of
+//                                               src/theme/themes.ts and
+//                                               `tileNumeralSize` of
+//                                               src/theme/tokens.ts
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-NUMBER-01  the number-only mode as a first-class renderer that consults
+//                 no capability probe
+//   DL-NUMBER-02  `classList` as the class-mutation surface
+//   DL-NUMBER-03  the tile appearance published as custom properties
+//   DL-NUMBER-04  a moved tile's node reconciled across paints while a spawn
+//                 and a merge each take a fresh node
+//   DL-NUMBER-05  every element lookup guarded and an absent element reported
+//                 once
 
 import {
   MAX_BOARD_SIZE,
@@ -255,9 +276,9 @@ const REFUSED_SUBSCRIBE_METRIC = 'render.numberOnly.subscribe.refused';
 /**
  * One cell of the rendered board, as plain data.
  *
- * Derived from the live tile during the event that carried it and holding no
- * reference to it, so it stays valid after the engine has mutated the board
- * that produced it.
+ * Derived from the board and tile projection a `state:commit` event carries,
+ * and holding no reference back to it, so it stays valid after the engine has
+ * moved on from the turn that emitted.
  */
 export interface RenderedCell {
   /** Zero-based column index, the outer index of `cells[x][y]`. */
@@ -339,6 +360,14 @@ export interface NumberOnlyRendererOptions {
    * to `mount(host)`.
    */
   readonly host?: Element | null;
+
+  /**
+   * The WebGL canvas layer, `#board-canvas` of index.html.
+   *
+   * `mount()` records its `hidden` state and hides it, because nothing draws
+   * into it while the board is drawn as DOM elements, and `unmount()` restores
+   * the state it found. No rendering context is ever requested from it here.
+   */
   readonly canvas?: Element | null;
 
   /**
@@ -389,10 +418,25 @@ export interface NumberOnlyRendererOptions {
    * is the value js/html_actuator.js L60 compared against.
    */
   readonly superThreshold?: number;
+
+  /**
+   * Theme to pin, as a `Theme` or a theme id.
+   *
+   * Supplying it fixes the palette for the renderer's whole life and no theme
+   * change is followed. An id that no theme carries is reported and the active
+   * theme is used instead. Omitting it follows the theme in force, repainting
+   * on every change.
+   */
   readonly theme?: Theme | ThemeId;
 
   /** Copy overrides. Absent members take `numberOnlyRendererCopy`. */
   readonly copy?: Partial<NumberOnlyRendererCopy>;
+
+  /**
+   * Sink the counters and diagnostics leave through. Wrapped so a reporter that
+   * throws cannot reach a paint. Defaults to a sink that discards, which is why
+   * omitting it silences reporting rather than disabling the renderer.
+   */
   readonly reporter?: RenderReporter;
 
   /**
@@ -411,6 +455,16 @@ export interface NumberOnlyRendererOptions {
  */
 export interface NumberOnlyRenderer {
   readonly mounted: boolean;
+
+  /**
+   * Resolves a host, unmounts anything already standing, and builds the board.
+   *
+   * @param host Host to build inside. Omitted, the constructed `host` option is
+   *   used.
+   * @returns Whether the board is mounted afterwards. `false` after
+   *   `dispose()`, where no document is reachable, and where no host resolves;
+   *   each of the last two is reported.
+   */
   mount(host?: Element | null): boolean;
 
   /**
@@ -423,6 +477,19 @@ export interface NumberOnlyRenderer {
    * nothing.
    */
   unmount(): void;
+
+  /**
+   * Registers `render` against `state:commit` and returns the release handle.
+   *
+   * Called more than once, each call registers its own listener and returns its
+   * own handle; a handle is idempotent, so releasing it twice releases once.
+   * After `dispose()` no listener is registered, the refusal is reported and the
+   * returned handle releases nothing, so a caller need not know whether the
+   * renderer outlived its handle.
+   *
+   * @param events Emitter to subscribe to.
+   * @returns The release handle.
+   */
   subscribe(events: EngineEvents): EngineEventSubscription;
 
   /**
@@ -434,8 +501,18 @@ export interface NumberOnlyRenderer {
    * of it is retained.
    */
   render(commit: StateCommitEvent): void;
-  frame(): boolean;
 
+  /**
+   * Runs the work of one frame: paints a queued commit, or applies the position
+   * rewrites a previous paint deferred.
+   *
+   * @returns Whether a further frame is still owed. `true` only when this call
+   *   painted a commit that left rewrites outstanding — the second
+   *   `requestAnimationFrame` js/html_actuator.js nested inside the first — so a
+   *   caller drives `frame()` again exactly while it returns `true`, and `false`
+   *   means nothing is queued and nothing is deferred.
+   */
+  frame(): boolean;
 
   /**
    * Everything the last paint put on screen, as plain data, or `null` before
@@ -444,7 +521,18 @@ export interface NumberOnlyRenderer {
    * @returns A frozen snapshot, safe to read after the engine has moved on.
    */
   readRenderedBoard(): RenderedBoard | null;
+
+  /**
+   * Unmounts the board, drops the queued commit and the last rendered board,
+   * releases every engine subscription this renderer registered and the theme
+   * subscription it holds.
+   *
+   * Idempotent. Afterwards `mount()` returns `false`, `subscribe()` registers
+   * nothing, `frame()` has no work and `readRenderedBoard()` returns `null`.
+   */
   dispose(): void;
+
+  /** Alias of `dispose()`, for callers that hold a renderer by that name. */
   destroy(): void;
 }
 
@@ -487,9 +575,8 @@ interface PaintedTile {
  * js/html_actuator.js L14 emptied the tile layer on every actuation and L16-L22
  * built every tile again, which is what the reconciliation below replaces: a
  * tile that only moved keeps its node, and its position is rewritten. The
- * animated states are NOT retained — a spawn and a merge take a fresh node,
- * because `appear` and `pop` are CSS animations and re-adding the class that
- * declares one does not restart it.
+ * animated states are NOT retained: a spawn and a merge each take a fresh node.
+ * Decision DL-NUMBER-04.
  */
 interface RetainedTile {
   /** The `.tile` element. */
@@ -1535,19 +1622,18 @@ export function createNumberOnlyRenderer(
    * Draws one tile, and the pair it merged from, reconciling against the nodes
    * the previous paint left in place.
    *
-   * Three cases, which are the three branches of js/html_actuator.js L66-L83:
+   * Three cases, which are the three branches of js/html_actuator.js L66-L83.
+   * Decision DL-NUMBER-04.
    *
-   *   moved     the node at the cell it came from is claimed and moved, so the
-   *             transition runs off the rewrite rather than off a deferred
-   *             class swap on a node built this paint. Where no node can be
+   *   moved     the node at the cell it came from is claimed and moved, and the
+   *             transition runs off that rewrite. Where no node can be
    *             claimed — the first paint, or a restored board — one is built
    *             at the source cell and moved on the next frame, exactly as
    *             L67-L72 did.
-   *   merged    a fresh node takes `.tile-merged`, because `pop` is a CSS
-   *             animation and re-adding the class does not restart it. The two
-   *             source tiles are drawn beneath it as transient nodes, which is
-   *             what L73-L80 drew and L14 removed on the next actuation.
-   *   spawned   a fresh node takes `.tile-new`, for the same reason.
+   *   merged    a fresh node takes `.tile-merged`, and the two source tiles are
+   *             drawn beneath it as transient nodes, which is what L73-L80 drew
+   *             and L14 removed on the next actuation.
+   *   spawned   a fresh node takes `.tile-new`.
    *
    * @param planned Tile to draw.
    * @param theme Theme the presentation is resolved under.
@@ -1658,19 +1744,16 @@ export function createNumberOnlyRenderer(
   };
 
   /**
-   * Writes the score and, where it rose, the delta.
+   * Tracks the score delta. Writes nothing: the score outlets and the
+   * `.score-addition` element belong to src/ui/components/score-panel.ts,
+   * which src/ui/screens/hud.ts mounts.
    *
-   * Ported from js/html_actuator.js L106-L121: the delta is the difference
-   * against the score the previous paint wrote, which is held from L7 and
-   * replaced at L110, and the `.score-addition` element carrying it is
-   * appended after the score text is written, which is the order L112 and L119
-   * used. style/main.scss gives that element the `move-up` animation, so it
-   * removes itself from view without this module timing anything.
+   * The delta is the difference against the score of the previous paint, which
+   * is the quantity js/html_actuator.js L106-L110 computed against the score it
+   * held from L7. The held score is replaced on every call, so a caller that
+   * discards a delta cannot make a later one wrong.
    *
-   * The held score is replaced whether or not the outlet is present, so an
-   * absent outlet cannot make a later delta wrong.
-   *
-   * @returns The delta, which is `0` or negative where none was appended.
+   * @returns The delta, which is `0` or negative where the score did not rise.
    */
   const trackScoreDelta = (score: number): number => {
     const difference = score - shownScore;
@@ -1872,10 +1955,11 @@ export function createNumberOnlyRenderer(
    * as long as this renderer holds a semantic lattice of its own.
    *
    * The number-only lattice carries `role="grid"` and a labelled cell per
-   * position. src/ui/a11y/parallel-board.ts, PLANNED AND NOT PRESENT AT THIS
-   * COMMIT, is to build a second lattice carrying the same roles over the same
-   * board. Exactly one of the two is exposed at a time; this renderer's own
-   * lattice is the one, because it is the surface that is drawn.
+   * position. `createParallelBoardLayer` of src/ui/a11y/focus-manager.ts
+   * builds a second lattice carrying the same roles over the same board, and
+   * is reached here only through the structural `ParallelBoardLifecycle`.
+   * Exactly one of the two is exposed at a time; this renderer's own lattice is
+   * the one, because it is the surface that is drawn.
    *
    * Called once this renderer HAS a lattice, never merely once it is mounted:
    * a mount with no configured size defers the lattice to the first commit,
@@ -2133,8 +2217,9 @@ export function createNumberOnlyRenderer(
       return;
     }
 
-    // Read here, inside the emission: `state:commit` carries the live
-    // board, and the next turn mutates the same objects.
+    // `planCommit` consumes the detached projection the event carries here,
+    // inside the emission, and the plan it returns is what the next frame
+    // paints; no part of the payload is retained past this call.
     queued = planCommit(commit);
 
     reporter.onCount({

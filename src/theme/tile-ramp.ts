@@ -29,8 +29,37 @@
  * suite and the separately stored seeded snapshot suite import it with no DOM,
  * no WebGL and no observability stack.
  *
- * Decisions behind this file: DL-RAMP-01 through DL-RAMP-04 in
- * docs/DECISION_LOG.md. Traceability rows: TR-RAMP-01 through TR-RAMP-06, one
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-RAMP-01  style/main.scss L334-L402  the `@while` generation loop, ported
+ *                                          as `computeTileTheme`
+ *   TR-RAMP-02  style/main.scss L336-L337  the `$gold-percent` interpolation,
+ *                                          ported as `goldPercent` and
+ *                                          `sassMix`
+ *   TR-RAMP-03  style/main.scss L339-L349  the `$special-colors` accent list,
+ *                                          ported as `tileSpecialColors`
+ *   TR-RAMP-04  style/main.scss L351-L356  the bright-text threshold, ported as
+ *                                          `TileTheme.brightText`
+ *   TR-RAMP-05  style/main.scss L358-L370  the `$glow-opacity` term and its
+ *                                          two-part shadow, ported as
+ *                                          `haloAlpha`, `insetAlpha` and
+ *                                          `glowSuppressed`
+ *   TR-RAMP-06  style/main.scss L372-L380  the `tile-super` band above the
+ *                                          ramp's last value
+ *   TR-RAMP-07  target-only row            `parseHexColor`, `quantiseColor` and
+ *                                          `formatHexColor`
+ *   TR-RAMP-08  target-only row            `rampValue`, `rampExponent` and
+ *                                          `tileRampConstants`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-RAMP-01  the ramp implemented as the same generative function the
+ *               stylesheet runs, never as a copied table
+ *   DL-RAMP-02  the unquantised `color` channel as the fill source
+ *   DL-RAMP-03  the palette supplied as input, so a theme changes hue and not
+ *               the ramp's shape
+ *   DL-RAMP-04  the `colorHex` form retained, reproducing the fills the
+ *               pre-migration generated stylesheet shipped
  */
 
 import {

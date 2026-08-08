@@ -11,6 +11,30 @@
  * as a runtime check; src/storage/local-storage-manager.ts accepts a key only
  * when both agree, so no read, write or removal of this origin's other Web
  * Storage keys is reachable through the adapter.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-KEYS-01  js/local_storage_manager.js L22  `bestScore`, the frozen
+ *                                                unprefixed literal
+ *   TR-KEYS-02  js/local_storage_manager.js L23  `gameState`, the frozen
+ *                                                unprefixed literal
+ *   TR-KEYS-03  js/local_storage_manager.js L31  the probe's key literal,
+ *                                                minted here as
+ *                                                `STORAGE_PROBE_KEY`
+ *   TR-KEYS-04  target-only row                  `STORAGE_NAMESPACE` and
+ *                                                `namespacedKey()`
+ *   TR-KEYS-05  target-only row                  `RUN_STATE_KEY`
+ *   TR-KEYS-06  target-only row                  `OwnedStorageKey`,
+ *                                                `isOwnedStorageKey()` and
+ *                                                `OWNED_STORAGE_KEYS`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-KEYS-01  the two pre-migration literals kept unprefixed and every key
+ *               minted after them namespaced
+ *   DL-KEYS-02  the owned set declared once as both a type and a runtime check
+ *   DL-KEYS-03  `namespacedKey()` throwing for a name that would not split into
+ *               exactly one namespace and one name
  */
 
 /**
@@ -123,6 +147,16 @@ export function isOwnedStorageKey(key: string): key is OwnedStorageKey {
 /** Key the versioned run-state envelope is persisted under. */
 export const RUN_STATE_KEY = namespacedKey('runState');
 
+/**
+ * Key the serialised keyboard binding table is persisted under.
+ *
+ * A remap is a setting, so it outlives the page that made it: the input manager
+ * writes this key through its own single rebind api and reads it back at
+ * construction (N2). The payload is what `serializeKeymap` of
+ * src/input/keymap.ts emits, and `deserializeKeymap` is what validates it.
+ */
+export const KEYMAP_KEY = namespacedKey('keymap');
+
 /** Key the Web Storage writability probe writes and immediately removes. */
 export const STORAGE_PROBE_KEY = namespacedKey('probe');
 
@@ -135,4 +169,5 @@ export const OWNED_STORAGE_KEYS: readonly OwnedStorageKey[] = Object.freeze([
   BEST_SCORE_KEY,
   GAME_STATE_KEY,
   RUN_STATE_KEY,
+  KEYMAP_KEY,
 ]);

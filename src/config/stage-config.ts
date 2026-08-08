@@ -1,6 +1,24 @@
 /**
  * Stage goal definitions and the stage progression curve.
  *
+ * HAS NO VANILLA ANALOGUE: no construct in js/game_manager.js, js/grid.js or
+ * js/tile.js resolved a stage, so every row below is target-only. One
+ * traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+ * module's area enumerated:
+ *   TR-STAGE-01  `StageGoalKind`, `StageGoal` and the two goal variants
+ *   TR-STAGE-02  `evaluateStageGoal` and `StageGoalProgress`
+ *   TR-STAGE-03  `StageConfig` and `stageGoalForIndex`
+ *   TR-STAGE-04  `createDefaultStageConfig` and `DEFAULT_STAGE_CONFIG`
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-STAGE-01  the two goal kinds, `'highest-tile'` and
+ *                `'score-threshold'`, as the whole goal vocabulary
+ *   DL-STAGE-02  the goal evaluated at `onAfterMove` and resolved at
+ *                `onStageEnd`
+ *   DL-STAGE-03  the ladder expressed as a plain-JSON config, so a goal
+ *                persists verbatim in the run-state envelope
+ *
  * Serialisation contract: `StageGoal` and `StageConfig` are plain JSON data —
  * string and number members only, no functions, class instances or `undefined`
  * members — so a goal is persisted verbatim as the run-state envelope's
@@ -239,8 +257,6 @@ export function stageGoalForIndex(
       // Explicit entries are bounded on the same terms as derived ones: a
       // `StageConfig` can arrive from JSON, where `target` is only a number,
       // so the produced goal is normalised rather than copied.
-      // a `StageConfig` can arrive from JSON, where `target` is only a
-      // number, so the produced goal is normalised rather than copied.
       return createStageGoal(
         entry.kind,
         boundedTarget(entry.target, ABSOLUTE_TARGET_CEILING),

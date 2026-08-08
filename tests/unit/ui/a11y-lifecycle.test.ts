@@ -25,7 +25,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import { createNumberOnlyRenderer } from '../../../src/render/number-only-renderer';
-import type { UiReportFields } from '../../../src/ui/a11y/settings';
+import type {
+  UiReportFields,
+  UiReporter,
+} from '../../../src/ui/a11y/settings';
 import {
   createFocusManager,
   createParallelBoardLayer,
@@ -304,6 +307,136 @@ describe('the focus manager destroys without a receiver', () => {
       releaseAll();
     }).not.toThrow();
     expect(manager.trapDepth()).toBe(0);
+
+    manager.destroy();
+  });
+});
+
+/* ==========================================================================
+ * The restore target a trap records
+ * ========================================================================== */
+
+describe('the restore target a focus trap records', () => {
+  /** Collects every warn record and counter a manager reports. */
+  const createRecorder = (): {
+    warnings: string[];
+    counters: string[];
+    reporter: UiReporter;
+  } => {
+    const warnings: string[] = [];
+    const counters: string[] = [];
+
+    return {
+      warnings,
+      counters,
+      reporter: {
+        log: (level, message): void => {
+          if (level === 'warn') {
+            warnings.push(message);
+          }
+        },
+        count: (name): void => {
+          counters.push(name);
+        },
+        error: (message): void => {
+          warnings.push(message);
+        },
+      },
+    };
+  };
+
+  it('skips the document body, and reports it as a state rather than a fault', () => {
+    document.body.innerHTML = `
+      <div id="board" tabindex="0">board</div>
+      <div id="dialog"><button type="button" id="inside">choose</button></div>
+    `;
+
+    const board = document.getElementById('board')!;
+    const dialog = document.getElementById('dialog')!;
+    const recorder = createRecorder();
+    const manager = createFocusManager({ reporter: recorder.reporter });
+
+    // Nothing holds focus, which is what a document reports as its body — and is
+    // the ordinary state in a game that binds its keys on the document.
+    expect(document.activeElement).toBe(document.body);
+
+    const trap = manager.trap(dialog, {
+      label: 'reward',
+      restoreFocusTo: board,
+      reporter: recorder.reporter,
+    });
+
+    expect(trap).not.toBeNull();
+
+    trap?.release();
+
+    // The FALLBACK served the release, which is what should have happened all
+    // along: focus lands on the supplied element rather than being left nowhere.
+    expect(document.activeElement).toBe(board);
+
+    // And no failure was reported: a body restore target is a state, not a
+    // fault, so it is counted and not warned about.
+    expect(recorder.warnings).not.toContain(
+      'focus trap restore target did not take focus',
+    );
+    expect(recorder.counters).toContain('ui.focus.trap.restore_body');
+
+    manager.destroy();
+  });
+
+  it('still restores to a real element that held focus', () => {
+    document.body.innerHTML = `
+      <button type="button" id="trigger">settings</button>
+      <div id="dialog"><button type="button" id="inside">close</button></div>
+    `;
+
+    const trigger = document.getElementById('trigger') as HTMLButtonElement;
+    const dialog = document.getElementById('dialog')!;
+    const recorder = createRecorder();
+    const manager = createFocusManager({ reporter: recorder.reporter });
+
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    const trap = manager.trap(dialog, {
+      label: 'settings',
+      reporter: recorder.reporter,
+    });
+
+    trap?.release();
+
+    // Unchanged behaviour for the case the recording exists for: focus returns to
+    // the control that opened the dialog.
+    expect(document.activeElement).toBe(trigger);
+    expect(recorder.counters).not.toContain('ui.focus.trap.restore_body');
+
+    manager.destroy();
+  });
+
+  it('leaves focus inside the document when nothing was recorded and no fallback was given', () => {
+    document.body.innerHTML = `
+      <div id="dialog"><button type="button" id="inside">ok</button></div>
+    `;
+
+    const dialog = document.getElementById('dialog')!;
+    const recorder = createRecorder();
+    const manager = createFocusManager({ reporter: recorder.reporter });
+
+    const trap = manager.trap(dialog, {
+      label: 'reward',
+      reporter: recorder.reporter,
+    });
+
+    expect(trap).not.toBeNull();
+
+    // No warning even here: there was nothing to restore to and nothing was
+    // promised, so there is nothing to report as broken.
+    expect(() => {
+      trap?.release();
+    }).not.toThrow();
+    expect(recorder.warnings).not.toContain(
+      'focus trap restore target did not take focus',
+    );
 
     manager.destroy();
   });

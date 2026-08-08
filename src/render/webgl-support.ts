@@ -25,6 +25,39 @@
  * explicit override; consumers gate the camera and particle effects on it. A
  * caller drives that override, so an accessibility preference reaches this
  * module without it importing src/ui/.
+ *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-WEBGL-01  target-only row  `probeWebGLSupport()`, `WebGLSupportResult`
+ *                                 and `resetWebGLSupportProbe()` — the sixth
+ *                                 capability check and the first reported
+ *   TR-WEBGL-02  target-only row  `attachContextLossHandlers()`,
+ *                                 `ContextLossHandlers` and
+ *                                 `WebGLContextLossInfo`
+ *   TR-WEBGL-03  target-only row  `RenderReporter`, `NOOP_RENDER_REPORTER`,
+ *                                 `createRenderReporter()` and
+ *                                 `createGuardedRenderReporter()`
+ *   TR-WEBGL-04  target-only row  `readMotionPreference()`,
+ *                                 `queryReducedMotion()`,
+ *                                 `setReducedMotionOverride()`,
+ *                                 `subscribeReducedMotion()` and
+ *                                 `REDUCED_MOTION_QUERY`
+ *   TR-WEBGL-05  target-only row  `describeRenderError()` and the contained
+ *                                 reporter counters
+ *
+ * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+ * only so the construct can be found from the log:
+ *   DL-WEBGL-01  the probe returning frozen serialisable data and writing
+ *                nothing onto the global object
+ *   DL-WEBGL-02  the probe result held after the first call, discarded only by
+ *                `resetWebGLSupportProbe()`
+ *   DL-WEBGL-03  no identifying extension requested, so no renderer or vendor
+ *                string enters a result or a report
+ *   DL-WEBGL-04  the reporter contract and its containment boundary declared
+ *                here, so no module under src/render/ imports
+ *                src/observability/
+ *   DL-WEBGL-05  the reduced-motion preference self-detected with an explicit
+ *                override, so no module under src/render/ imports src/ui/
  */
 
 /* ==========================================================================

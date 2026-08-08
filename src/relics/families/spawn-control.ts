@@ -16,9 +16,25 @@
 // This module reads no DOM, performs no I/O, reads no clock, reports nothing
 // and holds no mutable state.
 //
-// Target row of docs/TRACEABILITY_MATRIX.md. The relic catalogue is published
-// in docs/RELICS.md, the rules the relics read in docs/CONFIGURATION.md, and
-// hook dispatch in docs/architecture/hook-dispatch-sequence.md.
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, in declaration
+// order, all target-only because no vanilla construct declared a relic:
+//   TR-SPAWN-01  twin-seed         onSpawn
+//   TR-SPAWN-02  fertile-ground    onSpawn
+//   TR-SPAWN-03  prospectors-eye   onStageStart, onSpawn
+//   TR-SPAWN-04  loaded-dice       onSpawn
+//   TR-SPAWN-05  the frozen `SPAWN_CONTROL_FAMILY` export
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-SPAWN-01  each relic acting through the `onSpawn` payload's `value`,
+//                `position` and `count` members alone
+//   DL-SPAWN-02  every value and position a relic supplies drawn from the
+//                `spawn-value` and `spawn-position` substreams the base game
+//                already consumes
+//
+// The relic catalogue is published in docs/RELICS.md, the rules the relics read
+// in docs/CONFIGURATION.md, and hook dispatch in
+// docs/architecture/hook-dispatch-sequence.md.
 
 import { RARITIES, type Relic, type RelicFamily } from '../relic-types';
 import type { ReadonlyGridView } from '../../engine/hooks';
@@ -158,7 +174,7 @@ const twinSeed: Relic = Object.freeze<Relic>({
     'Half the time, a newly spawned lowest-value tile arrives as the next ' +
     'value up instead.',
 
-  hooks: {
+  hooks: Object.freeze({
     onSpawn: (payload, context) => {
       const values = context.config.spawn.values;
 
@@ -188,27 +204,33 @@ const twinSeed: Relic = Object.freeze<Relic>({
 
       return { ...payload, value: promoted };
     },
-  },
+  }),
 });
 
 /**
- * Steers a spawn onto an empty cell that touches a tile already on the board.
+ * Sprouts a SECOND tile beside a tile already on the board, leaving the
+ * spawn the engine is resolving exactly as it arrived.
  *
- * Binds `onSpawn`. Candidates are the empty cells adjacent to an occupied
- * cell, less the cell the spawn already carries. The engine inserts that
- * tile only after this dispatch resolves; the cell still reads as empty
- * here. An absent position is left absent, and a board offering no other
- * adjacent cell leaves the spawn where it is.
+ * Binds `onSpawn`. The extra tile is recorded through
+ * `HookContext.effects.insertTile`, which src/engine/board-effects.ts applies
+ * once this handler has returned, so the net effect of the dispatch is TWO
+ * tiles rather than one relocated tile. The payload is returned unchanged.
+ *
+ * Candidates are the empty cells adjacent to an occupied cell, less the cell
+ * the spawn already carries — the engine inserts that tile only after this
+ * dispatch resolves, so its cell still reads as empty here. An absent
+ * position is left absent, and a board offering no other adjacent cell
+ * sprouts nothing.
  */
 const fertileGround: Relic = Object.freeze<Relic>({
   id: 'fertile-ground',
   name: 'Fertile Ground',
   rarity: RARITIES[1],
   description:
-    'New tiles sprout beside tiles already on the board instead of in open ' +
-    'space.',
+    'Every new tile sprouts a second tile of the same value beside a tile ' +
+    'already on the board.',
 
-  hooks: {
+  hooks: Object.freeze({
     onSpawn: (payload, context) => {
       const origin = payload.position;
 
@@ -236,9 +258,11 @@ const fertileGround: Relic = Object.freeze<Relic>({
         return payload;
       }
 
-      return { ...payload, position: chosen };
+      context.effects.insertTile(chosen, payload.value);
+
+      return payload;
     },
-  },
+  }),
 });
 
 /**
@@ -258,7 +282,7 @@ const prospectorsEye: Relic = Object.freeze<Relic>({
   description:
     'New tiles appear along the edges of the board, leaving the centre clear.',
 
-  hooks: {
+  hooks: Object.freeze({
     onStageStart: (payload, context) => {
       // Plain JSON: the slot is persisted inside the run envelope.
       context.state = { stageBoardSize: payload.boardSize };
@@ -287,7 +311,7 @@ const prospectorsEye: Relic = Object.freeze<Relic>({
 
       return { ...payload, position: chosen };
     },
-  },
+  }),
 });
 
 /**
@@ -307,7 +331,7 @@ const loadedDice: Relic = Object.freeze<Relic>({
     'The spawn odds are turned upside down: the rarest tile value ' +
     'becomes the most common.',
 
-  hooks: {
+  hooks: Object.freeze({
     onSpawn: (payload, context) => {
       const spawn = context.config.spawn;
       const values = spawn.values;
@@ -328,7 +352,7 @@ const loadedDice: Relic = Object.freeze<Relic>({
 
       return { ...payload, value: drawn };
     },
-  },
+  }),
 });
 
 /* ==========================================================================

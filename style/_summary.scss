@@ -1,43 +1,48 @@
 // Run summary: the end-of-run panel — final score, stage reached, the relics
 // collected in pickup order, and the run seed, displayed and copyable.
 //
-// Selector contract. index.html declares the container and nothing inside it;
-// its consumer renders these children, in this source order:
-//
-//   section.run-summary                       the panel
-//     h2.run-summary-title
-//     div.run-summary-scores
-//       div.run-summary-score                 one per readout
-//         span.run-summary-score-label        caption first, value second
-//         span.run-summary-score-value
-//     hr
-//     h3.run-summary-relics-title
-//     ol.run-summary-relic-list role="list"   pickup order is source order
-//       li.run-summary-relic                  keeps its `list-item` display
-//         div.run-summary-relic-row           carries the row layout
-//           span.run-summary-relic-name
-//           span.run-summary-relic-rarity
-//           span.run-summary-relic-charges
-//     p.run-summary-relics-empty              rendered when no relic was taken
-//     hr
-//     section.run-summary-seed
-//       span.run-summary-seed-label
-//       code.run-summary-seed-value           the run seed, verbatim
-//       button.run-summary-seed-copy
-//       span.run-summary-seed-status          the text copy confirmation
-//     div.run-summary-actions
-//       button.run-summary-action             one per action
+// Selector contract. index.html declares the container and nothing inside it.
+// Its consumer renders, in source order, `section.run-summary` holding the
+// title, `.run-summary-scores` with one `.run-summary-score` per readout
+// (caption element first, value element second), the relic list
+// `ol.run-summary-relic-list` whose source order IS pickup order, the
+// no-relic paragraph, the `.run-summary-seed` group with the verbatim seed, its
+// copy control and its text confirmation, and `.run-summary-actions` with one
+// `.run-summary-action` per action. Every class this file styles is named in a
+// rule below, and the rendered tree is drawn as a named Mermaid figure in
+// docs/architecture/component-interaction.md.
 //
 // `.run-summary-relic` carries no `display`, which leaves the `<li>` at its
-// `list-item` used value: that generates the `::marker` the list is numbered by
-// and keeps the `listitem` role in the accessibility tree, so the row layout is
-// declared one level in on `.run-summary-relic-row`.
+// `list-item` used value, so it keeps its `::marker` and its `listitem` role
+// and the row layout is declared one level in on `.run-summary-relic-row`.
 //
 // Visibility. The router drives the `hidden` attribute and style/main.scss maps
 // `.screen[hidden]` to `display: none`, so every rule here is written
 // `:not([hidden])` and no rule declares `display` on the two elements that are
 // themselves toggled by the attribute.
 
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this file's area enumerated, all target-only because the retired stylesheet
+// carried no run summary:
+//   TR-SUMMARY-01  the panel surface and its two measures
+//   TR-SUMMARY-02  the score readouts and their caption-then-value order
+//   TR-SUMMARY-03  the relic list and its pickup-ordered rows
+//   TR-SUMMARY-04  the no-relic paragraph
+//   TR-SUMMARY-05  the seed group, its copy control and its confirmation
+//   TR-SUMMARY-06  the action row
+//   TR-SUMMARY-07  the narrow-layout restatement at the mobile threshold
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-SUMMARY-01  every length, duration and colour derived from a token once
+//                  at the top of this file, so no rule carries a literal
+//   DL-SUMMARY-02  every rule written `:not([hidden])`, with `display` declared
+//                  on neither attribute-toggled element
+//   DL-SUMMARY-03  `.run-summary-relic` left at its `list-item` display, with
+//                  the row layout one level in
+//   DL-A11Y-06     the seed value's monospace treatment
+//   DL-A11Y-07     the copy confirmation delivered as text
+//
 @use "sass:color";
 @use "sass:math";
 @use "tokens" as *;
@@ -117,9 +122,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 //
 // BLITZY [A11Y]: the control label sits below the WCAG AA 4.5:1 text threshold
 // under the default palette, the same figure style/main.scss flags for this
-// surface.
-//
-// treatment. Decision DL-A11Y-06.
+// surface. Decision DL-A11Y-06.
 @mixin summary-control {
   display: inline-block;
   box-sizing: border-box;
@@ -268,9 +271,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 
 // BLITZY [A11Y]: under the default palette the readout numerals and caption sit
 // below the WCAG AA text thresholds. These are the colours style/main.scss
-// already compiles for `.score-container`.
-//
-// for `.score-container`. Decision DL-A11Y-07.
+// already compiles for `.score-container`. Decision DL-A11Y-07.
 .run-summary-score {
   flex: 1 1 0;
   min-inline-size: 0;

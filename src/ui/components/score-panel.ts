@@ -27,8 +27,6 @@
 // - the two text assignments are appends, and any accessible name is
 // inserted ahead of the value on the same write
 //
-// Changed against that port, decisions DL-SCORE-01 through DL-SCORE-03 in
-//
 // The best score arrives as the storage layer returns it — a string where one
 // is stored and the number `0` where none is — and reaches the DOM as text.
 // No member below converts it, retains it or compares it: js/game_manager.js
@@ -40,8 +38,32 @@
 // report sink is injected. It reads no storage, holds no timer, registers no
 // listener and announces nothing.
 //
-// Decisions behind this file: DL-SCORE-01 through DL-SCORE-03 above, in
-// docs/DECISION_LOG.md. Traceability rows: TR-SCORE-01 through TR-SCORE-06,
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-SCORE-01  js/html_actuator.js L106-L121  `updateScore` and the rising
+//                                               `.score-addition` delta
+//   TR-SCORE-02  js/html_actuator.js L123-L125  `updateBestScore`
+//   TR-SCORE-03  index.html                     the two outlets, each seeded
+//                                               with `0`
+//   TR-SCORE-04  style/main.scss                the `Score` and `Best` `:after`
+//                                               captions, given a real
+//                                               accessible counterpart
+//   TR-SCORE-05  js/game_manager.js L80-L82     the best-score value shape,
+//                                               carried to the DOM unconverted
+//   TR-SCORE-06  js/game_manager.js L95         the best score re-read after
+//                                               the write
+//   TR-SCORE-07  target-only row                `createScorePanel()`,
+//                                               `ScoreSnapshot` and the guarded
+//                                               lookups
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-SCORE-01  the two lookups run through `resolveMount`, with a miss
+//                reported and skipped
+//   DL-SCORE-02  a real accessible counterpart added where the markup declares
+//                no name
+//   DL-SCORE-03  the two text assignments made as appends, with any accessible
+//                name inserted ahead of the value on the same write
 
 import type { BestScoreValue } from '../../engine/types';
 import type { UiReporter } from '../a11y/settings';

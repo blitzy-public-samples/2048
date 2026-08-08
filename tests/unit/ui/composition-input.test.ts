@@ -17,10 +17,17 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { DEFAULT_KEY_BINDINGS, describeBinding } from '../../../src/input/keymap';
 import { start } from '../../../src/main';
 import type { Application } from '../../../src/main';
 import { resetWebGLSupportProbe } from '../../../src/render/webgl-support';
+import { KEYMAP_KEY, RUN_STATE_KEY } from '../../../src/storage/storage-keys';
 import { applyTheme } from '../../../src/theme/themes';
+import {
+  REDUCED_MOTION_ATTRIBUTE,
+  readReflectedReducedMotion,
+} from '../../../src/ui/a11y/settings';
+import { readOwnedStorage } from '../../fixtures/storage';
 
 /**
  * The markup src/main.ts looks up, in the nesting index.html declares it in.
@@ -101,6 +108,7 @@ afterEach(() => {
   // highest score into every later test.
   window.localStorage.removeItem('bestScore');
   window.localStorage.removeItem('gameState');
+  window.localStorage.removeItem(RUN_STATE_KEY);
 });
 
 const press = (key: string, code: string): void => {
@@ -109,11 +117,53 @@ const press = (key: string, code: string): void => {
   );
 };
 
+/**
+ * Waits for a condition to hold, checking on every task turn.
+ *
+ * Replaces a fixed sleep. A sleep encodes a guess about how long a deferred
+ * write takes and turns a slow machine into a failing assertion; this returns as
+ * soon as the condition holds, and fails with a real message when it never does.
+ *
+ * @param holds The condition to wait for.
+ * @param timeoutMs How long to keep checking. Generous, because it costs nothing
+ *   when the condition holds early.
+ * @throws Error when the condition has not held by the deadline.
+ */
+const waitFor = async (
+  holds: () => boolean,
+  timeoutMs = 2000,
+): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+
+  while (!holds()) {
+    if (Date.now() > deadline) {
+      throw new Error(`the condition did not hold within ${timeoutMs}ms`);
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5);
+    });
+  }
+};
+
 const control = (selector: string): HTMLElement => {
   const found = document.querySelector<HTMLElement>(selector);
 
   if (found === null) {
     throw new Error(`the fixture lost ${selector}`);
+  }
+
+  return found;
+};
+
+/** A control in the rendered settings dialog, addressed by its visible name. */
+const panelButton = (name: string): HTMLButtonElement => {
+  const found = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('#settings-panel button'),
+  ).find((candidate) => candidate.textContent === name);
+
+  if (found === undefined) {
+    throw new Error(`the dialog has no control named ${name}`);
   }
 
   return found;
@@ -302,6 +352,80 @@ describe('the settings dialog', () => {
     expect(control('#settings-panel').hidden).toBe(true);
   });
 
+  it('engages exactly one focus trap on the dialog container', () => {
+    // TWO traps on one container is the composition defect: the dialog engaged
+    // its own and the router engaged another over the same element, so the
+    // router recorded a restore target that was already inside the container it
+    // was trapping and warned about it on every open. The router owns it — it
+    // has the trigger to restore focus to and the board to make inert, neither
+    // of which the dialog knows — and the dialog defers (N7).
+    application = start(document);
+
+    control('#settings-button').click();
+
+    const series = application.metrics.snapshot().series;
+    const valueOf = (suffix: string): number =>
+      series
+        .filter((entry) => entry.name.endsWith(suffix))
+        .reduce(
+          (total, entry) =>
+            total + (entry.kind === 'counter' ? entry.value : 0),
+          0,
+        );
+
+    // ONE engagement for one open, and no warning about a restore target inside
+    // the trapped container, which only a second trap over the same element
+    // produces.
+    expect(valueOf('ui_focus_trap_engaged')).toBe(1);
+    expect(valueOf('ui_focus_trap_restore_inside')).toBe(0);
+
+    // Still contained and still inert, so the one trap does the whole job.
+    expect(
+      control('#settings-panel').contains(document.activeElement),
+    ).toBe(true);
+    expect(control('#game-main').hasAttribute('inert')).toBe(true);
+  });
+
+  it('reaches the audio layer through the store alone', () => {
+    // The store is the single owner of mute and volume, and the audio layer
+    // follows it through its own subscription. The dialog used to write the
+    // store AND push the same value into the engine, so one value had two
+    // writers and a later sync could push a value the engine had already taken
+    // (N1).
+    //
+    // The store is written directly here rather than through the dialog's mute
+    // control, because jsdom supplies no `AudioContext`: the engine reports
+    // itself unavailable and the dialog correctly renders that control disabled.
+    // The dialog's own write is asserted against an available engine in
+    // tests/unit/ui/settings-panel.test.ts; what this asserts is the WIRING —
+    // that src/main.ts made the store the engine's source.
+    application = start(document);
+
+    expect(application.soundEngine.isMuted()).toBe(false);
+
+    application.preferences.setMuted(true);
+
+    expect(application.soundEngine.isMuted()).toBe(true);
+
+    application.preferences.setVolume(0.25);
+
+    expect(application.soundEngine.getVolume()).toBeCloseTo(0.25, 5);
+
+    // The last non-zero volume survives a mute: silence is held at the gain, not
+    // by forgetting the volume, so unmuting returns to what was set.
+    application.preferences.setMuted(false);
+
+    expect(application.soundEngine.isMuted()).toBe(false);
+    expect(application.soundEngine.getVolume()).toBeCloseTo(0.25, 5);
+
+    // And a direct write is refused, so a second writer cannot appear.
+    application.soundEngine.setMuted(true);
+    application.soundEngine.setVolume(1);
+
+    expect(application.soundEngine.isMuted()).toBe(false);
+    expect(application.soundEngine.getVolume()).toBeCloseTo(0.25, 5);
+  });
+
   it('switches the palette from the dialog', () => {
     application = start(document);
     control('#settings-button').click();
@@ -316,6 +440,165 @@ describe('the settings dialog', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe(
       'high-contrast',
     );
+  });
+});
+
+/* ==========================================================================
+ * What a dialog control reaches
+ * ========================================================================== */
+
+// Each case below drives a control in the REAL rendered dialog and asserts the
+// effect in the layer that owns it, rather than asserting the store write the
+// dialog's own suite already pins.
+//
+// tests/unit/ui/settings-panel.test.ts asserts the dialog writes the store, and
+// each owning layer's suite asserts it follows the store — but a store write
+// that no layer is subscribed to satisfies both and reaches nothing. These are
+// the joins:
+//
+//   focus restoration  asserted at the router over a stand-in dialog body in
+//                      tests/unit/ui/screen-router.test.ts:535, and at the
+//                      manager in tests/unit/ui/a11y-lifecycle.test.ts:387;
+//                      never once with the real dialog standing in between.
+//   reduced motion     driven through the store or the attribute directly in
+//                      tests/unit/ui/reduced-motion.test.ts; never from the
+//                      dialog's own control.
+//   a rebind           asserted as far as the owner's table in
+//                      tests/unit/ui/settings-panel.test.ts:894 and through
+//                      `remap()` in tests/unit/input/input-dispatch.test.ts;
+//                      never as far as a keystroke that moves the board.
+//
+// The number-only mode's join is the fourth, and lives in
+// tests/unit/render/renderer-selection.test.ts, because it needs a WebGL
+// context to start from a 2.5D board and leave it.
+describe('what a settings control reaches', () => {
+  it('returns focus to the settings control on Escape', () => {
+    application = start(document);
+
+    const trigger = control('#settings-button');
+
+    trigger.click();
+
+    expect(document.activeElement).not.toBe(trigger);
+
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        bubbles: true,
+      }),
+    );
+
+    // The trigger, not the body: a dialog that hides without restoring leaves a
+    // keyboard user at the top of the document with their place lost. Verified
+    // by mutation — dropping the trap release fails this case.
+    //
+    // What this canNOT see is the ORDER of the release against the hide. The
+    // router releases first because focus cannot be restored into a subtree that
+    // has just become `hidden`, but jsdom computes no layout and will focus a
+    // hidden element, so reversing the two still passes here. That ordering is
+    // held by the comment at src/ui/screen-router.ts and was observed in a real
+    // browser, where Escape restored the trigger with `:focus-visible` set.
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('returns focus to the settings control when the dialog closes itself', () => {
+    application = start(document);
+
+    const trigger = control('#settings-button');
+
+    trigger.click();
+
+    const close = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('#settings-panel button'),
+    ).find((candidate) => candidate.textContent === 'Close settings');
+
+    close?.click();
+
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('reduces motion from the dialog, reaching the channel the style layer reads', () => {
+    application = start(document);
+    control('#settings-button').click();
+
+    panelButton('Reduce motion').click();
+
+    expect(application.preferences.getMotionSetting()).toBe('reduce');
+    expect(application.preferences.isReducedMotion()).toBe(true);
+
+    // The reflected attribute is the single channel the style layer and the
+    // on-screen controls both read, and the value only reaches it by way of the
+    // RENDER layer's own store: the root pushes the preference in with
+    // `setReducedMotionOverride`, the store dispatches to every animating
+    // member, and the root's subscription writes the attribute on the way back
+    // out. Verified by mutation — deleting that push fails this case — so this
+    // asserts the round trip through the renderer, not a local write.
+    expect(readReflectedReducedMotion(document.documentElement)).toBe(true);
+    expect(
+      document.documentElement.getAttribute(REDUCED_MOTION_ATTRIBUTE),
+    ).toBe('true');
+
+    panelButton('Allow motion').click();
+
+    // Written explicitly false rather than removed, so an explicit allow is
+    // distinguishable from no preference at all.
+    expect(application.preferences.isReducedMotion()).toBe(false);
+    expect(readReflectedReducedMotion(document.documentElement)).toBe(false);
+  });
+
+  it('rebinds a movement key from the dialog, and the new key moves the board', () => {
+    application = start(document);
+    control('#settings-button').click();
+
+    const rebind = document.querySelector<HTMLButtonElement>(
+      '#settings-panel button[data-settings-action="moveUp"]',
+    );
+
+    expect(rebind).not.toBeNull();
+    rebind?.click();
+    press('t', 'KeyT');
+
+    // The dialog shows what the OWNER holds, so this fails for a dialog that
+    // only believed it had rebound something.
+    expect(control('#settings-panel').textContent).toContain(
+      describeBinding(
+        {
+          ...DEFAULT_KEY_BINDINGS,
+          moveUp: {
+            ...DEFAULT_KEY_BINDINGS.moveUp,
+            keys: ['t'],
+            codes: ['KeyT'],
+          },
+        },
+        'moveUp',
+      ),
+    );
+    expect(readOwnedStorage(KEYMAP_KEY)).toContain('KeyT');
+
+    // Closed first: movement is deliberately blocked while the dialog is open,
+    // so a keystroke pressed here would prove nothing about the binding.
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        bubbles: true,
+      }),
+    );
+
+    const moves = countMoveAttempts();
+
+    press('t', 'KeyT');
+
+    expect(moves.value).toBe(1);
+
+    // And the key it replaced is inert, which is what makes this a rebind
+    // rather than an addition.
+    press('ArrowUp', 'ArrowUp');
+
+    expect(moves.value).toBe(1);
+
+    moves.stop();
   });
 });
 
@@ -346,11 +629,13 @@ describe('the live region', () => {
     press('ArrowDown', 'ArrowDown');
     press('ArrowLeft', 'ArrowLeft');
 
-    // The announcer writes on a later task, in two phases, so the region is
-    // read after the event loop has turned rather than synchronously.
-    await new Promise((resolve) => {
-      setTimeout(resolve, 40);
-    });
+    // POLLED, NOT SLEPT. The announcer writes on a later task and in two phases,
+    // so the region has to be read after the event loop has turned — but a fixed
+    // sleep encodes a guess about how long that takes, and a machine slower than
+    // the guess fails a test about correctness for a reason that has nothing to
+    // do with correctness. Polling waits exactly as long as it needs to and no
+    // longer.
+    await waitFor((): boolean => announced() !== '');
 
     // Empty for the entire life of a run before the root constructed and fed an
     // announcer. Anything at all here is the fix.
@@ -474,5 +759,191 @@ describe('the win overlay', () => {
     expect(moves.value).toBe(1);
 
     moves.stop();
+  });
+});
+
+/* ==========================================================================
+ * The renderer fallback keeps the application whole
+ * ========================================================================== */
+
+describe('a 2.5D renderer that cannot mount', () => {
+  it('falls back to the number-only board without losing input, UI or focus', () => {
+    // jsdom implements no WebGL context, so the probe reports the board
+    // unavailable and this is the fallback path in production form.
+    application = start(document);
+
+    expect(application.renderer.mode).toBe('number-only');
+
+    // Reported as a FALLBACK rather than a choice, so the capability stays
+    // observable: this machine has no WebGL context, it was not asked for.
+    expect(application.renderer.fallback).toBe(true);
+    expect(application.renderer.chosen).toBe(false);
+    expect(application.renderer.support.supported).toBe(false);
+
+    // INPUT survived. The keystroke reaches the engine and resolves a turn.
+    let commits = 0;
+
+    application.engine.events.on('state:commit', (): void => {
+      commits += 1;
+    });
+
+    press('ArrowUp', 'ArrowUp');
+    press('ArrowRight', 'ArrowRight');
+    press('ArrowDown', 'ArrowDown');
+    press('ArrowLeft', 'ArrowLeft');
+
+    expect(commits).toBeGreaterThan(0);
+
+    // THE UI survived: the score outlets, the controls and the settings dialog
+    // are all still driven.
+    expect(control('.score-container').textContent).not.toBe('');
+    expect(application.hud.readRendered()).not.toBeNull();
+
+    // FOCUS survived: the dialog opens, traps and restores.
+    const trigger = control('#settings-button');
+
+    trigger.focus();
+
+    expect(application.preferences).toBeDefined();
+    expect(document.getElementById('settings-panel')?.hidden).toBe(true);
+
+    // And the board is on screen in the fallback's own host rather than nowhere.
+    expect(control('#board-number-only').hidden).toBe(false);
+    expect(control('#board-canvas').hidden).toBe(true);
+  });
+});
+
+/* ==========================================================================
+ * Relic activation
+ *
+ * `activateRelic` was emitted by every input surface and subscribed to by
+ * NOTHING, so a press reached the event bus and stopped there and no charge was
+ * ever spent by a player. These cases pin the subscription, and pin that the
+ * deduction goes through the hook bus so a manual activation and a relic
+ * handler's own request draw on one pool.
+ * ========================================================================== */
+
+describe('the relic activation control', () => {
+  /**
+   * A stored run holding `frostbind`, which carries a charge budget.
+   *
+   * Written before `start()`, because the envelope is read once during
+   * composition and the registry restores its relics from what it read.
+   */
+  const RUN_WITH_A_CHARGED_RELIC = JSON.stringify({
+    schemaVersion: 1,
+    runId: 'activation-run',
+    seed: 'activation-seed',
+    rngCursor: {
+      'spawn-value': 0,
+      'spawn-position': 0,
+      'relic-draw': 0,
+      'rarity-weight': 0,
+    },
+    stageIndex: 0,
+    stageGoal: { kind: 'highest-tile', target: 64 },
+    goalProgress: 0,
+    relics: [{ id: 'frostbind', charges: 5 }],
+    board: {
+      grid: {
+        size: 4,
+        cells: [
+          [{ position: { x: 0, y: 0 }, value: 2 }, null, null, null],
+          [null, null, null, null],
+          [null, null, null, null],
+          [null, null, null, null],
+        ],
+      },
+      score: 0,
+      over: false,
+      won: false,
+      keepPlaying: false,
+    },
+  });
+
+  /** The budget the bus holds for one relic. */
+  const budgetOf = (id: string): number | undefined =>
+    application?.engine.hooks
+      .subscribers()
+      .find((entry) => entry.id === id)?.charges;
+
+  const activationControl = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>(
+      '.on-screen-control[data-action="activateRelic"]',
+    );
+
+  it('restores the stored relic onto the bus, so it can be activated at all', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
+
+    application = start(document);
+
+    expect(budgetOf('frostbind')).toBe(5);
+  });
+
+  it('spends a charge when the activation control is used', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
+
+    application = start(document);
+
+    const activate = activationControl();
+
+    expect(activate).not.toBeNull();
+
+    activate?.click();
+
+    expect(budgetOf('frostbind')).toBe(4);
+  });
+
+  it('spends one charge per activation, down to zero and no further', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
+
+    application = start(document);
+
+    const activate = activationControl();
+
+    for (let press = 0; press < 7; press += 1) {
+      activate?.click();
+    }
+
+    expect(budgetOf('frostbind')).toBe(0);
+  });
+
+  it('spends nothing when the run holds no relic', () => {
+    application = start(document);
+
+    const activate = activationControl();
+
+    expect(() => activate?.click()).not.toThrow();
+    expect(application.engine.hooks.metrics().chargesConsumed).toBe(0);
+  });
+
+  it('stops the relic firing once a player has spent its budget', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
+
+    application = start(document);
+
+    const activate = activationControl();
+
+    for (let press = 0; press < 5; press += 1) {
+      activate?.click();
+    }
+
+    expect(budgetOf('frostbind')).toBe(0);
+
+    const before = application.engine.hooks.metrics().totals.skippedExhausted;
+
+    press('ArrowLeft', 'ArrowLeft');
+
+    // The move dispatched `onBeforeMove` and `onAfterMove`; `frostbind` binds
+    // neither, so the skip is counted on the hooks it does bind. What matters is
+    // that the relic is now guarded rather than still firing.
+    expect(
+      application.engine.hooks
+        .subscribers()
+        .find((entry) => entry.id === 'frostbind')?.charges,
+    ).toBe(0);
+    expect(
+      application.engine.hooks.metrics().totals.skippedExhausted,
+    ).toBeGreaterThanOrEqual(before);
   });
 });

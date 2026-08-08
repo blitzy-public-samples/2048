@@ -51,8 +51,9 @@
 // global; every test double below is hand-written. It runs in the
 // `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
 //
-// Decisions behind this file: DL-TERM-01 through DL-TERM-04 in
-// docs/DECISION_LOG.md, and DL-ENGINE-04 for the flag of section 7.
+// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
+// DL-TERM-01, DL-TERM-02, DL-TERM-03, DL-TERM-04, and DL-ENGINE-04 for the flag
+// of section 7.
 
 import { describe, expect, it, vi } from 'vitest';
 

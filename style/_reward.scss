@@ -24,6 +24,35 @@
 // card, and `[disabled]`/`[aria-disabled="true"]`. No rule here writes
 // `outline: none` or can displace the focus ring. The container takes
 // $z-index-modal, and the established ladder is not renumbered.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+// file's area enumerated:
+//   TR-REWARD-01  style/main.scss L196-L221  the `.game-message` overlay
+//                                            treatment, from which the reward
+//                                            panel's surface is compiled
+//   TR-REWARD-02  style/main.scss L334-L402  the tile ramp's anchors, from which
+//                                            the per-rarity accents are
+//                                            interpolated
+//   TR-REWARD-03  style/main.scss L159-L168  the `button` mixin, from which
+//                                            `.relic-card` is compiled
+//   TR-REWARD-04  target-only row            the three-offer list and its
+//                                            without-replacement rendering
+//   TR-REWARD-05  target-only row            the rarity chip, the charges chip
+//                                            and the hook badges
+//   TR-REWARD-06  target-only row            the clamped description
+//   TR-REWARD-07  target-only row            the narrow-layout restatement at
+//                                            the mobile threshold
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-REWARD-01  `.relic-card` rendered as a `<button>`, so its children are
+//                 phrasing content
+//   DL-REWARD-02  `data-rarity` driving both the accent edge and the chip, with
+//                 an unknown value resolving to the ramp's low anchor
+//   DL-REWARD-03  the description clamped to $reward-description-lines with an
+//                 ellipsis
+//   DL-REWARD-04  the tier carried by the accent edge, the tray accent's
+//                 thickness and the chip's own text, never by colour alone
 
 @use "sass:color";
 @use "sass:list";
@@ -345,18 +374,11 @@ $reward-rarities: $rarity-tiers !default;
 // `--theme-tile-super-numeral` and is therefore the highest-contrast colour the
 // active palette has against the card surface.
 //
-// BLITZY [A11Y]: the per-tier accent is NOT applied to this chip's label, and
-// the reason is geometric rather than aesthetic. One colour has to read on two
-// opposite surfaces — the reward card, which every palette makes dark, and the
-// active-relic tray, which sits on the page background and is light in all
-// three. Reaching the WCAG 1.4.3 minimum of 4.5:1 for text of this size against
-// both a near-black and a near-white surface confines a colour to a relative
-// luminance band roughly 0.175 to 0.183 wide, which cannot hold four
-// distinguishable tiers. The tier is instead carried by three channels that do
-// not depend on this chip's colour: the card's block-start accent edge, which
-// sits against the panel rather than against the card; the accent's thickness
-// on the tray, which steps once per tier; and this chip's own text, which names
-// the tier. No information is available only through colour.
+// BLITZY [A11Y]: the per-tier accent is NOT applied to this chip's label. The
+// tier is carried by three channels that do not depend on this chip's colour:
+// the card's block-start accent edge, the accent's thickness on the tray, which
+// steps once per tier, and this chip's own text, which names the tier. No
+// information is available only through colour. Decision DL-REWARD-04.
 .reward-offer .relic-card-rarity {
   @include reward-chip;
 }

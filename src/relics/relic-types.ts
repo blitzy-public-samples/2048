@@ -9,10 +9,22 @@
 // This module reads no DOM, performs no I/O, consumes no randomness, reads no
 // clock and reports nothing.
 //
-// target-only row of docs/TRACEABILITY_MATRIX.md, TR-RELIC-01 through
-// TR-RELIC-05 in declaration order: the rarity ladder, the family ladder,
-// Decisions behind this file: DL-RELIC-01, behaviour living in hook-bound
-// handler functions, and DL-RELIC-02, the persisted relic being the
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, all target-only
+// because no vanilla construct declared a relic:
+//   TR-RELIC-01  `RARITIES` and `Rarity`, the rarity ladder
+//   TR-RELIC-02  `DEFAULT_RARITY_WEIGHTS`, the draw weighting
+//   TR-RELIC-03  `RELIC_FAMILY_NAMES`, `RelicFamilyName` and `RelicFamily`
+//   TR-RELIC-04  `Relic` and `RelicHooks`, the seven-member declaration shape
+//                AAP Contract 3 mandates
+//   TR-RELIC-05  `ActiveRelic` and `PersistedRelic`, the held and persisted
+//                records
+//
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-RELIC-01  relic behaviour living in hook-bound handler functions rather
+//                than in members of the data object
+//   DL-RELIC-02  the persisted relic carrying the identifier, the charge
+//                budget and the state slot, and nothing else
 
 import type { HookHandlerTable } from '../engine/hooks';
 
@@ -106,6 +118,13 @@ export interface Relic {
   /**
    * Charge budget a run starts this relic with. Absent on a relic that fires
    * for the rest of the run, which is never charge-guarded.
+   *
+   * A budget is SPENT BY THE RELIC'S OWN EFFECT: a handler calls
+   * `HookContext.spendCharge()` on the path where its effect takes hold, and
+   * src/engine/hook-bus.ts deducts the charge once that handler's return has
+   * been accepted. A dispatch that reached a handler which then did nothing
+   * spends nothing, and once the budget reaches zero the bus's guard skips
+   * every handler the relic binds.
    */
   readonly charges?: number;
 
@@ -150,10 +169,14 @@ export interface ActiveRelic {
    * a relic with no charge budget, which is never charge-guarded; `0` on one
    * whose budget is spent, whose handlers are skipped.
    *
-   * NOT DECREMENTED BY DISPATCH. src/engine/hook-bus.ts reads this member to
-   * guard a handler, and deducts from it only through an explicit
-   * `consumeCharge()` call; a dispatch that invokes a handler does not itself
-   * spend a charge, and a handler does not write this member.
+   * WRITTEN ONLY BY THE BUS. src/engine/hook-bus.ts reads this member to guard
+   * a handler and is the only construct that deducts from it. A dispatch does
+   * not spend a charge merely by invoking a handler: it spends one when the
+   * handler asks it to, through `HookContext.spendCharge`, and only once that
+   * handler's return has been accepted. `HookBus.consumeCharge` is the other
+   * entry point, which a manual activation reaches. A handler never writes this
+   * member, and the two paths draw on this ONE budget however many hooks the
+   * relic binds.
    */
   charges: number | undefined;
 
@@ -161,23 +184,24 @@ export interface ActiveRelic {
    * The relic's own state slot for this run, initialised from
    * `definition.state`. JSON data only, as `Relic.state` is.
    *
-   * OWNED BY THE BUS, NOT SHARED WITH IT. src/engine/hook-bus.ts COPIES the
+   * OWNED BY THE BUS, NOT SHARED WITH IT. src/engine/hook-bus.ts copies the
    * slot in full when the relic is registered, copies it again into
    * `HookContext.state` on every dispatch, and copies what the handler left
    * back onto its own record only once that handler has returned and its
-   * return has been accepted. Three consequences follow, and each is why the
-   * copying exists:
+   * return has been accepted. Three properties follow from that:
    *
    *   Writing this member after registration does not reach the value a
-   *   dispatch reads. A run that has to change a live relic's state does it
-   *   through the relic's own handler, which is the one path the bus commits.
+   *   dispatch reads; a live relic's state changes only through the relic's own
+   *   handler.
    *
    *   Reading it back — here, or from a bus snapshot — never yields an object
-   *   a handler still holds, so a stale reference cannot write into the run.
+   *   a handler still holds.
    *
    *   A handler that writes into a nested member and then throws changes
-   *   nothing at all: the copy it wrote into is discarded with the rest of its
+   *   nothing: the copy it wrote into is discarded with the rest of its
    *   transaction, including any randomness it drew.
+   *
+   * Decision DL-RELIC-02.
    */
   state: unknown;
 }
