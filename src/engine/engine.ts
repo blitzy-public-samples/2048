@@ -20,22 +20,46 @@
 // calls, and the terminal-state checks to
 // src/engine/terminal-state.ts.
 //
-// FOUR CHANGES TO THE PORTED BEHAVIOUR, EACH REQUIRED BY THE SPLIT,
-// decisions DL-ENGINE-01 through DL-ENGINE-04 in that order
+// The members below have no vanilla counterpart and are target-only rows of
+// the same matrix; each carries the phrase "no vanilla source" at its
+// declaration:
+//   TR-ENGINE-11  endStage()
+//   TR-ENGINE-12  stageProgress()
+//   TR-ENGINE-13  goalInForce()
+//   TR-ENGINE-14  resolveMetStageGoal()
+//   TR-ENGINE-15  resolveStage()
+//   TR-ENGINE-16  hookEnvironment()
+//   TR-ENGINE-17  throughPort()
+//
+// SEVEN CHANGES TO THE PORTED BEHAVIOUR, EACH REQUIRED BY THE SPLIT,
+// decisions DL-ENGINE-01 through DL-ENGINE-07 in that order
 //   The push call at L91-L97 becomes the `state:commit` event. The engine
 //   holds no view reference and calls no renderer.
 //
-//   The two `Math.random()` calls at L71 and js/grid.js L41 become draws
-//   on the `spawn-value` and `spawn-position` substreams. Those were the
-//   vanilla sources' only two randomness call sites.
+//   The two randomness call sites of the vanilla sources — L71 and
+//   js/grid.js L41 — become draws on the `spawn-value` and
+//   `spawn-position` substreams. Those two were the only ones.
 //
-//   The literals `2048` (L170), `0.9 ? 2 : 4` (L71), `2` (L7) and the
-//   merge condition (L156-L157) are read from `RulesConfig`.
+//   The win literal (L170), the spawn distribution (L71), the start-tile
+//   count (L7) and the merge condition (L156-L157) are read from
+//   `RulesConfig`.
 //
 //   `keepPlaying` at L24-L27 assigned a boolean over the prototype method
 //   of the same name. The flag is `continuedPlay` and the method is
 //   `continuePlaying()`. The persisted member name is unchanged: it is
 //   still written as `keepPlaying` by `serialize()`.
+//
+//   The snapshot L36 read from storage reaches `setup()` as an ARGUMENT.
+//   The port is read only where no argument was supplied.
+//
+//   The persistence port L4 constructed is INJECTED and OPTIONAL, and its
+//   three snapshot calls are optional members, so a port carrying the
+//   best-score pair alone satisfies it and an engine built without one
+//   plays a complete game.
+//
+//   The stage goal is evaluated where `onAfterMove` is dispatched, through
+//   `evaluateStageGoal` of src/config/stage-config.ts, and a met goal is
+//   resolved through `endStage()`. Stage handling has no vanilla source.
 //
 // TWO IDENTIFIERS, NOT ONE
 //   `runId` identifies the run instance and is the value `RunState.runId`
@@ -50,17 +74,30 @@
 // goes through the injected port.
 //
 // Decisions behind this file: DL-ENGINE-01, the push call becoming the
-// `state:commit` event; DL-ENGINE-02, the two `Math.random()` sites
-// becoming named substream draws; DL-ENGINE-03, the four rule literals
-// moving into `RulesConfig`; DL-ENGINE-04, the forced `keepPlaying`
+// `state:commit` event; DL-ENGINE-02, the two randomness sites becoming
+// named substream draws; DL-ENGINE-03, the four rule literals moving into
+// `RulesConfig`; DL-ENGINE-04, the forced `keepPlaying` repair;
 // DL-ENGINE-05, the run identifier and the correlation identifier being
+// separate; DL-ENGINE-06, the snapshot arriving as an argument and the
+// persistence port becoming optional; DL-ENGINE-07, the stage-resolution
+// authority being injected.
 
 import {
+  createDefaultRulesConfig,
   DEFAULT_BOARD_SIZE,
   isSupportedBoardSize,
 } from '../config/default-config';
 import type { RulesConfig } from '../config/rules-config';
-import type { StageGoal } from '../config/stage-config';
+import type {
+  StageConfig,
+  StageGoal,
+  StageGoalProgress,
+} from '../config/stage-config';
+import {
+  DEFAULT_STAGE_CONFIG,
+  evaluateStageGoal,
+  stageGoalForIndex,
+} from '../config/stage-config';
 import type { RngStreams } from '../rng/rng-streams';
 import type { EngineEvents, MoveBeforeEvent } from './engine-events';
 import { createEngineEvents } from './engine-events';
@@ -74,6 +111,7 @@ import type {
 } from './hooks';
 import { resolveMove } from './move-resolver';
 import {
+  highestTileValue,
   isGameTerminated as isTerminated,
   isWinningMergeValue,
   movesAvailable,
@@ -154,6 +192,19 @@ const SNAPSHOT_RESTORED_METRIC = 'engine.snapshot.restored';
 /** Counter name for a board size reconciled away from the configured one. */
 const SIZE_RECONCILED_METRIC = 'engine.board.reconciled';
 
+/** Counter name for a stage goal the engine found met and resolved. */
+const STAGE_CLEARED_METRIC = 'engine.stage.cleared';
+
+/**
+ * Counter name for a call to the injected persistence port that raised.
+ *
+ * js/local_storage_manager.js L57-L59 called `setItem` with no handler, so a
+ * quota exhaustion left the commit path by raising. Every port call the
+ * engine makes now goes through `throughPort()`, which raises this counter
+ * instead.
+ */
+const STORAGE_FAILED_METRIC = 'engine.storage.failed';
+
 /* --------------------------------------------------------------------------
  * Ports
  * ----------------------------------------------------------------------- */
@@ -163,8 +214,10 @@ const SIZE_RECONCILED_METRIC = 'engine.board.reconciled';
  *
  * Extends the best-score pair with the three board-snapshot calls
  * js/game_manager.js made — `getGameState` at L36, `setGameState` at L88
- * and `clearGameState` at L18 and L86.
- * src/storage/local-storage-manager.ts satisfies this shape
+ * and `clearGameState` at L18 and L86. Those three are OPTIONAL members, so
+ * a port carrying the best-score pair alone — the `BestScorePort` the engine
+ * promotes through — satisfies this shape.
+ * src/storage/local-storage-manager.ts satisfies it in full
  * structurally; neither module imports the other.
  */
 export interface EngineStoragePort extends BestScorePort {
@@ -174,7 +227,7 @@ export interface EngineStoragePort extends BestScorePort {
    * @returns The parsed snapshot, or anything else — including `null` —
    *   when none is readable. The engine validates the shape itself.
    */
-  getGameState(): unknown;
+  getGameState?(): unknown;
 
   /**
    * Persists the board snapshot.
@@ -183,7 +236,7 @@ export interface EngineStoragePort extends BestScorePort {
    * @returns Whatever the implementation reports; the engine reads
    *   nothing from it.
    */
-  setGameState(state: unknown): unknown;
+  setGameState?(state: unknown): unknown;
 
   /**
    * Discards the persisted board snapshot.
@@ -191,25 +244,72 @@ export interface EngineStoragePort extends BestScorePort {
    * @returns Whatever the implementation reports; the engine reads
    *   nothing from it.
    */
-  clearGameState(): unknown;
+  clearGameState?(): unknown;
 }
 
-/** Construction parameters. */
+/**
+ * Which collaborator resolves a stage whose goal has been met.
+ *
+ * `'observer'` leaves the resolution to a subscriber, which calls
+ * `Engine.endStage()` itself; `'engine'` has the engine call it, from the
+ * turn that met the goal. Either way one method resolves the stage.
+ */
+export type StageResolutionAuthority = 'engine' | 'observer';
+
+/**
+ * The authority assumed when none is injected: a subscriber resolves.
+ * src/run/run-controller.ts is the subscriber that does so in the composed
+ * application.
+ */
+const DEFAULT_STAGE_RESOLUTION: StageResolutionAuthority = 'observer';
+
+/**
+ * The port an engine built without one uses: the absent best score
+ * js/local_storage_manager.js L43-L45 reported as the number `0`, and a
+ * write that keeps nothing. Its three snapshot members are absent, so no
+ * snapshot is read, written or cleared.
+ */
+const NOOP_STORAGE_PORT: EngineStoragePort = Object.freeze({
+  getBestScore(): 0 {
+    return 0;
+  },
+  setBestScore(): boolean {
+    return false;
+  },
+});
+
+/** Construction parameters. `streams` is the only required member. */
 export interface EngineOptions {
   /**
    * The rules in force. Every member is read at use time, so a value
-   * changed between turns takes effect on the next turn.
+   * changed between turns takes effect on the next turn. Defaults to a
+   * fresh `createDefaultRulesConfig()`, which reproduces the vanilla rules.
    */
-  readonly config: RulesConfig;
+  readonly config?: RulesConfig;
 
   /**
    * The run's seeded substreams. Every draw the engine takes is one of
-   * these.
+   * these. Required: the engine constructs no generator and consumes no
+   * other source of randomness.
    */
   readonly streams: RngStreams;
 
-  /** Persistence port. */
-  readonly storage: EngineStoragePort;
+  /**
+   * The progression curve, read for the goal of the stage in force when the
+   * stage source supplies none of its own. Defaults to
+   * `DEFAULT_STAGE_CONFIG`.
+   */
+  readonly stages?: StageConfig;
+
+  /** Which collaborator resolves a met goal. Defaults to `'observer'`. */
+  readonly stageResolution?: StageResolutionAuthority;
+
+  /**
+   * Persistence port. Defaults to a port reporting no best score and
+   * keeping nothing, so an engine built without one plays a complete game
+   * and persists nothing.
+   */
+  readonly storage?: EngineStoragePort;
 
   /** Event emitter. One is created when none is supplied. */
   readonly events?: EngineEvents;
@@ -404,12 +504,12 @@ function readSnapshot(value: unknown): SerializedGameState | null {
  *
  * Owns the board, the score and the three state flags, resolves moves,
  * dispatches the six hooks and emits the events of the engine event
- * contract. It holds no reference to a renderer, a screen or the
- * document.
+ * contract. It holds no reference to a renderer, to a screen or to
+ * anything the browser supplies.
  *
  * @example
  * ```ts
- * const engine = new Engine({ config, streams, storage });
+ * const engine = new Engine({ streams });
  *
  * engine.events.on('state:commit', (commit) => renderer.render(commit));
  * engine.setup();
@@ -419,6 +519,12 @@ function readSnapshot(value: unknown): SerializedGameState | null {
 export class Engine {
   /** The rules in force. Read at use time on every turn. */
   readonly config: RulesConfig;
+
+  /** The progression curve a stage goal is read from at use time. */
+  readonly stages: StageConfig;
+
+  /** Which collaborator resolves a met stage goal. */
+  readonly stageResolution: StageResolutionAuthority;
 
   /** The run's substreams. */
   readonly streams: RngStreams;
@@ -478,14 +584,19 @@ export class Engine {
   private stageGoalOverride: StageGoal | null;
 
   /**
-   * @param options Rules, substreams, persistence port and the optional
-   *   emitter, bus, reporter, run identifier, correlation identifier and
-   *   context providers.
+   * @param options The substreams, and optionally the rules, the
+   *   progression curve, the stage-resolution authority, the persistence
+   *   port, the emitter, the bus, the reporter, the correlation identifier
+   *   and the two context providers. Every member but `streams` carries a
+   *   default, so `new Engine({ streams })` plays a complete vanilla game.
    */
   constructor(options: EngineOptions) {
-    this.config = options.config;
+    this.config = options.config ?? createDefaultRulesConfig();
     this.streams = options.streams;
-    this.storage = options.storage;
+    this.stages = options.stages ?? DEFAULT_STAGE_CONFIG;
+    this.stageResolution =
+      options.stageResolution ?? DEFAULT_STAGE_RESOLUTION;
+    this.storage = options.storage ?? NOOP_STORAGE_PORT;
     this.reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
     this.correlationId = options.correlationId ?? '';
     // The emitter is handed the reporter, so a listener that throws is
@@ -530,9 +641,10 @@ export class Engine {
   /**
    * Assembles the stage slice of a commit.
    *
-   * The provider is authoritative for `stageIndex` and `goalProgress`; `goal`
-   * is the one an `onStageStart` handler returned where one did, so every
-   * stage-carrying payload — `stage:start`, `stage:end` and `state:commit` —
+   * Has no vanilla source. The provider is authoritative for `stageIndex`
+   * and `goalProgress`; `goal`
+   * is the one an `onStageStart` handler returned where one did, so each
+   * stage-carrying payload — `stage:start`, `stage:end`, `state:commit` —
    * reports the goal the stage is actually running against.
    *
    * @returns The stage slice.
@@ -553,16 +665,116 @@ export class Engine {
   }
 
   /**
-   * Builds the board, restoring a persisted snapshot when one is
-   * readable, and commits the result.
+   * Makes one call to the injected persistence port, containing a failure.
    *
-   * Ported from js/game_manager.js L35-L59. Two additions: the board
-   * size is reconciled before the grid is constructed, and
+   * Has no vanilla source. The port is injected and structural, so any of
+   * its five calls may raise;
+   * js/game_manager.js L79-L99 made all of them bare. A raise is counted
+   * under `engine.storage.failed` and the fallback stands in for the call's
+   * value, so a turn completes and the board stays consistent.
+   *
+   * @param call The port call to make.
+   * @param fallback Value taken when the call raises.
+   * @returns The call's own value, or `fallback` where it raised.
+   */
+  private throughPort<T>(call: () => T, fallback: T): T {
+    try {
+      return call();
+    } catch {
+      this.reporter.onCount?.({
+        correlationId: this.correlationId,
+        metric: STORAGE_FAILED_METRIC,
+        value: 1,
+      });
+
+      return fallback;
+    }
+  }
+
+  /**
+   * The goal the stage in progress is measured against.
+   *
+   * Has no vanilla source. Three sources in precedence order: the goal an
+   * `onStageStart` handler adopted, then the injected stage source's own
+   * goal, and finally `stageGoalForIndex()` over the injected curve — which
+   * is reached whenever the two above it yield `EMPTY_STAGE_CONTEXT`'s
+   * neutral goal, the zero-target goal src/engine/types.ts declares for an
+   * engine built without a stage source. `setup()` adopts the resolved
+   * `onStageStart` goal on every stage start, so the adopted goal is that
+   * same neutral object where no handler replaced it.
+   *
+   * Read only by `stageProgress()`. The stage slice `resolveStage()`
+   * assembles for `stage:start`, `stage:end` and `state:commit` reports the
+   * source's own goal and is not affected by the fallback.
+   *
+   * @returns The goal in force.
+   */
+  private goalInForce(): StageGoal {
+    const context = this.stageContext();
+    const adopted = this.stageGoalOverride;
+    const goal = adopted === null ? context.goal : adopted;
+
+    if (goal !== EMPTY_STAGE_CONTEXT.goal) {
+      return goal;
+    }
+
+    // `stageGoalForIndex` raises on an index that is not a non-negative
+    // integer, and the index reaches it from an injected provider, so an
+    // index it would refuse leaves the neutral goal in force rather than
+    // raising out of a query.
+    if (!Number.isInteger(context.stageIndex) || context.stageIndex < 0) {
+      return goal;
+    }
+
+    return stageGoalForIndex(context.stageIndex, this.stages);
+  }
+
+  /**
+   * Measures the stage in progress against its goal.
+   *
+   * Has no vanilla source. A query: it emits nothing, dispatches nothing,
+   * counts nothing and mutates nothing, so a subscriber may call it as
+   * freely as the turn pipeline does. `move()` calls it once per resolved
+   * move, which is where `onAfterMove` is dispatched.
+   *
+   * The two measured quantities are the live score and
+   * `highestTileValue()` of src/engine/terminal-state.ts over the board in
+   * force, which are the two members of `StageProgressInput`.
+   *
+   * @returns The measured quantity, the fraction of the target reached, and
+   *   whether the goal is met.
+   */
+  stageProgress(): StageGoalProgress {
+    return evaluateStageGoal(this.goalInForce(), {
+      score: this.score,
+      highestTileValue: highestTileValue(this.grid),
+    });
+  }
+
+  /**
+   * Builds the board, restoring a snapshot when one is readable, and
+   * commits the result.
+   *
+   * Ported from js/game_manager.js L35-L59. Three additions: the snapshot
+   * arrives as an argument rather than from the read L36 performed, the
+   * board size is reconciled before the grid is constructed, and
    * `onStageStart` is dispatched before the start tiles are inserted so
    * a spawn-affecting handler applies to them.
+   *
+   * @param previousState The snapshot to restore, or `null` to start fresh
+   *   without consulting the port. Omit it to fall back to the port's
+   *   `getGameState()` — the read js/game_manager.js L36 performed — which
+   *   is skipped entirely whenever an argument is supplied. The value is
+   *   validated either way, so a caller may pass an unvalidated snapshot;
+   *   src/run/run-controller.ts owns the version-tolerant load that
+   *   produces one.
    */
-  setup(): void {
-    const snapshot = readSnapshot(this.storage.getGameState());
+  setup(previousState?: SerializedGameState | null): void {
+    const supplied = previousState !== undefined;
+    const source: unknown = supplied
+      ? previousState
+      : this.throughPort(() => this.storage.getGameState?.(), null);
+    const snapshot = readSnapshot(source);
     const restored = snapshot !== null;
 
     if (snapshot === null) {
@@ -631,8 +843,8 @@ export class Engine {
     // The dispatch's resolved payload is ADOPTED rather than discarded:
     // `goal` is the one transformable member of `onStageStart`, so the goal a
     // handler returned is the goal this stage runs against and is the goal
-    // `stage:start` carries. The three invariant members cannot have changed —
-    // the bus refuses a return that changes any of them.
+    // `stage:start` carries. The three invariant members cannot have
+    // changed — the bus refuses a return that changes any of them.
     const started = this.hooks.dispatch(
       'onStageStart',
       {
@@ -664,7 +876,7 @@ export class Engine {
    * view clears the message on.
    */
   restart(): void {
-    this.storage.clearGameState();
+    this.throughPort(() => this.storage.clearGameState?.(), undefined);
     this.setup();
   }
 
@@ -674,6 +886,11 @@ export class Engine {
    * Ported from js/game_manager.js L24-L27. The flag it assigned over
    * its own method name is `continuedPlay`, and the actuator call at
    * L26 becomes a commit whose `terminated` is now `false`.
+   *
+   * TWO NAMES THE RENAME LEAVES UNCHANGED. The input event name L11
+   * subscribed with is still `keepPlaying`, and src/main.ts wires it to
+   * this method; the persisted member name L108 wrote is still
+   * `keepPlaying`, and `serialize()` writes it.
    */
   continuePlaying(): void {
     this.continuedPlay = true;
@@ -910,13 +1127,56 @@ export class Engine {
     // Ported from L189.
     this.commit();
 
+    this.resolveMetStageGoal();
+
     return true;
+  }
+
+  /**
+   * Resolves the stage in progress when its goal is met and the engine is
+   * the resolving authority.
+   *
+   * Has no vanilla source. Called once per resolved move, after the commit
+   * that move ended with, so the state the resolution reads is the state
+   * that was committed. Under the `'observer'` authority the measurement is
+   * not taken here at all and a subscriber resolves the stage instead, by
+   * calling `endStage()` itself.
+   */
+  private resolveMetStageGoal(): void {
+    if (this.stageResolution !== 'engine') {
+      return;
+    }
+
+    // `evaluateStageGoal` raises on a non-finite input. An `onAfterMove`
+    // handler writes `score` and an injected provider supplies `target`, so
+    // both are measured for finiteness first and a measurement that cannot
+    // be taken leaves the stage unresolved rather than raising out of the
+    // turn the commit above has already completed.
+    if (
+      !Number.isFinite(this.score) ||
+      !Number.isFinite(this.goalInForce().target) ||
+      !Number.isFinite(highestTileValue(this.grid))
+    ) {
+      return;
+    }
+
+    if (!this.stageProgress().cleared) {
+      return;
+    }
+
+    this.reporter.onCount?.({
+      correlationId: this.correlationId,
+      metric: STAGE_CLEARED_METRIC,
+      value: 1,
+    });
+
+    this.endStage(true);
   }
 
   /**
    * Ends the stage in progress.
    *
-   * Has no vanilla analogue. It dispatches `onStageEnd`, emits
+   * Has no vanilla source. It dispatches `onStageEnd`, emits
    * `stage:end` and commits, so a subscriber sees the stage resolve and
    * the state that resolved it in one turn.
    *
@@ -949,9 +1209,9 @@ export class Engine {
     // `resolveStage()` prefers the adopted goal over the provider's whenever
     // the two are not the same object. A subscriber to the emission above
     // advances the stage, which replaces the provider's goal with the next
-    // stage's — a different object — so an override left in place would make
-    // this commit report the new stage index beside the old stage's goal. The
-    // next `setup()` dispatches `onStageStart` and adopts afresh.
+    // stage's — a different object — so an override left in place would
+    // make this commit report the new stage index beside the old stage's
+    // goal. The next `setup()` dispatches `onStageStart` and adopts afresh.
     this.stageGoalOverride = null;
 
     this.commit();
@@ -977,11 +1237,11 @@ export class Engine {
    * comes from `Grid.randomAvailableCell` — js/grid.js L37-L43 — which is
    * the sole position-draw implementation. Both randomness call sites are
    * replaced by substreams: the value is drawn from `spawn-value` against
-   * the configured distribution, which reproduces
-   * `Math.random() < 0.9 ? 2 : 4` under the default weights, and the cell
-   * is drawn from `spawn-position` inside `randomAvailableCell` over the
-   * list js/grid.js L45-L55 collects. The value is drawn before the cell,
-   * which is the order L71 and js/grid.js L41 were reached in.
+   * the configured distribution, which reproduces the two-outcome draw of
+   * L71 under the default weights, and the cell is drawn from
+   * `spawn-position` inside `randomAvailableCell` over the list
+   * js/grid.js L45-L55 collects. The value is drawn before the cell, which
+   * is the order L71 and js/grid.js L41 were reached in.
    *
    * A full board spawns nothing and consumes no draw from either
    * substream, which is the boundary js/grid.js L37-L43 expressed by
@@ -1081,20 +1341,33 @@ export class Engine {
    *   The best score placed in the payload is re-read from storage after
    *   the possible write (L95), so the value a view shows is the value
    *   that is persisted.
+   *
+   * ONE ADDITION: each of the four port calls is made through
+   * `throughPort()`, so a port that raises is counted rather than left to
+   * leave the commit path. The call order and the values are otherwise
+   * those of L80-L95.
    */
   private commit(): void {
-    const best = this.storage.getBestScore();
+    // Every port call below goes through `throughPort`, which reports a
+    // raise and stands the absent-value reading `0` in for a failed read.
+    const best = this.throughPort(
+      (): string | 0 => this.storage.getBestScore(),
+      0,
+    );
 
     // Ported from L80-L82. The union is narrowed for the operator; the
     // runtime comparison is the one L80 performed.
     if ((best as number) < this.score) {
-      this.storage.setBestScore(this.score);
+      this.throughPort(() => this.storage.setBestScore(this.score), undefined);
     }
 
     if (this.over) {
-      this.storage.clearGameState();
+      this.throughPort(() => this.storage.clearGameState?.(), undefined);
     } else {
-      this.storage.setGameState(this.serialize());
+      this.throughPort(
+        () => this.storage.setGameState?.(this.serialize()),
+        undefined,
+      );
     }
 
     // Ported from L91-L97: the board travels by reference, as L91 passed
@@ -1103,7 +1376,10 @@ export class Engine {
     this.events.emit('state:commit', {
       board: this.grid,
       score: this.score,
-      bestScore: this.storage.getBestScore(),
+      bestScore: this.throughPort(
+        (): string | 0 => this.storage.getBestScore(),
+        0,
+      ),
       over: this.over,
       won: this.won,
       terminated: this.isGameTerminated(),

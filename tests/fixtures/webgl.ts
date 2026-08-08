@@ -4,7 +4,7 @@
 //   jsdom implements no canvas rendering context at all — `getContext()` warns
 //   "Not implemented" and returns `null` — so `WebGLRenderer` cannot be
 //   constructed under the unit environment, and every path in
-//   src/render/three-renderer.ts past `createBoardScene` would be unreachable
+//   src/render/three-renderer.ts past its `WebGLRenderer` would be unreachable
 //   without a stand-in. Playwright covers the real GPU path
 //   (tests/e2e/), which is the right place for a pixel to be asserted on; this
 //   fixture is for asserting on the RENDERER'S OWN behaviour — that a board is

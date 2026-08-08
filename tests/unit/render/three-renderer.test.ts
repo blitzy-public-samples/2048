@@ -855,3 +855,122 @@ describe('context loss', () => {
     renderer.destroy();
   });
 });
+
+/* ==========================================================================
+ * The change of scale
+ * ========================================================================== */
+
+/**
+ * A controllable stand-in for the breakpoint's `MediaQueryList`.
+ *
+ * jsdom answers `matchMedia` with a list that never changes and never
+ * dispatches, so the breakpoint is driven from the test instead: `cross()`
+ * flips `matches` and notifies every listener the renderer registered, which is
+ * what the browser does when the viewport passes `$mobile-threshold`.
+ */
+const stubScaleQuery = (): {
+  readonly cross: () => void;
+  readonly restore: () => void;
+} => {
+  const listeners: (() => void)[] = [];
+  const original = window.matchMedia;
+  let matches = false;
+
+  const query = {
+    get matches(): boolean {
+      return matches;
+    },
+    media: '',
+    onchange: null,
+    addEventListener: (_type: string, listener: () => void): void => {
+      listeners.push(listener);
+    },
+    removeEventListener: (_type: string, listener: () => void): void => {
+      const index = listeners.indexOf(listener);
+
+      if (index >= 0) {
+        listeners.splice(index, 1);
+      }
+    },
+    addListener: (listener: () => void): void => {
+      listeners.push(listener);
+    },
+    removeListener: (): void => {},
+    dispatchEvent: (): boolean => true,
+  };
+
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: (): MediaQueryList => query as unknown as MediaQueryList,
+  });
+
+  return {
+    cross: (): void => {
+      matches = !matches;
+
+      for (const listener of Array.from(listeners)) {
+        listener();
+      }
+    },
+    restore: (): void => {
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        writable: true,
+        value: original,
+      });
+    },
+  };
+};
+
+describe('the change of scale', () => {
+  it('redraws the board the commit already drew', () => {
+    const scale = stubScaleQuery();
+
+    try {
+      const fixture = harness();
+
+      fixture.renderer.render(
+        commitOf(4, [
+          { x: 0, y: 0, value: 2 },
+          { x: 1, y: 1, value: 4 },
+          { x: 2, y: 2, value: 8 },
+        ]),
+      );
+      drain(fixture.renderer);
+
+      expect(fixture.renderer.readStats().scale).toBe('desktop');
+      expect(fixture.renderer.readStats().liveTiles).toBe(3);
+      expect(fixture.renderer.readStats().boardsBuilt).toBe(1);
+
+      // Crossing the breakpoint generates the board again, which recalls every
+      // block into the factory's pool. The board must not be left empty until
+      // the next turn commits.
+      scale.cross();
+
+      expect(fixture.renderer.readStats().scale).toBe('mobile');
+      expect(fixture.renderer.readStats().boardsBuilt).toBe(2);
+
+      drain(fixture.renderer);
+
+      expect(fixture.renderer.readStats().liveTiles).toBe(3);
+
+      const board = fixture.renderer.readRenderedBoard();
+
+      expect(
+        board?.cells.filter((cell) => cell.value !== null),
+      ).toHaveLength(3);
+
+      // And back again, so the redraw is not one-directional.
+      scale.cross();
+      drain(fixture.renderer);
+
+      expect(fixture.renderer.readStats().scale).toBe('desktop');
+      expect(fixture.renderer.readStats().liveTiles).toBe(3);
+
+      fixture.renderer.destroy();
+    } finally {
+      scale.restore();
+    }
+  });
+});

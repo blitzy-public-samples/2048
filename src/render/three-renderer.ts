@@ -14,6 +14,12 @@
 //   renderer instead of the number-only one therefore changes what draws the
 //   board and nothing more.
 //
+//   It also owns the OUTPUT SURFACE: the canvas host is looked up and guarded
+//   here, so the `WebGLRenderer`, its pixel ratio, its clear colour, its
+//   drawing-buffer size and its context-loss listeners are held here as well.
+//   src/render/scene.ts builds the scene graph, the camera and the lighting rig
+//   and constructs no renderer.
+//
 // THE PARALLEL ACCESSIBILITY BOARD
 //   `#board-canvas` carries `aria-hidden="true"` and is one opaque node to
 //   assistive technology: a screen reader perceives the entire 2.5D board as a
@@ -55,6 +61,7 @@
 //
 // This module reads no storage and consumes no randomness.
 
+import { Color, SRGBColorSpace, WebGLRenderer } from 'three';
 import type { Vector3 } from 'three';
 
 import { isSupportedBoardSize } from '../config/default-config';
@@ -66,6 +73,8 @@ import { mobileThreshold } from '../theme/tokens';
 import type { GeometryScale, ScaleName } from '../theme/tokens';
 import {
   getActiveTheme,
+  getTheme,
+  isThemeId,
   resolveTileTheme,
   subscribeToThemeChange,
 } from '../theme/themes';
@@ -89,7 +98,7 @@ import type { CameraEffects } from './camera-effects';
 import type { FrameContext } from './render-loop';
 import { createParticleSystem } from './particles';
 import type { ParticleSystem } from './particles';
-import { createBoardScene } from './scene';
+import { createScene } from './scene';
 import type { BoardScene } from './scene';
 import { createTileMaterialCache } from './tile-materials';
 import type { TileMaterialCache } from './tile-materials';
@@ -104,6 +113,7 @@ import { numberOnlyRendererCopy } from './number-only-renderer';
 import type { RenderDetail, RenderReporter } from './webgl-support';
 import {
   NOOP_RENDER_REPORTER,
+  attachContextLossHandlers,
   createGuardedRenderReporter,
   describeRenderError,
 } from './webgl-support';
@@ -154,7 +164,50 @@ const CONTEXT_FAILED_METRIC = 'render.three.context.failed';
 const MERGE_METRIC = 'render.three.merge';
 
 /* ==========================================================================
- * 2. Geometry scale
+ * 2. The drawing buffer
+ * ========================================================================== */
+
+/**
+ * Alpha the drawing buffer is cleared to.
+ *
+ * Zero: the canvas replaces z-index layers 1 and 2 of style/main.scss —
+ * `.grid-container` at L254 and `.tile-container` at L288 — which were drawn
+ * inside `.game-container`, and its own background at style/main.scss L188 is
+ * what shows through every pixel the tilted board does not cover.
+ */
+const CLEAR_ALPHA = 0;
+
+/**
+ * Highest device pixel ratio the drawing buffer is sized at. Above it the
+ * buffer grows fourfold for a board of flat fills.
+ */
+const MAX_PIXEL_RATIO = 2;
+
+/** Pixel ratio used where the platform reports none. */
+const DEFAULT_PIXEL_RATIO = 1;
+
+/**
+ * The device pixel ratio the drawing buffer is sized at.
+ *
+ * @returns The platform's ratio, confined to `MAX_PIXEL_RATIO`, and
+ *   `DEFAULT_PIXEL_RATIO` where the platform reports none or reports one that
+ *   is not a positive finite number.
+ */
+function resolvePixelRatio(): number {
+  const candidate =
+    typeof globalThis.devicePixelRatio === 'number'
+      ? globalThis.devicePixelRatio
+      : DEFAULT_PIXEL_RATIO;
+
+  if (!Number.isFinite(candidate) || candidate <= 0) {
+    return DEFAULT_PIXEL_RATIO;
+  }
+
+  return Math.min(candidate, MAX_PIXEL_RATIO);
+}
+
+/* ==========================================================================
+ * 3. Geometry scale
  * ========================================================================== */
 
 /**
@@ -217,7 +270,7 @@ function openScaleQuery(view: Window | null): ScaleQueryList | null {
 }
 
 /* ==========================================================================
- * 3. The surfaces this renderer drives
+ * 4. The surfaces this renderer drives
  * ========================================================================== */
 
 /** One cell of the parallel accessibility board. */
@@ -275,7 +328,7 @@ export const threeRendererCopy: BoardCellCopy = Object.freeze({
 });
 
 /* ==========================================================================
- * 4. Construction parameters
+ * 5. Construction parameters
  * ========================================================================== */
 
 /**
@@ -405,7 +458,7 @@ export interface ThreeRenderer {
 }
 
 /* ==========================================================================
- * 5. Plan built from one commit
+ * 6. Plan built from one commit
  * ========================================================================== */
 
 type CommitBoard = StateCommitEvent['board'];
@@ -441,6 +494,36 @@ interface PaintPlan {
   readonly over: boolean;
   readonly won: boolean;
   readonly terminated: boolean;
+
+  /**
+   * Set on a plan queued to redraw the board the commit already drew, rather
+   * than to draw a turn. `restPlan` builds one.
+   */
+  readonly repaint?: boolean;
+}
+
+/**
+ * The same plan, with every animation input removed.
+ *
+ * A tile whose `from` is its own cell takes no move tween, and one carrying
+ * neither a `from` nor a merge pair would be taken for a spawn, so each tile
+ * carries its own cell as its origin and no merge pair: every block is placed
+ * where it already stands and no tween starts. Queued when the board is
+ * generated again at the other scale, where the lattice is rebuilt outside a
+ * turn and the blocks that stood on it have been recalled with it.
+ */
+function restPlan(plan: PaintPlan): PaintPlan {
+  return {
+    ...plan,
+    repaint: true,
+    tiles: plan.tiles.map((tile) => ({
+      value: tile.value,
+      x: tile.x,
+      y: tile.y,
+      from: { x: tile.x, y: tile.y },
+      merged: [],
+    })),
+  };
 }
 
 function readCell(board: CommitBoard, x: number, y: number): CommitTile | null {
@@ -515,7 +598,7 @@ function planCommit(commit: StateCommitEvent, scoreDelta: number): PaintPlan {
 }
 
 /* ==========================================================================
- * 6. One block on screen
+ * 7. One block on screen
  * ========================================================================== */
 
 /**
@@ -543,7 +626,7 @@ interface PendingMerge {
 }
 
 /* ==========================================================================
- * 7. Element resolution
+ * 8. Element resolution
  * ========================================================================== */
 
 /**
@@ -611,7 +694,7 @@ function measureElement(
 }
 
 /* ==========================================================================
- * 8. Construction
+ * 9. Construction
  * ========================================================================== */
 
 /**
@@ -652,6 +735,13 @@ export function createThreeRenderer(
   const requestedScale = options.scale ?? 'auto';
 
   let canvas: HTMLCanvasElement | null = null;
+
+  // The output surface is owned HERE, beside the canvas host this module looks
+  // up and guards: src/render/scene.ts builds the scene, the camera and the
+  // lights alone and constructs no renderer.
+  let webgl: WebGLRenderer | null = null;
+  let releaseContextLoss: (() => void) | null = null;
+  let contextLost = false;
   let scene: BoardScene | null = null;
   let materials: TileMaterialCache | null = null;
   let factory: TileMeshFactory | null = null;
@@ -716,6 +806,80 @@ export function createThreeRenderer(
   };
 
   /* ------------------------------------------------------------------
+   * The output surface
+   * --------------------------------------------------------------- */
+
+  /** Scratch a theme's page background is read into. */
+  const clearColor = new Color();
+
+  /**
+   * The theme the surface and the scene are pinned to, where one was supplied.
+   *
+   * `options.theme` accepts a catalogue entry or an id; the scene's rig and the
+   * clear colour both read a palette, so an id is resolved once here.
+   *
+   * @returns The pinned theme, or `undefined` where the renderer follows the
+   *   theme in force.
+   */
+  const readPinnedTheme = (): Theme | undefined => {
+    const supplied = options.theme;
+
+    if (supplied === undefined) {
+      return undefined;
+    }
+
+    return isThemeId(supplied) ? getTheme(supplied) : supplied;
+  };
+
+  /**
+   * Builds the renderer over one canvas.
+   *
+   * `alpha` is on and the clear alpha is zero, so the canvas is composited over
+   * the `$game-container-background` of `.game-container` at style/main.scss
+   * L188 rather than over a colour of its own. Shadow maps are left off; the
+   * casters and receivers the 2D design has are flat fills.
+   *
+   * @throws Error when the canvas yields no WebGL context, which is the signal
+   *   `mount()` converts into its number-only fallback.
+   */
+  const openSurface = (surface: HTMLCanvasElement): WebGLRenderer => {
+    const renderer = new WebGLRenderer({
+      canvas: surface,
+      antialias: true,
+      alpha: true,
+    });
+
+    renderer.setPixelRatio(resolvePixelRatio());
+    renderer.shadowMap.enabled = false;
+
+    return renderer;
+  };
+
+  /** Writes one theme's page background into the clear colour. */
+  const applyClearColor = (theme: Theme): void => {
+    const surface = webgl;
+
+    if (surface === null) {
+      return;
+    }
+
+    try {
+      clearColor.setStyle(theme.palette.pageBackground, SRGBColorSpace);
+      surface.setClearColor(clearColor, CLEAR_ALPHA);
+    } catch (error: unknown) {
+      reporter.onDiagnostic({
+        level: 'warning',
+        source: DIAGNOSTIC_SOURCE,
+        message:
+          'A theme background could not be read; the clear colour stands.',
+        detail: Object.freeze({ theme: theme.id }),
+        error: describeRenderError(error),
+        thrown: error,
+      });
+    }
+  };
+
+  /* ------------------------------------------------------------------
    * Drawing-surface size
    * --------------------------------------------------------------- */
 
@@ -741,6 +905,10 @@ export function createThreeRenderer(
     const unmeasured = geometry.fieldWidth - geometry.gridSpacing * 2;
     const width = measured?.width ?? unmeasured;
     const height = measured?.height ?? unmeasured;
+
+    // `false` for the third argument: the canvas's CSS size belongs to
+    // style/main.scss, and writing it here would fight the layout.
+    webgl?.setSize(width, height, false);
 
     if (active.resize(width, height)) {
       reporter.onCount({
@@ -787,12 +955,13 @@ export function createThreeRenderer(
       board = built;
       boardSize = built.boardSize;
       geometry = built.geometry;
-      activeScene.boardRoot.add(built.group);
+      activeScene.mountBoard(built.group);
       activeScene.reframe(built.boardSize, built.geometry);
-      camera?.setRestTransform({
-        position: activeScene.camera.position,
-        quaternion: activeScene.camera.quaternion,
-      });
+
+      // Read off the scene's own rest transform rather than off the live
+      // camera: a camera effect displaces the camera itself, so the live
+      // transform stops being the framing's the moment one runs.
+      camera?.setRestTransform(activeScene.readRestTransform());
       particles?.attachTo(built.group);
       applySize();
 
@@ -1238,8 +1407,9 @@ export function createThreeRenderer(
     // A terminal turn shakes the camera once: the 2D board's own terminal
     // treatment is the overlay src/ui/screens/hud.ts fades in, and this is the
     // board's half of the same moment. Suppressed while motion is reduced by
-    // the effects module itself.
-    if (plan.over) {
+    // the effects module itself, and on a repaint, which redraws a commit whose
+    // own shake has already run.
+    if (plan.over && plan.repaint !== true) {
       camera?.shake();
     }
 
@@ -1333,9 +1503,13 @@ export function createThreeRenderer(
     retireArrived();
 
     const activeScene = scene;
+    const surface = webgl;
 
-    if (activeScene !== null) {
-      activeScene.render();
+    // Nothing is drawn against a lost context: the handlers of
+    // src/render/webgl-support.ts report the loss and the restoration, and this
+    // frame and every frame between the two is skipped rather than issued.
+    if (activeScene !== null && surface !== null && !contextLost) {
+      surface.render(activeScene.scene, activeScene.camera);
     }
 
     return (
@@ -1372,6 +1546,14 @@ export function createThreeRenderer(
       board = null;
       geometry = null;
       ensureBoard(size);
+
+      // Generating the board recalls every block into the factory's pool, so
+      // the plan the board last showed is queued again. Without it the
+      // regenerated lattice stands empty until the next turn commits.
+      if (lastPlan !== null) {
+        queued = restPlan(lastPlan);
+      }
+
       options.onWork?.();
     };
 
@@ -1464,14 +1646,19 @@ export function createThreeRenderer(
     const size = readConfiguredSize();
 
     try {
-      scene = createBoardScene({
-        canvas: surface,
+      // The context is acquired here and nowhere else, so a caller that has
+      // already probed for support decides whether to mount at all.
+      webgl = openSurface(surface);
+      scene = createScene({
         boardSize: size,
         geometry: resolveBoardGeometry(size, scale),
+        theme: readPinnedTheme(),
         reporter,
       });
     } catch (error: unknown) {
       canvas = null;
+      webgl?.dispose();
+      webgl = null;
       scene = null;
       closeScale();
 
@@ -1502,6 +1689,25 @@ export function createThreeRenderer(
       reporter,
     });
 
+    applyClearColor(readPinnedTheme() ?? getActiveTheme());
+
+    // The context-loss handler the product has never had: WebGL is a hard
+    // runtime prerequisite of this renderer, and a lost context is silent
+    // without one.
+    releaseContextLoss = attachContextLossHandlers(
+      surface,
+      {
+        onContextLost: (): void => {
+          contextLost = true;
+        },
+        onContextRestored: (): void => {
+          contextLost = false;
+          options.onWork?.();
+        },
+      },
+      reporter,
+    );
+
     tweens = createTweenGroup({ reporter });
     particles = createParticleSystem({ reporter });
     camera = createCameraEffects(scene.camera, { reporter });
@@ -1528,9 +1734,13 @@ export function createThreeRenderer(
     openResize();
 
     releaseTheme = subscribeToThemeChange((theme: Theme): void => {
-      // The material cache and the mesh factory each follow the theme through
-      // their own subscription; this repaints so the change reaches the screen
-      // without waiting for a turn, and refreshes the projection's theme id.
+      // The material cache, the mesh factory and the scene's lighting rig each
+      // follow the theme through their own subscription; this repaints so the
+      // change reaches the screen without waiting for a turn, refreshes the
+      // projection's theme id, and carries the palette into the clear colour,
+      // which belongs to the renderer this module owns.
+      applyClearColor(theme);
+
       reporter.onCount({
         name: THEME_CHANGE_METRIC,
         value: 1,
@@ -1583,6 +1793,11 @@ export function createThreeRenderer(
     materials = null;
     scene?.dispose();
     scene = null;
+    releaseContextLoss?.();
+    releaseContextLoss = null;
+    contextLost = false;
+    webgl?.dispose();
+    webgl = null;
     board = null;
     geometry = null;
     boardSize = 0;
@@ -1801,7 +2016,7 @@ export function createThreeRenderer(
         activeTweens: tweens?.size() ?? 0,
         pendingMerges: pendingMerges.length,
         refusedSizes,
-        contextLost: scene?.isContextLost() ?? false,
+        contextLost,
         disposed,
       }),
   });

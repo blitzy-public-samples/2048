@@ -107,7 +107,17 @@ import {
 } from './input/on-screen-controls';
 import type { MarkupControlBinding } from './input/on-screen-controls';
 import { getTheme, isThemeId } from './theme/themes';
-import { createParallelBoardLayer } from './ui/a11y/focus-manager';
+import {
+  createFocusManager,
+  createParallelBoardLayer,
+} from './ui/a11y/focus-manager';
+import type { FocusManager } from './ui/a11y/focus-manager';
+import type {
+  SoundEngine,
+  SoundMetricsRecorder,
+  SoundReporter,
+} from './audio/sound-engine';
+import { createSoundEngine } from './audio/sound-engine';
 import type { LiveRegionAnnouncer } from './ui/a11y/live-region';
 import { createLiveRegionAnnouncer } from './ui/a11y/live-region';
 import type { EngineAnnouncer } from './ui/a11y/engine-announcer';
@@ -399,6 +409,47 @@ function createPreferenceSink(reporter: RenderReporter): UiReporter {
         detail: fields === undefined ? undefined : Object.freeze({ ...fields }),
         error: describeCaught(caught),
       });
+    },
+  };
+}
+
+/**
+ * Adapts a render sink to the audio layer's sink shape.
+ *
+ * The whole report is carried on one member, so the level, the code, the
+ * details and the caught value all reach the logger through it.
+ *
+ * @param reporter Render sink to write through.
+ * @returns An audio sink.
+ */
+function createSoundSink(reporter: RenderReporter): SoundReporter {
+  return {
+    report(report): void {
+      reporter.onDiagnostic({
+        level: report.level === 'warn' ? 'warning' : report.level,
+        source: 'audio',
+        message: report.message,
+        detail: Object.freeze({
+          code: report.code,
+          ...(report.details === undefined ? {} : report.details),
+        }),
+        error:
+          report.error === undefined ? undefined : describeCaught(report.error),
+      });
+    },
+  };
+}
+
+/**
+ * Adapts a render sink to the audio layer's counter shape.
+ *
+ * @param reporter Render sink to write through.
+ * @returns An audio counter recorder.
+ */
+function createSoundMetrics(reporter: RenderReporter): SoundMetricsRecorder {
+  return {
+    increment(name, value): void {
+      reporter.onCount({ name, value: value ?? 1 });
     },
   };
 }
@@ -1374,21 +1425,29 @@ export function start(ownerDocument: Document): Application {
   // rebinding rows own the keymap; the router only ever reaches it through the
   // two hooks below, which run when the dialog is opened and closed.
   let settings: SettingsPanel | null = null;
-  const settingsPanelHost = ownerDocument.querySelector(
+  const settingsPanelHost = ownerDocument.querySelector<HTMLElement>(
     SELECTORS.settingsPanel,
   );
+
+  // ONE focus manager for the page, shared by the router and the settings
+  // dialog, so both push onto and pop from a single trap stack.
+  const focusManager: FocusManager = createFocusManager({
+    reporter: createPreferenceSink(reporter),
+    isReducedMotion: (): boolean => preferences.isReducedMotion(),
+  });
+
   const router = createScreenRouter({
     document: ownerDocument,
     reporter: createPreferenceSink(reporter),
+    focus: focusManager,
     settingsPanel: settingsPanelHost,
     settingsTrigger: ownerDocument.querySelector(SELECTORS.settingsButton),
     gameRegion: ownerDocument.querySelector(SELECTORS.gameRegion),
     onSettingsOpen: (): void => {
-      settings?.render();
-      settings?.sync();
+      settings?.open();
     },
     onSettingsClose: (): void => {
-      settings?.cancelCapture();
+      settings?.close();
     },
   });
 
@@ -1419,15 +1478,48 @@ export function start(ownerDocument: Document): Application {
     reporter: createInputSink(reporter),
   });
 
+  // The dialog owns its own containment and its own body; the router owns when
+  // it is shown. The keymap arrives as a value and leaves through
+  // `onKeymapChange`: src/ui/a11y/settings.ts holds no keymap, so the input
+  // manager stays its owner and the control layer follows every rebind.
+  // The audio layer (A5): synthesised through the Web Audio API, with no binary
+  // asset. Its state is seeded from the store here and written by the settings
+  // dialog. `preferences` is not supplied: src/audio/sound-engine.ts refuses
+  // `setMuted` and `setVolume` when it is.
+  //
+  // Where no AudioContext constructor exists the engine reports itself
+  // unavailable and every member stays safe to call. The dialog states that in
+  // real text.
+  const soundEngine: SoundEngine = createSoundEngine({
+    reporter: createSoundSink(reporter),
+    metrics: createSoundMetrics(reporter),
+    muted: preferences.isMuted(),
+    volume: preferences.getVolume(),
+    unlockTargets: [ownerDocument],
+  });
+
+  soundEngine.subscribe(engine.events);
+
   settings = createSettingsPanel({
-    panel: settingsPanelHost,
+    host: settingsPanelHost,
+    hostSelector: SELECTORS.settingsPanel,
     preferences,
-    input,
-    controls,
-    document: ownerDocument,
-    onClose: (): void => {
-      router.closeSettings();
+    focusManager,
+    soundEngine,
+    keymap: input.getKeymap(),
+    onKeymapChange: (next): void => {
+      input.setKeymap(next);
+      controls.refresh();
     },
+    input,
+    suspendInput: (): void => {
+      input.suspend();
+    },
+    resumeInput: (): void => {
+      input.resume();
+    },
+    announcer,
+    document: ownerDocument,
     reporter: createPreferenceSink(reporter),
   });
 
@@ -1552,6 +1644,8 @@ export function start(ownerDocument: Document): Application {
       stopRouter();
       settings?.destroy();
       router.destroy();
+      focusManager.destroy();
+      soundEngine.dispose();
       stopRendering();
       stopCommitCapture();
       frameSubscription.remove();

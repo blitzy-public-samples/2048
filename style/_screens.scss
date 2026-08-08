@@ -224,19 +224,24 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
 
   @include focusable;
 
-  // The disabled state, which style/main.scss declares none of. `opacity` is
-  // applied to the control itself, which is a leaf. The state is also carried
-  // by the `disabled` attribute and by `aria-disabled`, so it never rests on
-  // colour alone.
+  // Hover, activation, selection and the disabled state. The shared mixin of
+  // style/_a11y.scss L164 is the single declaration of the four; the same mixin
+  // is included by the legacy button vocabulary of style/main.scss L329, the
+  // relic tray of style/_hud.scss L245 and the run summary of
+  // style/_summary.scss L153. It writes only `box-shadow`, `cursor`,
+  // `pointer-events`, `opacity` and a `box-shadow` transition.
   //
-  // BLITZY [A11Y]: at that fraction the label falls below the contrast the
-  // enabled control carries.
-  &:disabled,
-  &[aria-disabled="true"] {
-    cursor: default;
-    pointer-events: none;
-    opacity: $screen-tint-alpha;
-  }
+  // It supersedes the hand-rolled disabled block this mixin carried.
+  // `$screen-tint-alpha` and the mixin's `$a11y-disabled-alpha` are both 0.5.
+  // It adds the drawn counterpart of `aria-pressed="true"`, which every toggle
+  // rendered by src/ui/components/settings-panel.ts carries: the chosen
+  // palette, the chosen motion setting, mute and number-only mode.
+  //
+  // BLITZY [A11Y]: at $a11y-disabled-alpha the label falls below the contrast
+  // the enabled control carries. WCAG 1.4.3 exempts an inactive component, and
+  // the state is carried by the `disabled` attribute and by `aria-disabled` as
+  // well as by colour.
+  @include interactive-states;
 }
 
 // The element counterparts of the class vocabulary above, scoped to the three
@@ -474,6 +479,21 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
     padding: 0;
     font-weight: bold;
   }
+}
+
+// The volume slider of src/ui/components/settings-panel.ts, carrying the
+// `SETTINGS_SLIDER_CLASS` that module exports. The native control is kept and
+// only its tint is declared: `accent-color` recolours a native range's track
+// and thumb, and it resolves to the same custom property and token fallback as
+// @mixin screen-control above.
+//
+// BLITZY [DESIGN_SYSTEM_GAP]: the repository's vocabulary declares no slider
+// primitive; the native control is tinted rather than re-implemented.
+.settings-slider {
+  accent-color: var(
+    --theme-button-surface,
+    #{color.adjust($game-container-background, $lightness: -20%)}
+  );
 }
 
 // One setting: its name, its current value, and the control that changes it.

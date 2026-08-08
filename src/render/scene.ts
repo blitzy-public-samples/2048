@@ -1,38 +1,47 @@
 // The scene graph, the camera and the lighting rig of the 2.5D board.
 //
-// AAP R7. This module owns the three Three.js objects the board is composed
-// into and nothing else: it draws no tile, subscribes to no engine event, reads
-// no DOM beyond the canvas it is handed, and opens no frame loop.
-// src/render/three-renderer.ts composes it with the mesh factory, the tweens,
-// the particle system and the camera effects.
+// AAP R7. Part of the subsystem that replaced js/html_actuator.js, whose
+// `actuate(grid, metadata)` at js/html_actuator.js L10-L36 wrote tile nodes
+// into the `.tile-container` it looked up at js/html_actuator.js L2. The WebGL
+// canvas this scene is drawn through replaces z-index layers 1 and 2 of
+// style/main.scss — `.grid-container` at style/main.scss L254 and
+// `.tile-container` at style/main.scss L288 — while the overlay layer at
+// style/main.scss L205 is retained and extended by src/ui.
 //
-// WHY AN ORTHOGRAPHIC CAMERA
-//   The board is a flat 4x4 lattice drawn as extruded blocks, and every length
-//   in the design system is a CSS pixel: the field is $field-width, a cell is
-//   $tile-size and the gap is $grid-spacing. An orthographic camera whose frustum
-//   is those same pixel units keeps the projected board EXACTLY the size the
-//   stylesheet declares, so the 2.5D board occupies the footprint the 2D board
-//   occupied and `tilePositionStep` remains the one position authority. A
-//   perspective camera would foreshorten each row differently and put the
-//   product's own geometry tokens out of force.
+// The surface reproduced is `@mixin game-field` of style/main.scss L171-L194: a
+// `$field-width` square carrying `$grid-spacing` of padding, drawn in
+// `$game-container-background` with `$tile-border-radius * 2` of corner radius
+// under `box-sizing: border-box`. src/theme/tokens.ts carries those four as
+// `fieldWidth`, `gridSpacing`, `gameContainerBackground` and
+// `boardBorderRadius`, and every length below is arithmetic on that module, so
+// the mobile scale of style/main.scss L475-L548 — where `@include game-field`
+// is re-invoked at style/main.scss L530 against `$field-width: 280px` and
+// `$grid-spacing: 10px` — frames through this same code with no branch.
 //
-// THE 2.5D TILT
-//   The camera is lifted and tipped by a fixed angle rather than orbiting: the
-//   blocks read as extruded rather than flat, while every cell keeps a fixed,
-//   predictable screen position — which is what makes the parallel accessibility
-//   board's bounding boxes meaningful and what keeps the move tween a straight
-//   translation in board space.
+// WHAT THIS MODULE OWNS
+//   The scene graph, the board group, the camera and the lights. It builds no
+//   output surface of any kind and holds no canvas: three-renderer.ts owns the
+//   surface and its guarded host lookup, and composes this module with the mesh
+//   factory, the tweens, the particle system and the camera effects. The
+//   effects module RECEIVES the camera created here and is not imported.
 //
-// LIGHTING
-//   Three lights, no shadow maps. A hemisphere light supplies the ambient fill
-//   the flat 2D design implies, one directional key light produces the bevel
-//   highlight that stands in for `$tile-border-radius`, and a dim directional
-//   fill from the opposite side keeps the block sides from going black. Shadow
-//   maps are deliberately absent: the 2D design casts no shadow between tiles,
-//   and a shadow pass would triple the per-frame cost for an effect the design
-//   never had.
+//   It reads no DOM, opens no frame loop, draws no tile, subscribes to no
+//   engine event, reads no clock, consumes no randomness and performs no I/O.
+//   Its one subscription is the theme change of src/theme/themes.ts, which
+//   re-tunes the rig. Reporting is injected and defaults to the no-op sink of
+//   src/render/webgl-support.ts; nothing under src/observability is imported.
 //
-// This module reads no clock, consumes no randomness and touches no storage.
+// VALUES
+//   Every visual value — the camera's distance and tilt, each light's colour
+//   and intensity, the framing's margin and the board's background — is
+//   arithmetic on src/theme/tokens.ts, on the palette of
+//   src/theme/themes.ts, or on the board size. The bare numerals below are
+//   structural arithmetic alone: a half, a unit and a last index.
+//
+// Decisions behind this file: DL-SCENE-01, the camera projection; DL-SCENE-02,
+// the tilt; DL-SCENE-03, the lighting rig's tuning; DL-SCENE-04, the stage
+// progression; DL-SCENE-05, the background. Traceability rows: TR-SCENE-01
+// through TR-SCENE-09.
 
 import {
   Color,
@@ -40,18 +49,31 @@ import {
   Group,
   HemisphereLight,
   OrthographicCamera,
+  Quaternion,
   Scene,
+  SRGBColorSpace,
   Vector3,
-  WebGLRenderer,
 } from 'three';
+import type { Object3D } from 'three';
 
-import { isSupportedBoardSize } from '../config/default-config';
-import { depthScale } from '../theme/tokens';
-import type { GeometryScale } from '../theme/tokens';
+import type { RulesConfig } from '../config/rules-config';
 import { getActiveTheme, subscribeToThemeChange } from '../theme/themes';
 import type { Theme } from '../theme/themes';
-import { readThemeColor, toThreeColor } from './tile-materials';
-import type { RenderReporter } from './webgl-support';
+import {
+  depthScale,
+  fieldWidth,
+  gameContainerBackground,
+  gridRowCells,
+  gridSpacing,
+  tileGoldGlowColor,
+} from '../theme/tokens';
+import type { GeometryScale, ScaleName } from '../theme/tokens';
+import {
+  boardLayers,
+  cellToWorldIn,
+  resolveBoardGeometry,
+} from './tile-mesh-factory';
+import type { RenderDetail, RenderReporter } from './webgl-support';
 import {
   NOOP_RENDER_REPORTER,
   createGuardedRenderReporter,
@@ -59,361 +81,840 @@ import {
 } from './webgl-support';
 
 /* ==========================================================================
- * 1. Constants
+ * 1. Reporting
  * ========================================================================== */
 
+/** Value every diagnostic raised here carries as its `source`. */
 const DIAGNOSTIC_SOURCE = 'render/scene';
 
 /** Counter raised once per scene created. */
 const CREATED_METRIC = 'render.scene.created';
 
-/** Counter raised once per resize applied. */
-const RESIZED_METRIC = 'render.scene.resized';
+/** Counter raised once per light the rig installed. */
+const LIGHT_METRIC = 'render.scene.light';
 
-/** Counter raised once per reframe. */
+/** Counter raised once per board group mounted. */
+const MOUNTED_METRIC = 'render.scene.mounted';
+
+/** Counter raised once per re-frame that changed the framing. */
 const REFRAMED_METRIC = 'render.scene.reframed';
 
-/** Counter raised once per theme applied to the background. */
+/** Counter raised once per resize that changed the frustum. */
+const RESIZED_METRIC = 'render.scene.resized';
+
+/** Counter raised once per theme the rig re-tuned against. */
 const THEME_METRIC = 'render.scene.theme';
 
-/** Counter raised once per context loss the renderer reported. */
-const CONTEXT_LOST_METRIC = 'render.scene.context_lost';
+/** Counter raised once per stage the rig re-tuned for. */
+const STAGE_METRIC = 'render.scene.stage';
+
+/** Counter raised once per argument refused. */
+const REFUSED_METRIC = 'render.scene.refused';
 
 /** Counter raised once per disposal. */
 const DISPOSED_METRIC = 'render.scene.disposed';
 
-/**
- * Tilt of the camera above the board plane, in radians.
- *
- * 0.42 rad is roughly 24 degrees: enough that a block's top face and one side
- * are both visible — which is what makes the board read as extruded — while
- * shallow enough that the far row is not compressed into the near one. It is
- * a fixed value rather than an animated orbit, so a cell's screen position is
- * stable for the whole run.
- */
-export const cameraTilt = 0.42;
-
-/**
- * Distance from the board's centre to the camera, in board-space px.
- *
- * Only the orthographic frustum decides the projected size, so this is chosen
- * to clear the tallest block and the particle field rather than to set scale.
- */
-export const cameraDistance = 900;
-
-/** Half-depth of the orthographic frustum, in board-space px. */
-const FRUSTUM_DEPTH = 4000;
-
-/**
- * Vertical scale applied to the board, so the tilted board projects square.
- *
- * An orthographic camera tipped by `cameraTilt` foreshortens the board's y
- * axis by `cos(cameraTilt)`, which would project the square 4x4 field as a
- * rectangle 8.7% shorter than it is wide. Pre-stretching the board root by the
- * reciprocal cancels that exactly, so the projected footprint is the square
- * footprint style/main.scss lays out — which is what keeps the field inside the
- * container it is drawn in and keeps a cell's projected box aligned with the
- * counterpart cell of the parallel accessibility board.
- *
- * The extrusion is unaffected: block height is along z, so the top faces are
- * still offset and one side of every block still shows.
- */
-const BOARD_Y_SCALE = 1 / Math.cos(cameraTilt);
-
-/**
- * Height of a block above the field's top surface, in board-space px.
- *
- * `depthScale.bevel` lifts the block off the plate and `depthScale.tile` is its
- * own extrusion, so this is how far the top face stands above the field.
- */
-const BLOCK_HEIGHT = depthScale.bevel + depthScale.tile;
-
-/**
- * How far a block's top face is displaced up the screen by the tilt, in px.
- *
- * The frustum is widened by this and the camera's target raised by half of it,
- * so the top row's top face is inside the frustum and the board stays centred.
- * Without it the top row is clipped by exactly this much.
- */
-const EXTRUSION_RISE = BLOCK_HEIGHT * Math.sin(cameraTilt);
-
-/** Intensity of the ambient hemisphere fill. */
-const HEMISPHERE_INTENSITY = 2.36;
-
-/** Intensity of the directional key light. */
-const KEY_INTENSITY = 1.4;
-
-/** Intensity of the directional fill light. */
-const FILL_INTENSITY = 0.4;
-
-/**
- * Direction the key light arrives from, in board space.
- *
- * Up and to the left of the viewer, and tipped toward them, so the bevel
- * highlight lands on the top-left edge of every block — which is where the 1px
- * inset white highlight of the `$glow-opacity` box-shadow sat in the 2D design.
- */
-const KEY_DIRECTION = Object.freeze({ x: -0.45, y: 0.85, z: 0.65 });
-
-/**
- * Direction the fill light arrives from, in board space.
- *
- * Behind and below, so it lights the block SIDES the key light leaves dark
- * without adding to the top faces, whose normal it faces away from.
- */
-const FILL_DIRECTION = Object.freeze({ x: 0.6, y: 0.35, z: -0.55 });
-
-/**
- * Axis the hemisphere light's sky half lies along, in board space.
- *
- * `+z`, which is the board's own up axis — NOT the default `+y`. A hemisphere
- * light blends its two colours by `0.5 * dot(normal, axis) + 0.5`, so left at
- * the default every face of a board lying in the xy plane would take a 50/50
- * blend of white and the brown ground colour, washing the whole palette out.
- * Along `+z` a top face takes the sky colour alone and a downward face the
- * ground, which is what the flat 2D design implies.
- */
-const HEMISPHERE_AXIS = Object.freeze({ x: 0, y: 0, z: 1 });
-
-/** Colour of the hemisphere light's ground half. */
-const GROUND_COLOR = '#8f7a66';
-
 /* ==========================================================================
- * 2. Public API
+ * 2. Optics — arithmetic on src/theme/tokens.ts
  * ========================================================================== */
 
-/** Construction parameters. Only the canvas is required. */
-export interface BoardSceneOptions {
-  /** Canvas the WebGL context is obtained from. */
-  readonly canvas: HTMLCanvasElement;
+/**
+ * Diffuse irradiance the rig delivers to a surface facing the viewer.
+ *
+ * `BRDF_Lambert` of three's `common.glsl` returns `RECIPROCAL_PI * albedo`, so
+ * an irradiance of pi resolves such a surface to its own albedo: a tile dressed
+ * by src/render/tile-materials.ts reads as the ramp fill style/main.scss
+ * L334-L402 generates for its value. It is delivered by the hemisphere fill
+ * alone, whose contribution three routes through `RE_IndirectDiffuse` and which
+ * therefore carries no specular term. DL-SCENE-03.
+ */
+const TOTAL_IRRADIANCE = Math.PI;
 
-  /** Board edge length the frustum is framed for. Defaults to 4. */
-  readonly boardSize?: number;
+/**
+ * The camera and lighting magnitudes, each an expression on the geometry and
+ * depth tokens of src/theme/tokens.ts, whose `depthScale` states that camera
+ * and lighting values are declared under src/render.
+ *
+ * Angles are in radians, lengths in board-space px — one board-space px is
+ * one CSS px — and the four shares are fractions of `TOTAL_IRRADIANCE`.
+ */
+export const sceneOptics = Object.freeze({
+  /**
+   * Tilt of the camera off the board's normal.
+   *
+   * A block's own extrusion is `depthScale.tile` deep and adjacent cells are
+   * `gridSpacing` apart, so `atan2(gridSpacing, depthScale.tile)` is the angle
+   * at which a block's top edge meets the near edge of the block behind it.
+   * The rise is taken one `depthScale.bevel` short of that gap. DL-SCENE-02.
+   */
+  tilt: Math.atan2(gridSpacing - depthScale.bevel, depthScale.tile),
+
+  /** Clearance held between the drawn board and the frustum edge. */
+  margin: depthScale.bevel,
+
+  /** Distance from the camera's target to the camera. */
+  distance: fieldWidth,
+
+  /** Half-depth of the orthographic frustum, either side of `distance`. */
+  depthSpan: fieldWidth / 2,
 
   /**
-   * Geometry the frustum is framed from. Defaults to the desktop scale's, and
-   * is replaced by `reframe()` when the board size or the scale changes.
+   * Share of `TOTAL_IRRADIANCE` the key light carries at stage zero.
+   *
+   * The key reaches the sides and the bevels alone, and the hemisphere fill
+   * already floors a side at the mean of its two colours, so the share is held
+   * where the brightest bevel stays under a surface facing the viewer.
+   */
+  keyShareBase: depthScale.bevel / depthScale.board,
+
+  /** Share the key light gains across a run. */
+  keyShareRange: depthScale.bevel / depthScale.tile,
+
+  /** Weight the key light's colour reaches toward the palette's halo. */
+  warmRange: depthScale.bevel / depthScale.tile,
+
+  /** Stage index at which the run's progression reaches its half point. */
+  stageHalfLife: gridRowCells,
+});
+
+/**
+ * Reciprocal of the tilt's cosine, applied to the board group's y axis.
+ *
+ * An orthographic camera tilted by `sceneOptics.tilt` foreshortens the board's
+ * y axis by that cosine; the reciprocal cancels it, so the projected field is
+ * the square footprint `@mixin game-field` lays out at style/main.scss
+ * L190-L191 and a cell's projected box matches the counterpart cell of the
+ * parallel accessibility board. Block height is along z and is unaffected.
+ */
+const BOARD_Y_SCALE = 1 / Math.cos(sceneOptics.tilt);
+
+/** Sine of the tilt, the factor by which extrusion rises up the screen. */
+const TILT_SINE = Math.sin(sceneOptics.tilt);
+
+/** Cosine of the tilt, the factor the camera's target is divided through. */
+const TILT_COSINE = Math.cos(sceneOptics.tilt);
+
+/**
+ * The z coordinate the frustum's vertical axis is anchored at.
+ *
+ * `boardLayers.fieldSurface` of src/render/tile-mesh-factory.ts, the origin of
+ * the board's depth stack. The framing's own centring compensates for the
+ * anchor, so it fixes the arithmetic's origin and nothing else.
+ */
+const DEPTH_ANCHOR = boardLayers.fieldSurface;
+
+/* ==========================================================================
+ * 3. Public types
+ * ========================================================================== */
+
+/** A point in board space, as a framing reports one. */
+export interface FramePoint {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+}
+
+/**
+ * The camera transform one board size and geometry resolve to.
+ *
+ * Every member is derived from `sceneOptics`, the geometry of
+ * src/theme/tokens.ts and the board size; none is stated.
+ */
+export interface BoardFraming {
+  /** Cells per row the framing was computed for. */
+  readonly boardSize: number;
+
+  /** Lengths the framing was computed against. */
+  readonly geometry: GeometryScale;
+
+  /**
+   * Half-extent of the square frustum, in board-space px. `resize` widens one
+   * axis of it by the canvas's aspect ratio.
+   */
+  readonly halfExtent: number;
+
+  /** Width of the drawn board on the frustum's horizontal axis. */
+  readonly spanX: number;
+
+  /** Height of the drawn board on the frustum's vertical axis. */
+  readonly spanY: number;
+
+  /** Clearance held between the drawn board and the frustum edge. */
+  readonly margin: number;
+
+  /** Point the camera looks at. */
+  readonly target: FramePoint;
+
+  /** Point the camera sits at. */
+  readonly position: FramePoint;
+
+  /** Tilt of the camera off the board's normal, in radians. */
+  readonly tilt: number;
+
+  /** Distance from the target to the camera. */
+  readonly distance: number;
+
+  /** Near plane of the orthographic frustum. */
+  readonly near: number;
+
+  /** Far plane of the orthographic frustum. */
+  readonly far: number;
+
+  /** Scale applied to the board group's y axis. */
+  readonly boardScaleY: number;
+}
+
+/**
+ * The camera's transform with no camera effect applied, as copies a caller may
+ * keep and mutate.
+ *
+ * src/render/camera-effects.ts offsets from a rest transform and adopts a new
+ * one through its own `setRestTransform`, so a board rebuilt at another size
+ * re-frames and the effects module is handed the result rather than continuing
+ * to offset from the framing the previous size resolved to.
+ */
+export interface CameraRestPose {
+  readonly position: Vector3;
+  readonly quaternion: Quaternion;
+}
+
+/**
+ * The two lights the board is lit by.
+ *
+ * `ambient` is the fill: its axis is the board's own normal, its sky half
+ * carries `TOTAL_IRRADIANCE` in white, and its ground half carries the
+ * palette's board-field colour, which is the surface a block's side is lit by.
+ * A surface facing the viewer therefore resolves to its own albedo and a side
+ * resolves to the mean of the two halves, which is what makes a block read as
+ * extruded.
+ *
+ * `key` supplies the edge definition. It arrives ALONG THE BOARD PLANE, so it
+ * reaches the sides and the bevel ring alone and contributes neither a diffuse
+ * nor a specular term to any surface facing the viewer. DL-SCENE-03.
+ */
+export interface LightingRig {
+  readonly ambient: HemisphereLight;
+  readonly key: DirectionalLight;
+
+  /** Lights the rig installed. */
+  readonly count: number;
+}
+
+/** The tuning one stage index and palette resolve to. */
+export interface RigTuning {
+  /** Stage index the tuning was computed for. */
+  readonly stageIndex: number;
+
+  /** The run's progression, a fraction from zero up to but never one. */
+  readonly progress: number;
+
+  /** Share of the total irradiance the key light carries. */
+  readonly keyShare: number;
+
+  /** Weight the key light's colour was mixed toward the palette's halo at. */
+  readonly warmWeight: number;
+
+  /** Id of the theme the tuning was resolved against. */
+  readonly themeId: string;
+}
+
+/** What one scene has done and where it stands. */
+export interface SceneStats {
+  readonly boardSize: number;
+  readonly halfExtent: number;
+  readonly lights: number;
+
+  /** Objects mounted into the board group. */
+  readonly mountedObjects: number;
+  readonly reframes: number;
+  readonly resizes: number;
+  readonly retunes: number;
+
+  /** Arguments refused, across every member. */
+  readonly refused: number;
+  readonly stageIndex: number;
+  readonly themeId: string;
+  readonly disposed: boolean;
+}
+
+/** Options `frameBoard` resolves its geometry through. All are optional. */
+export interface FrameBoardOptions {
+  /**
+   * Lengths to frame against. Defaults to the lengths
+   * `resolveBoardGeometry` of src/render/tile-mesh-factory.ts resolves for the
+   * board size at `scale`, which is the same call the mesh factory lays the
+   * board out through.
    */
   readonly geometry?: GeometryScale;
 
-  /**
-   * Device pixel ratio the drawing buffer is sized at. Defaults to the
-   * window's, clamped to 2 — above that the buffer grows fourfold for no
-   * visible gain on a board of flat colours.
-   */
-  readonly pixelRatio?: number;
+  /** Which of the stylesheet's two scales to resolve. Defaults to desktop. */
+  readonly scale?: ScaleName;
+}
 
-  /** Sink every failure and every counter reports through. */
+/** Construction options. Every member is optional. */
+export interface SceneOptions {
+  /**
+   * Cells per row to frame for. Defaults to `config.boardSize`, and to
+   * `gridRowCells` of src/theme/tokens.ts where no configuration is supplied.
+   */
+  readonly boardSize?: number;
+
+  /**
+   * Rules the board size is read from. Read once, at construction: the
+   * configured size is reconciled during a run, and `reframe` is the call that
+   * carries a change into the camera.
+   */
+  readonly config?: RulesConfig;
+
+  /** Lengths to frame against. Resolved from the board size when absent. */
+  readonly geometry?: GeometryScale;
+
+  /** Which of the stylesheet's two scales to resolve. Defaults to desktop. */
+  readonly scale?: ScaleName;
+
+  /** Stage index to tune the rig for. Defaults to the first stage. */
+  readonly stageIndex?: number;
+
+  /**
+   * Theme to tune the rig against. Omitted, the theme in force is read at
+   * construction and the rig follows every later change.
+   */
+  readonly theme?: Theme;
+
+  /**
+   * Whether to follow theme changes. Defaults to `true` where no `theme` was
+   * supplied and to `false` where one was, so an explicit theme pins the rig.
+   */
+  readonly followActiveTheme?: boolean;
+
+  /** Sink every counter and every failure reports through. */
   readonly reporter?: RenderReporter;
 }
 
-/** What one scene created, and what a caller drives it through. */
+/**
+ * The scene, the camera, the lights and the board group, and the calls that
+ * drive them.
+ *
+ * Every member is safe to call at any time, before the first frame and after
+ * `dispose()` alike: a call made after disposal reports and returns rather
+ * than throwing.
+ */
 export interface BoardScene {
-  /** The Three.js renderer. */
-  readonly renderer: WebGLRenderer;
-
-  /** The scene graph root. */
+  /** The scene graph root. Carries the board group and the two lights. */
   readonly scene: Scene;
 
-  /** The orthographic camera the board is projected through. */
+  /** The camera the board is projected through. */
   readonly camera: OrthographicCamera;
 
   /**
-   * The group the board's own meshes are parented to, centred on the board's
-   * middle so a rotation or a punch acts about the board's centre rather than
-   * about its corner.
+   * The group the mesh factory's output is mounted into, centred on the
+   * board's middle so a camera effect or a rotation acts about the board's
+   * centre rather than about its corner.
    */
-  readonly boardRoot: Group;
+  readonly boardGroup: Group;
+
+  /** The lights installed in the scene. */
+  readonly lights: LightingRig;
 
   /**
-   * Sizes the drawing buffer and the frustum to a CSS pixel size.
+   * Parents one object to the board group.
+   *
+   * @param object The mesh factory's board group.
+   * @returns Whether the object was mounted.
+   */
+  mountBoard(object: Object3D): boolean;
+
+  /**
+   * Detaches every object mounted into the board group.
+   *
+   * Nothing the mesh factory owns is disposed: the geometries, the materials
+   * and the numeral textures belong to that factory, and this call releases
+   * the graph edges alone.
+   *
+   * @returns How many objects were detached.
+   */
+  clearBoard(): number;
+
+  /**
+   * Sizes the frustum to a canvas's CSS pixel size, holding the framing fitted
+   * at either orientation.
    *
    * @param width CSS width, in px.
    * @param height CSS height, in px.
-   * @returns Whether anything changed.
+   * @returns Whether the size was adopted. `false` where it is the size
+   *   already held, and where either length is not a positive finite number.
+   *   A size whose aspect ratio matches the one held is adopted and reported
+   *   even though it re-derives the same frustum.
    */
   resize(width: number, height: number): boolean;
 
   /**
-   * Reframes the camera for a board size and geometry.
+   * Re-frames the camera for a board size, and re-reads the rest transform.
    *
    * Called when a board-mutating relic changes the edge length and when the
-   * scale changes at the mobile breakpoint.
+   * scale changes at the mobile breakpoint of style/main.scss L475.
    *
    * @param boardSize Cells per row.
-   * @param geometry Geometry resolved for that size and scale.
-   * @returns Whether the frame changed.
+   * @param geometry Lengths resolved for that size and scale. Resolved from
+   *   the board size when absent.
+   * @returns Whether the framing changed.
    */
-  reframe(boardSize: number, geometry: GeometryScale): boolean;
+  reframe(boardSize: number, geometry?: GeometryScale): boolean;
 
-  /** Draws one frame. */
-  render(): void;
+  /** The framing in force. */
+  readFraming(): BoardFraming;
 
-  /** Applies a theme's page background to the clear colour. */
-  applyTheme(theme?: Theme): void;
-
-  /** Whether the WebGL context has been reported lost. */
-  isContextLost(): boolean;
+  /** The camera's transform with no camera effect applied. */
+  readRestTransform(): CameraRestPose;
 
   /**
-   * Releases the renderer, both lights and the theme subscription. Three.js
-   * frees no GPU resource on collection, so this is the call a teardown makes.
+   * Re-tunes the rig for a stage index.
+   *
+   * @param stageIndex Zero-based stage index. A negative index is confined to
+   *   zero and reported; a non-finite one is refused.
+   * @returns Whether the tuning changed.
+   */
+  applyStageTheme(stageIndex: number): boolean;
+
+  /**
+   * Re-tunes the rig against a theme.
+   *
+   * @param theme Theme to tune against. Defaults to the theme in force.
+   */
+  applyTheme(theme?: Theme): void;
+
+  /** The tuning in force. */
+  readTuning(): RigTuning;
+
+  /** What this scene has done and where it stands. */
+  readStats(): SceneStats;
+
+  /**
+   * Releases the lights, the board group and the theme subscription.
+   *
+   * Idempotent. Three.js frees nothing on collection, so this is the call a
+   * teardown makes.
    */
   dispose(): void;
 }
 
 /* ==========================================================================
- * 3. Construction
+ * 4. Framing — a pure function of the tokens and the board size
  * ========================================================================== */
 
-/** Highest device pixel ratio the drawing buffer is sized at. */
-const MAX_PIXEL_RATIO = 2;
-
-function resolvePixelRatio(supplied: number | undefined): number {
-  const candidate =
-    supplied ??
-    (typeof globalThis.devicePixelRatio === 'number'
-      ? globalThis.devicePixelRatio
-      : 1);
-
-  if (!Number.isFinite(candidate) || candidate <= 0) {
-    return 1;
-  }
-
-  return Math.min(candidate, MAX_PIXEL_RATIO);
-}
-
 /**
- * The half-extent of the frustum, in board-space px, for one board.
+ * The unit channel value, and the white point the key light departs from.
  *
- * The box framed is the CONTENT BOX of `.game-container`, which is
- * `$field-width` less the container's `$grid-spacing` padding on both sides —
- * because that is the box `#board-host`, and therefore the canvas, occupies.
- * One board-space px is then one CSS px, so the projected board is exactly the
- * size the stylesheet declares and the field's outer ring is drawn by the
- * container's own background exactly as it was in the 2D board.
- *
- * `EXTRUSION_RISE` is added so the top row's top face, which the tilt lifts up
- * the screen, is inside the frustum rather than clipped by it.
- *
- * The field is square, so one half-extent frames both axes; the aspect ratio of
- * the canvas widens the horizontal half in `resize`.
+ * Three's `Color` constructor called with no argument is white, so this
+ * carries the unit without stating it.
  */
-function frustumHalfExtent(geometry: GeometryScale): number {
-  const contentBox = geometry.fieldWidth - geometry.gridSpacing * 2;
+const WHITE = /* @__PURE__ */ new Color();
 
-  return contentBox / 2 + EXTRUSION_RISE / 2;
+/** Rejects an argument that is not a finite number. */
+function assertFiniteNumber(name: string, value: number): void {
+  if (!Number.isFinite(value)) {
+    throw new RangeError(
+      `scene: ${name} must be a finite number, received ${String(value)}`,
+    );
+  }
+}
+
+/** Rejects a board size that is not a positive integer. */
+function assertBoardSize(value: number): void {
+  assertFiniteNumber('boardSize', value);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new RangeError(
+      `scene: boardSize must be a positive integer, received ${String(value)}`,
+    );
+  }
+}
+
+/** Confines a fraction to zero through one. */
+function confineFraction(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(1, Math.max(0, value));
 }
 
 /**
- * Creates the scene, the camera and the lighting rig.
+ * Displacement up the frustum's vertical axis that one depth resolves to.
  *
- * The WebGL context is requested here and nowhere else, so a caller that has
- * already probed for support decides whether to call this at all.
+ * The tilt lifts a surface standing `z` above `boardLayers.fieldSurface` by
+ * that height's sine, which is what makes a block read as extruded rather than
+ * flat.
+ */
+function depthRise(z: number): number {
+  return (z - DEPTH_ANCHOR) * TILT_SINE;
+}
+
+/** The drawn board's bounds on the frustum's two axes. */
+interface BoardBounds {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minY: number;
+  readonly maxY: number;
+}
+
+/**
+ * Bounds of the board as the mesh factory lays it out at one size.
  *
- * @param options Canvas, board size, geometry, pixel ratio and report sink.
- * @returns A frozen scene.
- * @throws Error when the canvas yields no WebGL context. A caller probes with
- *   `probeWebGLSupport` first and selects the number-only renderer instead.
+ * The box measured is the CELL AREA — the cell plates and the blocks standing
+ * on them — read through `cellToWorldIn` and `boardLayers` of
+ * src/render/tile-mesh-factory.ts, which are the same two the factory positions
+ * every plate and block through. The field's own `$grid-spacing` ring at
+ * style/main.scss L175 therefore falls outside the frustum and is continued by
+ * the `$game-container-background` of `.game-container` at style/main.scss
+ * L188, which the canvas composites over.
+ *
+ * `tilePositionStep` of src/theme/tokens.ts floors each cell's offset, so the
+ * trailing edge lands a fraction of a px short of the leading edge's mirror and
+ * these bounds are a function of the board size rather than of the field width
+ * alone.
+ */
+function readBoardBounds(
+  boardSize: number,
+  geometry: GeometryScale,
+): BoardBounds {
+  const lastIndex = boardSize - 1;
+  const first = cellToWorldIn({ x: 0, y: 0 }, geometry);
+  const last = cellToWorldIn({ x: lastIndex, y: lastIndex }, geometry);
+  const halfCell = geometry.tileSize / 2;
+
+  return {
+    minX: Math.min(first.x, last.x) - halfCell,
+    maxX: Math.max(first.x, last.x) + halfCell,
+    minY:
+      Math.min(first.y, last.y) -
+      halfCell +
+      depthRise(boardLayers.tileBase),
+    maxY:
+      Math.max(first.y, last.y) +
+      halfCell +
+      depthRise(boardLayers.tileSurface),
+  };
+}
+
+/**
+ * The camera transform one board size resolves to.
+ *
+ * The frustum is fitted to the board as it is actually laid out at that size,
+ * so the board fills the canvas rather than floating inside it, and one
+ * board-space px projects to one CSS px of the box `.game-container` leaves for
+ * the canvas. A board rebuilt at another edge length resolves a different
+ * framing, and `reframe` is what carries it into the camera.
+ *
+ * @param boardSize Cells per row.
+ * @param options Geometry to frame against, or the scale to resolve it at.
+ * @returns The framing, frozen.
+ * @throws RangeError when `boardSize` is not a positive integer, or when it is
+ *   beyond the largest size src/render/tile-mesh-factory.ts resolves lengths
+ *   for.
  *
  * @example
  * ```ts
- * const scene = createBoardScene({ canvas });
- * scene.resize(500, 500);
- * scene.render();
+ * const framing = frameBoard(4);
+ * const mobile = frameBoard(4, { scale: 'mobile' });
  * ```
  */
-export function createBoardScene(options: BoardSceneOptions): BoardScene {
+export function frameBoard(
+  boardSize: number,
+  options: FrameBoardOptions = {},
+): BoardFraming {
+  assertBoardSize(boardSize);
+
+  const geometry =
+    options.geometry ?? resolveBoardGeometry(boardSize, options.scale);
+  const bounds = readBoardBounds(boardSize, geometry);
+  const spanX = bounds.maxX - bounds.minX;
+  const spanY = bounds.maxY - bounds.minY;
+  const centreX = (bounds.minX + bounds.maxX) / 2;
+  const centreY = (bounds.minY + bounds.maxY) / 2;
+  const halfExtent = Math.max(spanX, spanY) / 2 + sceneOptics.margin;
+
+  // The board group's y axis is pre-scaled by `BOARD_Y_SCALE`, so a drawn point
+  // sits at `y * BOARD_Y_SCALE` in world space and the target's own y is the
+  // fitted centre divided back through the tilt's cosine.
+  const target: FramePoint = {
+    x: centreX,
+    y: centreY / TILT_COSINE,
+    z: DEPTH_ANCHOR,
+  };
+
+  return Object.freeze({
+    boardSize,
+    geometry,
+    halfExtent,
+    spanX,
+    spanY,
+    margin: sceneOptics.margin,
+    target: Object.freeze(target),
+    position: Object.freeze({
+      x: target.x,
+      y: target.y - sceneOptics.distance * TILT_SINE,
+      z: target.z + sceneOptics.distance * TILT_COSINE,
+    }),
+    tilt: sceneOptics.tilt,
+    distance: sceneOptics.distance,
+    near: sceneOptics.distance - sceneOptics.depthSpan,
+    far: sceneOptics.distance + sceneOptics.depthSpan,
+    boardScaleY: BOARD_Y_SCALE,
+  });
+}
+
+/* ==========================================================================
+ * 5. Construction
+ * ========================================================================== */
+
+/** Whether a value carries Three.js's object marker. */
+function isObject3D(value: unknown): value is Object3D {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { readonly isObject3D?: unknown }).isObject3D === true
+  );
+}
+
+/**
+ * The tuning one stage index and theme resolve to.
+ *
+ * The progression is `stage / (stage + stageHalfLife)`: monotonic in the stage
+ * index, zero at the first stage, and approaching but never reaching one, so a
+ * run of any length resolves to a share and a weight inside the token-anchored
+ * band rather than beyond it. Both results are confined again on the way out.
+ * DL-SCENE-04.
+ */
+function computeTuning(stageIndex: number, theme: Theme): RigTuning {
+  const denominator = stageIndex + sceneOptics.stageHalfLife;
+  const progress =
+    denominator > 0 ? confineFraction(stageIndex / denominator) : 0;
+
+  return Object.freeze({
+    stageIndex,
+    progress,
+    keyShare: confineFraction(
+      sceneOptics.keyShareBase + sceneOptics.keyShareRange * progress,
+    ),
+    warmWeight: confineFraction(sceneOptics.warmRange * progress),
+    themeId: theme.id,
+  });
+}
+
+/**
+ * Reads one palette entry into a colour, holding a fallback where it cannot be
+ * read.
+ *
+ * The fallback is written first, so a palette entry three cannot parse leaves
+ * the token's own value in place rather than a colour of its choosing.
+ *
+ * @param target Colour written into and returned.
+ * @param value Palette entry to read.
+ * @param fallback Token to hold where the entry cannot be read.
+ * @returns `target`.
+ */
+function readPaletteColor(
+  target: Color,
+  value: string,
+  fallback: string,
+): Color {
+  target.setStyle(fallback, SRGBColorSpace);
+
+  if (typeof value !== 'string' || value.length === 0) {
+    return target;
+  }
+
+  target.setStyle(value, SRGBColorSpace);
+
+  return target;
+}
+
+/**
+ * Builds the scene graph, the camera, the board group and the lighting rig.
+ *
+ * The camera is framed at construction, so a caller that never calls
+ * `resize` — a document with no layout engine reports no canvas size —
+ * still projects a fitted board.
+ *
+ * @param options Board size, geometry, stage, theme and report sink.
+ * @returns A frozen scene.
+ *
+ * @example
+ * ```ts
+ * const board = createScene({ boardSize: 4 });
+ * board.mountBoard(factory.buildBoard(4).group);
+ * board.resize(470, 470);
+ * ```
+ */
+export function createScene(options: SceneOptions = {}): BoardScene {
   const reporter = createGuardedRenderReporter(
     options.reporter ?? NOOP_RENDER_REPORTER,
   );
 
-  const renderer = new WebGLRenderer({
-    canvas: options.canvas,
-    antialias: true,
+  let refused = 0;
 
-    // TRANSPARENT, deliberately. The canvas is laid over `.game-container`,
-    // whose background is `$game-container-background` — the same colour the
-    // board field is drawn in — and the tilted board does not fill the square
-    // canvas to the last pixel. Clearing to an opaque colour would paint those
-    // few pixels in that colour instead of letting the container's own
-    // background show, which is what the 2D board had there.
-    alpha: true,
-  });
-
-  renderer.setPixelRatio(resolvePixelRatio(options.pixelRatio));
-
-  // Shadow maps are deliberately off: the 2D design casts no shadow between
-  // tiles, so a shadow pass would cost per frame for an effect it never had.
-  renderer.shadowMap.enabled = false;
+  /** Reports one refused or confined argument. */
+  const reportRefused = (
+    message: string,
+    detail: RenderDetail,
+    level: 'warning' | 'error' = 'warning',
+  ): void => {
+    refused += 1;
+    reporter.onCount({ name: REFUSED_METRIC, value: 1, detail });
+    reporter.onDiagnostic({
+      level,
+      source: DIAGNOSTIC_SOURCE,
+      message,
+      detail,
+    });
+  };
 
   const scene = new Scene();
-  const camera = new OrthographicCamera(-1, 1, 1, -1, 1, FRUSTUM_DEPTH);
-  const boardRoot = new Group();
 
-  scene.add(boardRoot);
+  // TRANSPARENT. The canvas is composited over `.game-container`, whose
+  // `$game-container-background` at style/main.scss L188 is the colour the
+  // board field itself is drawn in, and the DOM overlay layer at
+  // style/main.scss L205 composites above the canvas. DL-SCENE-05.
+  scene.background = null;
 
-  const hemisphere = new HemisphereLight(
-    0xffffff,
-    new Color(GROUND_COLOR).getHex(),
-    HEMISPHERE_INTENSITY,
-  );
-  const key = new DirectionalLight(0xffffff, KEY_INTENSITY);
-  const fill = new DirectionalLight(0xffffff, FILL_INTENSITY);
+  const boardGroup = new Group();
 
-  key.position.set(KEY_DIRECTION.x, KEY_DIRECTION.y, KEY_DIRECTION.z);
-  fill.position.set(FILL_DIRECTION.x, FILL_DIRECTION.y, FILL_DIRECTION.z);
-  hemisphere.position.set(
-    HEMISPHERE_AXIS.x,
-    HEMISPHERE_AXIS.y,
-    HEMISPHERE_AXIS.z,
-  );
-
-  scene.add(hemisphere, key, fill);
+  boardGroup.name = 'board-root';
 
   // The tilt's vertical foreshortening, cancelled on the way in.
-  boardRoot.scale.set(1, BOARD_Y_SCALE, 1);
+  boardGroup.scale.set(1, BOARD_Y_SCALE, 1);
+  scene.add(boardGroup);
 
-  let boardSize = options.boardSize ?? 0;
-  let geometry: GeometryScale | null = options.geometry ?? null;
-  let width = 0;
-  let height = 0;
-  let contextLost = false;
+  const ambient = new HemisphereLight();
+  const key = new DirectionalLight();
 
-  const target = new Vector3();
+  ambient.name = 'board-ambient';
+  key.name = 'board-key';
+
+  // Directions, not places: a hemisphere light's axis and a directional light's
+  // direction are both read off the light's own position, and a directional
+  // light's default target sits at the origin. Both are scaled by `fieldWidth`
+  // so each light object stands clear of the board.
+  //
+  // The fill's axis is `+z`, the board's own normal and the axis
+  // `boardLayers` of src/render/tile-mesh-factory.ts stacks the field, the
+  // plates and the blocks along.
+  ambient.position.set(0, 0, fieldWidth);
+
+  // Along the board plane, with no depth component at all: the key reaches the
+  // sides and the bevel ring of a block and contributes nothing to a surface
+  // facing the viewer, whose normal it meets at a right angle. It arrives from
+  // the far side and the left, both at one `gridSpacing`. DL-SCENE-03.
+  key.position.set(-gridSpacing * fieldWidth, gridSpacing * fieldWidth, 0);
+
+  const rigLights = [ambient, key] as const;
+
+  scene.add(...rigLights);
+
+  const lights: LightingRig = Object.freeze({
+    ambient,
+    key,
+    count: rigLights.length,
+  });
+
+  const camera = new OrthographicCamera();
+  const cameraTarget = new Vector3();
+  const restPosition = new Vector3();
+  const restQuaternion = new Quaternion();
+  const keyColor = new Color();
+  const haloColor = new Color();
 
   /**
-   * Places the camera above and in front of the board's centre, looking at it.
+   * The framing the scene opens with.
    *
-   * The tilt is applied as a position rather than a rotation so `lookAt` keeps
-   * the up axis consistent: the camera is lifted by `sin(tilt)` and pulled back
-   * by `cos(tilt)`, both scaled by `cameraDistance`.
+   * The board size is read from `boardSize`, then from the `RulesConfig`'s own,
+   * then from `gridRowCells` of src/theme/tokens.ts. A size the renderer cannot
+   * frame is reported and the token's size framed instead, so construction
+   * always yields a projecting camera.
    */
+  const resolveInitialFraming = (): BoardFraming => {
+    const requested =
+      options.boardSize ?? options.config?.boardSize ?? gridRowCells;
+
+    try {
+      return frameBoard(requested, {
+        geometry: options.geometry,
+        scale: options.scale,
+      });
+    } catch (error: unknown) {
+      refused += 1;
+      reporter.onCount({
+        name: REFUSED_METRIC,
+        value: 1,
+        detail: Object.freeze({ boardSize: String(requested) }),
+      });
+      reporter.onDiagnostic({
+        level: 'warning',
+        source: DIAGNOSTIC_SOURCE,
+        message:
+          'A board size the renderer cannot frame was refused; the ' +
+          'stylesheet\u2019s own board size was framed instead.',
+        detail: Object.freeze({
+          boardSize: String(requested),
+          framed: gridRowCells,
+        }),
+        error: describeRenderError(error),
+        thrown: error,
+      });
+
+      return frameBoard(gridRowCells, { scale: options.scale });
+    }
+  };
+
+  let disposed = false;
+  let framing = resolveInitialFraming();
+  let viewportWidth = 0;
+  let viewportHeight = 0;
+  let stageIndex = 0;
+  let theme: Theme = options.theme ?? getActiveTheme();
+  let tuning: RigTuning = computeTuning(stageIndex, theme);
+  let reframes = 0;
+  let resizes = 0;
+  let retunes = 0;
+  let mountedObjects = 0;
+
+  /** Writes the camera's transform from the framing in force. */
   const placeCamera = (): void => {
-    // Raised by half the extrusion's screen rise, so the board plus the block
-    // heights above it is centred in the frustum rather than the plane alone.
-    target.set(0, EXTRUSION_RISE / 2, 0);
-    camera.position.set(
-      0,
-      target.y + Math.sin(cameraTilt) * cameraDistance,
-      Math.cos(cameraTilt) * cameraDistance,
+    cameraTarget.set(
+      framing.target.x,
+      framing.target.y,
+      framing.target.z,
     );
-    camera.lookAt(target);
+    camera.position.set(
+      framing.position.x,
+      framing.position.y,
+      framing.position.z,
+    );
+    camera.lookAt(cameraTarget);
+    camera.near = framing.near;
+    camera.far = framing.far;
     camera.updateProjectionMatrix();
+
+    // The rest transform is recorded rather than read back later:
+    // src/render/camera-effects.ts displaces the camera itself, so its live
+    // transform stops being the framing's the moment an effect runs.
+    restPosition.copy(camera.position);
+    restQuaternion.copy(camera.quaternion);
   };
 
   /**
-   * Writes the frustum for the current canvas size and geometry.
+   * Writes the frustum for the framing in force and the viewport last seen.
+   *
+   * The square half-extent is inscribed in whichever axis is shorter, so the
+   * board stays fitted at a portrait aspect ratio and at a landscape one alike.
    *
    * @returns Whether the projection changed.
    */
   const applyFrustum = (): boolean => {
-    if (geometry === null || width <= 0 || height <= 0) {
-      return false;
-    }
-
-    const half = frustumHalfExtent(geometry);
-    const aspect = width / height;
+    const aspect =
+      viewportWidth > 0 && viewportHeight > 0
+        ? viewportWidth / viewportHeight
+        : 1;
+    const half = framing.halfExtent;
     const halfWidth = aspect >= 1 ? half * aspect : half;
     const halfHeight = aspect >= 1 ? half : half / aspect;
 
@@ -421,7 +922,9 @@ export function createBoardScene(options: BoardSceneOptions): BoardScene {
       camera.left === -halfWidth &&
       camera.right === halfWidth &&
       camera.top === halfHeight &&
-      camera.bottom === -halfHeight
+      camera.bottom === -halfHeight &&
+      camera.near === framing.near &&
+      camera.far === framing.far
     ) {
       return false;
     }
@@ -430,161 +933,365 @@ export function createBoardScene(options: BoardSceneOptions): BoardScene {
     camera.right = halfWidth;
     camera.top = halfHeight;
     camera.bottom = -halfHeight;
-
     placeCamera();
 
     return true;
   };
 
-  const applyTheme = (theme?: Theme): void => {
-    const resolved = theme ?? getActiveTheme();
-    const background = resolved.palette.pageBackground;
+  /**
+   * Re-tunes the two lights for the stage index and palette in force.
+   *
+   * The fill's sky half is held at `TOTAL_IRRADIANCE` in white and its ground
+   * half takes the palette's board-field colour, so a surface facing the viewer
+   * resolves to its own albedo at every stage and under every palette. The key
+   * light's share rises across a run and its colour reaches toward the
+   * palette's own halo entry; both reach the sides and the bevel ring alone, so
+   * neither can move a fill off the ramp. A palette whose halo is neutral —
+   * the high-contrast palette's is — warms the key not at all.
+   * DL-SCENE-03, DL-SCENE-04.
+   *
+   * @returns Whether the tuning changed.
+   */
+  const retune = (): boolean => {
+    const next = computeTuning(stageIndex, theme);
 
-    try {
-      // Alpha zero: the colour is carried for the one case a host composites the
-      // canvas against it rather than against the page, and the container's own
-      // background is what shows through everywhere else.
-      renderer.setClearColor(toThreeColor(readThemeColor(background)), 0);
-      reporter.onCount({
-        name: THEME_METRIC,
-        value: 1,
-        detail: Object.freeze({ theme: resolved.id }),
-      });
-    } catch (error: unknown) {
-      reporter.onDiagnostic({
-        level: 'warning',
-        source: DIAGNOSTIC_SOURCE,
-        message: 'A theme background could not be read; the clear colour stands.',
-        detail: Object.freeze({ theme: resolved.id }),
-        error: describeRenderError(error),
-      });
+    readPaletteColor(haloColor, theme.palette.tileGlow, tileGoldGlowColor);
+    keyColor.copy(WHITE).lerp(haloColor, next.warmWeight);
+
+    ambient.color.copy(WHITE);
+    readPaletteColor(
+      ambient.groundColor,
+      theme.palette.boardField,
+      gameContainerBackground,
+    );
+    ambient.intensity = TOTAL_IRRADIANCE;
+
+    key.color.copy(keyColor);
+    key.intensity = next.keyShare * TOTAL_IRRADIANCE;
+
+    const changed =
+      tuning.stageIndex !== next.stageIndex ||
+      tuning.keyShare !== next.keyShare ||
+      tuning.warmWeight !== next.warmWeight ||
+      tuning.themeId !== next.themeId;
+
+    tuning = next;
+    retunes += 1;
+
+    return changed;
+  };
+
+  const applyTheme = (next?: Theme): void => {
+    if (disposed) {
+      reportRefused(
+        'A theme was refused: the scene has been disposed.',
+        Object.freeze({ theme: next?.id ?? null }),
+      );
+
+      return;
     }
-  };
 
-  // The context-loss handler the product has never had: WebGL is a hard runtime
-  // prerequisite, and a lost context is silent without this.
-  const onContextLost = (event: Event): void => {
-    // Cancelling the default action is what allows a restore to be attempted at
-    // all; without it the context is gone for the page's lifetime.
-    event.preventDefault();
-    contextLost = true;
+    theme = next ?? getActiveTheme();
+    retune();
 
-    reporter.onCount({ name: CONTEXT_LOST_METRIC, value: 1 });
-    reporter.onDiagnostic({
-      level: 'error',
-      source: DIAGNOSTIC_SOURCE,
-      message:
-        'The WebGL context was lost; the board stops drawing until it is ' +
-        'restored.',
+    reporter.onCount({
+      name: THEME_METRIC,
+      value: 1,
+      detail: Object.freeze({
+        theme: theme.id,
+        keyShare: tuning.keyShare,
+        warmWeight: tuning.warmWeight,
+      }),
     });
   };
 
-  const onContextRestored = (): void => {
-    contextLost = false;
+  const applyStageTheme = (nextStage: number): boolean => {
+    if (disposed) {
+      reportRefused(
+        'A stage theme was refused: the scene has been disposed.',
+        Object.freeze({ stageIndex: nextStage }),
+      );
 
-    reporter.onDiagnostic({
-      level: 'info',
-      source: DIAGNOSTIC_SOURCE,
-      message: 'The WebGL context was restored.',
+      return false;
+    }
+
+    if (!Number.isFinite(nextStage)) {
+      reportRefused(
+        'A stage index that is not a finite number was refused; the rig ' +
+          'stands as it was tuned.',
+        Object.freeze({ stageIndex: String(nextStage) }),
+      );
+
+      return false;
+    }
+
+    // A stage index below the first is confined to it and reported, so the
+    // rig the first stage resolves to is the one adopted. DL-SCENE-04.
+    const confined = Math.max(0, nextStage);
+
+    if (confined !== nextStage) {
+      reportRefused(
+        'A negative stage index was confined to the first stage.',
+        Object.freeze({ stageIndex: nextStage, confined }),
+      );
+    }
+
+    if (confined === stageIndex) {
+      return false;
+    }
+
+    stageIndex = confined;
+
+    const changed = retune();
+
+    reporter.onCount({
+      name: STAGE_METRIC,
+      value: 1,
+      detail: Object.freeze({
+        stageIndex,
+        progress: tuning.progress,
+        keyShare: tuning.keyShare,
+      }),
     });
+
+    return changed;
   };
 
-  options.canvas.addEventListener('webglcontextlost', onContextLost);
-  options.canvas.addEventListener('webglcontextrestored', onContextRestored);
+  const releaseTheme =
+    (options.followActiveTheme ?? options.theme === undefined)
+      ? subscribeToThemeChange((next: Theme): void => {
+          applyTheme(next);
+        })
+      : (): void => undefined;
 
-  const releaseTheme = subscribeToThemeChange((theme): void => {
-    applyTheme(theme);
-  });
+  // Tuned before any stage is adopted, so both lights carry this rig's values
+  // rather than the library's own defaults even where the caller supplied no
+  // stage, and where the stage supplied is the first one.
+  retune();
 
-  applyTheme();
+  if (options.stageIndex !== undefined) {
+    applyStageTheme(options.stageIndex);
+  }
+
+  applyFrustum();
   placeCamera();
 
   reporter.onCount({
+    name: LIGHT_METRIC,
+    value: lights.count,
+    detail: Object.freeze({
+      ambient: ambient.intensity,
+      key: key.intensity,
+    }),
+  });
+  reporter.onCount({
     name: CREATED_METRIC,
     value: 1,
-    detail: Object.freeze({ boardSize }),
+    detail: Object.freeze({
+      boardSize: framing.boardSize,
+      halfExtent: framing.halfExtent,
+      tilt: framing.tilt,
+      theme: theme.id,
+      lights: lights.count,
+    }),
   });
 
-  let disposed = false;
-
   return Object.freeze({
-    renderer,
     scene,
     camera,
-    boardRoot,
+    boardGroup,
+    lights,
 
-    resize(nextWidth: number, nextHeight: number): boolean {
-      if (
-        !Number.isFinite(nextWidth) ||
-        !Number.isFinite(nextHeight) ||
-        nextWidth <= 0 ||
-        nextHeight <= 0
-      ) {
+    mountBoard(object: Object3D): boolean {
+      if (disposed) {
+        reportRefused(
+          'A board was refused: the scene has been disposed.',
+          Object.freeze({ boardSize: framing.boardSize }),
+        );
+
         return false;
       }
 
-      if (nextWidth === width && nextHeight === height) {
+      if (!isObject3D(object) || object === boardGroup) {
+        reportRefused(
+          'A board that is not a mountable object was refused; the board ' +
+            'group stands as it was.',
+          Object.freeze({ boardSize: framing.boardSize }),
+        );
+
         return false;
       }
 
-      width = nextWidth;
-      height = nextHeight;
-
-      // `false` for the third argument: the canvas's CSS size is the
-      // stylesheet's business, and writing it here would fight the layout.
-      renderer.setSize(width, height, false);
-      applyFrustum();
+      boardGroup.add(object);
+      mountedObjects = boardGroup.children.length;
 
       reporter.onCount({
-        name: RESIZED_METRIC,
+        name: MOUNTED_METRIC,
         value: 1,
-        detail: Object.freeze({ width, height }),
+        detail: Object.freeze({
+          boardSize: framing.boardSize,
+          objects: mountedObjects,
+        }),
       });
 
       return true;
     },
 
-    reframe(nextSize: number, nextGeometry: GeometryScale): boolean {
-      if (!isSupportedBoardSize(nextSize)) {
+    clearBoard(): number {
+      const detached = boardGroup.children.length;
+
+      boardGroup.clear();
+      mountedObjects = boardGroup.children.length;
+
+      return detached;
+    },
+
+    resize(width: number, height: number): boolean {
+      if (disposed) {
+        reportRefused(
+          'A canvas size was refused: the scene has been disposed.',
+          Object.freeze({ width: String(width), height: String(height) }),
+        );
+
+        return false;
+      }
+
+      if (
+        !Number.isFinite(width) ||
+        !Number.isFinite(height) ||
+        width <= 0 ||
+        height <= 0
+      ) {
+        reportRefused(
+          'A canvas size that is not two positive lengths was refused; the ' +
+            'frustum stands as it was.',
+          Object.freeze({ width: String(width), height: String(height) }),
+        );
+
+        return false;
+      }
+
+      if (width === viewportWidth && height === viewportHeight) {
+        return false;
+      }
+
+      viewportWidth = width;
+      viewportHeight = height;
+
+      resizes += 1;
+
+      const reprojected = applyFrustum();
+
+      reporter.onCount({
+        name: RESIZED_METRIC,
+        value: 1,
+        detail: Object.freeze({
+          width,
+          height,
+          halfExtent: framing.halfExtent,
+          reprojected,
+        }),
+      });
+
+      return true;
+    },
+
+    reframe(nextSize: number, geometry?: GeometryScale): boolean {
+      if (disposed) {
+        reportRefused(
+          'A re-frame was refused: the scene has been disposed.',
+          Object.freeze({ boardSize: nextSize }),
+        );
+
+        return false;
+      }
+
+      let next: BoardFraming;
+
+      try {
+        next = frameBoard(nextSize, {
+          geometry: geometry ?? options.geometry,
+          scale: options.scale,
+        });
+      } catch (error: unknown) {
+        refused += 1;
+        reporter.onCount({
+          name: REFUSED_METRIC,
+          value: 1,
+          detail: Object.freeze({ boardSize: String(nextSize) }),
+        });
         reporter.onDiagnostic({
           level: 'warning',
           source: DIAGNOSTIC_SOURCE,
-          message: 'A board size the product does not support was refused.',
-          detail: Object.freeze({ boardSize: nextSize }),
+          message:
+            'A board size the renderer cannot frame was refused; the camera ' +
+            'stands as it was framed.',
+          detail: Object.freeze({ boardSize: String(nextSize) }),
+          error: describeRenderError(error),
+          thrown: error,
         });
 
         return false;
       }
 
-      const changed = nextSize !== boardSize || nextGeometry !== geometry;
+      const changed =
+        next.boardSize !== framing.boardSize ||
+        next.halfExtent !== framing.halfExtent ||
+        next.spanX !== framing.spanX ||
+        next.spanY !== framing.spanY ||
+        next.target.x !== framing.target.x ||
+        next.target.y !== framing.target.y;
 
-      boardSize = nextSize;
-      geometry = nextGeometry;
-
+      framing = next;
       applyFrustum();
 
+      // Written unconditionally: `applyFrustum` places the camera only where
+      // the projection changed, and a caller that re-framed is entitled to a
+      // rest transform that matches the framing it asked for.
+      placeCamera();
+
       if (changed) {
+        reframes += 1;
         reporter.onCount({
           name: REFRAMED_METRIC,
           value: 1,
-          detail: Object.freeze({ boardSize }),
+          detail: Object.freeze({
+            boardSize: framing.boardSize,
+            halfExtent: framing.halfExtent,
+          }),
         });
       }
 
       return changed;
     },
 
-    render(): void {
-      if (disposed || contextLost) {
-        return;
-      }
+    readFraming: (): BoardFraming => framing,
 
-      renderer.render(scene, camera);
-    },
+    readRestTransform: (): CameraRestPose =>
+      Object.freeze({
+        position: restPosition.clone(),
+        quaternion: restQuaternion.clone(),
+      }),
 
+    applyStageTheme,
     applyTheme,
 
-    isContextLost: (): boolean => contextLost,
+    readTuning: (): RigTuning => tuning,
+
+    readStats: (): SceneStats =>
+      Object.freeze({
+        boardSize: framing.boardSize,
+        halfExtent: framing.halfExtent,
+        lights: lights.count,
+        mountedObjects,
+        reframes,
+        resizes,
+        retunes,
+        refused,
+        stageIndex,
+        themeId: theme.id,
+        disposed,
+      }),
 
     dispose(): void {
       if (disposed) {
@@ -594,20 +1301,20 @@ export function createBoardScene(options: BoardSceneOptions): BoardScene {
       disposed = true;
 
       releaseTheme();
-      options.canvas.removeEventListener('webglcontextlost', onContextLost);
-      options.canvas.removeEventListener(
-        'webglcontextrestored',
-        onContextRestored,
-      );
+      boardGroup.clear();
+      mountedObjects = 0;
+      scene.remove(boardGroup, ...rigLights);
 
-      hemisphere.dispose();
-      key.dispose();
-      fill.dispose();
+      for (const light of rigLights) {
+        light.dispose();
+      }
 
-      scene.remove(hemisphere, key, fill, boardRoot);
-      renderer.dispose();
-
-      reporter.onCount({ name: DISPOSED_METRIC, value: 1 });
+      reporter.onCount({
+        name: DISPOSED_METRIC,
+        value: 1,
+        detail: Object.freeze({ boardSize: framing.boardSize }),
+      });
     },
   });
 }
+

@@ -1,983 +1,2340 @@
-// Trust-boundary suite of src/run/run-state.ts: the envelope's structural
-// validation, its deep copy, and the JSON round-trip contract its module
-// header states.
+// Schema suite of src/run/run-state.ts: the nine-member run-state envelope,
+// the board snapshot it wraps, its version classification and its cursor
+// normalisation. AAP Contract 5 (0.6.1.5), requirement R6, and the
+// schema-versioning half of implicit requirement I5.
 //
-// The contract under test, from that header: "Every member of `RunState` is
-// JSON data ... so `JSON.parse(JSON.stringify(state))` is deep-equal to
-// `state`". A relic's own `state` is the one member the wire types as
-// `unknown`, so it is the one member on which that promise has to be
-// enforced rather than declared. `PersistedRelicState` states the vocabulary
-// it is drawn from, `checkRelicState()` decides membership as part of
-// `isRunStateShape()`, and `cloneRelicState()` carries nothing outside it.
+// Superseded constructs this suite is the named verification target for:
+//   Tile.prototype.serialize         js/tile.js         L19-L27
+//   Grid.prototype.serialize         js/grid.js         L102-L117
+//   GameManager.prototype.serialize  js/game_manager.js L102-L110
+//   keepPlaying                      js/game_manager.js L24-L27 assignment,
+//                                    L31 read, L45 restore, L108 persist
+//   fakeStorage                      js/local_storage_manager.js L1-L19
 //
-// Sections, each naming the construct it exercises:
-//   1  isPersistedRelicState()   the vocabulary, value by value
-//   2  describeRunStateProblems()  relic state diagnosed field-scoped
-//   3  isRunStateShape()         the predicate the store gates writes on
-//   4  cloneRunState()           detachment, and the JSON projection
-//   5  RunStateStore             the boundary the two above compose into
-//   6  RunStateStore reports     every channel is attributable to one run
+// Collected by the unit:dom-free project of vitest.config.ts, environment
+// 'node'. Nothing here reads a document, a Web Storage global, a clock or
+// randomness; nothing installs a mock, replaces a global or writes a
+// snapshot artifact.
 //
-// Every hostile input below is one a stored envelope can actually carry:
-// `JSON.parse` produces `__proto__` as an ordinary own data property, and a
-// value assembled in memory can hold a function, a cycle or an accessor.
+// Coverage boundaries this suite stays inside: end-to-end cursor resume is
+// tests/unit/run/rng-cursor-persistence.test.ts, store behaviour is
+// tests/unit/run/run-state-store.test.ts, the deep copy is
+// tests/unit/run/run-state-cloning.test.ts, and the frozen best-score
+// contract is tests/unit/storage/best-score.test.ts.
 //
-// This suite reads no DOM, installs no mock and replaces no global; the one
-// test double is the hand-written persistence port in section 5. It is
-// collected by the `unit:dom` project of vitest.config.ts, whose environment
-// is 'jsdom', because tests/unit/run is not one of that config's DOM-free
-// directories; nothing here touches a document.
+// Figures these assertions define the schema for: Figure 4 (Turn Data Flow)
+// and Figure 7 (Seeded Determinism) of docs/architecture/data-flow.md.
 //
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md.
+// Decisions behind this file: docs/DECISION_LOG.md.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { EMPTY_BOARD, copyBoard } from '../../fixtures/boards';
-import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import {
+  createDefaultStageConfig,
+  stageGoalForIndex,
+} from '../../../src/config/stage-config';
+import type { StageGoal } from '../../../src/config/stage-config';
+import { Grid } from '../../../src/engine/grid';
+import { Tile } from '../../../src/engine/tile';
+import type {
+  SerializedGameState,
+  SerializedTile,
+} from '../../../src/engine/types';
+import type {
+  PersistedRelic as RelicsPersistedRelic,
+} from '../../../src/relics/relic-types';
+import {
+  MAX_RNG_CURSOR,
+  MAX_RUN_SEED_LENGTH,
+  RNG_STREAM_NAMES,
+} from '../../../src/rng/rng-streams';
+import type { RngCursorMap, StreamName } from '../../../src/rng/rng-streams';
+import * as runStateModule from '../../../src/run/run-state';
+import {
+  MAX_PERSISTED_RELICS,
+  MAX_SUPPORTED_BOARD_SIZE,
+  NOOP_RUN_REPORTER,
   RUN_STATE_SCHEMA_VERSION,
-  cloneRunState,
+  RUN_STATE_SCHEMA_VERSION_HISTORY,
+  classifyRunStateVersion,
   createFreshRunState,
   describeRunStateProblems,
+  isCurrentRunState,
   isPersistedRelicState,
   isRunStateShape,
+  normalizeRngCursor,
+  projectCurrentRunState,
+  redactRunSummary,
+  summarizeRunState,
+  summarizeRunStateForReport,
 } from '../../../src/run/run-state';
 import type {
+  FreshRunStateInput,
+  LegacyBoardSnapshot,
   PersistedRelic,
   RunReporter,
   RunState,
+  RunStateVersionVerdict,
+  RunSummary,
 } from '../../../src/run/run-state';
+import { MemoryStorage } from '../../../src/storage/memory-storage';
 import {
-  MAX_RUN_SEED_LENGTH,
-  createRngStreams,
-  isAcceptableRunSeed,
-} from '../../../src/rng/rng-streams';
-import { RunStateStore } from '../../../src/run/run-state-store';
-import type { RunStatePersistencePort } from '../../../src/run/run-state-store';
-import { RUN_STATE_KEY } from '../../../src/storage/storage-keys';
-import type { OwnedStorageKey } from '../../../src/storage/storage-keys';
+  BEST_SCORE_KEY,
+  OWNED_STORAGE_KEYS,
+} from '../../../src/storage/storage-keys';
+import { MERGE_PAIR_BOARD, copyBoard } from '../../fixtures/boards';
+
+/* ===== Type-level assertion helpers ===== */
+
+type Equal<X, Y> =
+  (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
+    ? true
+    : false;
+
+type Expect<T extends true> = T;
+
+/**
+ * `LegacyBoardSnapshot` is an alias of the engine's own snapshot declaration,
+ * never a second declaration of the same members.
+ */
+const boardSnapshotAliasHolds: Expect<
+  Equal<LegacyBoardSnapshot, SerializedGameState>
+> = true;
+
+/** The version verdict union carries five members and no sixth. */
+const versionVerdictUnionIsExhaustive: Expect<
+  Equal<
+    RunStateVersionVerdict,
+    'current' | 'older' | 'unknown' | 'absent' | 'malformed'
+  >
+> = true;
+
+/**
+ * The persisted relic triple is declared in src/run/run-state.ts and again in
+ * src/relics/relic-types.ts. Divergence between the two is a type error here.
+ */
+const relicTripleIsIdentical: Expect<
+  Equal<PersistedRelic, RelicsPersistedRelic>
+> = true;
+
+/** Assignability of the relics-side declaration to the run-side one. */
+const runAcceptsRelicsTriple: PersistedRelic = {} as RelicsPersistedRelic;
+
+/** Assignability of the run-side declaration to the relics-side one. */
+const relicsAcceptsRunTriple: RelicsPersistedRelic = {} as PersistedRelic;
 
 /* ===== Fixtures ===== */
 
+/** The nine members Contract 5 fixes the envelope at. */
+const ENVELOPE_MEMBERS: readonly string[] = [
+  'schemaVersion',
+  'runId',
+  'seed',
+  'rngCursor',
+  'stageIndex',
+  'stageGoal',
+  'goalProgress',
+  'relics',
+  'board',
+];
+
+/** The five members of the wrapped snapshot, in persisted key order. */
+const BOARD_MEMBERS: readonly string[] = [
+  'grid',
+  'score',
+  'over',
+  'won',
+  'keepPlaying',
+];
+
+/** The five members of a run summary, sorted. */
+const SUMMARY_MEMBERS: readonly string[] = [
+  'relics',
+  'runId',
+  'score',
+  'seed',
+  'stageIndex',
+];
+
+/** Every channel the injected report sink declares. */
+const REPORTER_CHANNELS: readonly string[] = [
+  'onLoadCorrupted',
+  'onVersionMigrated',
+  'onBoardSizeReconciled',
+  'onWriteFailed',
+  'onRunStarted',
+  'onStageAdvanced',
+  'onRewardDrawn',
+  'onRunEnded',
+];
+
+/** The four named RNG substreams a cursor map covers. */
+const CURSOR_STREAMS: readonly StreamName[] = RNG_STREAM_NAMES;
+
+const STAGE_CONFIG = createDefaultStageConfig();
+
+const INITIAL_STAGE_INDEX = 0;
+
+const FIXTURE_SCORE = 24;
+
+const ADDED_TILE_VALUE = 8;
+
+/** Every verdict `classifyRunStateVersion()` reduces a payload to. */
+const VERSION_VERDICTS: readonly RunStateVersionVerdict[] = [
+  'current',
+  'older',
+  'unknown',
+  'absent',
+  'malformed',
+];
+
 /**
- * Builds a fresh envelope wrapping the empty-board fixture.
+ * Builds the wrapped snapshot from live engine objects: a `Grid` rehydrated
+ * from the merge-pair fixture's cell matrix, one further `Tile` placed into
+ * it, and the three serialisation stages taken in order.
  *
- * @param relics Relics to place in pickup order. Defaults to none.
- * @returns The envelope.
+ * @param score Score to record in the manager stage.
+ * @returns The snapshot, in js/game_manager.js L102-L110's key order.
  */
-function envelope(relics: readonly PersistedRelic[] = []): RunState {
-  const state = createFreshRunState({
-    runId: 'run-1',
+function buildBoardSnapshot(
+  score: number = FIXTURE_SCORE
+): LegacyBoardSnapshot {
+  const fixture = copyBoard(MERGE_PAIR_BOARD);
+  const size = fixture.grid.size;
+
+  // js/grid.js L21-L34: the serialised matrix is read as state[x][y].
+  const grid = new Grid(size, fixture.grid.cells);
+
+  grid.insertTile(new Tile({ x: size - 1, y: size - 1 }, ADDED_TILE_VALUE));
+
+  return {
+    grid: grid.serialize(),
+    score,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  };
+}
+
+/**
+ * Builds the argument `createFreshRunState()` takes. The stage goal is read
+ * from src/config/stage-config.ts.
+ */
+function buildInput(): FreshRunStateInput {
+  return {
+    runId: 'run-0001',
     seed: 'seed-42',
-    rngCursor: { 'spawn-value': 2, 'spawn-position': 2 },
-    stageIndex: 0,
-    stageGoal: { kind: 'highest-tile', target: 64 },
-    board: copyBoard(EMPTY_BOARD),
+    rngCursor: {},
+    stageIndex: INITIAL_STAGE_INDEX,
+    stageGoal: stageGoalForIndex(INITIAL_STAGE_INDEX, STAGE_CONFIG),
+    board: buildBoardSnapshot(),
+  };
+}
+
+function buildEnvelope(): RunState {
+  return createFreshRunState(buildInput());
+}
+
+/**
+ * Builds an envelope holding `relics` in pickup order. `createFreshRunState()`
+ * always returns an empty relic list; this replaces that member.
+ */
+function buildEnvelopeWithRelics(
+  relics: readonly PersistedRelic[]
+): RunState {
+  return { ...buildEnvelope(), relics: relics.slice() };
+}
+
+/**
+ * A JSON projection of a valid envelope, typed loosely so a member can be
+ * deleted or replaced to build a hostile payload.
+ */
+function loosenEnvelope(): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(buildEnvelope())) as Record<
+    string,
+    unknown
+  >;
+}
+
+/** Every value a validator must reduce to a verdict without throwing. */
+const HOSTILE_INPUTS: readonly unknown[] = [
+  null,
+  undefined,
+  42,
+  'text',
+  true,
+  [],
+  [buildEnvelope()],
+  {},
+  Number.NaN,
+];
+
+/* ===== Storage teardown hygiene ===== */
+
+/**
+ * The store this suite owns and injects. The unit:dom-free project runs with
+ * environment 'node' and exposes no Web Storage global.
+ */
+const storage = new MemoryStorage();
+
+/**
+ * Best score observed at the start of the current test. js/game_manager.js
+ * L80-L82 promoted the value and js/local_storage_manager.js L61-L63 never
+ * removed it.
+ */
+let bestScoreAtEntry: string | null | undefined = 'unread';
+
+/**
+ * Removes every key the product owns, then the best-score key by name.
+ * Idempotent and tolerant of an already-clean store: `MemoryStorage`
+ * `removeItem` of an absent key is a no-op. vitest.config.ts's setup file
+ * registers an `afterEach` of its own.
+ */
+function clearOwnedKeys(): void {
+  for (const key of OWNED_STORAGE_KEYS) {
+    storage.removeItem(key);
+  }
+
+  storage.removeItem(BEST_SCORE_KEY);
+}
+
+beforeEach(() => {
+  bestScoreAtEntry = storage.getItem(BEST_SCORE_KEY);
+});
+
+afterEach(clearOwnedKeys);
+
+/* ===== 1. The nine-member envelope, and nothing more ===== */
+
+describe('the envelope carries exactly the nine Contract 5 members', () => {
+  it('carries all nine member names', () => {
+    const keys = Object.keys(buildEnvelope());
+
+    for (const member of ENVELOPE_MEMBERS) {
+      expect(keys).toContain(member);
+    }
   });
 
-  return { ...state, relics: relics.slice() };
+  it('carries no tenth member', () => {
+    const keys = Object.keys(buildEnvelope());
+
+    expect(keys).toHaveLength(ENVELOPE_MEMBERS.length);
+
+    for (const key of keys) {
+      expect(ENVELOPE_MEMBERS).toContain(key);
+    }
+  });
+
+  it('carries the nine as a set, independently of declaration order', () => {
+    const keys = Object.keys(buildEnvelope()).slice().sort();
+
+    expect(keys).toEqual([...ENVELOPE_MEMBERS].sort());
+  });
+
+  it('names run state and board state separately, never flattened', () => {
+    const state = buildEnvelope();
+
+    expect(Object.keys(state)).not.toContain('score');
+    expect(Object.keys(state)).not.toContain('over');
+    expect(Object.keys(state)).not.toContain('won');
+    expect(state.board.score).toBe(FIXTURE_SCORE);
+  });
+});
+
+/* ===== 2. The schema version, and the history that decides older ===== */
+
+describe('the schema version member', () => {
+  it('stamps a fresh envelope with the current version', () => {
+    expect(buildEnvelope().schemaVersion).toBe(RUN_STATE_SCHEMA_VERSION);
+  });
+
+  it('is an integer, which is what a classification can compare', () => {
+    expect(Number.isSafeInteger(RUN_STATE_SCHEMA_VERSION)).toBe(true);
+  });
+});
+
+describe('the schema version history makes older decidable', () => {
+  it('contains the current version', () => {
+    expect(RUN_STATE_SCHEMA_VERSION_HISTORY).toContain(
+      RUN_STATE_SCHEMA_VERSION
+    );
+  });
+
+  it('is a non-empty list of safe integers', () => {
+    expect(RUN_STATE_SCHEMA_VERSION_HISTORY.length).toBeGreaterThan(0);
+
+    for (const version of RUN_STATE_SCHEMA_VERSION_HISTORY) {
+      expect(Number.isSafeInteger(version)).toBe(true);
+    }
+  });
+
+  it('ascends strictly, so no two entries compare equal', () => {
+    const versions = [...RUN_STATE_SCHEMA_VERSION_HISTORY];
+
+    for (let index = 1; index < versions.length; index += 1) {
+      expect(versions[index]).toBeGreaterThan(versions[index - 1]);
+    }
+  });
+
+  it('ends at the current version, so nothing recorded is newer', () => {
+    const highest = Math.max(...RUN_STATE_SCHEMA_VERSION_HISTORY);
+
+    expect(highest).toBe(RUN_STATE_SCHEMA_VERSION);
+  });
+});
+
+/* ===== 3. The JSON round trip of the whole envelope ===== */
+
+describe('the whole envelope survives a JSON round trip', () => {
+  it('parses back deep-equal to the original', () => {
+    const state = buildEnvelope();
+    const restored = JSON.parse(JSON.stringify(state)) as RunState;
+
+    expect(restored).toEqual(state);
+  });
+
+  it('parses back byte-for-byte, so no member order moves', () => {
+    const state = buildEnvelope();
+    const restored = JSON.parse(JSON.stringify(state)) as RunState;
+
+    expect(JSON.stringify(restored)).toBe(JSON.stringify(state));
+  });
+
+  it('loses no member, which JSON would do for a function or undefined',
+    () => {
+      const state = buildEnvelope();
+      const restored = JSON.parse(JSON.stringify(state)) as RunState;
+
+      expect(Object.keys(restored).sort()).toEqual(
+        Object.keys(state).sort()
+      );
+    });
+
+  it('carries the stage goal through with both members intact', () => {
+    const state = buildEnvelope();
+    const restored = JSON.parse(JSON.stringify(state)) as RunState;
+    const goal: StageGoal = restored.stageGoal;
+
+    expect(Object.keys(goal).sort()).toEqual(['kind', 'target']);
+    expect(goal.kind).toBe(state.stageGoal.kind);
+    expect(goal.target).toBe(state.stageGoal.target);
+  });
+
+  it('carries a stage goal of plain data, holding no function member', () => {
+    const goal = buildEnvelope().stageGoal as unknown as Record<
+      string,
+      unknown
+    >;
+
+    for (const value of Object.values(goal)) {
+      expect(typeof value).not.toBe('function');
+    }
+  });
+
+  it('carries the run seed and the run identifier verbatim', () => {
+    const input = buildInput();
+    const restored = JSON.parse(
+      JSON.stringify(createFreshRunState(input))
+    ) as RunState;
+
+    expect(restored.seed).toBe(input.seed);
+    expect(restored.runId).toBe(input.runId);
+  });
+
+  it('carries every cursor count through as a finite number', () => {
+    const restored = JSON.parse(
+      JSON.stringify(buildEnvelope())
+    ) as RunState;
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(Number.isFinite(restored.rngCursor[name])).toBe(true);
+    }
+  });
+});
+
+/* ===== 4. The relics member as persisted triples ===== */
+
+describe('the relics member is a list of persisted relic triples', () => {
+  it('is empty on a fresh envelope', () => {
+    expect(buildEnvelope().relics).toEqual([]);
+  });
+
+  it('accepts a triple carrying identity, charges and state', () => {
+    const relic: PersistedRelic = {
+      id: 'gilded-spawn',
+      charges: 3,
+      state: { fired: 1 },
+    };
+    const state = buildEnvelopeWithRelics([relic]);
+
+    expect(isRunStateShape(state)).toBe(true);
+    expect(state.relics[0]).toEqual(relic);
+  });
+
+  it('accepts a triple with charges and state both absent', () => {
+    const relic: PersistedRelic = { id: 'plain-relic' };
+    const state = buildEnvelopeWithRelics([relic]);
+
+    expect(isRunStateShape(state)).toBe(true);
+    expect(Object.keys(state.relics[0])).toEqual(['id']);
+  });
+
+  it('accepts a triple whose charge budget is exhausted at zero', () => {
+    const state = buildEnvelopeWithRelics([{ id: 'spent', charges: 0 }]);
+
+    expect(isRunStateShape(state)).toBe(true);
+    expect(state.relics[0].charges).toBe(0);
+  });
+
+  it('preserves pickup order, which is hook dispatch order', () => {
+    const ids = ['first', 'second', 'third'];
+    const state = buildEnvelopeWithRelics(ids.map((id) => ({ id })));
+
+    expect(state.relics.map((relic) => relic.id)).toEqual(ids);
+  });
+
+  it('round-trips a triple whose optional members are absent', () => {
+    const state = buildEnvelopeWithRelics([{ id: 'plain-relic' }]);
+    const restored = JSON.parse(JSON.stringify(state)) as RunState;
+
+    expect(JSON.stringify(restored.relics)).toBe(
+      JSON.stringify(state.relics)
+    );
+  });
+
+  it('refuses a list longer than the persisted relic bound', () => {
+    const overflow: PersistedRelic[] = [];
+
+    for (let index = 0; index <= MAX_PERSISTED_RELICS; index += 1) {
+      overflow.push({ id: `relic-${index}` });
+    }
+
+    const state = buildEnvelopeWithRelics(overflow);
+
+    expect(isRunStateShape(state)).toBe(false);
+    expect(
+      describeRunStateProblems(state).some((problem) =>
+        problem.startsWith('relics')
+      )
+    ).toBe(true);
+  });
+});
+
+/* ===== 5. The board member wraps the snapshot verbatim ===== */
+
+/**
+ * Collects every serialised tile of a snapshot, column by column.
+ *
+ * @param board Snapshot to walk.
+ * @returns The occupied cells, x-outer then y-inner.
+ */
+function occupiedCells(board: LegacyBoardSnapshot): SerializedTile[] {
+  const tiles: SerializedTile[] = [];
+
+  for (const column of board.grid.cells) {
+    for (const cell of column) {
+      if (cell !== null) {
+        tiles.push(cell);
+      }
+    }
+  }
+
+  return tiles;
 }
 
-/** Every problem reported for one relic's `state` member. */
-function stateProblems(state: unknown): string[] {
-  return describeRunStateProblems(
-    envelope([{ id: 'relic-1', state }])
-  ).filter((problem) => problem.startsWith('relics[0].state'));
-}
+describe('the board member wraps the pre-migration snapshot verbatim', () => {
+  it('is a type alias of the engine snapshot, never a redeclaration', () => {
+    expect(boardSnapshotAliasHolds).toBe(true);
+  });
 
-/* ===== 1. isPersistedRelicState() ===== */
+  it('unwraps byte-for-byte identical after a wrap and a round trip', () => {
+    const board = buildBoardSnapshot();
+    const state = createFreshRunState({ ...buildInput(), board });
+    const restored = JSON.parse(JSON.stringify(state)) as RunState;
+
+    expect(JSON.stringify(restored.board)).toBe(JSON.stringify(board));
+  });
+
+  it('unwraps deep-equal after a wrap and a round trip', () => {
+    const board = buildBoardSnapshot();
+    const state = createFreshRunState({ ...buildInput(), board });
+    const restored = JSON.parse(JSON.stringify(state)) as RunState;
+
+    expect(restored.board).toEqual(board);
+  });
+
+  it('is wrapped rather than reshaped, so the snapshot reaches it whole',
+    () => {
+      const board = buildBoardSnapshot();
+      const state = createFreshRunState({ ...buildInput(), board });
+
+      expect(state.board).toBe(board);
+    });
+
+  it('accepts the engine grid serialisation with no cast', () => {
+    const board = buildBoardSnapshot();
+
+    expect(occupiedCells(board).length).toBeGreaterThan(0);
+    expect(isRunStateShape(createFreshRunState({ ...buildInput(), board })))
+      .toBe(true);
+  });
+});
+
+
+/* ===== 6. The three stages of the wrapped projection ===== */
+
+describe('the tile stage of the wrapped snapshot', () => {
+  // js/tile.js L19-L27
+  it('serialises a tile as position then value, in that key order', () => {
+    for (const tile of occupiedCells(buildBoardSnapshot())) {
+      expect(Object.keys(tile)).toEqual(['position', 'value']);
+    }
+  });
+
+  it('nests the coordinates under position as x then y', () => {
+    for (const tile of occupiedCells(buildBoardSnapshot())) {
+      expect(Object.keys(tile.position)).toEqual(['x', 'y']);
+      expect(Number.isSafeInteger(tile.position.x)).toBe(true);
+      expect(Number.isSafeInteger(tile.position.y)).toBe(true);
+    }
+  });
+
+  it('excludes the animation state previousPosition and mergedFrom', () => {
+    for (const tile of occupiedCells(buildBoardSnapshot())) {
+      expect(Object.keys(tile)).not.toContain('previousPosition');
+      expect(Object.keys(tile)).not.toContain('mergedFrom');
+    }
+  });
+
+  it('keeps position before value through the round trip', () => {
+    const board = buildBoardSnapshot();
+    const restored = JSON.parse(JSON.stringify(board)) as LegacyBoardSnapshot;
+
+    for (const tile of occupiedCells(restored)) {
+      expect(Object.keys(tile)).toEqual(['position', 'value']);
+    }
+  });
+
+  it('carries the tile placed through the engine at its own coordinates',
+    () => {
+      const board = buildBoardSnapshot();
+      const edge = board.grid.size - 1;
+      const placed = occupiedCells(board).find(
+        (tile) => tile.value === ADDED_TILE_VALUE
+      );
+
+      expect(placed).toEqual({
+        position: { x: edge, y: edge },
+        value: ADDED_TILE_VALUE,
+      });
+    });
+});
+
+describe('the grid stage of the wrapped snapshot', () => {
+  // js/grid.js L102-L117
+  it('serialises the grid as size then cells, in that key order', () => {
+    expect(Object.keys(buildBoardSnapshot().grid)).toEqual(['size', 'cells']);
+  });
+
+  it('builds the matrix x-outer and y-inner, square at the declared size',
+    () => {
+      const grid = buildBoardSnapshot().grid;
+
+      expect(grid.cells).toHaveLength(grid.size);
+
+      for (const column of grid.cells) {
+        expect(column).toHaveLength(grid.size);
+      }
+    });
+
+  it('declares a size within the supported board bound', () => {
+    const size = buildBoardSnapshot().grid.size;
+
+    expect(size).toBeGreaterThanOrEqual(1);
+    expect(size).toBeLessThanOrEqual(MAX_SUPPORTED_BOARD_SIZE);
+  });
+
+  it('holds an empty cell as literal null, not undefined', () => {
+    const grid = buildBoardSnapshot().grid;
+    const empties = grid.cells
+      .flat()
+      .filter((cell) => cell === null);
+
+    expect(empties.length).toBeGreaterThan(0);
+
+    for (const cell of empties) {
+      expect(cell).toBeNull();
+      expect(cell).not.toBeUndefined();
+    }
+  });
+
+  it('holds an empty cell as a present entry, never a sparse hole', () => {
+    const grid = buildBoardSnapshot().grid;
+
+    for (const column of grid.cells) {
+      for (let y = 0; y < grid.size; y += 1) {
+        expect(Object.prototype.hasOwnProperty.call(column, y)).toBe(true);
+      }
+    }
+  });
+
+  it('keeps an empty cell as literal null after the round trip', () => {
+    const board = buildBoardSnapshot();
+    const restored = JSON.parse(JSON.stringify(board)) as LegacyBoardSnapshot;
+    let emptyCount = 0;
+
+    for (const column of restored.grid.cells) {
+      for (const cell of column) {
+        if (cell === null) {
+          emptyCount += 1;
+        }
+      }
+    }
+
+    expect(emptyCount).toBe(
+      board.grid.cells.flat().filter((cell) => cell === null).length
+    );
+    expect(emptyCount).toBeGreaterThan(0);
+  });
+});
+
+describe('the manager stage of the wrapped snapshot', () => {
+  // js/game_manager.js L102-L110
+  it('serialises the board as grid, score, over, won, keepPlaying', () => {
+    expect(Object.keys(buildBoardSnapshot())).toEqual(BOARD_MEMBERS);
+  });
+
+  it('keeps that key order through the round trip', () => {
+    const restored = JSON.parse(
+      JSON.stringify(buildBoardSnapshot())
+    ) as LegacyBoardSnapshot;
+
+    expect(Object.keys(restored)).toEqual(BOARD_MEMBERS);
+  });
+
+  it('carries score as a finite number and the three flags as booleans',
+    () => {
+      const board = buildBoardSnapshot();
+
+      expect(Number.isFinite(board.score)).toBe(true);
+      expect(typeof board.over).toBe('boolean');
+      expect(typeof board.won).toBe('boolean');
+      expect(typeof board.keepPlaying).toBe('boolean');
+    });
+});
+
+/* ===== 7. The frozen persisted member name keepPlaying ===== */
+
+/** Names the persisted flag must not have moved to. */
+const RENAMED_FLAG_VARIANTS: readonly string[] = [
+  'continuedPlay',
+  'continueAfterWin',
+  'keepGoing',
+  'keep_playing',
+  'playingOn',
+];
+
+describe('the persisted member name keepPlaying is frozen', () => {
+  // js/game_manager.js L24-L27 assignment, L31 read, L45 restore, L108 persist
+  it('is an own property of the wrapped snapshot', () => {
+    const board = buildEnvelope().board;
+
+    expect(Object.prototype.hasOwnProperty.call(board, 'keepPlaying')).toBe(
+      true
+    );
+  });
+
+  it('holds a boolean', () => {
+    expect(typeof buildEnvelope().board.keepPlaying).toBe('boolean');
+  });
+
+  it('survives the round trip under the same name', () => {
+    const state = buildEnvelope();
+    const restored = JSON.parse(JSON.stringify(state)) as RunState;
+
+    expect(Object.keys(restored.board)).toContain('keepPlaying');
+    expect(restored.board.keepPlaying).toBe(state.board.keepPlaying);
+  });
+
+  it('appears under no renamed variant in the persisted board', () => {
+    const keys = Object.keys(buildEnvelope().board);
+
+    for (const variant of RENAMED_FLAG_VARIANTS) {
+      expect(keys).not.toContain(variant);
+    }
+  });
+
+  it('is the name the envelope validator itself reads', () => {
+    const payload = loosenEnvelope();
+    const board = payload.board as Record<string, unknown>;
+
+    board.continuedPlay = board.keepPlaying;
+    delete board.keepPlaying;
+
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(describeRunStateProblems(payload)).toContain(
+      'board.keepPlaying is not a boolean'
+    );
+  });
+
+  it('owns the persisted side alone, naming no input event', () => {
+    const state = buildEnvelope();
+
+    expect(Object.keys(state)).not.toContain('keepPlaying');
+    expect(Object.keys(state.board)).toContain('keepPlaying');
+  });
+});
+
+
+/* ===== 8. isRunStateShape ===== */
+
+describe('isRunStateShape accepts a structurally complete envelope', () => {
+  it('accepts a fresh envelope', () => {
+    expect(isRunStateShape(buildEnvelope())).toBe(true);
+  });
+
+  it('accepts one holding relics in pickup order', () => {
+    const state = buildEnvelopeWithRelics([
+      { id: 'first', charges: 2 },
+      { id: 'second', state: { seen: true } },
+    ]);
+
+    expect(isRunStateShape(state)).toBe(true);
+  });
+
+  it('accepts one restored from JSON', () => {
+    const restored = JSON.parse(JSON.stringify(buildEnvelope())) as unknown;
+
+    expect(isRunStateShape(restored)).toBe(true);
+  });
+
+  it('agrees with describeRunStateProblems on the same input', () => {
+    const inputs: readonly unknown[] = [
+      buildEnvelope(),
+      ...HOSTILE_INPUTS,
+      loosenEnvelope(),
+    ];
+
+    for (const input of inputs) {
+      expect(isRunStateShape(input)).toBe(
+        describeRunStateProblems(input).length === 0
+      );
+    }
+  });
+});
+
+describe('isRunStateShape refuses a broken payload without throwing', () => {
+  it('refuses every non-envelope value it is handed', () => {
+    for (const input of HOSTILE_INPUTS) {
+      expect(() => isRunStateShape(input)).not.toThrow();
+      expect(isRunStateShape(input)).toBe(false);
+    }
+  });
+
+  it('refuses an envelope missing any one of the nine members', () => {
+    for (const member of ENVELOPE_MEMBERS) {
+      const payload = loosenEnvelope();
+
+      delete payload[member];
+
+      expect(isRunStateShape(payload)).toBe(false);
+    }
+  });
+
+  it('refuses a member holding the wrong primitive type', () => {
+    const wrongTypes: Readonly<Record<string, unknown>> = {
+      schemaVersion: 'one',
+      runId: 7,
+      seed: null,
+      rngCursor: 'none',
+      stageIndex: '0',
+      stageGoal: 'highest-tile',
+      goalProgress: '0',
+      relics: { first: { id: 'x' } },
+      board: 'empty',
+    };
+
+    for (const member of Object.keys(wrongTypes)) {
+      const payload = loosenEnvelope();
+
+      payload[member] = wrongTypes[member];
+
+      expect(isRunStateShape(payload)).toBe(false);
+    }
+  });
+
+  it('refuses a board that is present but structurally wrong', () => {
+    const payload = loosenEnvelope();
+    const board = payload.board as Record<string, unknown>;
+    const grid = board.grid as Record<string, unknown>;
+
+    grid.cells = 'not-a-matrix';
+
+    expect(isRunStateShape(payload)).toBe(false);
+  });
+
+  it('refuses a goalProgress outside the closed unit interval', () => {
+    for (const value of [-0.5, 1.5, Number.NaN]) {
+      const payload = loosenEnvelope();
+
+      payload.goalProgress = value;
+
+      expect(isRunStateShape(payload)).toBe(false);
+    }
+  });
+});
+
+/* ===== 9. describeRunStateProblems ===== */
+
+describe('describeRunStateProblems reports nothing for a valid envelope',
+  () => {
+    it('returns an empty list for a fresh envelope', () => {
+      expect(describeRunStateProblems(buildEnvelope())).toEqual([]);
+    });
+
+    it('returns an empty list for one holding relics', () => {
+      const state = buildEnvelopeWithRelics([{ id: 'held', charges: 1 }]);
+
+      expect(describeRunStateProblems(state)).toEqual([]);
+    });
+
+    it('returns a fresh list on every call', () => {
+      const first = describeRunStateProblems(buildEnvelope());
+      const second = describeRunStateProblems(buildEnvelope());
+
+      expect(first).not.toBe(second);
+    });
+  });
+
+describe('describeRunStateProblems names the offending field', () => {
+  it('names each of the nine members when that member is missing', () => {
+    for (const member of ENVELOPE_MEMBERS) {
+      const payload = loosenEnvelope();
+
+      delete payload[member];
+
+      const problems = describeRunStateProblems(payload);
+
+      expect(problems.length).toBeGreaterThan(0);
+      expect(problems.some((problem) => problem.startsWith(member))).toBe(
+        true
+      );
+    }
+  });
+
+  it('names the whole value when it is not an object at all', () => {
+    for (const input of [null, undefined, 42, 'text', true, []]) {
+      expect(describeRunStateProblems(input)).toEqual([
+        'run state is not an object',
+      ]);
+    }
+  });
+
+  it('names schemaVersion when it is not an integer', () => {
+    const payload = loosenEnvelope();
+
+    payload.schemaVersion = 1.5;
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'schemaVersion is not an integer'
+    );
+  });
+
+  it('names runId when it is not a string', () => {
+    const payload = loosenEnvelope();
+
+    payload.runId = 7;
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'runId is not a string'
+    );
+  });
+
+  it('names seed when it is not a string', () => {
+    const payload = loosenEnvelope();
+
+    payload.seed = null;
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'seed is not a string'
+    );
+  });
+
+  it('names rngCursor when it is not an object', () => {
+    const payload = loosenEnvelope();
+
+    payload.rngCursor = 'none';
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'rngCursor is not an object'
+    );
+  });
+
+  it('names the substream whose recorded count is unusable', () => {
+    const payload = loosenEnvelope();
+    const cursor = payload.rngCursor as Record<string, unknown>;
+
+    cursor['relic-draw'] = -1;
+
+    expect(
+      describeRunStateProblems(payload).some((problem) =>
+        problem.startsWith('rngCursor.relic-draw')
+      )
+    ).toBe(true);
+  });
+
+  it('names stageIndex when it holds a string', () => {
+    const payload = loosenEnvelope();
+
+    payload.stageIndex = '0';
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'stageIndex is not a non-negative integer'
+    );
+  });
+
+  it('names stageGoal.kind when the kind is not a declared one', () => {
+    const payload = loosenEnvelope();
+    const goal = payload.stageGoal as Record<string, unknown>;
+
+    goal.kind = 'nonesuch';
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'stageGoal.kind is not a declared stage goal kind'
+    );
+  });
+
+  it('names stageGoal.target when it is not a finite number', () => {
+    const payload = loosenEnvelope();
+    const goal = payload.stageGoal as Record<string, unknown>;
+
+    goal.target = 'far';
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'stageGoal.target is not a finite number'
+    );
+  });
+
+  it('names goalProgress when it is outside the unit interval', () => {
+    const payload = loosenEnvelope();
+
+    payload.goalProgress = 2;
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'goalProgress is not a fraction within [0, 1]'
+    );
+  });
+
+  it('names relics when it is not an array', () => {
+    const payload = loosenEnvelope();
+
+    payload.relics = { first: { id: 'x' } };
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'relics is not an array'
+    );
+  });
+
+  it('names the pickup index of the offending relic', () => {
+    const payload = loosenEnvelope();
+
+    payload.relics = [{ id: 'ok' }, { id: 5 }];
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'relics[1].id is not a string'
+    );
+  });
+
+  it('names board.grid.cells when the matrix is not an array', () => {
+    const payload = loosenEnvelope();
+    const board = payload.board as Record<string, unknown>;
+    const grid = board.grid as Record<string, unknown>;
+
+    grid.cells = 'not-a-matrix';
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'board.grid.cells is not an array'
+    );
+  });
+
+  it('names board.grid.size when the edge is outside the bound', () => {
+    const payload = loosenEnvelope();
+    const board = payload.board as Record<string, unknown>;
+    const grid = board.grid as Record<string, unknown>;
+
+    grid.size = MAX_SUPPORTED_BOARD_SIZE + 1;
+
+    expect(
+      describeRunStateProblems(payload).some((problem) =>
+        problem.startsWith('board.grid.size')
+      )
+    ).toBe(true);
+  });
+
+  it('names board.score when it is not a finite number', () => {
+    const payload = loosenEnvelope();
+    const board = payload.board as Record<string, unknown>;
+
+    board.score = 'many';
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'board.score is not a finite number'
+    );
+  });
+});
+
+describe('describeRunStateProblems never throws', () => {
+  it('returns a list for every non-envelope value it is handed', () => {
+    for (const input of HOSTILE_INPUTS) {
+      expect(() => describeRunStateProblems(input)).not.toThrow();
+      expect(describeRunStateProblems(input).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('returns a list for wrongness nested at every level at once', () => {
+    const cyclic: Record<string, unknown> = {};
+
+    cyclic.self = cyclic;
+
+    const payload: Record<string, unknown> = {
+      schemaVersion: 'one',
+      runId: 7,
+      seed: null,
+      rngCursor: { 'spawn-value': 'many' },
+      stageIndex: -1,
+      stageGoal: { kind: 'nonesuch', target: 'far' },
+      goalProgress: 2,
+      relics: [{ id: 5, charges: -1, state: cyclic }],
+      board: {
+        grid: { size: 0, cells: [[{ position: null, value: 'two' }]] },
+        score: Number.NaN,
+        over: 'no',
+        won: 1,
+        keepPlaying: null,
+      },
+    };
+
+    expect(() => describeRunStateProblems(payload)).not.toThrow();
+    expect(describeRunStateProblems(payload).length).toBeGreaterThan(0);
+  });
+
+  it('reports an unreadable member rather than letting its accessor throw',
+    () => {
+      const payload = loosenEnvelope();
+
+      Object.defineProperty(payload, 'stageIndex', {
+        get(): never {
+          throw new Error('member refused');
+        },
+        configurable: true,
+        enumerable: true,
+      });
+
+      expect(() => describeRunStateProblems(payload)).not.toThrow();
+      expect(describeRunStateProblems(payload)).toContain(
+        'stageIndex is not readable'
+      );
+    });
+});
+
+
+/* ===== 10. classifyRunStateVersion ===== */
+
+describe('classifyRunStateVersion reports current for this build', () => {
+  it('reports current for a fresh envelope', () => {
+    expect(classifyRunStateVersion(buildEnvelope())).toBe('current');
+  });
+
+  it('reports current for a payload carrying only the current version', () => {
+    expect(
+      classifyRunStateVersion({ schemaVersion: RUN_STATE_SCHEMA_VERSION })
+    ).toBe('current');
+  });
+});
+
+describe('classifyRunStateVersion separates older from unknown', () => {
+  it('reports older for every recorded version below the current one', () => {
+    const recordedOlder = RUN_STATE_SCHEMA_VERSION_HISTORY.filter(
+      (version) => version < RUN_STATE_SCHEMA_VERSION
+    );
+
+    for (const version of recordedOlder) {
+      expect(classifyRunStateVersion({ schemaVersion: version })).toBe(
+        'older'
+      );
+    }
+  });
+
+  it('reports unknown for an integer above the current version', () => {
+    for (const offset of [1, 2, 99]) {
+      expect(
+        classifyRunStateVersion({
+          schemaVersion: RUN_STATE_SCHEMA_VERSION + offset,
+        })
+      ).toBe('unknown');
+    }
+  });
+
+  it('reports unknown for a lower integer the history does not record', () => {
+    const unrecorded = [0, -1, -99].filter(
+      (version) => !RUN_STATE_SCHEMA_VERSION_HISTORY.includes(version)
+    );
+
+    expect(unrecorded.length).toBeGreaterThan(0);
+
+    for (const version of unrecorded) {
+      expect(classifyRunStateVersion({ schemaVersion: version })).toBe(
+        'unknown'
+      );
+    }
+  });
+});
+
+describe('classifyRunStateVersion separates absent from malformed', () => {
+  it('reports absent when there is no stored value at all', () => {
+    expect(classifyRunStateVersion(null)).toBe('absent');
+    expect(classifyRunStateVersion(undefined)).toBe('absent');
+  });
+
+  it('reports absent for a payload written before the member existed', () => {
+    const payload = loosenEnvelope();
+
+    delete payload.schemaVersion;
+
+    expect(classifyRunStateVersion(payload)).toBe('absent');
+  });
+
+  it('reports malformed for a version present but not an integer', () => {
+    const wrong: readonly unknown[] = [
+      '1',
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      null,
+      true,
+      {},
+      [],
+    ];
+
+    for (const version of wrong) {
+      expect(classifyRunStateVersion({ schemaVersion: version })).toBe(
+        'malformed'
+      );
+    }
+  });
+
+  it('reports malformed for a payload that is not a plain object', () => {
+    for (const payload of [42, 'text', true, [], [buildEnvelope()]]) {
+      expect(classifyRunStateVersion(payload)).toBe('malformed');
+    }
+  });
+
+  it('reports malformed rather than letting an accessor throw', () => {
+    const payload: Record<string, unknown> = {};
+
+    Object.defineProperty(payload, 'schemaVersion', {
+      get(): never {
+        throw new Error('member refused');
+      },
+      configurable: true,
+      enumerable: true,
+    });
+
+    expect(() => classifyRunStateVersion(payload)).not.toThrow();
+    expect(classifyRunStateVersion(payload)).toBe('malformed');
+  });
+});
+
+describe('classifyRunStateVersion is total over the five-way union', () => {
+  it('declares five verdicts and no sixth', () => {
+    expect(versionVerdictUnionIsExhaustive).toBe(true);
+    expect(VERSION_VERDICTS).toHaveLength(5);
+    expect(new Set(VERSION_VERDICTS).size).toBe(VERSION_VERDICTS.length);
+  });
+
+  it('returns one declared verdict for every input, never throwing', () => {
+    const inputs: readonly unknown[] = [
+      ...HOSTILE_INPUTS,
+      buildEnvelope(),
+      loosenEnvelope(),
+      { schemaVersion: RUN_STATE_SCHEMA_VERSION },
+      { schemaVersion: RUN_STATE_SCHEMA_VERSION + 1 },
+      { schemaVersion: '1' },
+    ];
+
+    for (const input of inputs) {
+      expect(() => classifyRunStateVersion(input)).not.toThrow();
+      expect(VERSION_VERDICTS).toContain(classifyRunStateVersion(input));
+    }
+  });
+
+  it('reaches every verdict the recorded history makes reachable', () => {
+    const recordedOlder = RUN_STATE_SCHEMA_VERSION_HISTORY.filter(
+      (version) => version < RUN_STATE_SCHEMA_VERSION
+    );
+    const probes: readonly unknown[] = [
+      { schemaVersion: RUN_STATE_SCHEMA_VERSION },
+      { schemaVersion: RUN_STATE_SCHEMA_VERSION + 1 },
+      null,
+      'text',
+      ...recordedOlder.map((version) => ({ schemaVersion: version })),
+    ];
+    const expected: Set<RunStateVersionVerdict> = new Set([
+      'current',
+      'unknown',
+      'absent',
+      'malformed',
+    ]);
+
+    if (recordedOlder.length > 0) {
+      expected.add('older');
+    }
+
+    const reached = new Set(
+      probes.map((probe) => classifyRunStateVersion(probe))
+    );
+
+    expect([...reached].sort()).toEqual([...expected].sort());
+  });
+});
+
+/* ===== 11. normalizeRngCursor, the pure-validator input matrix ===== */
+
+/** Every value the cursor normaliser must reduce to a total map. */
+const CURSOR_INPUTS: readonly unknown[] = [
+  undefined,
+  null,
+  {},
+  { 'spawn-value': 4 },
+  { 'spawn-value': 4, 'relic-draw': 9 },
+  { 'spawn-value': 4, nonesuch: 9 },
+  { 'spawn-value': -5 },
+  { 'spawn-value': 2.5 },
+  { 'spawn-value': Number.NaN },
+  { 'spawn-value': Number.POSITIVE_INFINITY },
+  { 'spawn-value': Number.NEGATIVE_INFINITY },
+  { 'spawn-value': '7' },
+  { 'spawn-value': null },
+  { 'spawn-value': true },
+  { 'spawn-value': {} },
+  { 'spawn-value': [] },
+  { 'spawn-value': MAX_RNG_CURSOR + 1 },
+  42,
+  'text',
+  true,
+  [],
+];
+
+describe('normalizeRngCursor always returns a total cursor map', () => {
+  it('covers all four substream names for every input', () => {
+    for (const input of CURSOR_INPUTS) {
+      const cursor: RngCursorMap = normalizeRngCursor(input);
+
+      expect(Object.keys(cursor).sort()).toEqual(
+        [...CURSOR_STREAMS].sort()
+      );
+    }
+  });
+
+  it('never throws for any input', () => {
+    for (const input of CURSOR_INPUTS) {
+      expect(() => normalizeRngCursor(input)).not.toThrow();
+    }
+  });
+
+  it('carries the substream names in the order the tuple declares', () => {
+    expect(Object.keys(normalizeRngCursor(undefined))).toEqual([
+      ...CURSOR_STREAMS,
+    ]);
+  });
+
+  it('yields a non-negative safe integer for every substream', () => {
+    for (const input of CURSOR_INPUTS) {
+      const cursor = normalizeRngCursor(input);
+
+      for (const name of CURSOR_STREAMS) {
+        expect(Number.isSafeInteger(cursor[name])).toBe(true);
+        expect(cursor[name]).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+
+  it('returns a fresh map on every call', () => {
+    const first = normalizeRngCursor(undefined);
+    const second = normalizeRngCursor(undefined);
+
+    expect(first).not.toBe(second);
+    expect(first).toEqual(second);
+  });
+});
+
+describe('normalizeRngCursor fills and completes a recorded map', () => {
+  it('fills an absent, null or empty map with zero throughout', () => {
+    for (const input of [undefined, null, {}]) {
+      const cursor = normalizeRngCursor(input);
+
+      for (const name of CURSOR_STREAMS) {
+        expect(cursor[name]).toBe(0);
+      }
+    }
+  });
+
+  it('completes a partial map, keeping the counts it does record', () => {
+    const cursor = normalizeRngCursor({
+      'spawn-value': 7,
+      'relic-draw': 3,
+    });
+
+    expect(cursor['spawn-value']).toBe(7);
+    expect(cursor['relic-draw']).toBe(3);
+    expect(cursor['spawn-position']).toBe(0);
+    expect(cursor['rarity-weight']).toBe(0);
+  });
+
+  it('drops a member no substream is named by', () => {
+    const cursor = normalizeRngCursor({ 'spawn-value': 4, nonesuch: 9 });
+
+    expect(Object.keys(cursor)).not.toContain('nonesuch');
+    expect(cursor['spawn-value']).toBe(4);
+  });
+
+  it('keeps a count already at the resumable bound', () => {
+    const cursor = normalizeRngCursor({ 'spawn-value': MAX_RNG_CURSOR });
+
+    expect(cursor['spawn-value']).toBe(MAX_RNG_CURSOR);
+  });
+});
+
+describe('normalizeRngCursor rejects an unusable count to zero', () => {
+  it('rejects a negative count', () => {
+    expect(normalizeRngCursor({ 'spawn-value': -5 })['spawn-value']).toBe(0);
+  });
+
+  it('rejects a non-integer count', () => {
+    for (const count of [2.5, 0.1, -0.5]) {
+      expect(normalizeRngCursor({ 'spawn-value': count })['spawn-value'])
+        .toBe(0);
+    }
+  });
+
+  it('rejects a non-finite count', () => {
+    const nonFinite = [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+    ];
+
+    for (const count of nonFinite) {
+      expect(normalizeRngCursor({ 'spawn-value': count })['spawn-value'])
+        .toBe(0);
+    }
+  });
+
+  it('rejects a count that is not a number at all', () => {
+    for (const count of ['7', true, null, undefined, {}, []]) {
+      expect(normalizeRngCursor({ 'spawn-value': count })['spawn-value'])
+        .toBe(0);
+    }
+  });
+
+  it('rejects a count beyond the resumable bound', () => {
+    const beyond = normalizeRngCursor({
+      'spawn-value': MAX_RNG_CURSOR + 1,
+    });
+
+    expect(beyond['spawn-value']).toBe(0);
+  });
+
+  it('keeps zero as zero and collapses negative zero to positive', () => {
+    const zeroed = normalizeRngCursor({
+      'spawn-value': 0,
+      'relic-draw': -0,
+    });
+
+    expect(Object.is(zeroed['spawn-value'], 0)).toBe(true);
+    expect(Object.is(zeroed['relic-draw'], 0)).toBe(true);
+  });
+
+  it('rejects a count whose accessor throws', () => {
+    const source: Record<string, unknown> = {};
+
+    Object.defineProperty(source, 'spawn-value', {
+      get(): never {
+        throw new Error('member refused');
+      },
+      configurable: true,
+      enumerable: true,
+    });
+
+    expect(() => normalizeRngCursor(source)).not.toThrow();
+    expect(normalizeRngCursor(source)['spawn-value']).toBe(0);
+  });
+});
+
+
+/* ===== 12. createFreshRunState ===== */
+
+describe('createFreshRunState returns a distinct envelope per call', () => {
+  it('returns a new object on every call', () => {
+    const first = buildEnvelope();
+    const second = buildEnvelope();
+
+    expect(first).not.toBe(second);
+    expect(first).toEqual(second);
+  });
+
+  it('leaves a later call unaffected by a mutation of an earlier one', () => {
+    const first = buildEnvelope();
+    const mutableFirst = first as unknown as Record<string, unknown>;
+    const mutableBoard = first.board as unknown as Record<string, unknown>;
+
+    mutableFirst.stageIndex = 99;
+    mutableFirst.goalProgress = 1;
+    mutableBoard.score = 999999;
+
+    const second = buildEnvelope();
+
+    expect(second.stageIndex).toBe(INITIAL_STAGE_INDEX);
+    expect(second.goalProgress).toBe(0);
+    expect(second.board.score).toBe(FIXTURE_SCORE);
+  });
+
+  it('leaves a later cursor map unaffected by a mutation of an earlier one',
+    () => {
+      const first = buildEnvelope();
+      const mutableCursor = first.rngCursor as Record<StreamName, number>;
+
+      mutableCursor['spawn-value'] = 500;
+
+      expect(buildEnvelope().rngCursor['spawn-value']).toBe(0);
+    });
+
+  it('leaves a later relic list unaffected by a mutation of an earlier one',
+    () => {
+      const first = buildEnvelope();
+      const mutableRelics = first.relics as PersistedRelic[];
+
+      mutableRelics.push({ id: 'leaked' });
+
+      expect(buildEnvelope().relics).toEqual([]);
+    });
+
+  it('normalises the cursor it is handed rather than aliasing it', () => {
+    const source: Partial<RngCursorMap> = { 'spawn-value': 5 };
+    const state = createFreshRunState({
+      ...buildInput(),
+      rngCursor: source,
+    });
+
+    expect(state.rngCursor).not.toBe(source);
+    expect(state.rngCursor['spawn-value']).toBe(5);
+    expect(state.rngCursor['rarity-weight']).toBe(0);
+  });
+});
+
+describe('a fresh envelope starts a run at its initial values', () => {
+  it('starts at the stage index it is handed', () => {
+    expect(buildEnvelope().stageIndex).toBe(INITIAL_STAGE_INDEX);
+  });
+
+  it('starts goal progress at zero', () => {
+    expect(buildEnvelope().goalProgress).toBe(0);
+  });
+
+  it('starts with no relics held', () => {
+    const relics = buildEnvelope().relics;
+
+    expect(relics).toEqual([]);
+    expect(Array.isArray(relics)).toBe(true);
+  });
+
+  it('starts every substream cursor at zero', () => {
+    const cursor = buildEnvelope().rngCursor;
+
+    expect(Object.keys(cursor).sort()).toEqual([...CURSOR_STREAMS].sort());
+
+    for (const name of CURSOR_STREAMS) {
+      expect(cursor[name]).toBe(0);
+    }
+  });
+
+  it('carries the goal the stage ladder produces for that index', () => {
+    const state = buildEnvelope();
+    const ladderGoal: StageGoal = stageGoalForIndex(
+      INITIAL_STAGE_INDEX,
+      createDefaultStageConfig()
+    );
+
+    expect(state.stageGoal).toEqual(ladderGoal);
+    expect(state.stageGoal.kind).toBe(ladderGoal.kind);
+    expect(state.stageGoal.target).toBe(ladderGoal.target);
+  });
+
+  it('is structurally complete and classified as the current version', () => {
+    const state = buildEnvelope();
+
+    expect(describeRunStateProblems(state)).toEqual([]);
+    expect(isRunStateShape(state)).toBe(true);
+    expect(classifyRunStateVersion(state)).toBe('current');
+  });
+});
+
+/* ===== 13. RunSummary ===== */
+
+describe('a run summary is producible from an envelope', () => {
+  it('projects exactly the five summary members', () => {
+    const summary: RunSummary = summarizeRunState(buildEnvelope());
+
+    expect(Object.keys(summary).sort()).toEqual([...SUMMARY_MEMBERS]);
+  });
+
+  it('carries the seed the run-summary screen displays and copies', () => {
+    const input = buildInput();
+    const summary = summarizeRunState(createFreshRunState(input));
+
+    expect(summary.seed).toBe(input.seed);
+  });
+
+  it('reads the score through the wrapped board', () => {
+    const summary = summarizeRunState(buildEnvelope());
+
+    expect(summary.score).toBe(FIXTURE_SCORE);
+  });
+
+  it('carries the run identifier and the stage reached', () => {
+    const input = buildInput();
+    const summary = summarizeRunState(createFreshRunState(input));
+
+    expect(summary.runId).toBe(input.runId);
+    expect(summary.stageIndex).toBe(input.stageIndex);
+  });
+
+  it('preserves relic pickup order', () => {
+    const ids = ['first', 'second', 'third'];
+    const summary = summarizeRunState(
+      buildEnvelopeWithRelics(ids.map((id) => ({ id })))
+    );
+
+    expect(summary.relics.map((relic) => relic.id)).toEqual(ids);
+  });
+
+  it('is JSON-serialisable and round-trips deep-equal', () => {
+    const summary = summarizeRunState(
+      buildEnvelopeWithRelics([{ id: 'held', charges: 2, state: { n: 1 } }])
+    );
+    const restored = JSON.parse(JSON.stringify(summary)) as RunSummary;
+
+    expect(restored).toEqual(summary);
+    expect(JSON.stringify(restored)).toBe(JSON.stringify(summary));
+  });
+
+  it('is a fresh object on every call', () => {
+    const state = buildEnvelope();
+    const first = summarizeRunState(state);
+    const second = summarizeRunState(state);
+
+    expect(first).not.toBe(second);
+    expect(first).toEqual(second);
+  });
+});
+
+/* ===== 14. Correlation identity and the injected report sink ===== */
+
+describe('the run layer carries correlation identity without deriving it',
+  () => {
+    it('exports no correlation-identifier derivation of its own', () => {
+      const surface = Object.keys(runStateModule);
+
+      expect(surface).not.toContain('runCorrelationId');
+      expect(surface).not.toContain('deriveCorrelationId');
+    });
+
+    it('persists both derivation inputs, the seed and the run identifier',
+      () => {
+        const state = buildEnvelope();
+
+        expect(typeof state.seed).toBe('string');
+        expect(typeof state.runId).toBe('string');
+        expect(state.runId.length).toBeGreaterThan(0);
+        expect(state.seed.length).toBeGreaterThan(0);
+      });
+
+    it('carries both inputs through a reload unchanged, so a resumed run ' +
+      'reports under the identifier it already reported under', () => {
+      const input = buildInput();
+      const restored = JSON.parse(
+        JSON.stringify(createFreshRunState(input))
+      ) as RunState;
+
+      expect(restored.seed).toBe(input.seed);
+      expect(restored.runId).toBe(input.runId);
+    });
+
+    it('keeps the run identifier separate from the seed, so two runs of one ' +
+      'seed are distinguishable', () => {
+      const shared = buildInput();
+      const first = createFreshRunState({ ...shared, runId: 'run-a' });
+      const second = createFreshRunState({
+        ...buildInput(),
+        seed: shared.seed,
+        runId: 'run-b',
+      });
+
+      expect(first.seed).toBe(second.seed);
+      expect(first.runId).not.toBe(second.runId);
+    });
+
+    it('traces every envelope member to an argument or a fixed constant',
+      () => {
+        const input = buildInput();
+        const state = createFreshRunState(input);
+
+        expect(state.schemaVersion).toBe(RUN_STATE_SCHEMA_VERSION);
+        expect(state.runId).toBe(input.runId);
+        expect(state.seed).toBe(input.seed);
+        expect(state.stageIndex).toBe(input.stageIndex);
+        expect(state.stageGoal).toBe(input.stageGoal);
+        expect(state.board).toBe(input.board);
+        expect(state.goalProgress).toBe(0);
+        expect(state.relics).toEqual([]);
+        expect(state.rngCursor).toEqual(normalizeRngCursor(input.rngCursor));
+      });
+
+    it('builds the same envelope from the same argument, repeatedly', () => {
+      const input = buildInput();
+
+      expect(JSON.stringify(createFreshRunState(input))).toBe(
+        JSON.stringify(createFreshRunState(input))
+      );
+    });
+
+    it('builds the same envelope after a real delay, reading no clock',
+      async () => {
+        const input = buildInput();
+        const before = createFreshRunState(input);
+
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 2);
+        });
+
+        expect(JSON.stringify(createFreshRunState(input))).toBe(
+          JSON.stringify(before)
+        );
+      });
+
+    it('summarises the same envelope after a real delay, reading no clock',
+      async () => {
+        const state = buildEnvelope();
+        const before = summarizeRunState(state);
+
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 2);
+        });
+
+        expect(JSON.stringify(summarizeRunState(state))).toBe(
+          JSON.stringify(before)
+        );
+      });
+  });
+
+describe('NOOP_RUN_REPORTER satisfies the injected report sink', () => {
+  it('is assignable to the reporter port every run module falls back to',
+    () => {
+      const reporter: RunReporter = NOOP_RUN_REPORTER;
+
+      expect(reporter).toBe(NOOP_RUN_REPORTER);
+    });
+
+  it('implements every declared channel as a function', () => {
+    const sink = NOOP_RUN_REPORTER as unknown as Record<string, unknown>;
+
+    expect(Object.keys(sink).sort()).toEqual([...REPORTER_CHANNELS].sort());
+
+    for (const channel of REPORTER_CHANNELS) {
+      expect(typeof sink[channel]).toBe('function');
+    }
+  });
+
+  it('discards every report without throwing or returning a value', () => {
+    const sink = NOOP_RUN_REPORTER as unknown as Record<
+      string,
+      (report: unknown) => unknown
+    >;
+
+    for (const channel of REPORTER_CHANNELS) {
+      const handler = sink[channel];
+
+      expect(() => handler({})).not.toThrow();
+      expect(handler({})).toBeUndefined();
+    }
+  });
+
+  it('is frozen, so an injected channel cannot be replaced in place', () => {
+    expect(Object.isFrozen(NOOP_RUN_REPORTER)).toBe(true);
+  });
+});
+
+/* ===== 15. The persisted relic triple, and teardown hygiene ===== */
+
+describe('the persisted relic triple matches the relics declaration', () => {
+  it('is identical in both directions, checked at compile time', () => {
+    expect(relicTripleIsIdentical).toBe(true);
+    expect(boardSnapshotAliasHolds).toBe(true);
+    expect(versionVerdictUnionIsExhaustive).toBe(true);
+  });
+
+  it('is assignable both ways between the two declarations', () => {
+    expect(runAcceptsRelicsTriple).toBeDefined();
+    expect(relicsAcceptsRunTriple).toBeDefined();
+  });
+
+  it('declares identity, charges and state and no fourth member', () => {
+    const relic: PersistedRelic = {
+      id: 'gilded-spawn',
+      charges: 1,
+      state: null,
+    };
+
+    expect(Object.keys(relic).sort()).toEqual(['charges', 'id', 'state']);
+  });
+});
+
+describe('storage teardown removes the key the product never removed', () => {
+  // js/local_storage_manager.js L61-L63 removed the board snapshot alone.
+  it('records a best score and every other owned key', () => {
+    storage.setItem(BEST_SCORE_KEY, '99999');
+
+    for (const key of OWNED_STORAGE_KEYS) {
+      storage.setItem(key, 'written');
+    }
+
+    expect(storage.getItem(BEST_SCORE_KEY)).toBe('written');
+  });
+
+  it('finds no best score left behind by the preceding test', () => {
+    expect(bestScoreAtEntry).toBeUndefined();
+
+    for (const key of OWNED_STORAGE_KEYS) {
+      expect(storage.getItem(key)).toBeUndefined();
+    }
+  });
+
+  it('removes an already-clean store without throwing', () => {
+    expect(() => {
+      clearOwnedKeys();
+      clearOwnedKeys();
+    }).not.toThrow();
+
+    expect(storage.getItem(BEST_SCORE_KEY)).toBeUndefined();
+  });
+});
+
+
+/* ===== 16. isPersistedRelicState, the wire vocabulary ===== */
 
 describe('isPersistedRelicState accepts the persistable vocabulary', () => {
   it('accepts each primitive the vocabulary names', () => {
-    expect(isPersistedRelicState('flagged')).toBe(true);
-    expect(isPersistedRelicState(0)).toBe(true);
-    expect(isPersistedRelicState(-12.5)).toBe(true);
-    expect(isPersistedRelicState(true)).toBe(true);
-    expect(isPersistedRelicState(false)).toBe(true);
-    expect(isPersistedRelicState(null)).toBe(true);
+    for (const value of ['text', 0, -1, 1.5, true, false, null]) {
+      expect(isPersistedRelicState(value)).toBe(true);
+    }
   });
 
   it('accepts a plain object of counters and flags', () => {
     expect(
-      isPersistedRelicState({ fired: 3, armed: true, note: 'primed' })
+      isPersistedRelicState({ fired: 3, armed: true, label: 'x' })
     ).toBe(true);
   });
 
-  it('accepts an array and an empty container', () => {
+  it('accepts an array, an empty array and an empty object', () => {
     expect(isPersistedRelicState([1, 'two', false, null])).toBe(true);
-    expect(isPersistedRelicState({})).toBe(true);
     expect(isPersistedRelicState([])).toBe(true);
+    expect(isPersistedRelicState({})).toBe(true);
   });
 
-  it('accepts nesting up to the depth the copy descends to', () => {
-    // Eight levels below the member itself: the deepest value the copy
-    // reaches, and therefore the deepest the validation accepts.
-    let deep: unknown = 'leaf';
-
-    for (let level = 0; level < 8; level += 1) {
-      deep = { deep };
-    }
-
-    expect(isPersistedRelicState(deep)).toBe(true);
+  it('accepts nesting the copy descends to', () => {
+    expect(
+      isPersistedRelicState({ a: { b: { c: [{ d: 1 }] } } })
+    ).toBe(true);
   });
 
-  it('accepts a null-prototype object of data', () => {
+  it('accepts a null-prototype object holding data', () => {
     const bare = Object.create(null) as Record<string, unknown>;
 
-    bare.fired = 1;
+    bare.count = 1;
 
     expect(isPersistedRelicState(bare)).toBe(true);
+  });
+
+  it('accepts the same value reached by two different paths', () => {
+    const shared = { n: 1 };
+
+    expect(isPersistedRelicState({ left: shared, right: shared })).toBe(true);
   });
 });
 
 describe('isPersistedRelicState refuses what persistence cannot carry', () => {
   it('refuses a number that is not finite', () => {
-    expect(isPersistedRelicState(Number.NaN)).toBe(false);
-    expect(isPersistedRelicState(Number.POSITIVE_INFINITY)).toBe(false);
-    expect(isPersistedRelicState(Number.NEGATIVE_INFINITY)).toBe(false);
+    const nonFinite = [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+    ];
+
+    for (const value of nonFinite) {
+      expect(isPersistedRelicState(value)).toBe(false);
+    }
   });
 
   it('refuses undefined, a function, a symbol and a bigint', () => {
-    expect(isPersistedRelicState(undefined)).toBe(false);
-    expect(isPersistedRelicState((): void => undefined)).toBe(false);
-    expect(isPersistedRelicState(Symbol('state'))).toBe(false);
-    expect(isPersistedRelicState(BigInt(1))).toBe(false);
+    const outside: readonly unknown[] = [
+      undefined,
+      (): number => 1,
+      Symbol('s'),
+      BigInt(1),
+    ];
+
+    for (const value of outside) {
+      expect(isPersistedRelicState(value)).toBe(false);
+    }
   });
 
   it('refuses an object that is not data alone', () => {
-    expect(isPersistedRelicState(new Date(0))).toBe(false);
-    expect(isPersistedRelicState(new Map())).toBe(false);
-    expect(isPersistedRelicState(new Set())).toBe(false);
-    expect(isPersistedRelicState(/pattern/)).toBe(false);
-    expect(isPersistedRelicState(new Error('state'))).toBe(false);
+    const notData: readonly unknown[] = [
+      new Date(0),
+      new Map(),
+      new Set(),
+      new Error('boom'),
+      /regex/,
+    ];
+
+    for (const value of notData) {
+      expect(isPersistedRelicState(value)).toBe(false);
+    }
   });
 
-  it('refuses a member holding one of those values', () => {
-    expect(isPersistedRelicState({ at: new Date(0) })).toBe(false);
+  it('refuses a member holding a value outside the vocabulary', () => {
+    expect(isPersistedRelicState({ when: new Date(0) })).toBe(false);
     expect(isPersistedRelicState({ run: (): void => undefined })).toBe(false);
-    expect(isPersistedRelicState({ absent: undefined })).toBe(false);
-    expect(isPersistedRelicState([Number.NaN])).toBe(false);
+    expect(isPersistedRelicState({ count: Number.NaN })).toBe(false);
   });
 
   it('refuses each reserved member name', () => {
-    expect(
-      isPersistedRelicState(JSON.parse('{"__proto__":{"polluted":true}}'))
-    ).toBe(false);
-    expect(isPersistedRelicState(JSON.parse('{"constructor":1}'))).toBe(false);
-    expect(isPersistedRelicState(JSON.parse('{"prototype":1}'))).toBe(false);
+    for (const name of ['__proto__', 'constructor', 'prototype']) {
+      const hostile: Record<string, unknown> = {};
+
+      Object.defineProperty(hostile, name, {
+        value: 1,
+        configurable: true,
+        enumerable: true,
+        writable: true,
+      });
+
+      expect(isPersistedRelicState(hostile)).toBe(false);
+    }
   });
 
-  it('refuses an accessor rather than running it', () => {
+  it('refuses an accessor rather than running its getter', () => {
     let reads = 0;
-    const hostile = {
-      get fired(): number {
+    const hostile: Record<string, unknown> = {};
+
+    Object.defineProperty(hostile, 'computed', {
+      get(): number {
         reads += 1;
 
         return 1;
       },
-    };
+      configurable: true,
+      enumerable: true,
+    });
 
     expect(isPersistedRelicState(hostile)).toBe(false);
     expect(reads).toBe(0);
   });
 
   it('refuses a symbol-keyed member', () => {
-    const tagged: Record<string, unknown> = { fired: 1 };
+    const hostile: Record<string | symbol, unknown> = { count: 1 };
 
-    Object.defineProperty(tagged, Symbol('tag'), {
-      value: 1,
-      enumerable: true,
-    });
+    hostile[Symbol('hidden')] = 2;
 
-    expect(isPersistedRelicState(tagged)).toBe(false);
-  });
-
-  it('refuses a value nested deeper than the copy descends', () => {
-    let deep: unknown = 'leaf';
-
-    for (let level = 0; level < 9; level += 1) {
-      deep = { deep };
-    }
-
-    expect(isPersistedRelicState(deep)).toBe(false);
+    expect(isPersistedRelicState(hostile)).toBe(false);
   });
 
   it('refuses a cycle without recursing forever', () => {
-    const cyclic: Record<string, unknown> = { fired: 1 };
-
-    cyclic.self = cyclic;
-
-    expect(isPersistedRelicState(cyclic)).toBe(false);
-  });
-
-  it('refuses a cycle through an array', () => {
-    const entries: unknown[] = [1];
-
-    entries.push(entries);
-
-    expect(isPersistedRelicState(entries)).toBe(false);
-  });
-
-  it('accepts the same value reached twice by different paths', () => {
-    // Shared, not cyclic: only an ancestor is a cycle.
-    const shared = { fired: 1 };
-
-    expect(isPersistedRelicState({ left: shared, right: shared })).toBe(true);
-  });
-
-  it('refuses an array hole', () => {
-    const sparse: unknown[] = [1];
-
-    sparse.length = 3;
-
-    expect(isPersistedRelicState(sparse)).toBe(false);
-  });
-});
-
-/* ===== 2. describeRunStateProblems() names the offending member ===== */
-
-describe('describeRunStateProblems diagnoses relic state field-scoped', () => {
-  it('reports nothing for an absent state member', () => {
-    expect(describeRunStateProblems(envelope([{ id: 'relic-1' }]))).toEqual(
-      []
-    );
-  });
-
-  it('reports nothing for a state of counters and flags', () => {
-    expect(
-      describeRunStateProblems(
-        envelope([{ id: 'relic-1', charges: 2, state: { fired: 1 } }])
-      )
-    ).toEqual([]);
-  });
-
-  it('names the dotted path of a refused nested member', () => {
-    expect(stateProblems({ inner: { at: new Date(0) } })).toEqual([
-      'relics[0].state.inner.at is not a plain object or array',
-    ]);
-  });
-
-  it('names the index of a refused array entry', () => {
-    expect(stateProblems({ counts: [1, Number.NaN] })).toEqual([
-      'relics[0].state.counts[1] is not a finite number',
-    ]);
-  });
-
-  it('names a reserved member name', () => {
-    const hostile: unknown = JSON.parse('{"__proto__":{"polluted":true}}');
-
-    expect(stateProblems(hostile)).toEqual([
-      'relics[0].state.__proto__ is a reserved member name',
-    ]);
-  });
-
-  it('names a cycle once', () => {
     const cyclic: Record<string, unknown> = {};
 
     cyclic.self = cyclic;
 
-    expect(stateProblems(cyclic)).toEqual([
-      'relics[0].state.self refers back to a value containing it',
-    ]);
+    expect(() => isPersistedRelicState(cyclic)).not.toThrow();
+    expect(isPersistedRelicState(cyclic)).toBe(false);
   });
 
-  it('names an accessor', () => {
+  it('refuses a cycle reached through an array', () => {
+    const entries: unknown[] = [];
+
+    entries.push(entries);
+
+    expect(() => isPersistedRelicState(entries)).not.toThrow();
+    expect(isPersistedRelicState(entries)).toBe(false);
+  });
+
+  it('refuses an array hole, which JSON would rewrite as null', () => {
+    const holed: unknown[] = [1];
+
+    holed.length = 3;
+
+    expect(isPersistedRelicState(holed)).toBe(false);
+  });
+
+  it('refuses a value nested deeper than the copy descends', () => {
+    let deep: Record<string, unknown> = { leaf: 1 };
+
+    for (let level = 0; level < 12; level += 1) {
+      deep = { down: deep };
+    }
+
+    expect(() => isPersistedRelicState(deep)).not.toThrow();
+    expect(isPersistedRelicState(deep)).toBe(false);
+  });
+
+  it('never throws for any input it is handed', () => {
+    for (const value of HOSTILE_INPUTS) {
+      expect(() => isPersistedRelicState(value)).not.toThrow();
+    }
+  });
+});
+
+/* ===== 17. A relic's own state, diagnosed field-scoped ===== */
+
+/**
+ * Builds a loose payload whose single relic carries `state`.
+ *
+ * @param state Value to place in the relic's state slot.
+ * @returns The payload, ready for the validators.
+ */
+function payloadWithRelicState(state: unknown): Record<string, unknown> {
+  const payload = loosenEnvelope();
+
+  payload.relics = [{ id: 'held', state }];
+
+  return payload;
+}
+
+describe('a relic state member is diagnosed by its own path', () => {
+  it('reports nothing when the state member is absent', () => {
+    const payload = loosenEnvelope();
+
+    payload.relics = [{ id: 'held' }];
+
+    expect(describeRunStateProblems(payload)).toEqual([]);
+  });
+
+  it('reports nothing for a state of counters and flags', () => {
+    const payload = payloadWithRelicState({ fired: 2, armed: false });
+
+    expect(describeRunStateProblems(payload)).toEqual([]);
+  });
+
+  it('names the dotted path of a refused nested member', () => {
+    const payload = payloadWithRelicState({ inner: { when: new Date(0) } });
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'relics[0].state.inner.when is not a plain object or array'
+    );
+  });
+
+  it('names the index of a refused array entry', () => {
+    const payload = payloadWithRelicState([1, Number.NaN]);
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'relics[0].state[1] is not a finite number'
+    );
+  });
+
+  it('names a reserved member name', () => {
+    const hostile: Record<string, unknown> = {};
+
+    Object.defineProperty(hostile, 'constructor', {
+      value: 1,
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+
     expect(
-      stateProblems({
-        get fired(): number {
-          return 1;
-        },
-      })
-    ).toEqual(['relics[0].state.fired is an accessor']);
+      describeRunStateProblems(payloadWithRelicState(hostile))
+    ).toContain('relics[0].state.constructor is a reserved member name');
+  });
+
+  it('names a cycle once rather than recursing forever', () => {
+    const cyclic: Record<string, unknown> = {};
+
+    cyclic.self = cyclic;
+
+    const problems = describeRunStateProblems(
+      payloadWithRelicState(cyclic)
+    );
+
+    expect(problems).toContain(
+      'relics[0].state.self refers back to a value containing it'
+    );
+    expect(
+      problems.filter((problem) => problem.includes('refers back')).length
+    ).toBe(1);
+  });
+
+  it('names an accessor without running its getter', () => {
+    let reads = 0;
+    const hostile: Record<string, unknown> = {};
+
+    Object.defineProperty(hostile, 'computed', {
+      get(): number {
+        reads += 1;
+
+        return 1;
+      },
+      configurable: true,
+      enumerable: true,
+    });
+
+    expect(
+      describeRunStateProblems(payloadWithRelicState(hostile))
+    ).toContain('relics[0].state.computed is an accessor');
+    expect(reads).toBe(0);
   });
 
   it('keeps the pickup index of the offending relic', () => {
-    const problems = describeRunStateProblems(
-      envelope([
-        { id: 'first' },
-        { id: 'second', state: { run: (): void => undefined } },
-      ])
-    );
+    const payload = loosenEnvelope();
 
-    expect(problems).toEqual([
-      'relics[1].state.run is a function and is not persistable',
-    ]);
+    payload.relics = [
+      { id: 'first' },
+      { id: 'second' },
+      { id: 'third', state: { when: new Date(0) } },
+    ];
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'relics[2].state.when is not a plain object or array'
+    );
   });
 
   it('reports a bounded list for a wide corrupt state', () => {
     const wide: Record<string, unknown> = {};
 
     for (let index = 0; index < 200; index += 1) {
-      wide[`member-${index}`] = undefined;
+      wide[`member${index}`] = Number.NaN;
     }
 
-    const problems = describeRunStateProblems(
-      envelope([{ id: 'relic-1', state: wide }])
-    );
+    const problems = describeRunStateProblems(payloadWithRelicState(wide));
 
+    expect(problems.length).toBeGreaterThan(0);
     expect(problems.length).toBeLessThanOrEqual(32);
-    expect(problems[problems.length - 1]).toBe(
-      'further problems were not reported'
-    );
   });
 
-  it('reports a member an accessor refuses rather than throwing', () => {
-    const hostile: PersistedRelic = {
-      id: 'relic-1',
+  it('refuses the envelope whose relic state is not persistable', () => {
+    expect(isRunStateShape(payloadWithRelicState({ when: new Date(0) })))
+      .toBe(false);
+  });
 
-      get state(): unknown {
-        throw new Error('refused');
-      },
-    };
-
-    expect(() => describeRunStateProblems(envelope([hostile]))).not.toThrow();
-    expect(describeRunStateProblems(envelope([hostile]))).toContain(
-      'relics[0].state is not readable'
-    );
+  it('accepts the envelope whose relic state is persistable', () => {
+    expect(isRunStateShape(payloadWithRelicState({ fired: 1 }))).toBe(true);
   });
 });
 
-/* ===== 3. isRunStateShape() gates the write ===== */
+/* ===== 18. The run seed is bounded by what the RNG layer derives from ===== */
 
-describe('isRunStateShape decides relic state with the diagnosis', () => {
-  it('accepts an envelope whose relic state is persistable', () => {
+describe('the persisted run seed is bounded, not merely typed', () => {
+  it('accepts a seed at the length the RNG layer can derive from', () => {
+    const payload = loosenEnvelope();
+
+    payload.seed = 'a'.repeat(MAX_RUN_SEED_LENGTH);
+
+    expect(describeRunStateProblems(payload)).toEqual([]);
+    expect(isRunStateShape(payload)).toBe(true);
+  });
+
+  it('names the seed when it is longer than the RNG layer accepts', () => {
+    const payload = loosenEnvelope();
+
+    payload.seed = 'a'.repeat(MAX_RUN_SEED_LENGTH + 1);
+
+    expect(isRunStateShape(payload)).toBe(false);
     expect(
-      isRunStateShape(envelope([{ id: 'relic-1', state: { fired: 1 } }]))
+      describeRunStateProblems(payload).some((problem) =>
+        problem.startsWith('seed is longer than')
+      )
     ).toBe(true);
   });
 
-  it('refuses an envelope whose relic state is not', () => {
-    expect(
-      isRunStateShape(envelope([{ id: 'relic-1', state: new Date(0) }]))
-    ).toBe(false);
-    expect(
-      isRunStateShape(
-        envelope([
-          { id: 'relic-1', state: JSON.parse('{"__proto__":{"x":1}}') },
-        ])
-      )
-    ).toBe(false);
+  it('accepts an empty seed as a string the RNG layer can derive from', () => {
+    const payload = loosenEnvelope();
+
+    payload.seed = '';
+
+    expect(isRunStateShape(payload)).toBe(true);
+  });
+});
+
+/* ===== 19. isCurrentRunState ===== */
+
+describe('isCurrentRunState decides shape and version together', () => {
+  it('accepts a fresh envelope', () => {
+    expect(isCurrentRunState(buildEnvelope())).toBe(true);
   });
 
-  it('agrees with describeRunStateProblems on every input', () => {
-    const candidates: unknown[] = [
-      envelope(),
-      envelope([{ id: 'relic-1', state: { fired: 1 } }]),
-      envelope([{ id: 'relic-1', state: undefined }]),
-      envelope([{ id: 'relic-1', state: new Map() }]),
-      envelope([{ id: 'relic-1', state: [Symbol('x')] }]),
-      null,
-      undefined,
-      'envelope',
-      [],
-    ];
+  it('refuses a structurally complete envelope at another version', () => {
+    for (const offset of [1, -1, 99]) {
+      const payload = loosenEnvelope();
 
-    for (const candidate of candidates) {
-      expect(isRunStateShape(candidate)).toBe(
-        describeRunStateProblems(candidate).length === 0
-      );
+      payload.schemaVersion = RUN_STATE_SCHEMA_VERSION + offset;
+
+      expect(isRunStateShape(payload)).toBe(true);
+      expect(isCurrentRunState(payload)).toBe(false);
+    }
+  });
+
+  it('refuses an envelope at the current version but wrong in shape', () => {
+    const payload = loosenEnvelope();
+
+    delete payload.board;
+
+    expect(classifyRunStateVersion(payload)).toBe('current');
+    expect(isCurrentRunState(payload)).toBe(false);
+  });
+
+  it('refuses a payload carrying no version member at all', () => {
+    const payload = loosenEnvelope();
+
+    delete payload.schemaVersion;
+
+    expect(isCurrentRunState(payload)).toBe(false);
+  });
+
+  it('refuses every non-envelope value without throwing', () => {
+    for (const input of HOSTILE_INPUTS) {
+      expect(() => isCurrentRunState(input)).not.toThrow();
+      expect(isCurrentRunState(input)).toBe(false);
     }
   });
 });
 
-/* ===== 4. cloneRunState() detaches, and projects onto JSON ===== */
+/* ===== 20. projectCurrentRunState ===== */
 
-describe('cloneRunState detaches every part of the envelope', () => {
-  it('shares no object with the original', () => {
-    const original = envelope([
-      { id: 'relic-1', charges: 2, state: { fired: 1, log: [1, 2] } },
-    ]);
-    const copy = cloneRunState(original);
+describe('projectCurrentRunState writes the version this build reads', () => {
+  it('stamps the current version over any other', () => {
+    const stale: RunState = {
+      ...buildEnvelope(),
+      schemaVersion: RUN_STATE_SCHEMA_VERSION + 5,
+    };
 
-    expect(copy).toEqual(original);
-    expect(copy).not.toBe(original);
-    expect(copy.relics).not.toBe(original.relics);
-    expect(copy.relics[0]).not.toBe(original.relics[0]);
-    expect(copy.relics[0].state).not.toBe(original.relics[0].state);
-    expect(copy.rngCursor).not.toBe(original.rngCursor);
-    expect(copy.board).not.toBe(original.board);
-    expect(copy.board.grid.cells).not.toBe(original.board.grid.cells);
-  });
-
-  it('detaches a nested state subtree at every level', () => {
-    const nested = { a: { b: { c: { d: { e: { f: ['leaf'] } } } } } };
-    const original = envelope([{ id: 'relic-1', state: nested }]);
-    const copy = cloneRunState(original);
-    const copied = copy.relics[0].state as typeof nested;
-
-    expect(copied).toEqual(nested);
-    expect(copied.a).not.toBe(nested.a);
-    expect(copied.a.b.c.d.e).not.toBe(nested.a.b.c.d.e);
-    expect(copied.a.b.c.d.e.f).not.toBe(nested.a.b.c.d.e.f);
-  });
-
-  it('leaves a later mutation of the original invisible to the copy', () => {
-    const state: { fired: number; log: number[] } = { fired: 1, log: [1] };
-    const original = envelope([{ id: 'relic-1', state }]);
-    const copy = cloneRunState(original);
-
-    state.fired = 99;
-    state.log.push(2);
-
-    expect(copy.relics[0].state).toEqual({ fired: 1, log: [1] });
-  });
-
-  it('omits the state member the original omits', () => {
-    const copy = cloneRunState(envelope([{ id: 'relic-1' }]));
-
-    expect(Object.prototype.hasOwnProperty.call(copy.relics[0], 'state')).toBe(
-      false
+    expect(projectCurrentRunState(stale).schemaVersion).toBe(
+      RUN_STATE_SCHEMA_VERSION
     );
-    expect(
-      Object.prototype.hasOwnProperty.call(copy.relics[0], 'charges')
-    ).toBe(false);
+  });
+
+  it('emits exactly the nine members', () => {
+    const projected = projectCurrentRunState(buildEnvelope());
+
+    expect(Object.keys(projected).sort()).toEqual(
+      [...ENVELOPE_MEMBERS].sort()
+    );
+  });
+
+  it('drops a member a caller added to its own object', () => {
+    const foreign = {
+      ...buildEnvelope(),
+      smuggled: 'value',
+    } as unknown as RunState;
+
+    expect(Object.keys(projectCurrentRunState(foreign))).not.toContain(
+      'smuggled'
+    );
+  });
+
+  it('produces an envelope this build classifies as current', () => {
+    const projected = projectCurrentRunState(buildEnvelope());
+
+    expect(isCurrentRunState(projected)).toBe(true);
+  });
+
+  it('shares no mutable part with its argument', () => {
+    const state = buildEnvelope();
+    const projected = projectCurrentRunState(state);
+
+    expect(projected).not.toBe(state);
+    expect(projected.board).not.toBe(state.board);
+    expect(projected.board.grid).not.toBe(state.board.grid);
+    expect(projected.board.grid.cells).not.toBe(state.board.grid.cells);
+    expect(projected.rngCursor).not.toBe(state.rngCursor);
+    expect(projected.stageGoal).not.toBe(state.stageGoal);
+  });
+
+  it('round-trips through JSON deep-equal to itself', () => {
+    const projected = projectCurrentRunState(
+      buildEnvelopeWithRelics([{ id: 'held', charges: 1 }])
+    );
+    const restored = JSON.parse(JSON.stringify(projected)) as RunState;
+
+    expect(restored).toEqual(projected);
+  });
+});
+
+/* ===== 21. The redacted summary a report carries ===== */
+
+describe('a report summary carries every member except the seed', () => {
+  it('removes the seed and keeps the other four members', () => {
+    const summary = summarizeRunState(buildEnvelope());
+    const redacted = redactRunSummary(summary);
+
+    expect(Object.keys(redacted).sort()).toEqual([
+      'relics',
+      'runId',
+      'score',
+      'stageIndex',
+    ]);
+    expect(Object.keys(redacted)).not.toContain('seed');
+  });
+
+  it('keeps the run identifier, the score and the stage reached', () => {
+    const summary = summarizeRunState(buildEnvelope());
+    const redacted = redactRunSummary(summary);
+
+    expect(redacted.runId).toBe(summary.runId);
+    expect(redacted.score).toBe(summary.score);
+    expect(redacted.stageIndex).toBe(summary.stageIndex);
   });
 
   it('preserves relic pickup order', () => {
-    const copy = cloneRunState(
-      envelope([{ id: 'first' }, { id: 'second' }, { id: 'third' }])
+    const ids = ['first', 'second', 'third'];
+    const redacted = redactRunSummary(
+      summarizeRunState(buildEnvelopeWithRelics(ids.map((id) => ({ id }))))
     );
 
-    expect(copy.relics.map((relic) => relic.id)).toEqual([
-      'first',
-      'second',
-      'third',
-    ]);
+    expect(redacted.relics.map((relic) => relic.id)).toEqual(ids);
   });
 
-  it('round-trips through JSON unchanged', () => {
-    const original = envelope([
-      { id: 'relic-1', charges: 0, state: { fired: 3, log: [1, null] } },
-      { id: 'relic-2' },
-    ]);
-    const copy = cloneRunState(original);
+  it('projects an envelope straight to the redacted form', () => {
+    const state = buildEnvelope();
+    const direct = summarizeRunStateForReport(state);
 
-    expect(JSON.parse(JSON.stringify(copy))).toEqual(copy);
-    expect(JSON.parse(JSON.stringify(copy))).toEqual(original);
+    expect(direct).toEqual(redactRunSummary(summarizeRunState(state)));
+    expect(Object.keys(direct)).not.toContain('seed');
+  });
+
+  it('carries no seed anywhere in its serialised form', () => {
+    const input = buildInput();
+    const direct = summarizeRunStateForReport(createFreshRunState(input));
+
+    expect(JSON.stringify(direct)).not.toContain(input.seed);
+  });
+
+  it('is a fresh object sharing no relic with the summary', () => {
+    const summary = summarizeRunState(
+      buildEnvelopeWithRelics([{ id: 'held', state: { n: 1 } }])
+    );
+    const redacted = redactRunSummary(summary);
+
+    expect(redacted.relics).not.toBe(summary.relics);
+    expect(redacted.relics[0]).not.toBe(summary.relics[0]);
+    expect(redacted.relics[0].state).not.toBe(summary.relics[0].state);
   });
 });
 
-describe('cloneRunState carries data alone', () => {
-  it('never carries a source reference at the depth bound', () => {
-    let deep: Record<string, unknown> = { leaf: 'value' };
-    const deepest = deep;
-
-    for (let level = 0; level < 12; level += 1) {
-      deep = { deep };
-    }
-
-    const copy = cloneRunState(envelope([{ id: 'relic-1', state: deep }]));
-
-    expect(JSON.stringify(copy)).not.toContain('leaf');
-    expect(deepest.leaf).toBe('value');
-  });
-
-  it('drops a cycle instead of recursing forever', () => {
-    const cyclic: Record<string, unknown> = { fired: 1 };
-
-    cyclic.self = cyclic;
-
-    const copy = cloneRunState(envelope([{ id: 'relic-1', state: cyclic }]));
-
-    expect(copy.relics[0].state).toEqual({ fired: 1 });
-    expect(() => JSON.stringify(copy)).not.toThrow();
-  });
-
-  it('defines a stored __proto__ member without reaching a prototype', () => {
-    const hostile = JSON.parse('{"__proto__":{"polluted":true},"fired":1}');
-    const copy = cloneRunState(envelope([{ id: 'relic-1', state: hostile }]));
-    const copied = copy.relics[0].state as Record<string, unknown>;
-
-    expect(copied).toEqual({ fired: 1 });
-    expect(Object.getPrototypeOf(copied)).toBe(Object.prototype);
-    expect('polluted' in copied).toBe(false);
-    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
-  });
-
-  it('drops the values JSON cannot carry as data', () => {
-    const copy = cloneRunState(
-      envelope([
-        {
-          id: 'relic-1',
-          state: {
-            fired: 1,
-            absent: undefined,
-            run: (): void => undefined,
-            at: new Date(0),
-            broken: Number.NaN,
-          },
-        },
-      ])
-    );
-
-    expect(copy.relics[0].state).toEqual({ fired: 1 });
-  });
-
-  it('carries a dropped array entry as null so later indices hold', () => {
-    const copy = cloneRunState(
-      envelope([{ id: 'relic-1', state: { log: [1, Number.NaN, 3] } }])
-    );
-
-    expect(copy.relics[0].state).toEqual({ log: [1, null, 3] });
-  });
-
-  it('omits a state member that carries no data at all', () => {
-    const copy = cloneRunState(
-      envelope([{ id: 'relic-1', state: new Map([['fired', 1]]) }])
-    );
-
-    expect(
-      Object.prototype.hasOwnProperty.call(copy.relics[0], 'state')
-    ).toBe(false);
-  });
-
-  it('never invokes an accessor of the original', () => {
-    let reads = 0;
-    const hostile = {
-      get fired(): number {
-        reads += 1;
-
-        return 1;
-      },
-      armed: true,
-    };
-    const copy = cloneRunState(envelope([{ id: 'relic-1', state: hostile }]));
-
-    expect(reads).toBe(0);
-    expect(copy.relics[0].state).toEqual({ armed: true });
-  });
-});
-
-/* ===== 5. The store boundary the two compose into ===== */
-
-/** An in-memory persistence port, so no test reaches Web Storage. */
-function createPort(): RunStatePersistencePort & {
-  readonly written: Map<OwnedStorageKey, string>;
-} {
-  const written = new Map<OwnedStorageKey, string>();
-
-  return {
-    written,
-
-    readRaw(key: OwnedStorageKey): string | null {
-      return written.get(key) ?? null;
-    },
-
-    readJson(key: OwnedStorageKey): unknown {
-      const raw = written.get(key);
-
-      return raw === undefined ? null : JSON.parse(raw);
-    },
-
-    writeJson(key: OwnedStorageKey, value: unknown): boolean {
-      written.set(key, JSON.stringify(value));
-
-      return true;
-    },
-
-    removeRaw(key: OwnedStorageKey): boolean {
-      written.delete(key);
-
-      return true;
-    },
-  };
-}
-
-describe('RunStateStore refuses an envelope it could not read back', () => {
-  it('writes an envelope whose relic state is persistable', () => {
-    const port = createPort();
-    const store = new RunStateStore({ storage: port });
-
-    expect(
-      store.save(envelope([{ id: 'relic-1', charges: 1, state: { fired: 2 } }]))
-    ).toBe(true);
-    expect(port.written.has(RUN_STATE_KEY)).toBe(true);
-  });
-
-  it('refuses one carrying a value persistence would lose', () => {
-    const port = createPort();
-    const store = new RunStateStore({ storage: port });
-
-    expect(
-      store.save(envelope([{ id: 'relic-1', state: { at: new Date(0) } }]))
-    ).toBe(false);
-    expect(port.written.has(RUN_STATE_KEY)).toBe(false);
-  });
-
-  it('refuses one carrying a reserved member name', () => {
-    const port = createPort();
-    const store = new RunStateStore({ storage: port });
-
-    expect(
-      store.save(
-        envelope([
-          { id: 'relic-1', state: JSON.parse('{"__proto__":{"x":1}}') },
-        ])
-      )
-    ).toBe(false);
-    expect(port.written.has(RUN_STATE_KEY)).toBe(false);
-  });
-
-  it('refuses one carrying a cycle rather than throwing', () => {
-    const port = createPort();
-    const store = new RunStateStore({ storage: port });
-    const cyclic: Record<string, unknown> = {};
-
-    cyclic.self = cyclic;
-
-    expect(() =>
-      store.save(envelope([{ id: 'relic-1', state: cyclic }]))
-    ).not.toThrow();
-    expect(port.written.has(RUN_STATE_KEY)).toBe(false);
-  });
-
-  it('loads back a stored envelope whose state is data', () => {
-    const port = createPort();
-    const store = new RunStateStore({ storage: port });
-    const original = envelope([
-      { id: 'relic-1', charges: 3, state: { fired: 1, log: ['a'] } },
-    ]);
-
-    expect(store.save(original)).toBe(true);
-
-    const result = store.load();
-
-    expect(result.verdict).toBe('current');
-    expect(result.state).toEqual(original);
-    expect(result.state?.schemaVersion).toBe(RUN_STATE_SCHEMA_VERSION);
-    expect(result.state?.relics[0].state).not.toBe(original.relics[0].state);
-  });
-
-  it('falls back to fresh for a stored state outside the vocabulary', () => {
-    const port = createPort();
-    const store = new RunStateStore({ storage: port });
-    const stored = JSON.stringify(envelope()).replace(
-      '"relics":[]',
-      '"relics":[{"id":"relic-1","state":{"__proto__":{"polluted":true}}}]'
-    );
-
-    // Written past the store, the way a tampered origin would carry it.
-    port.written.set(RUN_STATE_KEY, stored);
-
-    const result = store.load();
-
-    expect(result.state).toBeNull();
-    expect(result.outcome).toBe('fresh-fallback');
-    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
-  });
-});
-
-/* ===== 6. Every report a store raises is attributable (F10) ===== */
-
-/** Correlation identifier the store under test is constructed with. */
-const STORE_CORRELATION_ID = 'run-correlation-9f2c';
-
-/** What a throwing port threw, so the report can be matched against it. */
-const READ_FAULT = new Error('The origin refused the read.');
-
-/**
- * Collects every report a store raises, whichever channel raises it.
- *
- * @param collected List each report is appended to, in the order raised.
- * @returns A fully implemented reporter.
- */
-function createCollectingReporter(collected: unknown[]): RunReporter {
-  return {
-    onLoadCorrupted: (report): void => {
-      collected.push(report);
-    },
-    onVersionMigrated: (report): void => {
-      collected.push(report);
-    },
-    onBoardSizeReconciled: (report): void => {
-      collected.push(report);
-    },
-    onWriteFailed: (report): void => {
-      collected.push(report);
-    },
-  };
-}
-
-/**
- * Reads the correlation identifier off every collected report.
- *
- * @param collected Reports to read.
- * @returns One entry per report, `undefined` where it carried none.
- */
-function carriedIds(collected: readonly unknown[]): readonly unknown[] {
-  return collected.map(
-    (report: unknown): unknown =>
-      (report as { correlationId?: unknown }).correlationId,
-  );
-}
-
-/**
- * Builds a port whose raw read throws and whose other members behave.
- *
- * @returns The port.
- */
-function createUnreadablePort(): RunStatePersistencePort {
-  const port = createPort();
-
-  return {
-    ...port,
-
-    readRaw(): string | null {
-      throw READ_FAULT;
-    },
-  };
-}
-
-describe('every report a RunStateStore raises is attributable', () => {
-  it('carries the injected identifier on a failed presence check', () => {
-    const collected: unknown[] = [];
-    const store = new RunStateStore({
-      storage: createUnreadablePort(),
-      reporter: createCollectingReporter(collected),
-      correlationId: STORE_CORRELATION_ID,
-    });
-
-    expect(store.exists()).toBe(false);
-    expect(collected).toHaveLength(1);
-    expect(carriedIds(collected)).toEqual([STORE_CORRELATION_ID]);
-  });
-
-  it('reports the presence check with its verdict, problem and throwable',
-    () => {
-      const collected: unknown[] = [];
-      const store = new RunStateStore({
-        storage: createUnreadablePort(),
-        reporter: createCollectingReporter(collected),
-        correlationId: STORE_CORRELATION_ID,
-      });
-
-      store.exists();
-
-      const report = collected[0] as {
-        readonly key: string;
-        readonly verdict: string;
-        readonly problems: readonly string[];
-        readonly error: unknown;
-      };
-
-      expect(report.key).toBe(RUN_STATE_KEY);
-      expect(report.verdict).toBe('malformed');
-      expect(report.problems).toHaveLength(1);
-      expect(report.problems[0]).toContain('presence check');
-
-      // The value the port threw, by identity rather than by summary.
-      expect(report.error).toBe(READ_FAULT);
-    });
-
-  it('reports no identifier rather than an empty one when none was ' +
-    'injected', () => {
-    const collected: unknown[] = [];
-    const store = new RunStateStore({
-      storage: createUnreadablePort(),
-      reporter: createCollectingReporter(collected),
-    });
-
-    expect(store.exists()).toBe(false);
-    expect(carriedIds(collected)).toEqual([undefined]);
-    expect(collected[0]).not.toHaveProperty('correlationId', '');
-  });
-
-  it('never throws out of exists() whatever the port does', () => {
-    const store = new RunStateStore({
-      storage: createUnreadablePort(),
-      correlationId: STORE_CORRELATION_ID,
-    });
-
-    expect(() => store.exists()).not.toThrow();
-  });
-
-  it('carries the identifier on every channel the store raises', () => {
-    const collected: unknown[] = [];
-    const reporter = createCollectingReporter(collected);
-
-    // A refused load, through the same corruption channel as the presence
-    // check but a different path into it.
-    const corrupt = createPort();
-
-    corrupt.written.set(RUN_STATE_KEY, '{"schemaVersion":1}');
-    new RunStateStore({
-      storage: corrupt,
-      reporter,
-      correlationId: STORE_CORRELATION_ID,
-    }).load();
-
-    // A refused write.
-    const refusing = createPort();
-    const refusingStore = new RunStateStore({
-      storage: {
-        ...refusing,
-
-        writeJson(): boolean {
-          return false;
-        },
-      },
-      reporter,
-      correlationId: STORE_CORRELATION_ID,
-    });
-
-    expect(refusingStore.save(envelope())).toBe(false);
-
-    // A refused removal.
-    const unremovable = createPort();
-    const unremovableStore = new RunStateStore({
-      storage: {
-        ...unremovable,
-
-        removeRaw(): boolean {
-          return false;
-        },
-      },
-      reporter,
-      correlationId: STORE_CORRELATION_ID,
-    });
-
-    expect(unremovableStore.clear()).toBe(false);
-
-    // A failed presence check.
-    new RunStateStore({
-      storage: createUnreadablePort(),
-      reporter,
-      correlationId: STORE_CORRELATION_ID,
-    }).exists();
-
-    expect(collected).toHaveLength(4);
-    expect(carriedIds(collected)).toEqual([
-      STORE_CORRELATION_ID,
-      STORE_CORRELATION_ID,
-      STORE_CORRELATION_ID,
-      STORE_CORRELATION_ID,
-    ]);
-  });
-
-  it('never reads a stored seed for the identifier it reports', () => {
-    const collected: unknown[] = [];
-    const port = createPort();
-
-    port.written.set(
-      RUN_STATE_KEY,
-      '{"schemaVersion":1,"seed":"a-seed-that-must-not-be-reported"}',
-    );
-
-    const store = new RunStateStore({
-      storage: port,
-      reporter: createCollectingReporter(collected),
-      correlationId: STORE_CORRELATION_ID,
-    });
-
-    expect(store.load().state).toBeNull();
-    expect(carriedIds(collected)).toEqual([STORE_CORRELATION_ID]);
-    expect(JSON.stringify(collected)).not.toContain(
-      'a-seed-that-must-not-be-reported',
-    );
-  });
-});
-
-describe('the run seed is bounded by what the RNG layer can derive from', () => {
-  it('accepts a seed at the RNG layer\'s own limit', () => {
-    const seed = 'a'.repeat(MAX_RUN_SEED_LENGTH);
-    const state = { ...envelope(), seed };
-
-    expect(describeRunStateProblems(state)).toEqual([]);
-    expect(isRunStateShape(state)).toBe(true);
-    expect(isAcceptableRunSeed(seed)).toBe(true);
-  });
-
-  it('refuses a seed the RNG layer would refuse to derive streams from', () => {
-    const seed = 'a'.repeat(MAX_RUN_SEED_LENGTH + 1);
-    const state = { ...envelope(), seed };
-
-    // Validating the member as a string alone let this envelope load
-    // successfully and then fail restoration a moment later, at a point with no
-    // fallback: the load reported success and the run had no substreams.
-    expect(isAcceptableRunSeed(seed)).toBe(false);
-    expect(isRunStateShape(state)).toBe(false);
-    expect(describeRunStateProblems(state)).toContain(
-      `seed is longer than ${MAX_RUN_SEED_LENGTH} characters`
-    );
-    expect(() => createRngStreams(seed)).toThrow();
-  });
-
-  it('still refuses a seed that is not a string at all', () => {
-    const state = { ...envelope(), seed: 42 } as unknown;
-
-    expect(describeRunStateProblems(state)).toContain('seed is not a string');
-  });
-
-  it('falls back to fresh rather than loading an overlong seed', () => {
-    const port = createPort();
-    const store = new RunStateStore({ storage: port });
-    const stored = JSON.stringify({
-      ...envelope(),
-      seed: 'a'.repeat(MAX_RUN_SEED_LENGTH + 1),
-    });
-
-    port.written.set(RUN_STATE_KEY, stored);
-
-    const result = store.load();
-
-    expect(result.state).toBeNull();
-    expect(result.outcome).toBe('fresh-fallback');
-  });
-});
-
-describe('a board-size precedence decision is reported even when it changes nothing', () => {
-  it('reports and labels a decision whose action is none', () => {
-    const port = createPort();
-    const reconciliations: unknown[] = [];
-    const store = new RunStateStore({
-      storage: port,
-      // The configured size disagrees with the saved one, and a relic implies
-      // the saved one, so the saved size wins and the matrix needs no change at
-      // all: `action` stays `'none'` while a real precedence decision resolved.
-      config: { ...createDefaultRulesConfig(), boardSize: 5 },
-      reporter: {
-        onBoardSizeReconciled: (report): void => {
-          reconciliations.push(report);
-        },
-      },
-    });
-
-    expect(store.save(envelope())).toBe(true);
-
-    // The relic-implied size is a load option, and it names the size the saved
-    // board already has, so nothing about the matrix changes.
-    const result = store.load({ relicBoardSize: 4 });
-
-    expect(result.state).not.toBeNull();
-    expect(result.reconciliation?.action).toBe('none');
-    expect(result.reconciliation?.reportable).toBe(true);
-
-    // Both halves used to be keyed on `action`, so the one decision a reader
-    // needs to see was the one decision that was hidden.
-    expect(result.outcome).toBe('reconciled');
-    expect(reconciliations).toHaveLength(1);
-  });
-
-  it('leaves an undisputed load labelled loaded and unreported', () => {
-    const port = createPort();
-    const reconciliations: unknown[] = [];
-    const store = new RunStateStore({
-      storage: port,
-      config: { ...createDefaultRulesConfig(), boardSize: 4 },
-      reporter: {
-        onBoardSizeReconciled: (report): void => {
-          reconciliations.push(report);
-        },
-      },
-    });
-
-    expect(store.save(envelope())).toBe(true);
-
-    const result = store.load();
-
-    expect(result.reconciliation?.action).toBe('none');
-    expect(result.reconciliation?.reportable).toBe(false);
-    expect(result.outcome).toBe('loaded');
-    expect(reconciliations).toHaveLength(0);
-  });
-});
