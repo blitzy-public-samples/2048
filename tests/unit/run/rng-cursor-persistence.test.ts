@@ -20,8 +20,19 @@
 // Superseded constructs this suite is a verification target for:
 //   Math.random() spawn value          js/game_manager.js L71
 //   Math.random() spawn position       js/grid.js         L37-L43
+//   available-cell order               js/grid.js         L45-L64
 //   the absence of any persisted draw position at all
 //                                      js/local_storage_manager.js L52-L59
+//
+// The first two rows above are the whole set of superseded randomness: a grep
+// of the tree finds exactly two `Math.random()` calls and no third, so the
+// substitution the substreams make is closed and enumerable. The order the
+// position draw indexes into is fixed by `Grid.prototype.availableCells` and
+// `Grid.prototype.eachCell` at js/grid.js L45-L64, x-outer and y-inner, so no
+// expectation below assumes another traversal.
+//
+// The `Math.random` identity assertions in section 9 are the descendant of
+// .jshintrc L5 `freeze: true`, the retired prohibition on writing to a native.
 //
 // Collected by the unit:dom-free project of vitest.config.ts, environment
 // 'node'. Nothing here reads a document, a Web Storage global or a clock;
@@ -32,14 +43,29 @@
 // of docs/architecture/data-flow.md, whose four substream cursors converge on
 // the envelope's `rngCursor` map.
 //
-// Coverage boundaries this suite stays inside: the substream derivation and the
-// draw arithmetic are tests/unit/rng/*.test.ts, the schema is
-// tests/unit/run/run-state.test.ts, and the store's verdicts and failure paths
-// are tests/unit/run/run-state-store.test.ts.
+// Coverage boundaries this suite stays inside. What it owns is the draw
+// accounting the persisted cursor map is assembled from and the resume that map
+// feeds; every neighbouring concern has its own owner:
+//   substream derivation arithmetic    tests/unit/rng/rng-streams.test.ts
+//   the ambient Math.random guard      tests/unit/rng/math-random-guard.test.ts
+//   the schema, and `normalizeRngCursor`'s degenerate input matrix
+//                                      tests/unit/run/run-state.test.ts
+//   store verdicts and failure paths   tests/unit/run/run-state-store.test.ts
+//   relic offer content: rarity weighting, sampling without replacement
+//                                      tests/unit/relics/relic-draw.test.ts
+//   board-size reconciliation          tests/unit/run/run-relic-board-size
+//                                        .test.ts
+//   the frozen best-score contract     tests/unit/storage/best-score.test.ts
+//
+// Determinism is achieved by construction here: every value is drawn from a
+// seeded substream, no clock, network or ambient randomness is read for test
+// data, and no snapshot artifact is written — the seeded snapshot gate under
+// tests/snapshot/ is configured and stored separately, and this suite compares
+// captured sequences in file instead.
 //
 // Decisions behind this file: docs/DECISION_LOG.md.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import type { SerializedGameState } from '../../../src/engine/types';
@@ -50,16 +76,23 @@ import {
 } from '../../../src/rng/rng-streams';
 import type {
   RngCursorMap,
+  RngRejection,
+  RngReporter,
+  RngStream,
   RngStreams,
   StreamName,
 } from '../../../src/rng/rng-streams';
+import {
+  createSeededRng,
+  deriveStreamSeed,
+} from '../../../src/rng/seeded-rng';
 import { createFreshRunState } from '../../../src/run/run-state';
+import type { RunReporter, RunState } from '../../../src/run/run-state';
+import { RunStateStore } from '../../../src/run/run-state-store';
 import type {
   PersistedStageGoal,
   RunStateLoadResult,
 } from '../../../src/run/run-state-store';
-import { RunStateStore } from '../../../src/run/run-state-store';
-import type { RunState } from '../../../src/run/run-state';
 import {
   LocalStorageManager,
 } from '../../../src/storage/local-storage-manager';
@@ -73,7 +106,26 @@ import { MERGE_PAIR_BOARD, copyBoard } from '../../fixtures/boards';
 
 /* ===== 1. Fixtures and the injected world ===== */
 
+/**
+ * The `Math.random` this file was loaded beside, read at module scope and so
+ * before any generator, substream or store in this file exists. Section 9
+ * compares against this reference by identity.
+ */
+const PLATFORM_MATH_RANDOM: () => number = Math.random;
+
+/**
+ * Own property names `globalThis` carried before this file constructed
+ * anything, read at module scope alongside the reference above. Section 9
+ * compares the set against it.
+ */
+const PLATFORM_GLOBAL_KEYS: readonly string[] = Object.freeze(
+  Object.getOwnPropertyNames(globalThis)
+);
+
 const RUN_SEED = 'cursor-resume-seed';
+
+/** A second run seed, for the assertions that two seeds must differ. */
+const OTHER_RUN_SEED = 'run-seed-2048';
 
 const RUN_ID = 'run-cursor-0001';
 
@@ -85,9 +137,10 @@ const STAGE_GOAL: PersistedStageGoal = {
 };
 
 /**
- * Draws taken from each substream before the run is persisted. Deliberately
- * unequal, so a resume that reads one substream's cursor for another is caught
- * rather than passing by coincidence.
+ * Draws taken from each substream before the run is persisted. No two counts
+ * are equal, which makes a resume that reads one substream's cursor for
+ * another distinguishable from a correct one. The counts themselves are
+ * argued in docs/DECISION_LOG.md.
  */
 const DRAWS_BEFORE_SAVE: Readonly<Record<StreamName, number>> = Object.freeze({
   'spawn-value': 5,
@@ -99,8 +152,71 @@ const DRAWS_BEFORE_SAVE: Readonly<Record<StreamName, number>> = Object.freeze({
 /** Draws compared after the resume, per substream. */
 const DRAWS_AFTER_RESUME = 6;
 
+/** Weighted draws taken when the spawn-value distribution is measured. */
+const WEIGHTED_DRAW_COUNT = 1000;
+
+/**
+ * The counts `WEIGHTED_DRAW_COUNT` weighted draws from `RUN_SEED`'s spawn-value
+ * substream resolve to, against the distribution `createDefaultRulesConfig()`
+ * declares. Exact counts, not a tolerance; the substream is seeded, so the
+ * tally is fixed. Argued in docs/DECISION_LOG.md.
+ */
+const WEIGHTED_DRAW_TALLY: Readonly<Record<number, number>> = Object.freeze({
+  2: 883,
+  4: 117,
+});
+
 /** Every backing store a test built, emptied by the teardown below. */
 const trackedStorages: MemoryStorage[] = [];
+
+/**
+ * A reporter that keeps every RNG refusal it is handed. Section 8 reads
+ * `rejections` to assert what a repaired cursor map reported; a sink that
+ * discarded its argument would leave the restore path unobserved.
+ */
+interface CapturedRngReports extends RngReporter {
+  readonly rejections: RngRejection[];
+}
+
+function createRngReportSink(): CapturedRngReports {
+  const rejections: RngRejection[] = [];
+
+  return {
+    rejections,
+    onRejected: (rejection: RngRejection): void => {
+      rejections.push(rejection);
+    },
+  };
+}
+
+/**
+ * A run reporter that keeps every report the store makes, named by member, for
+ * the assertions that a clean round trip reports no corruption, no migration
+ * and no failed write.
+ */
+interface CapturedRunReports extends RunReporter {
+  readonly records: string[];
+}
+
+function createRunReportSink(): CapturedRunReports {
+  const records: string[] = [];
+
+  return {
+    records,
+    onLoadCorrupted: (report): void => {
+      records.push(`load-corrupted:${report.verdict}`);
+    },
+    onVersionMigrated: (report): void => {
+      records.push(`version-migrated:${report.toVersion}`);
+    },
+    onBoardSizeReconciled: (report): void => {
+      records.push(`board-size-reconciled:${report.appliedSize}`);
+    },
+    onWriteFailed: (report): void => {
+      records.push(`write-failed:${report.key}`);
+    },
+  };
+}
 
 function buildBoard(): SerializedGameState {
   return copyBoard(MERGE_PAIR_BOARD);
@@ -112,6 +228,9 @@ function buildBoard(): SerializedGameState {
 interface World {
   readonly store: RunStateStore;
   readonly storage: MemoryStorage;
+
+  /** Everything the store reported, in report order. */
+  readonly reports: CapturedRunReports;
 }
 
 /**
@@ -133,13 +252,16 @@ function createWorld(seed: Readonly<Record<string, string>> = {}): World {
   }
 
   const port = new LocalStorageManager({ storage });
+  const reports = createRunReportSink();
 
   return {
     storage,
+    reports,
     store: new RunStateStore({
       storage: port,
       config: createDefaultRulesConfig(),
       correlationId: CORRELATION_ID,
+      reporter: reports,
     }),
   };
 }
@@ -274,24 +396,261 @@ function reference(
   return streams;
 }
 
-afterEach(() => {
+/**
+ * Every key this suite may have written, as one list with no repeat.
+ * `BEST_SCORE_KEY` is named beside `OWNED_STORAGE_KEYS` although the latter
+ * already contains it, so the frozen key is removed even were the owned list to
+ * stop carrying it. js/local_storage_manager.js L61-L63 removed the board
+ * snapshot and never the best score.
+ */
+const CLEARED_STORAGE_KEYS: readonly string[] = Object.freeze([
+  ...new Set<string>([...OWNED_STORAGE_KEYS, BEST_SCORE_KEY]),
+]);
+
+/**
+ * Empties and forgets every backing store a test built. Idempotent and total:
+ * removing an absent key is a no-op on `MemoryStorage`, so this composes with
+ * the teardown the shared setup file of vitest.config.ts registers and runs
+ * safely twice.
+ */
+function clearTrackedStorages(): void {
   for (const storage of trackedStorages) {
-    for (const key of OWNED_STORAGE_KEYS) {
+    for (const key of CLEARED_STORAGE_KEYS) {
       storage.removeItem(key);
     }
   }
 
   trackedStorages.length = 0;
+}
+
+beforeEach(clearTrackedStorages);
+
+afterEach(clearTrackedStorages);
+
+/* ===== 2. The four substreams and the shape of the persisted map ===== */
+
+describe('the substreams a run persists a cursor for', () => {
+  it('names the four substreams in the order the map is keyed by', () => {
+    expect([...RNG_STREAM_NAMES]).toEqual([
+      'spawn-value',
+      'spawn-position',
+      'relic-draw',
+      'rarity-weight',
+    ]);
+  });
+
+  it('resolves a substream reporting its own name, for all four', () => {
+    const streams = createRngStreams(RUN_SEED);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(streams.stream(name).name).toBe(name);
+    }
+  });
+
+  it('opens every substream at cursor zero', () => {
+    const streams = createRngStreams(RUN_SEED);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(streams.stream(name).cursor).toBe(0);
+    }
+  });
 });
 
-/* ===== 2. The cursor survives the store ===== */
+describe('the cursor map a run hands the envelope', () => {
+  it('is keyed by exactly the four substream names, in their order', () => {
+    const cursor = createRngStreams(RUN_SEED).snapshotCursors();
+
+    expect(Object.keys(cursor)).toEqual([...RNG_STREAM_NAMES]);
+  });
+
+  it('carries a finite whole count of no less than zero per name', () => {
+    const streams = createRngStreams(RUN_SEED);
+
+    advance(streams, DRAWS_BEFORE_SAVE);
+
+    const cursor = streams.snapshotCursors();
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(Number.isSafeInteger(cursor[name])).toBe(true);
+      expect(cursor[name]).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('survives a JSON round trip unchanged, member for member', () => {
+    const streams = createRngStreams(RUN_SEED);
+
+    advance(streams, DRAWS_BEFORE_SAVE);
+
+    const cursor = streams.snapshotCursors();
+    const revived = JSON.parse(JSON.stringify(cursor)) as RngCursorMap;
+
+    expect(revived).toEqual(cursor);
+  });
+
+  it('is detached: mutating it moves no substream', () => {
+    const streams = createRngStreams(RUN_SEED);
+
+    advance(streams, DRAWS_BEFORE_SAVE);
+
+    const taken = streams.snapshotCursors();
+
+    for (const name of RNG_STREAM_NAMES) {
+      taken[name] = 9999;
+    }
+
+    streams.stream('spawn-value').next();
+
+    const fresh = streams.snapshotCursors();
+
+    expect(fresh['spawn-value']).toBe(DRAWS_BEFORE_SAVE['spawn-value'] + 1);
+    expect(fresh['spawn-position']).toBe(DRAWS_BEFORE_SAVE['spawn-position']);
+    expect(fresh['relic-draw']).toBe(DRAWS_BEFORE_SAVE['relic-draw']);
+    expect(fresh['rarity-weight']).toBe(DRAWS_BEFORE_SAVE['rarity-weight']);
+  });
+});
+
+/* ===== 3. What the persisted count counts ===== */
+
+/**
+ * Takes `WEIGHTED_DRAW_COUNT` weighted selections from `stream` against the
+ * configured spawn distribution, tallying what was selected.
+ *
+ * Replaces js/game_manager.js L71, `Math.random() < 0.9 ? 2 : 4`. The values
+ * and weights are read from `createDefaultRulesConfig()` rather than restated.
+ *
+ * @param stream Substream to draw from.
+ * @returns How many times each value was selected.
+ */
+function tallyWeightedDraws(stream: RngStream): Record<number, number> {
+  const { spawn } = createDefaultRulesConfig();
+  const tally: Record<number, number> = {};
+
+  for (let index = 0; index < WEIGHTED_DRAW_COUNT; index += 1) {
+    const value = stream.pickWeighted(spawn.values, spawn.weights);
+
+    expect(value).not.toBeUndefined();
+
+    const selected = value as number;
+
+    tally[selected] = (tally[selected] ?? 0) + 1;
+  }
+
+  return tally;
+}
+
+describe('a cursor counts draws taken and nothing else', () => {
+  it('rises by exactly the number of raw draws taken, per substream', () => {
+    const streams = createRngStreams(RUN_SEED);
+
+    advance(streams, DRAWS_BEFORE_SAVE);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(streams.stream(name).cursor).toBe(DRAWS_BEFORE_SAVE[name]);
+    }
+  });
+
+  it('rises by one per bounded index draw, whatever the bound', () => {
+    const stream = createRngStreams(RUN_SEED).stream('spawn-position');
+
+    for (const bound of [1, 4, 16]) {
+      const before = stream.cursor;
+      const index = stream.nextInt(bound);
+
+      expect(stream.cursor).toBe(before + 1);
+      expect(Number.isInteger(index)).toBe(true);
+      expect(index).toBeGreaterThanOrEqual(0);
+      expect(index).toBeLessThan(bound);
+    }
+  });
+
+  it('rises by one per selection from a list of cells', () => {
+    const stream = createRngStreams(RUN_SEED).stream('spawn-position');
+
+    // Replaces js/grid.js L41, `cells[Math.floor(Math.random() *
+    // cells.length)]`. The list is written in the x-outer, y-inner order
+    // `Grid.prototype.eachCell` built it in at js/grid.js L45-L64.
+    const cells = ['0,0', '0,1', '0,2', '0,3'];
+    const chosen = stream.pick(cells);
+
+    expect(cells).toContain(chosen);
+    expect(stream.cursor).toBe(1);
+  });
+
+  it('does not rise for a selection from an empty list', () => {
+    const stream = createRngStreams(RUN_SEED).stream('spawn-position');
+
+    // js/grid.js L37-L43: `randomAvailableCell` fell through and returned
+    // undefined on a full board, the `if (cells.length)` guard at L40 having no
+    // else branch.
+    expect(stream.pick([])).toBeUndefined();
+    expect(stream.cursor).toBe(0);
+  });
+
+  it('persists no draw for a full-board selection that declined', () => {
+    const streams = createRngStreams(RUN_SEED);
+    const position = streams.stream('spawn-position');
+
+    position.next();
+    position.pick([]);
+    position.pick([]);
+
+    expect(streams.snapshotCursors()['spawn-position']).toBe(1);
+
+    const resumed = createRngStreams(RUN_SEED, streams.snapshotCursors());
+
+    expect(resumed.stream('spawn-position').next()).toBe(position.next());
+  });
+
+  it('rises by one per weighted selection, not one per candidate', () => {
+    const stream = createRngStreams(RUN_SEED).stream('spawn-value');
+
+    tallyWeightedDraws(stream);
+
+    expect(stream.cursor).toBe(WEIGHTED_DRAW_COUNT);
+  });
+
+  it('selects only values the configured distribution offers', () => {
+    const tally = tallyWeightedDraws(
+      createRngStreams(RUN_SEED).stream('spawn-value')
+    );
+    const { spawn } = createDefaultRulesConfig();
+
+    for (const selected of Object.keys(tally)) {
+      expect(spawn.values).toContain(Number(selected));
+    }
+  });
+
+  it('resolves the configured distribution to a fixed tally for a seed',
+    () => {
+      const tally = tallyWeightedDraws(
+        createRngStreams(RUN_SEED).stream('spawn-value')
+      );
+
+      expect(tally).toEqual(WEIGHTED_DRAW_TALLY);
+    });
+
+  it('resolves the same tally again from the same seed', () => {
+    const first = tallyWeightedDraws(
+      createRngStreams(RUN_SEED).stream('spawn-value')
+    );
+    const second = tallyWeightedDraws(
+      createRngStreams(RUN_SEED).stream('spawn-value')
+    );
+
+    expect(second).toEqual(first);
+  });
+});
+
+/* ===== 4. The cursor survives the store ===== */
 
 describe('the persisted cursor records where every substream stood', () => {
   it('carries a distinct count for each of the four substreams', () => {
     const { savedCursor } = roundTrip();
 
     for (const name of RNG_STREAM_NAMES) {
-      expect(savedCursor[name]).toBe(DRAWS_BEFORE_SAVE[name]);
+      expect(savedCursor[name], `${name} persisted count`).toBe(
+        DRAWS_BEFORE_SAVE[name]
+      );
     }
   });
 
@@ -328,7 +687,7 @@ describe('the persisted cursor records where every substream stood', () => {
   });
 });
 
-/* ===== 3. A recreated run continues the sequence ===== */
+/* ===== 5. A recreated run continues the sequence ===== */
 
 describe('a run recreated from the persisted cursor continues', () => {
   it('stands exactly where the uninterrupted run stands', () => {
@@ -344,19 +703,32 @@ describe('a run recreated from the persisted cursor continues', () => {
       const expected = drawEach(reference(), DRAWS_AFTER_RESUME);
 
       for (const name of RNG_STREAM_NAMES) {
-        expect(continued[name]).toEqual(expected[name]);
+        expect(continued[name], `${name} continuation`).toEqual(
+          expected[name]
+        );
       }
     });
+
+  it('continues where a run rebuilt from the pre-save snapshot would', () => {
+    const { savedCursor, resumed } = roundTrip();
+    const fromSnapshot = createRngStreams(RUN_SEED, savedCursor);
+    const expected = drawEach(fromSnapshot, DRAWS_AFTER_RESUME);
+    const continued = drawEach(resumed, DRAWS_AFTER_RESUME);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(continued[name], `${name} continuation`).toEqual(expected[name]);
+    }
+  });
 
   it('does not restart: the resumed draws differ from a fresh run', () => {
     const { resumed } = roundTrip();
     const continued = drawEach(resumed, DRAWS_AFTER_RESUME);
     const restarted = drawEach(createRngStreams(RUN_SEED), DRAWS_AFTER_RESUME);
 
-    // The whole point of persisting the cursor. Were it dropped, these would
-    // be equal and the reload would silently replay the run's opening draws.
+    // Were the persisted cursor dropped, these would be equal and the reload
+    // would replay the run's opening draws.
     for (const name of RNG_STREAM_NAMES) {
-      expect(continued[name]).not.toEqual(restarted[name]);
+      expect(continued[name], `${name} restart`).not.toEqual(restarted[name]);
     }
   });
 
@@ -387,7 +759,7 @@ describe('a run recreated from the persisted cursor continues', () => {
     drawEach(resumed, DRAWS_AFTER_RESUME);
 
     for (const name of RNG_STREAM_NAMES) {
-      expect(resumed.stream(name).cursor).toBe(
+      expect(resumed.stream(name).cursor, `${name} cursor`).toBe(
         DRAWS_BEFORE_SAVE[name] + DRAWS_AFTER_RESUME
       );
     }
@@ -426,7 +798,70 @@ describe('a run recreated from the persisted cursor continues', () => {
   });
 });
 
-/* ===== 4. Every substream resumes independently ===== */
+/** Start cursors the fast-forward is verified at, `0` among them. */
+const FAST_FORWARD_CURSORS: readonly number[] = Object.freeze([0, 2, 5]);
+
+/** Draws read from the ambient generator when its behaviour is measured. */
+const AMBIENT_DRAW_COUNT = 8;
+
+/**
+ * Reads `AMBIENT_DRAW_COUNT` draws from the ambient `Math.random`. Used only by
+ * section 9, on the generator itself rather than for any expected value: no
+ * assertion in this file derives test data from it.
+ *
+ * @returns The values read, in draw order.
+ */
+function ambientDraws(): number[] {
+  const drawn: number[] = [];
+
+  for (let index = 0; index < AMBIENT_DRAW_COUNT; index += 1) {
+    drawn.push(Math.random());
+  }
+
+  return drawn;
+}
+
+describe('the fast-forward every resume is built on', () => {
+  it('stands at the draw a start cursor of that many discards reaches', () => {
+    const straight = createSeededRng(RUN_SEED);
+    const sequence: number[] = [];
+
+    for (let index = 0; index < 8; index += 1) {
+      sequence.push(straight.next());
+    }
+
+    for (const start of FAST_FORWARD_CURSORS) {
+      expect(createSeededRng(RUN_SEED, start).next()).toBe(sequence[start]);
+    }
+  });
+
+  it('reports a start cursor as draws already consumed', () => {
+    for (const start of FAST_FORWARD_CURSORS) {
+      const rng = createSeededRng(RUN_SEED, start);
+
+      expect(rng.cursor).toBe(start);
+
+      rng.next();
+
+      expect(rng.cursor).toBe(start + 1);
+    }
+  });
+
+  it('positions each substream through the seed it is derived from', () => {
+    const { resumed } = roundTrip();
+
+    for (const name of RNG_STREAM_NAMES) {
+      const direct = createSeededRng(
+        deriveStreamSeed(RUN_SEED, name),
+        DRAWS_BEFORE_SAVE[name]
+      );
+
+      expect(resumed.stream(name).next()).toBe(direct.next());
+    }
+  });
+});
+
+/* ===== 6. Every substream resumes independently ===== */
 
 describe('one substream advancing cannot shift another resume', () => {
   it('resumes each substream against a counts map advancing only it', () => {
@@ -460,6 +895,24 @@ describe('one substream advancing cannot shift another resume', () => {
     }
   });
 
+  it('leaves the relic substreams unmoved by a run of spawn draws', () => {
+    const streams = createRngStreams(RUN_SEED);
+    const fresh = createRngStreams(RUN_SEED);
+    const position = streams.stream('spawn-position');
+
+    for (let index = 0; index < 24; index += 1) {
+      position.nextInt(16);
+      streams.stream('spawn-value').next();
+    }
+
+    for (const name of ['relic-draw', 'rarity-weight'] as const) {
+      expect(streams.stream(name).cursor, `${name} cursor`).toBe(0);
+      expect(streams.stream(name).next(), `${name} draw`).toBe(
+        fresh.stream(name).next()
+      );
+    }
+  });
+
   it('keeps the four substreams distinct after a resume', () => {
     const { resumed } = roundTrip(zeroCursor());
     const opening = RNG_STREAM_NAMES.map((name) =>
@@ -470,7 +923,52 @@ describe('one substream advancing cannot shift another resume', () => {
   });
 });
 
-/* ===== 5. The relic-draw stream: identical offers across a reload ===== */
+describe('the seed each substream is derived from', () => {
+  it('gives one run seed and one label one derived seed, every time', () => {
+    for (const name of RNG_STREAM_NAMES) {
+      expect(deriveStreamSeed(RUN_SEED, name)).toBe(
+        deriveStreamSeed(RUN_SEED, name)
+      );
+    }
+  });
+
+  it('gives the four labels four distinct derived seeds', () => {
+    const derived = RNG_STREAM_NAMES.map((name) =>
+      deriveStreamSeed(RUN_SEED, name)
+    );
+
+    expect(new Set(derived).size).toBe(RNG_STREAM_NAMES.length);
+  });
+
+  it('gives the four labels four distinct opening draws', () => {
+    const opening = RNG_STREAM_NAMES.map((name) =>
+      createSeededRng(deriveStreamSeed(RUN_SEED, name)).next()
+    );
+
+    expect(new Set(opening).size).toBe(RNG_STREAM_NAMES.length);
+  });
+
+  it('gives two run seeds different sequences on one substream name', () => {
+    const mine = createRngStreams(RUN_SEED);
+    const other = createRngStreams(OTHER_RUN_SEED);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(mine.stream(name).next()).not.toBe(other.stream(name).next());
+    }
+  });
+
+  it('gives two run seeds different resumes from one cursor map', () => {
+    const { savedCursor } = roundTrip();
+    const mine = createRngStreams(RUN_SEED, savedCursor);
+    const other = createRngStreams(OTHER_RUN_SEED, savedCursor);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(mine.stream(name).next()).not.toBe(other.stream(name).next());
+    }
+  });
+});
+
+/* ===== 7. The relic-draw stream: identical offers across a reload ===== */
 
 describe('relic offers reproduce across a reload', () => {
   /**
@@ -513,13 +1011,6 @@ describe('relic offers reproduce across a reload', () => {
     expect(offerThree(resumed, POOL)).toEqual(offerThree(reference(), POOL));
   });
 
-  it('offers no duplicate within one set of three', () => {
-    const { resumed } = roundTrip();
-    const offered = offerThree(resumed, POOL);
-
-    expect(new Set(offered).size).toBe(3);
-  });
-
   it('offers a different set after the reload than at the run start', () => {
     const { resumed } = roundTrip();
 
@@ -547,13 +1038,17 @@ describe('relic offers reproduce across a reload', () => {
   });
 });
 
-/* ===== 6. A cursor the store had to repair still resumes ===== */
+/* ===== 8. A partial or absent cursor map still resumes ===== */
 
-describe('a repaired cursor resumes without throwing', () => {
+describe('a partial or absent cursor map still resumes', () => {
   /**
-   * Writes a raw payload whose `rngCursor` is `cursor`, then loads it.
+   * Writes a raw payload whose `rngCursor` member is `cursor`, then loads it
+   * back. The payload is written before the port and the store are built, the
+   * order js/local_storage_manager.js L25-L26 and js/game_manager.js L36
+   * require: the writability probe and the snapshot read both run once, at
+   * construction.
    *
-   * @param cursor Value to store under `rngCursor`, valid or not.
+   * @param cursor Value to store under `rngCursor`.
    * @returns The load result and the world it came from.
    */
   function loadWithCursor(cursor: unknown): {
@@ -573,68 +1068,38 @@ describe('a repaired cursor resumes without throwing', () => {
     return { loaded: world.store.load(), world };
   }
 
-  it('zeroes a substream an older payload never carried', () => {
+  it('continues the substreams a partial map records', () => {
     const { loaded } = loadWithCursor({ 'spawn-value': 4 });
     const state = loaded.state as RunState;
-
-    expect(state.rngCursor['spawn-value']).toBe(4);
-
-    const resumed = createRngStreams(state.seed, state.rngCursor);
     const counts: Partial<Record<StreamName, number>> = zeroCursor();
 
     counts['spawn-value'] = 4;
 
+    const resumed = createRngStreams(state.seed, state.rngCursor);
+
+    expect(resumed.stream('spawn-value').cursor).toBe(4);
     expect(drawEach(resumed, 3)).toEqual(
       drawEach(reference(counts as Record<StreamName, number>), 3)
     );
   });
 
-  it('drops a substream name this build does not know', () => {
-    const { loaded } = loadWithCursor({
-      'spawn-value': 2,
-      'ghost-stream': 99,
-    });
+  it('starts the substreams a partial map omits from the beginning', () => {
+    const { loaded } = loadWithCursor({ 'spawn-value': 4 });
+    const state = loaded.state as RunState;
+    const resumed = createRngStreams(state.seed, state.rngCursor);
+    const fresh = createRngStreams(RUN_SEED);
 
-    expect(Object.keys(loaded.state?.rngCursor ?? {})).not.toContain(
-      'ghost-stream'
-    );
-  });
+    for (const name of RNG_STREAM_NAMES) {
+      if (name === 'spawn-value') {
+        continue;
+      }
 
-  it('zeroes an unusable count rather than refusing the run', () => {
-    for (const unusable of [-1, 1.5, Number.NaN, 'seven', null]) {
-      const { loaded } = loadWithCursor({
-        'spawn-value': unusable,
-        'spawn-position': 3,
-        'relic-draw': 0,
-        'rarity-weight': 0,
-      });
-      const state = loaded.state as RunState;
-
-      expect(state.rngCursor['spawn-value']).toBe(0);
-      expect(state.rngCursor['spawn-position']).toBe(3);
-      expect(() => createRngStreams(state.seed, state.rngCursor)).not.toThrow();
+      expect(resumed.stream(name).cursor).toBe(0);
+      expect(resumed.stream(name).next()).toBe(fresh.stream(name).next());
     }
   });
 
-  it('zeroes a count above the bound a fast-forward can absorb', () => {
-    const { loaded } = loadWithCursor({
-      'spawn-value': MAX_RNG_CURSOR + 1,
-      'spawn-position': 0,
-      'relic-draw': 0,
-      'rarity-weight': 0,
-    });
-    const state = loaded.state as RunState;
-
-    expect(state.rngCursor['spawn-value']).toBe(0);
-
-    const resumed = createRngStreams(state.seed, state.rngCursor);
-
-    expect(resumed.stream('spawn-value').next()).toBe(
-      createRngStreams(RUN_SEED).stream('spawn-value').next()
-    );
-  });
-
-  it('resumes from a cursor member that is absent altogether', () => {
+  it('resumes from a payload carrying no cursor member at all', () => {
     const { loaded } = loadWithCursor(undefined);
     const state = loaded.state as RunState;
 
@@ -648,16 +1113,108 @@ describe('a repaired cursor resumes without throwing', () => {
   });
 });
 
-/* ===== 7. The invariants the resume must not break ===== */
+describe('the restore reports the counts it could not use', () => {
+  it('reports nothing when every recorded count is usable', () => {
+    const sink = createRngReportSink();
+    const { savedCursor } = roundTrip();
+
+    createRngStreams(RUN_SEED, savedCursor, sink);
+
+    expect(sink.rejections).toEqual([]);
+  });
+
+  it('reports nothing for a partial map, which is an older payload', () => {
+    const sink = createRngReportSink();
+
+    createRngStreams(RUN_SEED, { 'spawn-value': 4 }, sink);
+
+    expect(sink.rejections).toEqual([]);
+  });
+
+  it('names the substream, the count and the bound it was measured against',
+    () => {
+      const sink = createRngReportSink();
+      const recorded: Partial<RngCursorMap> = {
+        ...zeroCursor(),
+        'spawn-value': -1,
+      };
+
+      createRngStreams(RUN_SEED, recorded, sink);
+
+      expect(sink.rejections).toHaveLength(1);
+      expect(sink.rejections[0]).toEqual({
+        kind: 'cursor-unusable',
+        stream: 'spawn-value',
+        observed: -1,
+        maximum: MAX_RNG_CURSOR,
+      });
+    });
+
+  it('resumes the substreams it did accept after refusing one', () => {
+    const sink = createRngReportSink();
+    const recorded: Partial<RngCursorMap> = {
+      ...zeroCursor(),
+      'spawn-value': -1,
+      'spawn-position': 3,
+    };
+    const resumed = createRngStreams(RUN_SEED, recorded, sink);
+
+    expect(resumed.stream('spawn-value').cursor).toBe(0);
+    expect(resumed.stream('spawn-position').cursor).toBe(3);
+    expect(sink.rejections).toHaveLength(1);
+  });
+
+  it('reports no corruption, no migration and no failed write for a clean ' +
+    'round trip', () => {
+    const { world } = roundTrip();
+
+    expect(world.reports.records).toEqual([]);
+  });
+});
+
+/* ===== 9. The invariants the resume must not break ===== */
 
 describe('the resume leaves the run RNG contract intact', () => {
-  it('never patches Math.random', () => {
-    const original = Math.random;
+  it('never patches Math.random, across the whole resume cycle', () => {
+    const straight = createSeededRng(RUN_SEED);
+
+    straight.next();
+
     const { resumed } = roundTrip();
 
     drawEach(resumed, DRAWS_AFTER_RESUME);
 
-    expect(Math.random).toBe(original);
+    // The invariant Figure 7 (Seeded Determinism) of
+    // docs/architecture/data-flow.md publishes as a guard node. Compared by
+    // identity against the reference read at module scope: a generator
+    // installed over the built-in would still answer `typeof 'function'`.
+    expect(Math.random).toBe(PLATFORM_MATH_RANDOM);
+  });
+
+  it('leaves Math.random unseeded after a seeded run is built', () => {
+    const before = ambientDraws();
+
+    createSeededRng(RUN_SEED);
+    createRngStreams(RUN_SEED);
+    roundTrip();
+
+    const after = ambientDraws();
+
+    expect(new Set(before).size).toBeGreaterThan(1);
+    expect(after).not.toEqual(before);
+  });
+
+  it('adds no own property to globalThis', () => {
+    const before = Object.getOwnPropertyNames(globalThis);
+
+    createSeededRng(RUN_SEED);
+    createRngStreams(RUN_SEED);
+    roundTrip();
+
+    expect(Object.getOwnPropertyNames(globalThis)).toEqual(before);
+    expect(Object.getOwnPropertyNames(globalThis)).toEqual([
+      ...PLATFORM_GLOBAL_KEYS,
+    ]);
   });
 
   it('returns draws inside the unit interval after a resume', () => {

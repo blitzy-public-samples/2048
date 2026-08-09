@@ -1,15 +1,40 @@
 // The relic registry: the catalogue, pickup order, charge accounting, the
 // manual activation path and the persistence projection.
 //
-// TWO SUITES IN ONE FILE, because two review units each wrote one and both sets
-// of expectations are kept. Each builds its own registry, so neither observes the
-// other's held relics.
+// SEVERAL SUITES IN ONE FILE. Each builds its own registry, so no suite
+// observes another's held relics.
+//
+// PROVENANCE
+//   js/keyboard_input_manager.js L18-L32  the vanilla three-name pub/sub bus
+//     whose append-only subscriber registry the pickup-ordered registry
+//     extends.
+//   js/local_storage_manager.js L47-L55   the unguarded `JSON.parse` whose
+//     absent guard `restore()` supplies; the tolerance suites pin that guard.
+//   js/game_manager.js L36-L45, L102-L110 the rehydration branch and the
+//     `serialize()` projection the persisted relic triple corresponds to.
+//   .jshintrc L1-L18                      two-space indentation, 80 columns and
+//     camelCase, carried forward per AAP 0.3.3.
+//
+// The figure these suites underpin is Figure 5, "Hook Dispatch Sequence:
+// Pickup-Order Fan-Out with Charge Guard and Error Isolation", in
+// docs/architecture/hook-dispatch-sequence.md.
+//
+// Decisions behind this file are recorded in docs/DECISION_LOG.md.
 
 import { describe, expect, it } from 'vitest';
 
-import type { HookBus } from '../../../src/engine/hook-bus';
+import type { HookBus, HookSubscriber } from '../../../src/engine/hook-bus';
 import { createHookBus } from '../../../src/engine/hook-bus';
-import { HOOK_NAMES, type HookName } from '../../../src/engine/hooks';
+import {
+  HOOK_NAMES,
+  type HookHandlerTable,
+  type HookName,
+  type HookSubscription,
+} from '../../../src/engine/hooks';
+import {
+  NOOP_ENGINE_REPORTER,
+  type EngineCountReport,
+} from '../../../src/engine/types';
 import {
   RELIC_CATALOGUE,
   RELIC_FAMILIES,
@@ -17,13 +42,30 @@ import {
   findRelicById,
   type RelicRunPort,
 } from '../../../src/relics/relic-registry';
-import type { RelicRegistryPort } from '../../../src/run/run-controller';
 import {
   RARITIES,
   RELIC_FAMILY_NAMES,
+  type ActiveRelic,
   type PersistedRelic,
   type Relic,
 } from '../../../src/relics/relic-types';
+
+/**
+ * The members `RelicRegistryPort` of src/run/run-controller.ts declares for the
+ * relic registry, mirrored here rather than imported: this suite's dependency
+ * set is src/relics and src/engine, and the consumer declares every member
+ * optional, so requiring all seven here holds `runPort()` to a stricter shape
+ * than the consumer's own declaration does.
+ */
+interface RunControllerRelicPort {
+  readonly snapshotRelics: () => readonly PersistedRelic[];
+  readonly restoreRelics: (relics: readonly PersistedRelic[]) => void;
+  readonly resolveRelic: (relicId: string) => PersistedRelic | null;
+  readonly knowsRelic: (relicId: string) => boolean;
+  readonly pickUpRelic: (relicId: string) => PersistedRelic | null;
+  readonly activateRelic: (relicId: string) => PersistedRelic | null;
+  readonly holdsRelic: (relicId: string) => boolean;
+}
 
 /* ===== Constants the catalogue is measured against ===== */
 
@@ -321,7 +363,7 @@ describe('RelicRegistry bus registration', () => {
     expect(registry.size()).toBe(1);
   });
 
-  it('exposes a commit-context provider that reads through to the registry', () => {
+  it('exposes a commit-context provider reading through the registry', () => {
     const registry = new RelicRegistry({ bus: createHookBus() });
     const provider = registry.commitContextProvider();
 
@@ -468,7 +510,7 @@ describe('RelicRegistry persistence', () => {
     expect(registry.find(charged.id)?.charges).toBe(2);
   });
 
-  it('carries no charge budget for a relic whose declaration carries none', () => {
+  it('carries no budget for a relic whose declaration carries none', () => {
     const registry = new RelicRegistry();
     const unlimited = RELIC_CATALOGUE.find(
       (relic) => relic.charges === undefined,
@@ -524,7 +566,7 @@ describe('RelicRegistry as the run controller port', () => {
     expect(bus.subscribers().map((entry) => entry.id)).toEqual([relic.id]);
   });
 
-  it('PICKS UP the relic a reward resolves, so its handlers begin dispatching', () => {
+  it('PICKS UP the relic a reward resolves, so its handlers dispatch', () => {
     const bus = createHookBus();
     const registry = new RelicRegistry({ bus });
     const relic = RELIC_CATALOGUE[3] as Relic;
@@ -559,7 +601,7 @@ describe('RelicRegistry as the run controller port', () => {
     expect(registry.resolveRelic('')).toBeNull();
   });
 
-  it('reads a declared board size out of any relic state, naming no relic', () => {
+  it('reads a declared board size out of relic state, naming no relic', () => {
     const registry = new RelicRegistry();
 
     expect(
@@ -1456,7 +1498,7 @@ describe('the state copy contains every reflection it performs', () => {
     expect(registry.find('hostile-keys')?.state).toEqual({});
   });
 
-  it('accepts a proxy whose descriptor trap throws, dropping the member', () => {
+  it('accepts a descriptor trap that throws, dropping the member', () => {
     const hostile = new Proxy(
       { kept: 1, refused: 2 },
       {
@@ -1623,7 +1665,8 @@ describe('restore is total against a hostile entry list', () => {
     });
 
     // NEITHER RAISES NOR RUNS THE TRAP. Every element is read through
-    // `Object.getOwnPropertyDescriptor` rather than by indexing, so a `get` trap
+    // `Object.getOwnPropertyDescriptor` rather than by indexing, so a `get`
+    // trap
     // written to raise is never invoked: the entry loads from its own data
     // descriptor, and a list that would have thrown out of `restore()` loads
     // whole instead of losing an element to the trap.
@@ -1662,12 +1705,13 @@ describe('restore is total against a hostile entry list', () => {
  * ========================================================================== */
 
 describe('runPort satisfies the run controller port', () => {
-  it('is assignable to RelicRegistryPort with every member present', () => {
+  it('is assignable to the run controller port, every member present', () => {
     const { port } = harness();
 
-    // The assignment IS the assertion: the two declarations are structural
-    // counterparts, so a member renamed on either side fails to compile here.
-    const controllerPort: RelicRegistryPort = port;
+    // The assignment IS the assertion: `RunControllerRelicPort` mirrors
+    // `RelicRegistryPort` of src/run/run-controller.ts, so a member renamed on
+    // the registry side fails to compile here.
+    const controllerPort: RunControllerRelicPort = port;
 
     expect(typeof controllerPort.snapshotRelics).toBe('function');
     expect(typeof controllerPort.restoreRelics).toBe('function');
@@ -1778,5 +1822,1326 @@ describe('runPort satisfies the run controller port', () => {
     expect(registeredIds(bus)).toEqual([]);
     expect(port.snapshotRelics()).toEqual([]);
     expect(port.holdsRelic(PLAIN_RELIC_ID)).toBe(false);
+  });
+});
+
+/* ==========================================================================
+ * Harness for the pickup-order, hook-binding and tolerance contracts
+ * ==========================================================================
+ *
+ * A fourth suite set, kept whole beside the three above. Every test below
+ * builds its own registry through the builders here, so none observes another's
+ * held relics or another's pickup order.
+ */
+
+/** A relic binding two hooks, carrying a budget and an initial state slot. */
+const TWO_HOOK_ID = 'temporal-anchor';
+
+/** The two hooks `temporal-anchor` binds, in `HOOK_NAMES` order. */
+const TWO_HOOK_BINDINGS: readonly HookName[] = ['onBeforeMove', 'onAfterMove'];
+
+/** A relic binding one hook, carrying neither a budget nor a state slot. */
+const NO_STATE_ID = 'echo-chamber';
+
+/**
+ * Two relics binding `onMerge` and nothing else, named in the reverse of their
+ * catalogue order so a pickup-order assertion over them cannot be satisfied by
+ * catalogue order.
+ */
+const MERGE_ONLY_IDS: readonly string[] = ['alloy-forge', 'echo-chamber'];
+
+/** Relics of the catalogue that declare a charge budget, per AAP A2. */
+const CHARGE_BEARING_COUNT = 5;
+
+/** Members a `PersistedRelic` carries, and the only members one carries. */
+const PERSISTED_MEMBERS: readonly string[] = ['id', 'charges', 'state'];
+
+/** A registry over a bus that records every registration made through it. */
+interface Recorded {
+  readonly registry: RelicRegistry;
+  readonly bus: HookBus;
+
+  /** Subscribers handed to `HookBus.register`, in call order. */
+  readonly registrations: readonly HookSubscriber[];
+}
+
+/**
+ * Builds a registry over a real bus wrapped so that every registration the
+ * registry makes is recorded.
+ *
+ * The wrapper delegates to the real bus, so what is recorded is exactly what
+ * the bus went on to hold; only `register` is intercepted.
+ *
+ * @returns The registry, the wrapped bus and the recorded registrations.
+ */
+function recorded(): Recorded {
+  const real = createHookBus();
+  const registrations: HookSubscriber[] = [];
+  const bus: HookBus = {
+    ...real,
+
+    register(subscriber: HookSubscriber): boolean {
+      registrations.push(subscriber);
+
+      return real.register(subscriber);
+    },
+  };
+
+  return { registry: new RelicRegistry({ bus }), bus, registrations };
+}
+
+/** A registry whose reports are captured, and the reports it delivered. */
+interface Reported {
+  readonly registry: RelicRegistry;
+  readonly counts: readonly EngineCountReport[];
+}
+
+/**
+ * Builds a registry reporting into a captured sink.
+ *
+ * @returns The registry and the counts it delivered.
+ */
+function reported(): Reported {
+  const counts: EngineCountReport[] = [];
+  const registry = new RelicRegistry({
+    bus: createHookBus(),
+    reporter: {
+      onCount: (report): void => {
+        counts.push(report);
+      },
+    },
+  });
+
+  return { registry, counts };
+}
+
+/**
+ * Reads the counter names a registry reported, in call order.
+ *
+ * @param counts Reports captured from the injected sink.
+ * @returns The metric names.
+ */
+function metricNames(counts: readonly EngineCountReport[]): readonly string[] {
+  return counts.map((report): string => report.metric);
+}
+
+/**
+ * Reads one held relic, failing the test where it is not held.
+ *
+ * @param registry Registry to read.
+ * @param id Identifier of the relic.
+ * @returns The held record.
+ */
+function heldRelic(registry: RelicRegistry, id: string): ActiveRelic {
+  const found = registry.find(id);
+
+  expect(found, `${id} is held`).toBeDefined();
+
+  return found as ActiveRelic;
+}
+
+/**
+ * Reads one declaration out of the catalogue, failing the test where the
+ * catalogue does not carry it.
+ *
+ * @param id Identifier to look up.
+ * @returns The declaration.
+ */
+function declaration(id: string): Relic {
+  const found = findRelicById(id);
+
+  expect(found, `${id} is in the catalogue`).toBeDefined();
+
+  return found as Relic;
+}
+
+/**
+ * Reads the hooks one handler table binds to a callable handler, in
+ * `HOOK_NAMES` order.
+ *
+ * @param hooks Handler table of a declaration or of a registration.
+ * @returns The hook names bound.
+ */
+function boundHooks(hooks: HookHandlerTable): readonly HookName[] {
+  return HOOK_NAMES.filter(
+    (hook): boolean => typeof hooks[hook] === 'function',
+  );
+}
+
+/**
+ * Reads the subscription one relic presents for one hook, or `undefined` where
+ * it presents none.
+ *
+ * @param bus Bus the relic is registered with.
+ * @param hook Hook to read.
+ * @param id Identifier of the relic.
+ * @returns The subscription, or `undefined`.
+ */
+function subscriptionOf(
+  bus: HookBus,
+  hook: HookName,
+  id: string,
+): HookSubscription | undefined {
+  return bus
+    .subscriptions(hook)
+    .find((entry): boolean => entry.subscriberId === id);
+}
+
+/** The declarations of the catalogue that carry a charge budget. */
+function chargeBearing(): readonly Relic[] {
+  return RELIC_CATALOGUE.filter(
+    (relic): boolean => relic.charges !== undefined,
+  );
+}
+
+/* ==========================================================================
+ * A. Pickup order is monotonic and never renumbered
+ * ========================================================================== */
+
+describe('pickup order is monotonic and never renumbered', () => {
+  it('holds three relics in exactly the order they were picked up', () => {
+    const { registry } = recorded();
+    const chosen: readonly string[] = ['gilded-rot', 'twin-seed', 'frostbind'];
+
+    for (const id of chosen) {
+      registry.pickUp(id);
+    }
+
+    expect(
+      registry.active().map((entry): string => entry.definition.id),
+    ).toEqual([...chosen]);
+    expect(
+      registry.active().map((entry): number => entry.pickupOrder),
+    ).toEqual([0, 1, 2]);
+  });
+
+  it('raises every pickup position above the one before it', () => {
+    const { registry } = recorded();
+
+    for (const relic of RELIC_CATALOGUE) {
+      registry.pickUp(relic.id);
+    }
+
+    const positions = registry
+      .active()
+      .map((entry): number => entry.pickupOrder);
+
+    expect(positions).toHaveLength(EXPECTED_RELIC_COUNT);
+
+    for (let index = 1; index < positions.length; index += 1) {
+      expect(positions[index]).toBeGreaterThan(positions[index - 1] as number);
+    }
+  });
+
+  it('appends a fourth relic last, displacing none of the first three', () => {
+    const { registry } = recorded();
+    const first: readonly string[] = [
+      'gilded-rot',
+      'twin-seed',
+      'frostbind',
+    ];
+
+    for (const id of first) {
+      registry.pickUp(id);
+    }
+
+    const before = registry.active();
+
+    registry.pickUp('tumbler');
+
+    const after = registry.active();
+
+    expect(after.map((entry): string => entry.definition.id)).toEqual([
+      ...first,
+      'tumbler',
+    ]);
+    expect(after[3]?.pickupOrder).toBe(3);
+
+    for (let index = 0; index < before.length; index += 1) {
+      expect(after[index]?.definition.id).toBe(before[index]?.definition.id);
+      expect(after[index]?.pickupOrder).toBe(before[index]?.pickupOrder);
+    }
+  });
+
+  it('rewrites no position of a relic that stays held', () => {
+    const { registry } = recorded();
+
+    for (const id of ['gilded-rot', 'twin-seed', 'frostbind']) {
+      registry.pickUp(id);
+    }
+
+    const assigned = new Map<string, number>(
+      registry
+        .active()
+        .map((entry): [string, number] => [
+          entry.definition.id,
+          entry.pickupOrder,
+        ]),
+    );
+
+    // Everything a run does to a registry short of starting a new one: more
+    // pickups, a refused duplicate, a refused unknown identifier, a spend
+    // against a budget, and the two projections.
+    registry.pickUp('tumbler');
+    registry.pickUp('twin-seed');
+    registry.pickUp('no-such-relic');
+    registry.activate('frostbind', 2);
+    registry.serialize();
+    registry.relicContext();
+
+    for (const [id, position] of assigned) {
+      expect(heldRelic(registry, id).pickupOrder).toBe(position);
+    }
+  });
+
+  it('advances a position only on a pickup it accepted', () => {
+    const { registry } = recorded();
+
+    expect(registry.pickUp('gilded-rot')?.pickupOrder).toBe(0);
+
+    // Three refusals: an unknown identifier, a relic already held, and a value
+    // that is no declaration at all. None takes a position.
+    expect(registry.pickUp('no-such-relic')).toBeUndefined();
+    expect(registry.pickUp('gilded-rot')).toBeUndefined();
+    expect(registry.pickUp({} as unknown as Relic)).toBeUndefined();
+
+    expect(registry.pickUp('twin-seed')?.pickupOrder).toBe(1);
+    expect(
+      registry.active().map((entry): number => entry.pickupOrder),
+    ).toEqual([0, 1]);
+  });
+
+  it('restarts at position zero for a new run, and only then', () => {
+    const { registry } = recorded();
+
+    registry.pickUp('gilded-rot');
+    registry.pickUp('twin-seed');
+
+    expect(registry.pickUp('frostbind')?.pickupOrder).toBe(2);
+
+    registry.clear();
+
+    expect(registry.pickUp('scouring-wind')?.pickupOrder).toBe(0);
+    expect(registry.pickUp('brittle-crown')?.pickupOrder).toBe(1);
+  });
+
+  it('holds a relic once however often it is picked up', () => {
+    const { registry } = recorded();
+
+    registry.pickUp('gilded-rot');
+    registry.pickUp('twin-seed');
+    registry.pickUp('frostbind');
+
+    const before = registry.active();
+
+    expect(registry.pickUp('twin-seed')).toBeUndefined();
+
+    const after = registry.active();
+
+    expect(after).toHaveLength(before.length);
+    expect(registry.has('twin-seed')).toBe(true);
+    expect(
+      registry.ownedIds().filter((id): boolean => id === 'twin-seed'),
+    ).toHaveLength(1);
+    expect(after.map((entry): string => entry.definition.id)).toEqual(
+      before.map((entry): string => entry.definition.id),
+    );
+    expect(after.map((entry): number => entry.pickupOrder)).toEqual(
+      before.map((entry): number => entry.pickupOrder),
+    );
+  });
+
+  it('agrees between ownedIds and has, for a held and an unheld relic', () => {
+    const { registry } = recorded();
+    const chosen: readonly string[] = ['brittle-crown', 'loaded-dice'];
+
+    for (const id of chosen) {
+      registry.pickUp(id);
+    }
+
+    expect(registry.ownedIds()).toEqual([...chosen]);
+
+    for (const relic of RELIC_CATALOGUE) {
+      expect(registry.has(relic.id)).toBe(
+        registry.ownedIds().includes(relic.id),
+      );
+    }
+
+    expect(registry.has('brittle-crown')).toBe(true);
+    expect(registry.has('scouring-wind')).toBe(false);
+    expect(registry.ownedIds()).not.toContain('scouring-wind');
+  });
+
+  it('empties both active and ownedIds when it is cleared', () => {
+    const { registry } = recorded();
+
+    for (const id of ['brittle-crown', 'loaded-dice', 'tumbler']) {
+      registry.pickUp(id);
+    }
+
+    expect(registry.active()).toHaveLength(3);
+
+    registry.clear();
+
+    expect(registry.active()).toEqual([]);
+    expect(registry.ownedIds()).toEqual([]);
+    expect(registry.size()).toBe(0);
+    expect(registry.has('brittle-crown')).toBe(false);
+  });
+
+  it('refuses a caller reordering the array active() handed back', () => {
+    const { registry } = recorded();
+    const chosen: readonly string[] = [
+      'gilded-rot',
+      'twin-seed',
+      'frostbind',
+    ];
+
+    for (const id of chosen) {
+      registry.pickUp(id);
+    }
+
+    const handed = registry.active();
+
+    expect(Object.isFrozen(handed)).toBe(true);
+    expect(() => {
+      (handed as ActiveRelic[]).reverse();
+    }).toThrow(TypeError);
+    expect(() => {
+      (handed as ActiveRelic[]).push(handed[0] as ActiveRelic);
+    }).toThrow(TypeError);
+
+    // A caller wanting another grouping derives one, and the derived array
+    // reaches nothing: the registry still reports acquisition order.
+    const derived = [...handed].reverse();
+
+    expect(derived.map((entry): string => entry.definition.id)).toEqual(
+      [...chosen].reverse(),
+    );
+    expect(
+      registry.active().map((entry): string => entry.definition.id),
+    ).toEqual([...chosen]);
+    expect(registry.ownedIds()).toEqual([...chosen]);
+  });
+});
+
+
+/* ==========================================================================
+ * B. One charge pool and one state slot per relic
+ * ========================================================================== */
+
+describe('one relic keeps one charge pool and one state slot', () => {
+  it('hands the bus ONE registration for every hook it binds', () => {
+    const { registry, registrations } = recorded();
+    const declared = declaration(TWO_HOOK_ID);
+
+    expect(boundHooks(declared.hooks)).toEqual([...TWO_HOOK_BINDINGS]);
+
+    registry.pickUp(TWO_HOOK_ID);
+
+    // ONE registration, not one per bound hook: the budget and the slot it
+    // carries are therefore the only budget and the only slot either binding
+    // can be dispatched with. A per-binding pool would need a second entry
+    // here, and a per-binding slot a second `state`.
+    expect(registrations).toHaveLength(1);
+
+    const registered = registrations[0] as HookSubscriber;
+
+    expect(registered.id).toBe(TWO_HOOK_ID);
+    expect(boundHooks(registered.hooks)).toEqual([...TWO_HOOK_BINDINGS]);
+    expect(registered.charges).toBe(declared.charges);
+    expect(registered.state).toEqual(declared.state);
+  });
+
+  it('presents both bindings from that one registration', () => {
+    const { registry, bus } = recorded();
+    const declared = declaration(TWO_HOOK_ID);
+
+    registry.pickUp(TWO_HOOK_ID);
+
+    expect(bus.subscribers()).toHaveLength(1);
+
+    const first = subscriptionOf(bus, 'onBeforeMove', TWO_HOOK_ID);
+    const second = subscriptionOf(bus, 'onAfterMove', TWO_HOOK_ID);
+
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(second?.subscriberId).toBe(first?.subscriberId);
+    expect(second?.pickupOrder).toBe(first?.pickupOrder);
+
+    // Two bindings of one subscriber: each carries the relic's own handler for
+    // its own hook, and the two handlers are different functions.
+    expect(first?.handler).toBe(declared.hooks.onBeforeMove);
+    expect(second?.handler).toBe(declared.hooks.onAfterMove);
+    expect(first?.handler).not.toBe(second?.handler);
+  });
+
+  it('leaves one binding the charges the other binding spent', () => {
+    const { registry, bus } = recorded();
+    const declared = declaration(TWO_HOOK_ID);
+    const budget = declared.charges as number;
+
+    registry.pickUp(TWO_HOOK_ID);
+
+    expect(subscriptionOf(bus, 'onBeforeMove', TWO_HOOK_ID)?.charges).toBe(
+      budget,
+    );
+    expect(subscriptionOf(bus, 'onAfterMove', TWO_HOOK_ID)?.charges).toBe(
+      budget,
+    );
+
+    const spent = registry.activate(TWO_HOOK_ID, 1);
+
+    expect(spent.consumed).toBe(1);
+    expect(spent.remaining).toBe(budget - 1);
+
+    // ONE POOL. A per-binding budget would leave the hook that was not
+    // dispatched at the full count.
+    expect(subscriptionOf(bus, 'onBeforeMove', TWO_HOOK_ID)?.charges).toBe(
+      budget - 1,
+    );
+    expect(subscriptionOf(bus, 'onAfterMove', TWO_HOOK_ID)?.charges).toBe(
+      budget - 1,
+    );
+    expect(heldRelic(registry, TWO_HOOK_ID).charges).toBe(budget - 1);
+  });
+
+  it('exhausts both bindings together, and never below zero', () => {
+    const { registry, bus } = recorded();
+    const budget = declaration(TWO_HOOK_ID).charges as number;
+
+    registry.pickUp(TWO_HOOK_ID);
+    registry.activate(TWO_HOOK_ID, budget);
+
+    for (const hook of TWO_HOOK_BINDINGS) {
+      expect(subscriptionOf(bus, hook, TWO_HOOK_ID)?.charges).toBe(0);
+    }
+
+    // A further activation against a spent pool takes nothing and reports it,
+    // and the pool stays at zero for both bindings.
+    const again = registry.activate(TWO_HOOK_ID, 1);
+
+    expect(again.held).toBe(true);
+    expect(again.limited).toBe(true);
+    expect(again.consumed).toBe(0);
+    expect(again.remaining).toBe(0);
+
+    for (const hook of TWO_HOOK_BINDINGS) {
+      expect(subscriptionOf(bus, hook, TWO_HOOK_ID)?.charges).toBe(0);
+    }
+  });
+
+  it('reads both bindings off the one state slot the registry holds', () => {
+    const { registry, bus } = recorded();
+    const declared = declaration(TWO_HOOK_ID);
+
+    registry.pickUp(TWO_HOOK_ID);
+
+    const first = subscriptionOf(bus, 'onBeforeMove', TWO_HOOK_ID);
+    const second = subscriptionOf(bus, 'onAfterMove', TWO_HOOK_ID);
+
+    expect(first?.state).toEqual(declared.state);
+    expect(second?.state).toEqual(first?.state);
+    expect(heldRelic(registry, TWO_HOOK_ID).state).toEqual(first?.state);
+
+    // Each read is a COPY of the one slot rather than the slot itself, which is
+    // what stops a reader reaching what a dispatch reads.
+    expect(second?.state).not.toBe(first?.state);
+    expect(first?.state).not.toBe(declared.state);
+  });
+
+  it('carries an advanced slot to both bindings at once', () => {
+    const { registry, bus } = recorded();
+    const advanced = { board: null, score: 41 };
+
+    registry.restore([
+      { id: TWO_HOOK_ID, charges: 2, state: advanced },
+    ]);
+
+    for (const hook of TWO_HOOK_BINDINGS) {
+      const subscription = subscriptionOf(bus, hook, TWO_HOOK_ID);
+
+      expect(subscription?.state).toEqual(advanced);
+      expect(subscription?.charges).toBe(2);
+    }
+
+    expect(heldRelic(registry, TWO_HOOK_ID).state).toEqual(advanced);
+    expect(heldRelic(registry, TWO_HOOK_ID).charges).toBe(2);
+  });
+
+  it('spends from the registry, never from the shared declaration', () => {
+    const { registry } = recorded();
+    const declared = declaration(TWO_HOOK_ID);
+    const budgetBefore = declared.charges;
+    const stateBefore: unknown = JSON.parse(JSON.stringify(declared.state));
+
+    registry.pickUp(TWO_HOOK_ID);
+    registry.activate(TWO_HOOK_ID, 2);
+    registry.restore([
+      { id: TWO_HOOK_ID, charges: 1, state: { board: null, score: 7 } },
+    ]);
+
+    expect(declaration(TWO_HOOK_ID).charges).toBe(budgetBefore);
+    expect(declaration(TWO_HOOK_ID).state).toEqual(stateBefore);
+    expect(Object.isFrozen(declared)).toBe(true);
+    expect(heldRelic(registry, TWO_HOOK_ID).charges).toBe(1);
+  });
+
+  it('seeds each of the five charge relics from its own declaration', () => {
+    const charged = chargeBearing();
+
+    expect(charged).toHaveLength(CHARGE_BEARING_COUNT);
+
+    for (const relic of charged) {
+      const { registry } = recorded();
+
+      registry.pickUp(relic.id);
+
+      expect(heldRelic(registry, relic.id).charges).toBe(relic.charges);
+      expect(registry.serialize()[0]?.charges).toBe(relic.charges);
+    }
+  });
+
+  it('leaves every other relic with no budget to guard', () => {
+    const unlimited = RELIC_CATALOGUE.filter(
+      (relic): boolean => relic.charges === undefined,
+    );
+
+    expect(unlimited).toHaveLength(EXPECTED_RELIC_COUNT - CHARGE_BEARING_COUNT);
+
+    for (const relic of unlimited) {
+      const { registry } = recorded();
+
+      registry.pickUp(relic.id);
+
+      expect(heldRelic(registry, relic.id).charges).toBeUndefined();
+    }
+  });
+
+  it('starts a relic declaring no state at undefined, not at null', () => {
+    const { registry } = recorded();
+
+    expect(declaration(NO_STATE_ID).state).toBeUndefined();
+
+    registry.pickUp(NO_STATE_ID);
+
+    const held = heldRelic(registry, NO_STATE_ID);
+
+    expect(held.state).toBeUndefined();
+    expect(held.state).not.toBeNull();
+
+    // A slot that survives no copy is written on no persisted entry either.
+    expect('state' in (registry.serialize()[0] as PersistedRelic)).toBe(false);
+  });
+
+  it('copies a declared slot rather than sharing the catalogue object', () => {
+    const { registry, registrations } = recorded();
+
+    for (const relic of RELIC_CATALOGUE) {
+      if (relic.state === null || typeof relic.state !== 'object') {
+        continue;
+      }
+
+      const { registry: own } = recorded();
+
+      own.pickUp(relic.id);
+
+      const held = heldRelic(own, relic.id);
+
+      expect(held.state).toEqual(relic.state);
+      expect(held.state).not.toBe(relic.state);
+    }
+
+    registry.pickUp(TWO_HOOK_ID);
+
+    expect((registrations[0] as HookSubscriber).state).not.toBe(
+      declaration(TWO_HOOK_ID).state,
+    );
+  });
+});
+
+/* ==========================================================================
+ * C. The subscriptions the registry emits for the hook bus
+ * ==========================================================================
+ *
+ * What the registry EMITS, and nothing about how the bus then walks it:
+ * pickup-ordered dispatch, the charge guard, error isolation and the
+ * compounding protocol are pinned by tests/unit/engine/hook-bus*.test.ts.
+ */
+
+describe('the registry emits one subscription per hook a relic binds', () => {
+  it('names a hook of HOOK_NAMES on every subscription it produces', () => {
+    const { registry, bus } = recorded();
+    const chosen: readonly string[] = [
+      'prospectors-eye',
+      'temporal-anchor',
+      'hollow-ascension',
+    ];
+
+    for (const id of chosen) {
+      registry.pickUp(id);
+    }
+
+    let produced = 0;
+
+    for (const hook of HOOK_NAMES) {
+      for (const subscription of bus.subscriptions(hook)) {
+        expect(HOOK_NAMES).toContain(hook);
+        expect(chosen).toContain(subscription.subscriberId);
+        expect(typeof subscription.handler).toBe('function');
+        produced += 1;
+      }
+    }
+
+    const expected = chosen.reduce(
+      (total: number, id: string): number =>
+        total + boundHooks(declaration(id).hooks).length,
+      0,
+    );
+
+    expect(produced).toBe(expected);
+  });
+
+  it('carries the owning relic pickup position on every subscription', () => {
+    const { registry, bus } = recorded();
+    const chosen: readonly string[] = [
+      'collapsing-vault',
+      'temporal-anchor',
+      'frostbind',
+    ];
+
+    for (const id of chosen) {
+      registry.pickUp(id);
+    }
+
+    const positions = new Map<string, number>(
+      registry
+        .active()
+        .map((entry): [string, number] => [
+          entry.definition.id,
+          entry.pickupOrder,
+        ]),
+    );
+
+    expect([...positions.values()]).toEqual([0, 1, 2]);
+
+    for (const hook of HOOK_NAMES) {
+      for (const subscription of bus.subscriptions(hook)) {
+        expect(subscription.pickupOrder).toBe(
+          positions.get(subscription.subscriberId),
+        );
+      }
+    }
+  });
+
+  it('orders two relics on one hook by pickup, not by catalogue', () => {
+    const { registry, bus } = recorded();
+    const catalogueOrder = RELIC_CATALOGUE.filter((relic): boolean =>
+      MERGE_ONLY_IDS.includes(relic.id),
+    ).map((relic): string => relic.id);
+
+    // The pickup order below is the REVERSE of catalogue order, so an assertion
+    // satisfied by catalogue order cannot pass.
+    expect(catalogueOrder).toEqual([...MERGE_ONLY_IDS].reverse());
+
+    for (const id of MERGE_ONLY_IDS) {
+      registry.pickUp(id);
+    }
+
+    expect(
+      bus
+        .subscriptions('onMerge')
+        .map((entry): string => entry.subscriberId),
+    ).toEqual([...MERGE_ONLY_IDS]);
+    expect(
+      bus.subscriptions('onMerge').map((entry): number => entry.pickupOrder),
+    ).toEqual([0, 1]);
+    expect(registry.ownedIds()).toEqual([...MERGE_ONLY_IDS]);
+  });
+
+  it('treats all sixteen relics alike, branching on no identifier', () => {
+    expect(RELIC_CATALOGUE).toHaveLength(EXPECTED_RELIC_COUNT);
+
+    for (const relic of RELIC_CATALOGUE) {
+      const { registry, bus } = recorded();
+      const bound = boundHooks(relic.hooks);
+
+      expect(bound.length).toBeGreaterThan(0);
+      expect(registry.pickUp(relic.id)).toBeDefined();
+
+      const emitted: HookName[] = [];
+
+      for (const hook of HOOK_NAMES) {
+        const subscription = subscriptionOf(bus, hook, relic.id);
+
+        if (subscription === undefined) {
+          continue;
+        }
+
+        emitted.push(hook);
+        expect(subscription.handler).toBe(relic.hooks[hook]);
+      }
+
+      // Every bound hook produces a subscription, and no unbound hook does.
+      expect(emitted).toEqual([...bound]);
+
+      for (const hook of HOOK_NAMES) {
+        if (bound.includes(hook)) {
+          continue;
+        }
+
+        expect(subscriptionOf(bus, hook, relic.id)).toBeUndefined();
+      }
+    }
+  });
+
+  it('covers all six hooks once the whole catalogue is held', () => {
+    const { registry, bus } = recorded();
+
+    for (const relic of RELIC_CATALOGUE) {
+      registry.pickUp(relic.id);
+    }
+
+    expect(HOOK_NAMES).toHaveLength(6);
+
+    for (const hook of HOOK_NAMES) {
+      expect(bus.subscriptions(hook).length).toBeGreaterThan(0);
+      expect(
+        bus.subscriptions(hook).map((entry): number => entry.pickupOrder),
+      ).toEqual(
+        [...bus.subscriptions(hook)]
+          .map((entry): number => entry.pickupOrder)
+          .sort((left: number, right: number): number => left - right),
+      );
+    }
+  });
+
+  it('fills a commit context with the identifier and the charges alone', () => {
+    const { registry } = recorded();
+
+    registry.pickUp(TWO_HOOK_ID);
+    registry.pickUp(NO_STATE_ID);
+    registry.activate(TWO_HOOK_ID, 1);
+
+    const context = registry.commitContextProvider()();
+
+    expect(context.map((entry): string => entry.id)).toEqual([
+      TWO_HOOK_ID,
+      NO_STATE_ID,
+    ]);
+    expect(context[0]?.charges).toBe(
+      (declaration(TWO_HOOK_ID).charges as number) - 1,
+    );
+    expect('charges' in (context[1] as object)).toBe(false);
+
+    for (const entry of context) {
+      expect(Object.keys(entry).sort()).toEqual(
+        entry.charges === undefined ? ['id'] : ['charges', 'id'],
+      );
+    }
+  });
+});
+
+/* ==========================================================================
+ * D. The persisted triple, and a restore that tolerates everything
+ * ==========================================================================
+ *
+ * `serialize()` corresponds to js/game_manager.js L102-L110 and `restore()` to
+ * the `if (previousState)` rehydration at L36-L45. The tolerance the loader
+ * carries is the guard js/local_storage_manager.js L52-L55 lacked, where a
+ * corrupted value reached `JSON.parse` unguarded and threw during startup.
+ */
+
+describe('serialize projects the persisted triple in pickup order', () => {
+  it('writes exactly id, charges and state, and no fourth member', () => {
+    const { registry } = recorded();
+
+    for (const relic of RELIC_CATALOGUE) {
+      registry.pickUp(relic.id);
+    }
+
+    const persisted = registry.serialize();
+
+    expect(persisted).toHaveLength(EXPECTED_RELIC_COUNT);
+    expect(persisted.map((entry): string => entry.id)).toEqual(
+      RELIC_CATALOGUE.map((relic): string => relic.id),
+    );
+
+    for (const entry of persisted) {
+      const members = Object.keys(entry);
+
+      expect(members).toContain('id');
+
+      for (const member of members) {
+        expect(PERSISTED_MEMBERS).toContain(member);
+      }
+
+      expect(members.length).toBeLessThanOrEqual(PERSISTED_MEMBERS.length);
+      expect(typeof entry.id).toBe('string');
+
+      const declared = declaration(entry.id);
+
+      expect('charges' in entry).toBe(declared.charges !== undefined);
+      expect('state' in entry).toBe(declared.state !== undefined);
+    }
+  });
+
+  it('projects the order it was picked up in, not the catalogue order', () => {
+    const { registry } = recorded();
+    const chosen: readonly string[] = [
+      'scouring-wind',
+      'echo-chamber',
+      'twin-seed',
+    ];
+
+    for (const id of chosen) {
+      registry.pickUp(id);
+    }
+
+    expect(registry.serialize().map((entry): string => entry.id)).toEqual([
+      ...chosen,
+    ]);
+    expect(registry.snapshotRelics().map((entry): string => entry.id)).toEqual([
+      ...chosen,
+    ]);
+  });
+
+  it('round-trips order, spent charges and an advanced slot', () => {
+    const { registry } = recorded();
+    const advanced = { frozen: [{ x: 1, y: 2 }] };
+
+    registry.restore([
+      { id: NO_STATE_ID },
+      { id: 'frostbind', charges: 6, state: advanced },
+      { id: TWO_HOOK_ID },
+    ]);
+    registry.activate(TWO_HOOK_ID, 2);
+    registry.activate('frostbind', 1);
+
+    const persisted = registry.serialize();
+    const resumed = recorded().registry;
+
+    resumed.restore(persisted);
+
+    expect(resumed.serialize()).toEqual(persisted);
+    expect(resumed.ownedIds()).toEqual(registry.ownedIds());
+    expect(
+      resumed.active().map((entry): number => entry.pickupOrder),
+    ).toEqual([0, 1, 2]);
+
+    for (const original of registry.active()) {
+      const carried = heldRelic(resumed, original.definition.id);
+
+      expect(carried.pickupOrder).toBe(original.pickupOrder);
+      expect(carried.charges).toBe(original.charges);
+      expect(carried.state).toEqual(original.state);
+      expect(carried.definition).toBe(original.definition);
+    }
+
+    expect(heldRelic(resumed, 'frostbind').charges).toBe(5);
+    expect(heldRelic(resumed, 'frostbind').state).toEqual(advanced);
+    expect(heldRelic(resumed, TWO_HOOK_ID).charges).toBe(
+      (declaration(TWO_HOOK_ID).charges as number) - 2,
+    );
+  });
+
+  it('registers every restored relic with the bus, in the given order', () => {
+    const { registry, bus, registrations } = recorded();
+
+    registry.restore([
+      { id: TWO_HOOK_ID, charges: 1 },
+      { id: NO_STATE_ID },
+    ]);
+
+    expect(registrations.map((entry): string => entry.id)).toEqual([
+      TWO_HOOK_ID,
+      NO_STATE_ID,
+    ]);
+    expect(bus.subscribers().map((entry): string => entry.id)).toEqual([
+      TWO_HOOK_ID,
+      NO_STATE_ID,
+    ]);
+    expect(subscriptionOf(bus, 'onBeforeMove', TWO_HOOK_ID)?.charges).toBe(1);
+  });
+});
+
+describe('restore tolerates unknown ids without throwing', () => {
+  it('skips the unknown entry and loads the ones around it', () => {
+    const { registry } = recorded();
+
+    expect(() =>
+      registry.restore([
+        { id: TWO_HOOK_ID, charges: 2 },
+        { id: 'no-such-relic', charges: 9 },
+        { id: 'frostbind', charges: 4, state: { frozen: [] } },
+      ]),
+    ).not.toThrow();
+
+    expect(registry.ownedIds()).toEqual([TWO_HOOK_ID, 'frostbind']);
+    expect(registry.has('no-such-relic')).toBe(false);
+    expect(heldRelic(registry, TWO_HOOK_ID).charges).toBe(2);
+    expect(heldRelic(registry, 'frostbind').charges).toBe(4);
+    expect(heldRelic(registry, 'frostbind').state).toEqual({ frozen: [] });
+    expect(
+      registry.active().map((entry): number => entry.pickupOrder),
+    ).toEqual([0, 1]);
+  });
+
+  it('reports the skip through the injected reporter', () => {
+    const { registry, counts } = reported();
+
+    registry.restore([
+      { id: 'no-such-relic' },
+      { id: NO_STATE_ID },
+    ]);
+
+    expect(metricNames(counts)).toContain('relics.restore.unknown');
+    expect(metricNames(counts)).toContain('relics.restore');
+    expect(registry.ownedIds()).toEqual([NO_STATE_ID]);
+    expect(registry.reporterFaults()).toBe(0);
+
+    for (const report of counts) {
+      expect(typeof report.correlationId).toBe('string');
+      expect(typeof report.value).toBe('number');
+    }
+  });
+
+  it('holds nothing where no entry names a relic the catalogue carries', () => {
+    const { registry } = recorded();
+
+    expect(() =>
+      registry.restore([{ id: 'one' }, { id: 'two' }, { id: 'three' }]),
+    ).not.toThrow();
+
+    expect(registry.active()).toEqual([]);
+    expect(registry.ownedIds()).toEqual([]);
+    expect(registry.serialize()).toEqual([]);
+  });
+});
+
+describe('restore tolerates absent ids without throwing', () => {
+  it('accepts an entry with no identifier at all', () => {
+    const { registry } = recorded();
+
+    expect(() =>
+      registry.restore([
+        {} as unknown as PersistedRelic,
+        { id: '' },
+        { id: NO_STATE_ID },
+      ]),
+    ).not.toThrow();
+
+    expect(registry.ownedIds()).toEqual([NO_STATE_ID]);
+    expect(heldRelic(registry, NO_STATE_ID).pickupOrder).toBe(0);
+  });
+
+  it('accepts an empty array, holding nothing', () => {
+    const { registry } = recorded();
+
+    registry.pickUp(TWO_HOOK_ID);
+
+    expect(() => registry.restore([])).not.toThrow();
+    expect(registry.active()).toEqual([]);
+    expect(registry.ownedIds()).toEqual([]);
+    expect(registry.size()).toBe(0);
+  });
+
+  it('accepts null and undefined, holding nothing', () => {
+    const { registry, bus } = recorded();
+
+    registry.pickUp(TWO_HOOK_ID);
+
+    expect(() => registry.restore(null)).not.toThrow();
+    expect(registry.size()).toBe(0);
+
+    registry.pickUp(TWO_HOOK_ID);
+
+    expect(() => registry.restore(undefined)).not.toThrow();
+    expect(registry.size()).toBe(0);
+
+    // The relics the discarded run held are unregistered with it.
+    expect(bus.subscribers()).toEqual([]);
+  });
+
+  it('accepts a value that is no array at all', () => {
+    const { registry, counts } = reported();
+
+    for (const input of ['nope', 42, {}, true]) {
+      expect(() =>
+        registry.restore(input as unknown as readonly PersistedRelic[]),
+      ).not.toThrow();
+      expect(registry.size()).toBe(0);
+    }
+
+    expect(metricNames(counts)).toContain('relics.restore.rejected');
+  });
+});
+
+describe('restore leaves a recorded budget as the bus will read it', () => {
+  it('keeps a recorded zero at zero, so a spent relic stays spent', () => {
+    const { registry, bus } = recorded();
+
+    expect(() =>
+      registry.restore([{ id: TWO_HOOK_ID, charges: 0 }]),
+    ).not.toThrow();
+
+    expect(heldRelic(registry, TWO_HOOK_ID).charges).toBe(0);
+    expect(registry.serialize()[0]?.charges).toBe(0);
+
+    // The relic is still registered and still bound: the guard that skips it
+    // lives in src/engine/hook-bus.ts, not here.
+    for (const hook of TWO_HOOK_BINDINGS) {
+      expect(subscriptionOf(bus, hook, TWO_HOOK_ID)?.charges).toBe(0);
+    }
+  });
+
+  it('reads a negative or unusable budget as spent, never as a refill', () => {
+    for (const recordedCharges of [-1, -1000, Number.NaN, Infinity]) {
+      const { registry } = recorded();
+
+      expect(() =>
+        registry.restore([{ id: TWO_HOOK_ID, charges: recordedCharges }]),
+      ).not.toThrow();
+
+      expect(heldRelic(registry, TWO_HOOK_ID).charges).toBe(0);
+    }
+  });
+
+  it('falls back to the declaration where an entry records none', () => {
+    const { registry } = recorded();
+
+    registry.restore([{ id: TWO_HOOK_ID }]);
+
+    expect(heldRelic(registry, TWO_HOOK_ID).charges).toBe(
+      declaration(TWO_HOOK_ID).charges,
+    );
+  });
+
+  it('leaves an unlimited relic unlimited, whatever the entry records', () => {
+    const { registry } = recorded();
+
+    registry.restore([
+      { id: NO_STATE_ID, charges: 5 },
+      { id: 'gilded-rot', charges: 0 },
+    ]);
+
+    expect(heldRelic(registry, NO_STATE_ID).charges).toBeUndefined();
+    expect(heldRelic(registry, 'gilded-rot').charges).toBeUndefined();
+    expect('charges' in (registry.serialize()[0] as PersistedRelic)).toBe(
+      false,
+    );
+  });
+});
+
+describe('restore tolerates a malformed entry beside a valid one', () => {
+  it('loads the valid entries around a string, a number and a null', () => {
+    const { registry, counts } = reported();
+    const entries: readonly unknown[] = [
+      'not-an-entry',
+      { id: TWO_HOOK_ID, charges: 3 },
+      7,
+      null,
+      { charges: 2 },
+      { id: NO_STATE_ID },
+      undefined,
+      [],
+    ];
+
+    expect(() =>
+      registry.restore(entries as readonly PersistedRelic[]),
+    ).not.toThrow();
+
+    expect(registry.ownedIds()).toEqual([TWO_HOOK_ID, NO_STATE_ID]);
+    expect(
+      registry.active().map((entry): number => entry.pickupOrder),
+    ).toEqual([0, 1]);
+    expect(heldRelic(registry, TWO_HOOK_ID).charges).toBe(3);
+    expect(metricNames(counts)).toContain('relics.restore.malformed');
+  });
+
+  it('loads the valid entries around a repeated identifier', () => {
+    const { registry } = recorded();
+
+    registry.restore([
+      { id: TWO_HOOK_ID, charges: 3 },
+      { id: TWO_HOOK_ID, charges: 1 },
+      { id: NO_STATE_ID },
+    ]);
+
+    expect(registry.ownedIds()).toEqual([TWO_HOOK_ID, NO_STATE_ID]);
+    expect(heldRelic(registry, TWO_HOOK_ID).charges).toBe(3);
+  });
+
+  it('accepts a state slot that is no object, holding what it can', () => {
+    const { registry } = recorded();
+
+    expect(() =>
+      registry.restore([
+        { id: TWO_HOOK_ID, state: 'not-a-slot' },
+        { id: 'frostbind', state: 12 },
+        { id: NO_STATE_ID, state: null },
+      ]),
+    ).not.toThrow();
+
+    expect(registry.ownedIds()).toEqual([
+      TWO_HOOK_ID,
+      'frostbind',
+      NO_STATE_ID,
+    ]);
+    expect(heldRelic(registry, TWO_HOOK_ID).state).toBe('not-a-slot');
+    expect(heldRelic(registry, 'frostbind').state).toBe(12);
+    expect(heldRelic(registry, NO_STATE_ID).state).toBeNull();
+  });
+});
+
+describe('every report leaves the registry through its injected sink', () => {
+  it('accepts NOOP_ENGINE_REPORTER and raises nothing through it', () => {
+    const registry = new RelicRegistry({
+      bus: createHookBus(),
+      reporter: NOOP_ENGINE_REPORTER,
+    });
+
+    expect(() => {
+      registry.pickUp(TWO_HOOK_ID);
+      registry.pickUp('no-such-relic');
+      registry.pickUp(TWO_HOOK_ID);
+      registry.activate(TWO_HOOK_ID, 1);
+      registry.activate('no-such-relic');
+      registry.restore([{ id: 'no-such-relic' }, { id: NO_STATE_ID }]);
+      registry.serialize();
+      registry.clear();
+    }).not.toThrow();
+
+    expect(registry.reporterFaults()).toBe(0);
+    expect(registry.correlationId).toBe('');
+  });
+
+  it('contains a sink that throws, and counts what it contained', () => {
+    const registry = new RelicRegistry({
+      bus: createHookBus(),
+      correlationId: 'run-contained',
+      reporter: {
+        onCount: (): void => {
+          throw new Error('sink refused the report');
+        },
+      },
+    });
+
+    expect(() => {
+      registry.pickUp(TWO_HOOK_ID);
+      registry.restore([{ id: 'no-such-relic' }]);
+    }).not.toThrow();
+
+    expect(registry.reporterFaults()).toBeGreaterThan(0);
+    expect(registry.correlationId).toBe('run-contained');
+    expect(registry.size()).toBe(0);
+  });
+
+  it('reports the held relics the bus marked degraded, in pickup order', () => {
+    const real = createHookBus();
+
+    // The mark itself is made by a handler throwing during a dispatch, which
+    // tests/unit/engine/hook-bus.test.ts pins. What is read here is the
+    // registry's own projection of the mark: held relics only, in pickup order.
+    const bus: HookBus = {
+      ...real,
+
+      degraded(): readonly string[] {
+        return Object.freeze([NO_STATE_ID, 'no-such-relic', TWO_HOOK_ID]);
+      },
+    };
+    const registry = new RelicRegistry({
+      bus,
+      reporter: NOOP_ENGINE_REPORTER,
+    });
+
+    registry.pickUp(TWO_HOOK_ID);
+    registry.pickUp('gilded-rot');
+    registry.pickUp(NO_STATE_ID);
+
+    expect(registry.degradedIds()).toEqual([TWO_HOOK_ID, NO_STATE_ID]);
+    expect(Object.isFrozen(registry.degradedIds())).toBe(true);
+    expect(registry.degradedIds()).not.toContain('gilded-rot');
+    expect(registry.degradedIds()).not.toContain('no-such-relic');
+  });
+
+  it('reports no degraded relic on a registry with no bus', () => {
+    const registry = new RelicRegistry({ reporter: NOOP_ENGINE_REPORTER });
+
+    registry.pickUp(TWO_HOOK_ID);
+
+    expect(registry.degradedIds()).toEqual([]);
+    expect(registry.reporterFaults()).toBe(0);
+  });
+
+  it('carries the run correlation identifier on every count', () => {
+    const counts: EngineCountReport[] = [];
+    const registry = new RelicRegistry({
+      bus: createHookBus(),
+      correlationId: 'run-registry-d',
+      reporter: {
+        onCount: (report): void => {
+          counts.push(report);
+        },
+      },
+    });
+
+    registry.pickUp(TWO_HOOK_ID);
+    registry.activate(TWO_HOOK_ID, 1);
+    registry.clear();
+
+    expect(counts.length).toBeGreaterThan(0);
+
+    for (const report of counts) {
+      expect(report.correlationId).toBe('run-registry-d');
+    }
+
+    expect(metricNames(counts)).toEqual([
+      'relics.pickup',
+      'relics.activate',
+      'relics.cleared',
+    ]);
+  });
+});
+
+/* ==========================================================================
+ * E. The shared catalogue is the same after every suite above
+ * ========================================================================== */
+
+describe('the catalogue this file shares is unchanged', () => {
+  it('still declares sixteen frozen relics over four frozen families', () => {
+    expect(RELIC_CATALOGUE).toHaveLength(EXPECTED_RELIC_COUNT);
+    expect(Object.isFrozen(RELIC_CATALOGUE)).toBe(true);
+    expect(RELIC_FAMILIES).toHaveLength(EXPECTED_FAMILY_COUNT);
+
+    for (const family of RELIC_FAMILIES) {
+      expect(Object.isFrozen(family)).toBe(true);
+      expect(Object.isFrozen(family.relics)).toBe(true);
+    }
+
+    for (const relic of RELIC_CATALOGUE) {
+      expect(Object.isFrozen(relic)).toBe(true);
+      expect(Object.isFrozen(relic.hooks)).toBe(true);
+      expect(findRelicById(relic.id)).toBe(relic);
+    }
+  });
+
+  it('still carries the budgets and slots its families declared', () => {
+    expect(chargeBearing()).toHaveLength(CHARGE_BEARING_COUNT);
+
+    for (const relic of chargeBearing()) {
+      expect(Number.isSafeInteger(relic.charges)).toBe(true);
+      expect(relic.charges as number).toBeGreaterThan(0);
+    }
+
+    for (const relic of RELIC_CATALOGUE) {
+      if (relic.state === undefined) {
+        continue;
+      }
+
+      // A declared slot is JSON data, so it survives a round trip through the
+      // wire form the run envelope carries it in.
+      expect(JSON.parse(JSON.stringify(relic.state))).toEqual(relic.state);
+    }
   });
 });

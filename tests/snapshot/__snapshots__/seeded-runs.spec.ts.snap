@@ -1,0 +1,165 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`AAP Contract 2 — dispatch follows pickup order > reproduces the recorded board and dispatch order > pickup-ordered dispatch 1`] = `
+"size 4  score 24  over false  won false  keepPlaying false
+x=0     2     .     4     4
+x=1     .     .     .     8
+x=2     .     4     .     .
+x=3     .     .     .     .
+rngCursor
+  spawn-value     10
+  spawn-position  10
+  relic-draw      0
+  rarity-weight   0
+turns resolved  8 of 8
+dispatch order, one line per spawn
+   1. first second
+   2. first second
+   3. first second
+   4. first second
+   5. first second
+   6. first second
+   7. first second
+   8. first second
+   9. first second
+  10. first second"
+`;
+
+exports[`AAP Contract 5 — the persisted run envelope > reproduces its recorded envelope > envelope at the interruption 1`] = `
+"schemaVersion  1
+runId          seeded-runs-fixture
+seed           run-seed-2048
+stageIndex     0
+stageGoal      highest-tile 16
+goalProgress   0
+relics         0 held
+rngCursor
+  spawn-value     6
+  spawn-position  6
+  relic-draw      0
+  rarity-weight   0
+board
+size 4  score 8  over false  won false  keepPlaying false
+x=0     2     .     4     4
+x=1     .     .     .     .
+x=2     2     .     .     .
+x=3     .     .     .     ."
+`;
+
+exports[`AAP V2 — a run interrupted and resumed from storage > reproduces the recorded board after the resume > resumed run 1`] = `
+"size 4  score 24  over false  won false  keepPlaying false
+x=0     2     .     4     4
+x=1     .     .     .     8
+x=2     .     4     .     .
+x=3     .     .     .     .
+rngCursor
+  spawn-value     10
+  spawn-position  10
+  relic-draw      0
+  rarity-weight   0
+turns resolved  4 of 4"
+`;
+
+exports[`AAP V2 — the reward offers of one seed > reproduces its recorded offer sequence > catalogue offer ids by stage 1`] = `
+"  set 1  twin-seed, temporal-anchor, collapsing-vault
+  set 2  prospectors-eye, chain-catalyst, tumbler
+  set 3  gilded-rot, temporal-anchor, hollow-ascension"
+`;
+
+exports[`AAP V2 — two engines from one seed and one move list > reproduces the board recorded for that seed > second engine, same seed 1`] = `
+"size 4  score 24  over false  won false  keepPlaying false
+x=0     2     .     4     4
+x=1     .     .     .     8
+x=2     .     4     .     .
+x=3     .     .     .     .
+rngCursor
+  spawn-value     10
+  spawn-position  10
+  relic-draw      0
+  rarity-weight   0
+turns resolved  8 of 8"
+`;
+
+exports[`js/game_manager.js L36-L45 — a restored run > reproduces its recorded board from the blocked fixture > restored from the blocked fixture 1`] = `
+"size 4  score 16  over false  won false  keepPlaying false
+x=0     2     2     8     4
+x=1     8     .    16     2
+x=2     .     2     .     .
+x=3     .     .     .     .
+rngCursor
+  spawn-value     7
+  spawn-position  7
+  relic-draw      0
+  rarity-weight   0
+turns resolved  7 of 8"
+`;
+
+exports[`js/game_manager.js L36-L45 — a restored run > reproduces its recorded board from the empty fixture > restored from the empty fixture 1`] = `
+"size 4  score 0  over false  won false  keepPlaying false
+x=0     .     .     .     .
+x=1     .     .     .     .
+x=2     .     .     .     .
+x=3     .     .     .     .
+rngCursor
+  spawn-value     0
+  spawn-position  0
+  relic-draw      0
+  rarity-weight   0
+turns resolved  0 of 8"
+`;
+
+exports[`js/game_manager.js L36-L45 — a restored run > reproduces its recorded board from the merge-pair fixture > restored from the merge-pair fixture 1`] = `
+"size 4  score 12  over false  won false  keepPlaying false
+x=0     .     2     4     4
+x=1     .     2     2     4
+x=2     .     .     .     .
+x=3     .     .     .     .
+rngCursor
+  spawn-value     7
+  spawn-position  7
+  relic-draw      0
+  rarity-weight   0
+turns resolved  7 of 8"
+`;
+
+exports[`js/game_manager.js L36-L45 — a restored run > reproduces its recorded board from the near-loss fixture > restored from the near-loss fixture 1`] = `
+"size 4  score 60  over true  won false  keepPlaying false
+x=0     2     8    32     2
+x=1    32     2     8     4
+x=2    16    32     4     2
+x=3     4     8    32    16
+rngCursor
+  spawn-value     4
+  spawn-position  4
+  relic-draw      0
+  rarity-weight   0
+turns resolved  4 of 8"
+`;
+
+exports[`js/game_manager.js L36-L45 — a restored run > reproduces its recorded board from the near-win fixture > restored from the near-win fixture 1`] = `
+"size 4  score 2048  over false  won true  keepPlaying false
+x=0     .     .     .     .
+x=1     .     .     .     .
+x=2     .     .     .     .
+x=3  2048     2     .     .
+rngCursor
+  spawn-value     1
+  spawn-position  1
+  relic-draw      0
+  rarity-weight   0
+turns resolved  1 of 8"
+`;
+
+exports[`js/game_manager.js L102-L110 — serialize() > reproduces its recorded board from a fresh start > fresh board 1`] = `
+"size 4  score 24  over false  won false  keepPlaying false
+x=0     2     .     4     4
+x=1     .     .     .     8
+x=2     .     4     .     .
+x=3     .     .     .     .
+rngCursor
+  spawn-value     10
+  spawn-position  10
+  relic-draw      0
+  rarity-weight   0
+turns resolved  8 of 8"
+`;

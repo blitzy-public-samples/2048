@@ -97,9 +97,10 @@ Please follow the house rules to have a bigger chance of your contribution being
    | `TEST` | `vitest.config.ts`, `vitest.snapshot.config.ts` |
    | `PW` | `playwright.config.ts` |
    | `FIXTURE` | `tests/fixtures/**` |
+   | `DOC` | `docs/**`, `README.md`, `CONTRIBUTING.md`, `blitzy-deck/**` |
 
 ### Changes that might not be accepted
-The five categories this section used to name — undo/redo features, save/reload features, changes to how the tiles look or their contents, changes to the layout, and changes to the grid size — are superseded, because the run-based roguelike feature set deliberately does all five. That list no longer describes what will be declined.
+The five categories this section used to name — undo/redo features, save/reload features, changes to how the tiles look or their contents, changes to the layout, and changes to the grid size — are superseded, because the run-based roguelike feature set deliberately does all five. That list no longer describes what will be declined. Decision `DL-DOC-02`.
 
 That feature set is landing in stages, so here is what each of the five categories now covers, and how much of it the game carries at this commit:
 

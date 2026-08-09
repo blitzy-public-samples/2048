@@ -2,44 +2,95 @@
  * The run lifecycle, composed.
  *
  * WHAT IS UNDER TEST
- *   The COMPOSITION of the run layer: most of what follows drives a real
- *   `Engine` against a real `RunStateStore` over an injected store, not the
- *   controller against fakes. Decisions of docs/DECISION_LOG.md it is the
- *   evidence for, one apiece: DL-RUNCTL-01, DL-RUNCTL-02, DL-RUNCTL-03,
- *   DL-RUNCTL-04. Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece:
- *   TR-RUNCTL-01, TR-RUNCTL-02, TR-RUNCTL-03, TR-RUNCTL-04, TR-RUNCTL-05,
- *   TR-RUNCTL-06, TR-RUNCTL-07, TR-RUNCTL-08.
+ *   `RunController` of src/run/run-controller.ts, from two directions.
+ *
+ *   Sections 1 to 20 exercise the COMPOSITION of the run layer: a real `Engine`
+ *   against a real `RunStateStore` over an injected store.
+ *
+ *   Sections 21 to 31 exercise the controller against its OWN declared ports —
+ *   `EnginePort`, `EngineEventSource` and `RelicRegistryPort` — with plain
+ *   recording objects, and cover the units the composition reaches only
+ *   indirectly: seed origination and entry, the stage-goal authority, the
+ *   reward triple, the run summary, the correlation identifier and the commit
+ *   context providers. NO MOCKING LIBRARY is used anywhere in this file: every
+ *   collaborator arrives by constructor injection.
+ *
+ *   Decisions of docs/DECISION_LOG.md this file is the evidence for, one
+ *   apiece: DL-RUNCTL-01, DL-RUNCTL-02, DL-RUNCTL-03, DL-RUNCTL-04,
+ *   DL-STAGE-02, DL-TEST-01. Rows of docs/TRACEABILITY_MATRIX.md it covers, one
+ *   apiece: TR-RUNCTL-01, TR-RUNCTL-02, TR-RUNCTL-03, TR-RUNCTL-04,
+ *   TR-RUNCTL-05, TR-RUNCTL-06, TR-RUNCTL-07, TR-RUNCTL-08.
  *
  * THE STORE IS INJECTED
  *   `tests/unit/run/` runs in both the `unit:dom-free` project, which has no
  *   Web Storage at all, and the `unit:dom` project, which has jsdom's. A
  *   `MemoryStorage` handed to `LocalStorageManager` makes every case below
  *   behave identically in both, and keeps one test's storage out of the next
- *   test's reach without depending on teardown. Decision DL-TEST-01.
+ *   test's reach without depending on teardown. Decision DL-TEST-01. Section 21
+ *   adds the `afterEach` that empties every store this file tracked, of every
+ *   key `OWNED_STORAGE_KEYS` and `BEST_SCORE_KEY` name.
+ *
+ * WHAT THIS FILE DOES NOT OWN
+ *   The loader's verdict matrix (tests/unit/run/run-state-store.test.ts), the
+ *   envelope's nine-member shape (tests/unit/run/run-state.test.ts), board-size
+ *   reconciliation (tests/unit/run/run-relic-board-size.test.ts), the RNG cursor
+ *   mechanism (tests/unit/run/rng-cursor-persistence.test.ts), the frozen
+ *   best-score contract (tests/unit/storage/best-score.test.ts) and the seeded
+ *   relic draw (tests/unit/relics/relic-draw.test.ts).
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import type { RulesConfig } from '../../../src/config/rules-config';
 import {
   createDefaultStageConfig,
+  evaluateStageGoal,
+  stageGoalForIndex,
   type StageConfig,
+  type StageGoal,
 } from '../../../src/config/stage-config';
 import { Engine } from '../../../src/engine/engine';
+import type {
+  EngineEventListener,
+  EngineEventName,
+  EngineEventPayloadMap,
+  EngineEventSubscription,
+} from '../../../src/engine/engine-events';
+import { Grid } from '../../../src/engine/grid';
+import { highestTileValue } from '../../../src/engine/terminal-state';
 import {
   DIRECTION_DOWN,
   DIRECTION_LEFT,
   DIRECTION_RIGHT,
   DIRECTION_UP,
+  type CorrelationId,
   type Direction,
   type SerializedGameState,
+  type StageCommitContext,
 } from '../../../src/engine/types';
-import { createRngStreams } from '../../../src/rng/rng-streams';
+import {
+  MAX_RUN_SEED_LENGTH,
+  RNG_STREAM_NAMES,
+  createRngStreams,
+  isAcceptableRunSeed,
+  type RngCursorMap,
+  type RngStreams,
+} from '../../../src/rng/rng-streams';
+import * as rngStreamsModule from '../../../src/rng/rng-streams';
+import * as seededRngModule from '../../../src/rng/seeded-rng';
 import {
   RunController,
+  normalizeEnteredSeed,
+  originateRunId,
+  originateRunSeed,
   resolveRunIdentity,
+  type EnginePort,
+  type EngineEventSource,
+  type MoveDirection,
+  type RelicRegistryPort,
   type RewardOffer,
+  type RewardResolution,
   type RunScope,
 } from '../../../src/run/run-controller';
 import { drawRelicOffers } from '../../../src/relics/relic-draw';
@@ -51,18 +102,31 @@ import type { Relic } from '../../../src/relics/relic-types';
 import {
   RUN_STATE_SCHEMA_VERSION,
   createFreshRunState,
+  runCorrelationId,
   type PersistedRelic,
   type RunReporter,
   type RunState,
+  type RunSummary,
 } from '../../../src/run/run-state';
-import { RunStateStore } from '../../../src/run/run-state-store';
+import {
+  RunStateStore,
+  type RunStateLoadOutcome,
+} from '../../../src/run/run-state-store';
 import { LocalStorageManager } from '../../../src/storage/local-storage-manager';
 import { MemoryStorage } from '../../../src/storage/memory-storage';
 import {
   BEST_SCORE_KEY,
   GAME_STATE_KEY,
+  OWNED_STORAGE_KEYS,
   RUN_STATE_KEY,
+  type OwnedStorageKey,
 } from '../../../src/storage/storage-keys';
+import {
+  copyBoard,
+  createEmptyBoard,
+  createMergePairBoard,
+  createNearWinBoard,
+} from '../../fixtures/boards';
 
 /* ==========================================================================
  * Harness
@@ -2947,5 +3011,2684 @@ describe('the relics a run holds', () => {
     expect(second.controller.relics().map((relic) => relic.id)).toEqual([
       FIRST_RELIC,
     ]);
+  });
+});
+
+/* ==========================================================================
+ * 21. Storage hygiene, and the ports the sections below drive
+ *
+ * Sections 22 to 28 drive the controller through the THREE STRUCTURAL PORTS it
+ * declares for itself — `EnginePort`, `EngineEventSource` and
+ * `RelicRegistryPort` of src/run/run-controller.ts — using plain objects that
+ * record their calls. No mocking library is imported and no module is replaced:
+ * the collaborators arrive by constructor injection, ported from
+ * js/application.js L3 and covered by row TR-RUNCTL-01 of
+ * docs/TRACEABILITY_MATRIX.md.
+ *
+ * Every judgement the sections below pin is argued in docs/DECISION_LOG.md,
+ * under DL-RUNCTL-01 to DL-RUNCTL-04, DL-STAGE-01 to DL-STAGE-03 and DL-TEST-01.
+ * ========================================================================== */
+
+/**
+ * Stores the cases below construct, so the teardown can empty each of them.
+ *
+ * `tests/unit/run/` runs in the `unit:dom-free` project, which offers no Web
+ * Storage, so the store every case injects is the only one holding what a case
+ * wrote. Registered here, cleared in `afterEach`.
+ */
+const trackedStores: MemoryStorage[] = [];
+
+/**
+ * Registers one store for teardown and returns it.
+ *
+ * @param backing Store to track.
+ * @returns The same store.
+ */
+function trackStorage(backing: MemoryStorage): MemoryStorage {
+  trackedStores.push(backing);
+
+  return backing;
+}
+
+/**
+ * Every key this suite removes: `OWNED_STORAGE_KEYS` and the frozen best-score
+ * literal, de-duplicated. Imported constants throughout; no key is spelled as a
+ * literal here.
+ */
+const CLEARED_KEYS: readonly OwnedStorageKey[] = Object.freeze([
+  ...new Set<OwnedStorageKey>([...OWNED_STORAGE_KEYS, BEST_SCORE_KEY]),
+]);
+
+/**
+ * Removes one key from the environment's Web Storage where it offers one.
+ *
+ * Total in every environment: the `unit:dom-free` project offers none, and
+ * every case below injects `MemoryStorage`.
+ *
+ * @param key Key to remove.
+ */
+function removeFromWebStorage(key: OwnedStorageKey): void {
+  try {
+    const store: Storage | undefined = (
+      globalThis as { localStorage?: Storage }
+    ).localStorage;
+
+    store?.removeItem(key);
+  } catch {
+    // A host whose global throws on access, or whose store refuses a removal,
+    // holds nothing this suite wrote.
+    return;
+  }
+}
+
+/**
+ * Empties every tracked store, and any Web Storage, of every key the product
+ * owns.
+ *
+ * IDEMPOTENT, so it composes with the `afterEach(clearOwnedStorage)` that
+ * tests/fixtures/storage.ts registers as a setup file for both unit projects.
+ * js/local_storage_manager.js L61-L63 removed the board snapshot and never the
+ * best score, which is the key this suite is careful to remove.
+ */
+function clearTrackedStorage(): void {
+  for (const key of CLEARED_KEYS) {
+    for (const backing of trackedStores) {
+      backing.removeItem(key);
+    }
+
+    removeFromWebStorage(key);
+  }
+}
+
+beforeEach(() => {
+  // The invariant the teardown leaves behind, asserted before every case rather
+  // than in one of them: no tracked store carries a key an earlier case wrote.
+  for (const backing of trackedStores) {
+    for (const key of CLEARED_KEYS) {
+      expect(backing.getItem(key)).toBeUndefined();
+    }
+  }
+});
+
+afterEach(clearTrackedStorage);
+
+/**
+ * A tracked store carrying its fixture BEFORE anything reads it.
+ *
+ * The writability probe and the single snapshot read both happen while
+ * `LocalStorageManager`, `RunStateStore` and `RunController` are constructed —
+ * js/local_storage_manager.js L25-L26 and js/game_manager.js L36 — so a fixture
+ * written afterwards is invisible to them.
+ *
+ * @param seed Raw stored strings, keyed by the key each is stored under.
+ * @returns The seeded store.
+ */
+function storageHolding(
+  seed: Readonly<Partial<Record<OwnedStorageKey, string>>>,
+): MemoryStorage {
+  const backing = trackStorage(new MemoryStorage());
+
+  for (const [key, value] of Object.entries(seed)) {
+    if (value !== undefined) {
+      backing.setItem(key, value);
+    }
+  }
+
+  return backing;
+}
+
+/** A listener held without its payload type, as the real emitter holds one. */
+type StoredListener = (payload: never) => void;
+
+/** The `EngineEventSource` fake, plus the emission helper a case drives it by. */
+interface RecordingEvents {
+  /** The subscription surface handed to the controller. */
+  readonly source: EngineEventSource;
+
+  /** How many listeners stand registered for one event. */
+  readonly listenerCount: (event: EngineEventName) => number;
+
+  /** Dispatches one event. */
+  readonly emit: <K extends EngineEventName>(
+    event: K,
+    payload: EngineEventPayloadMap[K],
+  ) => void;
+}
+
+/**
+ * An emitter with `EngineEvents.on`'s semantics and nothing else.
+ *
+ * `on()` APPENDS and returns a handle that removes exactly its own listener;
+ * `emit()` walks a copy of the list synchronously, in registration order, with
+ * the payload as the single argument — ported from js/keyboard_input_manager.js
+ * L18-L32. Listener containment is src/engine/engine-events.ts's own and is not
+ * reproduced here, so a controller listener that throws fails the case that
+ * emitted to it.
+ *
+ * @returns A fresh emitter holding no listener.
+ */
+function createRecordingEvents(): RecordingEvents {
+  const listeners = new Map<EngineEventName, StoredListener[]>();
+
+  const arrayFor = (event: EngineEventName): StoredListener[] => {
+    const held = listeners.get(event);
+
+    if (held !== undefined) {
+      return held;
+    }
+
+    const created: StoredListener[] = [];
+
+    listeners.set(event, created);
+
+    return created;
+  };
+
+  return {
+    source: {
+      on<K extends EngineEventName>(
+        event: K,
+        listener: EngineEventListener<K>,
+      ): EngineEventSubscription {
+        const held = arrayFor(event);
+
+        held.push(listener);
+
+        return (): void => {
+          const at = held.indexOf(listener);
+
+          if (at >= 0) {
+            held.splice(at, 1);
+          }
+        };
+      },
+    },
+
+    listenerCount: (event: EngineEventName): number => arrayFor(event).length,
+
+    emit<K extends EngineEventName>(
+      event: K,
+      payload: EngineEventPayloadMap[K],
+    ): void {
+      for (const held of arrayFor(event).slice()) {
+        (held as EngineEventListener<K>)(payload);
+      }
+    },
+  };
+}
+
+/** The `EnginePort` fake, plus readers for everything it recorded. */
+interface RecordingEngine {
+  /** The port handed to the controller. */
+  readonly port: EnginePort;
+
+  /** The emitter behind `port.events`. */
+  readonly events: RecordingEvents;
+
+  /** Every port call, in order, by member name. */
+  readonly calls: string[];
+
+  /** Every argument `setup()` received, in order. */
+  readonly setups: (SerializedGameState | null | undefined)[];
+
+  /** Every `cleared` argument `endStage()` received, in order. */
+  readonly endStages: boolean[];
+
+  /** Every argument `startStage()` received, in order. */
+  readonly startStages: (SerializedGameState | null | undefined)[];
+
+  /** Every direction `move()` received, in order. */
+  readonly moves: MoveDirection[];
+
+  /** Replaces the board `serialize()` projects. */
+  readonly hold: (board: SerializedGameState) => void;
+
+  /** The board `serialize()` projects, as a fresh copy. */
+  readonly board: () => SerializedGameState;
+}
+
+/** How a recording engine is built. */
+interface RecordingEngineOptions {
+  /** The board `serialize()` opens on. Defaults to an empty one. */
+  readonly board?: SerializedGameState;
+
+  /**
+   * Whether the port publishes `startStage`. `false` yields a port that only
+   * observes, which `RunEnginePort` admits and `openNextStage()` reads as an
+   * engine implementing no stage transition.
+   */
+  readonly startStage?: boolean;
+}
+
+/**
+ * An `EnginePort` that records every call and returns controllable values.
+ *
+ * `serialize()` returns a FRESH DEEP COPY of the board held, as
+ * `Engine.serialize()` does, so the controller needs no defensive clone and a
+ * case can compare what it stored against what it held.
+ *
+ * @param options Opening board, and whether `startStage` is published.
+ * @returns The port and its recorders.
+ */
+function createRecordingEngine(
+  options: RecordingEngineOptions = {},
+): RecordingEngine {
+  const events = createRecordingEvents();
+  const calls: string[] = [];
+  const setups: (SerializedGameState | null | undefined)[] = [];
+  const endStages: boolean[] = [];
+  const startStages: (SerializedGameState | null | undefined)[] = [];
+  const moves: MoveDirection[] = [];
+
+  let held: SerializedGameState = options.board ?? createEmptyBoard();
+
+  const observing: EnginePort = {
+    events: events.source,
+
+    serialize(): SerializedGameState {
+      calls.push('serialize');
+
+      return copyBoard(held);
+    },
+
+    endStage(cleared: boolean): void {
+      calls.push('endStage');
+      endStages.push(cleared);
+    },
+
+    // js/game_manager.js L36-L45: the snapshot the run opens on.
+    setup(previousState?: SerializedGameState | null): void {
+      calls.push('setup');
+      setups.push(previousState);
+    },
+
+    // js/game_manager.js L17-L21.
+    restart(): void {
+      calls.push('restart');
+    },
+
+    move(direction: MoveDirection): boolean {
+      calls.push('move');
+      moves.push(direction);
+
+      return true;
+    },
+
+    // js/game_manager.js L30-L32, reading the renamed flag.
+    isGameTerminated(): boolean {
+      calls.push('isGameTerminated');
+
+      return held.over || (held.won && !held.keepPlaying);
+    },
+
+    // js/game_manager.js L24-L27, under the name that no longer shadows it.
+    continuePlaying(): void {
+      calls.push('continuePlaying');
+    },
+  };
+
+  const transitioning: EnginePort = {
+    ...observing,
+
+    startStage(board?: SerializedGameState | null): void {
+      calls.push('startStage');
+      startStages.push(board);
+    },
+  };
+
+  return {
+    port: options.startStage === false ? observing : transitioning,
+    events,
+    calls,
+    setups,
+    endStages,
+    startStages,
+    moves,
+    hold: (board: SerializedGameState): void => {
+      held = board;
+    },
+    board: (): SerializedGameState => copyBoard(held),
+  };
+}
+
+
+/**
+ * The relics the recording registry's catalogue carries, freshly built per call.
+ *
+ * Three shapes, one apiece: an identifier alone, an identifier with a budget,
+ * and one with a budget and an opaque state slot. `PersistedRelic` fixes the
+ * triple to `id`, optional `charges` and optional `state`.
+ *
+ * These identifiers exist ONLY here. Nothing in src/run reads one, which is what
+ * a case asserting the absence of per-relic branching relies on.
+ *
+ * @returns A fresh catalogue.
+ */
+function recordingCatalogue(): PersistedRelic[] {
+  return [
+    { id: 'port-plain' },
+    { id: 'port-charged', charges: 3 },
+    { id: 'port-stateful', charges: 2, state: { spent: 0 } },
+    { id: 'port-second-plain' },
+  ];
+}
+
+/** The `RelicRegistryPort` fake, plus readers for everything it recorded. */
+interface RecordingRegistry {
+  /** The port handed to the controller. */
+  readonly port: RelicRegistryPort;
+
+  /** Identifiers taken on, IN PICKUP ORDER. */
+  readonly picked: () => readonly string[];
+
+  /** Entries held, in pickup order, as the registry would persist them. */
+  readonly held: () => readonly PersistedRelic[];
+
+  /** Every port call, in order, by member name. */
+  readonly calls: string[];
+
+  /** Withdraws one identifier from the catalogue this registry answers for. */
+  readonly forget: (relicId: string) => void;
+
+  /** Makes every later pickup refuse. */
+  readonly refuseEveryPickup: () => void;
+}
+
+/**
+ * A `RelicRegistryPort` that keeps its relics in pickup order.
+ *
+ * Publishes exactly the member set `RelicRegistry.runPort()` publishes —
+ * `knowsRelic`, `pickUpRelic`, `activateRelic`, `holdsRelic`, `resolveRelic`,
+ * `snapshotRelics` and `restoreRelics` — which is the documented route between
+ * src/run and src/relics. Order is APPEND-ONLY: nothing here sorts, filters or
+ * re-keys, so the order the hook bus would dispatch in is the order a case reads
+ * back.
+ *
+ * @returns The port and its recorders.
+ */
+function createRecordingRegistry(): RecordingRegistry {
+  const catalogue = recordingCatalogue();
+  const held: PersistedRelic[] = [];
+  const calls: string[] = [];
+  let refusing = false;
+
+  const entryFor = (relicId: string): PersistedRelic | null => {
+    const found = catalogue.find((relic) => relic.id === relicId);
+
+    if (found === undefined) {
+      return null;
+    }
+
+    const entry: { id: string; charges?: number; state?: unknown } = {
+      id: found.id,
+    };
+
+    if (found.charges !== undefined) {
+      entry.charges = found.charges;
+    }
+
+    if (found.state !== undefined) {
+      entry.state = JSON.parse(JSON.stringify(found.state)) as unknown;
+    }
+
+    return entry;
+  };
+
+  const takeOn = (relicId: string): PersistedRelic | null => {
+    if (refusing) {
+      return null;
+    }
+
+    const entry = entryFor(relicId);
+
+    if (entry === null || held.some((relic) => relic.id === relicId)) {
+      return null;
+    }
+
+    // APPENDED, so the position of every relic already held is untouched.
+    held.push(entry);
+
+    return { ...entry };
+  };
+
+  const port: RelicRegistryPort = {
+    knowsRelic: (relicId: string): boolean => {
+      calls.push('knowsRelic');
+
+      return catalogue.some((relic) => relic.id === relicId);
+    },
+
+    pickUpRelic: (relicId: string): PersistedRelic | null => {
+      calls.push('pickUpRelic');
+
+      return takeOn(relicId);
+    },
+
+    activateRelic: (relicId: string): PersistedRelic | null => {
+      calls.push('activateRelic');
+
+      return takeOn(relicId);
+    },
+
+    holdsRelic: (relicId: string): boolean => {
+      calls.push('holdsRelic');
+
+      return held.some((relic) => relic.id === relicId);
+    },
+
+    resolveRelic: (relicId: string): PersistedRelic | null => {
+      calls.push('resolveRelic');
+
+      const found = held.find((relic) => relic.id === relicId);
+
+      return found === undefined ? null : { ...found };
+    },
+
+    snapshotRelics: (): readonly PersistedRelic[] => {
+      calls.push('snapshotRelics');
+
+      return held.map((relic): PersistedRelic => ({ ...relic }));
+    },
+
+    restoreRelics: (relics: readonly PersistedRelic[]): void => {
+      calls.push('restoreRelics');
+      held.length = 0;
+
+      for (const relic of relics) {
+        if (catalogue.some((known) => known.id === relic.id)) {
+          held.push({ ...relic });
+        }
+      }
+    },
+  };
+
+  return {
+    port,
+    picked: (): readonly string[] => held.map((relic): string => relic.id),
+    held: (): readonly PersistedRelic[] =>
+      held.map((relic): PersistedRelic => ({ ...relic })),
+    calls,
+    forget: (relicId: string): void => {
+      const at = catalogue.findIndex((relic) => relic.id === relicId);
+
+      if (at >= 0) {
+        catalogue.splice(at, 1);
+      }
+    },
+    refuseEveryPickup: (): void => {
+      refusing = true;
+    },
+  };
+}
+
+/** One report the controller or the store made, as this suite captured it. */
+interface CapturedReport {
+  /** Which reporter member carried it. */
+  readonly kind: string;
+
+  /** The correlation identifier the report carried. */
+  readonly correlationId: CorrelationId;
+
+  /** The members of the report this suite reads back. */
+  readonly detail: Readonly<Record<string, unknown>>;
+}
+
+/** A capturing `RunReporter`, and readers over what it captured. */
+interface ReportSink {
+  /** The sink injected into the store and the controller. */
+  readonly reporter: RunReporter;
+
+  /** Every report, in the order it was made. */
+  readonly records: CapturedReport[];
+
+  /** Every report one reporter member carried. */
+  readonly of: (kind: string) => readonly CapturedReport[];
+}
+
+/**
+ * A reporter that COLLECTS rather than discards.
+ *
+ * Every member `RunReporter` declares is captured with its correlation
+ * identifier, so a case asserts on what was reported rather than on the fact
+ * that reporting happened. Nothing here reaches `console`, and nothing here is a
+ * no-op stub.
+ *
+ * @returns The sink and its readers.
+ */
+function createReportSink(): ReportSink {
+  const records: CapturedReport[] = [];
+
+  const capture = (
+    kind: string,
+    correlationId: CorrelationId,
+    detail: Readonly<Record<string, unknown>>,
+  ): void => {
+    records.push({ kind, correlationId, detail });
+  };
+
+  const reporter: RunReporter = {
+    onLoadCorrupted(report): void {
+      capture('load-corrupted', report.correlationId ?? '', {
+        key: report.key,
+        verdict: report.verdict,
+        problems: report.problems,
+        error: report.error,
+      });
+    },
+
+    onVersionMigrated(report): void {
+      capture('version-migrated', report.correlationId, {
+        fromVersion: report.fromVersion,
+        toVersion: report.toVersion,
+      });
+    },
+
+    onBoardSizeReconciled(report): void {
+      capture('board-size-reconciled', report.correlationId, {
+        savedSize: report.savedSize,
+        configuredSize: report.configuredSize,
+        appliedSize: report.appliedSize,
+      });
+    },
+
+    onWriteFailed(report): void {
+      capture('write-failed', report.correlationId, {
+        key: report.key,
+        byteLength: report.byteLength,
+        error: report.error,
+      });
+    },
+
+    onRunStarted(report): void {
+      capture('run-started', report.correlationId, {
+        runId: report.runId,
+        stageIndex: report.stageIndex,
+        resumed: report.resumed,
+        seedProvided: report.seedProvided,
+      });
+    },
+
+    onStageAdvanced(report): void {
+      capture('stage-advanced', report.correlationId, {
+        fromStageIndex: report.fromStageIndex,
+        toStageIndex: report.toStageIndex,
+        goal: report.goal,
+      });
+    },
+
+    onRewardOffered(report): void {
+      capture('reward-offered', report.correlationId, {
+        stageIndex: report.stageIndex,
+        offeredRelicIds: report.offeredRelicIds,
+      });
+    },
+
+    onRewardDrawn(report): void {
+      capture('reward-drawn', report.correlationId, {
+        stageIndex: report.stageIndex,
+        offeredRelicIds: report.offeredRelicIds,
+        selectedRelicId: report.selectedRelicId,
+        accepted: report.accepted,
+        refusal: report.refusal,
+      });
+    },
+
+    onRelicsNormalized(report): void {
+      capture('relics-normalized', report.correlationId, {
+        requested: report.requested,
+        restored: report.restored,
+        refused: report.refused,
+      });
+    },
+
+    onRunEnded(report): void {
+      capture('run-ended', report.correlationId, {
+        outcome: report.outcome,
+        summary: report.summary,
+      });
+    },
+  };
+
+  return {
+    reporter,
+    records,
+    of: (kind: string): readonly CapturedReport[] =>
+      records.filter((record) => record.kind === kind),
+  };
+}
+
+/**
+ * Distinguishes the run identifiers of two runs composed in one file run.
+ *
+ * `originateRunId()` mints a fresh identifier per run; this counter is the
+ * deterministic stand-in a case injects through `createToken`, so two runs never
+ * share an identifier and no case asserts an originated value.
+ */
+let tokenSerial = 0;
+
+/** How one port-driven run is composed. */
+interface DriveOptions {
+  /** The store to compose over. A fresh tracked one by default. */
+  readonly backing?: MemoryStorage;
+
+  /** The seed to play, as the run-start screen supplies one. */
+  readonly seed?: string;
+
+  /** The board the engine opens on. */
+  readonly board?: SerializedGameState;
+
+  /** Whether the port publishes `startStage`. */
+  readonly startStage?: boolean;
+
+  /** `false` composes the controller with no registry at all. */
+  readonly relics?: boolean;
+
+  /** The offers a cleared stage draws. Absent composes no draw port. */
+  readonly offers?: readonly RewardOffer[];
+
+  /** `false` leaves the controller unsubscribed from the engine. */
+  readonly observe?: boolean;
+}
+
+/** One run composed over the ports alone. */
+interface Driven {
+  readonly backing: MemoryStorage;
+  readonly manager: LocalStorageManager;
+  readonly store: RunStateStore;
+  readonly config: RulesConfig;
+  readonly stages: StageConfig;
+  readonly controller: RunController;
+  readonly engine: RecordingEngine;
+  readonly registry: RecordingRegistry;
+  readonly sink: ReportSink;
+  readonly streams: RngStreams;
+
+  /** The substream draw counts, as `observe()` and `persist()` read them. */
+  readonly cursors: () => RngCursorMap;
+
+  /** Releases the controller's subscriptions. */
+  readonly stop: () => void;
+
+  /** What `begin()` reported. */
+  readonly outcome: RunStateLoadOutcome;
+}
+
+/**
+ * Composes storage, store, controller, registry and engine port in the order
+ * src/main.ts composes them, and attaches the controller to the engine.
+ *
+ * The correlation identifier is injected as a READER, which is the form
+ * `RunControllerOptions.correlationId` accepts, and it is derived by
+ * `runCorrelationId()` from the seed and run identifier in force. DL-RUNCTL-04.
+ *
+ * @param options Store, seed, board, and which optional ports to publish.
+ * @returns Everything a case reads or drives.
+ */
+function drive(options: DriveOptions = {}): Driven {
+  const backing = options.backing ?? trackStorage(new MemoryStorage());
+  const manager = new LocalStorageManager({ storage: backing });
+  const config = createDefaultRulesConfig();
+  const stages = createDefaultStageConfig();
+  const sink = createReportSink();
+  const registry = createRecordingRegistry();
+  const engine = createRecordingEngine({
+    board: options.board,
+    startStage: options.startStage,
+  });
+
+  const createToken = (): string => {
+    tokenSerial += 1;
+
+    return `driven-run-${String(tokenSerial)}`;
+  };
+
+  const identity = resolveRunIdentity({
+    storage: manager,
+    createToken,
+    seed: options.seed,
+  });
+
+  const holder: { controller: RunController | null } = { controller: null };
+
+  const readCorrelationId = (): CorrelationId => {
+    const live = holder.controller;
+
+    return live === null ? '' : runCorrelationId(live.seed(), live.runId());
+  };
+
+  const store = new RunStateStore({
+    storage: manager,
+    config,
+    reporter: sink.reporter,
+    correlationId: readCorrelationId,
+  });
+
+  const offers = options.offers;
+
+  const controller = new RunController({
+    store,
+    identity,
+    config,
+    stages,
+    createToken,
+    reporter: sink.reporter,
+    correlationId: readCorrelationId,
+    relics: options.relics === false ? undefined : registry.port,
+    rewards:
+      offers === undefined
+        ? undefined
+        : {
+            draw: ({ count, ownedIds }): readonly RewardOffer[] =>
+              offers
+                .filter((offer) => !ownedIds.includes(offer.id))
+                .slice(0, count),
+          },
+  });
+
+  holder.controller = controller;
+
+  const outcome = controller.begin();
+  const streams = createRngStreams(controller.seed(), controller.cursors());
+  const cursors = (): RngCursorMap => streams.snapshotCursors();
+
+  return {
+    backing,
+    manager,
+    store,
+    config,
+    stages,
+    controller,
+    engine,
+    registry,
+    sink,
+    streams,
+    cursors,
+    stop:
+      options.observe === false
+        ? (): void => undefined
+        : controller.observe(engine.port, cursors),
+    outcome,
+  };
+}
+
+/** A board snapshot as an event carries it: the live lattice. */
+function gridOf(board: SerializedGameState): Grid {
+  // `Grid.fromState` reads `state[x][y]`, so the second argument is the CELLS
+  // matrix and not the serialised grid. js/grid.js L21-L34.
+  return new Grid(board.grid.size, board.grid.cells);
+}
+
+/**
+ * Emits `stage:start` for the stage in force, as the engine emits one while it
+ * prepares a board.
+ *
+ * @param run The composed run.
+ * @param board The board the stage opens on.
+ */
+function startStage(run: Driven, board: SerializedGameState): void {
+  run.engine.hold(board);
+  run.engine.events.emit('stage:start', {
+    stageIndex: run.controller.stageIndex(),
+    goal: run.controller.stageGoal(),
+    seed: run.controller.seed(),
+    boardSize: board.grid.size,
+  });
+}
+
+/**
+ * Emits `move:after` for one resolved turn, which is where the stage goal is
+ * MEASURED. DL-STAGE-02.
+ *
+ * @param run The composed run.
+ * @param board The board the move left, held by the engine as well so the two
+ *   agree on the moment being described.
+ * @param score The score the move left.
+ */
+function resolveMove(
+  run: Driven,
+  board: SerializedGameState,
+  score = 0,
+): void {
+  run.engine.hold({ ...board, score });
+  run.engine.events.emit('move:after', {
+    moved: true,
+    board: gridOf(board),
+    score,
+    over: false,
+    won: false,
+    terminated: false,
+    turn: 1,
+  });
+}
+
+/**
+ * Emits `stage:end`, which is where a met goal is RESOLVED. DL-STAGE-02.
+ *
+ * @param run The composed run.
+ * @param cleared Whether the stage cleared.
+ * @param score The score at resolution.
+ */
+function endStage(run: Driven, cleared: boolean, score = 0): void {
+  run.engine.events.emit('stage:end', {
+    stageIndex: run.controller.stageIndex(),
+    cleared,
+    score,
+  });
+}
+
+/**
+ * Emits `state:commit`, carrying the two slices the controller's own providers
+ * supply.
+ *
+ * @param run The composed run.
+ * @param over Whether the run is lost.
+ */
+function commit(run: Driven, over = false): void {
+  const board = run.engine.board();
+
+  run.engine.events.emit('state:commit', {
+    turn: 1,
+    board: gridOf(board),
+    score: board.score,
+    bestScore: 0,
+    over,
+    won: false,
+    terminated: over,
+    degraded: false,
+    stage: run.controller.stageCommitContextProvider()(),
+    relics: run.controller.relicCommitContextProvider()(),
+  });
+}
+
+/** The envelope as it is actually stored under one store, or `null`. */
+function storedEnvelope(backing: MemoryStorage): RunState | null {
+  const raw = backing.getItem(RUN_STATE_KEY);
+
+  return raw === undefined ? null : (JSON.parse(raw) as RunState);
+}
+
+/**
+ * The next `count` draws of every named substream, as one comparable list.
+ *
+ * @param streams Substreams to draw from. Advanced by the reading.
+ * @param count Draws to take per substream.
+ * @returns One entry per substream per draw, in `RNG_STREAM_NAMES` order.
+ */
+function draws(streams: RngStreams, count = 4): number[] {
+  const taken: number[] = [];
+
+  for (const name of RNG_STREAM_NAMES) {
+    for (let index = 0; index < count; index += 1) {
+      taken.push(streams.stream(name).next());
+    }
+  }
+
+  return taken;
+}
+
+/** A board whose highest tile is `value`, built through the shared fixtures. */
+function boardWithHighest(value: number): SerializedGameState {
+  // `createNearWinBoard(size, winValue)` lays two tiles of half the win value,
+  // so a win value of twice `value` yields a board whose highest tile is
+  // exactly `value`.
+  return createNearWinBoard(4, value * 2);
+}
+
+/**
+ * Takes one relic on through the reward transaction, which is the only route by
+ * which a relic joins a run.
+ *
+ * `resolveReward()` measures a selection against the offer standing, so the
+ * identifier is recorded as that offer first.
+ *
+ * @param run The composed run.
+ * @param relicId Identifier to offer and then select.
+ * @returns What `resolveReward()` reported.
+ */
+function takeReward(run: Driven, relicId: string): RewardResolution {
+  run.controller.recordRewardOffer([relicId]);
+
+  return run.controller.resolveReward(relicId);
+}
+
+
+/* ==========================================================================
+ * 22. The seed a run is played under
+ *
+ * Row TR-RUNCTL-07 of docs/TRACEABILITY_MATRIX.md: `originateRunSeed()` is the
+ * ONE unseeded randomness source in the product, and it lives here rather than
+ * in src/rng. Decision DL-RUNCTL-01.
+ * ========================================================================== */
+
+/** Names any seed-originating export would plausibly carry. */
+const ORIGINATOR_NAMES: readonly string[] = Object.freeze([
+  'originateRunSeed',
+  'originateRunId',
+  'originateSeed',
+  'createSeed',
+  'newSeed',
+  'freshSeed',
+  'randomSeed',
+  'generateSeed',
+  'mintSeed',
+]);
+
+describe('originateRunSeed', () => {
+  it('mints a non-empty seed the substreams accept', () => {
+    const seed = originateRunSeed();
+
+    expect(typeof seed).toBe('string');
+    expect(seed.length).toBeGreaterThan(0);
+    expect(isAcceptableRunSeed(seed)).toBe(true);
+  });
+
+  it('mints a different seed on every call', () => {
+    const first = originateRunSeed();
+    const second = originateRunSeed();
+
+    expect(first).not.toBe(second);
+  });
+
+  it('mints a run identifier separately from a seed', () => {
+    const first = originateRunId();
+    const second = originateRunId();
+
+    expect(first.length).toBeGreaterThan(0);
+    expect(second.length).toBeGreaterThan(0);
+    expect(first).not.toBe(second);
+    expect(first).not.toBe(originateRunSeed());
+  });
+
+  it('yields a value both generator factories build from', () => {
+    const seed = originateRunSeed();
+    const streams = createRngStreams(seed);
+
+    expect(streams.seed).toBe(seed);
+
+    for (const name of RNG_STREAM_NAMES) {
+      const drawn = streams.stream(name).next();
+
+      expect(Number.isFinite(drawn)).toBe(true);
+      expect(drawn).toBeGreaterThanOrEqual(0);
+      expect(drawn).toBeLessThan(1);
+    }
+
+    const rng = seededRngModule.createSeededRng(seed);
+
+    expect(rng.seed).toBe(seed);
+    expect(Number.isFinite(rng.next())).toBe(true);
+  });
+
+  it('is confined here: src/rng originates no seed of its own', () => {
+    const exported = new Set<string>([
+      ...Object.keys(rngStreamsModule),
+      ...Object.keys(seededRngModule),
+    ]);
+
+    // The surfaces were actually read: both factories are on them.
+    expect(exported.has('createRngStreams')).toBe(true);
+    expect(exported.has('createSeededRng')).toBe(true);
+
+    for (const name of ORIGINATOR_NAMES) {
+      expect(exported.has(name)).toBe(false);
+    }
+
+    expect(
+      [...exported].filter((name) => /originat|mintseed/iu.test(name)),
+    ).toEqual([]);
+
+    // Origination is a member of the run layer, which is what leaves every
+    // other randomness path seeded and auditable.
+    expect(typeof originateRunSeed).toBe('function');
+    expect(typeof originateRunId).toBe('function');
+  });
+});
+
+describe('normalizeEnteredSeed', () => {
+  it('maps one entered seed to one normalised seed, every time', () => {
+    expect(normalizeEnteredSeed('run-of-the-mill')).toBe('run-of-the-mill');
+    expect(normalizeEnteredSeed('run-of-the-mill')).toBe(
+      normalizeEnteredSeed('run-of-the-mill'),
+    );
+  });
+
+  it('maps two different entries to two different seeds', () => {
+    expect(normalizeEnteredSeed('seed-a')).not.toBe(
+      normalizeEnteredSeed('seed-b'),
+    );
+  });
+
+  it('trims surrounding whitespace and keeps the whitespace inside', () => {
+    expect(normalizeEnteredSeed('  spaced  ')).toBe('spaced');
+    expect(normalizeEnteredSeed('\t\nwrapped\r\n ')).toBe('wrapped');
+    expect(normalizeEnteredSeed('two words')).toBe('two words');
+  });
+
+  it('preserves case, so two casings are two seeds', () => {
+    expect(normalizeEnteredSeed('Seed')).toBe('Seed');
+    expect(normalizeEnteredSeed('seed')).toBe('seed');
+    expect(normalizeEnteredSeed('Seed')).not.toBe(normalizeEnteredSeed('seed'));
+  });
+
+  it('carries digits through as text rather than parsing them', () => {
+    expect(normalizeEnteredSeed('0042')).toBe('0042');
+    expect(normalizeEnteredSeed(' 0042 ')).toBe('0042');
+  });
+
+  it('carries characters outside the expected set through opaquely', () => {
+    const entered = 'sé\u00e7d/\\:;"\'<>|&%$#@!~`^*()[]{}';
+
+    expect(normalizeEnteredSeed(entered)).toBe(entered);
+    expect(isAcceptableRunSeed(normalizeEnteredSeed(entered))).toBe(true);
+  });
+
+  it('originates a seed for an empty entry', () => {
+    const first = normalizeEnteredSeed('');
+    const second = normalizeEnteredSeed('');
+
+    expect(first.length).toBeGreaterThan(0);
+    expect(second.length).toBeGreaterThan(0);
+
+    // Originated, not a constant: the run-start screen's seed field needs no
+    // error path for an empty submission.
+    expect(first).not.toBe(second);
+    expect(isAcceptableRunSeed(first)).toBe(true);
+  });
+
+  it('originates a seed for a whitespace-only entry', () => {
+    const first = normalizeEnteredSeed('   \t\n  ');
+    const second = normalizeEnteredSeed('   \t\n  ');
+
+    expect(first.trim()).toBe(first);
+    expect(first.length).toBeGreaterThan(0);
+    expect(first).not.toBe(second);
+    expect(isAcceptableRunSeed(first)).toBe(true);
+  });
+
+  it('bounds an over-long entry to the length the substreams accept', () => {
+    const entered = 'x'.repeat(MAX_RUN_SEED_LENGTH + 50);
+    const normalised = normalizeEnteredSeed(entered);
+
+    expect(normalised.length).toBe(MAX_RUN_SEED_LENGTH);
+    expect(entered.startsWith(normalised)).toBe(true);
+    expect(isAcceptableRunSeed(normalised)).toBe(true);
+
+    // Bounded, never refused: building the substreams from it cannot throw.
+    expect(() => createRngStreams(normalised)).not.toThrow();
+  });
+
+  it('leaves an entry already at the bound untouched', () => {
+    const entered = 'y'.repeat(MAX_RUN_SEED_LENGTH);
+
+    expect(normalizeEnteredSeed(entered)).toBe(entered);
+  });
+});
+
+describe('a run started from an entered seed', () => {
+  it('plays the entered seed and derives the same sequence twice', () => {
+    const entered = '  Player Seed 42  ';
+    const first = drive({ seed: normalizeEnteredSeed(entered) });
+    const second = drive({ seed: normalizeEnteredSeed(entered) });
+
+    expect(first.controller.seed()).toBe('Player Seed 42');
+    expect(second.controller.seed()).toBe(first.controller.seed());
+
+    // The human-facing half of AAP V2: one seed, one sequence.
+    expect(draws(first.streams)).toEqual(draws(second.streams));
+
+    // A replayed seed is still a NEW run instance.
+    expect(second.controller.runId()).not.toBe(first.controller.runId());
+  });
+
+  it('reports the seed as caller-supplied', () => {
+    const run = drive({ seed: 'reported-seed' });
+    const [started] = run.sink.of('run-started');
+
+    expect(started?.detail.seedProvided).toBe(true);
+    expect(started?.detail.resumed).toBe(false);
+    expect(run.controller.identity.seedProvided).toBe(true);
+  });
+
+  it('startRun normalises the seed it is handed and mints a new run', () => {
+    const run = drive();
+    const before = run.controller.runId();
+    const seed = run.controller.startRun(run.engine.port, {
+      seed: '  Typed Seed  ',
+    });
+
+    expect(seed).toBe('Typed Seed');
+    expect(run.controller.seed()).toBe('Typed Seed');
+    expect(run.controller.runId()).not.toBe(before);
+    expect(run.controller.stageIndex()).toBe(0);
+    expect(run.controller.relics()).toEqual([]);
+  });
+
+  it('startRun originates a seed when none is entered', () => {
+    const run = drive({ seed: 'originating-run' });
+    const originated = run.controller.startRun(run.engine.port);
+
+    expect(originated).not.toBe('originating-run');
+    expect(originated.length).toBeGreaterThan(0);
+    expect(run.controller.seed()).toBe(originated);
+    expect(isAcceptableRunSeed(originated)).toBe(true);
+  });
+});
+
+/* ==========================================================================
+ * 23. Stage goals are data, and the measurement is one function
+ *
+ * Rows TR-STAGE-01 to TR-STAGE-03 of docs/TRACEABILITY_MATRIX.md, reached
+ * through the run layer that consumes them. The controller holds no second
+ * evaluator: decision DL-RUNCTL-03.
+ * ========================================================================== */
+
+describe('stageGoalForIndex', () => {
+  it('derives one goal per index, deterministically', () => {
+    const stages = createDefaultStageConfig();
+
+    for (const index of [0, 1, 2, 7, 8, 20]) {
+      expect(stageGoalForIndex(index, stages)).toEqual(
+        stageGoalForIndex(index, stages),
+      );
+    }
+  });
+
+  it('consumes no randomness, so a draw between two calls changes nothing', () => {
+    const stages = createDefaultStageConfig();
+    const streams = createRngStreams('goal-derivation');
+    const before = stageGoalForIndex(3, stages);
+
+    draws(streams, 16);
+
+    expect(stageGoalForIndex(3, stages)).toEqual(before);
+  });
+
+  it('hands back a fresh object rather than a reference into the curve', () => {
+    const stages = createDefaultStageConfig();
+    const first = stageGoalForIndex(0, stages);
+    const second = stageGoalForIndex(0, stages);
+
+    expect(first).toEqual(second);
+    expect(first).not.toBe(second);
+    expect(first).not.toBe(stages.ladder[0]);
+  });
+
+  it('is a plain kind-and-target pair carrying no function', () => {
+    const stages = createDefaultStageConfig();
+
+    for (const index of [0, 4, 9]) {
+      const goal = stageGoalForIndex(index, stages);
+
+      expect(Object.keys(goal).sort()).toEqual(['kind', 'target']);
+      expect(['highest-tile', 'score-threshold']).toContain(goal.kind);
+      expect(typeof goal.target).toBe('number');
+      expect(Number.isFinite(goal.target)).toBe(true);
+
+      for (const value of Object.values(goal)) {
+        expect(typeof value).not.toBe('function');
+      }
+    }
+  });
+
+  it('survives the JSON round trip the envelope stores it through', () => {
+    const stages = createDefaultStageConfig();
+
+    for (const index of [0, 5, 12]) {
+      const goal = stageGoalForIndex(index, stages);
+      const restored = JSON.parse(JSON.stringify(goal)) as StageGoal;
+
+      expect(restored).toEqual(goal);
+    }
+  });
+});
+
+describe('evaluateStageGoal clamps the fraction it reports', () => {
+  /** The two goal kinds, each at a target a fixture board can straddle. */
+  const highestTile: StageGoal = { kind: 'highest-tile', target: 16 };
+  const scoreThreshold: StageGoal = { kind: 'score-threshold', target: 200 };
+
+  it('measures a highest-tile goal from the board through the engine seam', () => {
+    const below = highestTileValue(gridOf(boardWithHighest(8)));
+    const at = highestTileValue(gridOf(boardWithHighest(16)));
+    const above = highestTileValue(gridOf(boardWithHighest(64)));
+
+    expect([below, at, above]).toEqual([8, 16, 64]);
+
+    const under = evaluateStageGoal(highestTile, {
+      score: 0,
+      highestTileValue: below,
+    });
+
+    expect(under.achieved).toBe(8);
+    expect(under.cleared).toBe(false);
+    expect(under.progress).toBeGreaterThan(0);
+    expect(under.progress).toBeLessThan(1);
+
+    const exact = evaluateStageGoal(highestTile, {
+      score: 0,
+      highestTileValue: at,
+    });
+
+    expect(exact.cleared).toBe(true);
+    expect(exact.progress).toBe(1);
+
+    const over = evaluateStageGoal(highestTile, {
+      score: 0,
+      highestTileValue: above,
+    });
+
+    expect(over.cleared).toBe(true);
+    expect(over.progress).toBe(1);
+    expect(over.progress).toBeLessThanOrEqual(1);
+  });
+
+  it('measures a score-threshold goal from the score', () => {
+    const under = evaluateStageGoal(scoreThreshold, {
+      score: 50,
+      highestTileValue: 2048,
+    });
+
+    expect(under.achieved).toBe(50);
+    expect(under.cleared).toBe(false);
+    expect(under.progress).toBeGreaterThan(0);
+    expect(under.progress).toBeLessThan(1);
+
+    const exact = evaluateStageGoal(scoreThreshold, {
+      score: 200,
+      highestTileValue: 0,
+    });
+
+    expect(exact.cleared).toBe(true);
+    expect(exact.progress).toBe(1);
+
+    const over = evaluateStageGoal(scoreThreshold, {
+      score: 5000,
+      highestTileValue: 0,
+    });
+
+    expect(over.cleared).toBe(true);
+    expect(over.progress).toBe(1);
+  });
+
+  it('reports zero for an empty board and never a negative fraction', () => {
+    const empty = highestTileValue(gridOf(createEmptyBoard()));
+
+    expect(empty).toBe(0);
+
+    const progress = evaluateStageGoal(highestTile, {
+      score: 0,
+      highestTileValue: empty,
+    });
+
+    expect(progress.achieved).toBe(0);
+    expect(progress.cleared).toBe(false);
+    expect(progress.progress).toBe(0);
+  });
+
+  it('reads the merge-pair fixture as the two-tile board it is', () => {
+    expect(highestTileValue(gridOf(createMergePairBoard()))).toBe(2);
+  });
+});
+
+
+/* ==========================================================================
+ * 24. The controller SUBSCRIBES; it is never called by the engine
+ *
+ * Row TR-RUNCTL-01 of docs/TRACEABILITY_MATRIX.md: the three input
+ * subscriptions js/game_manager.js L9-L11 installed at construction become the
+ * four engine subscriptions `observe()` installs.
+ * ========================================================================== */
+
+describe('observe attaches to the engine', () => {
+  it('registers one listener per event it consumes and none elsewhere', () => {
+    const run = drive();
+    const { listenerCount } = run.engine.events;
+
+    expect(listenerCount('stage:start')).toBe(1);
+    expect(listenerCount('move:after')).toBe(1);
+    expect(listenerCount('stage:end')).toBe(1);
+    expect(listenerCount('state:commit')).toBe(1);
+
+    // The three the controller does not consume: those belong to the renderer
+    // and the hook bus.
+    expect(listenerCount('move:before')).toBe(0);
+    expect(listenerCount('tile:merge')).toBe(0);
+    expect(listenerCount('tile:spawn')).toBe(0);
+  });
+
+  it('appends, so a second subscriber displaces nothing', () => {
+    const run = drive();
+    const seen: string[] = [];
+
+    run.engine.events.source.on('move:after', (): void => {
+      seen.push('peer');
+    });
+
+    expect(run.engine.events.listenerCount('move:after')).toBe(2);
+
+    resolveMove(run, boardWithHighest(8), 12);
+
+    expect(seen).toEqual(['peer']);
+    expect(run.controller.goalProgress()).toBeGreaterThan(0);
+  });
+
+  it('tolerates an event it does not consume', () => {
+    const run = drive();
+
+    expect(() => {
+      run.engine.events.emit('tile:spawn', {
+        position: { x: 0, y: 0 },
+        value: 2,
+        turn: 1,
+      });
+    }).not.toThrow();
+  });
+
+  it('stops measuring once its subscriptions are released', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(8), 40);
+
+    const measured = run.controller.goalProgress();
+
+    run.stop();
+    resolveMove(run, boardWithHighest(16), 400);
+
+    expect(run.controller.goalProgress()).toBe(measured);
+  });
+});
+
+/* ==========================================================================
+ * 25. A stage is MEASURED at move:after and RESOLVED at stage:end
+ *
+ * The order Figure 4 (Turn Data Flow) publishes as `SG{"Stage goal met?"} ->
+ * SE["onStageEnd dispatch to reward screen"]`, and Figure 6 (Screen Flow State
+ * Machine) as `Stage -> StageClear -> Reward -> Stage`. Decision DL-STAGE-02.
+ * ========================================================================== */
+
+describe('the stage in progress', () => {
+  it('opens on the first ladder goal with no progress', () => {
+    const run = drive();
+
+    expect(run.controller.stageIndex()).toBe(0);
+    expect(run.controller.goalProgress()).toBe(0);
+    expect(run.controller.relics()).toEqual([]);
+    expect(run.controller.seed().length).toBeGreaterThan(0);
+    expect(run.controller.runId().length).toBeGreaterThan(0);
+    expect(run.controller.stageGoal()).toEqual(
+      stageGoalForIndex(0, run.stages),
+    );
+  });
+
+  it('measures progress from the board a resolved move left', () => {
+    const run = drive();
+    const board = boardWithHighest(8);
+    const expected = evaluateStageGoal(stageGoalForIndex(0, run.stages), {
+      score: 24,
+      highestTileValue: highestTileValue(gridOf(board)),
+    });
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, board, 24);
+
+    expect(run.controller.goalProgress()).toBe(expected.progress);
+    expect(expected.cleared).toBe(false);
+  });
+
+  it('leaves the stage index alone for a move that misses the goal', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(8), 24);
+    commit(run);
+
+    expect(run.controller.stageIndex()).toBe(0);
+    expect(run.controller.stageGoal()).toEqual(
+      stageGoalForIndex(0, run.stages),
+    );
+
+    // Nothing was resolved, so the engine was never asked to end a stage.
+    expect(run.engine.endStages).toEqual([]);
+  });
+
+  it('measures against the goal of the stage in force, then resolves', () => {
+    const run = drive();
+    const cleared = boardWithHighest(16);
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, cleared, 64);
+
+    // MEASURED, against stage 0's target of 16 — and not yet resolved.
+    expect(run.controller.goalProgress()).toBe(1);
+    expect(run.controller.stageIndex()).toBe(0);
+
+    endStage(run, true, 64);
+
+    // RESOLVED: the next index, that index's goal, and progress back to zero.
+    expect(run.controller.stageIndex()).toBe(1);
+    expect(run.controller.stageGoal()).toEqual(
+      stageGoalForIndex(1, run.stages),
+    );
+    expect(run.controller.goalProgress()).toBe(0);
+  });
+
+  it('resolves nothing for a stage:end that did not clear', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 64);
+    endStage(run, false, 64);
+
+    expect(run.controller.stageIndex()).toBe(0);
+    expect(run.controller.goalProgress()).toBe(1);
+  });
+
+  it('reports the advance it made, from one index to the next', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 64);
+    endStage(run, true, 64);
+
+    const [advanced] = run.sink.of('stage-advanced');
+
+    expect(advanced?.detail.fromStageIndex).toBe(0);
+    expect(advanced?.detail.toStageIndex).toBe(1);
+    expect(advanced?.detail.goal).toEqual(stageGoalForIndex(1, run.stages));
+    expect(advanced?.correlationId).toBe(run.controller.correlationId());
+  });
+});
+
+describe('advanceStage', () => {
+  it('recomputes the goal from the curve and zeroes the progress', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(8), 24);
+
+    expect(run.controller.goalProgress()).toBeGreaterThan(0);
+
+    const goal = run.controller.advanceStage();
+
+    expect(goal).toEqual(stageGoalForIndex(1, run.stages));
+    expect(run.controller.stageGoal()).toEqual(goal);
+    expect(run.controller.goalProgress()).toBe(0);
+    expect(run.controller.stageIndex()).toBe(1);
+  });
+
+  it('advances one stage per call, and carries the relics forward', () => {
+    const run = drive();
+
+    takeReward(run, 'port-charged');
+
+    run.controller.advanceStage();
+    run.controller.advanceStage();
+
+    expect(run.controller.stageIndex()).toBe(2);
+    expect(run.controller.stageGoal()).toEqual(
+      stageGoalForIndex(2, run.stages),
+    );
+    expect(run.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-charged',
+    ]);
+  });
+});
+
+describe('the progress that reaches storage', () => {
+  it('is the clamped fraction evaluateStageGoal returned', () => {
+    const run = drive();
+    const board = boardWithHighest(8);
+    const expected = evaluateStageGoal(stageGoalForIndex(0, run.stages), {
+      score: 36,
+      highestTileValue: highestTileValue(gridOf(board)),
+    });
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, board, 36);
+
+    expect(run.controller.persist(run.engine.port, run.cursors)).toBe(true);
+
+    const stored = storedEnvelope(run.backing);
+
+    expect(stored?.goalProgress).toBe(expected.progress);
+    expect(stored?.goalProgress).toBeGreaterThan(0);
+    expect(stored?.goalProgress).toBeLessThan(1);
+    expect(stored?.stageGoal).toEqual(stageGoalForIndex(0, run.stages));
+  });
+
+  it('never exceeds the fraction s upper bound', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(1024), 9000);
+    run.controller.persist(run.engine.port, run.cursors);
+
+    const stored = storedEnvelope(run.backing);
+
+    expect(stored?.goalProgress).toBe(1);
+  });
+});
+
+/* ==========================================================================
+ * 26. startRun, resumeRun and endRun over the ports
+ *
+ * Rows TR-RUNCTL-02 (js/game_manager.js L17-L21 `restart()`), TR-RUNCTL-04
+ * (L35-L45 `setup()`), TR-RUNCTL-05 (L85-L89 the save-or-clear branch) and
+ * TR-RUNCTL-06 (L95 the read-after-write) of docs/TRACEABILITY_MATRIX.md.
+ * ========================================================================== */
+
+describe('startRun', () => {
+  it('opens the engine on the board it was handed', () => {
+    const run = drive({ observe: false });
+    const opening = createMergePairBoard();
+
+    run.controller.startRun(run.engine.port, { board: opening });
+
+    expect(run.engine.setups).toHaveLength(1);
+    expect(run.engine.setups[0]).toEqual(opening);
+    expect(run.controller.openingBoard()).toEqual(opening);
+  });
+
+  it('discards whatever was stored, so the next run starts at stage 0', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    takeReward(run, 'port-plain');
+    run.controller.advanceStage();
+    run.controller.persist(run.engine.port, run.cursors);
+
+    expect(storedEnvelope(run.backing)?.stageIndex).toBe(1);
+
+    run.controller.startRun(run.engine.port);
+
+    expect(run.controller.stageIndex()).toBe(0);
+    expect(run.controller.relics()).toEqual([]);
+    expect(run.controller.goalProgress()).toBe(0);
+    expect(storedEnvelope(run.backing)).toBeNull();
+  });
+
+  it('publishes the run it started', () => {
+    const run = drive();
+
+    run.sink.records.length = 0;
+    run.controller.startRun(run.engine.port, { seed: 'restarted-seed' });
+
+    const [started] = run.sink.of('run-started');
+
+    expect(started?.detail.runId).toBe(run.controller.runId());
+    expect(started?.detail.stageIndex).toBe(0);
+    expect(started?.detail.resumed).toBe(false);
+    expect(started?.detail.seedProvided).toBe(true);
+    expect(started?.correlationId).toBe(run.controller.correlationId());
+  });
+});
+
+describe('resumeRun', () => {
+  it('restores the seed, the run, the stage and the relics stored', () => {
+    const backing = trackStorage(new MemoryStorage());
+    const first = drive({ backing, seed: 'resume-this-run' });
+
+    startStage(first, createEmptyBoard());
+    takeReward(first, 'port-charged');
+    takeReward(first, 'port-plain');
+    first.controller.advanceStage();
+    first.engine.hold(boardWithHighest(8));
+
+    expect(first.controller.persist(first.engine.port, first.cursors)).toBe(
+      true,
+    );
+
+    first.stop();
+
+    const second = drive({ backing, observe: false });
+    const resumed = second.controller.resumeRun(second.engine.port);
+
+    expect(resumed).toBe('loaded');
+    expect(second.controller.seed()).toBe('resume-this-run');
+    expect(second.controller.runId()).toBe(first.controller.runId());
+    expect(second.controller.stageIndex()).toBe(1);
+    expect(second.controller.stageGoal()).toEqual(
+      stageGoalForIndex(1, second.stages),
+    );
+    expect(second.controller.goalProgress()).toBe(
+      first.controller.goalProgress(),
+    );
+
+    // PICKUP ORDER, carried across the reload exactly as it was recorded.
+    expect(second.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-charged',
+      'port-plain',
+    ]);
+  });
+
+  it('continues the substream sequence instead of restarting it', () => {
+    const backing = trackStorage(new MemoryStorage());
+    const first = drive({ backing, seed: 'cursor-continuity' });
+
+    draws(first.streams, 3);
+    first.controller.persist(first.engine.port, first.cursors);
+    first.stop();
+
+    const stored = storedEnvelope(backing);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(stored?.rngCursor[name]).toBe(3);
+    }
+
+    const second = drive({ backing, observe: false });
+
+    second.controller.resumeRun(second.engine.port);
+
+    const continued = createRngStreams(
+      second.controller.seed(),
+      second.controller.cursors(),
+    );
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(continued.stream(name).cursor).toBe(3);
+    }
+
+    expect(draws(continued, 2)).toEqual(draws(first.streams, 2));
+  });
+
+  it('falls back to a fresh run when nothing is stored', () => {
+    const run = drive({ observe: false });
+    const outcomes: RunStateLoadOutcome[] = [];
+
+    expect(() => {
+      outcomes.push(run.controller.resumeRun(run.engine.port));
+    }).not.toThrow();
+
+    expect(outcomes).toEqual(['absent']);
+    expect(run.controller.stageIndex()).toBe(0);
+    expect(run.controller.relics()).toEqual([]);
+    expect(run.controller.seed().length).toBeGreaterThan(0);
+
+    // No envelope was read, so the engine's own port read of the legacy
+    // snapshot is the remaining authority — js/game_manager.js L36.
+    expect(run.engine.setups).toEqual([undefined]);
+  });
+
+  it('falls back to a fresh run for a corrupted payload, and reports it', () => {
+    const backing = storageHolding({ [RUN_STATE_KEY]: '{not json at all' });
+
+    // Composition itself must survive the payload; nothing here writes over it,
+    // so the second composition below reads the same corrupted value.
+    expect(() => drive({ backing, observe: false })).not.toThrow();
+
+    const run = drive({ backing, observe: false });
+
+    expect(run.outcome).toBe('fresh-fallback');
+
+    const [corrupted] = run.sink.of('load-corrupted');
+
+    expect(corrupted).toBeDefined();
+    expect(corrupted?.detail.key).toBe(RUN_STATE_KEY);
+    expect(typeof corrupted?.detail.verdict).toBe('string');
+    expect(Array.isArray(corrupted?.detail.problems)).toBe(true);
+    expect(corrupted?.correlationId).toBe(run.controller.correlationId());
+    expect(corrupted?.correlationId.length).toBeGreaterThan(0);
+
+    // The run is coherent afterwards.
+    expect(run.controller.stageIndex()).toBe(0);
+    expect(run.controller.relics()).toEqual([]);
+    expect(run.controller.stageGoal()).toEqual(
+      stageGoalForIndex(0, run.stages),
+    );
+    expect(run.controller.openingBoard()).toBeNull();
+
+    expect(() => run.controller.resumeRun(run.engine.port)).not.toThrow();
+    expect(run.controller.seed().length).toBeGreaterThan(0);
+  });
+});
+
+describe('endRun', () => {
+  it('summarises the run and removes the envelope', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    takeReward(run, 'port-plain');
+    run.engine.hold({ ...boardWithHighest(8), score: 320 });
+    run.controller.persist(run.engine.port, run.cursors);
+
+    expect(storedEnvelope(run.backing)).not.toBeNull();
+
+    const summary = run.controller.endRun('abandoned');
+
+    expect(summary.score).toBe(320);
+    expect(summary.relics.map((relic) => relic.id)).toEqual(['port-plain']);
+
+    // js/game_manager.js L85-L89 cleared the snapshot on a LOSS and not on a
+    // win; an explicit end clears it whatever the outcome.
+    expect(storedEnvelope(run.backing)).toBeNull();
+    expect(run.store.exists()).toBe(false);
+    expect(run.controller.lastSummary()).toEqual(summary);
+  });
+
+  it('ends once, and reports the same summary for a second call', () => {
+    const run = drive();
+
+    run.engine.hold({ ...createEmptyBoard(), score: 90 });
+    run.controller.persist(run.engine.port, run.cursors);
+
+    const first = run.controller.endRun('won');
+    const second = run.controller.endRun('lost');
+
+    expect(second).toEqual(first);
+    expect(run.sink.of('run-ended')).toHaveLength(1);
+  });
+
+  it('redacts the seed from the report while the summary keeps it', () => {
+    const run = drive({ seed: 'seed-stays-in-the-summary' });
+    const summary = run.controller.endRun('abandoned');
+    const [ended] = run.sink.of('run-ended');
+
+    expect(summary.seed).toBe('seed-stays-in-the-summary');
+    expect(ended?.detail.outcome).toBe('abandoned');
+    expect(JSON.stringify(ended?.detail.summary)).not.toContain(
+      'seed-stays-in-the-summary',
+    );
+    expect(ended?.correlationId).toBe(
+      runCorrelationId('seed-stays-in-the-summary', summary.runId),
+    );
+  });
+
+  it('leaves a fresh run in force, so the next commit starts at stage 0', () => {
+    const run = drive();
+
+    run.controller.advanceStage();
+    run.controller.endRun('lost');
+
+    expect(run.controller.stageIndex()).toBe(0);
+    expect(run.controller.relics()).toEqual([]);
+    expect(run.controller.goalProgress()).toBe(0);
+  });
+});
+
+describe('a restart within a run', () => {
+  it('keeps the stage and the relics, and does not end the run', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    takeReward(run, 'port-charged');
+    run.controller.advanceStage();
+
+    const stage = run.controller.stageIndex();
+    const goal = run.controller.stageGoal();
+
+    // js/game_manager.js L17-L21: the board is discarded and a fresh one opens.
+    run.engine.port.restart();
+    startStage(run, createMergePairBoard());
+    commit(run);
+
+    expect(run.engine.calls).toContain('restart');
+    expect(run.controller.stageIndex()).toBe(stage);
+    expect(run.controller.stageGoal()).toEqual(goal);
+    expect(run.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-charged',
+    ]);
+    expect(run.controller.lastSummary()).toBeNull();
+    expect(run.sink.of('run-ended')).toEqual([]);
+  });
+});
+
+describe('a lost run', () => {
+  it('is finished and cleared by the commit that carries the loss', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    run.controller.persist(run.engine.port, run.cursors);
+
+    expect(storedEnvelope(run.backing)).not.toBeNull();
+
+    run.engine.hold({ ...boardWithHighest(8), score: 150, over: true });
+    commit(run, true);
+
+    const [ended] = run.sink.of('run-ended');
+    const finished = run.controller.lastSummary();
+
+    expect(ended?.detail.outcome).toBe('lost');
+
+    // Reported under the identity of the run that ENDED. `finish()` replaces the
+    // envelope with a fresh run afterwards, so the identifier the controller
+    // publishes from here on belongs to the next run rather than to this one.
+    expect(ended?.correlationId).toBe(
+      runCorrelationId(run.controller.seed(), finished?.runId),
+    );
+    expect(ended?.correlationId).not.toBe(run.controller.correlationId());
+
+    // js/game_manager.js L85-L89 cleared the snapshot on a loss; the envelope
+    // is cleared with it, so the two keys cannot disagree.
+    expect(storedEnvelope(run.backing)).toBeNull();
+    expect(finished?.score).toBe(150);
+  });
+});
+
+
+/* ==========================================================================
+ * 27. Reward resolution records the triple, in pickup order
+ *
+ * Contract 3 of AAP 0.6.1.3 fixes the persisted relic to `id`, optional
+ * `charges` and optional `state`. What an OFFER is drawn from — rarity
+ * weighting, sampling without replacement, the no-duplicate-in-three property —
+ * belongs to src/relics/relic-draw.ts and is asserted in
+ * tests/unit/relics/relic-draw.test.ts; what is asserted here is that the
+ * SELECTED relic is recorded correctly.
+ * ========================================================================== */
+
+describe('resolveReward records the relic it took on', () => {
+  it('records an identifier alone for a relic carrying nothing else', () => {
+    const run = drive();
+
+    expect(takeReward(run, 'port-plain')).toEqual({
+      accepted: true,
+      refusal: null,
+    });
+
+    const [held] = run.controller.relics();
+
+    expect(held).toEqual({ id: 'port-plain' });
+    expect(Object.keys(held ?? {})).toEqual(['id']);
+    expect('charges' in (held ?? {})).toBe(false);
+    expect('state' in (held ?? {})).toBe(false);
+  });
+
+  it('records the budget of a relic that carries one, and nothing more', () => {
+    const run = drive();
+
+    takeReward(run, 'port-charged');
+
+    const [held] = run.controller.relics();
+
+    expect(held).toEqual({ id: 'port-charged', charges: 3 });
+    expect(Object.keys(held ?? {}).sort()).toEqual(['charges', 'id']);
+    expect('state' in (held ?? {})).toBe(false);
+  });
+
+  it('carries an opaque state slot through without reshaping it', () => {
+    const run = drive();
+
+    takeReward(run, 'port-stateful');
+
+    const [held] = run.controller.relics();
+
+    expect(held).toEqual({
+      id: 'port-stateful',
+      charges: 2,
+      state: { spent: 0 },
+    });
+    expect(Object.keys(held ?? {}).sort()).toEqual([
+      'charges',
+      'id',
+      'state',
+    ]);
+  });
+
+  it('records nothing beyond the triple, whatever the registry returned', () => {
+    const run = drive();
+
+    takeReward(run, 'port-stateful');
+    takeReward(run, 'port-charged');
+    takeReward(run, 'port-plain');
+
+    for (const relic of run.controller.relics()) {
+      for (const member of Object.keys(relic)) {
+        expect(['id', 'charges', 'state']).toContain(member);
+      }
+    }
+  });
+});
+
+describe('the order relics are recorded in', () => {
+  it('is pickup order, appended and never sorted', () => {
+    const run = drive();
+
+    takeReward(run, 'port-stateful');
+    takeReward(run, 'port-plain');
+    takeReward(run, 'port-charged');
+
+    expect(run.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-stateful',
+      'port-plain',
+      'port-charged',
+    ]);
+
+    // The live registry agrees, so the order a hook bus would dispatch in and
+    // the order the envelope carries are one order.
+    expect(run.registry.picked()).toEqual([
+      'port-stateful',
+      'port-plain',
+      'port-charged',
+    ]);
+  });
+
+  it('survives a persist and a resume', () => {
+    const backing = trackStorage(new MemoryStorage());
+    const first = drive({ backing, seed: 'pickup-order-survives' });
+
+    takeReward(first, 'port-charged');
+    takeReward(first, 'port-second-plain');
+    takeReward(first, 'port-plain');
+    first.controller.persist(first.engine.port, first.cursors);
+    first.stop();
+
+    expect(storedEnvelope(backing)?.relics.map((relic) => relic.id)).toEqual([
+      'port-charged',
+      'port-second-plain',
+      'port-plain',
+    ]);
+
+    const second = drive({ backing, observe: false });
+
+    expect(second.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-charged',
+      'port-second-plain',
+      'port-plain',
+    ]);
+
+    // Handed back to the registry in the same order, so a resumed run dispatches
+    // to its relics rather than only displaying them.
+    expect(second.registry.picked()).toEqual([
+      'port-charged',
+      'port-second-plain',
+      'port-plain',
+    ]);
+    expect(second.registry.calls).toContain('restoreRelics');
+  });
+
+  it('appends at the end, leaving every earlier position where it was', () => {
+    const run = drive();
+
+    takeReward(run, 'port-plain');
+
+    const before = run.controller.relics();
+
+    takeReward(run, 'port-charged');
+
+    const after = run.controller.relics();
+
+    expect(after.slice(0, before.length)).toEqual(before);
+    expect(after[after.length - 1]?.id).toBe('port-charged');
+  });
+});
+
+describe('a selection the run cannot take', () => {
+  it('refuses an identifier that was never offered, without throwing', () => {
+    const run = drive();
+
+    takeReward(run, 'port-plain');
+
+    const resolution = run.controller.resolveReward('port-charged');
+
+    expect(resolution).toEqual({ accepted: false, refusal: 'not-offered' });
+    expect(run.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-plain',
+    ]);
+  });
+
+  it('refuses an unknown identifier and reports it with usable detail', () => {
+    const run = drive();
+
+    // Offered while the catalogue carried it, withdrawn before the selection:
+    // the offer stands, and the membership question now answers no.
+    run.controller.recordRewardOffer(['port-charged']);
+    run.registry.forget('port-charged');
+
+    const resolution = run.controller.resolveReward('port-charged');
+
+    expect(resolution).toEqual({ accepted: false, refusal: 'unknown' });
+
+    // The run is coherent: nothing was recorded and nothing was half-recorded.
+    expect(run.controller.relics()).toEqual([]);
+    expect(run.registry.picked()).toEqual([]);
+    expect(run.controller.stageIndex()).toBe(0);
+
+    const drawn = run.sink.of('reward-drawn');
+    const last = drawn[drawn.length - 1];
+
+    expect(last?.detail.selectedRelicId).toBe('port-charged');
+    expect(last?.detail.refusal).toBe('unknown');
+    expect(last?.detail.accepted).toBe(false);
+    expect(last?.detail.offeredRelicIds).toEqual(['port-charged']);
+    expect(last?.correlationId).toBe(run.controller.correlationId());
+    expect(last?.correlationId.length).toBeGreaterThan(0);
+  });
+
+  it('refuses an offer the catalogue never carried, and reports the offer', () => {
+    const run = drive();
+
+    expect(run.controller.recordRewardOffer(['no-such-relic'])).toBe(false);
+
+    const [offered] = run.sink.of('reward-drawn');
+
+    expect(offered?.detail.refusal).toBe('offer');
+    expect(offered?.detail.selectedRelicId).toBeUndefined();
+
+    // Nothing was offered, so nothing can be selected from it.
+    expect(run.controller.resolveReward('no-such-relic')).toEqual({
+      accepted: false,
+      refusal: 'not-offered',
+    });
+    expect(run.controller.relics()).toEqual([]);
+  });
+
+  it('refuses an empty identifier', () => {
+    const run = drive();
+
+    expect(run.controller.resolveReward('')).toEqual({
+      accepted: false,
+      refusal: 'not-offered',
+    });
+    expect(run.controller.relics()).toEqual([]);
+  });
+
+  it('refuses a relic the run already holds', () => {
+    const run = drive();
+
+    expect(takeReward(run, 'port-charged').accepted).toBe(true);
+
+    // Offered and selected a second time: the run holds it, so it is refused
+    // rather than recorded twice.
+    const again = takeReward(run, 'port-charged');
+
+    expect(again).toEqual({ accepted: false, refusal: 'held' });
+    expect(run.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-charged',
+    ]);
+    expect(run.registry.picked()).toEqual(['port-charged']);
+  });
+
+  it('withdraws the record when the registry refuses the pickup', () => {
+    const run = drive();
+
+    run.registry.refuseEveryPickup();
+
+    const resolution = takeReward(run, 'port-plain');
+
+    expect(resolution).toEqual({ accepted: false, refusal: 'refused' });
+    expect(run.controller.relics()).toEqual([]);
+    expect(storedEnvelope(run.backing)).toBeNull();
+  });
+});
+
+describe('the controller branches on no individual relic', () => {
+  it('records an identifier only the injected registry knows', () => {
+    const run = drive();
+
+    // Every identifier in this suite's catalogue is declared in this file.
+    // Nothing in src/run names one, so the registry is the only construct that
+    // knows the relic exists.
+    for (const relic of recordingCatalogue()) {
+      expect(takeReward(run, relic.id).accepted).toBe(true);
+    }
+
+    expect(run.controller.relics().map((held) => held.id)).toEqual(
+      recordingCatalogue().map((relic) => relic.id),
+    );
+  });
+
+  it('records nothing at all when no registry can be asked', () => {
+    const run = drive({ relics: false });
+
+    // A controller composed without a registry admits an identifier on its
+    // shape alone and persists the bare identifier.
+    expect(takeReward(run, 'any-identifier-at-all')).toEqual({
+      accepted: true,
+      refusal: null,
+    });
+    expect(run.controller.relics()).toEqual([{ id: 'any-identifier-at-all' }]);
+    expect(run.registry.calls).toEqual([]);
+  });
+});
+
+describe('the reward round a cleared stage opens', () => {
+  /** The offer a drawing run presents, as a reward screen would show it. */
+  const offers: readonly RewardOffer[] = Object.freeze([
+    Object.freeze({
+      id: 'port-charged',
+      name: 'Charged',
+      rarity: 'common',
+      description: 'A relic with a budget.',
+      hooks: Object.freeze(['onMerge']),
+      charges: 3,
+    }),
+    Object.freeze({
+      id: 'port-plain',
+      name: 'Plain',
+      rarity: 'common',
+      description: 'A relic with no budget.',
+      hooks: Object.freeze(['onSpawn']),
+    }),
+  ]);
+
+  it('waits on the player: the stage clears, then the offer stands', () => {
+    const run = drive({ offers });
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 64);
+    commit(run);
+
+    // Stage -> StageClear -> Reward of Figure 6: the stage was resolved and the
+    // index has NOT moved while the choice stands.
+    expect(run.engine.endStages).toEqual([true]);
+    expect(run.controller.isRewardPending()).toBe(true);
+    expect(run.controller.currentOffer().map((offer) => offer.id)).toEqual([
+      'port-charged',
+      'port-plain',
+    ]);
+    expect(run.controller.stageIndex()).toBe(0);
+  });
+
+  it('advances on the selection: Reward -> Stage', () => {
+    const run = drive({ offers });
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 64);
+    commit(run);
+
+    expect(run.controller.resolveReward('port-plain')).toEqual({
+      accepted: true,
+      refusal: null,
+    });
+
+    expect(run.controller.stageIndex()).toBe(1);
+    expect(run.controller.stageGoal()).toEqual(
+      stageGoalForIndex(1, run.stages),
+    );
+    expect(run.controller.goalProgress()).toBe(0);
+    expect(run.controller.isRewardPending()).toBe(false);
+    expect(run.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-plain',
+    ]);
+
+    // The selection persisted itself, rather than waiting for a later commit.
+    expect(storedEnvelope(run.backing)?.relics.map((relic) => relic.id)).toEqual(
+      ['port-plain'],
+    );
+    expect(storedEnvelope(run.backing)?.stageIndex).toBe(1);
+  });
+
+  it('reports the offer and then the selection', () => {
+    const run = drive({ offers });
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 64);
+    commit(run);
+    run.controller.resolveReward('port-charged');
+
+    const [offered] = run.sink.of('reward-offered');
+    const drawn = run.sink.of('reward-drawn');
+    const taken = drawn[drawn.length - 1];
+
+    expect(offered?.detail.stageIndex).toBe(0);
+    expect(offered?.detail.offeredRelicIds).toEqual([
+      'port-charged',
+      'port-plain',
+    ]);
+    expect(taken?.detail.selectedRelicId).toBe('port-charged');
+    expect(taken?.detail.accepted).toBe(true);
+    expect(taken?.detail.refusal).toBeUndefined();
+  });
+
+  it('excludes a relic the run already holds from the next offer', () => {
+    const run = drive({ offers });
+
+    takeReward(run, 'port-charged');
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 64);
+    commit(run);
+
+    expect(run.controller.currentOffer().map((offer) => offer.id)).toEqual([
+      'port-plain',
+    ]);
+  });
+
+  it('leaves the offer standing when a selection is refused', () => {
+    const run = drive({ offers });
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 64);
+    commit(run);
+
+    expect(
+      run.controller.resolveReward('port-second-plain').accepted,
+    ).toBe(false);
+    expect(run.controller.isRewardPending()).toBe(true);
+    expect(run.controller.currentOffer()).toHaveLength(2);
+    expect(run.controller.stageIndex()).toBe(0);
+  });
+});
+
+
+/* ==========================================================================
+ * 28. summary(): the run as a summary screen reads it
+ *
+ * Working assumption A4 of AAP 0.1.1.4: the seed is DISPLAYED AND COPYABLE on
+ * the run summary and accepted on the run-start screen. Sharing, networking and
+ * daily seeds are out of scope per AAP 0.7.2.1, and nothing here asserts one.
+ * ========================================================================== */
+
+describe('summary', () => {
+  it('carries the final score, the stage reached, the relics and the seed', () => {
+    const run = drive({ seed: 'summary-seed' });
+
+    startStage(run, createEmptyBoard());
+    takeReward(run, 'port-charged');
+    takeReward(run, 'port-plain');
+    run.controller.advanceStage();
+    run.engine.hold({ ...boardWithHighest(64), score: 1480 });
+    run.controller.persist(run.engine.port, run.cursors);
+
+    const summary: RunSummary = run.controller.summary();
+
+    expect(summary.seed).toBe('summary-seed');
+    expect(summary.runId).toBe(run.controller.runId());
+    expect(summary.score).toBe(1480);
+    expect(summary.stageIndex).toBe(run.controller.stageIndex());
+    expect(summary.relics.map((relic) => relic.id)).toEqual([
+      'port-charged',
+      'port-plain',
+    ]);
+  });
+
+  it('exposes the run seed itself, character for character', () => {
+    const entered = '  A Seed With  Spaces  ';
+    const run = drive({ seed: normalizeEnteredSeed(entered) });
+
+    expect(run.controller.summary().seed).toBe(run.controller.seed());
+    expect(run.controller.summary().seed).toBe('A Seed With  Spaces');
+  });
+
+  it('is JSON-serialisable, so a screen can render and copy it', () => {
+    const run = drive({ seed: 'serialisable-summary' });
+
+    takeReward(run, 'port-stateful');
+    run.engine.hold({ ...createMergePairBoard(), score: 12 });
+    run.controller.persist(run.engine.port, run.cursors);
+
+    const summary = run.controller.summary();
+    const encoded = JSON.stringify(summary);
+
+    expect(typeof encoded).toBe('string');
+    expect(JSON.parse(encoded) as RunSummary).toEqual(summary);
+    expect(encoded).toContain('serialisable-summary');
+  });
+
+  it('is a read-only projection: it mutates nothing and repeats itself', () => {
+    const run = drive({ seed: 'read-only-summary' });
+
+    startStage(run, createEmptyBoard());
+    takeReward(run, 'port-charged');
+    resolveMove(run, boardWithHighest(8), 44);
+    run.controller.persist(run.engine.port, run.cursors);
+
+    const before = run.controller.state();
+    const first = run.controller.summary();
+    const second = run.controller.summary();
+
+    expect(second).toEqual(first);
+    expect(second).not.toBe(first);
+    expect(run.controller.state()).toEqual(before);
+    expect(run.controller.stageIndex()).toBe(before.stageIndex);
+    expect(run.controller.goalProgress()).toBe(before.goalProgress);
+    expect(run.controller.relics()).toEqual(before.relics);
+
+    // A caller writing into the projection cannot reach the envelope.
+    expect(storedEnvelope(run.backing)?.relics.map((relic) => relic.id)).toEqual(
+      ['port-charged'],
+    );
+  });
+
+  it('has no summary of a finished run until one finishes', () => {
+    const run = drive();
+
+    expect(run.controller.lastSummary()).toBeNull();
+
+    const finished = run.controller.endRun('won');
+
+    expect(run.controller.lastSummary()).toEqual(finished);
+  });
+});
+
+/* ==========================================================================
+ * 29. The correlation identifier every report of a run carries
+ *
+ * Row TR-RUNCTL-04 and decision DL-RUNCTL-04: the identifier is REPUBLISHED
+ * from an injected source, never derived here, and `runCorrelationId()` of
+ * src/run/run-state.ts is the derivation the composition root supplies. An
+ * identifier that shifted mid-run would leave every log line of that run
+ * unjoinable.
+ * ========================================================================== */
+
+describe('correlationId', () => {
+  it('is the identifier derived from the seed and the run identifier', () => {
+    const run = drive({ seed: 'correlated-run' });
+
+    expect(run.controller.correlationId()).toBe(
+      runCorrelationId(run.controller.seed(), run.controller.runId()),
+    );
+    expect(run.controller.correlationId().length).toBeGreaterThan(0);
+  });
+
+  it('is unchanged across a move, an advance, a reward and a reload', () => {
+    const backing = trackStorage(new MemoryStorage());
+    const run = drive({ backing, seed: 'stable-across-a-run' });
+    const pinned = run.controller.correlationId();
+
+    startStage(run, createEmptyBoard());
+    expect(run.controller.correlationId()).toBe(pinned);
+
+    resolveMove(run, boardWithHighest(8), 24);
+    expect(run.controller.correlationId()).toBe(pinned);
+
+    takeReward(run, 'port-charged');
+    expect(run.controller.correlationId()).toBe(pinned);
+
+    run.controller.advanceStage();
+    expect(run.controller.correlationId()).toBe(pinned);
+
+    commit(run);
+    expect(run.controller.correlationId()).toBe(pinned);
+
+    expect(run.controller.persist(run.engine.port, run.cursors)).toBe(true);
+    expect(run.controller.correlationId()).toBe(pinned);
+
+    run.stop();
+
+    // THE RELOAD. A resumed run keeps the stored seed and run identifier, so it
+    // reports under the identifier the run has been reporting under all along.
+    const resumed = drive({ backing, observe: false });
+
+    resumed.controller.resumeRun(resumed.engine.port);
+
+    expect(resumed.controller.seed()).toBe(run.controller.seed());
+    expect(resumed.controller.runId()).toBe(run.controller.runId());
+    expect(resumed.controller.correlationId()).toBe(pinned);
+  });
+
+  it('is a different identifier for a new run', () => {
+    const run = drive({ seed: 'first-of-two' });
+    const first = run.controller.correlationId();
+
+    run.controller.startRun(run.engine.port, { seed: 'second-of-two' });
+
+    const second = run.controller.correlationId();
+
+    expect(second).not.toBe(first);
+    expect(second).toBe(
+      runCorrelationId(run.controller.seed(), run.controller.runId()),
+    );
+  });
+
+  it('separates two runs replaying one seed', () => {
+    const first = drive({ seed: 'one-seed-two-runs' });
+    const second = drive({ seed: 'one-seed-two-runs' });
+
+    expect(second.controller.seed()).toBe(first.controller.seed());
+    expect(second.controller.runId()).not.toBe(first.controller.runId());
+    expect(second.controller.correlationId()).not.toBe(
+      first.controller.correlationId(),
+    );
+
+    // Both still group under the seed, which is the grouping form's whole point.
+    const grouped = runCorrelationId('one-seed-two-runs');
+
+    expect(first.controller.correlationId().startsWith(grouped)).toBe(true);
+    expect(second.controller.correlationId().startsWith(grouped)).toBe(true);
+  });
+
+  it('is carried by every report the run makes', () => {
+    const run = drive({ seed: 'reported-under-one-id' });
+    const pinned = run.controller.correlationId();
+
+    startStage(run, createEmptyBoard());
+    takeReward(run, 'port-charged');
+    resolveMove(run, boardWithHighest(16), 64);
+    endStage(run, true, 64);
+    commit(run);
+
+    expect(run.sink.records.length).toBeGreaterThan(0);
+
+    for (const record of run.sink.records) {
+      expect(record.correlationId).toBe(pinned);
+      expect(record.correlationId.length).toBeGreaterThan(0);
+    }
+
+    // The records carry usable detail, not just an identifier.
+    expect(run.sink.of('run-started')).toHaveLength(1);
+    expect(run.sink.of('reward-drawn')).toHaveLength(1);
+    expect(run.sink.of('stage-advanced')).toHaveLength(1);
+  });
+
+  it('reports a failed write with the key, a size and the cause', () => {
+    // A store whose port refuses every write, which is what a full quota looks
+    // like from here.
+    const run = drive();
+    const refusing = new RunStateStore({
+      storage: {
+        readRaw: (): string | null => null,
+        readJson: (): unknown => null,
+        writeJson: (): boolean => false,
+        removeRaw: (): boolean => true,
+      },
+      config: run.config,
+      reporter: run.sink.reporter,
+    });
+    const controller = new RunController({
+      store: refusing,
+      identity: run.controller.identity,
+      config: run.config,
+      stages: run.stages,
+      reporter: run.sink.reporter,
+      correlationId: 'pinned-correlation-id',
+    });
+
+    controller.begin();
+
+    expect(controller.persist(run.engine.port, run.cursors)).toBe(false);
+
+    const failures = run.sink.of('write-failed');
+
+    expect(failures.length).toBeGreaterThan(0);
+
+    const last = failures[failures.length - 1];
+
+    expect(last?.correlationId).toBe('pinned-correlation-id');
+    expect(last?.detail.key).toBe(RUN_STATE_KEY);
+    expect(last?.detail.error).toBeDefined();
+    expect(controller.correlationId()).toBe('pinned-correlation-id');
+  });
+});
+
+/* ==========================================================================
+ * 30. stageCommitContextProvider: the stage slice the engine places on a commit
+ *
+ * Row TR-RUNCTL-08 of docs/TRACEABILITY_MATRIX.md. The provider is HANDED TO the
+ * engine, which is what keeps src/engine from importing src/run or src/relics.
+ * ========================================================================== */
+
+describe('stageCommitContextProvider', () => {
+  it('yields a provider that reads the stage in force at call time', () => {
+    const run = drive();
+    const provider = run.controller.stageCommitContextProvider();
+    const opening: StageCommitContext = provider();
+
+    expect(opening.stageIndex).toBe(0);
+    expect(opening.goal).toEqual(stageGoalForIndex(0, run.stages));
+    expect(opening.goalProgress).toBe(0);
+
+    run.controller.advanceStage();
+
+    // The SAME provider, read again: it resolves the envelope fresh rather than
+    // capturing it.
+    const advanced = provider();
+
+    expect(advanced.stageIndex).toBe(1);
+    expect(advanced.goal).toEqual(stageGoalForIndex(1, run.stages));
+    expect(advanced.goalProgress).toBe(0);
+  });
+
+  it('reflects the progress a resolved move measured', () => {
+    const run = drive();
+    const provider = run.controller.stageCommitContextProvider();
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(8), 24);
+
+    const slice = provider();
+
+    expect(slice.goalProgress).toBe(run.controller.goalProgress());
+    expect(slice.goalProgress).toBeGreaterThan(0);
+    expect(slice.goalProgress).toBeLessThanOrEqual(1);
+    expect(slice.stageIndex).toBe(run.controller.stageIndex());
+    expect(slice.goal).toEqual(run.controller.stageGoal());
+  });
+
+  it('hands out a frozen copy of the goal rather than the live one', () => {
+    const run = drive();
+    const first = run.controller.stageCommitContextProvider()();
+    const second = run.controller.stageCommitContextProvider()();
+
+    expect(second.goal).toEqual(first.goal);
+    expect(second.goal).not.toBe(first.goal);
+    expect(Object.isFrozen(first.goal)).toBe(true);
+  });
+
+  it('is what a commit payload carries, beside the relic slice', () => {
+    const run = drive();
+    const carried: StageCommitContext[] = [];
+
+    run.engine.events.source.on('state:commit', (event): void => {
+      carried.push(event.stage);
+    });
+
+    startStage(run, createEmptyBoard());
+    takeReward(run, 'port-charged');
+    resolveMove(run, boardWithHighest(8), 24);
+    commit(run);
+
+    const [slice] = carried;
+
+    expect(slice?.stageIndex).toBe(0);
+    expect(slice?.goal).toEqual(stageGoalForIndex(0, run.stages));
+    expect(slice?.goalProgress).toBe(run.controller.goalProgress());
+    expect(run.controller.relicCommitContextProvider()()).toEqual([
+      { id: 'port-charged', charges: 3 },
+    ]);
+  });
+});
+
+/* ==========================================================================
+ * 31. Storage isolation across the cases of this file
+ *
+ * The two cases below are ORDERED: the first writes the frozen best-score key
+ * into a tracked store, the second finds it gone. js/local_storage_manager.js
+ * L61-L63 removed the board snapshot and never the best score, so a suite that
+ * ignored the key would leak the highest score into every case after it.
+ * ========================================================================== */
+
+/** One store the ordered pair below shares, tracked for teardown. */
+const isolationBacking = trackStorage(new MemoryStorage());
+
+describe('the persistence teardown', () => {
+  it('leaves a best score and an envelope for the teardown to remove', () => {
+    const manager = new LocalStorageManager({ storage: isolationBacking });
+
+    expect(manager.setBestScore(4096)).toBe(true);
+
+    const run = drive({ backing: isolationBacking, seed: 'leaks-nothing' });
+
+    takeReward(run, 'port-plain');
+
+    expect(typeof isolationBacking.getItem(BEST_SCORE_KEY)).toBe('string');
+    expect(isolationBacking.getItem(RUN_STATE_KEY)).not.toBeUndefined();
+    expect(manager.getBestScore()).toBe('4096');
+  });
+
+  it('finds every key the product owns gone at the start of a later case', () => {
+    expect(isolationBacking.getItem(BEST_SCORE_KEY)).toBeUndefined();
+    expect(isolationBacking.getItem(GAME_STATE_KEY)).toBeUndefined();
+    expect(isolationBacking.getItem(RUN_STATE_KEY)).toBeUndefined();
+
+    for (const key of CLEARED_KEYS) {
+      expect(isolationBacking.getItem(key)).toBeUndefined();
+    }
+
+    // The frozen literal is one of the keys removed, named through the imported
+    // constant rather than spelled out here.
+    expect(CLEARED_KEYS).toContain(BEST_SCORE_KEY);
+    expect(new LocalStorageManager({ storage: isolationBacking }).getBestScore())
+      .toBe(0);
+  });
+});
+
+/* ==========================================================================
+ * 32. The engine port keeps one member per vanilla input action
+ *
+ * Row TR-RUNCTL-03 of docs/TRACEABILITY_MATRIX.md: js/game_manager.js L24-L32,
+ * the `keepPlaying` and terminated branches.
+ *
+ * THE RENAME THIS FILE MAKES VERIFIABLE. `GameManager.prototype.keepPlaying`
+ * assigned `this.keepPlaying = true` over its own prototype method (L24-L27),
+ * and `isGameTerminated` read that same shadowed name (L31). On `EnginePort` the
+ * two are separate members: a command and a query.
+ *
+ * The other two spellings of the name stay frozen and are asserted where they
+ * live — the INPUT ACTION name in tests/unit/input/input-dispatch.test.ts, and
+ * the PERSISTED board member in tests/unit/run/run-state.test.ts.
+ * ========================================================================== */
+
+describe('the ported engine port', () => {
+  it('publishes move, restart and continuePlaying, one per input action', () => {
+    const run = drive({ observe: false });
+    const port = run.engine.port;
+
+    // The three names js/game_manager.js L9-L11 subscribed at construction.
+    expect(typeof port.move).toBe('function');
+    expect(typeof port.restart).toBe('function');
+    expect(typeof port.continuePlaying).toBe('function');
+  });
+
+  it('separates the terminated query from the continue command', () => {
+    const run = drive({ observe: false });
+    const port = run.engine.port;
+
+    expect(typeof port.isGameTerminated).toBe('function');
+    expect(typeof port.continuePlaying).toBe('function');
+
+    // Two members, never one name carrying both a method and a boolean.
+    expect(port.isGameTerminated).not.toBe(port.continuePlaying);
+    expect(port.isGameTerminated()).toBe(false);
+    expect(run.engine.calls).toContain('isGameTerminated');
+  });
+
+  it('reads the frozen board member when it answers the query', () => {
+    const run = drive({ observe: false });
+
+    // A won board with play not continued is terminated; continuing it is what
+    // the command does, and the flag it reads carries the frozen wire name.
+    run.engine.hold({ ...createMergePairBoard(), won: true });
+
+    expect(run.engine.port.isGameTerminated()).toBe(true);
+
+    run.engine.hold({
+      ...createMergePairBoard(),
+      won: true,
+      keepPlaying: true,
+    });
+
+    expect(run.engine.port.isGameTerminated()).toBe(false);
+  });
+
+  it('takes exactly the four directions and nothing wider', () => {
+    const run = drive({ observe: false });
+    const directions: readonly MoveDirection[] = [0, 1, 2, 3];
+
+    for (const direction of directions) {
+      expect(run.engine.port.move(direction)).toBe(true);
+    }
+
+    expect(run.engine.moves).toEqual([0, 1, 2, 3]);
   });
 });
