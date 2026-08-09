@@ -12,30 +12,43 @@
 // carried no counter, gauge or histogram:
 //   TR-METRIC-01  the counter, gauge and histogram primitives
 //   TR-METRIC-02  the series registry and the canonical metric-name contract
-//   TR-METRIC-03  the turn-boundary counters `turnsTotal`, `mergesTotal` and
+//   TR-METRIC-03  the emission-fed turn-boundary counters `mergesTotal` and
 //                 `spawnsTotal`
-//   TR-METRIC-04  the engine-counter families `spawnAttemptsTotal` and
-//                 `spawnSuppressedTotal`
+//   TR-METRIC-04  the counter-fed families `turnsTotal`, `spawnAttemptsTotal`
+//                 and `spawnSuppressedTotal`
 //   TR-METRIC-05  the pull integration with the hook bus's dispatch counts
 //   TR-METRIC-06  the Prometheus text exposition and the snapshot `download`
 //
 // Boundaries the turn-boundary counters come from in the retired control flow:
-// `turnsTotal` from `move()` entry through the actuation push, `mergesTotal`
+// `turnsTotal` from the actuation push of js/game_manager.js L182-L190, which
+// sat INSIDE that method's `if (moved)` block, so a vanilla move that changed
+// nothing spawned nothing, actuated nothing and closed no turn; `mergesTotal`
 // from the merge branch, which is entered once per merge inside the traversal
-// so a move resolving two merges enters it twice, and `spawnsTotal` from
+// so a move resolving two merges enters it twice; and `spawnsTotal` from
 // `addRandomTile()`.
 //
 // WHICH FEED EACH FAMILY HAS. An engine EVENT feeds `engineEventsTotal`,
-// `turnsTotal`, `mergesTotal` and `spawnsTotal`, through `recordEngineEvent`
-// or `recordEngineEventCount`; an engine COUNTER feeds `spawnAttemptsTotal`
-// and `spawnSuppressedTotal`, through `recordSpawnAttempt` and
-// `recordSpawnSuppressed`. The two are not interchangeable: the engine
-// returns before emitting `tile:spawn` on a full board — the boundary that
-// keeps a full board free of draws — so an emission count measures resolved
-// spawns and attempts are only observable at the engine's own
+// `mergesTotal` and `spawnsTotal`, through `recordEngineEvent` or
+// `recordEngineEventCount`; an engine COUNTER feeds `turnsTotal`,
+// `spawnAttemptsTotal` and `spawnSuppressedTotal`, through
+// `recordTurnResolved`, `recordSpawnAttempt` and `recordSpawnSuppressed`. The
+// two are not interchangeable, for the same reason in both directions.
+//
+// The engine returns before emitting `tile:spawn` on a full board — the
+// boundary that keeps a full board free of draws — so an emission count
+// measures resolved spawns and attempts are only observable at the engine's own
 // `engine.spawn.attempt` counter, raised on entry to the spawn. Feeding an
 // attempt family from an emission under-reports it by exactly the full-board
-// attempts, and that is the one substitution this module refuses to make.
+// attempts.
+//
+// `move:after`, symmetrically, is the completion signal of EVERY turn that
+// reached the walk and carries `moved: false` for one that moved nothing, so an
+// emission count measures turns ATTEMPTED. A turn that resolved is observable
+// at the engine's own `engine.move.resolved` counter, raised once per move that
+// changed the board. Feeding the turn family from the emission OVER-reports it
+// by exactly the idle inputs — pressing into a wall, repeating a direction on a
+// settled board — which skews every rate derived from it, and that is the
+// substitution this module refuses to make in either direction.
 //
 // Emission counts do not vary with observers. The emitter counts an emission
 // before it looks a listener up, so an event with no subscriber is counted
@@ -238,6 +251,18 @@ export const METRIC_PREFIX = 'game2048_';
  * `_milliseconds`.
  */
 export const METRIC_NAMES = Object.freeze({
+  /**
+   * Turns that resolved a move. Boundary: the actuation push of
+   * js/game_manager.js L182-L190, which sat inside that method's `if (moved)`
+   * block, and which is the engine's `engine.move.resolved` counter. It is NOT
+   * the `move:after` event: that event is the completion signal of every turn
+   * that reached the walk and carries `moved: false` for a turn that moved
+   * nothing, so an emission count measures turns attempted. Fed by
+   * `recordTurnResolved` alone.
+   *
+   * Never above `engine_events_total{event="move:after"}`, and below it by
+   * exactly the number of idle inputs.
+   */
   turnsTotal: `${METRIC_PREFIX}turns_total`,
   mergesTotal: `${METRIC_PREFIX}merges_total`,
 
@@ -310,7 +335,9 @@ export const METRIC_LABELS = Object.freeze({
 
 const METRIC_HELP: Readonly<Record<keyof typeof METRIC_NAMES, string>> =
   Object.freeze({
-    turnsTotal: 'Turns resolved, one per move:after emission.',
+    turnsTotal:
+      'Turns that resolved a move, one per engine turn that changed the ' +
+      'board. Idle turns are not counted.',
     mergesTotal: 'Tile merges resolved, one per tile:merge emission.',
     spawnsTotal:
       'Tiles inserted, one per tile:spawn emission carrying a position.',
@@ -1547,8 +1574,14 @@ export class MetricsRegistry {
    *
    * `tile:merge` is emitted once per merge — js/game_manager.js L156-L170 was
    * entered once per merge inside the traversal — so a move that resolves two
-   * merges calls this twice and the merge counter rises by two. `move:after`
-   * closes one turn.
+   * merges calls this twice and the merge counter rises by two.
+   *
+   * `move:after` closes NO turn here and does not touch `turns_total`. It is
+   * the completion signal of every turn that reached the walk, emitted with
+   * `moved: false` for a turn that moved nothing, so counting emissions
+   * over-reports turns by exactly the idle inputs. Turns that resolved arrive
+   * through `recordTurnResolved`, from the engine's own
+   * `engine.move.resolved` counter.
    *
    * `tile:spawn` stands for one tile INSERTED, and only when its payload
    * carries a position. It is not the spawn-attempt boundary and it does not
@@ -1572,9 +1605,7 @@ export class MetricsRegistry {
 
       counter.inc(1);
 
-      if (event === 'move:after') {
-        this.turnsCounter.inc(1);
-      } else if (event === 'tile:merge') {
+      if (event === 'tile:merge') {
         this.mergesCounter.inc(1);
       } else if (event === 'tile:spawn' && carriesSpawnPosition(detail)) {
         this.spawnsCounter.inc(1);
@@ -1594,11 +1625,14 @@ export class MetricsRegistry {
    * report that carries no `event` but names an engine event in `hook` is
    * refused and reported rather than folded under that hook.
    *
-   * Equivalent to `recordEngineEvent` for the per-event, turn and merge
-   * families, and the path a wiring layer uses when it is handed reports
-   * rather than events. It records no insertion, because a count report
-   * carries no payload: insertions arrive with the event through
-   * `recordEngineEvent`.
+   * Equivalent to `recordEngineEvent` for the per-event and merge families, and
+   * the path a wiring layer uses when it is handed reports rather than events.
+   * It records no insertion and no turn, because a count report carries no
+   * payload and no resolution: insertions arrive with the event through
+   * `recordEngineEvent`, and turns that resolved arrive through
+   * `recordTurnResolved` from the engine's `engine.move.resolved` counter. A
+   * `move:after` report therefore raises the per-event family and nothing else —
+   * the report cannot tell a turn that resolved from one that moved nothing.
    *
    * @param report One count report. `value` is the number of emissions it
    *   stands for, read as one when absent.
@@ -1659,11 +1693,32 @@ export class MetricsRegistry {
 
       counter.inc(emissions);
 
-      if (named === 'move:after') {
-        this.turnsCounter.inc(emissions);
-      } else if (named === 'tile:merge') {
+      if (named === 'tile:merge') {
         this.mergesCounter.inc(emissions);
       }
+    } catch {
+      this.reporterFaults += 1;
+    }
+  }
+
+  /**
+   * Counts one turn that resolved a move.
+   *
+   * THE AUTHORITATIVE TURN BOUNDARY, which is the engine's
+   * `engine.move.resolved` counter, raised once per move that changed the board
+   * immediately before the commit that ends it — the actuation push of
+   * js/game_manager.js L182-L190, which sat inside that method's `if (moved)`
+   * block. It is therefore the only feed `turns_total` has.
+   *
+   * The `move:after` event is NOT that boundary and does not reach this: the
+   * engine emits it for every turn that reached the walk, carrying
+   * `moved: false` for one that moved nothing, so a turn family fed from the
+   * emission counts idle inputs — a press into a wall, a direction repeated on
+   * a settled board — as turns and skews every rate derived from it.
+   */
+  recordTurnResolved(): void {
+    try {
+      this.turnsCounter.inc(1);
     } catch {
       this.reporterFaults += 1;
     }

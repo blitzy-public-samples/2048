@@ -30,6 +30,7 @@ import { describe, expect, it } from 'vitest';
 import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import { Engine } from '../../../src/engine/engine';
 import { createRngStreams } from '../../../src/rng/rng-streams';
+import type { RngCursorMap } from '../../../src/rng/rng-streams';
 import { DIRECTION_LEFT } from '../../../src/engine/types';
 
 /* ===== Harness ===== */
@@ -253,6 +254,119 @@ describe('the wrapper is a measurement, not a transformation', () => {
 
     expect(runs).toBe(1);
     expect(engine.score).toBe(4);
+  });
+});
+
+/* ==========================================================================
+ * A wrapper that breaks its own contract
+ * ========================================================================== */
+
+describe('a wrapper that breaks the exactly-once contract', () => {
+  /** Counter name the engine raises for a contained wrapper violation. */
+  const TRACING_FAULT_METRIC = 'engine.move.tracing.fault';
+
+  /**
+   * Builds an engine on the merge-pair board with the given wrapper, and
+   * collects the counters it reports.
+   *
+   * @param traceMoveResolution Wrapper to inject, or `undefined` for none.
+   * @returns The engine and the counter tally.
+   */
+  const createCounted = (
+    traceMoveResolution?: <T>(run: () => T) => T,
+  ): {
+    engine: Engine;
+    counts: Map<string, number>;
+    cursors: () => RngCursorMap;
+  } => {
+    const counts = new Map<string, number>();
+    const streams = createRngStreams(RUN_SEED);
+    const engine = new Engine({
+      config: createDefaultRulesConfig(),
+      streams,
+      reporter: {
+        onCount: (report): void => {
+          counts.set(
+            report.metric,
+            (counts.get(report.metric) ?? 0) + report.value,
+          );
+        },
+      },
+      ...(traceMoveResolution === undefined
+        ? {}
+        : { tracing: { traceMoveResolution } }),
+    });
+
+    engine.setup(MERGE_PAIR as never);
+
+    return {
+      engine,
+      counts,
+      cursors: (): RngCursorMap => streams.snapshotCursors(),
+    };
+  };
+
+  it('replays the first outcome when a wrapper runs the work twice', () => {
+    let runs = 0;
+    const traced = createCounted(<T>(run: () => T): T => {
+      run();
+
+      return run();
+    });
+    const plain = createCounted();
+
+    traced.engine.events.on('move:after', (): void => {
+      runs += 1;
+    });
+
+    expect(traced.engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(plain.engine.move(DIRECTION_LEFT)).toBe(true);
+
+    // THE DEFECT THIS PINS. The second call re-walked an already-resolved
+    // board, which reports `moved: false` with no score delta, and the turn
+    // adopted that: the two tiles merged on the board while the score stayed 0
+    // and no tile spawned — a half-resolved turn, silently.
+    expect(traced.engine.score).toBe(4);
+    expect(traced.engine.score).toBe(plain.engine.score);
+    expect(traced.engine.serialize()).toEqual(plain.engine.serialize());
+    expect(traced.cursors()).toEqual(plain.cursors());
+    expect(runs).toBe(1);
+
+    // Contained rather than propagated, so the violation is visible in exactly
+    // one place: the counter.
+    expect(traced.counts.get(TRACING_FAULT_METRIC)).toBe(1);
+    expect(plain.counts.get(TRACING_FAULT_METRIC)).toBeUndefined();
+  });
+
+  it('keeps the resolver outcome when a wrapper returns one of its own', () => {
+    const traced = createCounted(<T>(run: () => T): T => {
+      run();
+
+      // A measurement that decided to answer for the work: the shape is a
+      // `MoveOutcome` the resolver never produced.
+      return { moved: false, merges: [], scoreDelta: 0 } as unknown as T;
+    });
+    const plain = createCounted();
+
+    expect(traced.engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(plain.engine.move(DIRECTION_LEFT)).toBe(true);
+
+    expect(traced.engine.score).toBe(4);
+    expect(traced.engine.serialize()).toEqual(plain.engine.serialize());
+    expect(traced.cursors()).toEqual(plain.cursors());
+    expect(traced.counts.get(TRACING_FAULT_METRIC)).toBe(1);
+  });
+
+  it('leaves a well-behaved wrapper uncounted and unchanged', () => {
+    const traced = createCounted(<T>(run: () => T): T => run());
+    const plain = createCounted();
+
+    expect(traced.engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(plain.engine.move(DIRECTION_LEFT)).toBe(true);
+
+    expect(traced.engine.serialize()).toEqual(plain.engine.serialize());
+    expect(traced.cursors()).toEqual(plain.cursors());
+    expect(traced.counts.get(TRACING_FAULT_METRIC)).toBeUndefined();
   });
 });
 

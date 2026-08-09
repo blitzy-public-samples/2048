@@ -805,26 +805,39 @@ export interface EngineTracingSubscription {
    * Closes an open turn span that will never commit, as an IDLE turn.
    *
    * WHY A CALLER HAS TO SAY SO. A turn span opens on `move:before` and closes
-   * on `state:commit`. A move the resolver found changed nothing commits
-   * nothing and — unlike a withdrawn move, which reports itself through
-   * `cancelled`, and unlike a resolved move, which emits `move:after` — emits
-   * NO further event at all: `Engine.move()` counts it and returns `false`. The
-   * span would therefore stay open until the next input arrived and would
-   * measure the player's think time as turn latency.
+   * on `state:commit`, and a turn that commits nothing has to be closed by
+   * something else. Which turns those are:
    *
-   * The engine cannot close it without emitting `move:after` for a move that
-   * did not happen, which five other subscribers would act on — the announcer
-   * would narrate it and the renderer would animate it. So the caller that
-   * KNOWS the move was idle, because `move()` returned `false`, closes it here.
+   *   AN IDLE MOVE CLOSES ITSELF. The engine emits `move:after` carrying
+   *   `moved: false` as the completion signal of a turn that moved nothing, and
+   *   the `move:after` listener above closes the span as `unmoved` on the spot.
+   *   Calling this for one is a harmless no-op — the span is already closed.
    *
-   * A MOVE WITHDRAWN BY AN `onBeforeMove` HANDLER ARRIVES HERE TOO. A veto a
-   * LISTENER cast is already on the emitted payload, so the `move:before`
-   * listener above closes that turn as `cancelled` on the spot. A veto a HOOK
-   * HANDLER cast is resolved after the emission and, like an idle move, ends
-   * the turn with no further event, so from the caller's side the two are one:
-   * `move()` returned `false` with a span open. Both are closed here, and the
-   * span's `direction` attribute plus the `engine.move.cancelled` counter are
-   * what separate them afterwards.
+   *   A MOVE A HOOK HANDLER WITHDREW IS THE PATH THAT NEEDS THE CALLER. The
+   *   veto is resolved after `move:before` has been emitted, and a withdrawn
+   *   move emits nothing further, so from the caller's side the turn ends with
+   *   `move()` returning `false` and a span still open. `settleMove` closes it
+   *   as `cancelled`, which is the outcome that classifies it; this closes it as
+   *   `unmoved`.
+   *
+   *   A VETO A LISTENER CAST is already on the payload when the `move:before`
+   *   listener above runs, so that listener closes the turn as `cancelled`
+   *   itself — but only when the vetoing listener was registered BEFORE this
+   *   subscription. Registered after it, the veto is invisible at emission time
+   *   and the turn arrives here like a hook veto. Production casts no veto from
+   *   a listener; vetoes come from relic hook handlers.
+   *
+   * The engine cannot close the withdrawn turn without emitting `move:after`
+   * for a move that did not happen, which five other subscribers would act on —
+   * the announcer would narrate it and the renderer would animate it. So the
+   * caller that KNOWS the move ended, because `move()` returned `false`, closes
+   * it here.
+   *
+   * A SPAN LEFT OPEN CANNOT CONTAMINATE THE LATENCY HISTOGRAM. `endTurn`
+   * records `turn_latency_milliseconds` for the `committed` outcome alone, and
+   * the next `move:before` closes a stale span as `superseded`, so a caller that
+   * never settles loses the classification of that one turn rather than
+   * reporting the player's think time as a turn latency.
    *
    * Safe to call when no turn span is open, after detaching, and repeatedly:
    * each does nothing. A move refused because the game is already over opens no
@@ -2792,6 +2805,14 @@ export function attachEngineTracing(
           },
         });
 
+        // READ AT THIS LISTENER'S TURN IN REGISTRATION ORDER, so a veto is seen
+        // here only when the listener that cast it was registered BEFORE this
+        // subscription. A veto cast after it — or by a hook handler, which is
+        // resolved after the emission — leaves this span open, and
+        // `settleMove` closes it as `cancelled` from the attempt's outcome
+        // instead. Both paths therefore end with the span closed and neither
+        // reaches the latency histogram, which `endTurn` writes for the
+        // `committed` outcome alone.
         if (payload.cancelled) {
           endTurn(SPAN_OUTCOMES.cancelled);
         }

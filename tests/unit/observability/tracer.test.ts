@@ -93,6 +93,7 @@ import type {
 } from '../../../src/engine/hook-bus';
 import { HOOK_NAMES } from '../../../src/engine/hooks';
 import type {
+  BeforeMovePayload,
   HookEnvironment,
   HookName,
   SpawnPayload,
@@ -3515,5 +3516,178 @@ describe('Tracer.recordCommitAttribution', () => {
     expect(recordsFor('commit attribution rejected')[0]?.fields).toEqual({
       received: 'turns',
     });
+  });
+});
+
+/* ==========================================================================
+ * Turn-span settlement: which turns close themselves and which need the caller
+ * ========================================================================== */
+
+describe('turn-span settlement across every unresolved path', () => {
+  /**
+   * Registers a hook handler that withdraws every move.
+   *
+   * A HOOK veto rather than a listener veto, which is the only kind production
+   * casts: relic handlers withdraw moves, listeners do not. It is resolved
+   * AFTER `move:before` has been emitted, so the tracer cannot see it and the
+   * turn ends with no further event.
+   *
+   * @param engine Engine to register on.
+   */
+  const withdrawEveryMove = (engine: Engine): void => {
+    engine.hooks.register({
+      id: 'withdraws-every-move',
+      hooks: {
+        onBeforeMove: (payload): BeforeMovePayload => ({
+          ...payload,
+          cancelled: true,
+        }),
+      },
+    });
+  };
+
+  it('leaves a hook-withdrawn turn open, and settleMove closes it', () => {
+    const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
+    const engine = engineOn(BLOCKED_BOARD);
+    const subscription = attachEngineTracing(engine.events, tracer);
+
+    withdrawEveryMove(engine);
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(attempt.resolution).toBe('cancelled');
+
+    // THE ONE PATH THAT DEPENDS ON ITS CALLER. The veto is resolved after the
+    // emission and a withdrawn move emits nothing further, so the span is still
+    // open here — and the caller holding the attempt is the only party that
+    // knows the turn ended.
+    expect(subscription.currentTurnSpan()).toBeDefined();
+    expect(latency.count).toBe(0);
+    expect(subscription.settleMove(attempt)).toBe(true);
+
+    const turn = oneRecordFor(SPAN_NAMES.engineTurn);
+
+    // Closed under the outcome the ATTEMPT had, which is what separates a
+    // withdrawn move from a move that pressed into a wall.
+    expect(turn.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.cancelled,
+    );
+    expect(subscription.currentTurnSpan()).toBeUndefined();
+    expect(latency.count).toBe(0);
+    expect(tracer.snapshot().open).toBe(0);
+    expect(tracer.snapshot().anomalies).toBe(0);
+
+    // Settling a second time, and after the span is gone, does nothing.
+    expect(subscription.settleMove(attempt)).toBe(false);
+    expect(tracer.snapshot().doubleEnds).toBe(0);
+  });
+
+  it('keeps think time out of the latency histogram when nothing settles', () => {
+    // A caller that never settles is the failure mode the obligation invites,
+    // so what it costs is pinned rather than described: the classification of
+    // that one turn, and nothing else. `endTurn` records the latency for the
+    // committed outcome alone, so the open span cannot become a turn latency
+    // however long it stays open.
+    const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
+    const engine = engineOn(NEAR_WIN_BOARD);
+    const subscription = attachEngineTracing(engine.events, tracer);
+
+    withdrawEveryMove(engine);
+
+    expect(engine.attemptMove(DIRECTION_LEFT).resolution).toBe('cancelled');
+    expect(subscription.currentTurnSpan()).toBeDefined();
+
+    // Nothing is settled. The next move supersedes the stale span.
+    expect(engine.hooks.unregister('withdraws-every-move')).toBe(true);
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+
+    const turns = recordsFor(SPAN_NAMES.engineTurn);
+
+    expect(turns).toHaveLength(2);
+    expect(turns[0].attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.superseded,
+    );
+    expect(turns[1].attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.committed,
+    );
+
+    // One committed turn, one latency sample: the unsettled turn contributed
+    // none, and the two turn measures agree.
+    expect(latency.count).toBe(1);
+    expect(tracer.snapshot().doubleEnds).toBe(0);
+  });
+
+  it('closes a listener veto whichever side of the tracer it was registered', () => {
+    // The `move:before` listener reads `cancelled` at its own turn in
+    // registration order, so a veto cast by a listener registered BEFORE the
+    // tracer is visible at emission time and one registered AFTER it is not.
+    // The END STATE is the same either way, which is the property that matters:
+    // no span is left open and no anomaly is reported.
+    const outcomes: unknown[] = [];
+
+    for (const vetoFirst of [true, false]) {
+      const engine = engineOn(BLOCKED_BOARD);
+      const veto = (payload: MoveBeforeEvent): void => {
+        payload.cancelled = true;
+      };
+
+      if (vetoFirst) {
+        engine.events.on('move:before', veto);
+      }
+
+      const subscription = attachEngineTracing(engine.events, tracer);
+
+      if (!vetoFirst) {
+        engine.events.on('move:before', veto);
+      }
+
+      const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+      expect(attempt.resolution).toBe('cancelled');
+
+      // Registered first, the tracer saw the veto and closed the turn on the
+      // spot; registered second, the veto arrived after the span was opened and
+      // the caller's settle closes it.
+      expect(subscription.currentTurnSpan() !== undefined).toBe(!vetoFirst);
+      subscription.settleMove(attempt);
+
+      const turns = recordsFor(SPAN_NAMES.engineTurn);
+
+      outcomes.push(turns[turns.length - 1].attributes[SPAN_ATTRIBUTES.outcome]);
+
+      expect(subscription.currentTurnSpan()).toBeUndefined();
+      subscription();
+    }
+
+    expect(outcomes).toEqual([
+      SPAN_OUTCOMES.cancelled,
+      SPAN_OUTCOMES.cancelled,
+    ]);
+    expect(
+      registry.histogram(METRIC_NAMES.turnLatencyMilliseconds).count,
+    ).toBe(0);
+    expect(tracer.snapshot().anomalies).toBe(0);
+    expect(tracer.snapshot().open).toBe(0);
+  });
+
+  it('settles an idle turn the engine has already closed as a no-op', () => {
+    const engine = engineOn(BLOCKED_BOARD);
+    const subscription = attachEngineTracing(engine.events, tracer);
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(attempt.resolution).toBe('idle');
+
+    // The engine's `move:after` completion signal closed it already, so the
+    // caller's settle finds nothing to close and reports so.
+    expect(subscription.currentTurnSpan()).toBeUndefined();
+    expect(subscription.settleMove(attempt)).toBe(false);
+    expect(subscription.settleTurn()).toBe(false);
+    subscription.closeIdleTurn();
+
+    expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.unmoved);
+    expect(tracer.snapshot().doubleEnds).toBe(0);
+    expect(tracer.snapshot().anomalies).toBe(0);
   });
 });

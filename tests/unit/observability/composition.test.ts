@@ -314,6 +314,75 @@ describe('the metrics registry is wired', () => {
     expect(value('game2048_spawns_total')).toBeGreaterThan(0);
   });
 
+  it('counts no turn for an idle input, and one for a resolved move', () => {
+    // ONE tile in the top-left corner, so `ArrowUp` and `ArrowLeft` resolve
+    // nothing on every seed while `ArrowRight` resolves. Written before
+    // `start()`, which is when the board is read.
+    window.localStorage.setItem(
+      GAME_STATE_KEY,
+      JSON.stringify({
+        grid: {
+          size: 4,
+          cells: [
+            [{ position: { x: 0, y: 0 }, value: 2 }, null, null, null],
+            [null, null, null, null],
+            [null, null, null, null],
+            [null, null, null, null],
+          ],
+        },
+        score: 0,
+        over: false,
+        won: false,
+        keepPlaying: false,
+      }),
+    );
+
+    application = start(document);
+
+    const counter = (name: string, labels: Readonly<Record<string, string>> =
+      {}): number => {
+      const series = application?.metrics
+        .snapshot()
+        .series.find(
+          (candidate) =>
+            candidate.name === name &&
+            Object.entries(labels).every(
+              ([label, expected]) => candidate.labels[label] === expected,
+            ),
+        );
+
+      return series !== undefined && series.kind === 'counter'
+        ? series.value
+        : -1;
+    };
+
+    const idleInputs = 3;
+
+    for (let press_ = 0; press_ < idleInputs; press_ += 1) {
+      press('ArrowUp', 'ArrowUp');
+    }
+
+    // THE SEAM THIS PINS, through the REAL composition root rather than a
+    // hand-driven registry. Each of those inputs emitted `move:after` as the
+    // completion signal of a turn that moved nothing, and the root once
+    // forwarded every emission into the turn family — so pressing into a wall
+    // read as a turn and every rate derived from `game2048_turns_total` was
+    // skewed by the number of idle inputs.
+    expect(
+      counter('game2048_engine_events_total', { event: 'move:after' }),
+    ).toBe(idleInputs);
+    expect(counter('game2048_turns_total')).toBe(0);
+
+    press('ArrowRight', 'ArrowRight');
+
+    // The counter is fed from the engine's own resolved-move counter, so the
+    // first move that changes the board raises it — and raises it once.
+    expect(counter('game2048_turns_total')).toBe(1);
+    expect(
+      counter('game2048_engine_events_total', { event: 'move:after' }),
+    ).toBe(idleInputs + 1);
+  });
+
   it('counts rendered frames, the one previously unmeasured boundary', async () => {
     application = start(document);
 

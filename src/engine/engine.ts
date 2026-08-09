@@ -239,8 +239,21 @@ export const SPAWN_ATTEMPT_METRIC = 'engine.spawn.attempt';
  */
 export const SPAWN_SUPPRESSED_METRIC = 'engine.spawn.suppressed';
 
-/** Counter name for a resolved move. */
-const MOVE_RESOLVED_METRIC = 'engine.move.resolved';
+/**
+ * Counter name for a resolved move.
+ *
+ * THE AUTHORITATIVE RESOLVED-TURN BOUNDARY. Raised once per move that changed
+ * the board, immediately before the commit that ends it, so it counts turns
+ * that resolved and nothing else: a move withdrawn on `onBeforeMove` raises
+ * `engine.move.cancelled`, a move whose walk found nothing to move raises
+ * `engine.move.idle`, and a move refused because play is over or its direction
+ * is outside the contract raises `engine.move.blocked` or
+ * `engine.move.refused`. The `move:after` event is NOT that boundary: it is the
+ * completion signal of EVERY turn that reached the walk, idle turns included,
+ * so an emission count measures turns attempted rather than turns resolved.
+ * Turns resolved are accounted here and nowhere else.
+ */
+export const MOVE_RESOLVED_METRIC = 'engine.move.resolved';
 
 /** Counter name for a discarded persisted snapshot. */
 const SNAPSHOT_REJECTED_METRIC = 'engine.snapshot.rejected';
@@ -269,6 +282,18 @@ const LOSS_REOPENED_METRIC = 'engine.move.lossReopened';
  * instead.
  */
 const STORAGE_FAILED_METRIC = 'engine.storage.failed';
+
+/**
+ * Counter name for an injected tracing wrapper that broke its own contract.
+ *
+ * The sibling of `engine.hook.tracing.fault` of src/engine/hook-bus.ts, raised
+ * for the same two violations: a wrapper that runs the resolution work more
+ * than once, and one that returns a value of its own in place of the outcome
+ * the work produced. Both are contained rather than propagated — the turn
+ * resolves on the work's own outcome — so this counter is the only place a
+ * misbehaving composition-root wrapper is visible.
+ */
+const TRACING_FAULT_METRIC = 'engine.move.tracing.fault';
 
 /* --------------------------------------------------------------------------
  * Ports
@@ -552,6 +577,14 @@ export interface EngineOptions {
  * The wrapper must run the function it is handed exactly once and return its
  * value, and rethrow whatever it threw: it is a measurement, never a
  * transformation.
+ *
+ * TWO OF THOSE OBLIGATIONS ARE NOW ENFORCED rather than assumed, matching the
+ * sibling port `HookBusTracing.traceHookDispatch` of src/engine/hook-bus.ts. A
+ * wrapper that runs the work a second time has the first outcome replayed
+ * instead, and one that returns a value of its own has the work's outcome
+ * returned instead; each is counted under `engine.move.tracing.fault`. A
+ * wrapper that throws on its own account, or that never runs the work at all,
+ * still fails loudly. `Engine.tracedResolution` is where this is held.
  */
 export interface EngineTracing {
   /**
@@ -792,10 +825,11 @@ export class Engine {
   private readonly relicContext: RelicCommitContextProvider;
 
   /**
-   * Runs the traversal walk and merge resolution of a turn inside its span.
+   * The injected span wrapper, or identity where none was injected.
    *
    * Identity where no wrapper was injected, so the untraced turn is exactly the
-   * turn that ran before tracing existed.
+   * turn that ran before tracing existed. Called through `tracedResolution()`
+   * rather than directly, which is what holds the work to one run.
    */
   private readonly traceResolution: <T>(run: () => T) => T;
 
@@ -1625,8 +1659,10 @@ export class Engine {
     // The `onMerge` dispatch reaches the merge branch as a callback, and
     // a handler's `resultValue` is the value written to the board.
     // Wrapped in the resolution span, which the turn span opened by the
-    // emission above encloses. Identity where no wrapper was injected.
-    const outcome = this.traceResolution((): MoveOutcome =>
+    // emission above encloses. Identity where no wrapper was injected, and run
+    // through `tracedResolution()` so the walk happens once whatever the
+    // injected wrapper does with the function it is handed.
+    const outcome = this.tracedResolution((): MoveOutcome =>
       resolveMove(this.grid, resolved, this.config, {
         dispatchMerge: (payload: MergeDispatchPayload): MergePayload =>
           this.hooks.dispatch('onMerge', payload, this.hookEnvironment())
@@ -1812,6 +1848,99 @@ export class Engine {
     this.resolveMetStageGoal();
 
     return frozenAttempt('moved', direction, resolved, true);
+  }
+
+  /**
+   * Runs the resolution work inside the injected wrapper, exactly once.
+   *
+   * THE WORK RUNS ONCE WHATEVER THE WRAPPER DOES, and the outcome the turn
+   * adopts is the work's own. `EngineTracing.traceMoveResolution` declares that
+   * a wrapper must run the function it is handed exactly once and return its
+   * value, but a wrapper is composition-root code and nothing enforced it here,
+   * while the sibling port `HookBusTracing.traceHookDispatch` of
+   * src/engine/hook-bus.ts has held its work to one run all along. Two of the
+   * four ways a wrapper can break the contract were SILENT at this boundary,
+   * and both are contained here:
+   *
+   *   the wrapper calls the
+   *   work more than once    the first outcome is replayed — the held value, or
+   *                          the held throw — and the walk is NOT re-entered. A
+   *                          second walk of an already-resolved board reports
+   *                          `moved: false` with no score delta, and the turn
+   *                          adopted it: the board merged, the score was not
+   *                          credited and no tile spawned.
+   *   the wrapper returns
+   *   something else         a completed walk's own outcome is returned, so a
+   *                          wrapper is a measurement and never a
+   *                          transformation.
+   *
+   * The two LOUD ways are left exactly as they were, because a broken tracer
+   * that announces itself is better than one this quietly repairs: a wrapper
+   * that throws on its own account still propagates — the behaviour
+   * tests/unit/engine/engine-tracing.test.ts pins deliberately, since swallowing
+   * it would hide a broken tracer behind a game that stopped resolving moves —
+   * and a wrapper that never runs the work at all still fails on the value it
+   * substituted.
+   *
+   * Every contained violation raises `TRACING_FAULT_METRIC`.
+   *
+   * @param body The resolution work.
+   * @returns Whatever `body` returned, on its first and only run.
+   */
+  private tracedResolution<T>(body: () => T): T {
+    /** Whether the work has been entered. Raised BEFORE it runs. */
+    let started = false;
+
+    /** Whether the work returned. */
+    let settled = false;
+
+    /** Whether the WORK threw, which is separate from the wrapper throwing. */
+    let failed = false;
+
+    let thrown: unknown;
+    let held: T | undefined;
+
+    const once = (): T => {
+      if (started) {
+        this.count(TRACING_FAULT_METRIC);
+
+        if (failed) {
+          throw thrown;
+        }
+
+        return held as T;
+      }
+
+      started = true;
+
+      try {
+        const value = body();
+
+        held = value;
+        settled = true;
+
+        return value;
+      } catch (error: unknown) {
+        failed = true;
+        thrown = error;
+
+        throw error;
+      }
+    };
+
+    const returned = this.traceResolution(once);
+
+    // GUARDED ON `settled` DELIBERATELY. Only a walk that returned has an
+    // outcome to prefer; a wrapper that never started the work has none, and
+    // substituting one would turn that loud failure into a silent half-turn —
+    // which is the class of defect this method exists to close.
+    if (settled && !Object.is(returned, held)) {
+      this.count(TRACING_FAULT_METRIC);
+
+      return held as T;
+    }
+
+    return returned;
   }
 
   /**

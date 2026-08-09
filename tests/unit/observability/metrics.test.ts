@@ -81,7 +81,16 @@ import type {
   HookEnvironment,
   SpawnPayload,
 } from '../../../src/engine/hooks';
-import { DIRECTION_LEFT } from '../../../src/engine/types';
+import {
+  DIRECTION_DOWN,
+  DIRECTION_LEFT,
+  DIRECTION_RIGHT,
+  DIRECTION_UP,
+} from '../../../src/engine/types';
+import type {
+  Direction,
+  SerializedGameState,
+} from '../../../src/engine/types';
 import { createLogger } from '../../../src/observability/logger';
 import type { LogRecord, Logger } from '../../../src/observability/logger';
 import {
@@ -100,6 +109,7 @@ import type {
   MetricsSnapshot,
 } from '../../../src/observability/metrics';
 import { createRngStreams } from '../../../src/rng/rng-streams';
+import { createBlockedBoard } from '../../fixtures/boards';
 
 /* ===== 1. Helpers ===== */
 
@@ -121,6 +131,16 @@ const SPAWN_ATTEMPT_METRIC = 'engine.spawn.attempt';
 
 /** Counter name the engine raises for a spawn that inserted nothing. */
 const SPAWN_SUPPRESSED_METRIC = 'engine.spawn.suppressed';
+
+/**
+ * Counter name the engine raises once per move that changed the board.
+ *
+ * The literal is repeated here rather than imported, like the three above it:
+ * the name is the wire contract the turn family is fed through, so a rename in
+ * src/engine/engine.ts has to fail here rather than silently flatten
+ * `game2048_turns_total` to zero.
+ */
+const MOVE_RESOLVED_METRIC = 'engine.move.resolved';
 
 /**
  * Reads one unlabelled counter's value out of a snapshot.
@@ -567,11 +587,31 @@ describe('recordEngineEvent', () => {
     }
   });
 
-  it('closes one turn per move:after emission', () => {
+  it('closes NO turn on a move:after emission, which idle turns carry too',
+    () => {
+      const registry = createMetricsRegistry();
+
+      // The engine emits `move:after` for every turn that reached the walk and
+      // carries `moved: false` on one that moved nothing, so the emission counts
+      // turns ATTEMPTED. A turn family fed from it counted a press into a wall
+      // as a turn.
+      registry.recordEngineEvent('move:after');
+      registry.recordEngineEvent('move:after');
+
+      const snapshot = registry.snapshot();
+
+      expect(eventCounterValue(snapshot, 'move:after')).toBe(2);
+      expect(counterValue(snapshot, METRIC_NAMES.turnsTotal)).toBe(0);
+    });
+
+  it('closes one turn per resolved-turn count, not per emission', () => {
     const registry = createMetricsRegistry();
 
-    registry.recordEngineEvent('move:after');
-    registry.recordEngineEvent('move:after');
+    // The engine's `engine.move.resolved` counter, raised once per move that
+    // changed the board: the actuation push of js/game_manager.js L182-L190,
+    // which sat inside that method's `if (moved)` block.
+    registry.recordTurnResolved();
+    registry.recordTurnResolved();
 
     expect(counterValue(registry.snapshot(), METRIC_NAMES.turnsTotal)).toBe(2);
   });
@@ -668,13 +708,20 @@ describe('recordEngineEventCount reads the event dimension', () => {
     expect(counterValue(snapshot, METRIC_NAMES.mergesTotal)).toBe(3);
   });
 
-  it('closes one turn per move:after report', () => {
+  it('records no turn, because a report carries no resolution', () => {
     const registry = createMetricsRegistry();
 
     registry.recordEngineEventCount({ event: 'move:after' });
     registry.recordEngineEventCount({ event: 'move:after', value: 1 });
 
-    expect(counterValue(registry.snapshot(), METRIC_NAMES.turnsTotal)).toBe(2);
+    const snapshot = registry.snapshot();
+
+    // The per-event family rises, and the turn family does not: a count report
+    // cannot tell a turn that resolved from one that moved nothing, exactly as
+    // it cannot tell a spawn that inserted a tile from one that did not.
+    expect(eventCounterValue(snapshot, 'move:after')).toBe(2);
+    expect(counterValue(snapshot, METRIC_NAMES.turnsTotal)).toBe(0);
+    expect(snapshot.rejected).toBe(0);
   });
 
   it('refuses an event name arriving in the hook dimension (F8)', () => {
@@ -997,13 +1044,17 @@ describe('the engine boundary agrees with the spawn families', () => {
   /**
    * Wires a registry to a real engine the way a composition root does: the
    * engine's spawn counters feed the attempt and suppression families, its
-   * emit counter feeds the per-event family, and its `tile:spawn` payloads
-   * feed the insertion family.
+   * resolved-move counter feeds the turn family, its emit counter feeds the
+   * per-event family, and its `tile:spawn` payloads feed the insertion family.
    *
    * @param registry Registry to feed.
+   * @param state Board to set up on. A fresh random board by default.
    * @returns The set-up engine.
    */
-  function createWiredEngine(registry: MetricsRegistry): Engine {
+  function createWiredEngine(
+    registry: MetricsRegistry,
+    state?: SerializedGameState,
+  ): Engine {
     const engine = new Engine({
       config: { ...DEFAULT_RULES_CONFIG },
       streams: createRngStreams(RUN_SEED),
@@ -1014,6 +1065,8 @@ describe('the engine boundary agrees with the spawn families', () => {
             registry.recordSpawnAttempt();
           } else if (report.metric === SPAWN_SUPPRESSED_METRIC) {
             registry.recordSpawnSuppressed();
+          } else if (report.metric === MOVE_RESOLVED_METRIC) {
+            registry.recordTurnResolved();
           } else if (report.metric === EMIT_METRIC) {
             registry.recordEngineEventCount(report);
           }
@@ -1024,7 +1077,7 @@ describe('the engine boundary agrees with the spawn families', () => {
     engine.events.on('tile:spawn', (payload) => {
       registry.recordEngineEvent('tile:spawn', payload);
     });
-    engine.setup();
+    engine.setup(state);
 
     return engine;
   }
@@ -1097,6 +1150,90 @@ describe('the engine boundary agrees with the spawn families', () => {
     expect(eventCounterValue(snapshot, 'move:after')).toBe(1);
     expect(counterValue(snapshot, METRIC_NAMES.turnsTotal)).toBe(1);
     expect(snapshot.rejected).toBe(0);
+  });
+
+  it('counts no turn for an idle move driven through the real engine', () => {
+    const registry = createMetricsRegistry();
+
+    // Column 0 holds 2, 4, 8, 16 with no gap and no equal neighbour, so up,
+    // down and left all resolve nothing on this board.
+    const engine = createWiredEngine(registry, createBlockedBoard(4));
+    const idle: readonly Direction[] = [
+      DIRECTION_UP,
+      DIRECTION_LEFT,
+      DIRECTION_DOWN,
+      DIRECTION_UP,
+      DIRECTION_LEFT,
+      DIRECTION_DOWN,
+      DIRECTION_UP,
+      DIRECTION_LEFT,
+      DIRECTION_DOWN,
+      DIRECTION_UP,
+    ];
+
+    for (const direction of idle) {
+      expect(engine.attemptMove(direction).resolution).toBe('idle');
+    }
+
+    const snapshot = registry.snapshot();
+    const counts = spawnCounts(registry);
+
+    // THE DEFECT THIS PINS. Every one of those ten inputs emitted `move:after`
+    // as its completion signal, so a turn family fed from the emission read ten
+    // turns for a run in which nothing resolved — and every rate derived from
+    // it, merges and spawns and score per turn, was skewed with it. Only a
+    // bare registry driven by hand could miss it, which is why this case drives
+    // the engine.
+    expect(counterValue(snapshot, METRIC_NAMES.turnsTotal)).toBe(0);
+    expect(eventCounterValue(snapshot, 'move:after')).toBe(idle.length);
+
+    // Every adjacent family agrees with the turn family: nothing merged,
+    // nothing spawned, and no spawn was even attempted, because a spawn belongs
+    // to a move that moved.
+    expect(counterValue(snapshot, METRIC_NAMES.mergesTotal)).toBe(0);
+    expect(counts.inserted).toBe(0);
+    expect(counts.attempts).toBe(0);
+    expect(snapshot.rejected).toBe(0);
+  });
+
+  it('counts exactly the turns that resolved over a mixed move list', () => {
+    const registry = createMetricsRegistry();
+    const engine = createWiredEngine(registry, createBlockedBoard(4));
+    const list: readonly Direction[] = [
+      DIRECTION_LEFT,
+      DIRECTION_RIGHT,
+      DIRECTION_UP,
+      DIRECTION_LEFT,
+      DIRECTION_DOWN,
+      DIRECTION_RIGHT,
+      DIRECTION_UP,
+      DIRECTION_LEFT,
+    ];
+    let resolved = 0;
+    let reachedTheWalk = 0;
+
+    for (const direction of list) {
+      const resolution = engine.attemptMove(direction).resolution;
+
+      if (resolution === 'moved') {
+        resolved += 1;
+      }
+
+      if (resolution === 'moved' || resolution === 'idle') {
+        reachedTheWalk += 1;
+      }
+    }
+
+    const snapshot = registry.snapshot();
+
+    // Both counts are read from the attempts rather than assumed, so the case
+    // holds on any seed: the turn family tracks the moves that resolved, and
+    // the per-event family tracks every turn that reached the walk. The list
+    // contains at least one of each, which is what makes the two differ.
+    expect(resolved).toBeGreaterThan(0);
+    expect(reachedTheWalk).toBeGreaterThan(resolved);
+    expect(counterValue(snapshot, METRIC_NAMES.turnsTotal)).toBe(resolved);
+    expect(eventCounterValue(snapshot, 'move:after')).toBe(reachedTheWalk);
   });
 
   it('counts the same emissions whether or not a listener is registered',

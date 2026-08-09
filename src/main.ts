@@ -77,6 +77,7 @@ import type { RulesConfig } from './config/rules-config';
 import { Engine } from './engine/engine';
 import { createHookBus } from './engine/hook-bus';
 import {
+  MOVE_RESOLVED_METRIC,
   SPAWN_ATTEMPT_METRIC,
   SPAWN_SUPPRESSED_METRIC,
 } from './engine/engine';
@@ -633,6 +634,16 @@ function createEngineSink(
         metrics.recordSpawnAttempt();
       } else if (report.metric === SPAWN_SUPPRESSED_METRIC) {
         metrics.recordSpawnSuppressed();
+      } else if (report.metric === MOVE_RESOLVED_METRIC) {
+        // THE TURN COUNTER IS FED FROM HERE, for the same reason the two spawn
+        // families are: `engine.move.resolved` is raised once per move that
+        // changed the board, while `move:after` is emitted for every turn that
+        // reached the walk — carrying `moved: false` for one that moved nothing.
+        // Forwarding the emission instead counted a press into a wall as a turn,
+        // so `game2048_turns_total` over-reported by exactly the idle inputs and
+        // every rate derived from it — merges, score and spawns per turn — was
+        // skewed with it.
+        metrics.recordTurnResolved();
       }
 
       // `hook` and `event` are separate dimensions of `EngineCountReport`
@@ -2936,17 +2947,23 @@ export function start(ownerDocument: Document): Application {
    *
    * The generic sink routes every reported count into a counter named after the
    * report, which is enough to see that something happened. It is NOT enough to
-   * populate `game2048_turns_total`, `game2048_merges_total`,
-   * `game2048_spawns_total`, `game2048_engine_events_total{event}` or
-   * `game2048_frames_rendered_total` — the families the registry declares with
-   * real help text, and the only names a dashboard or an alert would ever be
-   * keyed to. Those have purpose-built recorders, and without calling them every
-   * one of those series reads a flat zero forever while the real numbers sit in
-   * counters no dashboard knows the names of.
+   * populate `game2048_merges_total`, `game2048_spawns_total`,
+   * `game2048_engine_events_total{event}` or `game2048_frames_rendered_total` —
+   * the families the registry declares with real help text, and the only names a
+   * dashboard or an alert would ever be keyed to. Those have purpose-built
+   * recorders, and without calling them every one of those series reads a flat
+   * zero forever while the real numbers sit in counters no dashboard knows the
+   * names of.
    *
    * `recordEngineEvent` also reads a spawn's `position`, which is how the
    * registry separates a spawn that inserted a tile from a spawn attempt on a
    * full board — a distinction the generic counter cannot express.
+   *
+   * `game2048_turns_total` is NOT fed from here. `move:after` is emitted for
+   * every turn that reached the walk, so the turn family is fed from the
+   * engine's `engine.move.resolved` counter in the report sink above; adding a
+   * feed here would count idle inputs as turns again, and adding one beside it
+   * would double every turn.
    */
   const stopEventMetrics: (() => void)[] = ENGINE_EVENT_NAMES.map((name) =>
     engine.events.on(name, (payload): void => {
