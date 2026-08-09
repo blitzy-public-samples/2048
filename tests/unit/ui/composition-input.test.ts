@@ -370,9 +370,12 @@ describe('the settings dialog', () => {
     control('#settings-button').click();
 
     const series = application.metrics.snapshot().series;
-    const valueOf = (suffix: string): number =>
+
+    // Read by the `report` label, because every generic report is counted on
+    // one family rather than under a family name of its own. DL-MAIN-11.
+    const valueOf = (report: string): number =>
       series
-        .filter((entry) => entry.name.endsWith(suffix))
+        .filter((entry) => entry.labels['report'] === report)
         .reduce(
           (total, entry) =>
             total + (entry.kind === 'counter' ? entry.value : 0),
@@ -382,8 +385,8 @@ describe('the settings dialog', () => {
     // ONE engagement for one open, and no warning about a restore target inside
     // the trapped container, which only a second trap over the same element
     // produces.
-    expect(valueOf('ui_focus_trap_engaged')).toBe(1);
-    expect(valueOf('ui_focus_trap_restore_inside')).toBe(0);
+    expect(valueOf('ui.focus.trap.engaged')).toBe(1);
+    expect(valueOf('ui.focus.trap.restore_inside')).toBe(0);
 
     // Still contained and still inert, so the one trap does the whole job.
     expect(

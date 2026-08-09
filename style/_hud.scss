@@ -134,6 +134,12 @@ $hud-rarity-tiers: $rarity-tiers !default;
   min-inline-size: 0;
 }
 
+// The live board dimension, which src/ui/screens/hud.ts reads from the payload
+// on every write. Sized to its own text, like the stage number beside it.
+.hud-board {
+  flex: 0 0 auto;
+}
+
 .hud-label {
   display: block;
   font-size: $hud-label-size;

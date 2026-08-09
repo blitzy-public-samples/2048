@@ -74,6 +74,8 @@ Please follow the house rules to have a bigger chance of your contribution being
    | `CONTROL` | `src/input/on-screen-controls.ts` |
    | `ROUTER` | `src/ui/screen-router.ts` |
    | `HUD` | `src/ui/screens/hud.ts`, `style/_hud.scss` |
+   | `RUNSTART` | `src/ui/screens/run-start.ts` |
+   | `STAGECLEAR` | `src/ui/screens/stage-progress.ts` |
    | `SCORE` | `src/ui/components/score-panel.ts` |
    | `PANEL` | `src/ui/components/settings-panel.ts` |
    | `LIVE` | `src/ui/a11y/live-region.ts` |
@@ -107,7 +109,7 @@ That feature set is landing in stages, so here is what each of the five categori
  - Undo/redo features — the accepted change is an undo relic, one of the charge-based board-manipulation relics; redo is not part of it. `src/relics/` carries the relic vocabulary, all sixteen relics across the four families, the registry and the seeded 1-of-3 draw, and `src/main.ts` composes them: relics are in play, they fire on the six named hooks, and a charge-based one spends its charges through the hook bus
  - Save/reload features — the board and the best score persist as they always did, and run state now persists beside them: `src/run/` carries the versioned envelope, its guarded store and the run controller, and the controller resumes the seed, the RNG cursors, the stage and the active relics on reload
  - Changes to how the tiles look or their contents — the accepted change renders tiles as extruded, emissive blocks, and it is in the game: `src/render/three-renderer.ts` draws the board where a WebGL context is available, and `src/render/number-only-renderer.ts` draws it where one is not or where the number-only preference is set
- - Changes to the layout — the accepted change is a screen flow: run start, in-run HUD, reward screen, stage progress and run summary. The in-run HUD has landed as `src/ui/screens/hud.ts`, and `src/ui/screen-router.ts` owns the game region and the settings overlay; the other four screens have markup roots in `index.html` and no module yet. The reward *moment* behind one of them is composed even though its screen is not: a cleared stage draws its seeded 1-of-3 offer, announces it and exposes it on the application handle, so the screen that lands later renders a decision that is already being made
+ - Changes to the layout — the accepted change is a screen flow: run start, in-run HUD, reward screen, stage progress and run summary. All six screen modules have landed — `src/ui/screens/run-start.ts`, `hud.ts`, `stage-progress.ts`, `reward.ts`, `run-summary.ts` and `game-over.ts` — and `src/ui/screen-router.ts` carries the screen state machine that sequences them alongside the game region and the settings overlay. The in-run HUD is the one the composition root composes today; the other five are delivered against the router's `SCREEN_MODULES` table and are not yet reached from the entry point. The reward *moment* behind one of them is composed even though its screen is not: a cleared stage draws its seeded 1-of-3 offer, announces it and exposes it on the application handle, so the screen that lands later renders a decision that is already being made
  - Changes to the grid size — the board dimension is configuration-driven rather than a literal, and this is the one of the five already in the game: `src/config/default-config.ts` carries the size, the engine reads it, and the renderer builds the board from the size each committed state carries
 
 We are still conservative with the core game, so these will have to be evaluated carefully before being merged:

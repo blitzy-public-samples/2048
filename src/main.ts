@@ -1,75 +1,27 @@
-// The composition root: the single module index.html loads.
+// The composition root: the single module index.html L113 loads.
 //
-// Supersedes js/application.js, which is deleted. That file was four
-// lines — `new GameManager(4, KeyboardInputManager, HTMLActuator,
-// LocalStorageManager);` inside a `DOMContentLoaded` listener — and it
-// injected constructors rather than instances, which is the seam the
-// engine/renderer split is built on. The wiring below keeps that
-// injection and reverses one direction of it: the engine no longer holds
-// a view; the renderer subscribes to the engine's events.
+// Ported from js/application.js L1-L4, the whole of it:
+//   L1-L2, L4  the one-animation-frame deferral, reproduced by `bootstrap()`
+//   L3         `new GameManager(4, KeyboardInputManager, HTMLActuator,
+//              LocalStorageManager)` — the constructor injection reproduced by
+//              `start()`, and the board-size literal `4`, now read from
+//              src/config/default-config.ts
+// Ported from js/game_manager.js L1-L14, the constructor body:
+//   L3-L5   the three collaborators constructed from injected constructors
+//   L7      the starting tile count, now `RulesConfig.startTiles`
+//   L9-L11  the `move`, `restart` and `keepPlaying` subscriptions, kept under
+//           those names and extended with `startRun`, `selectReward`,
+//           `activateRelic`, `continueStage`, `endRun`, `openSettings`,
+//           `closeSettings` and `cancel`
+//   L13     `setup()`, now `RunController.openEngineBoard()`, called last
+// Ported from index.html L7, the <link> to the committed generated CSS,
+// replaced by the stylesheet import below.
 //
-// WHAT THIS FILE OWNS
-//   the stylesheet import, which is how style/main.scss reaches the page
-//   now that index.html carries no <link>;
-//   the run seed and the four seeded substreams every draw is taken from;
-//   the rules configuration the engine and the renderer read;
-//   the WebGL capability probe, and the renderer selection it decides;
-//   the frame loop the renderer's work is scheduled on;
-//   the report sink every layer's counters and diagnostics reach;
-//   the ONE tracer, and the wrappers that carry it to every measured boundary;
-//   the ONE health surface, and the readiness the renderer decision reads.
-//
-// THE BOARD-SIZE LITERAL
-//   js/application.js L3 carried the only board-size value in the vanilla
-//   JavaScript. It is gone: the size comes from
-//   src/config/default-config.ts, and src/render/number-only-renderer.ts
-//   builds the board from the size the engine commits.
-//
-// THE TWO RANDOMNESS CALL SITES
-//   `Math.random()` appears nowhere in src/. The spawn value and the
-//   spawn cell are drawn from the `spawn-value` and `spawn-position`
-//   substreams of the seed created here, and the seed itself comes from
-//   Web Crypto or, where that is unavailable, from the two clocks — never
-//   from `Math.random`.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-MAIN-01  js/application.js L1, L4  the `DOMContentLoaded` wrapper
-//   TR-MAIN-02  js/application.js L3      the construction that injected four
-//                                         constructors and carried the only
-//                                         board-size literal
-//   TR-MAIN-03  index.html L7             the <link> to the committed generated
-//                                         CSS, replaced by the stylesheet
-//                                         import below
-//   TR-MAIN-04  target-only row           the run seed and the four seeded
-//                                         substreams
-//   TR-MAIN-05  target-only row           the WebGL capability probe and the
-//                                         renderer selection it decides
-//   TR-MAIN-06  target-only row           the frame loop the renderer's work is
-//                                         scheduled on
-//   TR-MAIN-07  target-only row           the one tracer, its boundary wrappers
-//                                         and the hook bus built with them
-//   TR-MAIN-08  target-only row           the one health surface and its
-//                                         readiness verdict
-//   TR-MAIN-09  target-only row           the diagnostics overlay and the
-//                                         `Application` surface
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-MAIN-01  the stylesheet entering through the module graph
-//   DL-MAIN-02  the run seed drawn from Web Crypto with the two clocks as the
-//               fallback, and never from `Math.random`
-//   DL-MAIN-03  one tracer, one health surface and one report sink constructed
-//               here and injected everywhere
-//   DL-MAIN-04  `setup()` called after every subscriber has attached
-//   DL-MAIN-06  one mutable run-correlation context: the logger is the sole
-//               authority, every reporter is handed a reader of it rather
-//               than a captured value, and the scope is rotated as a run is
-//               adopted, before the board opens
+// Decisions behind this file are argued in docs/DECISION_LOG.md; the ids are
+// named beside the constructs they belong to. DL-MAIN-01 to DL-MAIN-11 are
+// this file's own rows.
 
-// The stylesheet enters through the module graph. index.html's <link> to
-// the committed generated CSS was removed; this import is its replacement
-// and it is the only one in the module graph.
+// Ported from index.html L7. DL-MAIN-01.
 import '../style/main.scss';
 
 import { createDefaultRulesConfig } from './config/default-config';
@@ -155,9 +107,10 @@ import { createRngStreams } from './rng/rng-streams';
 import type { HookBus } from './engine/hook-bus';
 import { RelicRegistry } from './relics/relic-registry';
 import { drawRelicOffers } from './relics/relic-draw';
-import type { PersistedRelic } from './relics/relic-types';
+import type { ActiveRelic, PersistedRelic } from './relics/relic-types';
 import { HOOK_NAMES } from './engine/hooks';
 import { createDefaultStageConfig } from './config/stage-config';
+import type { StageGoal } from './config/stage-config';
 import type {
   RewardOffer,
   RewardSelection,
@@ -170,7 +123,11 @@ import {
   originateRunSeed,
   resolveRunIdentity,
 } from './run/run-controller';
-import type { RunReporter } from './run/run-state';
+import type {
+  RunOutcome,
+  RunReporter,
+  RunSummary,
+} from './run/run-state';
 import { RunStateStore } from './run/run-state-store';
 import type { StorageFailure } from './storage/local-storage-manager';
 import { LocalStorageManager } from './storage/local-storage-manager';
@@ -200,7 +157,7 @@ import {
 import type { EngineAnnouncer } from './ui/a11y/engine-announcer';
 import { createEngineAnnouncer } from './ui/a11y/engine-announcer';
 import { createScreenRouter } from './ui/screen-router';
-import type { RewardCard } from './ui/screen-router';
+import type { RewardCard, RouterInputSurface } from './ui/screen-router';
 import { createSettingsPanel } from './ui/components/settings-panel';
 import type { SettingsPanel } from './ui/components/settings-panel';
 import type { Hud } from './ui/screens/hud';
@@ -216,21 +173,8 @@ import {
  * ----------------------------------------------------------------------- */
 
 /**
- * The elements index.html declares that this root looks up.
- *
- * Every lookup is guarded: the eight-selector contract of the vanilla
- * markup was dereferenced unchecked in four places in
- * js/html_actuator.js and two in js/keyboard_input_manager.js, so a
- * renamed class was a startup failure. An absent element is reported and
- * the rest of the page still starts.
- */
-/**
- * Renders a theme id as the prose name a preference announcement carries.
- *
- * src/ui/a11y/live-region.ts deliberately imports no theme module, so its
- * default reads an id with its hyphens as spaces — "colourblind safe". This
- * supplies the catalogue's own `name` instead, and falls back to the id where
- * the value is not one this build knows.
+ * Renders a theme id as the prose name a preference announcement carries. Falls
+ * back to the id where the value is not one this build knows.
  *
  * @param theme Theme id to render.
  * @returns The prose name.
@@ -240,15 +184,22 @@ function describeThemeName(theme: string): string {
 }
 
 /**
- * Name the inter-frame gap is reported under.
- *
- * Deliberately NOT the canonical frame metric: that one carries how long the
- * frame callbacks occupied the frame, which the loop measures and the tracer
- * records exactly once. This is the gap between frames, which is a different
+ * Name the gap BETWEEN frames is reported under. The canonical frame metric
+ * carries how long the frame callbacks occupied one frame; this is a different
  * quantity and therefore a different series.
  */
 const FRAME_INTERVAL_TIMING = 'render.frame.interval';
 
+/**
+ * The elements index.html declares that this root looks up.
+ *
+ * Every lookup below is guarded. The vanilla markup's eight-selector contract
+ * was dereferenced unchecked in four places in js/html_actuator.js L2-L5 and one
+ * in js/keyboard_input_manager.js L141, so a renamed class was a startup
+ * failure; an absent element is reported here and the rest of the page starts.
+ * `.tile-container` of index.html L70-L72 is not among them: the canvas host
+ * replaces it.
+ */
 const SELECTORS = Object.freeze({
   boardNumberOnly: '#board-number-only',
   boardCanvas: '#board-canvas',
@@ -262,10 +213,9 @@ const SELECTORS = Object.freeze({
   liveRegion: '#live-region',
   diagnostics: '#diagnostics-overlay',
   rewardScreen: '#screen-reward',
-  // BOTH the host and a descendant. The parallel board's roving tab stop sits on
+  // Both the host and a descendant: the parallel board's roving tab stop sits on
   // the HOST under the Three renderer and on the active CELL under the
-  // number-only renderer, so a descendant-only selector matched nothing on every
-  // WebGL session and the reward screen's focus restore fell back to the body.
+  // number-only renderer.
   boardTabStop: '#board-a11y[tabindex="0"], #board-a11y [tabindex="0"]',
   hudGroup: '#screen-hud',
   hudStage: '#hud-stage',
@@ -276,11 +226,9 @@ const SELECTORS = Object.freeze({
  * The markup controls this root binds, and the action each publishes.
  *
  * `LEGACY_CONTROL_BINDINGS` is the three of js/keyboard_input_manager.js
- * L72-L74, and `mountOnScreenControls` is their ONE binding owner: this root
- * used to bind the same three elements a second time from a loop of its own, so
- * every pointer activation published twice — a double restart, and a double
- * `keepPlaying`. `#settings-button` is appended here rather than bound
- * separately, for the same reason: one owner per element.
+ * L72-L74. `mountOnScreenControls` is their one binding owner, and
+ * `#settings-button` is appended to the same list rather than bound separately:
+ * one owner per element.
  */
 const MARKUP_CONTROLS: readonly MarkupControlBinding[] = Object.freeze([
   ...LEGACY_CONTROL_BINDINGS,
@@ -293,6 +241,29 @@ const MARKUP_CONTROLS: readonly MarkupControlBinding[] = Object.freeze([
 /* --------------------------------------------------------------------------
  * Reporting
  * ----------------------------------------------------------------------- */
+
+/**
+ * The one counter family every generic report increment lands on.
+ *
+ * The report's own dotted name travels as the `report` label and its leading
+ * segment as the `subsystem` label — the shape `recordSpanDuration` gives the
+ * timing channel in `src/observability/metrics.ts`. DL-METRIC-04, DL-MAIN-11.
+ */
+const REPORT_COUNTER_NAME = `${METRIC_PREFIX}reports_total`;
+
+/** `# HELP` text `REPORT_COUNTER_NAME` is exported with. */
+const REPORT_COUNTER_HELP =
+  'Reports counted across every subsystem. The report name is the report ' +
+  'label and its leading segment the subsystem label.';
+
+/** Label carrying a report's own dotted name. */
+const REPORT_LABEL = 'report';
+
+/** Label carrying the leading segment of that name. */
+const REPORT_SUBSYSTEM_LABEL = 'subsystem';
+
+/** Subsystem label of a report whose name carries no leading segment. */
+const UNKNOWN_SUBSYSTEM = 'unknown';
 
 /**
  * Maps a render diagnostic level onto a log level.
@@ -314,25 +285,21 @@ function toLogLevel(level: RenderDiagnostic['level']): LogLevel {
 /**
  * Builds the sink every layer of the application reports through.
  *
- * THE ONE SINK. `RenderReporter` is the hub the whole reporting graph adapts
- * onto — the engine, input, storage, preference and UI adapters below all
- * narrow to it — so wiring its three channels to the structured logger and the
- * metrics registry is what puts the entire graph into real sinks rather than
- * some of it.
- *
- * Before this, the browser build wrote diagnostics straight to `console` and
- * DISCARDED every count and every timing: the logger and the metrics registry
- * were both fully implemented, and neither was ever constructed, so nothing
- * carried a correlation identifier, no counter ever moved and the diagnostics
- * surface had nothing to show. Console output is retained — the logger writes it
- * itself under `consoleOutput` — so nothing that used to be visible stops being
- * visible.
+ * `RenderReporter` is the hub the whole reporting graph adapts onto: the engine,
+ * input, storage, preference and UI adapters below all narrow to it, and its
+ * three channels are wired here to the structured logger and the metrics
+ * registry. Console output is retained — the logger writes it itself under
+ * `consoleOutput`. DL-MAIN-03, DL-MAIN-07.
  *
  * @param logger Structured logger diagnostics are recorded through.
  * @param metrics Registry counts and timings are recorded into.
  * @returns A frozen reporter whose channels cannot throw into their callers.
  */
 function createSink(logger: Logger, metrics: MetricsRegistry): RenderReporter {
+  // `# HELP` and `# TYPE` for the collapsed counter family, recorded once.
+  // DL-MAIN-11.
+  metrics.describe(REPORT_COUNTER_NAME, REPORT_COUNTER_HELP, 'counter');
+
   return createRenderReporter({
     onDiagnostic: (diagnostic: RenderDiagnostic): void => {
       const target = logger.child(diagnostic.source);
@@ -361,11 +328,11 @@ function createSink(logger: Logger, metrics: MetricsRegistry): RenderReporter {
     },
 
     onCount: (count: RenderCount): void => {
-      // Counted under a Prometheus-safe name: the report's own dotted name is
-      // kept as a label so the original is still readable in a snapshot.
-      metrics.counter(toMetricName(count.name), readCountLabels(count)).inc(
-        count.value,
-      );
+      // One family, the report's dotted name carried as a label rather than
+      // rendered into a family name of its own. DL-METRIC-04, DL-MAIN-11.
+      metrics
+        .counter(REPORT_COUNTER_NAME, readCountLabels(count))
+        .inc(count.value);
     },
 
     onTiming: (timing: RenderTiming): void => {
@@ -378,38 +345,38 @@ function createSink(logger: Logger, metrics: MetricsRegistry): RenderReporter {
 }
 
 /**
- * Renders a dotted report name as a Prometheus-safe metric name.
+ * Reads the subsystem a dotted report name belongs to: its leading segment.
  *
- * The reporting layers name counters as `'render.webgl.probe'`; Prometheus
- * accepts `[a-zA-Z_:][a-zA-Z0-9_:]*`. Separators become underscores and any
- * other unaccepted character is replaced rather than dropped, so two distinct
- * report names cannot collapse onto one metric.
+ * `'render.webgl.probe'` reads as `'render'`. A name carrying no separator
+ * reads whole, and an empty one reads as `UNKNOWN_SUBSYSTEM`, so the label is
+ * always present and always non-empty.
  *
- * @param name Report name to render.
- * @returns The metric name, prefixed by the registry's namespace.
+ * @param name Report name to read.
+ * @returns The subsystem label value.
  */
-function toMetricName(name: string): string {
-  const normalized = String(name)
-    .replace(/[.\-/\s]+/g, '_')
-    .replace(/[^a-zA-Z0-9_:]/g, '_');
+function toReportSubsystem(name: string): string {
+  const text = String(name).trim();
+  const separator = text.indexOf('.');
+  const leading = separator === -1 ? text : text.slice(0, separator);
 
-  return `${METRIC_PREFIX}${normalized === '' ? 'unnamed' : normalized}`;
+  return leading === '' ? UNKNOWN_SUBSYSTEM : leading;
 }
 
 /**
- * Reads the labels a counter increment carries.
- *
- * Only the report's own name, because a label set of unbounded cardinality is
- * how a metrics registry is turned into a memory leak: `detail` can carry a
- * board size, a selector or a caught message, and any of those as a label
- * would mint a new series per distinct value. The detail stays in the log
- * record, which is bounded by the buffer, rather than in the metric.
+ * Reads the labels a counter increment carries: the report's own dotted name
+ * and the subsystem it belongs to, and nothing else. `detail` stays in the log
+ * record and is carried into no label. DL-METRIC-04, DL-MAIN-11.
  *
  * @param count The increment.
  * @returns The label set.
  */
 function readCountLabels(count: RenderCount): Readonly<Record<string, string>> {
-  return Object.freeze({ report: String(count.name) });
+  const name = String(count.name);
+
+  return Object.freeze({
+    [REPORT_LABEL]: name,
+    [REPORT_SUBSYSTEM_LABEL]: toReportSubsystem(name),
+  });
 }
 
 /**
@@ -668,15 +635,12 @@ function createEngineSink(
  *
  * Every member of `RunReporter` is routed: the four failure and resolution
  * reports as diagnostics, the four lifecycle reports as counted events. The
- * board-size reconciliation and the refused payload are the reports the
- * guarded loader produces, and this is the sink they reach — before this
- * adapter existed, `RunStateStore` was constructed nowhere and they reached
- * nothing at all.
+ * board-size reconciliation and the refused payload are the reports the guarded
+ * loader produces, and this is the sink they reach.
  *
- * NO SEED IS FORWARDED. A seed is text the player may have typed, and none of
- * these report shapes carries one: `RunStartedReport` carries `seedProvided`
- * and `RunEndedReport` carries the summary with the seed already redacted out
- * of it.
+ * No seed is forwarded. None of these report shapes carries one:
+ * `RunStartedReport` carries `seedProvided`, and `RunEndedReport` carries the
+ * summary with the seed already redacted out of it. DL-LOG-06.
  *
  * @param reporter The one sink of the composition.
  * @returns A complete `RunReporter`.
@@ -895,16 +859,13 @@ function createRngSink(reporter: RenderReporter): RngReporter {
  * Boundary tracing, injected rather than imported
  * ----------------------------------------------------------------------- */
 
-// Rule 3 requires trace coverage of the whole chain validation gate V8 names —
-// input, engine turn, move resolution, hook dispatch, relic handler, renderer,
-// and the frame callback — and AAP 0.4.1.2 requires the observability layer to
-// attach as ordinary subscribers with no engine-side call site. Every one of
-// those boundaries is spanned by a collaborator this root injects, so no module
-// under src/engine, src/input, src/relics or src/render imports anything from
-// src/observability. Decision DL-MAIN-05.
+// The seven boundaries validation gate V8 names — input, engine turn, move
+// resolution, hook dispatch, relic handler, renderer and the frame callback —
+// are each spanned by a collaborator this root injects, so no module under
+// src/engine, src/input, src/relics or src/render imports anything from
+// src/observability. DL-MAIN-05.
 //
-// WHERE EACH ONE IS SPANNED, so a reader does not go looking for a wrapper that
-// is not here:
+// Where each one is spanned:
 //   input.dispatch      `createInputSink(reporter, tracer)`, whose `startSpan`
 //                       the input manager calls around its whole listener walk.
 //   engine.turn         `attachEngineTracing`, opened on `move:before`, closed
@@ -934,15 +895,12 @@ const SEED_RADIX = 36;
  * Creates one random run token.
  *
  * Called twice per page load, once for the run seed and once for the
- * run-instance identifier, and the two draws are independent.
+ * run-instance identifier; the two draws are independent. Web Crypto is the
+ * source where it is available, and the two clocks combined where it is not.
+ * `Math.random()` is called by no module under src/, and a test asserts the
+ * global is never replaced. DL-MAIN-02.
  *
- * Web Crypto is the source where it is available. Where it is not, the
- * two clocks are combined, which yields a distinct token per page load
- * without reaching for `Math.random()`: no module under src/ calls it,
- * and a test asserts the global is never replaced.
- *
- * @returns A token string. The seed form is used verbatim by the
- *   substreams.
+ * @returns A token string. The seed form is used verbatim by the substreams.
  */
 function createRunToken(): string {
   const source = globalThis.crypto;
@@ -1026,12 +984,11 @@ export interface BoardRenderSelection {
 }
 
 /**
- * The part of a board renderer this root drives.
- *
- * Declared structurally and satisfied by BOTH renderers, which is what lets the
- * mode be selected — and switched — without the wiring below knowing which one
- * it holds. `frame` accepts the loop's context, which the 2.5D renderer reads a
- * delta from and the number-only renderer ignores.
+ * The part of a board renderer this root drives. Declared structurally and
+ * satisfied by BOTH renderers, so the mode can be selected and switched without
+ * the wiring below knowing which one it holds. `frame` accepts the loop's
+ * context, which the 2.5D renderer reads a delta from and the number-only
+ * renderer ignores.
  */
 interface BoardRenderer {
   readonly mounted: boolean;
@@ -1053,16 +1010,8 @@ interface BoardRenderer {
  * How long a lost WebGL context is waited on before the number-only board takes
  * over.
  *
- * BOUNDED, DELIBERATELY. A loss the browser restores is common — a driver
- * reset, a tab restored from the background — and swapping renderers on every
- * one of them would replace a board that recovers in two frames with a
- * different board altogether. A loss the browser never restores is the case that
- * left the board frozen for the rest of the session, which is what this bound
- * ends.
- *
- * 1200 ms is the delay the terminal overlay already waits before it fades in
- * (`$transition-speed` x 12), so the fallback cannot appear faster than the
- * slowest thing the product already shows a player.
+ * 1200 ms is the delay the terminal overlay waits before it fades in
+ * (`$transition-speed` x 12 of style/main.scss). DL-MAIN-10.
  */
 export const CONTEXT_RESTORE_GRACE_MS = 1200;
 
@@ -1080,20 +1029,15 @@ function readContextLost(renderer: BoardRenderer): boolean {
 /**
  * Selects the board rendering mode from the capability and the preference.
  *
- * TWO INDEPENDENT REASONS produce number-only rendering, and they are not
- * interchangeable: WebGL is a hard runtime prerequisite the product has never
- * had, so a machine without a context must be served the number-only board
- * (implicit requirement I6); and number-only mode is a first-class accessible
- * rendering mode a player may choose with a context available (R9). The
- * preference store holds both as one effective value — `isNumberOnlyMode()` —
- * and reports which of the two produced it, so the report below can say why.
- *
- * The probe is therefore consulted BEFORE this, and its result is pushed into
- * the store as a force, which is the order a prerequisite has to be checked in.
+ * Two distinct inputs produce number-only rendering and the selection reports
+ * which: an absent WebGL context, which the probe pushes into the store as a
+ * force (implicit requirement I6), and the player's own choice of number-only
+ * as a rendering mode (R9). The store holds both as the one effective value
+ * `isNumberOnlyMode()`, and the probe is consulted before this call.
  *
  * @param support The probe result.
  * @param preferences The store holding the effective number-only value.
- * @returns The selected mode, and why it is in force.
+ * @returns The selected mode, and which input put it in force.
  */
 function selectBoardRenderer(
   support: WebGLSupportResult,
@@ -1116,15 +1060,14 @@ function selectBoardRenderer(
  * The renderer registers its own listeners from inside `subscribe`, so the span
  * is applied where the listener is REGISTERED rather than around a call this
  * module makes. Every other event name is registered unchanged, and `off`
- * resolves a caller's listener back to the wrapper it was registered as, so
- * removal behaves exactly as it does on the engine's own emitter.
+ * resolves a caller's listener back to the wrapper it was registered as.
  *
  * @param events The engine's emitter.
  * @param traceRenderCommit The `render.commit` boundary wrapper.
- * @param readTurnSpan Reads the turn span open right now, which the commit span
- *   is opened as a CHILD of explicitly. The listener that closes the turn span
- *   is another `state:commit` listener, so relying on the implicit-parent stack
- *   made the parent link depend on which of the two was registered first.
+ * @param readTurnSpan Reads the turn span open right now. The commit span is
+ *   opened as an explicit CHILD of it, because the listener that closes the turn
+ *   span is another `state:commit` listener and the implicit-parent stack would
+ *   make the link depend on registration order.
  * @returns A frozen emitter with the same three members.
  */
 function createTracedRenderEvents(
@@ -1234,12 +1177,7 @@ export interface Application {
   /** The one HUD actuator: the score outlets and the terminal overlay. */
   readonly hud: Hud;
 
-  /**
-   * The diagnostics surface, this build's stand-in for a metrics endpoint.
-   *
-   * Exposed so the capability is exercisable — from a console, a test or a key
-   * binding — rather than only reachable if something happens to open it.
-   */
+  /** The diagnostics surface, this build's stand-in for a metrics endpoint. */
   readonly diagnostics: DiagnosticsOverlay;
 
   /** The structured logger every layer reports through. */
@@ -1251,89 +1189,53 @@ export interface Application {
   /**
    * The Performance-API tracer every span of the input -> engine -> hook bus ->
    * relic handler -> renderer chain, and of the frame callback, is opened on —
-   * every module boundary validation gate V8 enumerates.
-   *
-   * Exposed for the same reason the diagnostics surface is: a capability that
-   * cannot be exercised locally is not delivered, and `snapshot()` on this is
-   * how the span records are read from a console or a test without the overlay
-   * having to be opened.
+   * every module boundary validation gate V8 enumerates. `snapshot()` on it
+   * reads the span records without the overlay being opened.
    */
   readonly tracer: Tracer;
 
   /**
    * The health surface: the five reused capability probes plus the WebGL probe,
-   * their roll-up report and the two readiness verdicts.
-   *
-   * Exposed so `check()`, `report()` and `readiness()` are reachable at will
-   * against the running page rather than only against a unit test — a static
-   * bundle has no port for an orchestrator to poll, so this object IS the
-   * readiness probe (AAP 0.7.2.4).
+   * their roll-up report and the two readiness verdicts. `check()`, `report()`
+   * and `readiness()` on it are the readiness probe a static bundle has no port
+   * for an orchestrator to poll (AAP 0.7.2.4).
    */
   readonly health: HealthSurface;
 
-
   /**
-   * The run in progress: its identity, its stage, its relics and its summary.
-   *
-   * Exposed because it is the only reachable source of the run seed — which the
-   * player is meant to be able to read and copy — and of the finished run a
-   * summary is drawn from once the stored envelope has been cleared.
+   * The run in progress: its identity, its stage, its relics and its summary,
+   * and the only reachable source of the run seed.
    */
   readonly run: RunController;
 
-  /**
-   * The reward moment: the offer a cleared stage earned, and taking one.
-   *
-   * Exposed because the reward screen is driven from outside this module and the
-   * seeded draw lives inside it: without a reachable surface the offer would be
-   * drawn, recorded, announced and then impossible to act on.
-   */
+  /** The reward moment: the offer a cleared stage earned, and taking one. */
   readonly rewards: RewardSurface;
 
   /**
    * The relic registry: the catalogue, the relics held in pickup order, their
    * charge budgets, and the manual activation a player's `activateRelic` press
-   * reaches.
-   *
-   * Exposed for the same reason the tracer and the health surface are: a
-   * capability that cannot be exercised from a console or a test is not
-   * delivered. A press activates through this object, and the budget it spends
-   * is the one src/engine/hook-bus.ts holds.
+   * reaches. The budget it spends is the one src/engine/hook-bus.ts holds.
    */
   readonly relics: RelicRegistry;
 
   /**
-   * The accessibility and presentation preferences in force.
-   *
-   * Exposed because it is the surface that decides which renderer draws the
-   * board, which palette is applied and whether motion is reduced, and because
-   * nothing outside this module could otherwise reach the running application's
-   * settings at all.
+   * The accessibility and presentation preferences in force: the surface that
+   * decides which renderer draws the board, which palette is applied and
+   * whether motion is reduced.
    */
   readonly preferences: PreferenceStore;
 
   /**
    * The audio layer, which FOLLOWS `preferences` and cannot be written to
-   * directly.
-   *
-   * Exposed for the same reason the store is: it is otherwise unreachable, and
-   * it is the only place the effect of a mute or a volume change can be read
-   * back. `setMuted` and `setVolume` on it are refused — the store is the single
-   * owner of both (N1).
+   * directly: `setMuted` and `setVolume` on it are refused, and the store is
+   * the single owner of both.
    */
   readonly soundEngine: SoundEngine;
 
-  /** Stops the frame loop and removes every listener that was bound. */
   /**
    * Discards the run in force and starts a FRESH one: a new run identifier, a
    * new seed, substreams rebuilt at cursor zero, no relics, stage 0, and a new
-   * board.
-   *
-   * THE EXPLICIT NEW-RUN PATH. `start()` resumes, and this replaces — the two
-   * are separate calls rather than one call that guesses. Every piece of run
-   * identity is replaced together, so a second run played without a reload can
-   * neither inherit the previous run's seed and cursors nor report under its
-   * correlation identifier.
+   * board. `start()` resumes; this replaces.
    *
    * @param seed Seed to play, reduced by `normalizeEnteredSeed`. Originated when
    *   absent.
@@ -1341,50 +1243,26 @@ export interface Application {
    */
   readonly startNewRun: (seed?: string) => string;
 
+  /** Stops the frame loop and removes every listener that was bound. */
   readonly dispose: () => void;
 }
 
 /**
- * Builds and starts the application.
- *
- * The order is load-bearing, and it is a chain rather than a preference:
- *
- *   storage -> run identity -> correlation identifier -> logger, metrics,
- *   tracer and health -> run controller -> substreams -> hook bus -> engine ->
- *   engine tracing -> subscribers -> `setup()`
- *
- * Storage comes first because the run's identity is read out of it. That
- * identity supplies the correlation identifier, which everything that reports is
- * keyed on. The controller's load then supplies the seed and the cursors the
- * substreams are built from, and the engine reads the substreams and the
- * configuration. Every subscriber attaches after the engine exists, and
- * `setup()` runs last so the first state commit reaches a renderer that is
- * already listening — js/game_manager.js L13 called `setup()` from its own
- * constructor and therefore emitted its first actuation before anything else
- * could have attached.
- *
- * @param ownerDocument Document to mount into. Defaults to the ambient
- *   `document`.
- * @returns The composed application.
- */
-/**
- * `RngStreams` whose backing instance can be replaced.
- *
- * WHY A FACADE. The engine takes its substreams at construction and reads them
- * through `this.streams` at every use site, caching no stream object. A run
- * that starts fresh needs substreams built from a NEW seed at cursor zero, and
- * rebuilding the engine to deliver them would tear down every subscription the
- * composition root installed. Swapping what this delegates to replaces the
- * randomness without disturbing anything holding a reference to it.
- *
- * `seed` is a getter rather than a captured value, so it reports the seed of the
- * run in force.
+ * `RngStreams` whose backing instance can be replaced, so a fresh run's
+ * substreams reach every holder of a reference without the engine being rebuilt.
+ * `seed` is a getter, so it reports the seed of the run in force. DL-MAIN-09.
  */
 interface SwappableRngStreams extends RngStreams {
   /** Replaces the backing instance. Later draws come from `next`. */
   replace(next: RngStreams): void;
 }
 
+/**
+ * Builds the facade over an initial set of substreams.
+ *
+ * @param initial Substreams the facade delegates to until it is replaced.
+ * @returns The facade.
+ */
 function createSwappableRngStreams(
   initial: RngStreams,
 ): SwappableRngStreams {
@@ -1404,23 +1282,32 @@ function createSwappableRngStreams(
   };
 }
 
+/**
+ * Builds and starts the application.
+ *
+ * The order is a chain: storage -> run identity -> correlation identifier ->
+ * logger, metrics, tracer and health -> run controller -> substreams -> hook
+ * bus -> engine -> engine tracing -> subscribers -> the board. The board opens
+ * last, after every subscriber has attached, which is where js/game_manager.js
+ * L13 called `setup()` from its own constructor instead. DL-MAIN-03,
+ * DL-MAIN-04, DL-MAIN-06.
+ *
+ * @param ownerDocument Document to mount into.
+ * @returns The composed application.
+ */
 export function start(ownerDocument: Document): Application {
   // A caller composing the application supersedes the automatic boot deferred by
-  // `bootstrap()`: one document hosts one application, and a second composition
-  // over the same markup would bind every control twice. The boot's own call is
-  // exempt.
+  // `bootstrap()`. The boot's own call is exempt. DL-MAIN-09.
   cancelPendingBoot();
 
   const config = createDefaultRulesConfig();
   const stages = createDefaultStageConfig();
 
-  // Storage is composed FIRST, ahead of the observability layer, because the
-  // run's identity is read out of it and everything that reports is keyed on a
-  // value derived from that identity.
-  //
-  // Its own failure sink therefore does not exist yet. Failures raised before it
-  // does are held and replayed the moment it is attached, so a quota exhausted
-  // during the identity read is reported rather than dropped.
+  // Storage is composed FIRST, ahead of the observability layer: the run's
+  // identity is read out of it and the correlation identifier is derived from
+  // that identity. Its own failure sink therefore does not exist yet, so
+  // failures raised before it does are held and replayed the moment it is
+  // attached. DL-MAIN-06.
   const earlyStorageFailures: StorageFailure[] = [];
   let reportStorageFailure = (failure: StorageFailure): void => {
     earlyStorageFailures.push(failure);
@@ -1434,46 +1321,34 @@ export function start(ownerDocument: Document): Application {
     },
   });
 
-  // The run's identity: the seed it plays and the instance that plays it.
-  //
-  // Read from the stored envelope where one is readable, so a reload CONTINUES
-  // the run it interrupted — same seed, same run identifier, and therefore the
-  // same correlation identifier — rather than starting a new one. Originated
-  // only when there is nothing to continue. Reports nothing: it is what makes
-  // reporting possible.
+  // The run's identity: the seed it plays and the instance that plays it. Read
+  // from the stored envelope where one is readable, so a reload CONTINUES the run
+  // it interrupted under the same seed, run identifier and correlation
+  // identifier; originated only where there is nothing to continue.
   const identity: RunIdentity = resolveRunIdentity({
     storage,
     createToken: createRunToken,
   });
 
-  // The one derivation of the run correlation identifier. Every module
-  // that reports receives this value; none derives one of its own, and
-  // neither the seed nor the run identifier is carried into a report.
+  // The one derivation of the run correlation identifier, from both inputs: the
+  // run instance makes it unique and the seed keeps the seed-grouping prefix.
+  // Every module that reports receives it; none derives one of its own, and
+  // neither the seed nor the run identifier is carried into a report. No engine
+  // behaviour reads it.
   //
-  // Both inputs: the run instance makes it unique, and the seed keeps the
-  // seed-grouping prefix, so a stream can still be grouped by seed. The seed is
-  // displayed and copyable by design, so replays of one seed are an expected
-  // event rather than an edge case, and an identifier derived from the seed
-  // alone would put every one of them under a single value. No engine behaviour
-  // reads this, so gameplay determinism is unaffected.
-  //
-  // HELD IN A SCOPE RATHER THAN A CONSTANT. A run started without a reload mints
-  // a new identity, so an identifier captured by each module at construction
-  // attributed the second run's records, counters, spans, health reports, hook
-  // contexts, relic reports and persistence reports to the first run.
-  // `readCorrelationId` is what every module receives, and `rotateCorrelation`
-  // below is the ONE writer — of this scope and, through
-  // `Logger.setCorrelationId`, of the logger the metrics registry, the tracer
-  // and the health surface read theirs from.
+  // Held in a SCOPE, not a constant: a run started without a reload mints a new
+  // identity. `readCorrelationId` is what every module receives, and
+  // `rotateCorrelation` below is the one writer — of this scope and, through
+  // `Logger.setCorrelationId`, of the logger the metrics registry, the tracer and
+  // the health surface read theirs from. DL-MAIN-06, DL-LOG-01.
   let runCorrelationId = deriveCorrelationId(identity.seed, identity.runId);
 
   /** Reads the correlation identifier of the run in force. */
   const readCorrelationId = (): CorrelationId => runCorrelationId;
 
-  // The structured logger and the metrics registry, both of which shipped fully
-  // implemented and neither of which was ever constructed. `consoleOutput` keeps
-  // everything that used to reach the console reaching it, now as a structured
-  // record carrying the correlation identifier rather than a bare string.
+  // The structured logger and the metrics registry. `consoleOutput` keeps
+  // everything that reaches the console reaching it, as a structured record
+  // carrying the correlation identifier. DL-MAIN-03, DL-LOG-01.
   const logger = createLogger({
     correlationId: runCorrelationId,
     subsystem: 'main',
@@ -1503,56 +1378,42 @@ export function start(ownerDocument: Document): Application {
   const boundaries: BoundaryTracing = createBoundaryTracing(tracer);
 
   /**
-   * The WebGL probe result, once taken. Held in a slot because the health
-   * surface is composed before the probe runs — it is read by the storage sink
-   * replay above — and because the probe must run exactly once per session.
+   * The WebGL probe result, once taken. A slot, because the health surface is
+   * composed before the probe runs and the probe runs exactly once per session.
    */
   let webglProbeResult: WebGLProbeView | undefined;
 
   /**
    * The WebGL failure the board is living with right now, or `null` while the
-   * capability the boot probe found is the one in force.
-   *
-   * A SLOT, because the health surface is built before the renderer it asks
-   * about: `probeWebGLSupport` holds its startup result and hands the same one to
-   * every later caller, so a surface reading it alone would report the capability
-   * the machine had at BOOT for the rest of the session — a context taken away
-   * ten minutes in, a 2.5D board that never mounted, or a rebuild that failed
-   * would all still read as healthy. Filled once the renderer exists, and answers
-   * `null` until then.
+   * capability the boot probe found is the one in force. A slot, filled once the
+   * renderer exists and answering `null` until then: `probeWebGLSupport` hands
+   * every later caller its startup result, so a surface reading that alone
+   * reports the capability the machine had at BOOT for the rest of the session.
    */
   let readLiveWebGLFailure: () => string | null = (): string | null => null;
 
-  // The health surface: the five capability probes the vanilla sources
-  // performed and reported nowhere, plus the WebGL probe the Three.js renderer
-  // introduced. The live storage manager is handed over so its
-  // construction-time probe result is read instead of a second write-and-remove
-  // round trip being taken.
-  //
-  // `webglProbe` hands back the ONE probe result taken below rather than taking
-  // a second: a second probe would request a second WebGL context. The slot is
-  // read at call time and falls through to the module's own probe until the
-  // result exists, so a check taken before boot completed still answers.
+  // The health surface: the five capability probes the vanilla sources performed
+  // and reported nowhere, plus the WebGL probe the Three.js renderer introduced.
+  // The live storage manager is handed over, so its construction-time probe
+  // result is read instead of a second write-and-remove round trip. `webglProbe`
+  // hands back the ONE probe result taken below; the slot is read at call time
+  // and falls through to the module's own probe until that result exists.
+  // DL-HEALTH-02.
   const health = createHealthSurface({
     logger,
     metrics,
     storage,
 
-    // THE POINTER FAMILY IS PROBED, not inferred. Derived from whether the input
-    // manager happened to be listening, it answered a different question — one
-    // about this application's own wiring rather than about what the platform
-    // resolves to — and reported a healthy platform as unhealthy for as long as
-    // dispatch was suspended.
+    // The pointer family is PROBED, not inferred from whether the input manager
+    // is listening: js/keyboard_input_manager.js L4-L13 probed the platform.
     pointerProbe: detectPointerEventFamily,
     webglProbe: (): WebGLProbeView => {
       const probed = webglProbeResult ?? probeWebGLSupport();
 
-      // THE LIVE VERDICT. A context that was obtained and then taken away, one
-      // whose resources could not be rebuilt after a restoration, a 2.5D board
-      // that never mounted, and a number-only board forced in place of one are
-      // each a WebGL failure NOW, whatever the boot probe found, and each is the
-      // verdict the readiness roll-up has to act on: the number-only board is
-      // required for as long as any of them holds.
+      // The live verdict, which the readiness roll-up acts on: a context taken
+      // away, one whose resources could not be rebuilt, a 2.5D board that never
+      // mounted, and a forced number-only board are each a WebGL failure NOW,
+      // whatever the boot probe found.
       const failure = readLiveWebGLFailure();
 
       return failure === null
@@ -1573,10 +1434,10 @@ export function start(ownerDocument: Document): Application {
    * Recomputes the held health report and readiness verdicts.
    *
    * `HealthSurface.report()` and `readiness()` return the report `check()` last
-   * produced, so a renderer transition that happens after boot — a fallback, a
-   * mode switch, a lost context, a rebuild that failed — left the diagnostics
-   * panel and every exported snapshot showing BOOT readiness against a board
-   * that was no longer the one drawing. Every such transition calls this.
+   * produced, so every renderer transition after boot — a fallback, a mode
+   * switch, a lost context, a rebuild that failed — calls this, and the
+   * diagnostics panel and every exported snapshot describe the board drawing
+   * now.
    *
    * Nothing is probed that was not probed at boot: the WebGL result is the held
    * one plus the live verdict above, and the Web Storage result is the manager's
@@ -1633,20 +1494,20 @@ export function start(ownerDocument: Document): Application {
     boardSize: config.boardSize,
   });
 
-  // The hook bus, built HERE rather than inside the engine, because the relic
-  // registry needs it and the registry must exist before the run controller
-  // loads: a resumed envelope hands its relics back through
-  // `RelicRegistryPort.restoreRelics`, and a registry composed after that load
-  // would be handed nothing. The engine takes this same instance below, so there
-  // is exactly one bus and every registered relic is dispatched to.
+  // The one sink the hook bus, the relic registry and the engine all report
+  // through. DL-MAIN-07.
+  const engineReporter = createEngineSink(reporter, metrics);
+
+  // The hook bus, built HERE rather than inside the engine: the relic registry
+  // takes it, and the registry has to exist before the run controller loads,
+  // because a resumed envelope hands its relics back through
+  // `RelicRegistryPort.restoreRelics`. The engine takes this same instance below,
+  // so there is exactly one bus.
+  //
   // The two boundary wrappers are injected here: `hook.dispatch` spans each
   // dispatch and `relic.handler` spans each handler invocation, both attributed
   // to the hook. `BoundaryTracing` satisfies `HookDispatchTracing` structurally,
-  // so src/engine imports nothing from src/observability.
-  // Hoisted ahead of its first use, because the hook bus, the relic registry and
-  // the engine all report through ONE sink rather than through three of their
-  // own.
-  const engineReporter = createEngineSink(reporter, metrics);
+  // so src/engine imports nothing from src/observability. DL-HOOKBUS-05.
 
   const hooks: HookBus = createHookBus({
     correlationId: readCorrelationId,
@@ -1655,16 +1516,14 @@ export function start(ownerDocument: Document): Application {
   });
 
   // The relic registry: the sixteen-relic catalogue, pickup order, charge
-  // accounting and the hook subscriptions that make a held relic fire.
+  // accounting and the hook subscriptions that make a held relic fire (AAP
+  // 0.6.2.5, R3). The one construction of it.
   //
-  // AAP 0.6.2.5 and R3. It shipped fully implemented and was constructed
-  // NOWHERE, so `RELIC_CATALOGUE` reached no bus and a run could hold no relic
-  // whatever the reward screen said. This is the one construction of it.
-  // NO `catalogue` IS SUPPLIED. The default is `RELIC_CATALOGUE` used as it
-  // stands, already frozen at every level by the module that owns it; supplying
-  // it explicitly takes the injected path, which adopts a fresh copy of every
-  // declaration and would replace the array the seeded reward snapshots resolve
-  // their drawn indices against.
+  // No `catalogue` is supplied. The default is `RELIC_CATALOGUE` as it stands,
+  // already frozen at every level by the module that owns it; supplying it takes
+  // the injected path, which adopts a fresh copy of every declaration and would
+  // replace the array the seeded reward snapshots resolve their drawn indices
+  // against. DL-REGISTRY-01.
   const registry = new RelicRegistry({
     bus: hooks,
     correlationId: readCorrelationId,
@@ -1712,12 +1571,9 @@ export function start(ownerDocument: Document): Application {
   const runSink = createRunSink(reporter);
 
   /**
-   * The substreams in force.
-   *
-   * Held rather than captured because a new run REPLACES them: they are built
-   * from the run's seed, so a run started mid-session must draw from its own
-   * sequence and not from wherever the previous run's substreams had reached.
-   * Every reader below goes through this holder.
+   * The substreams in force. Held rather than captured: a new run REPLACES them,
+   * because they are built from the run's seed. Every reader below goes through
+   * this holder.
    */
   const streamHolder: { streams: RngStreams } = {
     streams: createRngStreams(
@@ -1728,25 +1584,22 @@ export function start(ownerDocument: Document): Application {
   };
 
   /**
-   * Replaces the substreams behind the swappable facade, once that facade
-   * exists.
-   *
-   * `run.begin()` publishes a run scope before the facade is built — the facade
-   * is built from the loaded run's own seed — so the callback cannot close over
-   * it. Left absent until then, when replacing nothing is exactly right.
+   * Replaces the substreams behind the swappable facade, once that facade exists.
+   * `run.begin()` publishes a run scope before the facade is built, from the
+   * loaded run's own seed, so the callback cannot close over it and is absent
+   * until then.
    */
   let replaceSwappableStreams: ((next: RngStreams) => void) | undefined;
 
   /**
    * Rotates the one correlation scope every reporting module reads.
    *
-   * ONE WRITE, and every observer follows it: the scope itself for the engine,
-   * the emitter, the hook bus, the relic registry, the run controller and the
-   * run-state store, and `Logger.setCorrelationId` for the logger and for every
-   * logger sharing its state — which is what the metrics registry, the tracer
-   * and the health surface read theirs from. Records, counters, spans and
-   * reports already emitted are not relabelled: they were true when they were
-   * written.
+   * One write, which every observer follows: the scope itself for the engine, the
+   * emitter, the hook bus, the relic registry, the run controller and the
+   * run-state store, and `Logger.setCorrelationId` for the logger and every
+   * logger sharing its state, which is where the metrics registry, the tracer and
+   * the health surface read theirs from. Records, counters, spans and reports
+   * already emitted are not relabelled. DL-MAIN-06.
    *
    * @param next The identifier the run now in force is keyed under.
    */
@@ -1768,34 +1621,20 @@ export function start(ownerDocument: Document): Application {
   };
 
   /**
-   * Rebuilds every construct scoped to the run.
-   *
-   * A new run mints a new seed and a new run identifier, and the substreams are
-   * built from that seed. Without this the substreams of the run before it
-   * stayed in place and a "new" run replayed the previous sequence, which is
-   * the determinism guarantee the seed provides. Invoked before the engine
-   * opens a board, so the opening spawns come from the new sequence.
-   *
-   * The correlation scope is rotated HERE for the same reason and at the same
-   * moment: this is the one point before a new run's first emission, so every
-   * record, counter, span, hook context and persistence report the new run
-   * produces — the opening `stage:start` and `state:commit` included — is
-   * attributed to it rather than to the run the page loaded with.
+   * Rebuilds every construct scoped to the run: the substreams, from the run's
+   * own seed, and the correlation scope, from its identity. Invoked before the
+   * engine opens a board, so the opening spawns come from the new sequence and
+   * the opening `stage:start` and `state:commit` are attributed to the new run.
+   * DL-MAIN-06, DL-RNG-05.
    */
   const adoptRunScope = (scope: RunScope): void => {
-    // THE CORRELATION SCOPE, ROTATED FIRST. The controller publishes this scope
-    // BEFORE it opens the engine's board, so every report of the new run — the
-    // engine's, the bus's, the registry's, the store's, the controller's and
-    // every span the tracer opens — carries the new run's identifier from the
-    // opening spawns onward. Rotating after the run had opened left the first
-    // reports of a second run attributed to the run before it.
-    //
-    // Derived from the scope the controller published rather than from a later
-    // query, so the identifier matches the seed and the run identifier the
-    // envelope carries. Idempotent at composition time: the scope published by
-    // `begin()` carries the same identity `deriveCorrelationId` was first
-    // called with above, so a resumed run keeps the identifier it was stored
-    // under and `rotateCorrelation` short-circuits.
+    // The correlation scope, rotated FIRST: the controller publishes this scope
+    // before it opens the engine's board, so every report of the new run carries
+    // the new identifier from the opening spawns onward. Derived from the scope
+    // published rather than from a later query, so the identifier matches the
+    // seed and run identifier the envelope carries; at composition time
+    // `begin()` publishes the identity `deriveCorrelationId` was already called
+    // with above and `rotateCorrelation` short-circuits. DL-MAIN-06.
     rotateCorrelation(deriveCorrelationId(scope.seed, scope.runId));
 
     const next = createRngStreams(
@@ -1831,34 +1670,30 @@ export function start(ownerDocument: Document): Application {
     // The registry, reached through the port so the controller names no relic
     // type. Every member delegates on each call rather than being captured, so a
     // charge a handler spent and a state slot a handler advanced are read at
-    // write time rather than at composition time.
+    // write time.
+    //
+    // One member per name `RelicRegistryPort` of src/run/run-controller.ts
+    // actually reads. The alternative spellings it also accepts —
+    // `activateRelic`, `pickUp`, `resolveRelic`, `knowsRelic` and `serialize` —
+    // are left off: it resolves `pickUpRelic ?? activateRelic`,
+    // `persistedEntry ?? resolveRelic`, `knowsRelic ?? knows` and
+    // `serialize ?? snapshotRelics`, so a second spelling is a second
+    // implementation of one step that can never run. DL-MAIN-09.
     relics: {
       snapshotRelics: (): readonly PersistedRelic[] => registry.serialize(),
-      activateRelic: (relicId): PersistedRelic | null => {
-        const taken = registry.pickUp(relicId);
-
-        if (taken === undefined) {
-          return null;
-        }
-
-        // The entry as the registry now holds it, so the envelope records the
-        // budget the registry seeded rather than the catalogue's declaration.
-        return registry.serialize().find((entry) => entry.id === relicId) ?? null;
-      },
       ownedRelicIds: (): readonly string[] => registry.ownedIds(),
       restoreRelics: (relics): void => {
         registry.restore(relics);
       },
       knows: (relicId): boolean => registry.knows(relicId),
 
-      // THE CONFIRMATION READER. `resolveReward()` appends the entry the pickup
-      // produced and then asks this whether the live registry agrees, withdrawing
-      // the append where it does not — so the envelope can never carry a relic
-      // the bus is not dispatching.
+      // The confirmation reader: `resolveReward()` appends the entry the pickup
+      // produced and then asks this whether the live registry agrees,
+      // withdrawing the append where it does not.
       holdsRelic: (relicId): boolean => registry.has(relicId),
 
-      // The entry-returning pickup, so the persisted record is exactly what the
-      // registry accepted rather than one the controller assembled beside it.
+      // The entry-returning pickup, so the persisted record is what the
+      // registry accepted.
       pickUpRelic: (relicId): PersistedRelic | null => {
         if (registry.pickUp(relicId) === undefined) {
           return null;
@@ -1866,24 +1701,9 @@ export function start(ownerDocument: Document): Application {
 
         return registry.persistedEntry(relicId);
       },
-      pickUp: (relicId): unknown => registry.pickUp(relicId),
       activate: (relicId, amount) => registry.activate(relicId, amount),
       persistedEntry: (relicId): PersistedRelic | null =>
         registry.persistedEntry(relicId),
-      resolveRelic: (relicId): PersistedRelic | null => {
-        const known = registry
-          .catalogue()
-          .find((relic) => relic.id === relicId);
-
-        if (known === undefined) {
-          return null;
-        }
-
-        return Object.freeze({
-          id: known.id,
-          ...(known.charges === undefined ? {} : { charges: known.charges }),
-        });
-      },
     },
 
     // The seeded draw. Consumes the run's `relic-draw` and `rarity-weight`
@@ -1926,15 +1746,15 @@ export function start(ownerDocument: Document): Application {
     detail: Object.freeze({ outcome: runOutcome }),
   });
 
-  // Built from the run rather than from the identity, so the sequence played and
-  // the sequence recorded cannot diverge: `seed()` is the seed of the envelope
-  // in force, and `cursors()` is where that envelope left each substream. A
-  // fresh run yields zeros, so its opening spawns are taken rather than skipped.
-  // ONE BACKING INSTANCE, reached two ways. `streamHolder` is the slot
+  // Built from the run rather than from the identity: `seed()` is the seed of the
+  // envelope in force and `cursors()` is where that envelope left each substream,
+  // and a fresh run yields zeros so its opening spawns are taken rather than
+  // skipped.
+  //
+  // One backing instance, reached two ways. `streamHolder` is the slot
   // `adoptRunScope` replaces when a new run mints a new seed, and the facade
-  // below is what the reward draw and the diagnostics surface hold, so neither
-  // has to be rebuilt for a run started mid-session to draw from its own
-  // sequence. Both are updated by `adoptRunScope` and nowhere else.
+  // below is what the reward draw and the diagnostics surface hold. Both are
+  // updated by `adoptRunScope` and nowhere else. DL-RNG-05.
   streamHolder.streams = createRngStreams(
     run.seed(),
     run.cursors(),
@@ -1980,21 +1800,16 @@ export function start(ownerDocument: Document): Application {
     stageContext: () => run.stageContext(),
     relicContext: () => run.relicContext(),
 
-    // THE RESOLUTION SPAN IS INJECTED, not wrapped from out here. The turn span
-    // opens on `move:before`, which the engine emits from inside `move()`, so a
-    // wrapper placed around `move()` would OPEN BEFORE that emission and become
-    // the turn's parent — the resolution appearing to contain the turn it is part
-    // of, and the turn left open across its own parent's end. Handed to the
-    // engine, it runs around the traversal walk alone, which is the one placement
-    // that nests correctly.
+    // The resolution span is INJECTED, not wrapped from out here: the engine runs
+    // it around the traversal walk alone, so it nests inside the turn span, which
+    // opens on the `move:before` the engine emits from inside `move()`.
+    // DL-HOOKBUS-05.
     tracing: { traceMoveResolution: boundaries.traceMoveResolution },
   });
 
-  // The relic registry is composed ABOVE, before the run controller, because a
-  // resumed envelope hands its relics back during `run.begin()` and a registry
-  // built here would be handed nothing. The relics an adopted envelope carried
-  // are re-hydrated now that the engine's bus has dispatched nothing yet, so a
-  // held relic fires from this engine's first dispatch.
+  // The relics an adopted envelope carried, re-hydrated onto the engine's bus
+  // before it has dispatched anything, so a held relic fires from the first
+  // dispatch.
   run.restoreHeldRelics();
 
   // The frame callback is the system's only asynchronous boundary. Its span is
@@ -2008,10 +1823,9 @@ export function start(ownerDocument: Document): Application {
     onFrameEnd: frameLifecycle.onFrameEnd,
   });
 
-  // The preference store, composed BEFORE the renderer because the renderer
-  // selection reads it: number-only mode is a mode a player may choose as well
-  // as the mode a machine without WebGL is served, and the store is where those
-  // two are combined into one effective value.
+  // The preference store, composed BEFORE the renderer, whose selection reads
+  // the one effective number-only value it combines the choice and the force
+  // into.
   const preferences = createPreferenceStore({
     reporter: createPreferenceSink(reporter),
   });
@@ -2029,21 +1843,16 @@ export function start(ownerDocument: Document): Application {
     });
   };
 
-  // The reduced-motion preference is pushed into the render layer's store and
-  // reflected onto the document element before any renderer is built, so the
-  // first frame a renderer draws already honours it rather than animating once
-  // and then settling down.
+  // Pushed into the render layer's store and reflected onto the document element
+  // before any renderer is built, so the first frame already honours it.
   setReducedMotionOverride(preferences.reducedMotionOverride());
   reflectMotion(queryReducedMotion());
 
-  // The WebGL capability probe. Consulted once, before any renderer is built,
-  // and its result pushed into the store as a FORCE rather than compared against
-  // at each use: number-only mode then has one effective value, and the settings
-  // surface can refuse to turn it off on a machine that cannot draw without it.
-  //
-  // Called before the readiness below so the render layer's own diagnostic
-  // carries the probe. The probe holds its result, so the readiness below reads
-  // the same one and the two cannot disagree.
+  // The WebGL capability probe (implicit requirement I6). Consulted once, before
+  // any renderer is built, and its result pushed into the store as a FORCE, so
+  // number-only mode has one effective value and the settings surface can refuse
+  // to turn it off on a machine that cannot draw without it. The probe holds its
+  // result, so the readiness below reads the same one. DL-WEBGL-02.
   const support = probeWebGLSupport(reporter);
 
   // Handed to the health surface, which reads the slot rather than probing again.
@@ -2055,11 +1864,10 @@ export function start(ownerDocument: Document): Application {
     );
   }
 
-  // The parallel accessibility board: the focusable, labelled per-cell
-  // counterparts beside the board. It is built here rather than by a renderer,
-  // because it is the surface a canvas renderer CANNOT provide — a canvas is one
-  // opaque node to assistive technology — and every renderer therefore has to be
-  // able to hand it over rather than own it.
+  // The parallel accessibility board of index.html L70: the focusable, labelled
+  // per-cell counterparts beside the canvas, which is `aria-hidden`. Built here
+  // rather than by a renderer, so a mode switch hands it over instead of one
+  // renderer owning it (R9).
   const parallelBoardHost = ownerDocument.querySelector(SELECTORS.boardA11y);
   const parallelBoard = createParallelBoardLayer({
     host: parallelBoardHost,
@@ -2071,17 +1879,6 @@ export function start(ownerDocument: Document): Application {
     loop.invalidate();
   };
 
-  /**
-   * Builds the renderer for one mode.
-   *
-   * Both renderers receive the parallel board's element AND the layer that owns
-   * its cells, and each does the opposite thing with them: the 2.5D renderer
-   * mounts the layer, because `#board-canvas` is `aria-hidden` and carries no
-   * semantics at all, while the number-only renderer takes the layer down,
-   * because its own lattice carries `role="grid"` over the same board. Exactly
-   * one of the two lattices is exposed, and the hand-over goes through the
-   * layer's own api rather than through either renderer emptying an element.
-   */
   /**
    * The bounded wait for a lost WebGL context, or `null` when none is running.
    */
@@ -2098,17 +1895,13 @@ export function start(ownerDocument: Document): Application {
   };
 
   /**
-   * Serves the number-only board because the context did not come back.
+   * Serves the number-only board because the context did not come back. Does
+   * nothing where the context HAS come back or the number-only board is already
+   * in force.
    *
-   * Nothing is done where the context HAS come back, or where the number-only
-   * board is already in force, so a loss the browser restored inside the window
-   * costs the player nothing at all.
-   *
-   * The swap itself goes through the preference store rather than being done
-   * here: forcing number-only mode is what `applyRenderMode` follows, and that
-   * path already destroys the old renderer, mounts the new one, subscribes it and
-   * REPLAYS THE LAST COMMIT into it — so the board arrives populated instead of
-   * standing empty until the next turn.
+   * The swap goes through the preference store, which `applyRenderMode` follows:
+   * that path destroys the old renderer, mounts the new one, subscribes it and
+   * replays the last commit into it. DL-MAIN-10.
    *
    * @param reason Why the wait ended, carried into the record.
    */
@@ -2134,10 +1927,8 @@ export function start(ownerDocument: Document): Application {
       'the WebGL context was lost and not restored',
     );
 
-    // Announced, because a player who cannot see the board changing renderer is
-    // otherwise given no signal that anything happened. A forced number-only
-    // fallback interrupts, because the board the player is reading has just been
-    // replaced by a different one.
+    // Announced assertively: the board the player is reading has been replaced by
+    // a different one.
     announcer.announceText(
       'The 3D board is unavailable. The number board is now in use.',
       ASSERTIVE_POLARITY,
@@ -2145,11 +1936,9 @@ export function start(ownerDocument: Document): Application {
   };
 
   /**
-   * Starts the bounded wait after the browser has taken the context away.
-   *
-   * The renderer has already suspended drawing by the time this runs, and it will
-   * resume by itself if the context is restored. This adds the only thing it
-   * cannot do: an end to the wait.
+   * Starts the bounded wait after the browser has taken the context away. The
+   * renderer has already suspended drawing and resumes by itself where the
+   * context is restored; this adds an end to the wait. DL-MAIN-10.
    */
   const onContextLost = (): void => {
     reporter.onCount({
@@ -2174,12 +1963,9 @@ export function start(ownerDocument: Document): Application {
   };
 
   /**
-   * Ends the bounded wait, but ONLY for a restoration that rebuilt the board.
-   *
-   * A restored context is a new context, and the renderer's rebuild of every
-   * resource that context owns can fail. Ending the wait on the restoration
-   * alone ended it on a board that never came back: the 2.5D board stayed
-   * parked, the number-only fallback was cancelled, and nothing was drawing.
+   * Ends the bounded wait, but ONLY for a restoration that rebuilt the board: a
+   * restored context is a new context, and the renderer's rebuild of every
+   * resource that context owns can fail.
    *
    * @param outcome The renderer's verdict on its own rebuild.
    */
@@ -2203,9 +1989,8 @@ export function start(ownerDocument: Document): Application {
       return;
     }
 
-    // The rebuild did not complete and the context still reads as lost, which is
-    // final: waiting longer cannot rebuild it, so the number-only board takes
-    // over now rather than at the deadline.
+    // The rebuild did not complete and the context still reads as lost, so the
+    // number-only board takes over now rather than at the deadline.
     contextRebuildFailed = true;
 
     reporter.onCount({
@@ -2234,12 +2019,10 @@ export function start(ownerDocument: Document): Application {
 
   const buildRenderer = (mode: BoardRenderMode): BoardRenderer => {
     if (mode === 'three') {
-      // GUARDED AT THE FACTORY TOO, not only inside the mount. The mount unwinds
-      // its own failures and reports `mounted: false`, which the fallback below
-      // acts on; this covers the narrower case of the factory itself raising
-      // before a mount is attempted, which would otherwise escape `start()` and
-      // take down the whole application — losing the input manager, the screens
-      // and the focus manager along with the board.
+      // Guarded at the factory as well as inside the mount: the mount unwinds its
+      // own failures and reports `mounted: false`, which the fallback below acts
+      // on, and this covers the factory itself raising before a mount is
+      // attempted, which would otherwise escape `start()`.
       try {
         return createThreeRenderer({
           canvas: ownerDocument.querySelector(SELECTORS.boardCanvas),
@@ -2261,20 +2044,13 @@ export function start(ownerDocument: Document): Application {
           onContextRestored,
         });
       } catch (error: unknown) {
-        // THE ACTIVE MODE IS MADE AUTHORITATIVE BEFORE THE FALLBACK IS
-        // RETURNED. A factory that raised leaves the number-only board drawing,
-        // and `selection` is what every later reader consults for the mode that
-        // is drawing: the mounted-state guard in `fallBackToNumberOnly` below,
-        // the live context-loss reader handed to the health surface, the
-        // context-restoration wait, and the settings surface. Leaving
-        // `selection.mode` as 'three' described a renderer that does not exist,
-        // and the fallback helper then refused to act because the number-only
-        // renderer it was meant to install had already mounted.
-        //
-        // The preference is forced as well as the selection recomputed, so the
-        // settings surface reports that the 2.5D choice is no longer available
-        // — the same pair `fallBackToNumberOnly` applies for a mount that
-        // failed.
+        // The active mode is made authoritative BEFORE the fallback is returned.
+        // `selection` is what every later reader consults for the mode that is
+        // drawing: the mounted-state guard in `fallBackToNumberOnly` below, the
+        // live context-loss reader handed to the health surface, the
+        // context-restoration wait and the settings surface. The preference is
+        // forced as well as the selection recomputed, which is the same pair
+        // `fallBackToNumberOnly` applies for a mount that failed.
         preferences.forceNumberOnlyMode(
           'the 2.5D renderer could not be constructed',
         );
@@ -2289,12 +2065,11 @@ export function start(ownerDocument: Document): Application {
             'unaffected.',
           detail: Object.freeze({ correlationId: readCorrelationId() }),
 
-          // THE TOTAL REDUCTION, shared with src/render/ and with the engine
-          // sink above. Reading `name`, `message` or `String(value)` here let a
+          // The total reduction, shared with src/render/ and with the engine sink
+          // above: reading `name`, `message` or `String(value)` here lets a
           // hostile getter or a throwing `toString` raise from inside the catch
-          // that exists to contain it, which would take `start()` down with the
-          // board. `thrown` carries the value itself for a sink that can keep
-          // more of it than the two-field summary does.
+          // that contains it. `thrown` carries the value itself for a sink that
+          // keeps more than the two-field summary.
           error: describeRenderError(error),
           thrown: error,
         });
@@ -2326,13 +2101,12 @@ export function start(ownerDocument: Document): Application {
   };
 
   /**
-   * Falls back to the number-only board when the 2.5D one did not mount.
+   * Falls back to the number-only board where the 2.5D one did not mount: the
+   * probe reporting a context available is not the same as one being acquired.
+   * Recorded in the store as a force, so the settings surface reflects that the
+   * choice is no longer available.
    *
-   * The probe reporting a context available is not the same as a context being
-   * acquired: a driver can refuse the second one, and a canvas can be absent
-   * from the markup entirely. The fallback is recorded in the store as a force,
-   * so the settings surface reflects that the choice is no longer available.
-   *
+   * @param reason Why the fallback was applied, carried into the store.
    * @returns Whether a fallback was applied.
    */
   const fallBackToNumberOnly = (reason: string): boolean => {
@@ -2351,15 +2125,12 @@ export function start(ownerDocument: Document): Application {
   fallBackToNumberOnly('the WebGL board could not be mounted');
   reportSelection();
 
-  // The health surface can now ask the board itself, which is the only holder of
-  // the live answer. Read through `selection` and `renderer` rather than captured
-  // from them, so a renderer swapped mid-session is the one consulted.
-  //
-  // Four live states, in the order a reader needs them: a context taken away, a
-  // restored context whose resources could not be rebuilt, a 2.5D board that is
-  // selected but not mounted, and a number-only board FORCED in place of one. A
-  // number-only board the player chose reports nothing, because that mode is a
-  // feature rather than a failure.
+  // The live answer, read through `selection` and `renderer` rather than captured
+  // from them, so a renderer swapped mid-session is the one consulted. Four
+  // states report a failure: a context taken away, a restored context whose
+  // resources could not be rebuilt, a 2.5D board selected but not mounted, and a
+  // number-only board FORCED in place of one. A number-only board the player
+  // chose reports nothing.
   readLiveWebGLFailure = (): string | null => {
     if (selection.mode === 'three') {
       if (readContextLost(renderer)) {
@@ -2374,10 +2145,8 @@ export function start(ownerDocument: Document): Application {
     return selection.fallback ? FORCED_FALLBACK_FAILURE : null;
   };
 
-  // RUN ONCE AT BOOT, rather than left until something reads the panel: the
-  // per-check log records and the six status gauges ARE the delivery of Rule 3's
-  // health capability, and a check nobody ran reports nothing. `readiness()`
-  // below reads the report this call leaves, so it probes nothing further.
+  // Run once at boot: the per-check log records and the six status gauges are
+  // written by this call, and `readiness()` below reads the report it leaves.
   const bootHealth = health.check();
 
   logger.info('Health checked.', {
@@ -2388,10 +2157,8 @@ export function start(ownerDocument: Document): Application {
   });
 
   // The readiness verdicts the health surface derives from its own webgl and
-  // storage checks: whether a WebGL board may be mounted at all, and whether
-  // the run persists or is ephemeral. Logged once, here, so the running page
-  // states the two decisions rather than leaving them implicit in the renderer
-  // it happens to have selected.
+  // storage checks: whether a WebGL board may be mounted at all, and whether the
+  // run persists or is ephemeral. Logged once, here.
   const readiness = health.readiness();
 
   logger.info('Readiness resolved.', {
@@ -2408,10 +2175,8 @@ export function start(ownerDocument: Document): Application {
     selected: selection.mode,
   });
 
-  // COUNTED AS WELL AS LOGGED. A verdict that is only logged is a verdict a
-  // dashboard cannot see was acted on: the counter is what puts boot readiness on
-  // the metrics surface beside the renderer it selected, and the detail carries
-  // the two decisions themselves rather than only their roll-up.
+  // Counted as well as logged, so boot readiness reaches the metrics surface
+  // beside the renderer it selected. DL-HEALTH-06.
   reporter.onCount({
     name: 'health.readiness',
     value: 1,
@@ -2442,19 +2207,15 @@ export function start(ownerDocument: Document): Application {
 
   let stopRendering = renderer.subscribe(renderEvents);
 
-  // MOVED TO THE END OF THE ORDER, after the renderer's own commit listener.
-  // The tracing subscription's `state:commit` listener closes the turn span, and
-  // listeners run in registration order, so the turn used to be closed before
-  // the renderer's `render.commit` span was opened.
+  // Moved to the END of the registration order, after the renderer's own commit
+  // listener: the tracing subscription's `state:commit` listener closes the turn
+  // span, and listeners run in registration order.
   stopEngineTracing.reattachCommitClosing();
   const frameSubscription = loop.addFrameCallback((context): boolean => {
-    // INTER-FRAME CADENCE, UNDER ITS OWN NAME. `FrameContext.delta` is the gap
+    // Inter-frame cadence, under its own name. `FrameContext.delta` is the gap
     // since the previous frame, clamped at `maxDelta` and zero on the first
-    // frame; it is not how long this callback occupied the frame. It used to be
-    // written to the canonical frame metric, which made that metric read as
-    // renderer occupancy while carrying cadence. Occupancy is measured by the
-    // loop and recorded once through the tracer's frame hooks above, and
-    // cadence is kept here as a separately named series so neither is lost.
+    // frame; occupancy is a different quantity, measured by the loop and recorded
+    // once through the tracer's frame hooks above.
     reporter.onTiming({
       name: FRAME_INTERVAL_TIMING,
       durationMs: context.delta,
@@ -2464,12 +2225,9 @@ export function start(ownerDocument: Document): Application {
   });
 
   /**
-   * The last state the engine committed.
-   *
-   * Retained so a renderer built mid-run is given the board at once rather than
-   * standing empty until the next turn. `state:commit` carries the live grid,
-   * which is unchanged between turns, so replaying the last commit into a fresh
-   * renderer is a full reconciliation and not a stale one.
+   * The last state the engine committed, retained so a renderer built mid-run is
+   * given the board at once. `state:commit` carries the live grid, which is
+   * unchanged between turns, so a replay of it is a full reconciliation.
    */
   let lastCommit: StateCommitEvent | null = null;
   const stopCommitCapture = engine.events.on(
@@ -2530,18 +2288,6 @@ export function start(ownerDocument: Document): Application {
     }
   };
 
-  // The HUD is mounted BESIDE the renderer, not inside it. The score outlets,
-  // the rising score delta and the terminal overlay have exactly one owner, and
-  // that owner subscribes to `state:commit` directly, so selecting a different
-  // board renderer changes what draws the board and nothing else.
-  /**
-   * Names a relic, falling back to its identifier.
-   *
-   * The catalogue is the authority, so the tray and every announcement carry the
-   * relic's real name rather than the identifier the input layer published.
-   * Declared HERE, above the first consumer, rather than beside the reward
-   * binding that also uses it.
-   */
   /**
    * Reads one catalogue definition by identifier.
    *
@@ -2553,48 +2299,77 @@ export function start(ownerDocument: Document): Application {
   ): { name: string; rarity: string; charges?: number } | undefined =>
     registry.catalogue().find((relic) => relic.id === relicId);
 
+  /**
+   * Names a relic, falling back to its identifier.
+   *
+   * @param relicId Identifier to name.
+   * @returns The catalogue's name, or the identifier.
+   */
   const relicName = (relicId: string): string =>
     relicDefinition(relicId)?.name ?? relicId;
 
+  // The HUD is mounted BESIDE the renderer, not inside it: the score outlets, the
+  // rising score delta and the terminal overlay have one owner, and that owner
+  // subscribes to `state:commit` directly. DL-HUD-01.
   const hud = createHud({
     scoreContainer: ownerDocument.querySelector<HTMLElement>(SELECTORS.score),
     bestContainer: ownerDocument.querySelector<HTMLElement>(SELECTORS.best),
     messageContainer: ownerDocument.querySelector(SELECTORS.message),
 
-    // The in-run status outlets. index.html has declared all three since the
-    // markup was written and nothing filled them, so a run reported its stage,
-    // its goal progress and the relics it held nowhere on screen — the reward the
-    // player had just chosen included.
+    // The in-run status outlets index.html L47-L49 declares.
     hudContainer: ownerDocument.querySelector(SELECTORS.hudGroup),
     stageContainer: ownerDocument.querySelector(SELECTORS.hudStage),
     relicTrayContainer: ownerDocument.querySelector(SELECTORS.relicTray),
+
+    // NO ACTIVATION CALLBACK IS PASSED. src/ui/screens/hud.ts hosts the
+    // relic-activation control but never binds it: `mountOnScreenControls` is
+    // the single owner of every element-to-action binding, and `activateRelic`
+    // is one of its indexed actions, so the tray press arrives through the
+    // `activateRelic` subscription below rather than through the HUD. The tray
+    // is in pickup order, which is the order the registry keeps, so the slot the
+    // press names is the identifier's position in it. DL-MAIN-09, DL-CONTROL-04.
 
     // The catalogue is the only place a display name exists, and the commit's
     // relic slice carries identifiers alone, so the tray reads the name through
     // here rather than showing the raw identifier.
     relicName: (relicId): string => relicName(relicId),
 
-    // The rarity tier, from the same catalogue definition and for the same
-    // reason: style/_hud.scss declares an accent rule per rarity tier and the
-    // reward card states the tier on the way in, so without this the tray was
-    // the one surface that named neither the tier visually nor to a screen
-    // reader. Resolved on each call, so a tray rebuilt for a relic taken later
-    // in the run carries its tier too.
+    // The rarity tier, from the same catalogue definition: style/_hud.scss
+    // declares an accent rule per tier. Resolved on each call, so a tray rebuilt
+    // for a relic taken later in the run carries its tier too. DL-HUD-04.
     relicRarity: (relicId): string => relicDefinition(relicId)?.rarity ?? '',
+
+    // The held relics IN PICKUP ORDER, read at the moment of every write rather
+    // than snapshotted, so a budget the hook bus spent between turns is on
+    // screen. The registry is the authority for that order and this reads it as
+    // it stands.
+    relics: (): readonly ActiveRelic[] => registry.active(),
+
+    // Read per write as well: a board-mutating relic changes the dimension
+    // mid-run, so nothing derived from it is held.
+    boardSize: (): number => config.boardSize,
+
+    // Resolved per announcement, because the ONE announcer for the page is
+    // constructed below this call.
+    announcer: (): LiveRegionAnnouncer | null => announcer,
     document: ownerDocument,
     reporter: createPreferenceSink(reporter),
   });
-  const stopHud = hud.subscribe(engine.events);
 
-  // The ONE announcer for the page, and the translator that feeds it.
-  //
-  // `createLiveRegionAnnouncer` and its whole `Announcement` vocabulary shipped
-  // fully built and were never constructed, so `#live-region` stayed empty for
-  // the life of a run and a screen-reader user was told nothing about a move, a
-  // merge, a spawn or a verdict. One announcer rather than several, because
-  // three live regions announcing at once race and suppress one another — which
-  // is why the score outlets give up their own `role="status"` in index.html and
-  // become labelled values this narrates instead.
+  // The HUD is a screen module, not an engine subscriber: src/ui/screens/hud.ts
+  // subscribes to no emitter and takes a commit through `render`. Registered
+  // BEFORE the router's own subscription, which the append-only `on` of
+  // js/keyboard_input_manager.js L18-L32 preserves, so the outlets carry the
+  // turn's values before a terminal commit moves the flow off the stage state.
+  const stopHud = engine.events.on('state:commit', (commit): void => {
+    hud.render(commit);
+  });
+
+  // The ONE announcer for the page, over `#live-region` of index.html L109, and
+  // the translator that feeds it from the engine's events. One announcer rather
+  // than several: live regions announcing at once race and suppress one another,
+  // which is why the score outlets carry labels rather than `role="status"`.
+  // DL-LIVE-01, DL-ANNOUNCE-01.
   const announcer: LiveRegionAnnouncer = createLiveRegionAnnouncer({
     selector: SELECTORS.liveRegion,
     root: ownerDocument,
@@ -2612,10 +2387,9 @@ export function start(ownerDocument: Document): Application {
   const stopAnnouncedPreferences = announcer.observePreferences(preferences);
 
   // Follows the store rather than the setting, so an operating-system change
-  // under the `'system'` setting is reflected too. Reflecting is the ONLY
-  // thing done here: the reflected attribute is the single channel the style
-  // layer and the on-screen controls both read, so pushing the value into the
-  // controls separately would give them a second, competing source.
+  // under the `'system'` setting is reflected too. Reflecting is the only thing
+  // done here: the reflected attribute is the one channel the style layer and the
+  // on-screen controls both read.
   const stopMotion = subscribeReducedMotion((reduced): void => {
     reflectMotion(reduced);
   });
@@ -2623,8 +2397,7 @@ export function start(ownerDocument: Document): Application {
   const stopPreferences = preferences.subscribe((_snapshot, changed): void => {
     if (changed.includes('numberOnlyMode')) {
       // The board renderer follows the effective value, so number-only mode is
-      // reached and left without a reload — which is what makes it a mode
-      // rather than a build-time choice.
+      // reached and left without a reload. DL-NUMBER-01.
       applyRenderMode();
     }
 
@@ -2639,15 +2412,12 @@ export function start(ownerDocument: Document): Application {
     reflectMotion(preferences.isReducedMotion());
   });
 
-  // The screen router: the ONE owner of the effective input context, and the
-  // owner of the settings dialog's shown state. It is built BEFORE the input
-  // manager and the control layer because both take `router.context` as their
-  // own context source — which is what makes the keyboard, the gesture path and
-  // the generated controls read one function rather than three.
-  //
-  // The settings panel is filled in after the input manager exists, because its
-  // rebinding rows own the keymap; the router only ever reaches it through the
-  // two hooks below, which run when the dialog is opened and closed.
+  // The screen router: the ONE owner of the effective input context, of the
+  // screen state machine and of the settings dialog's shown state. Built BEFORE
+  // the input manager and the control layer, both of which take `router.context`
+  // as their context source. The settings panel is filled in after the input
+  // manager exists, because its rebinding rows own the keymap, and the router
+  // reaches it through the two hooks below. DL-ROUTER-01.
   let settings: SettingsPanel | null = null;
   const settingsPanelHost = ownerDocument.querySelector<HTMLElement>(
     SELECTORS.settingsPanel,
@@ -2674,21 +2444,48 @@ export function start(ownerDocument: Document): Application {
       settings?.close();
     },
 
-    // The reward screen. The router owns when it is shown and what it looks
-    // like; the run controller owns whether a choice is legal and what it does.
-    // A card press arrives here as an identifier and is handed straight into the
-    // controller's transaction, which validates it against the offer that is
-    // actually standing.
     rewardScreen: ownerDocument.querySelector(SELECTORS.rewardScreen),
 
-    // Resolved per open, because the parallel board's tab stop roves: the cell
-    // that can take focus is whichever one carries `tabindex="0"` at the moment
-    // the screen goes up.
+    // Resolved per open: the parallel board's tab stop roves, so the cell
+    // carrying `tabindex="0"` is read at the moment the screen goes up.
     rewardRestoreFocusTo: (): Element | null =>
       ownerDocument.querySelector(SELECTORS.boardTabStop),
+
+    // The ONE path a chosen relic is applied through. `chooseReward()` of
+    // src/ui/screen-router.ts calls this on both of its branches, so no second
+    // applier is wired: the run port's `resolveReward` and `advanceStage` are
+    // left off below for that reason. DL-MAIN-09.
     onRewardSelect: (relicId): void => {
       takeReward(relicId);
     },
+
+    // Left to src/ui/screens/hud.ts, the sole writer of `.game-message`.
+    // DL-HUD-01, DL-ROUTER-03.
+    terminalOverlay: null,
+
+    // Read-only members only. `startRun` is left off because the `startRun`
+    // input action below reaches `startNewRun()`; `advanceStage` and
+    // `resolveReward` are left off because `RunController.selectReward()`
+    // already clears the offer, advances the stage and opens the next board.
+    // DL-MAIN-09.
+    run: {
+      seed: (): string => run.seed(),
+      runId: (): string => run.runId(),
+      stageIndex: (): number => run.state().stageIndex,
+      stageGoal: (): StageGoal => run.stageGoal(),
+      goalProgress: (): number => run.goalProgress(),
+      relics: (): readonly PersistedRelic[] => registry.serialize(),
+      summary: (): RunSummary => run.summary(),
+      endRun: (outcome: RunOutcome): RunSummary => run.endRun(outcome),
+    },
+
+    // The announcer is NOT handed over, for the reason `announceGameplay`
+    // defaults to false: src/ui/a11y/engine-announcer.ts and this root own
+    // narration. `SCREEN_ANNOUNCEMENTS` of src/ui/screen-router.ts restates the
+    // same moments generically, and the queue of src/ui/a11y/live-region.ts
+    // coalesces within a flush, so the generic string superseded the offer list
+    // and the acquisition this root announces. DL-MAIN-09.
+    preferences,
   });
 
   /**
@@ -2706,10 +2503,8 @@ export function start(ownerDocument: Document): Application {
   function takeReward(relicId: string): RewardSelection {
     const selection = run.selectReward(relicId, engine);
 
-    // COUNTED BY OUTCOME, in two series rather than one. A refusal and an
-    // acceptance answer different questions — how often a run gained a relic,
-    // and how often a press was turned away — and a single series with the
-    // outcome in its detail cannot be summed for either.
+    // Counted by outcome, in two series rather than one, so each can be summed.
+    // DL-METRIC-04.
     reporter.onCount({
       name:
         selection.outcome === 'accepted'
@@ -2724,19 +2519,15 @@ export function start(ownerDocument: Document): Application {
 
     if (selection.outcome !== 'accepted') {
       // A refused press leaves the offer standing, so the screen goes back up
-      // carrying the same three cards rather than the run stalling with no
-      // screen and no way to choose.
+      // carrying the same three cards.
       showPendingReward();
 
       return selection;
     }
 
-    // THE STRUCTURED ANNOUNCEMENT, not free text. src/ui/a11y/live-region.ts
-    // models a relic acquisition as its own kind, composes it as "Relic
-    // acquired: name, rarity. N charges.", and holds it in the queue at the
-    // priority a pickup deserves — free text is discarded before it is. Passing
-    // the three fields lets that module do the composing, which is why the copy
-    // lives there and not here.
+    // The structured announcement, not free text: src/ui/a11y/live-region.ts
+    // models a relic acquisition as its own kind, composes the copy and holds it
+    // in the queue above free text. DL-LIVE-03.
     const taken = relicDefinition(relicId);
 
     announcer.announce({
@@ -2754,9 +2545,6 @@ export function start(ownerDocument: Document): Application {
   /**
    * The offer whose cards were last read into the live region, as their joined
    * identifiers, or the empty string while none stands.
-   *
-   * Declared beside its only reader so the once-per-offer gate below is visible
-   * from the announcement it guards.
    */
   let announcedOffer = '';
 
@@ -2780,12 +2568,9 @@ export function start(ownerDocument: Document): Application {
 
     const cards: readonly RewardCard[] = run.currentOffer();
 
-    // ANNOUNCED ONCE PER OFFER, AND NOT ONLY WHEN THE SCREEN WENT UP. The live
-    // region is the accessible channel in its own right, so an offer a
-    // screen-reader user has to choose from is spoken even where the reward
-    // screen's mount point is missing from the page. Keyed on the offer's own
-    // identifiers, because this runs after EVERY commit and a standing offer
-    // must not be re-read on every move.
+    // Announced once per offer, and not only where the screen went up, so an
+    // offer is spoken even with the reward mount point missing. Keyed on the
+    // offer's own identifiers, because this runs after EVERY commit.
     const signature = cards.map((card): string => card.id).join(',');
 
     if (signature !== announcedOffer) {
@@ -2833,11 +2618,9 @@ export function start(ownerDocument: Document): Application {
     // terminal turn the engine reported.
     context: router.context,
 
-    // A remap made in an earlier session, validated by `deserializeKeymap`,
-    // which answers with the defaults for a payload it cannot read rather than
-    // throwing. An ABSENT key is not an unreadable payload — it is the first run
-    // — so it is not put through the guard at all, and a fresh load reports
-    // nothing.
+    // A remap made in an earlier session, validated by `deserializeKeymap`, which
+    // answers with the defaults for a payload it cannot read. An ABSENT key is
+    // the first run, not an unreadable payload, so it never reaches the guard.
     keymap: readStoredKeymap(),
 
     // The durable half of the manager's single rebind api. Failure is reported
@@ -2847,28 +2630,24 @@ export function start(ownerDocument: Document): Application {
       storage.writeJson(KEYMAP_KEY, serializeKeymap(next)),
 
     // The ONE follower of a rebind: the generated controls carry each action's
-    // key in their accessible names, so they re-read the table the manager now
-    // holds. Nothing else needs telling — the manager's own keydown listener
-    // reads that table directly (N2).
+    // key in their accessible names, so they re-read the table the manager holds.
+    // The manager's own keydown listener reads that table directly.
     onKeymapChange: (): void => {
       controlLayer?.refresh();
     },
 
-    // THE TRACER IS SUPPLIED HERE AND NOWHERE ELSE in the input layer: the
+    // The tracer is supplied HERE AND NOWHERE ELSE in the input layer: the
     // manager is the one place a dispatch is walked, and it opens the
-    // `input.dispatch` span around that whole walk, naming the event in the
-    // span's `action` attribute. The on-screen controls and the touch layer
-    // dispatch THROUGH this manager, so that span already covers them and a
-    // second sink carrying a tracer would nest a duplicate.
+    // `input.dispatch` span around that whole walk, naming the event in the span's
+    // `action` attribute. The on-screen controls and the touch layer dispatch
+    // through this manager, so that span already covers them.
     reporter: createInputSink(reporter, tracer),
   });
 
-  // `reducedMotion` is deliberately NOT supplied: supplying it pins a value
-  // that takes precedence over the reflected attribute for the rest of the
-  // mount, which would make the attribute — the one source the style layer also
-  // reads — unable to move these controls. The attribute is written above,
-  // before this mount, so it is already correct here, and the controls observe
-  // it for every later change.
+  // `reducedMotion` is NOT supplied: a supplied value takes precedence over the
+  // reflected attribute for the rest of the mount, and that attribute is the one
+  // source the style layer reads too. It is written above, before this mount, and
+  // the controls observe it for every later change.
   const controls = mountOnScreenControls({
     host: input,
     ownerDocument,
@@ -2882,24 +2661,12 @@ export function start(ownerDocument: Document): Application {
 
   controlLayer = controls;
 
-  // The dialog owns its own containment and its own body; the router owns when
-  // it is shown. The keymap arrives as a value and leaves through
-  // `onKeymapChange`: src/ui/a11y/settings.ts holds no keymap, so the input
-  // manager stays its owner and the control layer follows every rebind.
-  // The audio layer (A5): synthesised through the Web Audio API, with no binary
-  // asset.
-  //
-  // `preferences` IS supplied, which makes the store the single owner of mute
-  // and volume: the engine takes both from it, follows it for the rest of its
-  // life through its own subscription, and refuses `setMuted`/`setVolume` so a
-  // second writer cannot exist. The settings dialog therefore writes only the
-  // store and pushes nothing into the engine, which is the one application-level
-  // subscriber the audio effect is applied by (N1). `muted` and `volume` seeds
-  // are omitted because a supplied store makes them ignored.
-  //
+  // The audio layer (AAP A5): synthesised through the Web Audio API, with no
+  // binary asset. `preferences` IS supplied, which makes the store the single
+  // owner of mute and volume — the engine follows it and refuses
+  // `setMuted`/`setVolume` — so the `muted` and `volume` seeds are omitted.
   // Where no AudioContext constructor exists the engine reports itself
-  // unavailable and every member stays safe to call. The dialog states that in
-  // real text.
+  // unavailable and every member stays safe to call. DL-AUDIO-01.
   const soundEngine: SoundEngine = createSoundEngine({
     reporter: createSoundSink(reporter),
     metrics: createSoundMetrics(reporter),
@@ -2920,8 +2687,8 @@ export function start(ownerDocument: Document): Application {
     keymapOwner: input,
 
     // The router holds the trap on this container: it knows the trigger to
-    // restore focus to and the game region to make inert. Two traps on one
-    // container is what this turns off (N7).
+    // restore focus to and the game region to make inert. This turns off the
+    // dialog's own, so one container carries one trap.
     trapFocus: false,
     input,
     suspendInput: (): void => {
@@ -2935,35 +2702,50 @@ export function start(ownerDocument: Document): Application {
     reporter: createPreferenceSink(reporter),
   });
 
-  // Subscribes the dialog actions and pushes the effective context into the
-  // controls, which is what makes a control whose action is inactive leave both
-  // the accessibility tree and the tab order.
-  router.attach({ input, controls });
+  // The surface carries `on`, `getKeymap` and `setContext`, and NOT the three
+  // optional suspension members of `RouterInputSurface`. `SCREEN_SUSPENDS_INPUT`
+  // of src/ui/screen-router.ts marks `reward` as a suspending state, and
+  // `InputManager.handleKeyDown` drops EVERY key while suspended, including the
+  // `Digit1`-`Digit3` bindings src/input/keymap.ts declares for `selectReward`
+  // in the `'overlay'` context and the slot bindings it declares for
+  // `activateRelic`. The overlay context alone withholds movement: every
+  // movement binding is declared in the `'game'` context only. DL-MAIN-09.
+  const routerInput: RouterInputSurface = {
+    on: (
+      event: 'openSettings' | 'closeSettings' | 'cancel' | 'selectReward',
+      listener: (index: number) => void,
+    ): (() => void) =>
+      event === 'selectReward'
+        ? input.on('selectReward', (index): void => {
+            listener(index);
+          })
+        : input.on(event, (): void => {
+            listener(0);
+          }),
+    getKeymap: (): Keymap => input.getKeymap(),
+    setContext: (context): void => {
+      input.setContext(context);
+    },
+  };
+
+  // Subscribes the dialog and reward actions and pushes the effective context
+  // into the controls, so a control whose action is inactive leaves both the
+  // accessibility tree and the tab order.
+  router.attach({ input: routerInput, controls });
 
   const stopRouter = router.subscribe(engine.events);
 
   /**
-   * Feeds the registry's CANONICAL metric families.
+   * Feeds the registry's CANONICAL metric families: `game2048_merges_total`,
+   * `game2048_spawns_total`, `game2048_engine_events_total{event}` and
+   * `game2048_frames_rendered_total`, the families the registry declares with
+   * help text and the names a dashboard is keyed to. `recordEngineEvent` also
+   * reads a spawn's `position`, which separates a spawn that inserted a tile from
+   * an attempt on a full board.
    *
-   * The generic sink routes every reported count into a counter named after the
-   * report, which is enough to see that something happened. It is NOT enough to
-   * populate `game2048_merges_total`, `game2048_spawns_total`,
-   * `game2048_engine_events_total{event}` or `game2048_frames_rendered_total` —
-   * the families the registry declares with real help text, and the only names a
-   * dashboard or an alert would ever be keyed to. Those have purpose-built
-   * recorders, and without calling them every one of those series reads a flat
-   * zero forever while the real numbers sit in counters no dashboard knows the
-   * names of.
-   *
-   * `recordEngineEvent` also reads a spawn's `position`, which is how the
-   * registry separates a spawn that inserted a tile from a spawn attempt on a
-   * full board — a distinction the generic counter cannot express.
-   *
-   * `game2048_turns_total` is NOT fed from here. `move:after` is emitted for
-   * every turn that reached the walk, so the turn family is fed from the
-   * engine's `engine.move.resolved` counter in the report sink above; adding a
-   * feed here would count idle inputs as turns again, and adding one beside it
-   * would double every turn.
+   * `game2048_turns_total` is NOT fed from here: the turn family is fed from the
+   * engine's `engine.move.resolved` counter in the report sink above, and a
+   * second feed would double every turn. DL-METRIC-02.
    */
   const stopEventMetrics: (() => void)[] = ENGINE_EVENT_NAMES.map((name) =>
     engine.events.on(name, (payload): void => {
@@ -2977,23 +2759,19 @@ export function start(ownerDocument: Document): Application {
     }),
   );
 
-  // The diagnostics surface: this build's stand-in for the metrics endpoint
-  // Rule 3 requires, since a static bundle has no server to serve one from and
-  // no port for an orchestrator to poll (AAP 0.7.2.4).
-  //
-  // Without this the registry would be write-only — every counter moving and
-  // nobody able to read one — which is the state the review found.
+  // The diagnostics surface: this build's stand-in for the metrics endpoint,
+  // since a static bundle has no server to serve one from and no port for an
+  // orchestrator to poll (AAP 0.7.2.4). DL-METRIC-05.
   const diagnostics = createDiagnosticsOverlay({
     metrics,
     logger,
     selector: SELECTORS.diagnostics,
     document: ownerDocument,
 
-    // The one health surface, handed over WHOLE rather than as a boolean
-    // projection of it: the overlay reads its probe views and its report, so the
-    // panel and the exported snapshot carry the three-state status, the
-    // reused-versus-added provenance, the per-check gauges and the readiness
-    // verdicts that a `{name, healthy}` list threw away.
+    // The one health surface, handed over WHOLE: the overlay reads its probe
+    // views and its report, so the panel and the exported snapshot carry the
+    // three-state status, the reused-versus-added provenance, the per-check
+    // gauges and the readiness verdicts.
     health,
 
     // The one tracer, so the trace panel shows the frame statistics and the
@@ -3020,39 +2798,27 @@ export function start(ownerDocument: Document): Application {
     streamHolder.streams.snapshotCursors(),
   );
 
-  // The reward screen follows the controller, and is subscribed AFTER
-  // `run.observe` so this handler runs on the commit the controller has already
-  // drawn the offer on. Reading `isRewardPending()` rather than the commit's own
-  // members keeps the controller the single authority on whether a choice is
-  // owed: the screen is a view of that state and never a second copy of it.
+  // The reward screen follows the controller, subscribed AFTER `run.observe` so
+  // this handler runs on the commit the controller has already drawn the offer on.
+  // `isRewardPending()` is read rather than the commit's own members, so the
+  // controller stays the single authority on whether a choice is owed.
   const stopRewardScreen = engine.events.on('state:commit', (): void => {
     showPendingReward();
   });
 
   /**
-   * Discards the run in force and starts a fresh one.
-   *
-   * THE ORDER IS THE CONTRACT, and every step of it replaces rather than
-   * reuses:
-   *   1. The seed is decided FIRST, because the substreams are built from it and
-   *      the board is seeded from the substreams. Deciding it later would seed
-   *      the opening tiles from the run that just ended.
-   *   2. The reward screen comes down, so a fresh run cannot be reached with the
-   *      previous run's offer still on screen.
-   *   3. The registry is cleared, so no relic is carried across and pickup order
-   *      restarts at zero.
-   *   4. The substreams are REPLACED, at cursor zero, from the new seed. This is
-   *      what closes the determinism hole: without it a second run played in one
-   *      page load continues the first run's sequence.
-   *   5. `run.startRun` clears the stored envelope, assembles a fresh one with a
-   *      new run identifier at stage 0, and calls `engine.setup()`, whose commit
-   *      persists it.
-   *   6. The correlation scope every observer reads is rotated to the one
-   *      derived from the new run, so later records, counters, spans, health
-   *      reports, hook contexts and persistence reports are attributed to the
-   *      run that emitted them rather than to the run this page loaded with.
-   *      Rotated by `adoptRunScope`, which step 5 publishes to BEFORE the board
-   *      opens, so the new run's FIRST emission already carries it.
+   * Discards the run in force and starts a fresh one. The order is the contract,
+   * and every step replaces rather than reuses:
+   *   1. the seed, decided first, because the substreams are built from it and
+   *      the board is seeded from the substreams;
+   *   2. the reward screen, taken down;
+   *   3. the registry, cleared, so pickup order restarts at zero;
+   *   4. the substreams, replaced at cursor zero from the new seed;
+   *   5. `run.startRun`, which clears the stored envelope, assembles a fresh one
+   *      with a new run identifier at stage 0 and opens the board;
+   *   6. the correlation scope, rotated by `adoptRunScope`, which step 5
+   *      publishes to BEFORE the board opens.
+   * DL-MAIN-06.
    *
    * @param seed Seed to play. Originated when absent.
    * @returns The seed the new run is played under.
@@ -3071,11 +2837,7 @@ export function start(ownerDocument: Document): Application {
     storage.clearGameState();
 
     // The substreams AND the correlation scope are replaced by `adoptRunScope`,
-    // which `run.startRun` publishes to BEFORE it opens the board — so the
-    // opening spawns are drawn from the new seed rather than from wherever the
-    // ended run had reached, and the new run's first reports already carry the
-    // new run's identifier. Doing either here as well would build the same
-    // instance twice and would rotate after the emissions it is meant to label.
+    // which `run.startRun` publishes to BEFORE it opens the board.
     run.startRun(engine, { seed: nextSeed });
 
     logger.info('A new run started.', {
@@ -3093,90 +2855,96 @@ export function start(ownerDocument: Document): Application {
     return run.seed();
   };
 
-  // The three subscriptions js/game_manager.js L9-L11 installed, by the
-  // same three event names.
+  // The three subscriptions js/game_manager.js L9-L11 installed, under the same
+  // three event names.
   //
-  // NONE OF THE SIX HANDLERS BELOW OPENS AN `input.dispatch` SPAN OF ITS OWN.
-  // The input manager opens exactly one around its whole listener walk, through
-  // the `startSpan` its sink carries, and every handler here runs inside that
-  // span — so it is the parent of every span the turn opens, it names the event
-  // in its `action` attribute, and it covers the five events dispatched to
-  // subscribers outside this block too. A wrapper here would nest a second span
-  // of the same name inside it and count every input twice.
+  // No handler below opens an `input.dispatch` span of its own: the input manager
+  // opens exactly one around its whole listener walk, through the `startSpan` its
+  // sink carries, so every handler here already runs inside it.
   const stopMove = input.on('move', (direction): void => {
-    // `'failed'` UNTIL THE CALL RETURNS. An attempt that throws leaves the turn
-    // span open with no outcome at all, and the `finally` below is the only
-    // place that still runs; the default therefore names the path the attempt
-    // actually took rather than the one an unset value would suggest.
+    // `'failed'` until the call returns: an attempt that throws reaches only the
+    // `finally` below, and the default names the path it took.
     let resolution: FinalMoveResolution = 'failed';
 
     try {
-      // THE STRUCTURED OUTCOME, not the boolean. `move()` returns `false` for
-      // three different turns — one refused because the game is over, one a
-      // listener or an `onBeforeMove` handler withdrew, and one the resolver
-      // found changed nothing — so settling on the boolean labelled a withdrawn
-      // move as an idle one and could never report a blocked or a failed
-      // attempt at all.
+      // The structured outcome, not the boolean. `move()` returns `false` for a
+      // turn refused because the game is over, a turn a listener or an
+      // `onBeforeMove` handler withdrew, and a turn the resolver found changed
+      // nothing.
       resolution = engine.attemptMove(direction).resolution;
     } finally {
-      // An attempt that moved nothing emits no `move:after`, so nothing an event
-      // listener sees can close the turn span it opened; the caller holding the
-      // outcome closes it. A committed turn has already closed its own span and
-      // a blocked move opened none, so both are no-ops here.
-      //
-      // SETTLED INSIDE THE INPUT SPAN, which is still open for the length of
-      // this listener: settling after it had ended left the turn span open
-      // across its own parent's end, which the tracer unwinds as an
-      // out-of-order end and then reports again for every attribute and for the
-      // second end that arrives on the closed span.
+      // An attempt that moved nothing emits no `move:after`, so no event listener
+      // can close the turn span; the caller holding the outcome closes it.
+      // Settled INSIDE the input span, which is still open for the length of this
+      // listener. A committed turn has closed its own span and a blocked move
+      // opened none, so both are no-ops here.
       stopEngineTracing.settleMove({ resolution });
     }
   });
 
-  // `restart` STARTS A NEW RUN rather than only reseeding the board. The vanilla
-  // control reset a board because a board was all there was; a run carries a
-  // seed, a stage, a relic set and an identity, and leaving those in place would
-  // make "New Game" continue the run it claims to end — and would have the new
-  // board draw from the ended run's cursor position.
+  // `restart` starts a NEW RUN rather than only reseeding the board: a run carries
+  // a seed, a stage, a relic set and an identity, and `startNewRun` replaces all
+  // of them. js/game_manager.js L17-L21 reset a board, which was all there was.
   const stopRestart = input.on('restart', (): void => {
-    // THROUGH `startNewRun`, not straight to the engine. A bare
-    // `engine.restart()` left the envelope, the seed, the substreams, the relics
-    // and the correlation identifier of the run being abandoned in place.
     startNewRun();
   });
   const stopContinue = input.on('keepPlaying', (): void => {
     engine.continuePlaying();
   });
 
-  // The reward screen's selection. The index is the card the player activated,
-  // resolved against the offer the CONTROLLER is standing on — the same set the
-  // screen is showing — so an index outside it selects nothing. The press then
-  // goes through `takeReward`, which is the one path a relic is taken on by, so a
-  // keyboard activation and a card press cannot differ.
-  const stopSelectReward = input.on('selectReward', (index): void => {
-    const chosen = run.currentOffer()[index];
+  // `selectReward` is NOT subscribed here. `attach()` of
+  // src/ui/screen-router.ts registers that binding itself and routes the press
+  // through `chooseReward()`, which reaches `onRewardSelect` above; a second
+  // subscription applied the same choice twice, and the second call was refused
+  // as `'already-resolved'` and counted under `run.rewardRefused` on a
+  // successful selection. One owner per binding, as `MARKUP_CONTROLS` above.
+  // DL-MAIN-09.
 
-    if (chosen === undefined) {
+  // The index names a slot of the HUD's relic tray, which is rendered in pickup
+  // order, so it resolves against the relics held directly. The deduction is
+  // made through `HookBus.consumeCharge`, so a manual activation and a relic
+  // handler's own request spend from one pool. The call goes through the
+  // controller, which writes the budget that remains: an activation is not a
+  // move, so no commit follows it on its own.
+  const activateHeldRelic = (index: number, relicId: string): void => {
+    const activation = run.activateRelic(
+      engine,
+      () => streamHolder.streams.snapshotCursors(),
+      relicId,
+    );
+    const remaining = activation.remaining ?? null;
+    const consumed = activation.consumed;
+
+    reporter.onCount({
+      name: consumed > 0 ? 'relics.activated' : 'relics.activation.refused',
+      value: 1,
+      detail: Object.freeze({
+        index,
+        relicId,
+        remaining,
+        persisted: activation.persisted,
+      }),
+    });
+
+    if (consumed === 0) {
       return;
     }
 
-    takeReward(chosen.id);
-  });
+    // The HUD alone, re-rendered from the last commit with the relic slice
+    // re-read through the controller. A `state:commit` re-emitted through the
+    // engine would reach both renderers as a fresh turn and replay the previous
+    // turn's move, spawn and merge tweens.
+    if (lastCommit !== null) {
+      hud.render({ ...lastCommit, relics: run.relicContext() });
+    }
 
-  // `activateRelic` WAS EMITTED BY EVERY INPUT SURFACE AND SUBSCRIBED TO BY
-  // NOTHING, so a press reached the event bus and stopped there and no charge
-  // was ever spent by a player. This is the subscription. The index names a slot
-  // of the HUD's relic tray, which is rendered in pickup order, so it resolves
-  // against the relics held directly.
-  //
-  // The deduction is the bus's, made through `HookBus.consumeCharge`, so a
-  // manual activation and a relic handler's own request spend from ONE pool. An
-  // index naming no held relic, and a relic whose budget is already spent, are
-  // both reported and change nothing.
-  //
-  // THROUGH THE CONTROLLER, so the budget that remains is WRITTEN. An activation
-  // is not a move, so no commit follows it on its own; without the write a
-  // reload resumed on a budget that had never fallen.
+    announcer.announceText(
+      `Relic activated. ${String(remaining ?? 0)} charges remaining.`,
+    );
+  };
+
+  // The indexed slot bindings of src/input/keymap.ts, and the generated
+  // on-screen control per slot.
   const stopActivateRelic = input.on('activateRelic', (index): void => {
     const held = registry.ownedIds()[index];
 
@@ -3190,67 +2958,88 @@ export function start(ownerDocument: Document): Application {
       return;
     }
 
-    const activation = run.activateRelic(
-      engine,
-      () => streamHolder.streams.snapshotCursors(),
-      held,
-    );
-    const remaining = activation.remaining ?? null;
-    const consumed = activation.consumed;
-
-    reporter.onCount({
-      name: consumed > 0 ? 'relics.activated' : 'relics.activation.refused',
-      value: 1,
-      detail: Object.freeze({
-        index,
-        relicId: held,
-        remaining,
-        persisted: activation.persisted,
-      }),
-    });
-
-    if (consumed > 0) {
-      // THE PRESENTATION STATE IS PUBLISHED, not left until the next commit. A
-      // manual activation spends a charge BETWEEN turns: the registry's budget
-      // and the persisted envelope both moved, and the tray — which is a
-      // projection of the commit's relic slice — went on showing the count the
-      // last commit carried until the player made a move. Republished here, from
-      // the last commit with the relic slice re-read through the controller, so
-      // the tray and the announcement below describe the same moment.
-      //
-      // THE HUD ALONE, not a re-emitted commit. Re-emitting `state:commit`
-      // through the engine would reach both renderers as a fresh turn and replay
-      // the previous turn's move, spawn and merge tweens; an activation changes
-      // charges, not the board, so the board must not be re-planned.
-      if (lastCommit !== null) {
-        hud.render({ ...lastCommit, relics: run.relicContext() });
-      }
-
-      // Announced through the live region as well, because a charge count is a
-      // state change a player who cannot see the tray still has to perceive.
-      announcer.announceText(
-        `Relic activated. ${String(remaining ?? 0)} charges remaining.`,
-      );
-    }
+    activateHeldRelic(index, held);
   });
 
-  // `startRun` had no subscriber either: the run-start screen's own control
-  // emitted it and nothing acted on it. It starts a run through the composed
-  // path, so the seed, the substreams, the relics, the envelope and the
-  // correlation identifier are all replaced together.
-  const stopStartRun = input.on('startRun', (): void => {
-    startNewRun();
+  // Emitted by the run-start screen's own control and by the `startRun` action.
+  // Starts a run through the composed path, so the seed, the substreams, the
+  // relics, the envelope and the correlation identifier are replaced together.
+  //
+  // THE PAYLOAD IS FORWARDED. `InputEventPayload['startRun']` of
+  // src/input/keymap.ts is `string | undefined` and carries the seed the
+  // run-start screen of src/ui/screens/run-start.ts reduced through
+  // `normalizeEnteredSeed()`; a listener taking no argument dropped it, so a
+  // typed seed reached nothing and every run was played under an originated
+  // one. `startNewRun` already distinguishes the two cases — `undefined`
+  // originates, a value is normalised — so the seed is handed straight to it.
+  const stopStartRun = input.on('startRun', (seed): void => {
+    startNewRun(seed);
+  });
+
+  // The two overlay actions src/input/keymap.ts declares for a screen's own
+  // control: `continueStage` leaves stage progress for the reward offer and
+  // `endRun` leaves the win state for the run summary. Both are edges of
+  // `TRANSITIONS` in src/ui/screen-router.ts, so each is sent rather than
+  // acted on here. DL-MAIN-09.
+  const stopContinueStage = input.on('continueStage', (): void => {
+    router.send('stageEnd');
+  });
+
+  const stopEndRun = input.on('endRun', (): void => {
+    router.send('endRun');
   });
 
   loop.start();
 
-  // THE BOARD THE LOAD RESOLVED, through the controller so the three cases are
+  // What held focus before the flow started, so the boot can put it back.
+  // js/application.js moved focus nowhere at load.
+  const focusHeldBeforeBoot = ownerDocument.activeElement;
+  const nothingHeldFocusBeforeBoot =
+    focusHeldBeforeBoot === null ||
+    focusHeldBeforeBoot === ownerDocument.body;
+
+  // The state machine of AAP Figure 6, entered at `INITIAL_SCREEN` before the
+  // board opens below. `readStageStart` of src/ui/screen-router.ts takes the
+  // `runStart -> stage` edge on the `stage:start` that `openEngineBoard()`
+  // emits, so the two calls are ordered and not interchangeable: started after
+  // the board opened, the machine would hold `runStart` over a playable board.
+  // DL-MAIN-09.
+  const entered = router.start();
+
+  logger.info('The screen flow started.', {
+    screen: entered,
+    missingMounts: router.missingMounts().length,
+  });
+
+  // The board the load resolved, through the controller so the three cases are
   // decided in one place: an adopted envelope opens on its reconciled board, an
   // envelope read and refused opens fresh, and no envelope at all falls back to
-  // the engine's own legacy read so a save written before the upgrade still
-  // loads. A bare `engine.setup()` took the legacy read in every case, so the
-  // board played and the metadata describing it could come from two runs.
+  // the engine's own legacy read, so a save written before the upgrade loads.
   run.openEngineBoard(engine);
+
+  // The boot's own focus placement, undone. `enterScreen` of
+  // src/ui/screen-router.ts places focus for every state it enters and the boot
+  // enters two, and `focusContainerFor('stage')` resolves to `#game-main`, whose
+  // first focusable element in DOM order is `.restart-button`. Released only
+  // where nothing held focus beforehand, so a composition over a document with
+  // a focused element leaves it alone, and every transition after the boot still
+  // places focus. DL-MAIN-09.
+  const focusHeldAfterBoot = ownerDocument.activeElement;
+  const bootWindow = ownerDocument.defaultView;
+
+  if (
+    nothingHeldFocusBeforeBoot &&
+    focusHeldAfterBoot !== focusHeldBeforeBoot &&
+    bootWindow !== null &&
+    focusHeldAfterBoot instanceof bootWindow.HTMLElement
+  ) {
+    focusHeldAfterBoot.blur();
+    reporter.onCount({
+      name: 'ui.boot.focusReleased',
+      value: 1,
+      detail: Object.freeze({ screen: router.current() }),
+    });
+  }
 
   // The diagnostics surface's runtime opt-in, DEFAULT OFF: it mounts and opens
   // only for a session carrying `?diagnostics` or `#diagnostics`, and every
@@ -3285,9 +3074,9 @@ export function start(ownerDocument: Document): Application {
     relics: registry,
     run,
 
-    // Expressed over the run controller, which owns the immutable active offer
-    // and the single-use validated selection, so this surface adds a reachable
-    // shape and no second authority.
+    // Expressed over the run controller, which owns the immutable active offer and
+    // the single-use validated selection, so this surface adds no second
+    // authority.
     rewards: Object.freeze({
       offers: (): readonly RewardOffer[] => run.currentOffer(),
       choose: (relicId: string): boolean =>
@@ -3298,13 +3087,13 @@ export function start(ownerDocument: Document): Application {
       stopMove();
       stopRestart();
       stopContinue();
-      stopSelectReward();
       stopActivateRelic();
       stopStartRun();
+      stopContinueStage();
+      stopEndRun();
       stopRewardScreen();
       cancelContextRestoreWait();
       stopRunPersistence();
-      stopEngineTracing();
       stopHud();
       hud.destroy();
 
@@ -3344,36 +3133,18 @@ export function start(ownerDocument: Document): Application {
 }
 
 /**
- * Starts the application once the document is ready.
- *
- * js/application.js L1 and L4 wrapped its one statement in a
- * `DOMContentLoaded` listener because the ten classic script elements it
- * belonged to were loaded before `</body>`. A module script is deferred
- * by definition, so the document is already parsed by the time this runs;
- * the readiness check is kept for the one case a module can still be
- * evaluated early, which is an injected or dynamically imported entry.
- */
-/**
  * Name the running application is published under for local inspection.
- *
  * Namespaced and underscore-prefixed, so it cannot collide with anything the
- * page or a future dependency declares.
+ * page or a dependency declares.
  */
 const APPLICATION_GLOBAL = '__blitzy2048';
 
 /**
- * Publishes the running application for local inspection.
- *
- * Rule 3's standard is that a capability which cannot be exercised locally is
- * not delivered, and the diagnostics surface has no on-screen affordance: no
- * control opens it and the input vocabulary binds no action to it. Without a
- * handle it would be built, wired, and unreachable from a browser — delivered
- * only in the sense that it exists.
- *
- * A read-only handle, and the ONLY global this module writes. Nothing in the
- * application reads it back, so removing it would change no behaviour; it exists
- * for a developer console, and the failure to publish is contained because a
- * frozen or hostile global object must not stop the game booting.
+ * Publishes the running application for local inspection: the handle a console
+ * reaches the diagnostics surface, the tracer, the metrics registry and the
+ * health surface through. The only global this module writes, and nothing in the
+ * application reads it back. A global that cannot be written is contained.
+ * DL-MAIN-03.
  *
  * @param application The application to publish.
  */
@@ -3397,12 +3168,9 @@ function publishForInspection(application: Application): void {
 }
 
 /**
- * Runs a callback once on the next animation frame.
- *
- * Falls back to a zero-delay timer in an environment with no
- * `requestAnimationFrame` — the same gap js/animframe_polyfill.js shimmed, which
- * deleting that polyfill narrowed the browser matrix for but did not remove the
- * need for a path around.
+ * Runs a callback once on the next animation frame, falling back to a zero-delay
+ * timer where `requestAnimationFrame` is absent — the gap
+ * js/animframe_polyfill.js shimmed. DL-MAIN-08.
  *
  * @param callback Callback to run once, on the next frame.
  */
@@ -3443,14 +3211,9 @@ export type BootstrapOutcome =
   | 'unavailable';
 
 /**
- * One token per composition `bootstrap()` has scheduled and not yet run.
- *
- * A TOKEN PER BOOT RATHER THAN ONE SHARED FLAG. A page load calls `bootstrap()`
- * once, but a test or an embedder may call it more than once, and a single flag
- * makes those calls interfere: the first boot to reach its frame would clear the
- * flag the second is waiting on and the second would stand down for no reason. A
- * token is deleted by the boot that owns it, so only `start()` — which clears the
- * set — cancels a boot that is not its own.
+ * One token per composition `bootstrap()` has scheduled and not yet run. A token
+ * is deleted by the boot that owns it; `start()` clears the whole set.
+ * DL-MAIN-09.
  */
 const pendingBoots = new Set<object>();
 
@@ -3459,13 +3222,8 @@ let booting = false;
 
 /**
  * Cancels a deferred automatic boot, called by `start()` when a CALLER composes
- * first.
- *
- * ONE DOCUMENT, ONE APPLICATION. `start()` is exported so an embedder — or a
- * test — can compose the application itself, and the automatic boot must not then
- * compose a second one over the same markup: every control would be bound twice
- * and every keystroke handled twice. A caller that composes first supersedes the
- * boot; the boot's own call is exempt, which `booting` distinguishes.
+ * first: one document holds one application. The boot's own call is exempt,
+ * which `booting` distinguishes. DL-MAIN-09.
  */
 function cancelPendingBoot(): void {
   if (!booting) {
@@ -3477,18 +3235,14 @@ function cancelPendingBoot(): void {
  * Composes and publishes the application ON THE NEXT ANIMATION FRAME.
  *
  * Ported from js/application.js L1-L4, whose whole body was one
- * `window.requestAnimationFrame` callback wrapping the composition. Deferring by
- * exactly ONE FRAME — not a loop, not a poll, not an immediate call — is what let
- * the first paint happen before any of the application's own work, and it is
- * preserved rather than replaced: an immediate composition delays that first
- * paint by however long the whole graph takes to build, which the vanilla game
- * deliberately avoided.
+ * `window.requestAnimationFrame` callback wrapping the composition: exactly one
+ * frame, not a loop, not a poll and not an immediate call.
  *
- * The readiness guard around it is NEW, because the vanilla scripts were the last
- * elements of the body and the document was therefore already parsed when they
- * ran. A module script is deferred but can still be evaluated while the document
- * is loading, and the composition reads several markup mount points. The guard
- * waits, and the one-frame deferral still applies afterwards.
+ * The readiness guard around it is new. The vanilla scripts were the last
+ * elements of the body, so the document was already parsed when they ran; a
+ * module script is deferred but can still be evaluated while the document is
+ * loading, and the composition reads markup mount points. The one-frame deferral
+ * still applies after the guard.
  *
  * @param options Document, scheduler and composer. Every member has a default.
  * @returns What was done.

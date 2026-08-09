@@ -203,11 +203,21 @@ const busRow = (
     .metrics()
     .subscribers.find((row) => row.id === relicId);
 
-/** A counter's value by series name, or `0` where it never moved. */
-const counter = (subject: Application, name: string): number => {
+/**
+ * A report counter's value by report name, or `0` where it never moved.
+ *
+ * Every generic report is counted on one family with its own dotted name as
+ * the `report` label, so the series is found by that label rather than by a
+ * family name of its own. DL-METRIC-04, DL-MAIN-11.
+ */
+const counter = (subject: Application, report: string): number => {
   const series = subject.metrics
     .snapshot()
-    .series.find((candidate) => candidate.name === name);
+    .series.find(
+      (candidate) =>
+        candidate.name === 'game2048_reports_total' &&
+        candidate.labels['report'] === report,
+    );
 
   return series !== undefined && series.kind === 'counter' ? series.value : 0;
 };
@@ -325,7 +335,7 @@ describe('the reward offer', () => {
   it('counts the draw', () => {
     const subject = clearOpeningStage();
 
-    expect(counter(subject, 'game2048_run_rewardOffered')).toBeGreaterThan(0);
+    expect(counter(subject, 'run.rewardOffered')).toBeGreaterThan(0);
   });
 
   it('advances only the two relic substreams', () => {
@@ -435,8 +445,8 @@ describe('taking an offered relic', () => {
     subject.rewards.choose(id);
     subject.rewards.choose(id);
 
-    expect(counter(subject, 'game2048_run_rewardTaken')).toBe(1);
-    expect(counter(subject, 'game2048_run_rewardRefused')).toBe(1);
+    expect(counter(subject, 'run.rewardTaken')).toBe(1);
+    expect(counter(subject, 'run.rewardRefused')).toBe(1);
   });
 
   it('announces the acquisition by name', async () => {

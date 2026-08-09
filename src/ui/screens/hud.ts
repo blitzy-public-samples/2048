@@ -1,160 +1,255 @@
-// The in-run HUD: the ONE actuator that writes the score, the best score and
-// the terminal overlay, wired to the engine's events and independent of which
-// renderer draws the board.
-//
-// SOLE OWNERSHIP OF THE THREE OUTLETS
-//   `.score-container`, `.best-container` and `.game-message` are written here
-//   and nowhere else. src/render/number-only-renderer.ts is board-only and
-//   holds no score cache, so the HUD and the terminal overlay update on every
-//   commit whichever renderer draws the board. Decision DL-HUD-01.
+// The in-run heads-up display: the `stage` state of src/ui/screen-router.ts,
+// and the only screen live while a board is being played.
 //
 // WHAT IT OWNS
-//   the score and best-score outlets, through `ScorePanel`;
+//   the score and best-score outlets `.score-container` and `.best-container`,
+//   through `ScorePanel`;
+//   the stage indicator in `#hud-stage`: the stage number, the goal readout and
+//   the live board dimension;
+//   the active-relic tray in `#relic-tray`, one `createRelicTrayItem` row per
+//   held relic in the order supplied;
 //   the `.game-message` overlay: the two state classes js/html_actuator.js
-//   L124-L137 toggled, and the verdict text L129 wrote;
-//   nothing else. It draws no tile, requests no rendering context and reads no
-//   engine state of its own — every value arrives on a `state:commit`.
+//   L131-L133 toggled and the verdict text L129 wrote;
+//   the unconfirmed-status notice `.hud-degraded` and the `data-degraded` flag
+//   on the run-status group.
+//
+// WHAT IT DOES NOT OWN
+//   the two score writes themselves. `updateScore` and `updateBestScore` of
+//   js/html_actuator.js L106-L125 map to src/ui/components/score-panel.ts,
+//   which owns the `+N` `.score-addition` node and the real accessible names;
+//   this module calls that component and restates none of it;
+//   the tray row's element tree, built by src/ui/components/relic-card.ts;
+//   every element-to-action binding: `.restart-button`, `.retry-button`,
+//   `.keep-playing-button`, the direction pad and the relic-activation control
+//   all belong to src/input/on-screen-controls.ts and are hosted here, never
+//   bound here;
+//   the engine subscription. A payload arrives from the host: a commit
+//   through `render`, a router context through `enter` and `update`, and this
+//   module subscribes to no emitter;
+//   pickup order, stage-goal evaluation, charge budgets and board size, each
+//   read as supplied and none recomputed here.
 //
 // PORTED BEHAVIOUR
-//   js/html_actuator.js L20-L27  actuate(): score then best score, in that
-//                                order, and the message decided last
-//   js/html_actuator.js L124-L127 message(won): 'game-won' or 'game-over'
-//   js/html_actuator.js L129      the two verdict strings, verbatim
-//   js/html_actuator.js L136-L138 clearMessage(): both classes removed
+//   js/html_actuator.js L24-L25    the write order: the score, then the best
+//                                  score
+//   js/html_actuator.js L26-L33    the overlay decided last, from the terminal
+//                                  flags alone, with the loss taking precedence
+//   js/html_actuator.js L127-L132  message(won): 'game-won' or 'game-over',
+//                                  then the verdict into the overlay paragraph
+//   js/html_actuator.js L129       the two verdict strings, verbatim
+//   js/html_actuator.js L135-L139  clearMessage(): both classes removed
+//   js/game_manager.js L95         the best score rendered from the payload,
+//                                  which is the value re-read from storage
+//   style/main.scss L103, L205     the z-index ceiling of 100, extended through
+//                                  `zIndex.hud` of ../../theme/tokens
 //
-// Every lookup is guarded: none of the eight selectors of the vanilla markup
-// was null-checked, so a renamed class was a startup failure.
+// Every lookup is guarded through `resolveMount`: none of the eight selectors
+// of the vanilla markup was null-checked, so a renamed class was a startup
+// failure (I12).
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece. HUD is one area
 // across the TypeScript and stylesheet halves, so these ordinals are unique
 // across this module and style/_hud.scss:
-//   TR-HUD-01  js/html_actuator.js L20-L27    `actuate()`'s score, best score
-//                                             and message order
-//   TR-HUD-02  js/html_actuator.js L124-L127  `message(won)` and its two state
+//   TR-HUD-01  js/html_actuator.js L24-L27    the write order of `actuate()`:
+//                                             score, best score, message
+//   TR-HUD-02  js/html_actuator.js L127-L131  `message(won)` and its two state
 //                                             classes
 //   TR-HUD-03  js/html_actuator.js L129       the two verdict strings, verbatim
-//   TR-HUD-04  js/html_actuator.js L136-L138  `clearMessage()`, both classes
+//   TR-HUD-04  js/html_actuator.js L135-L139  `clearMessage()`, both classes
 //                                             removed
 //   TR-HUD-05  target-only row                `createHud()`, `HudSnapshot` and
 //                                             the guarded lookups
-//   TR-HUD-06  target-only row                the stage index, goal progress
-//                                             and relic tray slices a commit
-//                                             carries
+//   TR-HUD-06  target-only row                the stage number, the goal
+//                                             readout and the live board
+//                                             dimension
 //   TR-HUD-12  target-only row                the unconfirmed-status notice:
 //                                             `.hud-degraded`, its hidden
-//                                             state and `data-degraded` on
-//                                             the run-status group
-//   TR-HUD-13  target-only row                the per-relic rarity metadata:
-//                                             `data-rarity` and the visually
-//                                             hidden tier label
+//                                             state and `data-degraded` on the
+//                                             run-status group
+//   TR-HUD-13  target-only row                the per-relic tier and budget
+//                                             metadata the tray row carries
+//   TR-HUD-15  target-only row                the `Screen` lifecycle —
+//                                             `mount`, `enter`, `update`,
+//                                             `leave`, `unmount` — and the
+//                                             in-place tray reconciliation
+//   TR-HUD-16  target-only row                the live-region charge-change and
+//                                             relic-acquisition announcements
 //
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
 //   DL-HUD-01  the HUD as the sole writer of the score, best-score and terminal
 //              overlay outlets, outside every renderer
-//   DL-HUD-02  every value arriving on a `state:commit`, with no engine state
-//              read here
+//   DL-HUD-02  every value arriving on a payload, with no engine state read
+//              here
 //   DL-HUD-03  the two verdict strings carried verbatim from the retired
 //              actuator
+//   DL-HUD-07  `leave()` deactivating rather than tearing down, with the full
+//              teardown in `unmount()`
+//   DL-HUD-08  the acquisition announcement opt-in and the charge-change
+//              announcement always on
+//   DL-HUD-09  the commit push retained beside the router lifecycle, and the
+//              score write skipped for an unchanged context refresh
+//   DL-HUD-10  the goal track decorative rather than a `role="progressbar"`
+//
+// Nothing is read or written at import time: every lookup, every report and
+// every DOM write happens inside a call.
 
+import type { StageGoal } from '../../config/stage-config';
+import type { StateCommitEvent } from '../../engine/engine-events';
 import type {
-  EngineEvents,
-  EngineEventSubscription,
-  StateCommitEvent,
-} from '../../engine/engine-events';
-import type { BestScoreValue } from '../../engine/types';
+  BestScoreValue,
+  RelicCommitContext,
+  RelicCommitEntry,
+} from '../../engine/types';
+import type { ActiveRelic, Rarity } from '../../relics/relic-types';
+import { zIndex } from '../../theme/tokens';
+import type { ScreenName as FocusScreenName } from '../a11y/focus-manager';
+import { focusInitial } from '../a11y/focus-manager';
+import type { LiveRegionAnnouncer } from '../a11y/live-region';
 import type { UiReporter } from '../a11y/settings';
 import {
   NOOP_UI_REPORTER,
   createSafeUiReporter,
   resolveMount,
 } from '../a11y/settings';
-import type {
-  RelicCommitContext,
-  StageCommitContext,
-} from '../../engine/types';
+import type { RelicTrayItem } from '../components/relic-card';
+import {
+  createRelicTrayItem,
+  relicCardClasses,
+} from '../components/relic-card';
 import type { ScorePanel } from '../components/score-panel';
 import { createScorePanel } from '../components/score-panel';
+import type { Screen, ScreenContext } from '../screen-router';
 
 /* ==========================================================================
- * 1. Selectors, classes and copy
+ * 1. Selectors, classes, attributes and copy
  * ========================================================================== */
 
-/** Selector of the terminal overlay. Read at js/html_actuator.js L6. */
+/** Selector of the terminal overlay. index.html. */
 const MESSAGE_SELECTOR = '.game-message';
 
-/** Selector of the verdict paragraph inside the overlay. */
+/** Selector of the overlay's verdict element, for the report on a miss. */
 const VERDICT_SELECTOR = '.game-message > p';
 
-/** Class the overlay carries on a win. js/html_actuator.js L125. */
+/** The verdict element, resolved inside the overlay this module holds. */
+const SCOPED_VERDICT_SELECTOR = ':scope > p';
+
+/** Overlay state class of a won board. js/html_actuator.js L128. */
 const WON_CLASS = 'game-won';
 
-/** Class the overlay carries on a loss. js/html_actuator.js L125. */
+/** Overlay state class of a lost board. js/html_actuator.js L128. */
 const OVER_CLASS = 'game-over';
 
-/** Logical name of the overlay mount, carried into every report. */
-const MESSAGE_MOUNT = 'message';
-
-/** Selector of the in-run status group, hidden until a run is under way. */
+/** Selector of the in-run status group. index.html. */
 const HUD_SELECTOR = '#screen-hud';
 
-/** Selector of the stage indicator. */
+/** Selector of the stage indicator. index.html. */
 const STAGE_SELECTOR = '#hud-stage';
 
-/** Selector of the active-relic tray. */
+/** Selector of the active-relic tray. index.html. */
 const RELIC_TRAY_SELECTOR = '#relic-tray';
 
 /**
- * Class of the unconfirmed-status notice, which style/_hud.scss dresses.
+ * Selector of the region focus is placed inside on entry.
  *
- * Written by this module and by nothing else, exactly as the two overlay state
- * classes are.
+ * index.html declares `#board-a11y` inside `#game-main` and outside
+ * `#screen-hud`, and `SCREEN_INITIAL_FOCUS.stage` of ../a11y/focus-manager
+ * names that cell layer as this state's designated target.
  */
+const FOCUS_CONTAINER_SELECTOR = '#game-main';
+
+/**
+ * The state this screen renders, as ../a11y/focus-manager names it.
+ *
+ * A literal type rather than the wider union, so a context is narrowed to
+ * `StageScreenContext` by comparing its `screen` against this constant, and the
+ * `satisfies` keeps the agreement with that module's own name set.
+ */
+const STAGE_SCREEN = 'stage' as const satisfies FocusScreenName;
+
+/** Class of the unconfirmed-status notice. style/_hud.scss. */
 const DEGRADED_CLASS = 'hud-degraded';
 
-/**
- * Attribute the run-status group carries while the engine reports the turn's
- * terminal or stage status as unestablished. The stylesheet reads it, so the
- * notice and the surface around it are dressed from one flag.
- */
+/** Attribute the run-status group carries while a status is unestablished. */
 const DEGRADED_ATTRIBUTE = 'data-degraded';
 
-/**
- * Attribute one tray item carries its rarity tier on. style/_hud.scss draws one
- * accent rule per `$rarity-tiers` entry off it, and style/_reward.scss reads the
- * same tier vocabulary for the reward card.
- */
-const RARITY_ATTRIBUTE = 'data-rarity';
+/** Class of one readout's label. style/_hud.scss. */
+const LABEL_CLASS = 'hud-label';
+
+/** Class of one readout's value. style/_hud.scss. */
+const VALUE_CLASS = 'hud-value';
+
+/** Class of the stage-number readout group. style/_hud.scss. */
+const STAGE_INDEX_CLASS = 'hud-stage-index';
+
+/** Class of the goal readout group. style/_hud.scss. */
+const GOAL_CLASS = 'hud-goal';
+
+/** Class of the board-dimension readout group. style/_hud.scss. */
+const BOARD_CLASS = 'hud-board';
+
+/** Class of the goal track. style/_hud.scss. */
+const GOAL_METER_CLASS = 'hud-goal-meter';
+
+/** Class of the goal track's fill. style/_hud.scss. */
+const GOAL_METER_FILL_CLASS = 'hud-goal-meter-fill';
 
 /**
- * The visually-hidden utility of style/_a11y.scss, used for the rarity text
- * beside the accent that states the same tier visually.
+ * The custom property style/_hud.scss reads for the goal track's fill, as a
+ * fraction of the track in the closed interval [0, 1].
  */
-const RARITY_TEXT_CLASS = 'visually-hidden';
+const GOAL_FRACTION_PROPERTY = '--hud-goal-fraction';
 
-/** Counter naming a rarity resolver that raised. */
-const RARITY_FAULT_METRIC = 'ui.hud.relicRarity.faulted';
+/** Attribute the empty-state row carries. style/_hud.scss. */
+const EMPTY_TRAY_ATTRIBUTE = 'data-relic-empty';
 
-/** Logical names of the three run-status mounts. */
+/** Attribute keeping a decorative element out of the accessibility tree. */
+const HIDDEN_ATTRIBUTE = 'aria-hidden';
+
+/** Value every boolean ARIA attribute here is written with. */
+const ARIA_TRUE = 'true';
+
+/** Logical names the four mounts are reported under. */
 const HUD_MOUNT = 'hud';
 const STAGE_MOUNT = 'stage';
 const RELIC_TRAY_MOUNT = 'relicTray';
-
-/**
- * The custom property style/_hud.scss reads for the goal track's fill, clamped
- * to the closed interval [0, 1].
- */
-const GOAL_FRACTION_PROPERTY = '--hud-goal-fraction';
+const MESSAGE_MOUNT = 'message';
+const FOCUS_MOUNT = 'focusContainer';
 
 /** Label naming this module in every report. */
 const REPORT_CONTEXT = 'hud';
 
 /**
- * The two verdicts, ported verbatim from js/html_actuator.js L129, and
- * overridable so a caller can localise them without editing this module.
+ * The rung this surface occupies, read from `zIndex` of ../../theme/tokens and
+ * declared by `.hud` in style/_hud.scss.
+ *
+ * The first step of the ladder extension above the retained ceiling of 100, and
+ * below `zIndex.diagnosticsOverlay`.
+ */
+export const HUD_Z_INDEX: number = zIndex.hud;
+
+/** The ids an empty tray reports. */
+const EMPTY_RELIC_IDS: readonly string[] = Object.freeze([]);
+
+/** The tier a synthesised declaration carries when none was resolved. */
+const UNRESOLVED_RARITY = '';
+
+/** The handler table a synthesised declaration carries. */
+const NO_HOOKS = Object.freeze({});
+
+/**
+ * Every string this module renders, overridable so a caller can localise it
+ * without editing this module.
+ *
+ * `relicCharges` and `relicRarity` are handed to `createRelicTrayItem` as its
+ * `chargesRemaining` and `rarityText`, so one override reaches the tray rows as
+ * well as this module.
  */
 export const hudCopy = Object.freeze({
+  /** js/html_actuator.js L129, verbatim. */
   wonMessage: 'You win!',
+
+  /** js/html_actuator.js L129, verbatim. */
   overMessage: 'Game over!',
 
   /** Label above the stage number. */
@@ -163,39 +258,44 @@ export const hudCopy = Object.freeze({
   /** Label above the goal readout. */
   goalLabel: 'Goal',
 
+  /** Label above the board dimension. */
+  boardLabel: 'Board',
+
   /** Renders the stage number a zero-based index names. */
   stageValue: (stageIndex: number): string => String(stageIndex + 1),
 
-  /** Renders the goal readout from its kind, target and measured progress. */
+  /** Renders the goal readout from its kind, target and measured quantity. */
   goalValue: (kind: string, target: number, measured: number): string =>
     kind === 'score-threshold'
       ? `${measured} / ${target} score`
       : `${measured} / ${target} tile`,
 
+  /** Renders the board dimension from the size in force. */
+  boardValue: (boardSize: number): string => `${boardSize} × ${boardSize}`,
+
   /** Label naming the tray for assistive technology. */
   relicTrayLabel: 'Active relics, in pickup order',
 
-  /** Rendered in place of the tray while a run holds no relic. */
+  /** Rendered in place of a row while a run holds no relic. */
   relicTrayEmpty: 'No relics yet',
 
   /** Renders a relic's remaining charge budget. */
   relicCharges: (charges: number): string => `${charges} left`,
 
   /**
-   * Renders a relic's rarity tier for assistive technology.
-   *
-   * Read as visually-hidden text rather than shown: the tier is carried visually
-   * by the accent style/_hud.scss draws on the item's leading edge, in both its
-   * colour and its thickness, so a second visible chip would state it twice.
+   * Renders a relic's tier for assistive technology, beside the accent
+   * style/_hud.scss draws on the row's leading edge.
    */
   relicRarity: (rarity: string): string => `Rarity: ${rarity}`,
 
+  /** Announced when a held relic's remaining budget changed. */
+  chargeAnnouncement: (name: string, charges: number): string =>
+    `${name}: ${charges} left.`,
+
   /**
-   * Shown while a commit reports `degraded`: the engine could not establish
-   * whether the run is lost or the stage is cleared, so the verdict beside it is
-   * unconfirmed rather than settled. Read as text by a screen reader that
-   * reaches the run-status group; the once-per-transition announcement is
-   * src/ui/a11y/engine-announcer.ts's.
+   * Shown while a payload reports `degraded`: the engine could not establish
+   * whether the run is lost or the stage is cleared. The once-per-transition
+   * announcement is src/ui/a11y/engine-announcer.ts's.
    */
   degradedNotice: 'Board status unconfirmed',
 });
@@ -206,13 +306,19 @@ export type HudCopy = typeof hudCopy;
  * 2. Report names
  * ========================================================================== */
 
-/** Counter raised once per completed mount. */
+/** Counter raised once per completed construction. */
 const MOUNTED_METRIC = 'ui.hud.mounted';
 
 /** Counter raised once per outlet the document did not supply. */
 const MOUNT_MISSING_METRIC = 'ui.hud.mount_missing';
 
-/** Counter raised once per commit this HUD wrote. */
+/** Counter raised once per `mount` the router applied. */
+const HOST_MOUNTED_METRIC = 'ui.hud.host_mounted';
+
+/** Counter raised per `mount` call after the first. */
+const HOST_REMOUNTED_METRIC = 'ui.hud.host_remounted';
+
+/** Counter raised once per payload written. */
 const COMMIT_METRIC = 'ui.hud.commit';
 
 /** Counter raised per terminal overlay shown, carrying the verdict. */
@@ -224,11 +330,32 @@ const WRITE_AFTER_DESTROY_METRIC = 'ui.hud.write_after_destroy';
 /** Counter raised once per `destroy`. */
 const DESTROYED_METRIC = 'ui.hud.destroyed';
 
-/** Counter raised once per stage transition the indicator wrote. */
+/** Counter raised once per stage indicator written. */
 const STAGE_METRIC = 'ui.hud.stage';
 
-/** Counter raised once per relic-tray rebuild. */
+/** Counter raised per stage indicator skipped, carrying the cause. */
+const STAGE_SKIPPED_METRIC = 'ui.hud.stage.skipped';
+
+/** Counter raised once per tray reconciliation, carrying the row counts. */
 const RELIC_TRAY_METRIC = 'ui.hud.relic_tray';
+
+/** Counter raised per lifecycle call, carrying the member. */
+const LIFECYCLE_METRIC = 'ui.hud.lifecycle';
+
+/** Counter raised per context whose state is not the one this screen owns. */
+const CONTEXT_REFUSED_METRIC = 'ui.hud.context_refused';
+
+/** Counter raised per focus placement, carrying the source. */
+const FOCUS_METRIC = 'ui.hud.focus';
+
+/** Counter raised per score write skipped as unchanged. */
+const SCORE_UNCHANGED_METRIC = 'ui.hud.score.unchanged';
+
+/** Counter raised per announcement written, carrying the kind. */
+const ANNOUNCED_METRIC = 'ui.hud.announced';
+
+/** Counter raised per injected reader that raised or answered badly. */
+const READER_FAULT_METRIC = 'ui.hud.reader.faulted';
 
 /* ==========================================================================
  * 3. Public API
@@ -237,9 +364,16 @@ const RELIC_TRAY_METRIC = 'ui.hud.relic_tray';
 /** Which terminal state the overlay is showing, and `null` for none. */
 export type HudTerminalState = 'won' | 'over' | null;
 
-/** What one commit put on screen, as plain data. */
+/** What one payload put on screen, as plain data. */
 export interface HudSnapshot {
   readonly score: number;
+
+  /**
+   * The best score exactly as the payload carried it: the raw stored string
+   * when a value is present and the number `0` when it is absent, which is what
+   * js/local_storage_manager.js L43-L45 returned and js/game_manager.js L95
+   * placed in the payload. Neither coerced nor formatted here.
+   */
   readonly bestScore: BestScoreValue;
 
   /** The terminal state in force, and `null` while play continues. */
@@ -249,24 +383,58 @@ export interface HudSnapshot {
   readonly verdict: string | null;
 
   /**
-   * One-based stage number shown, and `null` where no indicator resolved.
-   *
-   * One-based because it is player-facing copy; the engine's own index stays
-   * zero-based everywhere else.
+   * One-based stage number shown, and `null` where no indicator resolved or no
+   * stage was measurable. One-based because it is player-facing copy; the
+   * engine's own index stays zero-based everywhere else.
    */
   readonly stage: number | null;
 
-  /** Relic identifiers shown in the tray, in pickup order. */
+  /** Relic identifiers shown in the tray, in the order supplied. */
   readonly relics: readonly string[];
 
   /**
-   * Whether the commit reported its terminal or stage status as unestablished,
-   * as `StateCommitEvent.degraded` carries it. `true` means the notice is
-   * showing; the flag is recorded whether or not a run-status outlet resolved,
-   * so a caller reads the state rather than inferring it from the DOM.
+   * The board dimension the payload reported, read live on every write and
+   * never cached, and `null` where the payload carried none.
+   */
+  readonly boardSize: number | null;
+
+  /**
+   * Whether the payload reported its terminal or stage status as unestablished.
+   * Recorded whether or not a run-status outlet resolved to show it.
    */
   readonly degraded: boolean;
 }
+
+/**
+ * The part of the announcer this screen drives, as ../a11y/live-region declares
+ * it. A structural subset, so the announcer is exercisable with a stand-in.
+ */
+export type HudAnnouncerPort = Pick<
+  LiveRegionAnnouncer,
+  'announce' | 'announceText'
+>;
+
+/**
+ * The announcer as an option: the component itself, `null` for none, or a
+ * reader resolved at the moment of the announcement, which a composition whose
+ * announcer is built after this screen passes.
+ */
+export type HudAnnouncerSource =
+  | HudAnnouncerPort
+  | null
+  | (() => HudAnnouncerPort | null);
+
+/**
+ * Reads the relics a run holds, in pickup order.
+ *
+ * `RelicRegistry.active()` of src/relics/relic-registry.ts has this shape: it
+ * returns the held relics in pickup order with the charge budgets the hook bus
+ * holds. Called on every write, so a budget spent between turns is observed.
+ */
+export type HudRelicSource = () => readonly ActiveRelic[];
+
+/** Reads the board dimension in force. */
+export type HudBoardSizeSource = () => number | null;
 
 /** Everything the factory accepts. Every member is optional. */
 export interface HudOptions {
@@ -287,9 +455,9 @@ export interface HudOptions {
   readonly messageContainer?: Element | string | null;
 
   /**
-   * The in-run status group, whose `hidden` this HUD releases on the first
-   * commit. A selector is resolved against `document`; `null` marks an outlet
-   * the caller looked for and did not find. Defaults to `HUD_SELECTOR`.
+   * The in-run status group, whose `hidden` this screen releases on the first
+   * write. Defaults to `HUD_SELECTOR`, and `mount` adopts the container the
+   * router injects where no group resolved here.
    */
   readonly hudContainer?: Element | string | null;
 
@@ -300,84 +468,124 @@ export interface HudOptions {
   readonly relicTrayContainer?: Element | string | null;
 
   /**
-   * Called with a relic identifier when its tray control is activated. Absent,
-   * the control is rendered as a plain readout rather than a button, so nothing
-   * offers an action that goes nowhere.
+   * The region focus is placed inside on entry. A selector is resolved against
+   * `document`; an element is used as given; `null` opts this screen out of
+   * placing focus at all. Defaults to `FOCUS_CONTAINER_SELECTOR`.
    */
-  readonly onRelicActivate?: (relicId: string) => void;
+  readonly focusContainer?: Element | string | null;
+
+  /**
+   * Reads the held relics in pickup order, which is what the tray renders.
+   * Absent, the tray is rendered from the payload's own relic slice and the two
+   * resolvers below.
+   */
+  readonly relics?: HudRelicSource;
+
+  /**
+   * Reads the board dimension in force, consulted where a payload carries
+   * none. Called on every write; nothing is cached from it.
+   */
+  readonly boardSize?: HudBoardSizeSource;
 
   /**
    * Resolves a relic identifier to the name the tray shows.
    *
-   * WHY IT IS INJECTED. A commit's relic slice carries an identifier and a charge
-   * count and nothing else, deliberately — the engine holds no relic definition,
-   * so it has nothing else to carry. The catalogue is the only place a display
-   * name exists, and it lives in src/relics, which this module does not import.
-   * Without a resolver the tray shows the raw identifier, which is the same relic
-   * under a different name from the one the reward card and the announcement both
-   * used.
-   *
-   * Absent, or returning a blank string, falls back to the identifier.
+   * A payload's relic slice carries an identifier and a charge count and
+   * nothing else, and the catalogue that holds a display name lives in
+   * src/relics, which this module does not import. Absent, or returning a blank
+   * string, falls back to the identifier.
    */
   readonly relicName?: (relicId: string) => string;
 
   /**
-   * Resolves a relic identifier to its rarity tier.
-   *
-   * WHY IT IS INJECTED, and why it is separate from `relicName`. The rarity is
-   * catalogue metadata, exactly as the name is: a commit's relic slice carries an
-   * identifier and a charge count and nothing else, and the catalogue lives in
-   * src/relics, which this module does not import. Without a resolver the tier
-   * reached neither the DOM nor assistive technology, so the rarity accent
-   * style/_hud.scss declares for every `$rarity-tiers` entry could never match
-   * and a screen-reader user was told a relic's name and budget but not its tier.
-   *
-   * Absent, or returning a blank string, leaves `data-rarity` unwritten and the
-   * item's accessible text unchanged.
+   * Resolves a relic identifier to its tier. Absent, or returning a blank
+   * string, leaves `data-rarity` unwritten and the row's text unchanged.
    */
   readonly relicRarity?: (relicId: string) => string;
+
+  /** Region the charge-change announcement is written through. */
+  readonly announcer?: HudAnnouncerSource;
+
+  /**
+   * Whether a changed charge budget is announced. Defaults to `true`, and is
+   * inert where no announcer is supplied.
+   */
+  readonly announceCharges?: boolean;
+
+  /**
+   * Whether a relic appearing in the tray for the first time is announced as an
+   * acquisition. Defaults to `false`: a composition whose reward transaction
+   * announces the pickup itself leaves this off, and one with no such
+   * transaction turns it on. The relics standing at the first write are never
+   * announced, whatever this carries.
+   */
+  readonly announceAcquisitions?: boolean;
 
   /** Document a lookup runs against. Defaults to the ambient document. */
   readonly document?: Document;
 
-  /** Verdict overrides. Either string may be replaced. */
+  /** Copy overrides. Any member may be replaced. */
   readonly copy?: Partial<HudCopy>;
 
   /** Sink every miss, every write and every skipped write reports through. */
   readonly reporter?: UiReporter;
 }
 
-/** The mounted HUD. Every member is safe to call at any time. */
-export interface Hud {
+/**
+ * The mounted HUD: the `Screen` of ../screen-router, plus the commit push and
+ * the readers a host drives it with. Every member is safe to call at any time.
+ */
+export interface Hud extends Screen {
   /**
-   * Writes one commit: the score, then the best score, then the overlay —
-   * which is the order js/html_actuator.js L24-L27 wrote them in.
+   * Receives the container the router resolved for this state, once. Any outlet
+   * that did not resolve at construction is resolved inside that container.
    *
-   * @param commit The commit to write. Only the score, best score, terminal
-   *   flags and win flag are read.
+   * @param host The resolved container.
+   */
+  mount(host: Element): void;
+
+  /**
+   * Renders one entry to this state and places focus.
+   *
+   * @param context The context the router built. A context for another state is
+   *   reported and refused.
+   */
+  enter(context: ScreenContext): void;
+
+  /**
+   * Renders one in-state refresh. Focus is not moved and nothing is rebuilt
+   * that did not change.
+   *
+   * @param context The context the router built.
+   */
+  update(context: ScreenContext): void;
+
+  /** Marks this state left. Nothing rendered is torn down. */
+  leave(): void;
+
+  /** Tears the screen down. Equivalent to `destroy`. */
+  unmount(): void;
+
+  /**
+   * Writes one commit: the score, then the best score, then the overlay, then
+   * the run-status half, which is the order js/html_actuator.js L24-L27
+   * wrote the first three in.
+   *
+   * @param commit The commit to write.
    * @returns What was written.
    */
   render(commit: StateCommitEvent): HudSnapshot;
 
-  /**
-   * Subscribes to an emitter's `state:commit`, which is the only event this
-   * HUD reads.
-   *
-   * @param events Emitter to attach to.
-   * @returns A handle that removes the subscription.
-   */
-  subscribe(events: EngineEvents): EngineEventSubscription;
-
-  /** What the last `render` put on screen, or `null` before the first. */
+  /** What the last write put on screen, or `null` before the first. */
   readRendered(): HudSnapshot | null;
 
-  /**
-   * Whether the overlay resolved. The score outlets report separately, through
-   * `ScorePanel.isReady()`.
-   */
+  /** Whether this state has been entered and not yet left. */
+  isActive(): boolean;
+
+  /** Whether the terminal overlay resolved. */
   hasOverlay(): boolean;
 
-  /** The score component this HUD drives, for a caller that reads its state. */
+  /** The score component this screen drives, for a caller that reads it. */
   readonly scorePanel: ScorePanel;
 
   /** Whether the stage indicator resolved. */
@@ -387,76 +595,212 @@ export interface Hud {
   hasRelicTray(): boolean;
 
   /**
-   * Removes the overlay classes this HUD added, releases the score component
-   * and drops every subscription. Every later call is a reported no-op.
+   * Removes every node this screen created, releases the score component and
+   * the tray rows, and clears the overlay classes it added. Every later call is
+   * a reported no-op.
    */
   destroy(): void;
 }
 
 /* ==========================================================================
- * 4. Construction
+ * 4. The normalised view one write renders
  * ========================================================================== */
 
+/**
+ * One payload reduced to what this screen writes, whichever member of the
+ * public surface delivered it.
+ *
+ * `render` builds one from a `StateCommitEvent` and `enter`/`update` build one
+ * from a `StageScreenContext`, so the write path below is single.
+ */
+interface HudView {
+  readonly score: number;
+  readonly bestScore: BestScoreValue;
+
+  /** The terminal state the payload reported, and `null` for none. */
+  readonly terminal: HudTerminalState;
+
+  /** Zero-based stage index, and `null` where the payload carried none. */
+  readonly stageIndex: number | null;
+
+  /** The goal in force, and `null` where none was measurable. */
+  readonly goal: StageGoal | null;
+
+  /** Fraction of the goal reached, in the closed interval [0, 1]. */
+  readonly goalFraction: number;
+
+  /**
+   * The measured quantity, where the payload stated it, and `null` where it is
+   * to be derived from the fraction and the target.
+   */
+  readonly goalAchieved: number | null;
+
+  /** The held relics, in the order supplied. */
+  readonly relics: readonly ActiveRelic[];
+
+  /** The live board dimension, and `null` where none was available. */
+  readonly boardSize: number | null;
+
+  readonly degraded: boolean;
+}
+
+/**
+ * Reads the ambient document.
+ *
+ * @returns The document, or `null` outside a browser.
+ */
 function readAmbientDocument(): Document | null {
   return typeof document === 'undefined' ? null : document;
 }
 
 /**
- * Narrows an element to the HTML element whose `classList` this module writes.
+ * Narrows an element to the HTML element whose `classList`, `hidden` and
+ * `ownerDocument` this module reads.
  *
- * @param element Element to narrow.
- * @returns The element, or `null` where it carries no `classList` to write.
+ * @param element Element to narrow, or `null`.
+ * @returns The element, or `null` where it carries no `classList`.
  */
-function asHtmlElement(element: Element): HTMLElement | null {
+function asHtmlElement(element: Element | null): HTMLElement | null {
+  if (element === null) {
+    return null;
+  }
+
   return 'classList' in element ? (element as HTMLElement) : null;
 }
 
+/**
+ * Merges a caller's overrides onto the default copy.
+ *
+ * @param overrides Subset to replace, or `undefined` for none.
+ * @returns The copy in force, frozen.
+ */
 function mergeCopy(overrides: Partial<HudCopy> | undefined): HudCopy {
   if (overrides === undefined) {
     return hudCopy;
   }
 
-  return Object.freeze({
-    wonMessage: overrides.wonMessage ?? hudCopy.wonMessage,
-    overMessage: overrides.overMessage ?? hudCopy.overMessage,
-    stageLabel: overrides.stageLabel ?? hudCopy.stageLabel,
-    goalLabel: overrides.goalLabel ?? hudCopy.goalLabel,
-    stageValue: overrides.stageValue ?? hudCopy.stageValue,
-    goalValue: overrides.goalValue ?? hudCopy.goalValue,
-    relicTrayLabel: overrides.relicTrayLabel ?? hudCopy.relicTrayLabel,
-    relicTrayEmpty: overrides.relicTrayEmpty ?? hudCopy.relicTrayEmpty,
-    relicCharges: overrides.relicCharges ?? hudCopy.relicCharges,
-    relicRarity: overrides.relicRarity ?? hudCopy.relicRarity,
-    degradedNotice: overrides.degradedNotice ?? hudCopy.degradedNotice,
-  });
+  return Object.freeze({ ...hudCopy, ...overrides });
 }
 
 /**
- * Mounts the HUD.
+ * Maps a reported fraction into the closed interval [0, 1].
  *
- * Nothing is read or written at import time: the overlay lookup, the score
- * component's own two lookups and every report happen inside this call. An
- * absent outlet is reported and its writes are skipped; the outlets that did
- * resolve keep working.
+ * Applied to the raw number a commit's stage slice carries, so the readout and
+ * the track are driven by one value and a provider reporting outside the
+ * interval cannot produce a readout above its own target. The
+ * `StageGoalProgress` a router context carries is already clamped by
+ * `evaluateStageGoal` of ../../config/stage-config and is used verbatim.
  *
- * @param options Pre-resolved outlets, document, copy and report sink.
- * @returns The mounted HUD, whether or not every outlet resolved.
+ * @param fraction Reported fraction.
+ * @returns The fraction, clamped, and `0` where it is not finite.
+ */
+function clampFraction(fraction: number): number {
+  if (!Number.isFinite(fraction)) {
+    return 0;
+  }
+
+  return Math.min(Math.max(fraction, 0), 1);
+}
+
+/**
+ * Reads a board's dimension without holding the board.
+ *
+ * TOTAL, and read on every write rather than captured: a board-mutating relic
+ * changes the dimension mid-run, and `reconcileBoardSize` of
+ * ../../run/run-state-store.ts can change it again on load.
+ *
+ * @param board The board a payload carried, by reference and never written.
+ * @returns The dimension, or `null` where the value is not a positive integer.
+ */
+function readBoardSizeOf(board: unknown): number | null {
+  if (board === null || typeof board !== 'object') {
+    return null;
+  }
+
+  const size = (board as { size?: unknown }).size;
+
+  return typeof size === 'number' && Number.isInteger(size) && size > 0
+    ? size
+    : null;
+}
+
+/**
+ * Reads the terminal state a commit reports.
+ *
+ * Ported from js/html_actuator.js L27-L33: the overlay is decided from the
+ * terminal flags alone, and a loss takes precedence over a win because a board
+ * can carry both.
+ *
+ * @param commit Commit to read.
+ * @returns The terminal state, and `null` while play continues.
+ */
+function readTerminal(commit: StateCommitEvent): HudTerminalState {
+  if (!commit.terminated) {
+    return null;
+  }
+
+  if (commit.over) {
+    return 'over';
+  }
+
+  return commit.won ? 'won' : null;
+}
+
+/** One tray row on screen, and the relic it addresses. */
+interface TrayEntry {
+  /** The relic's identifier, which the row is reused by. */
+  readonly id: string;
+
+  /** The row itself, held so it is updated in place and destroyed once. */
+  readonly item: RelicTrayItem;
+}
+
+/* ==========================================================================
+ * 5. Construction
+ * ========================================================================== */
+
+/**
+ * Mounts the in-run HUD.
+ *
+ * Nothing is read or written here beyond the outlet lookups: an absent
+ * outlet is reported and its writes are skipped, and the outlets that did
+ * resolve keep working. `ScorePanel.isReady()` reports the score half
+ * separately, so a caller can react to an unresolved surface rather than
+ * discover it as a crash.
+ *
+ * @param options Pre-resolved outlets, readers, document, copy and report sink.
+ * @returns The mounted screen, whether or not every outlet resolved.
  *
  * @example
  * ```ts
  * const hud = createHud({
  *   scoreContainer: document.querySelector('.score-container'),
  *   bestContainer: document.querySelector('.best-container'),
- *   messageContainer: '.game-message',
+ *   relics: () => registry.active(),
  * });
  *
- * const stop = hud.subscribe(engine.events);
+ * // Driven by the router, as the `stage` state's module:
+ * const router = createScreenRouter({ screens: { stage: hud } });
+ *
+ * // Or driven by a commit the host pushes:
+ * hud.render(commit);
  * ```
  */
 export function createHud(options: HudOptions = {}): Hud {
   const reporter = createSafeUiReporter(options.reporter ?? NOOP_UI_REPORTER);
   const owner = options.document ?? readAmbientDocument();
   const copy = mergeCopy(options.copy);
+  const announceCharges = options.announceCharges ?? true;
+  const announceAcquisitions = options.announceAcquisitions ?? false;
+
+  /**
+   * The two strings a tray row renders, handed to `createRelicTrayItem` so an
+   * override of this module's copy reaches the rows as well.
+   */
+  const trayCopy = Object.freeze({
+    chargesRemaining: copy.relicCharges,
+    rarityText: copy.relicRarity,
+  });
 
   const scorePanel = createScorePanel({
     scoreContainer: options.scoreContainer ?? null,
@@ -465,103 +809,292 @@ export function createHud(options: HudOptions = {}): Hud {
     reporter,
   });
 
-  // A caller that already holds the element hands it in; a caller that does
-  // not lets this one guarded lookup run. `resolveMount` reports a miss rather
-  // than returning an unchecked node.
-  const supplied = options.messageContainer ?? null;
-  const overlay: HTMLElement | null =
-    supplied === null
-      ? resolveMount<HTMLElement>(MESSAGE_SELECTOR, {
-          name: MESSAGE_MOUNT,
-          ...(owner === null ? {} : { root: owner }),
-          reporter,
-          context: REPORT_CONTEXT,
-        })
-      : typeof supplied === 'string'
-        ? resolveMount<HTMLElement>(supplied, {
-            name: MESSAGE_MOUNT,
-            ...(owner === null ? {} : { root: owner }),
-            reporter,
-            context: REPORT_CONTEXT,
-          })
-        : asHtmlElement(supplied);
-
-  if (overlay === null) {
-    reporter.count(MOUNT_MISSING_METRIC, { mount: MESSAGE_MOUNT });
-  }
-
   /**
-   * Resolves one optional run-status outlet.
+   * Resolves one outlet: a supplied element is used as given, a selector is
+   * resolved through the guarded lookup, and nothing falls back to this
+   * module's own selector for the mount. A miss is reported and counted
+   * rather than raised, so the outlets that resolved keep working (I12).
    *
-   * The same three-way shape the overlay uses above: a supplied element is taken
-   * as given, a string is resolved, and nothing falls back to this module's own
-   * selector. A miss is COUNTED and skipped rather than raised, because the HUD
-   * has to keep writing the score when the run-status markup is absent — which
-   * is what every unit fixture that carries only the legacy outlets is.
+   * @param supplied Element or selector the caller injected.
+   * @param fallback Selector used where the caller injected neither.
+   * @param mount Logical name carried into the report.
+   * @param root Root the selector is evaluated against. Defaults to `owner`.
+   * @returns The outlet, or `null`.
    */
   const resolveOutlet = (
     supplied: Element | string | null | undefined,
     fallback: string,
     mount: string,
+    root: Element | Document | null = owner,
   ): HTMLElement | null => {
-    const resolved =
+    const injected =
+      supplied === null ||
+      supplied === undefined ||
+      typeof supplied === 'string'
+        ? null
+        : asHtmlElement(supplied);
+    const selector =
       supplied === null || supplied === undefined
-        ? resolveMount<HTMLElement>(fallback, {
+        ? fallback
+        : typeof supplied === 'string'
+          ? supplied
+          : null;
+    const resolved =
+      selector === null
+        ? injected
+        : resolveMount<HTMLElement>(selector, {
             name: mount,
-            ...(owner === null ? {} : { root: owner }),
+            ...(root === null ? {} : { root }),
             reporter,
             context: REPORT_CONTEXT,
-          })
-        : typeof supplied === 'string'
-          ? resolveMount<HTMLElement>(supplied, {
-              name: mount,
-              ...(owner === null ? {} : { root: owner }),
-              reporter,
-              context: REPORT_CONTEXT,
-            })
-          : asHtmlElement(supplied);
+          });
 
     if (resolved === null) {
-      reporter.count(MOUNT_MISSING_METRIC, { mount });
+      reporter.count(MOUNT_MISSING_METRIC, { mount, context: REPORT_CONTEXT });
     }
 
     return resolved;
   };
 
-  const hudGroup = resolveOutlet(
+  const overlay = resolveOutlet(
+    options.messageContainer,
+    MESSAGE_SELECTOR,
+    MESSAGE_MOUNT,
+  );
+
+  // The three run-status outlets. Mutable: `mount` fills in whichever did not
+  // resolve here, from the container the router injects.
+  let hudGroup = resolveOutlet(
     options.hudContainer,
     HUD_SELECTOR,
     HUD_MOUNT,
   );
-  const stageOutlet = resolveOutlet(
+  let stageOutlet = resolveOutlet(
     options.stageContainer,
     STAGE_SELECTOR,
     STAGE_MOUNT,
   );
-  const relicTray = resolveOutlet(
+  let relicTray = resolveOutlet(
     options.relicTrayContainer,
     RELIC_TRAY_SELECTOR,
     RELIC_TRAY_MOUNT,
   );
 
-  const subscriptions: EngineEventSubscription[] = [];
+  /** The container the router injected, held so `enter` can fall back to it. */
+  let mountedHost: Element | null = null;
 
   let destroyed = false;
+  let active = false;
   let rendered: HudSnapshot | null = null;
 
   /**
-   * The stage slice last written, so an unchanged stage rebuilds nothing.
-   *
-   * A commit arrives on every turn and the indicator changes on a stage
-   * transition alone, so comparing first keeps the HUD from replacing three
-   * elements sixty times a minute.
+   * The stage slice last written, so an unchanged indicator rebuilds nothing.
+   * A payload arrives on every turn and the indicator changes on a stage
+   * transition, a progress step or a board mutation alone.
    */
   let lastStage: string | null = null;
 
-  /** The relic slice last written, compared the same way and for the same reason. */
-  let lastRelics: string | null = null;
+  /** The one-based stage number last written, reported by a skipped write. */
+  let lastStageNumber: number | null = null;
 
-  /** Releases the run-status group's `hidden`, once, on the first commit. */
+  /** The score pair last written, compared before a context refresh writes. */
+  let lastScore: {
+    readonly score: number;
+    readonly best: BestScoreValue;
+  } | null = null;
+
+  /** The unconfirmed-status notice, built on first use and kept afterwards. */
+  let degradedNotice: HTMLElement | null = null;
+
+  /** The empty-state row, built on first use and kept afterwards. */
+  let emptyRow: HTMLElement | null = null;
+
+  /** The rows on screen, in the order they are rendered in. */
+  let trayEntries: TrayEntry[] = [];
+
+  /** The budget last announced per relic, keyed by identifier. */
+  const lastCharges = new Map<string, number | undefined>();
+
+  /** Whether a relic slice was written, so a restored loadout stays silent. */
+  let seenRelics = false;
+
+  /**
+   * Records a call that reached a destroyed screen.
+   *
+   * @param member Name of the member called.
+   */
+  const reportAfterDestroy = (member: string): void => {
+    reporter.log('debug', 'A call reached a destroyed HUD.', {
+      member,
+      context: REPORT_CONTEXT,
+    });
+    reporter.count(WRITE_AFTER_DESTROY_METRIC, {
+      member,
+      context: REPORT_CONTEXT,
+    });
+  };
+
+  /* ------------------------------------------------------------------------
+   * Announcements
+   * ---------------------------------------------------------------------- */
+
+  /**
+   * Resolves the announcer for one announcement.
+   *
+   * Contained and total: a reader that raises yields no announcer, and the
+   * announcement is skipped rather than failing the write. Read per call, so a
+   * composition whose announcer is built after this screen is reached.
+   *
+   * @returns The announcer, or `null` where none is available.
+   */
+  const readAnnouncer = (): HudAnnouncerPort | null => {
+    const source = options.announcer;
+
+    if (source === null || source === undefined) {
+      return null;
+    }
+
+    if (typeof source !== 'function') {
+      return source;
+    }
+
+    try {
+      return source() ?? null;
+    } catch (error: unknown) {
+      reporter.error('the HUD announcer reader raised', error, {
+        context: REPORT_CONTEXT,
+        reader: 'announcer',
+      });
+      reporter.count(READER_FAULT_METRIC, {
+        context: REPORT_CONTEXT,
+        reader: 'announcer',
+      });
+
+      return null;
+    }
+  };
+
+  /**
+   * Writes one line into the live region.
+   *
+   * The canvas is `aria-hidden`, so the DOM layer is the only channel a charge
+   * count reaches a screen-reader user through.
+   *
+   * @param text Line to announce.
+   * @param kind Kind carried into the report.
+   */
+  const announceLine = (text: string, kind: string): void => {
+    const announcer = readAnnouncer();
+
+    if (announcer === null) {
+      return;
+    }
+
+    try {
+      announcer.announceText(text);
+      reporter.count(ANNOUNCED_METRIC, { context: REPORT_CONTEXT, kind });
+    } catch (error: unknown) {
+      reporter.error('a HUD announcement raised', error, {
+        context: REPORT_CONTEXT,
+        kind,
+      });
+    }
+  };
+
+  /**
+   * Announces one relic taken through the structured `relicAcquired` variant of
+   * ../a11y/live-region.
+   *
+   * PRIMITIVES, not the relic: that variant is typed over a name, a tier and a
+   * budget, so the three fields are read off the declaration and passed as
+   * strings and a number.
+   *
+   * @param relic The relic that joined the tray.
+   */
+  const announceAcquired = (relic: ActiveRelic): void => {
+    const announcer = readAnnouncer();
+
+    if (announcer === null) {
+      return;
+    }
+
+    const definition = relic.definition;
+
+    try {
+      announcer.announce({
+        kind: 'relicAcquired',
+        name: definition.name,
+        rarity: definition.rarity,
+        charges: relic.charges,
+      });
+      reporter.count(ANNOUNCED_METRIC, {
+        context: REPORT_CONTEXT,
+        kind: 'relicAcquired',
+      });
+    } catch (error: unknown) {
+      reporter.error('a HUD acquisition announcement raised', error, {
+        context: REPORT_CONTEXT,
+        relicId: definition.id,
+      });
+    }
+  };
+
+  /**
+   * Announces what changed about the tray, and records the budgets the next
+   * write compares against.
+   *
+   * A budget is read from the relic the write rendered, so what is announced is
+   * what the row shows. The relics standing at the first write are the run's
+   * restored loadout and are recorded without an acquisition announcement.
+   *
+   * @param relics The relics just rendered, in the order supplied.
+   */
+  const reconcileAnnouncements = (
+    relics: readonly ActiveRelic[],
+  ): void => {
+    const present = new Set<string>();
+
+    for (const relic of relics) {
+      const id = relic.definition.id;
+      const charges = relic.charges;
+
+      present.add(id);
+
+      const known = lastCharges.has(id);
+      const previous = lastCharges.get(id);
+
+      lastCharges.set(id, charges);
+
+      if (!known) {
+        if (seenRelics && announceAcquisitions) {
+          announceAcquired(relic);
+        }
+
+        continue;
+      }
+
+      if (announceCharges && charges !== undefined && charges !== previous) {
+        announceLine(
+          copy.chargeAnnouncement(relic.definition.name, charges),
+          'charges',
+        );
+      }
+    }
+
+    for (const id of Array.from(lastCharges.keys())) {
+      if (!present.has(id)) {
+        lastCharges.delete(id);
+      }
+    }
+
+    seenRelics = true;
+  };
+
+  /* ------------------------------------------------------------------------
+   * The run-status group
+   * ---------------------------------------------------------------------- */
+
+  /** Releases the run-status group's `hidden`, once, on the first write. */
   const revealGroup = (): void => {
     if (hudGroup !== null && hudGroup.hidden) {
       hudGroup.hidden = false;
@@ -569,25 +1102,16 @@ export function createHud(options: HudOptions = {}): Hud {
   };
 
   /**
-   * The unconfirmed-status notice, built on first use and kept afterwards.
-   *
-   * Not part of the markup: index.html declares the three run-status outlets and
-   * the notice is a state this module writes, exactly as the overlay's verdict
-   * text is.
-   */
-  let degradedNotice: HTMLElement | null = null;
-
-  /**
    * Shows or clears the unconfirmed-status notice.
    *
-   * ONE FLAG, TWO CHANNELS. The group carries `data-degraded` so the stylesheet
-   * can mark the surface, and the notice carries the state as real text so a
-   * screen reader reaching the run-status group reads it; the once-per-transition
-   * announcement belongs to src/ui/a11y/engine-announcer.ts, so no live-region
-   * role is added here and the same state is not announced twice.
+   * ONE FLAG, TWO CHANNELS: the group carries `data-degraded` for the
+   * stylesheet, and the notice carries the state as real text for a screen
+   * reader that reaches the group. No live-region role is added here, so the
+   * state is not announced twice: the once-per-transition announcement
+   * belongs to src/ui/a11y/engine-announcer.ts.
    *
-   * @param degraded What the commit reported.
-   * @returns The flag, so the snapshot records what was asked for even where no
+   * @param degraded What the payload reported.
+   * @returns The flag, so a snapshot records what was asked for even where no
    *   outlet resolved to write it into.
    */
   const renderDegraded = (degraded: boolean): boolean => {
@@ -596,8 +1120,7 @@ export function createHud(options: HudOptions = {}): Hud {
     }
 
     if (degraded) {
-      revealGroup();
-      hudGroup.setAttribute(DEGRADED_ATTRIBUTE, 'true');
+      hudGroup.setAttribute(DEGRADED_ATTRIBUTE, ARIA_TRUE);
     } else {
       hudGroup.removeAttribute(DEGRADED_ATTRIBUTE);
     }
@@ -620,9 +1143,19 @@ export function createHud(options: HudOptions = {}): Hud {
     return degraded;
   };
 
+  /* ------------------------------------------------------------------------
+   * The stage indicator
+   * ---------------------------------------------------------------------- */
+
   /**
    * Builds one labelled readout: a label above a value, which is the pattern
-   * style/_hud.scss styles as `.hud-label` and `.hud-value`.
+   * style/_hud.scss dresses as `.hud-label` and `.hud-value`.
+   *
+   * @param doc Document the nodes are created in.
+   * @param className Class of the group.
+   * @param label Label text.
+   * @param value Value text.
+   * @returns The group.
    */
   const buildReadout = (
     doc: Document,
@@ -636,12 +1169,12 @@ export function createHud(options: HudOptions = {}): Hud {
 
     const labelNode = doc.createElement('span');
 
-    labelNode.className = 'hud-label';
+    labelNode.className = LABEL_CLASS;
     labelNode.textContent = label;
 
     const valueNode = doc.createElement('span');
 
-    valueNode.className = 'hud-value';
+    valueNode.className = VALUE_CLASS;
     valueNode.textContent = value;
 
     group.append(labelNode, valueNode);
@@ -650,18 +1183,42 @@ export function createHud(options: HudOptions = {}): Hud {
   };
 
   /**
-   * Writes the stage indicator: the stage number, the goal readout, and the
-   * track whose fill the goal fraction drives.
+   * Builds the goal track, whose fill the reported fraction drives.
    *
-   * The measured quantity is derived from the target and the reported fraction
-   * rather than read from the board, so the indicator carries exactly the
-   * progress the run reported and cannot disagree with it.
+   * DECORATIVE: the track carries `aria-hidden`, and the quantity it depicts
+   * is announced by the `.hud-value` sibling beside it. See `DL-HUD-10`.
    *
-   * @param stage The commit's stage slice.
-   * @returns The one-based stage number written, or `null` when no outlet
-   *   resolved.
+   * @param doc Document the nodes are created in.
+   * @param fraction Fraction of the goal reached, in [0, 1].
+   * @returns The track.
    */
-  const renderStage = (stage: StageCommitContext): number | null => {
+  const buildGoalMeter = (doc: Document, fraction: number): HTMLElement => {
+    const meter = doc.createElement('div');
+
+    meter.className = GOAL_METER_CLASS;
+    meter.setAttribute(HIDDEN_ATTRIBUTE, ARIA_TRUE);
+
+    const fill = doc.createElement('div');
+
+    fill.className = GOAL_METER_FILL_CLASS;
+    fill.style.setProperty(GOAL_FRACTION_PROPERTY, String(fraction));
+    meter.append(fill);
+
+    return meter;
+  };
+
+  /**
+   * Writes the stage indicator: the stage number, the goal readout with its
+   * track, and the live board dimension.
+   *
+   * The board dimension is read from the view on every call and nothing derived
+   * from it is held, so a board-mutating relic is reflected on the turn it
+   * takes effect and again after a reload.
+   *
+   * @param view The payload's normalised view.
+   * @returns The one-based stage number written, or `null` where none was.
+   */
+  const renderStage = (view: HudView): number | null => {
     if (stageOutlet === null) {
       return null;
     }
@@ -669,292 +1226,507 @@ export function createHud(options: HudOptions = {}): Hud {
     const doc = stageOutlet.ownerDocument ?? owner;
 
     if (doc === null) {
+      reporter.count(STAGE_SKIPPED_METRIC, {
+        context: REPORT_CONTEXT,
+        cause: 'no-document',
+      });
+
       return null;
     }
 
-    // Clamped here rather than in the stylesheet, so the text and the track are
-    // driven by one value: a provider reporting a fraction outside [0, 1] cannot
-    // produce a readout above its own target.
-    const fraction = Number.isFinite(stage.goalProgress)
-      ? Math.min(Math.max(stage.goalProgress, 0), 1)
-      : 0;
-    const measured = Math.round(fraction * stage.goal.target);
-    const signature = `${stage.stageIndex}|${stage.goal.kind}|${stage.goal.target}|${measured}`;
+    const stageIndex = view.stageIndex;
 
-    revealGroup();
+    if (stageIndex === null) {
+      reporter.count(STAGE_SKIPPED_METRIC, {
+        context: REPORT_CONTEXT,
+        cause: 'no-stage',
+      });
+
+      return lastStageNumber;
+    }
+
+    const goal = view.goal;
+    const fraction = view.goalFraction;
+
+    // The measured quantity as the payload stated it, and otherwise derived
+    // from the target and the reported fraction, so the readout carries exactly
+    // the progress the run reported and cannot disagree with it.
+    const measured =
+      goal === null
+        ? 0
+        : (view.goalAchieved ?? Math.round(fraction * goal.target));
+    const boardSize = view.boardSize;
+    const signature = [
+      stageIndex,
+      goal === null ? 'none' : goal.kind,
+      goal === null ? 0 : goal.target,
+      measured,
+      fraction,
+      boardSize ?? 0,
+    ].join('|');
+    const number = stageIndex + 1;
 
     if (signature === lastStage) {
-      return stage.stageIndex + 1;
+      return number;
     }
 
     lastStage = signature;
+    lastStageNumber = number;
 
-    const index = buildReadout(
-      doc,
-      'hud-stage-index',
-      copy.stageLabel,
-      copy.stageValue(stage.stageIndex),
-    );
-    const goal = buildReadout(
-      doc,
-      'hud-goal',
-      copy.goalLabel,
-      copy.goalValue(stage.goal.kind, stage.goal.target, measured),
-    );
+    const groups: HTMLElement[] = [
+      buildReadout(
+        doc,
+        STAGE_INDEX_CLASS,
+        copy.stageLabel,
+        copy.stageValue(stageIndex),
+      ),
+    ];
 
-    const meter = doc.createElement('div');
+    if (goal !== null) {
+      const goalGroup = buildReadout(
+        doc,
+        GOAL_CLASS,
+        copy.goalLabel,
+        copy.goalValue(goal.kind, goal.target, measured),
+      );
 
-    // Not a `role="progressbar"`: the same quantity is already in
-    // `.hud-value` as text, and a second announcement of it would have a screen
-    // reader read the progress twice on every stage change.
-    meter.className = 'hud-goal-meter';
-    meter.setAttribute('aria-hidden', 'true');
+      goalGroup.append(buildGoalMeter(doc, fraction));
+      groups.push(goalGroup);
+    }
 
-    const fill = doc.createElement('div');
+    if (boardSize !== null) {
+      groups.push(
+        buildReadout(
+          doc,
+          BOARD_CLASS,
+          copy.boardLabel,
+          copy.boardValue(boardSize),
+        ),
+      );
+    }
 
-    fill.className = 'hud-goal-meter-fill';
-    fill.style.setProperty(GOAL_FRACTION_PROPERTY, String(fraction));
-    meter.append(fill);
-    goal.append(meter);
-
-    stageOutlet.replaceChildren(index, goal);
+    stageOutlet.replaceChildren(...groups);
 
     reporter.count(STAGE_METRIC, {
-      stageIndex: stage.stageIndex,
-      goalKind: stage.goal.kind,
-      goalTarget: stage.goal.target,
+      context: REPORT_CONTEXT,
+      stageIndex,
+      goalKind: goal === null ? 'none' : goal.kind,
+      goalTarget: goal === null ? 0 : goal.target,
+      boardSize: boardSize ?? 0,
     });
 
-    return stage.stageIndex + 1;
+    return number;
+  };
+
+  /* ------------------------------------------------------------------------
+   * The active-relic tray
+   * ---------------------------------------------------------------------- */
+
+  /**
+   * Reads one relic's display name through the injected resolver.
+   *
+   * Contained and total, as every read of an injected collaborator here is: a
+   * resolver that raises, or answers with anything but a non-empty string,
+   * yields the identifier rather than failing the write.
+   *
+   * @param relicId Identifier to resolve.
+   * @returns The name, or the identifier.
+   */
+  const readName = (relicId: string): string => {
+    const resolve = options.relicName;
+
+    if (resolve === undefined) {
+      return relicId;
+    }
+
+    try {
+      const answer = resolve(relicId);
+
+      return typeof answer === 'string' && answer.length > 0
+        ? answer
+        : relicId;
+    } catch (error: unknown) {
+      reporter.error('the HUD relic-name resolver raised', error, {
+        context: REPORT_CONTEXT,
+        relicId,
+      });
+      reporter.count(READER_FAULT_METRIC, {
+        context: REPORT_CONTEXT,
+        reader: 'relicName',
+      });
+
+      return relicId;
+    }
   };
 
   /**
-   * Writes the active-relic tray, IN PICKUP ORDER.
-   *
-   * Pickup order is the order src/engine/hook-bus.ts dispatches in, so it is
-   * what decides how two relics on one hook compound. Showing it is what lets a
-   * player predict the compounding rather than discover it, which is why the
-   * order is the tray's own document order and the slot number comes from a CSS
-   * counter over that order rather than from an index written into the markup.
-   *
-   * @param relics The commit's relic slice, already in pickup order.
-   * @returns The identifiers written.
-   */
-  /**
-   * Reads one relic's rarity tier through the injected resolver.
-   *
-   * Contained and total, as every read of an injected collaborator here is: a
-   * resolver that raises, or answers with anything but a string, yields the empty
-   * string, which leaves the attribute unwritten and the accessible text
-   * unchanged rather than failing the commit.
+   * Reads one relic's tier through the injected resolver.
    *
    * @param relicId Identifier to resolve.
-   * @returns The tier, or the empty string where none was resolved.
+   * @returns The tier, or the empty string where none was resolved, which
+   *   leaves `data-rarity` unwritten and the row's text unchanged.
    */
   const readRarity = (relicId: string): string => {
     const resolve = options.relicRarity;
 
     if (resolve === undefined) {
-      return '';
+      return UNRESOLVED_RARITY;
     }
 
     try {
-      const resolved: unknown = resolve(relicId);
+      const answer = resolve(relicId);
 
-      return typeof resolved === 'string' ? resolved : '';
-    } catch {
-      reporter.count(RARITY_FAULT_METRIC, { relicId });
+      return typeof answer === 'string' ? answer : UNRESOLVED_RARITY;
+    } catch (error: unknown) {
+      reporter.error('the HUD relic-rarity resolver raised', error, {
+        context: REPORT_CONTEXT,
+        relicId,
+      });
+      reporter.count(READER_FAULT_METRIC, {
+        context: REPORT_CONTEXT,
+        reader: 'relicRarity',
+      });
 
-      return '';
+      return UNRESOLVED_RARITY;
     }
   };
 
-  const renderRelics = (
-    relics: RelicCommitContext,
-  ): readonly string[] => {
+  /**
+   * Builds a held record from a payload's relic entry.
+   *
+   * A payload's slice carries an identifier and a charge count, so the name and
+   * the tier come from the two resolvers and the remaining declaration members
+   * are the neutral ones a tray row does not render. `pickupOrder` is the
+   * entry's position in the slice, which the provider supplies in pickup
+   * order.
+   *
+   * @param entry Entry to build from.
+   * @param index Position in the slice.
+   * @returns The held record.
+   */
+  const synthesiseRelic = (
+    entry: RelicCommitEntry,
+    index: number,
+  ): ActiveRelic => ({
+    definition: {
+      id: entry.id,
+      name: readName(entry.id),
+
+      // The resolver's answer verbatim: a tier outside the ladder and the empty
+      // string are both carried as they arrive, and ../components/relic-card
+      // reports the former and writes no attribute for the latter.
+      rarity: readRarity(entry.id) as Rarity,
+      description: '',
+      hooks: NO_HOOKS,
+    },
+    pickupOrder: index,
+    charges: entry.charges,
+    state: undefined,
+  });
+
+  /**
+   * Reads the held relics through the injected reader.
+   *
+   * @returns The relics, or `null` where no reader is supplied or it answered
+   *   with anything but an array.
+   */
+  const readLiveRelics = (): readonly ActiveRelic[] | null => {
+    const read = options.relics;
+
+    if (read === undefined) {
+      return null;
+    }
+
+    try {
+      const answer = read();
+
+      if (!Array.isArray(answer)) {
+        reporter.count(READER_FAULT_METRIC, {
+          context: REPORT_CONTEXT,
+          reader: 'relics',
+          cause: 'not-an-array',
+        });
+
+        return null;
+      }
+
+      return answer;
+    } catch (error: unknown) {
+      reporter.error('the HUD relic reader raised', error, {
+        context: REPORT_CONTEXT,
+        reader: 'relics',
+      });
+      reporter.count(READER_FAULT_METRIC, {
+        context: REPORT_CONTEXT,
+        reader: 'relics',
+      });
+
+      return null;
+    }
+  };
+
+  /**
+   * The relics one write renders, IN THE ORDER SUPPLIED.
+   *
+   * The injected reader is `RelicRegistry.active()`, which returns the held
+   * relics in pickup order with the budgets the hook bus holds; the payload's
+   * own slice is the fallback. Neither is sorted, grouped, filtered or
+   * reversed here: pickup order is the order src/engine/hook-bus.ts dispatches
+   * in, so the tray's order is what lets a player predict how two relics on
+   * one hook compound.
+   *
+   * @param slice The payload's relic slice, already in pickup order.
+   * @returns The relics to render.
+   */
+  const readActiveRelics = (
+    slice: RelicCommitContext,
+  ): readonly ActiveRelic[] => {
+    const live = readLiveRelics();
+
+    if (live !== null && live.length > 0) {
+      return live;
+    }
+
+    return slice.map(synthesiseRelic);
+  };
+
+  /** Destroys every row on screen and forgets them. */
+  const clearTrayRows = (): void => {
+    for (const entry of trayEntries) {
+      entry.item.destroy();
+    }
+
+    trayEntries = [];
+  };
+
+  /**
+   * Shows the empty-state row, building it once.
+   *
+   * A REAL list item carrying no role of its own, so the implicit `listitem` of
+   * an `<li>` inside a `<ul>` stands and the `role="list"` on the tray keeps a
+   * permitted child. It is marked `data-relic-empty` because it is not a relic:
+   * style/_hud.scss suppresses the slot counter on it.
+   */
+  const showEmptyRow = (): void => {
     if (relicTray === null) {
-      return [];
+      return;
     }
 
     const doc = relicTray.ownerDocument ?? owner;
 
     if (doc === null) {
-      return [];
+      return;
     }
 
-    const ids = relics.map((relic): string => relic.id);
-
-    // The rarity joins the signature the rebuild is skipped on: it is resolved
-    // through an injected reader, so a tier that became resolvable between two
-    // commits would otherwise never reach the DOM.
-    const signature = relics
-      .map(
-        (relic): string =>
-          `${relic.id}:${relic.charges ?? ''}:${readRarity(relic.id)}`,
-      )
-      .join(',');
-
-    revealGroup();
-
-    if (signature === lastRelics) {
-      return Object.freeze(ids);
+    if (emptyRow === null) {
+      emptyRow = doc.createElement('li');
+      emptyRow.className = relicCardClasses.trayItem;
+      emptyRow.setAttribute(EMPTY_TRAY_ATTRIBUTE, ARIA_TRUE);
+      emptyRow.textContent = copy.relicTrayEmpty;
     }
 
-    lastRelics = signature;
+    // Appended only where it is not already there: a payload arrives on every
+    // turn and an append of an attached node is a move, which would relocate
+    // the row once a turn for the whole time a run holds no relic.
+    if (emptyRow.parentNode !== relicTray) {
+      relicTray.append(emptyRow);
+    }
+  };
 
-    // Restated on every rebuild rather than trusted from the markup, so a tray
+  /** Takes the empty-state row off screen, keeping it for reuse. */
+  const hideEmptyRow = (): void => {
+    emptyRow?.remove();
+  };
+
+  /**
+   * Puts the rows in the order the relics were supplied in, moving only a row
+   * that is not already where it belongs.
+   *
+   * @param entries Rows in the order they are to appear.
+   */
+  const orderTrayRows = (entries: readonly TrayEntry[]): void => {
+    if (relicTray === null) {
+      return;
+    }
+
+    let cursor: ChildNode | null = relicTray.firstChild;
+
+    for (const entry of entries) {
+      const element = entry.item.element;
+
+      if (element === null) {
+        continue;
+      }
+
+      if (cursor === element) {
+        cursor = element.nextSibling;
+
+        continue;
+      }
+
+      relicTray.insertBefore(element, cursor);
+    }
+  };
+
+  /**
+   * Writes the active-relic tray IN PICKUP ORDER, reusing the rows on screen.
+   *
+   * IN PLACE: a payload arrives on every turn, so a row already showing a relic
+   * is updated through `RelicTrayItem.update` and only a relic that joined or
+   * left costs a row. A budget is read from the relic at this call rather than
+   * from anything captured, so a count reaches zero and stays legible.
+   *
+   * @param relics The relics to show, in the order supplied.
+   * @returns The identifiers written, in that order.
+   */
+  const renderRelics = (
+    relics: readonly ActiveRelic[],
+  ): readonly string[] => {
+    const ids = Object.freeze(
+      relics.map((relic): string => relic.definition.id),
+    );
+
+    if (relicTray === null) {
+      return ids;
+    }
+
+    // Restated on every write rather than trusted from the markup, so a tray
     // supplied by a caller carries the same accessible name as the one
     // index.html declares.
     relicTray.setAttribute('aria-label', copy.relicTrayLabel);
 
     if (relics.length === 0) {
-      const empty = doc.createElement('li');
+      clearTrayRows();
+      showEmptyRow();
+      reporter.count(RELIC_TRAY_METRIC, {
+        context: REPORT_CONTEXT,
+        relics: 0,
+        created: 0,
+        removed: 0,
+      });
 
-      // A REAL list item, carrying no role of its own so the implicit
-      // `listitem` of an `<li>` inside a `<ul>` stands. `role="none"` was tried
-      // here to keep the announced item count equal to the number of relics
-      // held; it removes the only child role a `role="list"` permits, which
-      // leaves the list ARIA-invalid and announced as empty. "List, 1 item, no
-      // relics yet" is unambiguous, so the valid structure is kept.
-      empty.className = 'relic-tray-item';
-      empty.setAttribute('data-relic-empty', 'true');
-      empty.textContent = copy.relicTrayEmpty;
-
-      relicTray.replaceChildren(empty);
-      reporter.count(RELIC_TRAY_METRIC, { relics: 0 });
-
-      return Object.freeze(ids);
+      return ids;
     }
 
-    const items: HTMLElement[] = [];
+    hideEmptyRow();
+
+    // Rows keyed by identifier, so a relic held twice keeps two rows and the
+    // order below decides which of them is reused first.
+    const reusable = new Map<string, TrayEntry[]>();
+
+    for (const entry of trayEntries) {
+      const pool = reusable.get(entry.id);
+
+      if (pool === undefined) {
+        reusable.set(entry.id, [entry]);
+      } else {
+        pool.push(entry);
+      }
+    }
+
+    const next: TrayEntry[] = [];
+    let created = 0;
 
     for (const relic of relics) {
-      const item = doc.createElement('li');
+      const id = relic.definition.id;
+      const existing = reusable.get(id)?.shift();
 
-      item.className = 'relic-tray-item';
-      item.setAttribute('data-relic-id', relic.id);
+      if (existing !== undefined) {
+        existing.item.update(relic);
+        next.push(existing);
 
-      // The tier the stylesheet draws its leading-edge accent from, one rule per
-      // `$rarity-tiers` entry. Written only when a reader resolved one, so a tray
-      // with no catalogue behind it carries no attribute rather than an empty
-      // one that matches no rule.
-      const rarity = readRarity(relic.id);
-
-      if (rarity.length > 0) {
-        item.setAttribute(RARITY_ATTRIBUTE, rarity);
+        continue;
       }
 
-      // The stylesheet dims an exhausted relic off this attribute, and it is
-      // written even at zero so the dimming is reachable.
-      if (relic.charges !== undefined) {
-        item.setAttribute('data-charges', String(relic.charges));
-      }
-
-      // A BUTTON ONLY WHERE THERE IS SOMETHING TO ACTIVATE. Without a handler the
-      // control is a readout, because a focusable button that does nothing is
-      // worse for a keyboard user than no button at all.
-      const control = doc.createElement(
-        options.onRelicActivate === undefined ? 'span' : 'button',
-      );
-
-      control.className = 'relic-tray-control';
-
-      if (options.onRelicActivate !== undefined) {
-        (control as HTMLButtonElement).type = 'button';
-        control.setAttribute('data-relic-id', relic.id);
-      }
-
-      const name = doc.createElement('span');
-      const resolved = options.relicName?.(relic.id);
-
-      name.className = 'relic-tray-name';
-      name.textContent =
-        typeof resolved === 'string' && resolved.length > 0
-          ? resolved
-          : relic.id;
-
-      // The full name is on the element regardless, so a name the stylesheet
-      // truncates to an ellipsis is still readable on hover and is still
-      // announced in full.
-      name.title = name.textContent;
-      control.append(name);
-
-      // THE TIER, IN TEXT, for the reader the accent cannot reach. Visually
-      // hidden rather than shown, because the accent already states the tier
-      // twice over — by colour and by thickness — on the item's leading edge.
-      if (rarity.length > 0) {
-        const tier = doc.createElement('span');
-
-        tier.className = RARITY_TEXT_CLASS;
-        tier.textContent = copy.relicRarity(rarity);
-        control.append(tier);
-      }
-
-      if (relic.charges !== undefined) {
-        const charges = doc.createElement('span');
-
-        charges.className = 'relic-tray-charges';
-        charges.textContent = copy.relicCharges(relic.charges);
-        control.append(charges);
-      }
-
-      item.append(control);
-      items.push(item);
+      created += 1;
+      next.push({
+        id,
+        item: createRelicTrayItem({
+          relic,
+          host: relicTray,
+          ...(owner === null ? {} : { document: owner }),
+          reporter,
+          copy: trayCopy,
+        }),
+      });
     }
 
-    relicTray.replaceChildren(...items);
+    let removed = 0;
 
-    reporter.count(RELIC_TRAY_METRIC, { relics: relics.length });
+    for (const pool of reusable.values()) {
+      for (const entry of pool) {
+        removed += 1;
+        entry.item.destroy();
+      }
+    }
 
-    return Object.freeze(ids);
+    trayEntries = next;
+    orderTrayRows(next);
+
+    reporter.count(RELIC_TRAY_METRIC, {
+      context: REPORT_CONTEXT,
+      relics: relics.length,
+      created,
+      removed,
+    });
+
+    return ids;
   };
 
-  /** Resolves a tray activation to the relic it addresses. */
-  const readTrayPress = (event: Event): void => {
-    const activate = options.onRelicActivate;
+  /* ------------------------------------------------------------------------
+   * The score outlets and the terminal overlay
+   * ---------------------------------------------------------------------- */
 
-    if (activate === undefined) {
+  /**
+   * Writes the score pair through `ScorePanel`, which is the only component
+   * that touches either outlet.
+   *
+   * The best score is handed over EXACTLY as it arrived: never coerced,
+   * never compared, never cached and never formatted.
+   * js/local_storage_manager.js L43-L45 returns the raw stored string when a
+   * value is present and the number `0` when it is absent, and
+   * js/game_manager.js L80-L82 relies on the relational coercion of that
+   * string.
+   * The value rendered is the one js/game_manager.js L95 re-read from storage
+   * after the possible write, so what is shown equals what is persisted.
+   *
+   * @param score Score the payload carried.
+   * @param best Best score the payload carried.
+   * @param rewrite Whether an unchanged pair is written again. A commit push
+   *   rewrites, so a repeated commit clears the previous delta node exactly as
+   *   js/html_actuator.js L107 did; a context refresh does not, so a second
+   *   driver reporting the same turn cannot erase the delta the first showed.
+   */
+  const writeScore = (
+    score: number,
+    best: BestScoreValue,
+    rewrite: boolean,
+  ): void => {
+    if (
+      !rewrite &&
+      lastScore !== null &&
+      lastScore.score === score &&
+      lastScore.best === best
+    ) {
+      reporter.count(SCORE_UNCHANGED_METRIC, { context: REPORT_CONTEXT });
+
       return;
     }
 
-    const target = event.target;
+    lastScore = { score, best };
 
-    if (target === null || typeof target !== 'object') {
-      return;
-    }
-
-    const closest = (target as { closest?: (s: string) => Element | null })
-      .closest;
-
-    if (typeof closest !== 'function') {
-      return;
-    }
-
-    const control = closest.call(target as Element, '.relic-tray-control');
-    const relicId = control?.getAttribute('data-relic-id');
-
-    if (relicId === null || relicId === undefined || relicId.length === 0) {
-      return;
-    }
-
-    activate(relicId);
+    // The score first, then the best score: the order of
+    // js/html_actuator.js L24-L25, and the order the delta depends on, since
+    // the delta is computed against the score the component last wrote.
+    scorePanel.update({ score, bestScore: best });
   };
-
-  if (relicTray !== null && options.onRelicActivate !== undefined) {
-    relicTray.addEventListener('click', readTrayPress);
-  }
-
-  reporter.count(MOUNTED_METRIC, {
-    score: scorePanel.isReady(),
-    overlay: overlay !== null,
-  });
 
   /**
    * Shows the terminal overlay.
    *
-   * Ported from js/html_actuator.js L124-L131: the state class first, then the
-   * verdict into the overlay's own paragraph. An overlay carrying no paragraph
-   * is reported and still receives its class, because the class is what the
+   * Ported from js/html_actuator.js L127-L132: the state class first, then the
+   * verdict into the overlay's own paragraph. An overlay carrying no
+   * paragraph is reported and still receives its class, which is what the
    * stylesheet fades in.
    *
    * @param won Whether the verdict is the winning one.
@@ -969,7 +1741,7 @@ export function createHud(options: HudOptions = {}): Hud {
 
     overlay.classList.add(won ? WON_CLASS : OVER_CLASS);
 
-    const paragraph = overlay.querySelector(':scope > p');
+    const paragraph = overlay.querySelector(SCOPED_VERDICT_SELECTOR);
 
     if (paragraph === null) {
       reporter.log('warn', 'The terminal overlay carries no verdict element.', {
@@ -981,7 +1753,7 @@ export function createHud(options: HudOptions = {}): Hud {
     }
 
     paragraph.textContent = verdict;
-    reporter.count(VERDICT_METRIC, { won });
+    reporter.count(VERDICT_METRIC, { context: REPORT_CONTEXT, won });
 
     return verdict;
   };
@@ -989,9 +1761,9 @@ export function createHud(options: HudOptions = {}): Hud {
   /**
    * Clears the terminal overlay.
    *
-   * Ported from js/html_actuator.js L136-L138, which the manager reached
-   * through `continueGame()` on restart and on keep-playing. Both arrive here
-   * as a commit whose `terminated` is `false`.
+   * Ported from js/html_actuator.js L135-L139, which the manager reached
+   * through `continueGame()` L38-L41 on restart and on keep-playing. Both
+   * arrive here as a payload reporting no terminal state.
    */
   const clearMessage = (): void => {
     if (overlay === null) {
@@ -1002,93 +1774,418 @@ export function createHud(options: HudOptions = {}): Hud {
     overlay.classList.remove(OVER_CLASS);
   };
 
-  const render = (commit: StateCommitEvent): HudSnapshot => {
+  /* ------------------------------------------------------------------------
+   * The single write path
+   * ---------------------------------------------------------------------- */
+
+  /**
+   * Writes one normalised view and records what it put on screen.
+   *
+   * @param view The view to write.
+   * @param rewriteScore Whether an unchanged score pair is written again.
+   * @returns What was written.
+   */
+  const write = (view: HudView, rewriteScore: boolean): HudSnapshot => {
     if (destroyed) {
-      reporter.count(WRITE_AFTER_DESTROY_METRIC);
+      reportAfterDestroy('write');
 
       return (
         rendered ?? {
-          score: commit.score,
-          bestScore: commit.bestScore,
+          score: view.score,
+          bestScore: view.bestScore,
           terminal: null,
           verdict: null,
           stage: null,
-          relics: [],
-          degraded: commit.degraded,
+          relics: EMPTY_RELIC_IDS,
+          boardSize: null,
+          degraded: view.degraded,
         }
       );
     }
 
-    // Score first, then best score: the order of js/html_actuator.js L24-L25,
-    // and the order the delta depends on, since the delta is computed against
-    // the score this component last wrote.
-    scorePanel.update({ score: commit.score, bestScore: commit.bestScore });
+    revealGroup();
+    writeScore(view.score, view.bestScore, rewriteScore);
 
-    let terminal: HudTerminalState = null;
     let verdict: string | null = null;
 
-    // Ported from js/html_actuator.js L26-L27: the overlay is decided from the
-    // terminal flags alone, and a loss takes precedence over a win because a
-    // board can carry both.
-    if (commit.terminated) {
-      if (commit.over) {
-        terminal = 'over';
-        verdict = showMessage(false);
-      } else if (commit.won) {
-        terminal = 'won';
-        verdict = showMessage(true);
-      } else {
-        clearMessage();
-      }
+    if (view.terminal === 'over') {
+      verdict = showMessage(false);
+    } else if (view.terminal === 'won') {
+      verdict = showMessage(true);
     } else {
       clearMessage();
     }
 
-    // The run-status half. Written AFTER the score and the overlay, so the two
-    // outlets js/html_actuator.js owned keep their original write order and this
-    // addition cannot delay them.
-    const stage = renderStage(commit.stage);
-    const relics = renderRelics(commit.relics);
+    // The run-status half, written after the two outlets js/html_actuator.js
+    // owned, so their original write order stands and this addition cannot
+    // delay them.
+    const stage = renderStage(view);
+    const relics = renderRelics(view.relics);
+    const degraded = renderDegraded(view.degraded);
 
-    // Written after the stage and the tray, so the run-status group is revealed
-    // and populated before the notice joins it, and cleared again the moment a
-    // measurement succeeds — which is what `StateCommitEvent.degraded` reports.
-    const degraded = renderDegraded(commit.degraded);
+    reconcileAnnouncements(view.relics);
 
     rendered = Object.freeze({
-      score: commit.score,
-      bestScore: commit.bestScore,
-      terminal,
+      score: view.score,
+      bestScore: view.bestScore,
+      terminal: view.terminal,
       verdict,
       stage,
       relics,
+      boardSize: view.boardSize,
       degraded,
     });
 
     reporter.count(COMMIT_METRIC, {
-      score: commit.score,
-      terminal: terminal ?? 'none',
+      context: REPORT_CONTEXT,
+      score: view.score,
+      terminal: view.terminal ?? 'none',
+      relics: relics.length,
     });
 
     return rendered;
   };
 
+  /**
+   * Reads the board dimension one payload reports: the payload's own value
+   * first, then the injected reader.
+   *
+   * NOTHING IS CACHED. A board-mutating relic changes the dimension mid-run, so
+   * a value captured at mount goes stale; every consumer of it below derives
+   * from this call.
+   *
+   * @param supplied The dimension the payload carried, or `null`.
+   * @returns The dimension, or `null` where neither source answered.
+   */
+  const readBoardSize = (supplied: number | null): number | null => {
+    if (supplied !== null) {
+      return supplied;
+    }
+
+    const read = options.boardSize;
+
+    if (read === undefined) {
+      return null;
+    }
+
+    try {
+      const answer = read();
+
+      return typeof answer === 'number' &&
+        Number.isInteger(answer) &&
+        answer > 0
+        ? answer
+        : null;
+    } catch (error: unknown) {
+      reporter.error('the HUD board-size reader raised', error, {
+        context: REPORT_CONTEXT,
+        reader: 'boardSize',
+      });
+      reporter.count(READER_FAULT_METRIC, {
+        context: REPORT_CONTEXT,
+        reader: 'boardSize',
+      });
+
+      return null;
+    }
+  };
+
+  /**
+   * Reduces one commit to the view a write renders.
+   *
+   * The board travels BY REFERENCE on every payload and is read, never cloned
+   * and never written: only its dimension is taken, and only for this call.
+   *
+   * @param commit Commit to reduce.
+   * @returns The view.
+   */
+  const viewFromCommit = (commit: StateCommitEvent): HudView => ({
+    score: commit.score,
+    bestScore: commit.bestScore,
+    terminal: readTerminal(commit),
+    stageIndex: commit.stage.stageIndex,
+    goal: commit.stage.goal,
+    goalFraction: clampFraction(commit.stage.goalProgress),
+    goalAchieved: null,
+    relics: readActiveRelics(commit.relics),
+    boardSize: readBoardSize(readBoardSizeOf(commit.board)),
+    degraded: commit.degraded,
+  });
+
+  /**
+   * Reduces one router context to the view a write renders, and refuses a
+   * context for another state.
+   *
+   * `StageGoalProgress.progress` is used VERBATIM: `evaluateStageGoal` of
+   * ../../config/stage-config already clamped it to the closed interval [0, 1],
+   * and `achieved` is the measured quantity it stated, so neither is rescaled
+   * here.
+   *
+   * @param context Context the router built.
+   * @param member Lifecycle member carried into the report.
+   * @returns The view, or `null` where the context is for another state.
+   */
+  const viewFromContext = (
+    context: ScreenContext,
+    member: string,
+  ): HudView | null => {
+    if (context.screen !== STAGE_SCREEN) {
+      reporter.log('warn', 'The HUD received a context for another screen.', {
+        context: REPORT_CONTEXT,
+        member,
+        screen: context.screen,
+      });
+      reporter.count(CONTEXT_REFUSED_METRIC, {
+        context: REPORT_CONTEXT,
+        member,
+        screen: context.screen,
+      });
+
+      return null;
+    }
+
+    const progress = context.goalProgress;
+
+    return {
+      score: context.score,
+      bestScore: context.bestScore,
+      terminal: null,
+      stageIndex: context.stageIndex,
+      goal: context.goal,
+      goalFraction: progress === null ? 0 : progress.progress,
+      goalAchieved: progress === null ? null : progress.achieved,
+      relics: readActiveRelics(context.relics),
+      boardSize: readBoardSize(context.boardSize),
+      degraded: context.degraded,
+    };
+  };
+
+  /* ------------------------------------------------------------------------
+   * Focus placement
+   * ---------------------------------------------------------------------- */
+
+  /**
+   * Resolves the container focus is placed inside on entry.
+   *
+   * An injected element is used as given, a selector is resolved through the
+   * guarded lookup, an explicit `null` opts out, and nothing falls back to
+   * `FOCUS_CONTAINER_SELECTOR` and then to the container the entry carried. The
+   * designated target `SCREEN_INITIAL_FOCUS.stage` names, `#board-a11y`, is
+   * a descendant of that region and not of `#screen-hud`.
+   *
+   * @param host Container the entry carried, or `null`.
+   * @returns The container, or `null`.
+   */
+  const resolveFocusContainer = (host: Element | null): Element | null => {
+    const supplied = options.focusContainer;
+
+    if (supplied === null) {
+      return null;
+    }
+
+    if (supplied !== undefined && typeof supplied !== 'string') {
+      return supplied;
+    }
+
+    const resolved = resolveMount<HTMLElement>(
+      supplied ?? FOCUS_CONTAINER_SELECTOR,
+      {
+        name: FOCUS_MOUNT,
+        ...(owner === null ? {} : { root: owner }),
+        reporter,
+        context: REPORT_CONTEXT,
+      },
+    );
+
+    return resolved ?? host ?? mountedHost;
+  };
+
+  /**
+   * Places focus for one entry to this state, through `focusInitial` of
+   * ../a11y/focus-manager.
+   *
+   * @param host Container the entry carried, or `null`.
+   */
+  const placeFocus = (host: Element | null): void => {
+    const container = resolveFocusContainer(host);
+
+    if (container === null) {
+      reporter.count(FOCUS_METRIC, {
+        context: REPORT_CONTEXT,
+        source: 'none',
+        focused: false,
+      });
+
+      return;
+    }
+
+    const placement = focusInitial(STAGE_SCREEN, container, {
+      reporter,
+      context: REPORT_CONTEXT,
+    });
+
+    reporter.count(FOCUS_METRIC, {
+      context: REPORT_CONTEXT,
+      source: placement.source,
+      focused: placement.focused,
+    });
+  };
+
+  /* ------------------------------------------------------------------------
+   * Teardown
+   * ---------------------------------------------------------------------- */
+
+  /** Removes every node this screen created and releases its collaborators. */
+  const destroy = (): void => {
+    if (destroyed) {
+      reportAfterDestroy('destroy');
+
+      return;
+    }
+
+    destroyed = true;
+    active = false;
+
+    clearMessage();
+
+    // The notice and the empty-state row are this module's own elements, so
+    // they leave with it, and the group is left carrying no state attribute
+    // of ours.
+    degradedNotice?.remove();
+    degradedNotice = null;
+    hideEmptyRow();
+    emptyRow = null;
+    hudGroup?.removeAttribute(DEGRADED_ATTRIBUTE);
+
+    clearTrayRows();
+    lastCharges.clear();
+    scorePanel.destroy();
+
+    reporter.count(DESTROYED_METRIC, { context: REPORT_CONTEXT });
+  };
+
+  reporter.count(MOUNTED_METRIC, {
+    context: REPORT_CONTEXT,
+    score: scorePanel.isReady(),
+    overlay: overlay !== null,
+    stage: stageOutlet !== null,
+    relicTray: relicTray !== null,
+    zIndex: HUD_Z_INDEX,
+  });
+
   return Object.freeze({
     scorePanel,
 
-    render,
+    mount(host: Element): void {
+      if (destroyed) {
+        reportAfterDestroy('mount');
 
-    subscribe(events: EngineEvents): EngineEventSubscription {
-      const release = events.on('state:commit', (commit): void => {
-        render(commit);
+        return;
+      }
+
+      if (mountedHost !== null) {
+        reporter.count(HOST_REMOUNTED_METRIC, { context: REPORT_CONTEXT });
+
+        return;
+      }
+
+      mountedHost = host;
+
+      // The router is the authority that resolves and injects the container, so
+      // the outlets that did not resolve at construction are resolved INSIDE it
+      // rather than through a second document-wide lookup.
+      hudGroup = hudGroup ?? asHtmlElement(host);
+      stageOutlet =
+        stageOutlet ??
+        resolveOutlet(undefined, STAGE_SELECTOR, STAGE_MOUNT, host);
+      relicTray =
+        relicTray ??
+        resolveOutlet(undefined, RELIC_TRAY_SELECTOR, RELIC_TRAY_MOUNT, host);
+
+      reporter.count(HOST_MOUNTED_METRIC, {
+        context: REPORT_CONTEXT,
+        stage: stageOutlet !== null,
+        relicTray: relicTray !== null,
       });
+    },
 
-      subscriptions.push(release);
+    enter(context: ScreenContext): void {
+      if (destroyed) {
+        reportAfterDestroy('enter');
 
-      return release;
+        return;
+      }
+
+      active = true;
+
+      const view = viewFromContext(context, 'enter');
+
+      if (view !== null) {
+        write(view, false);
+      }
+
+      // An in-state refresh never moves focus, whichever member delivered it.
+      if (!context.refresh) {
+        placeFocus(context.host);
+      }
+
+      reporter.count(LIFECYCLE_METRIC, {
+        context: REPORT_CONTEXT,
+        member: 'enter',
+        trigger: context.trigger,
+      });
+    },
+
+    update(context: ScreenContext): void {
+      if (destroyed) {
+        reportAfterDestroy('update');
+
+        return;
+      }
+
+      const view = viewFromContext(context, 'update');
+
+      if (view !== null) {
+        write(view, false);
+      }
+
+      reporter.count(LIFECYCLE_METRIC, {
+        context: REPORT_CONTEXT,
+        member: 'update',
+        trigger: context.trigger,
+      });
+    },
+
+    leave(): void {
+      if (destroyed) {
+        reportAfterDestroy('leave');
+
+        return;
+      }
+
+      active = false;
+
+      reporter.count(LIFECYCLE_METRIC, {
+        context: REPORT_CONTEXT,
+        member: 'leave',
+      });
+    },
+
+    unmount(): void {
+      reporter.count(LIFECYCLE_METRIC, {
+        context: REPORT_CONTEXT,
+        member: 'unmount',
+      });
+      destroy();
+    },
+
+    render(commit: StateCommitEvent): HudSnapshot {
+      return write(viewFromCommit(commit), true);
     },
 
     readRendered: (): HudSnapshot | null => rendered,
+
+    isActive: (): boolean => active,
 
     hasOverlay: (): boolean => overlay !== null,
 
@@ -1096,36 +2193,6 @@ export function createHud(options: HudOptions = {}): Hud {
 
     hasRelicTray: (): boolean => relicTray !== null,
 
-    destroy(): void {
-      if (destroyed) {
-        reporter.count(WRITE_AFTER_DESTROY_METRIC);
-
-        return;
-      }
-
-      destroyed = true;
-
-      for (const release of subscriptions) {
-        release();
-      }
-
-      subscriptions.length = 0;
-
-      clearMessage();
-
-      // The notice is this module's own element, so it leaves with it, and the
-      // group is left carrying no state class of ours.
-      degradedNotice?.remove();
-      degradedNotice = null;
-      hudGroup?.removeAttribute(DEGRADED_ATTRIBUTE);
-
-      scorePanel.destroy();
-
-      if (relicTray !== null) {
-        relicTray.removeEventListener('click', readTrayPress);
-      }
-
-      reporter.count(DESTROYED_METRIC);
-    },
+    destroy,
   });
 }

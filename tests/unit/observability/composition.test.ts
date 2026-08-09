@@ -33,6 +33,10 @@ import {
 } from '../../../src/observability/health';
 import type { LogRecord } from '../../../src/observability/logger';
 import {
+  METRIC_NAMES,
+  METRIC_PREFIX,
+} from '../../../src/observability/metrics';
+import {
   SPAN_ATTRIBUTES,
   SPAN_NAMES,
   SPAN_OUTCOMES,
@@ -284,7 +288,8 @@ describe('the metrics registry is wired', () => {
 
     for (const series of application.metrics.snapshot().series) {
       // A dotted report name would be rejected by a scrape, so the sink
-      // normalises it. Anything unnamespaced here means a bypass.
+      // carries it as a label of a namespaced family rather than as a name.
+      // Anything unnamespaced here means a bypass.
       expect(series.name.startsWith('game2048_')).toBe(true);
       expect(series.name).toMatch(/^[a-zA-Z_:][a-zA-Z0-9_:]*$/);
     }
@@ -425,6 +430,49 @@ describe('the metrics registry is wired', () => {
     expect(
       perEvent.some((series) => series.labels.event === 'move:after'),
     ).toBe(true);
+  });
+
+  it('carries every generic report on ONE labelled family', () => {
+    application = start(document);
+
+    playEveryDirection();
+
+    const canonical = new Set<string>(Object.values(METRIC_NAMES));
+    const families = new Set<string>();
+
+    for (const series of application.metrics.snapshot().series) {
+      families.add(series.name);
+    }
+
+    const reportFamily = `${METRIC_PREFIX}reports_total`;
+    const outside = [...families].filter(
+      (name) => !canonical.has(name) && name !== reportFamily,
+    );
+
+    // THE SEAM THIS PINS. The root once rendered each dotted report name into
+    // a Prometheus family of its own, so the open set of report names competed
+    // with the declared vocabulary for the registry's bounded family budget and
+    // the reports raised last — the teardown ones — were the ones rejected.
+    // DL-METRIC-04, DL-MAIN-11.
+    expect(outside).toEqual([]);
+
+    const reports = application.metrics
+      .snapshot()
+      .series.filter((series) => series.name === reportFamily);
+
+    expect(reports.length).toBeGreaterThan(1);
+
+    // Both dimensions on every series: the report's own dotted name, and the
+    // leading segment of it the family aggregates by.
+    for (const series of reports) {
+      const report = series.labels['report'] ?? '';
+      const subsystem = series.labels['subsystem'] ?? '';
+
+      expect(series.kind).toBe('counter');
+      expect(report.length).toBeGreaterThan(0);
+      expect(subsystem.length).toBeGreaterThan(0);
+      expect(report.startsWith(subsystem)).toBe(true);
+    }
   });
 
   it('folds the hook bus dispatch counts in when the surface reads', () => {
@@ -1826,12 +1874,14 @@ describe('the health surface is wired', () => {
     const readiness = application.metrics
       .snapshot()
       .series.filter(
-        (series) => series.name === 'game2048_health_readiness',
+        (series) =>
+          series.name === 'game2048_reports_total' &&
+          series.labels['report'] === 'health.readiness',
       );
 
-    // Named `health.readiness` by the root and normalised to a Prometheus-safe
-    // series by the sink. A verdict taken and not counted is a verdict nobody
-    // can see was acted on.
+    // Named `health.readiness` by the root and carried by the sink as the
+    // `report` label of the one report family. A verdict taken and not counted
+    // is a verdict nobody can see was acted on.
     expect(readiness.length).toBeGreaterThan(0);
     expect(
       readiness.some(
