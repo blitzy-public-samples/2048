@@ -149,6 +149,8 @@ import {
   EMPTY_STAGE_CONTEXT,
   NOOP_ENGINE_REPORTER,
   correlationReader,
+  isMoveDirection,
+  isNeutralStageGoal,
 } from './types';
 
 /* --------------------------------------------------------------------------
@@ -200,6 +202,15 @@ export const SUPPRESSED_SPAWN_VALUE = 0;
 
 /** Counter name for a move refused because play is blocked. */
 const MOVE_BLOCKED_METRIC = 'engine.move.blocked';
+
+/**
+ * Counter name for a move refused because its direction is not one of the four.
+ *
+ * ITS OWN SERIES, not folded into `engine.move.blocked`: a move refused because
+ * the game is over is the game working, while a direction outside the contract
+ * is a CALLER DEFECT, and one series carrying both cannot be read for either.
+ */
+const MOVE_REFUSED_METRIC = 'engine.move.refused';
 
 /** Counter name for a move withdrawn by an `onBeforeMove` handler. */
 const MOVE_CANCELLED_METRIC = 'engine.move.cancelled';
@@ -305,10 +316,12 @@ export interface EngineStoragePort extends BestScorePort {
  * Which of its four paths a requested move took.
  *
  * The four the engine already counts, named: `'blocked'` for a move refused
- * because the game is over (`engine.move.blocked`), `'cancelled'` for one a
- * listener or an `onBeforeMove` handler withdrew (`engine.move.cancelled`),
- * `'idle'` for one the resolver found changed nothing (`engine.move.idle`), and
- * `'moved'` for one that resolved (`engine.move.resolved`).
+ * before it began (`engine.move.blocked` where the game is over,
+ * `engine.move.refused` where the direction is not one of the four),
+ * `'cancelled'` for one a listener or an `onBeforeMove` handler withdrew
+ * (`engine.move.cancelled`), `'idle'` for one the resolver found changed nothing
+ * (`engine.move.idle`), and `'moved'` for one that resolved
+ * (`engine.move.resolved`).
  */
 export type MoveResolution = 'blocked' | 'cancelled' | 'idle' | 'moved';
 
@@ -332,7 +345,11 @@ export interface MoveAttempt {
    */
   readonly committed: boolean;
 
-  /** The direction the caller asked for. */
+  /**
+   * The direction the caller asked for, echoed back as it arrived — including a
+   * value outside the four, which is refused as `'blocked'` rather than
+   * substituted, so a caller reading this sees what it passed.
+   */
   readonly direction: Direction;
 
   /**
@@ -340,6 +357,53 @@ export interface MoveAttempt {
    * redirected. Equal to `direction` on every path no handler changed.
    */
   readonly resolvedDirection: Direction;
+}
+
+/** Text recorded for a report sink's throw that offered nothing readable. */
+const UNREADABLE_REPORTER_FAULT = 'unreadable thrown value';
+
+/**
+ * Reads text from a value the injected report sink threw.
+ *
+ * TOTAL. Every read of the value and every conversion of it is contained, so
+ * describing a fault cannot raise a second one: there is no further sink a
+ * throw from here could be reported to, and the counter this feeds is raised
+ * on the engine's own turn pipeline.
+ *
+ * The same reading order src/engine/hook-bus.ts `describeError` uses, so a
+ * fault the bus describes and a fault the engine describes read alike.
+ *
+ * @param thrown The caught value.
+ * @returns Text describing `thrown`.
+ */
+function describeThrown(thrown: unknown): string {
+  if (typeof thrown === 'string') {
+    return thrown.length > 0 ? thrown : UNREADABLE_REPORTER_FAULT;
+  }
+
+  if (typeof thrown === 'number' || typeof thrown === 'boolean') {
+    return String(thrown);
+  }
+
+  if (thrown === null || thrown === undefined) {
+    return UNREADABLE_REPORTER_FAULT;
+  }
+
+  if (typeof thrown === 'object' || typeof thrown === 'function') {
+    try {
+      const carried: unknown = Reflect.get(thrown as object, 'message');
+
+      if (typeof carried === 'string' && carried.length > 0) {
+        return carried;
+      }
+    } catch {
+      return UNREADABLE_REPORTER_FAULT;
+    }
+
+    return UNREADABLE_REPORTER_FAULT;
+  }
+
+  return UNREADABLE_REPORTER_FAULT;
 }
 
 /**
@@ -789,6 +853,18 @@ export class Engine {
   private readonly readCorrelationId: () => CorrelationId;
 
   /**
+   * Counter reports the injected sink threw out of, contained by `count()`.
+   * Read through `reporterFaults`.
+   */
+  private reporterFaultCount: number;
+
+  /**
+   * Text of the most recent contained sink throw. Read through
+   * `lastReporterFault`.
+   */
+  private lastReporterFaultText: string | undefined;
+
+  /**
    * @param options The substreams, and optionally the rules, the
    *   progression curve, the stage-resolution authority, the persistence
    *   port, the emitter, the bus, the reporter, the correlation identifier,
@@ -857,6 +933,8 @@ export class Engine {
     this.stageEnded = false;
     this.terminalUnknown = false;
     this.turnCounter = 0;
+    this.reporterFaultCount = 0;
+    this.lastReporterFaultText = undefined;
   }
 
   /**
@@ -884,6 +962,38 @@ export class Engine {
    */
   isDegraded(): boolean {
     return this.terminalUnknown;
+  }
+
+  /**
+   * How many counter reports the injected sink threw out of, contained by
+   * `count()`.
+   *
+   * Has no vanilla source; js/game_manager.js reported nothing. `0` for a sink
+   * that behaves. A non-zero count means reporting is failing while the turns
+   * themselves are not: every board, score and event of every counted
+   * occurrence is the one the engine produced.
+   *
+   * The member `LocalStorageManager.reporterFaults` and
+   * `HookBusMetrics.reporterFaults` carry for the two sibling ports, so one
+   * reading answers the same question at all three layers.
+   *
+   * @returns The contained-throw count.
+   */
+  get reporterFaults(): number {
+    return this.reporterFaultCount;
+  }
+
+  /**
+   * Text of the most recent contained report-sink throw, and `undefined` while
+   * there has been none.
+   *
+   * The member `LocalStorageManager.lastReporterFault` carries, in this layer's
+   * plain-text form.
+   *
+   * @returns The description, or `undefined`.
+   */
+  get lastReporterFault(): string | undefined {
+    return this.lastReporterFaultText;
   }
 
   /**
@@ -935,6 +1045,47 @@ export class Engine {
   }
 
   /**
+   * Raises one counter through the injected report sink, containing a throw
+   * from the sink itself.
+   *
+   * Has no vanilla source. THE ONE PATH EVERY COUNTER THIS FILE RAISES TAKES:
+   * each of the counter sites called `this.reporter.onCount?.()` directly, and
+   * an `EngineReporter` — whose three members are all optional and which
+   * src/engine/types.ts exports for an implementation of a caller's own — that
+   * threw from `onCount` took `setup()`, `move()` and `restart()` down with it.
+   * The two sibling ports at this layer already contain such a throw and count
+   * it: src/engine/hook-bus.ts `deliver` and
+   * src/storage/local-storage-manager.ts's reporter delivery.
+   *
+   * The report is built inside the sink's own guard and the correlation
+   * identifier is read there too, so neither a hostile identifier source nor a
+   * hostile sink reaches the turn pipeline. A contained throw is counted on
+   * `reporterFaults` and described by `lastReporterFault`; nothing is
+   * re-delivered, because the sink is the only place a report could go.
+   *
+   * @param metric Counter name, one of this module's own constants.
+   */
+  private count(metric: string): void {
+    // Nothing to deliver to, and nothing to build: an engine constructed
+    // without a sink — `NOOP_ENGINE_REPORTER` carries all three members, a
+    // caller's object may carry none — allocates no report here.
+    if (this.reporter.onCount === undefined) {
+      return;
+    }
+
+    try {
+      this.reporter.onCount({
+        correlationId: this.correlationId,
+        metric,
+        value: 1,
+      });
+    } catch (thrown: unknown) {
+      this.reporterFaultCount += 1;
+      this.lastReporterFaultText = describeThrown(thrown);
+    }
+  }
+
+  /**
    * Makes one call to the injected persistence port, containing a failure.
    *
    * Has no vanilla source. The port is injected and structural, so any of
@@ -951,11 +1102,10 @@ export class Engine {
     try {
       return call();
     } catch {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-        metric: STORAGE_FAILED_METRIC,
-        value: 1,
-      });
+      // THROUGH `count()`, so a sink that throws from inside this catch is
+      // contained: a contained port failure was being replaced by an escaping
+      // report failure.
+      this.count(STORAGE_FAILED_METRIC);
 
       return fallback;
     }
@@ -971,7 +1121,15 @@ export class Engine {
    * neutral goal, the zero-target goal src/engine/types.ts declares for an
    * engine built without a stage source. `setup()` adopts the resolved
    * `onStageStart` goal on every stage start, so the adopted goal is that
-   * same neutral object where no handler replaced it.
+   * same neutral goal where no handler replaced it.
+   *
+   * THE NEUTRAL GOAL IS RECOGNISED BY VALUE, through
+   * `isNeutralStageGoal()`, not by object identity: the hook bus rebuilds the
+   * `onStageStart` payload whenever it invokes a subscriber, so the goal
+   * `beginStage()` adopts is a structurally-equal COPY of the neutral goal as
+   * soon as any subscriber is registered — and an identity comparison read that
+   * copy as a goal a handler had supplied, leaving a zero-target goal in force
+   * that a fresh board already meets.
    *
    * Read only by `stageProgress()`. The stage slice `resolveStage()`
    * assembles for `stage:start`, `stage:end` and `state:commit` reports the
@@ -984,7 +1142,7 @@ export class Engine {
     const adopted = this.stageGoalOverride;
     const goal = adopted === null ? context.goal : adopted;
 
-    if (goal !== EMPTY_STAGE_CONTEXT.goal) {
+    if (!isNeutralStageGoal(goal)) {
       return goal;
     }
 
@@ -1048,19 +1206,9 @@ export class Engine {
     const restored = snapshot !== null;
 
     if (snapshot === null) {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-
-        metric: SNAPSHOT_REJECTED_METRIC,
-        value: 1,
-      });
+      this.count(SNAPSHOT_REJECTED_METRIC);
     } else {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-
-        metric: SNAPSHOT_RESTORED_METRIC,
-        value: 1,
-      });
+      this.count(SNAPSHOT_RESTORED_METRIC);
     }
 
     // Board-size reconciliation. A snapshot carries the size its board
@@ -1081,12 +1229,7 @@ export class Engine {
     const size = snapshot === null ? configured : snapshot.grid.size;
 
     if (size !== this.config.boardSize) {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-
-        metric: SIZE_RECONCILED_METRIC,
-        value: 1,
-      });
+      this.count(SIZE_RECONCILED_METRIC);
       this.config.boardSize = size;
     }
 
@@ -1194,11 +1337,7 @@ export class Engine {
    *   carried into the new stage untouched.
    */
   startStage(board?: SerializedGameState | null): void {
-    this.reporter.onCount?.({
-      correlationId: this.correlationId,
-      metric: STAGE_STARTED_METRIC,
-      value: 1,
-    });
+    this.count(STAGE_STARTED_METRIC);
 
     // Released before either path below runs, so the dispatch each makes and the
     // commit it ends with both see an unresolved stage.
@@ -1342,6 +1481,9 @@ export class Engine {
    * belongs to a move that moved. The returned value reports the SLIDE, so such
    * a turn returns `false`.
    *
+   * A direction outside the four is refused as a no-op returning `false`; see
+   * `attemptMove()`, whose boolean projection this is.
+   *
    * @param direction Direction to move in: 0 up, 1 right, 2 down, 3
    *   left.
    * @returns `true` when the board changed.
@@ -1365,18 +1507,38 @@ export class Engine {
    * No new event is emitted and no emission is reordered: AAP Contract 1 fixes
    * the seven events, so the outcome is RETURNED rather than announced.
    *
+   * A DIRECTION OUTSIDE THE FOUR IS REFUSED AS `'blocked'`, before anything is
+   * emitted or dispatched. `Direction` is a compile-time claim and the value
+   * arrives from an input adapter, from a structural port that widens it to
+   * `number`, and from callers holding strings — so an unusable one used to
+   * reach the vector lookup and raise a bare `TypeError` from inside the
+   * pipeline, after `move:before` had been emitted and `onBeforeMove`
+   * dispatched, leaving the turn with no `move:after` to close it and a
+   * subscriber's turn span open. A numeric string was worse: the lookup coerced
+   * it into a real, committed move.
+   *
    * @param direction Direction to move in: 0 up, 1 right, 2 down, 3 left.
    * @returns The frozen outcome of the attempt.
    */
   attemptMove(direction: Direction): MoveAttempt {
+    // THE CONTRACT MEASURED, not assumed, and measured FIRST: nothing is
+    // emitted, dispatched, drawn or written for a direction the engine cannot
+    // resolve, so the board, the score and all four RNG cursors stand exactly as
+    // they did and the turn is closed by the returned outcome alone.
+    if (!isMoveDirection(direction)) {
+      // THROUGH `count()`, like every other counter this file raises, so a
+      // report sink that throws cannot turn a refused direction into an
+      // escaping report failure.
+      this.count(MOVE_REFUSED_METRIC);
+
+      // The direction is echoed back as it arrived rather than replaced by a
+      // usable one, so a caller reading the outcome sees the value it passed.
+      return frozenAttempt('blocked', direction, direction, false);
+    }
+
     // Ported from L134.
     if (this.isGameTerminated()) {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-
-        metric: MOVE_BLOCKED_METRIC,
-        value: 1,
-      });
+      this.count(MOVE_BLOCKED_METRIC);
 
       return frozenAttempt('blocked', direction, direction, false);
     }
@@ -1428,12 +1590,7 @@ export class Engine {
     const cancelled = before.payload.cancelled;
 
     if (cancelled) {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-
-        metric: MOVE_CANCELLED_METRIC,
-        value: 1,
-      });
+      this.count(MOVE_CANCELLED_METRIC);
 
       // A withdrawn move normally changes nothing and commits nothing, which is
       // L134's behaviour. A withdrawn move that ALSO reseated the board — undo
@@ -1504,12 +1661,7 @@ export class Engine {
 
     // Ported from L175-L177 through the resolver's outcome.
     if (!outcome.moved) {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-
-        metric: MOVE_IDLE_METRIC,
-        value: 1,
-      });
+      this.count(MOVE_IDLE_METRIC);
 
       // AN ACCEPTED PRE-MOVE EFFECT IS A STATE CHANGE, SLIDE OR NO SLIDE. A
       // permutation, an excision or a restore recorded on `onBeforeMove` reached
@@ -1637,11 +1789,7 @@ export class Engine {
         true
     ) {
       this.over = false;
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-        metric: LOSS_REOPENED_METRIC,
-        value: 1,
-      });
+      this.count(LOSS_REOPENED_METRIC);
     }
 
     // Emitted from what was applied, member for member, so `move:after` and
@@ -1656,12 +1804,7 @@ export class Engine {
       terminated: this.isGameTerminated(),
     });
 
-    this.reporter.onCount?.({
-      correlationId: this.correlationId,
-
-      metric: MOVE_RESOLVED_METRIC,
-      value: 1,
-    });
+    this.count(MOVE_RESOLVED_METRIC);
 
     // Ported from L189.
     this.commit();
@@ -1764,11 +1907,7 @@ export class Engine {
       return;
     }
 
-    this.reporter.onCount?.({
-      correlationId: this.correlationId,
-      metric: STAGE_CLEARED_METRIC,
-      value: 1,
-    });
+    this.count(STAGE_CLEARED_METRIC);
 
     this.endStage(true);
   }
@@ -1814,11 +1953,7 @@ export class Engine {
     // paying out a stage bounty repeatedly and offering a reward per turn.
     // Released by `startStage()` and by every fresh `setup()`.
     if (this.stageEnded) {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-        metric: STAGE_END_REPEATED_METRIC,
-        value: 1,
-      });
+      this.count(STAGE_END_REPEATED_METRIC);
 
       return;
     }
@@ -1904,18 +2039,10 @@ export class Engine {
    * `tile:spawn` is emitted for every attempt whether or not it inserted.
    */
   private addRandomTile(): void {
-    this.reporter.onCount?.({
-      correlationId: this.correlationId,
-      metric: SPAWN_ATTEMPT_METRIC,
-      value: 1,
-    });
+    this.count(SPAWN_ATTEMPT_METRIC);
 
     if (!this.grid.cellsAvailable()) {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-        metric: SPAWN_SUPPRESSED_METRIC,
-        value: 1,
-      });
+      this.count(SPAWN_SUPPRESSED_METRIC);
 
       // AAP Contract 1: `tile:spawn` carries no position when the board is
       // full. The attempt is therefore EMITTED, so a subscriber counting
@@ -1981,11 +2108,7 @@ export class Engine {
     if (inserted) {
       this.grid.insertTile(new Tile(position, payload.value));
     } else {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-        metric: SPAWN_SUPPRESSED_METRIC,
-        value: 1,
-      });
+      this.count(SPAWN_SUPPRESSED_METRIC);
     }
 
     // THE EMITTED POSITION IS THE INSERTED CELL OR NOTHING. Carrying a
@@ -2177,11 +2300,7 @@ export class Engine {
     refused: number,
   ): boolean {
     for (const effect of effects) {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-        metric: EFFECT_APPLIED_METRIC,
-        value: 1,
-      });
+      this.count(EFFECT_APPLIED_METRIC);
 
       // The score travels with the lattice a restore installed. Bounded exactly
       // as a restored snapshot's score is, so a handler cannot install a
@@ -2197,20 +2316,12 @@ export class Engine {
       // The rules already carry the new edge length — board-effects writes
       // `boardSize` with the lattice — so this is the count, not the write.
       if (effect.kind === 'resizeBoard') {
-        this.reporter.onCount?.({
-          correlationId: this.correlationId,
-          metric: SIZE_RECONCILED_METRIC,
-          value: 1,
-        });
+        this.count(SIZE_RECONCILED_METRIC);
       }
     }
 
     for (let index = 0; index < refused; index += 1) {
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-        metric: EFFECT_REFUSED_METRIC,
-        value: 1,
-      });
+      this.count(EFFECT_REFUSED_METRIC);
     }
 
     return effects.length > 0;
@@ -2233,11 +2344,7 @@ export class Engine {
       return measure();
     } catch {
       this.terminalUnknown = true;
-      this.reporter.onCount?.({
-        correlationId: this.correlationId,
-        metric: TERMINAL_UNKNOWN_METRIC,
-        value: 1,
-      });
+      this.count(TERMINAL_UNKNOWN_METRIC);
 
       return null;
     }

@@ -65,6 +65,33 @@ export const DIRECTION_DOWN: Direction = 2;
 export const DIRECTION_LEFT: Direction = 3;
 
 /**
+ * Reports whether a value is one of the four declared move directions.
+ *
+ * THE RUNTIME HALF OF THE `Direction` CONTRACT. The type alone is a
+ * compile-time claim, and a direction reaches the engine from an input adapter,
+ * a structural port that widens it to `number`, and a caller that may hold a
+ * string from a data attribute — so a claim is all it is. Without this measure a
+ * value outside the four raised a bare `TypeError` from the vector lookup deep
+ * inside the move pipeline, AFTER the move had been announced and the pre-move
+ * hook dispatched, leaving the turn open; and a numeric STRING was coerced by
+ * the lookup into a real, committed move.
+ *
+ * Strict: no coercion, so `'0'` and `true` are refused rather than read as
+ * directions.
+ *
+ * @param value Candidate direction.
+ * @returns `true` for exactly `0`, `1`, `2` and `3`.
+ */
+export function isMoveDirection(value: unknown): value is Direction {
+  return (
+    value === DIRECTION_UP ||
+    value === DIRECTION_RIGHT ||
+    value === DIRECTION_DOWN ||
+    value === DIRECTION_LEFT
+  );
+}
+
+/**
  * The board's backing store: a square matrix indexed `cells[x][y]`, x-major on
  * the outer array, holding `null` in every empty cell.
  */
@@ -253,6 +280,20 @@ export interface EngineCountReport {
   readonly event?: string;
 }
 
+/**
+ * The report sink the engine, the emitter and the hook bus deliver to.
+ *
+ * EVERY MEMBER IS OPTIONAL, so an implementation of a caller's own may carry
+ * one, two or none. A MEMBER THAT THROWS IS CONTAINED at every one of the three
+ * delivery sites: the throw reaches neither the caller that asked for the
+ * operation nor the operation itself, so a game-domain call — `Engine.setup()`,
+ * `Engine.move()`, `Engine.restart()`, an emission, a hook dispatch — completes
+ * with the board, the score and the events it would have produced anyway. Each
+ * contained throw is counted, on `Engine.reporterFaults` and described by
+ * `Engine.lastReporterFault` for the engine's own counters, and on
+ * `HookBusMetrics.reporterFaults` for the bus's. Nothing is re-delivered: the
+ * sink is the only place a report could go.
+ */
 export interface EngineReporter {
   readonly onHookError?: (report: EngineHookErrorReport) => void;
 
@@ -335,6 +376,33 @@ export const EMPTY_STAGE_CONTEXT: StageCommitContext = Object.freeze({
   goal: NEUTRAL_STAGE_GOAL,
   goalProgress: 0,
 });
+
+/**
+ * Reports whether a goal IS the neutral one `EMPTY_STAGE_CONTEXT` carries,
+ * measured by VALUE rather than by object identity.
+ *
+ * WHY BY VALUE. The neutral goal is a sentinel meaning "no stage source supplied
+ * a goal", and it crosses src/engine/hook-bus.ts on the `onStageStart` payload:
+ * the bus rebuilds that payload whenever it invokes a subscriber, so what comes
+ * back is a structurally-equal COPY rather than this object. A consumer
+ * comparing identity therefore read "a handler supplied a goal" from the mere
+ * presence of a subscriber, and adopted a zero-target goal that every board
+ * meets. Comparing the two members instead cannot be defeated by a copy.
+ *
+ * A goal a stage source genuinely declares as a zero-target score threshold is
+ * indistinguishable from the sentinel, and is treated as the sentinel: it is met
+ * by every board, so resolving it through the configured curve is what the
+ * fallback exists for.
+ *
+ * @param goal Goal to measure.
+ * @returns `true` for the neutral goal, by value.
+ */
+export function isNeutralStageGoal(goal: StageGoal): boolean {
+  return (
+    goal.kind === NEUTRAL_STAGE_GOAL.kind &&
+    goal.target === NEUTRAL_STAGE_GOAL.target
+  );
+}
 
 /**
  * The relic slice committed by an engine constructed without a relic source.

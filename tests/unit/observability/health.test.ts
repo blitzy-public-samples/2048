@@ -2389,3 +2389,85 @@ describe('isolation from the suites that follow', () => {
     expect(window.localStorage.getItem(GAME_STATE_KEY)).toBeNull();
   });
 });
+
+/* ==========================================================================
+ * A settings bag outside the declared type
+ * ========================================================================== */
+
+describe('a settings argument that is not an object', () => {
+  it('constructs from an explicit null as it does from no argument', () => {
+    // A DEFAULT PARAMETER STANDS IN FOR `undefined` ALONE, so an explicit
+    // `null` reached the collaborator reads and raised out of construction.
+    const surface = createHealthSurface(null as never);
+
+    expect(surface.check().checks).toHaveLength(HEALTH_CHECK_COUNT);
+    expect(new HealthSurface(null as never).report().checks).toHaveLength(
+      HEALTH_CHECK_COUNT,
+    );
+  });
+
+  it('runs every member handed an explicit null', () => {
+    const surface = createHealthSurface();
+
+    expect(surface.check(null as never).checks).toHaveLength(
+      HEALTH_CHECK_COUNT,
+    );
+    expect(surface.report(null as never).checks).toHaveLength(
+      HEALTH_CHECK_COUNT,
+    );
+    expect(surface.checkOne('storage', null as never)).toBeDefined();
+    expect(surface.readiness(null as never)).toBeDefined();
+    expect(surface.probeReader(null as never)()).toHaveLength(
+      HEALTH_CHECK_COUNT,
+    );
+  });
+
+  it('runs every member handed a value of the wrong kind', () => {
+    const surface = createHealthSurface();
+
+    for (const bag of ['refresh', 42, true, Symbol('bag')]) {
+      expect(surface.check(bag as never).checks).toHaveLength(
+        HEALTH_CHECK_COUNT,
+      );
+      expect(surface.readiness(bag as never)).toBeDefined();
+    }
+  });
+
+  it('contains a settings bag whose read raises', () => {
+    const hostile = new Proxy(
+      {},
+      {
+        get(): never {
+          throw new Error('settings read trap');
+        },
+      },
+    );
+    const surface = createHealthSurface();
+
+    expect(surface.check(hostile as never).checks).toHaveLength(
+      HEALTH_CHECK_COUNT,
+    );
+    expect(surface.report(hostile as never).status).toBeDefined();
+    expect(surface.readiness(hostile as never)).toBeDefined();
+  });
+
+  it('still honours a refresh a well-formed bag asks for', () => {
+    // The normalisation must not swallow the one setting the type declares.
+    let probes = 0;
+    const surface = createHealthSurface({
+      storageProbe: (): StorageProbeView => {
+        probes += 1;
+
+        return { supported: true, strategy: 'localStorage' };
+      },
+    });
+
+    surface.check();
+
+    const afterFirst = probes;
+
+    surface.check({ refresh: true });
+
+    expect(probes).toBeGreaterThan(afterFirst);
+  });
+});

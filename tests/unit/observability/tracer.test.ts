@@ -110,7 +110,7 @@ import type {
   SerializedGameState,
 } from '../../../src/engine/types';
 import { createLogger } from '../../../src/observability/logger';
-import type { Logger } from '../../../src/observability/logger';
+import type { LogFields, Logger } from '../../../src/observability/logger';
 import {
   DEFAULT_DURATION_BUCKETS,
   METRIC_LABELS,
@@ -120,6 +120,7 @@ import {
 import type { MetricsRegistry } from '../../../src/observability/metrics';
 import {
   BOUNDARY_SPAN_NAMES,
+  COMMIT_ATTRIBUTIONS,
   DEFAULT_FRAME_BUDGET_MS,
   DEFAULT_TRACE_CAPACITY,
   INERT_SPAN,
@@ -1739,6 +1740,32 @@ describe('attachEngineTracing over the append-only emitter (TR-TRACE-05, TR-TRAC
     expect(snapshot.faults).toBe(0);
   });
 
+  it('opens no turn span at all for a direction outside the four', () => {
+    // The engine measures the direction BEFORE it announces the move, so a
+    // caller passing an unusable one opens nothing here. Previously the move was
+    // announced first and the pipeline then raised, so the turn span this module
+    // opens on `move:before` stayed open with no outcome and no end.
+    const engine = blockedEngine();
+
+    attachEngineTracing(engine.events, tracer);
+
+    expect(engine.move(4 as never)).toBe(false);
+    expect(engine.move('3' as never)).toBe(false);
+
+    const snapshot = tracer.snapshot();
+
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(0);
+    expect(snapshot.open).toBe(0);
+    expect(snapshot.anomalies).toBe(0);
+    expect(snapshot.faults).toBe(0);
+
+    // And a legitimate move afterwards still opens and closes its own span.
+    expect(engine.move(DIRECTION_LEFT)).toBe(false);
+
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(1);
+    expect(tracer.snapshot().open).toBe(0);
+  });
+
   it('leaks no turn span across two consecutive real no-op moves', () => {
     // Without the engine's no-op completion signal the first turn span stayed
     // open and the second `move:before` superseded it, which is the leak this
@@ -3342,5 +3369,151 @@ describe('Span identifier determinism', () => {
     const ids = driveIdentifierSequence(tracer);
 
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+/* ==========================================================================
+ * 9. Commit attribution accounting
+ * ========================================================================== */
+
+describe('Tracer.recordCommitAttribution', () => {
+  /**
+   * Values that are not one of `COMMIT_ATTRIBUTIONS` and that a `typeof` test
+   * settles on its own.
+   */
+  const PLAIN_INVALID: readonly unknown[] = Object.freeze([
+    undefined,
+    null,
+    '',
+    0,
+    {},
+    [],
+    true,
+    'nope',
+  ]);
+
+  /**
+   * Values whose own conversion to a primitive raises. Each was a THROW out of
+   * this member: the count was read at `counts[attribution]` before the value
+   * was settled, and reading a member under a key converts the key.
+   *
+   * @returns One value per conversion channel: the proxy get trap, `toString`
+   *   and `Symbol.toPrimitive`.
+   */
+  const conversionHostileValues = (): readonly unknown[] => [
+    new Proxy(
+      {},
+      {
+        get(): never {
+          throw new Error('proxy get trap');
+        },
+      },
+    ),
+    {
+      toString(): never {
+        throw new Error('toString trap');
+      },
+    },
+    {
+      [Symbol.toPrimitive](): never {
+        throw new Error('toPrimitive trap');
+      },
+    },
+  ];
+
+  /**
+   * The records carrying one message.
+   *
+   * @param message Message to match.
+   * @returns Every record under it.
+   */
+  const recordsFor = (message: string): readonly { fields?: LogFields }[] =>
+    logger.recent().filter((record) => record.message === message);
+
+  it('counts each of the three attributions it declares', () => {
+    tracer.recordCommitAttribution(COMMIT_ATTRIBUTIONS.turn);
+    tracer.recordCommitAttribution(COMMIT_ATTRIBUTIONS.lifecycle, {
+      phase: 'setup',
+    });
+    tracer.recordCommitAttribution(COMMIT_ATTRIBUTIONS.unattributed);
+    tracer.recordCommitAttribution(COMMIT_ATTRIBUTIONS.turn);
+
+    expect(tracer.commitCounts()).toEqual({
+      turn: 2,
+      lifecycle: 1,
+      unattributed: 1,
+    });
+    expect(tracer.snapshot().commits).toEqual(tracer.commitCounts());
+    expect(tracer.snapshot().anomalies).toBe(0);
+  });
+
+  it('rejects and reports a value that is not one of the three', () => {
+    for (const value of PLAIN_INVALID) {
+      expect(() => {
+        tracer.recordCommitAttribution(value as never);
+      }).not.toThrow();
+    }
+
+    expect(tracer.commitCounts()).toEqual({
+      turn: 0,
+      lifecycle: 0,
+      unattributed: 0,
+    });
+    expect(tracer.snapshot().anomalies).toBe(PLAIN_INVALID.length);
+    expect(recordsFor('commit attribution rejected')).toHaveLength(
+      PLAIN_INVALID.length,
+    );
+  });
+
+  it('contains a value whose own conversion to a primitive raises', () => {
+    const hostile = conversionHostileValues();
+
+    for (const value of hostile) {
+      expect(() => {
+        tracer.recordCommitAttribution(value as never, { phase: 'setup' });
+      }).not.toThrow();
+    }
+
+    // REPORTED, NOT COUNTED: each reached the same guard the plain invalid
+    // values reach, so each raised one anomaly and no attribution moved.
+    expect(tracer.commitCounts()).toEqual({
+      turn: 0,
+      lifecycle: 0,
+      unattributed: 0,
+    });
+    expect(tracer.snapshot().anomalies).toBe(hostile.length);
+
+    const reports = recordsFor('commit attribution rejected');
+
+    expect(reports).toHaveLength(hostile.length);
+
+    // The rejected value is named by what a total read of it could establish:
+    // `received` is the empty string, because none of the three is a string.
+    for (const report of reports) {
+      expect(report.fields).toEqual({ received: '' });
+    }
+  });
+
+  it('keeps accounting for the attributions that follow a rejected one', () => {
+    tracer.recordCommitAttribution(
+      conversionHostileValues()[0] as never,
+    );
+    tracer.recordCommitAttribution(COMMIT_ATTRIBUTIONS.turn);
+    tracer.recordCommitAttribution(COMMIT_ATTRIBUTIONS.lifecycle);
+
+    expect(tracer.commitCounts()).toEqual({
+      turn: 1,
+      lifecycle: 1,
+      unattributed: 0,
+    });
+    expect(tracer.snapshot().anomalies).toBe(1);
+  });
+
+  it('names a string it was handed that is not an attribution', () => {
+    tracer.recordCommitAttribution('turns' as never);
+
+    expect(recordsFor('commit attribution rejected')[0]?.fields).toEqual({
+      received: 'turns',
+    });
   });
 });

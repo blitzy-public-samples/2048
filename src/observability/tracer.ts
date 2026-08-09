@@ -367,6 +367,32 @@ export const COMMIT_ATTRIBUTIONS = Object.freeze({
 export type CommitAttribution =
   (typeof COMMIT_ATTRIBUTIONS)[keyof typeof COMMIT_ATTRIBUTIONS];
 
+/** Every attribution, in declaration order. */
+const COMMIT_ATTRIBUTION_LIST: readonly CommitAttribution[] = Object.freeze([
+  COMMIT_ATTRIBUTIONS.turn,
+  COMMIT_ATTRIBUTIONS.lifecycle,
+  COMMIT_ATTRIBUTIONS.unattributed,
+]);
+
+/**
+ * Narrows an arbitrary value to a declared attribution, the way `isSpanName`
+ * narrows a span name.
+ *
+ * TOTAL. The `typeof` test settles the value without reading a member off it
+ * and without converting it, so a value whose own conversion throws — a
+ * `toString` or a `Symbol.toPrimitive` that raises, a proxy whose get trap
+ * raises — is refused here rather than raising out of the caller.
+ *
+ * @param value Value to test.
+ * @returns Whether `value` is one of `COMMIT_ATTRIBUTIONS`.
+ */
+function isCommitAttribution(value: unknown): value is CommitAttribution {
+  return (
+    typeof value === 'string' &&
+    COMMIT_ATTRIBUTION_LIST.includes(value as CommitAttribution)
+  );
+}
+
 /** How many commits each attribution accounted for. */
 export interface CommitTraceCounts {
   /** Commits that closed an open turn span. */
@@ -1792,15 +1818,21 @@ export class Tracer {
     attribution: CommitAttribution,
     fields?: LogFields,
   ): void {
-    const counted = this.commitCountsByAttribution[attribution];
-
-    if (typeof counted !== 'number') {
+    // THE VALUE IS SETTLED BEFORE IT IS USED AS A KEY. The count was read at
+    // `this.commitCountsByAttribution[attribution]` first, which converts the
+    // value to a property key, so a value whose own conversion raised took the
+    // whole call down and never reached the guard that followed the read.
+    // `isCommitAttribution` settles it with a `typeof` test and a membership
+    // test, neither of which reads a member off the value or converts it.
+    if (!isCommitAttribution(attribution)) {
       this.reportAnomaly('commit attribution rejected', {
         received: typeof attribution === 'string' ? attribution : '',
       });
 
       return;
     }
+
+    const counted = this.commitCountsByAttribution[attribution];
 
     this.commitCountsByAttribution[attribution] = counted + 1;
 

@@ -71,6 +71,7 @@ import {
 } from '../../../src/engine/engine-events';
 import type {
   BoardProjection,
+  EngineEventName,
   MoveAfterEvent,
   StateCommitEvent,
 } from '../../../src/engine/engine-events';
@@ -320,6 +321,7 @@ const CORRELATION_ID_UNDER_TEST = 'run-correlation-metrics';
  */
 const ENGINE_OWNED_METRICS: readonly string[] = Object.freeze([
   'engine.move.blocked',
+  'engine.move.refused',
   'engine.move.cancelled',
   'engine.move.idle',
   'engine.move.resolved',
@@ -3641,5 +3643,583 @@ describe('attemptMove(): which of the four paths a move took', () => {
     engine.setup(copyBoard(MERGE_PAIR_BOARD));
 
     expect(Object.isFrozen(engine.attemptMove(DIRECTION_LEFT))).toBe(true);
+  });
+});
+
+/* ==========================================================================
+ * The stage-ladder fallback survives a subscriber that changes nothing
+ *
+ * The neutral goal `EMPTY_STAGE_CONTEXT` carries is a SENTINEL meaning "no
+ * stage source supplied a goal", and it crosses the hook bus on the
+ * `onStageStart` payload. The bus rebuilds that payload whenever it invokes a
+ * subscriber, so the goal the engine adopts is a structurally-equal COPY as soon
+ * as anything is registered — and a sentinel recognised by object identity was
+ * therefore defeated by the mere PRESENCE of an observer, leaving a zero-target
+ * goal in force that a fresh board already meets. Four of the sixteen relics
+ * bind `onStageStart`.
+ * ========================================================================== */
+
+describe('the configured stage curve stands behind an onStageStart observer', () => {
+  it('keeps the ladder goal in force when a void observer is registered', () => {
+    const bare = new Engine({ streams: streamsFor() });
+
+    bare.setup(null);
+
+    const observed = new Engine({ streams: streamsFor() });
+
+    // A PURE OBSERVER: it returns nothing, so it changes nothing.
+    observed.hooks.register({
+      id: 'observer',
+      hooks: { onStageStart: (): void => undefined },
+    });
+    observed.setup(null);
+
+    expect(bare.stageGoalInForce()).toEqual(
+      stageGoalForIndex(0, DEFAULT_STAGE_CONFIG),
+    );
+    expect(observed.stageGoalInForce()).toEqual(bare.stageGoalInForce());
+  });
+
+  it('does not report a fresh board as clearing stage zero', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.hooks.register({
+      id: 'observer',
+      hooks: { onStageStart: (): void => undefined },
+    });
+    engine.setup(null);
+
+    const progress = engine.stageProgress();
+
+    // The zero-target goal the identity comparison left in force measured every
+    // board as complete: progress 1 and cleared on the opening position.
+    expect(progress.cleared).toBe(false);
+    expect(progress.progress).toBeLessThan(1);
+  });
+
+  it('resolves no stage on the first move under the engine authority', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageResolution: 'engine',
+    });
+    const ended: boolean[] = [];
+
+    engine.hooks.register({
+      id: 'observer',
+      hooks: { onStageStart: (): void => undefined },
+    });
+    engine.events.on('stage:end', (event): void => {
+      ended.push(event.cleared);
+    });
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    engine.move(DIRECTION_LEFT);
+
+    // A run composed without a stage-context provider — the composition
+    // tests/unit/relics/relic-integration.test.ts documents — declared its
+    // stage cleared on the first move it played.
+    expect(ended).toEqual([]);
+    expect(engine.hasStageEnded()).toBe(false);
+  });
+
+  it('still adopts a goal an onStageStart handler genuinely replaced', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const replaced: StageGoal = Object.freeze({
+      kind: 'score-threshold',
+      target: 7777,
+    });
+
+    engine.hooks.register({
+      id: 'goal-replacer',
+      hooks: {
+        onStageStart: (payload) => ({ ...payload, goal: replaced }),
+      },
+    });
+    engine.setup(null);
+
+    // Recognising the sentinel by value must not cost the handler its authority.
+    expect(engine.stageGoalInForce()).toEqual(replaced);
+  });
+
+  it('keeps an injected provider goal ahead of the configured curve', () => {
+    const supplied: StageGoal = Object.freeze({
+      kind: 'highest-tile',
+      target: 128,
+    });
+
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageContext: (): StageCommitContext =>
+        Object.freeze({ stageIndex: 3, goal: supplied, goalProgress: 0 }),
+    });
+
+    engine.hooks.register({
+      id: 'observer',
+      hooks: { onStageStart: (): void => undefined },
+    });
+    engine.setup(null);
+
+    // The provider's own goal, not stage 3 of the ladder: the fallback is only
+    // for a source that supplied none.
+    expect(engine.stageGoalInForce()).toEqual(supplied);
+  });
+
+  it('falls back to the curve for a provider goal that is the neutral one', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      stageContext: (): StageCommitContext =>
+        Object.freeze({
+          stageIndex: 2,
+          goal: { kind: 'score-threshold' as const, target: 0 },
+          goalProgress: 0,
+        }),
+    });
+
+    engine.setup(null);
+
+    // A zero-target score threshold is met by every board, so it is read as the
+    // sentinel it is identical to and the curve decides.
+    expect(engine.stageGoalInForce()).toEqual(
+      stageGoalForIndex(2, DEFAULT_STAGE_CONFIG),
+    );
+  });
+});
+
+/* ==========================================================================
+ * A direction outside the four is refused, not thrown
+ *
+ * `Direction` is a compile-time claim. The value arrives from an input adapter,
+ * from a structural port that used to widen it to `number`, and from callers
+ * holding strings — so an unusable one reached the vector lookup and raised a
+ * bare `TypeError` from inside the pipeline, AFTER `move:before` had been
+ * emitted and `onBeforeMove` dispatched: the turn had no `move:after` to close
+ * it and a subscriber's turn span was left open. A numeric string was coerced
+ * into a real, committed move.
+ * ========================================================================== */
+
+/** Every value outside the four directions a caller can reach the engine with. */
+const OUT_OF_CONTRACT_DIRECTIONS: readonly { label: string; value: unknown }[] =
+  Object.freeze([
+    { label: 'one past the last direction', value: 4 },
+    { label: 'a larger integer', value: 7 },
+    { label: 'a negative integer', value: -1 },
+    { label: 'a fraction', value: 1.5 },
+    { label: 'NaN', value: Number.NaN },
+    { label: 'Infinity', value: Number.POSITIVE_INFINITY },
+    { label: '-Infinity', value: Number.NEGATIVE_INFINITY },
+    { label: 'undefined', value: undefined },
+    { label: 'null', value: null },
+    { label: 'an object', value: {} },
+    { label: 'an array', value: [] },
+    { label: 'true', value: true },
+    { label: 'false', value: false },
+    { label: "the numeric string '0'", value: '0' },
+    { label: "the numeric string '3'", value: '3' },
+    { label: 'a word', value: 'left' },
+    { label: 'a symbol', value: Symbol('up') },
+    { label: 'a bigint', value: 1n },
+  ]);
+
+describe('attemptMove(): an out-of-contract direction', () => {
+  it.each(OUT_OF_CONTRACT_DIRECTIONS)(
+    'refuses $label without throwing and without opening a turn',
+    ({ value }: { value: unknown }) => {
+      const recording = createRecordingReporter();
+      const streams = streamsFor();
+      const engine = new Engine({
+        streams,
+        reporter: recording.reporter,
+        correlationId: CORRELATION_ID_UNDER_TEST,
+      });
+
+      const events: string[] = [];
+      const dispatched: string[] = [];
+
+      engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+      for (const name of ENGINE_EVENT_NAMES) {
+        engine.events.on(name, (): void => {
+          events.push(name);
+        });
+      }
+
+      recordHooks(engine, dispatched);
+
+      const board = engine.serialize();
+      const cursors = streams.snapshotCursors();
+
+      recording.counts.length = 0;
+
+      const attempt = engine.attemptMove(value as Direction);
+
+      // REFUSED, CLOSED AND UNCOMMITTED: the outcome is the whole of the turn.
+      expect(attempt.moved).toBe(false);
+      expect(attempt.resolution).toBe('blocked');
+      expect(attempt.committed).toBe(false);
+
+      // NOTHING WAS ANNOUNCED AND NOTHING WAS DISPATCHED, so a subscriber that
+      // opens work on `move:before` has nothing left open.
+      expect(events).toEqual([]);
+      expect(dispatched).toEqual([]);
+
+      // And nothing moved: not the board, not the score, not one cursor.
+      expect(engine.serialize()).toEqual(board);
+      expect(streams.snapshotCursors()).toEqual(cursors);
+
+      // Counted under its own name, which is what separates a caller defect
+      // from the ordinary refusal of a finished game.
+      expect(engineMetricNamesOf(recording.counts)).toEqual([
+        'engine.move.refused',
+      ]);
+      expect(countOf(recording.counts, 'engine.move.refused')).toBe(1);
+      expect(countOf(recording.counts, 'engine.move.blocked')).toBe(0);
+    },
+  );
+
+  it.each(OUT_OF_CONTRACT_DIRECTIONS)(
+    'reports false from move() for $label',
+    ({ value }: { value: unknown }) => {
+      const engine = new Engine({ streams: streamsFor() });
+
+      engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+      expect(engine.move(value as Direction)).toBe(false);
+    },
+  );
+
+  it('echoes the direction it was given back rather than substituting one', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const attempt = engine.attemptMove(9 as Direction);
+
+    expect(attempt.direction).toBe(9);
+    expect(attempt.resolvedDirection).toBe(9);
+    expect(Object.isFrozen(attempt)).toBe(true);
+  });
+
+  it('refuses a numeric string rather than coercing it into a move', () => {
+    const engine = new Engine({ streams: streamsFor() });
+    const control = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+    control.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    // `'3'` used to resolve as DIRECTION_LEFT, merge, spawn and commit.
+    expect(engine.move('3' as unknown as Direction)).toBe(false);
+    expect(engine.serialize()).toEqual(control.serialize());
+    expect(engine.score).toBe(0);
+  });
+
+  it('refuses an out-of-contract direction on a terminated game too', () => {
+    const recording = createRecordingReporter();
+    const engine = new Engine({
+      streams: streamsFor(),
+      reporter: recording.reporter,
+      correlationId: CORRELATION_ID_UNDER_TEST,
+    });
+
+    // Two half-value tiles: one move to the configured win value, which blocks
+    // play pending an acknowledgement.
+    engine.setup(createNearWinBoard(DEFAULT_BOARD_SIZE));
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.isGameTerminated()).toBe(true);
+
+    recording.counts.length = 0;
+
+    // The direction is measured FIRST, so the refusal is attributed to the
+    // contract rather than to the terminal state.
+    expect(engine.attemptMove(4 as Direction).resolution).toBe('blocked');
+    expect(engineMetricNamesOf(recording.counts)).toEqual([
+      'engine.move.refused',
+    ]);
+  });
+
+  it('still resolves the four directions and a legitimate redirect', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const straight = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(straight.resolution).toBe('moved');
+
+    const redirected = new Engine({ streams: streamsFor() });
+
+    redirected.hooks.register({
+      id: 'redirect',
+      hooks: {
+        onBeforeMove: (payload: BeforeMovePayload): BeforeMovePayload => ({
+          ...payload,
+          direction: DIRECTION_UP,
+        }),
+      },
+    });
+    redirected.setup(copyBoard(MERGE_PAIR_BOARD));
+
+    const viaHook = redirected.attemptMove(DIRECTION_LEFT);
+
+    // The guard measures what the CALLER passed; a handler's redirect is
+    // validated by the bus and still resolves the move it names.
+    expect(viaHook.direction).toBe(DIRECTION_LEFT);
+    expect(viaHook.resolvedDirection).toBe(DIRECTION_UP);
+  });
+});
+
+/* ==========================================================================
+ * A throwing report sink, contained
+ * ========================================================================== */
+
+describe('a report sink that throws (Engine.reporterFaults)', () => {
+  /**
+   * Builds a sink whose `onCount` throws `thrown` and which records nothing.
+   *
+   * @param thrown Value `onCount` throws. Defaults to an `Error`.
+   * @returns The sink, for `EngineOptions.reporter`.
+   */
+  const throwingCountReporter = (
+    thrown: unknown = new Error('onCount exploded'),
+  ): EngineReporter =>
+    Object.freeze({
+      onCount(): void {
+        throw thrown;
+      },
+    });
+
+  it('does not escape setup(), move() or restart()', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      reporter: throwingCountReporter(),
+    });
+
+    expect(() => {
+      engine.setup(null);
+    }).not.toThrow();
+    expect(() => {
+      engine.move(DIRECTION_LEFT);
+    }).not.toThrow();
+    expect(() => {
+      engine.restart();
+    }).not.toThrow();
+    expect(() => {
+      engine.serialize();
+    }).not.toThrow();
+  });
+
+  it('counts every contained throw and describes the last one', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      reporter: throwingCountReporter(),
+    });
+
+    expect(engine.reporterFaults).toBe(0);
+    expect(engine.lastReporterFault).toBeUndefined();
+
+    engine.setup(null);
+
+    // `setup()` raises the snapshot counter, so at least one report was
+    // delivered and at least one throw was contained.
+    expect(engine.reporterFaults).toBeGreaterThan(0);
+    expect(engine.lastReporterFault).toBe('onCount exploded');
+
+    const afterSetup = engine.reporterFaults;
+
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.reporterFaults).toBeGreaterThan(afterSetup);
+  });
+
+  it('describes a thrown value that carries no message', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      reporter: throwingCountReporter({ code: 'E_NO_MESSAGE' }),
+    });
+
+    engine.setup(null);
+
+    expect(engine.lastReporterFault).toBe('unreadable thrown value');
+  });
+
+  it('describes a thrown string and a thrown number', () => {
+    const thrownString = new Engine({
+      streams: streamsFor(),
+      reporter: throwingCountReporter('sink refused'),
+    });
+    const thrownNumber = new Engine({
+      streams: streamsFor(),
+      reporter: throwingCountReporter(7),
+    });
+
+    thrownString.setup(null);
+    thrownNumber.setup(null);
+
+    expect(thrownString.lastReporterFault).toBe('sink refused');
+    expect(thrownNumber.lastReporterFault).toBe('7');
+  });
+
+  it('contains a value whose own message read raises', () => {
+    const hostile = new Proxy(
+      {},
+      {
+        get(): never {
+          throw new Error('read trap');
+        },
+      },
+    );
+    const engine = new Engine({
+      streams: streamsFor(),
+      reporter: throwingCountReporter(hostile),
+    });
+
+    expect(() => {
+      engine.setup(null);
+    }).not.toThrow();
+    expect(engine.lastReporterFault).toBe('unreadable thrown value');
+  });
+
+  it('plays the same game a sink that behaves plays', () => {
+    // THE GAME-DOMAIN RESULT IS THE MEASURE. One engine reports to a sink that
+    // throws from every count, the other to a sink that records them; the two
+    // play the same scripted moves on the same seed and must agree on the
+    // board, the score and what they persist.
+    const hostile = new Engine({
+      streams: streamsFor(),
+      reporter: throwingCountReporter(),
+    });
+    const recording = createRecordingReporter();
+    const control = new Engine({
+      streams: streamsFor(),
+      reporter: recording.reporter,
+    });
+
+    hostile.setup(null);
+    control.setup(null);
+
+    const script: readonly Direction[] = [
+      DIRECTION_LEFT,
+      DIRECTION_UP,
+      DIRECTION_RIGHT,
+      DIRECTION_DOWN,
+      DIRECTION_LEFT,
+      DIRECTION_UP,
+    ];
+
+    for (const direction of script) {
+      expect(hostile.move(direction)).toBe(control.move(direction));
+    }
+
+    expect(hostile.serialize()).toEqual(control.serialize());
+    expect(hostile.score).toBe(control.score);
+    expect(hostile.currentTurn()).toBe(control.currentTurn());
+
+    // The ENGINE-OWNED counts the control sink took are the reports the hostile
+    // sink threw out of. The emitter and the bus report through the same sink
+    // and contain their own throws — the bus counts them on
+    // `HookBusMetrics.reporterFaults` — so this counter measures the engine's
+    // share and nothing else.
+    expect(hostile.reporterFaults).toBe(
+      engineMetricNamesOf(recording.counts).length,
+    );
+    expect(hostile.reporterFaults).toBeLessThan(recording.counts.length);
+  });
+
+  it('emits every event a sink that behaves emits', () => {
+    const seen: EngineEventName[] = [];
+    const engine = new Engine({
+      streams: streamsFor(),
+      reporter: throwingCountReporter(),
+    });
+
+    for (const event of ENGINE_EVENT_NAMES) {
+      engine.events.on(event, (): void => {
+        seen.push(event);
+      });
+    }
+
+    engine.setup(null);
+    engine.move(DIRECTION_LEFT);
+
+    expect(seen).toContain('state:commit');
+    expect(seen).toContain('move:before');
+  });
+
+  it('keeps the frozen best-score contract under a throwing sink', () => {
+    // AAP 0.8.3 V3: the port reports the raw string when a value is present,
+    // the promotion comparison relies on the relational coercion of it, and the
+    // committed value is the one re-read after the possible write. None of that
+    // may be disturbed by a sink that throws.
+    const recordingPort = createRecordingPort(null, '1000');
+    const commits: (string | 0)[] = [];
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: recordingPort.port,
+      reporter: throwingCountReporter(),
+    });
+
+    engine.events.on('state:commit', (payload): void => {
+      commits.push(payload.bestScore);
+    });
+
+    engine.setup(null);
+
+    expect(typeof commits[0]).toBe('string');
+    expect(commits[0]).toBe('1000');
+    expect(recordingPort.best).toBe('1000');
+    expect(engine.reporterFaults).toBeGreaterThan(0);
+  });
+
+  it('contains a throw from a port failure report', () => {
+    // `throughPort()` reports the failure from inside its own catch, so a sink
+    // that throws there replaced a contained port failure with an escaping
+    // report failure.
+    const engine = new Engine({
+      streams: streamsFor(),
+      storage: {
+        getBestScore(): string | 0 {
+          return 0;
+        },
+        setBestScore(): unknown {
+          return true;
+        },
+        getGameState(): unknown {
+          throw new Error('port refused the read');
+        },
+      },
+      reporter: throwingCountReporter(),
+    });
+
+    expect(() => {
+      engine.setup();
+    }).not.toThrow();
+    expect(engine.reporterFaults).toBeGreaterThan(0);
+  });
+
+  it('leaves the fault count at zero for a sink that behaves', () => {
+    const recording = createRecordingReporter();
+    const engine = new Engine({
+      streams: streamsFor(),
+      reporter: recording.reporter,
+    });
+
+    engine.setup(null);
+    engine.move(DIRECTION_LEFT);
+
+    expect(recording.counts.length).toBeGreaterThan(0);
+    expect(engine.reporterFaults).toBe(0);
+    expect(engine.lastReporterFault).toBeUndefined();
+  });
+
+  it('reports nothing and counts nothing for a sink with no onCount', () => {
+    const engine = new Engine({
+      streams: streamsFor(),
+      reporter: Object.freeze({}),
+    });
+
+    engine.setup(null);
+    engine.move(DIRECTION_LEFT);
+
+    expect(engine.reporterFaults).toBe(0);
   });
 });

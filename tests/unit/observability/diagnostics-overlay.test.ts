@@ -2484,3 +2484,83 @@ describe('a destroyed overlay', () => {
     expect(harness.overlay.available).toBe(false);
   });
 });
+
+/* ==========================================================================
+ * A host outside the declared type
+ * ========================================================================== */
+
+describe('a host that is not an element', () => {
+  /** Values a caller could supply where `Element | null` is declared. */
+  const NON_ELEMENT_HOSTS: readonly unknown[] = Object.freeze([
+    'not-an-element',
+    42,
+    true,
+    { nodeType: 1 },
+    [],
+  ]);
+
+  it('mounts nothing and throws from no member', () => {
+    for (const host of NON_ELEMENT_HOSTS) {
+      const overlay = createDiagnosticsOverlay({
+        metrics: createMetricsRegistry(),
+        document,
+        host: host as never,
+      });
+
+      try {
+        // Treated exactly as `null`: the declared way to disable mounting.
+        expect(overlay.mount()).toBe(false);
+        expect(overlay.available).toBe(false);
+        expect(overlay.isOpen()).toBe(false);
+
+        // Every member still answers, which is what `host: null` also does.
+        expect(() => {
+          overlay.open();
+          overlay.refresh();
+          overlay.toggle();
+          overlay.close();
+        }).not.toThrow();
+
+        // AND THE DATA MODEL IS WHOLE, which is the point of the surface: the
+        // export path is the substitute for a scraped metrics endpoint.
+        expect(overlay.snapshot().metrics.series.length).toBeGreaterThan(0);
+        expect(overlay.toPrometheusText().length).toBeGreaterThan(0);
+        expect(JSON.parse(overlay.snapshotJson())).toBeDefined();
+      } finally {
+        overlay.destroy();
+      }
+
+      // The fixture host the suite's `beforeEach` declares is left alone:
+      // nothing was created beside it and nothing was rendered into it, which
+      // is what a disabled host means.
+      expect(document.querySelectorAll('#diagnostics-overlay')).toHaveLength(1);
+      expect(hostText()).toBe('');
+    }
+  });
+
+  it('adopts an element from another realm by its surface', () => {
+    // DUCK-TYPED, so a host built in an iframe document or by another DOM
+    // implementation is still adopted.
+    const host = document.createElement('div');
+
+    document.body.appendChild(host);
+
+    const overlay = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      host,
+    });
+
+    try {
+      expect(overlay.mount()).toBe(true);
+      expect(overlay.available).toBe(true);
+
+      overlay.open();
+
+      expect(overlay.isOpen()).toBe(true);
+    } finally {
+      overlay.destroy();
+      host.remove();
+    }
+  });
+});

@@ -534,7 +534,9 @@ export interface DiagnosticsOverlayOptions {
 
   /**
    * Host element, already resolved. `null` disables the overlay, and `mount()`
-   * creates nothing for it.
+   * creates nothing for it. A supplied value that does not carry the element
+   * surface this module reads is treated exactly as `null`: the overlay mounts
+   * nothing and its whole data model stays available.
    */
   readonly host?: Element | null;
 
@@ -830,6 +832,31 @@ function resolveDocument(
 }
 
 /**
+ * Whether a value carries the element surface this module reads.
+ *
+ * DUCK-TYPED, not `instanceof`: a host may come from another realm — an iframe
+ * document, a `jsdom` window a test built — where `Element` is a different
+ * constructor. The three members tested are the ones every host path here
+ * calls.
+ *
+ * @param value Value to test.
+ * @returns Whether the value can be treated as the host element.
+ */
+function isElementLike(value: unknown): value is Element {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const candidate = value as Partial<Element>;
+
+  return (
+    typeof candidate.setAttribute === 'function' &&
+    typeof candidate.hasAttribute === 'function' &&
+    typeof candidate.querySelectorAll === 'function'
+  );
+}
+
+/**
  * Whether a value is an element with an inline style declaration.
  *
  * @param value Value to test.
@@ -910,9 +937,16 @@ function clear(element: Element): void {
 function isHidden(element: Element): boolean {
   const candidate = (element as Partial<HTMLElement>).hidden;
 
-  return typeof candidate === 'boolean'
-    ? candidate
-    : element.hasAttribute('hidden');
+  if (typeof candidate === 'boolean') {
+    return candidate;
+  }
+
+  // READ ONLY WHERE IT IS CALLABLE. `applyVisibility` reaches this from outside
+  // the guard `setHidden` wraps its own writes in, so a node without the
+  // attribute reader raised out of `open()` from here.
+  return typeof element.hasAttribute === 'function'
+    ? element.hasAttribute('hidden')
+    : false;
 }
 
 /**
@@ -1378,7 +1412,16 @@ export function createDiagnosticsOverlay(
   options: DiagnosticsOverlayOptions,
 ): DiagnosticsOverlay {
   const owner = resolveDocument(options.document);
-  const explicitHost = options.host;
+  // SETTLED AT THE BOUNDARY. `host` is declared as `Element | null`, and a
+  // value that is neither was adopted as the host and then raised out of the
+  // first member that read a DOM member off it. Anything but an element-like
+  // value becomes `null`, which is the declared way to disable mounting.
+  const explicitHost: Element | null | undefined =
+    options.host === undefined
+      ? undefined
+      : isElementLike(options.host)
+        ? options.host
+        : null;
   const selector = options.selector ?? DIAGNOSTICS_OVERLAY_SELECTOR;
   const metrics = options.metrics;
   const logger = options.logger ?? null;

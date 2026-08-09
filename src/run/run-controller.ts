@@ -43,6 +43,16 @@
  *   an admitted one fired on no hook and was erased by the next commit's
  *   projection.
  *
+ * ONE REGISTRATION STEP, AND ONE ROUND CLOSURE
+ *   `selectReward()` — the method a reward screen presses — takes the relic on
+ *   through that SAME `takeRelicOn()` step, and both it and `resolveReward()`
+ *   finish through `closeRewardRound()`, which clears the offer and performs the
+ *   one stage advance a cleared stage is owed. Neither path can therefore keep a
+ *   relic without advancing the run nor advance the run without keeping the
+ *   relic: `selectReward()` used to reach for an activation member the registry's
+ *   own port does not publish and advance on a synthetic record, and
+ *   `resolveReward()` used to keep the relic on a stage that never advanced.
+ *
  * NO CLOCK ON THE PLAY PATH, NO DOM
  *   The time source `originateRunSeed()` falls back to is read only while
  *   minting a seed, never while a turn resolves. Nothing here reads the
@@ -675,6 +685,17 @@ export interface RunEnginePort {
 export type EngineEventSource = Pick<EngineEvents, 'on'>;
 
 /**
+ * The four move directions, as `EnginePort.move` accepts them.
+ *
+ * DECLARED HERE, NOT IMPORTED, for the same reason every other member of these
+ * ports is: this folder names src/engine's types structurally. Identical to
+ * `Direction` of src/engine/types.ts — 0 up, 1 right, 2 down, 3 left — so an
+ * engine satisfies the port and a caller cannot reach the engine with a fifth
+ * value through this declaration.
+ */
+export type MoveDirection = 0 | 1 | 2 | 3;
+
+/**
  * The slice of the engine a run START drives, beyond the observation surface.
  *
  * `Engine` in src/engine/engine.ts satisfies this structurally; nothing imports
@@ -690,8 +711,16 @@ export interface EnginePort extends RunEnginePort {
   /** Discards the board in progress and opens a fresh one. */
   restart(): void;
 
-  /** Resolves one turn. Reports whether the board changed. */
-  move(direction: number): boolean;
+  /**
+   * Resolves one turn. Reports whether the board changed.
+   *
+   * NARROWED TO THE FOUR DIRECTIONS, not `number`: a port widening the engine's
+   * own parameter type made an out-of-contract direction reachable through this
+   * declaration without a type error, and the engine assumed the narrowed union.
+   * `MoveDirection` restates `Direction` of src/engine/types.ts rather than
+   * importing a value from it, keeping this folder's ports structural.
+   */
+  move(direction: MoveDirection): boolean;
 
   /** Whether the engine refuses further moves. */
   isGameTerminated(): boolean;
@@ -724,9 +753,11 @@ export interface RelicRegistryPort {
    * position, seeds its budget and its state slot, and binds its handlers so the
    * hook bus dispatches to it from the next dispatch onwards.
    *
-   * THE ACTIVATION STEP. `resolveRelic` only reads; this is what makes a chosen
-   * relic actually fire. A registry without it can record a reward but cannot
-   * make it take effect, which is the defect this member closes.
+   * THE ACTIVATION STEP, under the second of the two names it may be published
+   * as. `resolveRelic` only reads; this is what makes a chosen relic actually
+   * fire. `takeRelicOn()` reads `pickUpRelic` first and this next, so a registry
+   * publishing either has its relics registered — and a registry publishing
+   * neither can record a reward but cannot make it take effect.
    *
    * @param relicId Identifier of the relic to take on.
    * @returns The entry to persist, or `null` where the identifier is unknown,
@@ -931,6 +962,9 @@ const NO_OFFER: readonly RewardOffer[] = Object.freeze([]);
 
 /** The stage index recorded while no offer stands. */
 const NO_OFFER_STAGE = -1;
+
+/** The stage index recorded while the engine has reported starting none. */
+const NO_STARTED_STAGE = -1;
 
 /**
  * Copies one persisted relic entry, detaching its state slot by structural copy.
@@ -1261,6 +1295,33 @@ export class RunController {
    */
   private offerStageIndex: number;
 
+  /**
+   * The relic the reward round in force was resolved with, and `null` while no
+   * round has been resolved.
+   *
+   * WHAT SEPARATES A RESOLVED ROUND FROM NO ROUND AT ALL. An accepted selection
+   * clears the offer and the offered identifiers together, so neither of those
+   * can answer "was this round already resolved?" afterwards: reading them
+   * reported `'no-offer'` for a double-clicked card and `'already-resolved'` for
+   * an offer that had been recorded and never drawn. Cleared whenever a new
+   * round opens — a fresh draw, a recorded offer, a begun or started run, a
+   * finished one.
+   */
+  private resolvedRelicId: string | null;
+
+  /**
+   * The stage index the ENGINE last reported starting, and `-1` while it has
+   * reported none.
+   *
+   * WHAT MAKES A STAGE OPEN IDEMPOTENT. Two collaborators can open the stage a
+   * cleared one advanced to — the commit handler, and `completeReward()` closing
+   * the reward that gated it — and both opening it dispatched `onStageStart`
+   * twice for one stage, so every per-stage relic effect applied twice. Recorded
+   * from the engine's own `stage:start`, so it names the stage the engine
+   * actually began rather than the one this controller intended to begin.
+   */
+  private startedStageIndex: number;
+
   /** The envelope in force. Replaced wholesale; never mutated in place. */
   private current: RunState;
 
@@ -1324,6 +1385,8 @@ export class RunController {
     this.offeredRelicIds = [];
     this.offer = NO_OFFER;
     this.offerStageIndex = NO_OFFER_STAGE;
+    this.resolvedRelicId = null;
+    this.startedStageIndex = NO_STARTED_STAGE;
     this.current = this.freshState(this.identity.runId);
     this.stageCleared = false;
     this.resolvingStage = false;
@@ -1430,9 +1493,17 @@ export class RunController {
     this.offer = NO_OFFER;
     this.offerStageIndex = NO_OFFER_STAGE;
 
+    // No round of THIS run has been resolved and no stage of it has been opened
+    // yet, whichever run the instance was reporting on before.
+    this.resolvedRelicId = null;
+    this.startedStageIndex = NO_STARTED_STAGE;
+
     // The relics of an adopted envelope are handed back to the registry so the
     // hook bus dispatches to them in the pickup order they were saved in. An
-    // envelope that was not adopted hands back the fresh, empty list.
+    // envelope that was not adopted hands back the fresh, empty list — which
+    // DISCARDS anything a registry was holding before this call, because the
+    // envelope is the authority for what a run holds. See `restoreHeldRelics()`
+    // for where a relic may be taken on.
     this.restoreRelics();
 
     // The seed and the cursors the run will actually be played under are known
@@ -1476,6 +1547,15 @@ export class RunController {
    * Idempotent and total: the registry's own `restore` drops whatever it held
    * first, so calling this twice leaves the same set held, and a registry that
    * raises is reported rather than left to raise out of composition.
+   *
+   * THE ENVELOPE IS THE AUTHORITY, so this — and the `begin()` that precedes it —
+   * makes the live registry agree with the envelope and DISCARDS anything the
+   * registry held that the envelope does not carry. A relic must therefore be
+   * taken on through the reward transaction (`selectReward()` /
+   * `resolveReward()`), which records it in the envelope as it registers it, or
+   * be restored from an envelope by this call after `begin()`; one picked up on
+   * the registry directly before `begin()` belongs to no run and does not
+   * survive it.
    */
   restoreHeldRelics(): void {
     this.restoreRelics();
@@ -1807,6 +1887,12 @@ export class RunController {
    */
   observe(engine: RunEnginePort, cursors: () => RngCursorMap): () => void {
     const stopStageStart = engine.events.on('stage:start', (event): void => {
+      // WHICH STAGE THE ENGINE HAS OPEN, recorded from the engine's own emission
+      // so a second opener can tell that this stage is already begun. Two
+      // collaborators can open the stage a cleared one advanced to, and both
+      // opening it dispatched `onStageStart` twice for one stage.
+      this.startedStageIndex = event.stageIndex;
+
       // THE BOARD READER IS ATTACHED HERE, not at subscription. A stage start is
       // the first moment the engine holds a board of this run — it is emitted
       // before the commit `setup()` ends with — and until then the engine's
@@ -2019,6 +2105,10 @@ export class RunController {
     // this at `NO_OFFER_STAGE` and no selection can be attributed to it.
     this.offerStageIndex = this.current.stageIndex;
 
+    // A NEW ROUND, so the round previously resolved is no longer the one a
+    // selection would be reporting against.
+    this.resolvedRelicId = null;
+
     // THE OFFER ITSELF IS REPORTABLE, not only the selection made from it: an
     // offer drawn and never taken is exactly the case a bare selection counter
     // cannot see, and it is the one that says a reward screen was reached.
@@ -2046,24 +2136,36 @@ export class RunController {
   }
 
   /**
-   * Resolves the reward: validates the choice, activates it, persists it, and
-   * opens the next stage.
+   * Resolves the reward: validates the choice, takes the relic on LIVE,
+   * persists it, and opens the next stage.
    *
    * ONE TRANSACTION, and the only path a relic enters a run by. Every step is
    * ordered so a refusal at any point leaves the run exactly as it was:
    *
-   *   1  an offer must be standing, or the selection is `'no-offer'`;
+   *   1  an offer must be standing, or the selection is `'no-offer'` — or
+   *      `'already-resolved'` where this round has already been resolved;
    *   2  the identifier must be one of the offered ones, or `'not-offered'` —
    *      which is what stops a corrupted store or a caller reaching past the
    *      screen from activating a relic that was never offered;
-   *   3  the registry must accept the activation, or `'unknown-relic'`;
+   *   3  the registry must take the relic on, or `'unknown-relic'`;
    *   4  the envelope must accept the relic, or `'refused'`;
-   *   5  only then is the offer cleared, the stage advanced, the next stage
+   *   5  the live registry must agree that it holds it, or `'refused'` with the
+   *      append withdrawn;
+   *   6  only then is the offer cleared, the stage advanced, the next stage
    *      opened on the engine, and the envelope written.
    *
-   * SINGLE-USE. The offer is cleared by the accepted selection, so a second
-   * call reports `'already-resolved'` and changes nothing — a double-clicked
-   * card cannot take two relics or advance two stages.
+   * THE RELIC IS TAKEN ON THROUGH `takeRelicOn()`, the same registration step
+   * `resolveReward()` uses, so the entry persisted is the one the registry
+   * produced by REGISTERING the relic with the hook bus. Previously this path
+   * called an activation member the registry's own port does not publish, so it
+   * recorded a synthetic entry, registered nothing, and the next commit's
+   * projection of the registry erased it: a run could clear stages, be offered
+   * relics, select them, advance, and hold nothing.
+   *
+   * SINGLE-USE. The offer is cleared by the accepted selection and the round is
+   * recorded as resolved, so a second call reports `'already-resolved'` and
+   * changes nothing — a double-clicked card cannot take two relics or advance
+   * two stages.
    *
    * @param relicId Identifier the player chose.
    * @param engine Engine to open the next stage on. Omit it to advance the run's
@@ -2073,9 +2175,14 @@ export class RunController {
    */
   selectReward(relicId: string, engine?: RunEnginePort): RewardSelection {
     if (this.offer.length === 0) {
+      // WHAT WAS RESOLVED, NOT WHAT WAS OFFERED. An accepted selection clears
+      // the offer and the offered identifiers together, so reading the offered
+      // list here reported `'no-offer'` for the double-clicked card this code
+      // exists to describe and `'already-resolved'` for an offer that had been
+      // recorded and never drawn.
       return this.refuseSelection(
         relicId,
-        this.offeredRelicIds.length > 0 ? 'already-resolved' : 'no-offer',
+        this.resolvedRelicId === null ? 'no-offer' : 'already-resolved',
       );
     }
 
@@ -2086,34 +2193,35 @@ export class RunController {
       return this.refuseSelection(relicId, 'not-offered');
     }
 
-    const activated = this.activate(relicId);
+    // LIVE FIRST, exactly as `resolveReward()` does it: the entry appended below
+    // is the one the registry produced by taking the relic on, so the persisted
+    // record is a consequence of the registration rather than bookkeeping beside
+    // it.
+    const activated = this.takeRelicOn(relicId);
 
     if (activated === null) {
       return this.refuseSelection(relicId, 'unknown-relic');
     }
 
+    const held = this.current.relics;
+
     if (!this.appendRelic(relicId, activated)) {
+      return this.refuseSelection(relicId, 'refused');
+    }
+
+    // The live registry is asked whether it agrees, and one that does not has
+    // its append WITHDRAWN, so the persisted list and the live registrations can
+    // never disagree about which relics a run holds.
+    if (!this.registryHolds(relicId)) {
+      this.current = { ...this.current, relics: held };
+
       return this.refuseSelection(relicId, 'refused');
     }
 
     const offered = this.offeredRelicIds;
 
-    // EXACTLY ONE ADVANCE PER CLEARED STAGE. `stage:end` advances during its own
-    // emission where an engine is observing, so the index has already moved by
-    // the time a card is pressed; a controller driven with no engine observing
-    // reaches here on the index the offer was drawn at. Advancing only in the
-    // second case is what keeps a selection from skipping a stage.
-    const alreadyAdvanced = this.current.stageIndex !== this.offerStageIndex;
-
-    // Cleared BEFORE the stage advances, so nothing reached from the advance can
-    // select a second time.
-    this.offer = NO_OFFER;
-    this.offerStageIndex = NO_OFFER_STAGE;
-    this.offeredRelicIds = [];
-
-    if (!alreadyAdvanced) {
-      this.advanceStage();
-    }
+    // Clears the offer and performs the one advance the cleared stage is owed.
+    this.closeRewardRound(relicId);
 
     if (engine !== undefined) {
       this.openNextStage(engine);
@@ -2159,6 +2267,12 @@ export class RunController {
     const admitted = this.admitOffer(relicIds);
 
     this.offeredRelicIds = admitted ?? [];
+
+    // A RECORDED OFFER OPENS A ROUND, so whatever round was resolved before it
+    // is no longer the one a selection reports against: a selection made while
+    // this offer stands and no draw has been performed is `'no-offer'`, not
+    // `'already-resolved'`.
+    this.resolvedRelicId = null;
 
     if (admitted === null) {
       this.reportReward(undefined, false, 'offer');
@@ -2247,11 +2361,62 @@ export class RunController {
     }
 
     // CLEARED ONLY ON SUCCESS, so a refused pick leaves the same three cards
-    // standing and the player can choose again.
-    this.offeredRelicIds = [];
+    // standing and the player can choose again. A DRAWN offer is closed with the
+    // one advance its cleared stage is owed: without that advance this path kept
+    // the relic and left the run on the stage it had already cleared, with a
+    // reward still reported as pending, so it could never reach the next stage.
+    this.closeRewardRound(relicId);
+
+    // THE PICKUP IS PERSISTED BY THE TRANSACTION THAT MADE IT. Previously the
+    // write that carried a chosen relic to storage was the commit of the stage
+    // start that followed, so a reward resolved without a stage start after it —
+    // which is every reward whose stage was already open — was held live and
+    // never persisted, and a reload dropped it.
+    this.write();
     this.reportReward(relicId, true, null);
 
     return Object.freeze({ accepted: true, refusal: null });
+  }
+
+  /**
+   * Closes the reward round one accepted selection resolved.
+   *
+   * THE HALF OF THE TRANSACTION THAT MOVES THE RUN, shared by both public
+   * selection methods so neither can perform one half of it. Three things
+   * happen, in this order:
+   *
+   *   - the round is recorded as RESOLVED, which is what lets a second call on
+   *     the same round report `'already-resolved'` rather than reading the
+   *     cleared offer and reporting `'no-offer'`;
+   *   - the offer standing is cleared BEFORE the advance, so nothing reached
+   *     from the advance can select a second time;
+   *   - the stage advances, but only where it has not advanced already.
+   *
+   * EXACTLY ONE ADVANCE PER CLEARED STAGE. `stage:end` advances during its own
+   * emission where no reward gates the transition, so the index has already
+   * moved by the time a card is pressed; where a draw port IS injected that
+   * subscriber withholds the advance and the index still stands at the one the
+   * offer was drawn at. Comparing the two is what distinguishes them, and
+   * advancing only in the second case is what keeps a selection from skipping a
+   * stage — and what stops a recorded-but-undrawn offer, which belongs to a
+   * stage that already advanced, from advancing a second time.
+   *
+   * @param relicId Identifier the accepted selection took on.
+   */
+  private closeRewardRound(relicId: string): void {
+    const drawnOffer = this.offer.length > 0;
+    const pendingAdvance =
+      drawnOffer && this.current.stageIndex === this.offerStageIndex;
+
+    this.resolvedRelicId = relicId;
+
+    this.offer = NO_OFFER;
+    this.offerStageIndex = NO_OFFER_STAGE;
+    this.offeredRelicIds = [];
+
+    if (pendingAdvance) {
+      this.advanceStage();
+    }
   }
 
   /**
@@ -2313,10 +2478,10 @@ export class RunController {
    * the advance moved to. Nothing else starts that stage, which is why a run
    * that only advanced its index never dispatched `onStageStart` again.
    *
-   * THE RELIC IS PERSISTED BY THE STAGE START, not by a write of its own. The
-   * commit `startStage()` ends with runs `onCommit`, whose write carries the
-   * envelope including the relic just appended — so the pickup and the stage it
-   * was won in reach storage together rather than one without the other.
+   * THE RELIC IS PERSISTED BY `resolveReward()` ITSELF, so the pickup and the
+   * stage it was won in reach storage together whether or not a stage start
+   * follows. Where one does, the commit `startStage()` ends with writes the same
+   * envelope again from the board that stage opened on.
    *
    * A REFUSED SELECTION STILL STARTS THE STAGE. The stage was cleared and the
    * index already advanced, so withholding the start would strand the run
@@ -2330,10 +2495,18 @@ export class RunController {
   completeReward(engine: RunEnginePort, relicId: string): RewardResolution {
     const resolution = this.resolveReward(relicId);
 
-    // The port declares it optional, so an engine that does not implement stage
-    // transitions leaves the index advanced and begins nothing — which is what a
-    // double that only observes does.
-    engine.startStage?.();
+    // ONE START PER STAGE. Where nothing gated the transition the commit that
+    // resolved the stage has already opened the stage that follows, and starting
+    // it again dispatched `onStageStart` twice for one stage — which applied
+    // every per-stage relic effect twice. The engine's own `stage:start` records
+    // which stage is open, and a stage already open is not reopened.
+    //
+    // The port declares `startStage` optional, so an engine that does not
+    // implement stage transitions leaves the index advanced and begins nothing —
+    // which is what a double that only observes does.
+    if (this.startedStageIndex !== this.current.stageIndex) {
+      engine.startStage?.();
+    }
 
     return resolution;
   }
@@ -2431,43 +2604,6 @@ export class RunController {
   }
 
   /**
-   * Activates one relic through the registry, containing a throw.
-   *
-   * @param relicId Identifier to activate.
-   * @returns The entry to persist, or `null` where the registry refused it. A
-   *   controller with no registry port persists the bare identifier, so the
-   *   reward flow is exercisable without one.
-   */
-  private activate(relicId: string): PersistedRelic | null {
-    const activate = this.registry?.activateRelic;
-
-    if (activate === undefined) {
-      return { id: relicId };
-    }
-
-    try {
-      const entry = activate(relicId);
-
-      if (entry === null || typeof entry !== 'object') {
-        return null;
-      }
-
-      // The identifier the player chose wins over the one the registry reported,
-      // so a registry cannot substitute a different relic.
-      return { ...entry, id: relicId };
-    } catch (error) {
-      this.reporter.onWriteFailed?.({
-        correlationId: this.readRunCorrelationId(),
-        key: RUN_STATE_KEY,
-        byteLength: 0,
-        error,
-      });
-
-      return null;
-    }
-  }
-
-  /**
    * Identifiers of the relics held, from the registry where it reports them and
    * from the envelope otherwise.
    *
@@ -2540,6 +2676,11 @@ export class RunController {
     this.offerStageIndex = NO_OFFER_STAGE;
     this.stageCleared = false;
     this.ended = false;
+
+    // A started run has resolved no reward round and has had no stage opened
+    // yet: the `setup()` this call drives is what opens its first one.
+    this.resolvedRelicId = null;
+    this.startedStageIndex = NO_STARTED_STAGE;
 
     // The board this run opens on, which `board()` and `openingBoard()` both
     // report so a caller that composed the engine separately opens the same
@@ -2759,6 +2900,12 @@ export class RunController {
    * snapshot the engine holds is handed straight back to it and the tiles in play
    * survive into the new stage.
    *
+   * IDEMPOTENT PER STAGE. A stage the engine has already reported starting is
+   * not reopened, so a caller that reaches this after the commit path has
+   * already opened the stage — or after `completeReward()` has — cannot dispatch
+   * `onStageStart` a second time for one stage and double-apply every per-stage
+   * relic effect.
+   *
    * @param engine The engine to open the stage on.
    * @returns Whether a stage was opened.
    */
@@ -2766,6 +2913,10 @@ export class RunController {
     const start = engine.startStage;
 
     if (start === undefined) {
+      return false;
+    }
+
+    if (this.startedStageIndex === this.current.stageIndex) {
       return false;
     }
 
@@ -3081,13 +3232,14 @@ export class RunController {
    *
    * THE REGISTRATION STEP, whichever member carries it: it is what puts the
    * relic's handlers on the hook bus, so the relic fires from the next hook
-   * onwards. Two spellings are accepted, tried in this order —
+   * onwards. Three spellings are accepted, tried in this order —
    * `pickUpRelic`, which registers AND returns the entry to persist, so the
-   * record is exactly what the registry accepted; then `pickUp`, whose entry is
-   * read back through `resolveRelic`. A registry publishing NEITHER cannot
-   * register anything, and the entry falls back to `resolveRelic` and then to the
-   * bare identifier, which is the form a relic carrying neither charges nor state
-   * persists as.
+   * record is exactly what the registry accepted; then `activateRelic`, the
+   * same step under the other name a port may publish it as; then `pickUp`,
+   * whose entry is read back through `resolveRelic`. A registry publishing NONE
+   * of them cannot register anything, and the entry falls back to
+   * `resolveRelic` and then to the bare identifier, which is the form a relic
+   * carrying neither charges nor state persists as.
    *
    * The identifier the caller chose always wins over the one the registry
    * reported, so a registry cannot substitute a different relic.
@@ -3097,7 +3249,11 @@ export class RunController {
    */
   private takeRelicOn(relicId: string): PersistedRelic | null {
     const registry = this.registry;
-    const takeAndRead = registry?.pickUpRelic;
+
+    // `activateRelic` accepted here as well as `pickUpRelic`, because
+    // `selectReward()` now reaches the registry through this one method and
+    // src/main.ts's port publishes the activation step under that name.
+    const takeAndRead = registry?.pickUpRelic ?? registry?.activateRelic;
 
     if (takeAndRead !== undefined) {
       try {
@@ -3342,10 +3498,13 @@ export class RunController {
     this.stageCleared = false;
 
     // A finished run holds no pending reward: the offer it was showing belonged
-    // to the run that has just ended.
+    // to the run that has just ended, as did any round it resolved and any stage
+    // it had open.
     this.offer = NO_OFFER;
     this.offerStageIndex = NO_OFFER_STAGE;
     this.offeredRelicIds = [];
+    this.resolvedRelicId = null;
+    this.startedStageIndex = NO_STARTED_STAGE;
 
     this.reporter.onRunEnded?.({
       correlationId: this.readRunCorrelationId(),

@@ -549,6 +549,44 @@ function isWebGLProbeView(value: unknown): value is WebGLProbeView {
 }
 
 /**
+ * Reduces a settings bag to one this module can read from.
+ *
+ * TOTAL. A default parameter stands in for `undefined` ALONE, so an explicit
+ * `null` — and any other value that is not an object — reached the reads that
+ * follow it and raised out of a member this class documents as never throwing.
+ * Anything that is not an object becomes the empty bag, which is the same
+ * reading an omitted argument gives.
+ *
+ * @param options The supplied bag, whatever it is.
+ * @returns The bag, or an empty one.
+ */
+function settingsOf<T extends object>(options: T): T {
+  return isRecord(options) ? options : ({} as T);
+}
+
+/**
+ * Reads the one member `HealthCheckOptions` carries.
+ *
+ * TOTAL, in both directions: a bag that is not an object yields `false`, and a
+ * bag whose `refresh` getter raises is contained rather than raising out of the
+ * member that read it.
+ *
+ * @param options The supplied bag, whatever it is.
+ * @returns Whether the held Web Storage result is to be discarded.
+ */
+function refreshRequested(options: HealthCheckOptions): boolean {
+  if (!isRecord(options)) {
+    return false;
+  }
+
+  try {
+    return options.refresh === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Reads a monotonic clock, matching the guarded idiom
  * src/observability/metrics.ts uses.
  *
@@ -1154,26 +1192,29 @@ export class HealthSurface {
    *   library.
    */
   constructor(options: HealthSurfaceOptions = {}) {
+    // READ THROUGH `settingsOf`, because the default above stands in for an
+    // omitted argument alone: an explicit `null` reached the six reads below.
+    const supplied = settingsOf(options);
     const base =
-      options.logger ?? createLogger({ subsystem: HEALTH_SUBSYSTEM });
+      supplied.logger ?? createLogger({ subsystem: HEALTH_SUBSYSTEM });
 
     this.logger = base.child(HEALTH_SUBSYSTEM);
     this.metrics =
-      options.metrics ?? createMetricsRegistry({ logger: this.logger });
-    this.storageState = isStorageStateView(options.storage)
-      ? options.storage
+      supplied.metrics ?? createMetricsRegistry({ logger: this.logger });
+    this.storageState = isStorageStateView(supplied.storage)
+      ? supplied.storage
       : undefined;
     this.storageProbe =
-      typeof options.storageProbe === 'function'
-        ? options.storageProbe
+      typeof supplied.storageProbe === 'function'
+        ? supplied.storageProbe
         : probeWebStorage;
     this.pointerProbe =
-      typeof options.pointerProbe === 'function'
-        ? options.pointerProbe
+      typeof supplied.pointerProbe === 'function'
+        ? supplied.pointerProbe
         : detectPointerEventFamily;
     this.webglProbe =
-      typeof options.webglProbe === 'function'
-        ? options.webglProbe
+      typeof supplied.webglProbe === 'function'
+        ? supplied.webglProbe
         : probeWebGLSupport;
   }
 
@@ -1197,7 +1238,7 @@ export class HealthSurface {
    *   `HEALTH_CHECK_COUNT` results in `HEALTH_CHECK_IDS` order.
    */
   check(options: HealthCheckOptions = {}): HealthReport {
-    const refresh = options.refresh === true;
+    const refresh = refreshRequested(options);
     const startedAt = monotonicNow();
     const checks: HealthCheckResult[] = [];
     const counts: Record<HealthStatus, number> = {
@@ -1244,7 +1285,7 @@ export class HealthSurface {
     id: HealthCheckId,
     options: HealthCheckOptions = {},
   ): HealthCheckResult {
-    const evaluated = this.evaluate(id, options.refresh === true);
+    const evaluated = this.evaluate(id, refreshRequested(options));
 
     this.publish(evaluated);
 
@@ -1262,7 +1303,7 @@ export class HealthSurface {
   report(options: HealthCheckOptions = {}): HealthReport {
     const held = this.latest;
 
-    if (held !== null && options.refresh !== true) {
+    if (held !== null && !refreshRequested(options)) {
       return held;
     }
 
@@ -1649,5 +1690,5 @@ function toProbeView(result: HealthCheckResult): HealthProbeView {
 export function createHealthSurface(
   options: HealthSurfaceOptions = {},
 ): HealthSurface {
-  return new HealthSurface(options);
+  return new HealthSurface(settingsOf(options));
 }

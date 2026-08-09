@@ -39,8 +39,10 @@ import { createRngStreams } from '../../../src/rng/rng-streams';
 import {
   RunController,
   resolveRunIdentity,
+  type RewardOffer,
   type RunScope,
 } from '../../../src/run/run-controller';
+import { drawRelicOffers } from '../../../src/relics/relic-draw';
 import {
   RELIC_CATALOGUE,
   RelicRegistry,
@@ -2403,5 +2405,547 @@ describe('activating a relic', () => {
 
     expect(outcome.consumed).toBe(0);
     expect(outcome.persisted).toBe(false);
+  });
+});
+
+/* ==========================================================================
+ * 17. The reward transaction with a seeded draw port (wiring A)
+ *
+ * THE WIRING THE CONTROLLER AUTO-DRIVES, and the one src/main.ts composes: a
+ * real `RelicRegistry` reached through `runPort()` AND a seeded draw port, so a
+ * cleared stage draws its own offer and `selectReward()` closes it. Every case
+ * below asserts the LIVE REGISTRY and the LIVE BUS as well as the returned
+ * outcome, because a selection can report `'accepted'` while the registry holds
+ * nothing and the next commit's projection erases the record.
+ * ========================================================================== */
+
+/** One composed run with a registry port and a seeded draw port. */
+interface ComposedWithRewards extends ComposedWithRelics {
+  /** Identifiers the bus is dispatching to, in pickup order. */
+  readonly busSubscriberIds: () => readonly string[];
+}
+
+/**
+ * Composes storage, store, controller, registry, substreams and engine with a
+ * seeded draw port bound, in the order src/main.ts uses.
+ *
+ * The registry is bound through `runPort()` rather than as the instance, which
+ * is the route src/relics/relic-registry.ts documents as the one between the
+ * two folders — and the route on which a selected relic used to be lost.
+ */
+function composeWithRewards(
+  options: ComposeOptions = {},
+): ComposedWithRewards {
+  const backing = options.backing ?? new MemoryStorage();
+  const manager = new LocalStorageManager({ storage: backing });
+  const config = createDefaultRulesConfig();
+  const stages = createDefaultStageConfig();
+  const { reports, reporter } = createRecorder();
+
+  const issued: string[] = [];
+  let next = 0;
+  const createToken = (): string => {
+    const token = options.tokens?.[next] ?? `token-${String(next)}`;
+
+    next += 1;
+    issued.push(token);
+
+    return token;
+  };
+
+  const identity = resolveRunIdentity({
+    storage: manager,
+    createToken,
+    seed: options.seed ?? 'wiring-a',
+  });
+
+  const holder: { controller: RunController | null } = { controller: null };
+
+  const engine = new Engine({
+    config,
+    stages,
+    streams: createRngStreams(identity.seed, {}),
+    storage: manager,
+    stageContext: () =>
+      holder.controller?.stageContext() ?? {
+        stageIndex: 0,
+        goal: stages.ladder[0],
+        goalProgress: 0,
+      },
+    relicContext: () => holder.controller?.relicContext() ?? [],
+  });
+
+  const registry = new RelicRegistry({
+    bus: engine.hooks,
+    catalogue: RELIC_CATALOGUE,
+  });
+
+  let streams: ReturnType<typeof createRngStreams> | null = null;
+
+  const controller = new RunController({
+    store: new RunStateStore({ storage: manager, config, reporter }),
+    identity,
+    config,
+    stages,
+    createToken,
+    reporter,
+
+    // THE DOCUMENTED ROUTE between the two folders, not the instance.
+    relics: registry.runPort(),
+
+    // The seeded draw, which is what makes the cleared stage offer a reward of
+    // its own instead of waiting for a caller to record one.
+    rewards: {
+      draw: ({ count, ownedIds }): readonly RewardOffer[] =>
+        streams === null
+          ? []
+          : drawRelicOffers({
+              pool: registry.catalogue(),
+              ownedIds,
+              count,
+              streams,
+            }).map((relic): RewardOffer => ({
+              id: relic.id,
+              name: relic.name,
+              rarity: relic.rarity,
+              description: relic.description,
+              hooks: Object.keys(relic.hooks),
+              ...(relic.charges === undefined ? {} : { charges: relic.charges }),
+            })),
+    },
+  });
+
+  holder.controller = controller;
+  controller.begin();
+
+  const live = createRngStreams(controller.seed(), controller.cursors());
+
+  streams = live;
+
+  const stop = controller.observe(engine, () => live.snapshotCursors());
+
+  if (options.setup !== false) {
+    engine.setup(mergeReadyBoard());
+  }
+
+  return {
+    backing,
+    manager,
+    config,
+    stages,
+    controller,
+    engine,
+    reports,
+    tokens: issued,
+    stop,
+    registry,
+    busSubscriberIds: (): readonly string[] =>
+      engine.hooks.subscribers().map((subscriber): string => subscriber.id),
+  };
+}
+
+/**
+ * A board whose first move LEFT merges 8 + 8 into 16, which is the first ladder
+ * goal — so one move clears stage 0 and the reward round opens.
+ */
+function mergeReadyBoard(): SerializedGameState {
+  const size = 4;
+  const cells: ({ position: { x: number; y: number }; value: number } | null)[][] =
+    [];
+
+  for (let x = 0; x < size; x += 1) {
+    const column: ({ position: { x: number; y: number }; value: number } | null)[] =
+      [];
+
+    for (let y = 0; y < size; y += 1) {
+      column.push(
+        y === 0 && x < 2 ? { position: { x, y }, value: 8 } : null,
+      );
+    }
+
+    cells.push(column);
+  }
+
+  return {
+    grid: { size, cells },
+    score: 0,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  };
+}
+
+describe('a reward drawn by the run and taken through selectReward', () => {
+  it('offers a reward and holds the stage until the card is pressed', () => {
+    const { controller, engine } = composeWithRewards();
+
+    engine.move(DIRECTION_LEFT);
+
+    // The clear draws its own offer, and the stage waits on the player.
+    expect(controller.isRewardPending()).toBe(true);
+    expect(controller.currentOffer()).toHaveLength(3);
+    expect(controller.stageIndex()).toBe(0);
+  });
+
+  it('takes the relic on LIVE, persists it, and advances once', () => {
+    const { backing, controller, engine, registry, busSubscriberIds } =
+      composeWithRewards();
+
+    engine.move(DIRECTION_LEFT);
+
+    const chosen = controller.currentOffer()[0];
+
+    if (chosen === undefined) {
+      throw new Error('a cleared stage offered no reward');
+    }
+
+    const selection = controller.selectReward(chosen.id, engine);
+
+    expect(selection.outcome).toBe('accepted');
+
+    // THE LIVE REGISTRY AND THE LIVE BUS, not only the returned outcome. A
+    // selection that reported `'accepted'` while these were empty is exactly
+    // the defect this case exists for: the relic was displayed, dispatched to
+    // nothing, and erased by the next commit's projection.
+    expect(registry.ownedIds()).toEqual([chosen.id]);
+    expect(busSubscriberIds()).toContain(chosen.id);
+    expect(controller.relics().map((relic) => relic.id)).toEqual([chosen.id]);
+    expect(readStored(backing)?.relics.map((relic) => relic.id)).toEqual([
+      chosen.id,
+    ]);
+
+    // EXACTLY ONE ADVANCE, and the reward is no longer pending.
+    expect(controller.stageIndex()).toBe(1);
+    expect(readStored(backing)?.stageIndex).toBe(1);
+    expect(controller.isRewardPending()).toBe(false);
+  });
+
+  it("keeps the relic firing for the rest of the run", () => {
+    const { controller, engine, registry } = composeWithRewards();
+
+    engine.move(DIRECTION_LEFT);
+
+    const chosen = controller.currentOffer()[0];
+
+    controller.selectReward(chosen?.id ?? '', engine);
+
+    const invocationsOf = (id: string): number =>
+      engine.hooks
+        .metrics()
+        .subscribers.find((subscriber) => subscriber.id === id)?.invoked ?? 0;
+
+    const before = invocationsOf(chosen?.id ?? '');
+
+    play(engine, MOVES);
+
+    // ITS OWN HANDLERS RAN, on the moves that followed the pickup — which is
+    // AAP user key flow 1: "chosen relic effects immediately fire on subsequent
+    // moves/merges/spawns for rest of run".
+    expect(registry.ownedIds()).toEqual([chosen?.id]);
+    expect(invocationsOf(chosen?.id ?? '')).toBeGreaterThan(before);
+    expect(engine.hooks.degraded()).toEqual([]);
+  });
+
+  it('takes the relic on and advances through completeReward too', () => {
+    const { backing, controller, engine, registry, busSubscriberIds } =
+      composeWithRewards({ seed: 'wiring-a-complete' });
+
+    engine.move(DIRECTION_LEFT);
+
+    const chosen = controller.currentOffer()[0];
+
+    if (chosen === undefined) {
+      throw new Error('a cleared stage offered no reward');
+    }
+
+    const resolution = controller.completeReward(engine, chosen.id);
+
+    // BOTH HALVES, on the other public method as well: neither may keep the
+    // relic without advancing nor advance without keeping the relic.
+    expect(resolution.accepted).toBe(true);
+    expect(registry.ownedIds()).toEqual([chosen.id]);
+    expect(busSubscriberIds()).toContain(chosen.id);
+    expect(readStored(backing)?.relics.map((relic) => relic.id)).toEqual([
+      chosen.id,
+    ]);
+    expect(controller.stageIndex()).toBe(1);
+    expect(controller.isRewardPending()).toBe(false);
+  });
+
+  it('dispatches onStageStart exactly once per stage entered', () => {
+    const { controller, engine } = composeWithRewards({
+      seed: 'wiring-a-stage-start',
+    });
+
+    const dispatched: number[] = [];
+
+    engine.hooks.register({
+      id: 'stage-counter',
+      hooks: {
+        onStageStart: (payload) => {
+          dispatched.push(payload.stageIndex);
+
+          return payload;
+        },
+      },
+    });
+
+    engine.move(DIRECTION_LEFT);
+    controller.selectReward(controller.currentOffer()[0]?.id ?? '', engine);
+
+    // One entry for the stage the selection opened, and no repeat of it: a stage
+    // opened twice applied every per-stage relic effect twice.
+    expect(dispatched).toEqual([1]);
+  });
+
+  it('never offers a relic the run already holds', () => {
+    const { controller, engine, registry } = composeWithRewards({
+      seed: 'wiring-a-pool',
+    });
+
+    const taken: string[] = [];
+    const directions: readonly Direction[] = [
+      DIRECTION_UP,
+      DIRECTION_RIGHT,
+      DIRECTION_DOWN,
+      DIRECTION_LEFT,
+    ];
+
+    engine.move(DIRECTION_LEFT);
+
+    for (let move = 0; move < 40 && !engine.serialize().over; move += 1) {
+      if (controller.isRewardPending()) {
+        const offer = controller.currentOffer();
+
+        for (const card of offer) {
+          expect(taken).not.toContain(card.id);
+        }
+
+        // No duplicate inside one set of three, either (AAP V6).
+        expect(new Set(offer.map((card) => card.id)).size).toBe(offer.length);
+
+        const chosen = offer[0];
+
+        if (chosen !== undefined) {
+          controller.selectReward(chosen.id, engine);
+          taken.push(chosen.id);
+        }
+      }
+
+      engine.move(directions[move % 4]);
+    }
+
+    expect(taken.length).toBeGreaterThan(0);
+    expect(registry.ownedIds()).toEqual(taken);
+  });
+});
+
+/* ==========================================================================
+ * 18. The reward outcome codes mean what they say
+ * ========================================================================== */
+
+describe('the reward selection outcome codes', () => {
+  it('reports already-resolved for a second press of the same card', () => {
+    const { controller, engine, registry } = composeWithRewards({
+      seed: 'outcome-codes',
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    const offer = controller.currentOffer();
+
+    expect(controller.selectReward(offer[0]?.id ?? '', engine).outcome).toBe(
+      'accepted',
+    );
+
+    // A DOUBLE-CLICKED CARD. The accepted selection cleared the offer, so this
+    // is the state the code exists to describe — and it reported `'no-offer'`
+    // while an offer recorded and never drawn reported `'already-resolved'`.
+    expect(controller.selectReward(offer[0]?.id ?? '', engine).outcome).toBe(
+      'already-resolved',
+    );
+    expect(controller.selectReward(offer[1]?.id ?? '', engine).outcome).toBe(
+      'already-resolved',
+    );
+
+    // And neither took a second relic nor advanced a second stage.
+    expect(registry.ownedIds()).toHaveLength(1);
+    expect(controller.stageIndex()).toBe(1);
+  });
+
+  it('reports no-offer while no round has been resolved', () => {
+    const { controller } = composeWithRewards({ seed: 'outcome-no-offer' });
+
+    expect(controller.selectReward(FIRST_RELIC).outcome).toBe('no-offer');
+  });
+
+  it('reports no-offer for an offer recorded but never drawn', () => {
+    const { controller } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    // Nothing was resolved, so nothing is `'already-resolved'`; no offer object
+    // stands, so a selection has nothing to be made from.
+    expect(controller.selectReward(FIRST_RELIC).outcome).toBe('no-offer');
+  });
+
+  it('reports not-offered for a card that was never in the offer', () => {
+    const { controller, engine } = composeWithRewards({
+      seed: 'outcome-not-offered',
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    const offered = controller.currentOffer().map((card) => card.id);
+    const unoffered = RELIC_CATALOGUE.map((relic) => relic.id).find(
+      (id) => !offered.includes(id),
+    );
+
+    expect(controller.selectReward(unoffered ?? '', engine).outcome).toBe(
+      'not-offered',
+    );
+
+    // The offer is retained, so the screen can be re-presented.
+    expect(controller.isRewardPending()).toBe(true);
+    expect(controller.stageIndex()).toBe(0);
+  });
+
+  it('reports already-resolved after a resolution recorded by resolveReward', () => {
+    const { controller } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    expect(controller.resolveReward(FIRST_RELIC).accepted).toBe(true);
+
+    // The round WAS resolved, through the other public method.
+    expect(controller.selectReward(FIRST_RELIC).outcome).toBe(
+      'already-resolved',
+    );
+  });
+});
+
+/* ==========================================================================
+ * 19. The registry's run port satisfies the consumer
+ * ========================================================================== */
+
+describe('the registry run port', () => {
+  it('publishes an activation member the reward transaction can reach', () => {
+    const { registry } = composeWithRelics();
+    const port = registry.runPort();
+
+    // BOTH SPELLINGS. The consumer accepts either, and a port publishing
+    // neither records a reward it never registers.
+    expect(port.pickUpRelic).toBeTypeOf('function');
+    expect(port.activateRelic).toBeTypeOf('function');
+  });
+
+  it('registers the relic through activateRelic as pickUpRelic does', () => {
+    const { engine, registry } = composeWithRelics();
+    const port = registry.runPort();
+
+    const entry = port.activateRelic(SECOND_RELIC);
+
+    expect(entry?.id).toBe(SECOND_RELIC);
+    expect(registry.has(SECOND_RELIC)).toBe(true);
+    expect(
+      engine.hooks.subscribers().map((subscriber) => subscriber.id),
+    ).toContain(SECOND_RELIC);
+
+    // A second activation of the same relic is refused, exactly as a second
+    // pickup is.
+    expect(port.activateRelic(SECOND_RELIC)).toBeNull();
+    expect(registry.ownedIds()).toEqual([SECOND_RELIC]);
+  });
+
+  it('refuses an identifier the catalogue does not carry', () => {
+    const { registry } = composeWithRelics();
+
+    expect(registry.runPort().activateRelic('no-such-relic')).toBeNull();
+    expect(registry.ownedIds()).toEqual([]);
+  });
+});
+
+/* ==========================================================================
+ * 20. The envelope is the authority for the relics a run holds
+ *
+ * `begin()` and `restoreHeldRelics()` make the LIVE registry agree with the
+ * envelope, which means a relic picked up on the registry before a run began
+ * belongs to no run and does not survive it. That is the reason a relic must be
+ * taken on through the reward transaction, which records it as it registers it,
+ * or restored from an envelope after `begin()` — the order src/main.ts composes
+ * in. The cases below pin both halves, so a composition that gets the order
+ * wrong fails here rather than losing a player's relics silently.
+ * ========================================================================== */
+
+describe('the relics a run holds', () => {
+  it('discards a pickup made before begin(), with no half state left', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const engine = new Engine({
+      config,
+      streams: createRngStreams('authority-seed', {}),
+      storage: manager,
+    });
+    const registry = new RelicRegistry({ bus: engine.hooks });
+
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager, seed: 'authority-seed' }),
+      config,
+      stages: createDefaultStageConfig(),
+      relics: registry.runPort(),
+    });
+
+    // TOO EARLY: no run has been begun, so this relic belongs to none.
+    registry.pickUp(FIRST_RELIC);
+
+    controller.begin();
+
+    const streams = createRngStreams(controller.seed(), controller.cursors());
+
+    controller.observe(engine, () => streams.snapshotCursors());
+    engine.setup(controller.openingBoard());
+    play(engine, MOVES);
+
+    // Discarded consistently — live, in the projection and in storage — so no
+    // surface reports a relic another surface does not.
+    expect(registry.ownedIds()).toEqual([]);
+    expect(controller.relics()).toEqual([]);
+    expect(readStored(backing)?.relics).toEqual([]);
+    expect(
+      engine.hooks.subscribers().map((subscriber) => subscriber.id),
+    ).toEqual([]);
+  });
+
+  it('carries a resumed envelope back onto a fresh registry and bus', () => {
+    const first = composeWithRelics({ seed: 'authority-resume' });
+
+    first.controller.recordRewardOffer([FIRST_RELIC]);
+    first.controller.completeReward(first.engine, FIRST_RELIC);
+    play(first.engine, MOVES);
+    first.stop();
+
+    expect(readStored(first.backing)?.relics.map((relic) => relic.id)).toEqual([
+      FIRST_RELIC,
+    ]);
+
+    // A RELOAD: the same storage, a registry and a bus that did not exist when
+    // the relic was taken on.
+    const second = composeWithRelics({
+      backing: first.backing,
+      seed: 'authority-resume',
+      setup: false,
+    });
+
+    second.controller.restoreHeldRelics();
+
+    expect(second.registry.ownedIds()).toEqual([FIRST_RELIC]);
+    expect(
+      second.engine.hooks.subscribers().map((subscriber) => subscriber.id),
+    ).toEqual([FIRST_RELIC]);
+    expect(second.controller.relics().map((relic) => relic.id)).toEqual([
+      FIRST_RELIC,
+    ]);
   });
 });

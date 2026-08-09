@@ -649,3 +649,69 @@ describe('RelicRegistry.activate', () => {
     expect(registry.activate(0).relicId).toBeNull();
   });
 });
+
+/* ==========================================================================
+ * An unusable stored budget, contained at every boundary
+ *
+ * A budget restored from storage or declared by a caller may be negative or not
+ * a number at all. src/engine/hook-bus.ts stores such a value exactly as it was
+ * written — `consumeCharge` is its one writer — and the guard reads it as spent,
+ * so the handler never runs. What this suite pins is the other half: every
+ * boundary that REPORTS or PERSISTS a remaining budget normalises it to a whole
+ * number at or above zero, so an unusable value can never reach a projection, a
+ * commit or the run envelope.
+ * ========================================================================== */
+
+/** Every budget the guard reads as spent and no boundary may republish. */
+const UNUSABLE_BUDGETS: readonly { label: string; charges: number }[] =
+  Object.freeze([
+    { label: 'one charge in debt', charges: -1 },
+    { label: 'a large negative budget', charges: -100 },
+    { label: 'NaN', charges: Number.NaN },
+    { label: '-Infinity', charges: Number.NEGATIVE_INFINITY },
+  ]);
+
+describe('a restored budget that is negative or not a number', () => {
+  it.each(UNUSABLE_BUDGETS)(
+    'is projected and committed as zero for $label',
+    ({ charges }: { charges: number }) => {
+      const bus = createHookBus({});
+      const registry = new RelicRegistry({ bus });
+      const charged = CHARGED[0];
+
+      registry.restore([{ id: charged.id, charges }]);
+
+      // THE PROJECTION AND THE COMMIT SLICE, which are what a screen shows and
+      // what the run envelope carries.
+      expect(registry.serialize()[0]?.charges).toBe(0);
+      expect(registry.persistedEntry(charged.id)?.charges).toBe(0);
+      expect(registry.relicContext()[0]?.charges).toBe(0);
+
+      // And the relic is held, so the zero is a spent budget rather than an
+      // absent relic.
+      expect(registry.has(charged.id)).toBe(true);
+    },
+  );
+
+  it.each(UNUSABLE_BUDGETS)(
+    'never fires the handler for $label, and reports nothing left',
+    ({ charges }: { charges: number }) => {
+      const bus = createHookBus({});
+      const registry = new RelicRegistry({ bus });
+      const charged = CHARGED[0];
+
+      registry.restore([{ id: charged.id, charges }]);
+
+      const consumption = registry.activate(charged.id);
+
+      expect(consumption.held).toBe(true);
+      expect(consumption.limited).toBe(true);
+      expect(consumption.consumed).toBe(0);
+      expect(consumption.remaining).toBe(0);
+
+      // The budget never goes further into debt, however often it is asked.
+      expect(registry.activate(charged.id, 5).consumed).toBe(0);
+      expect(registry.serialize()[0]?.charges).toBe(0);
+    },
+  );
+});

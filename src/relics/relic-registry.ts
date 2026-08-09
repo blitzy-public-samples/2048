@@ -1007,17 +1007,18 @@ function adoptLive(
  * ----------------------------------------------------------------------- */
 
 /**
- * The six operations a run controller drives a registry through.
+ * The seven operations a run controller drives a registry through.
  *
  * DECLARED HERE, NOT IMPORTED. `RelicRegistryPort` of
- * src/run/run-controller.ts declares the same six members, so this record
+ * src/run/run-controller.ts declares the same members, so this record
  * satisfies that port structurally and neither folder imports the other. Every
  * member is total: none raises, whatever it is given.
  *
- * `pickUpRelic` is the LIVE registration step. A reward that is not taken on
- * through it never reaches src/engine/hook-bus.ts, so its handlers never fire
- * and the projection this port reports does not carry it — which is how a
- * controller-only append was erased by the next commit.
+ * `pickUpRelic` is the LIVE registration step, and `activateRelic` is the same
+ * step under the other name the consumer accepts for it. A reward that is not
+ * taken on through one of them never reaches src/engine/hook-bus.ts, so its
+ * handlers never fire and the projection this port reports does not carry it —
+ * which is how a controller-only append was erased by the next commit.
  */
 export interface RelicRunPort {
   /** Projects the relics held, in pickup order, refreshed from the bus. */
@@ -1045,6 +1046,20 @@ export interface RelicRunPort {
    *   held, and a registration the bus refused.
    */
   readonly pickUpRelic: (relicId: string) => PersistedRelic | null;
+
+  /**
+   * The SAME activation step as `pickUpRelic`, under the second name
+   * `RelicRegistryPort` of src/run/run-controller.ts accepts for it.
+   *
+   * Published because the consumer accepts either spelling and a port
+   * publishing neither cannot register anything: a reward taken on through a
+   * port that omitted this reached the controller's list alone, fired on no
+   * hook, and was erased by the next commit's projection.
+   *
+   * @returns The entry to persist for the relic the registry accepted, and
+   *   `null` for one it refused.
+   */
+  readonly activateRelic: (relicId: string) => PersistedRelic | null;
 
   /** Whether the registry holds the relic live, in pickup order. */
   readonly holdsRelic: (relicId: string) => boolean;
@@ -1757,7 +1772,7 @@ export class RelicRegistry {
    * Builds the port a run controller drives this registry through.
    *
    * THE ONE ROUTE BETWEEN THE TWO FOLDERS. `RelicRegistryPort` of
-   * src/run/run-controller.ts names the same six members, so the object
+   * src/run/run-controller.ts names the same members, so the object
    * returned here satisfies that port without either folder importing the
    * other. Each member is bound to this instance and reads through to it on
    * every call, so a relic taken on after the port was built is a relic the
@@ -1766,11 +1781,23 @@ export class RelicRegistry {
    * `pickUpRelic` is what makes a chosen reward LIVE: it registers the relic's
    * handlers with the bus and returns the entry to persist for exactly the
    * relic the registry accepted, so the controller can append that entry rather
-   * than one of its own.
+   * than one of its own. `activateRelic` is published alongside it as the same
+   * step under the consumer's other name for it, so a reward transaction
+   * reaching for either spelling finds one.
    *
    * @returns A frozen port bound to this registry.
    */
   runPort(): RelicRunPort {
+    // The one implementation both activation names resolve to, so the two
+    // spellings can never diverge in what they register or what they report.
+    const takeOn = (relicId: string): PersistedRelic | null => {
+      if (this.pickUp(relicId) === undefined) {
+        return null;
+      }
+
+      return this.persistedEntry(relicId);
+    };
+
     return Object.freeze({
       snapshotRelics: (): readonly PersistedRelic[] => this.serialize(),
 
@@ -1783,13 +1810,12 @@ export class RelicRegistry {
 
       knowsRelic: (relicId: string): boolean => this.knows(relicId),
 
-      pickUpRelic: (relicId: string): PersistedRelic | null => {
-        if (this.pickUp(relicId) === undefined) {
-          return null;
-        }
+      pickUpRelic: takeOn,
 
-        return this.persistedEntry(relicId);
-      },
+      // Added because `RunController.selectReward()` reaches for an activation
+      // member and this port published none: the relic was recorded and never
+      // registered.
+      activateRelic: takeOn,
 
       holdsRelic: (relicId: string): boolean => this.has(relicId),
     });
