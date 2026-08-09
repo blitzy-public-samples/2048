@@ -9,57 +9,17 @@
  * as a table in this module, and are the expected values of the
  * ramp-comparison test instead.
  *
- * Every fill is emitted in two forms. `color` carries the unquantised float
- * channels, which reproduce the pinned Dart Sass output to full precision.
- * `colorHex` floors the interpolated base before the accent overlay and floors
- * the result again, which reproduces the twelve historically shipped hex values
- * byte for byte. Both come from one code path, parameterised by
- * `quantiseIntermediate`.
- *
- * The two forms are NOT interchangeable: on the four accented values 8, 16, 32
- * and 64 the pinned compiler's unquantised channel and the historically shipped
- * channel differ by one.
- *
  * The two glow alphas are emitted without a glow colour: the halo and inset
  * colours are palette entries, published as `--theme-tile-glow` and
  * `--theme-tile-glow-inset` by style/_themes.scss.
  *
- * Renderer-agnostic and free of module-scope side effects: this module reads no
- * DOM, imports no renderer, creates no GPU object and emits no log, so the unit
- * suite and the separately stored seeded snapshot suite import it with no DOM,
- * no WebGL and no observability stack.
+ * Renderer-agnostic and free of module-scope side effects: this module reads
+ * no DOM, imports no renderer, creates no GPU object and emits no log, so the
+ * unit suite and the separately stored seeded snapshot suite import it with no
+ * DOM, no WebGL and no observability stack.
  *
- * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
- * this module's area enumerated:
- *   TR-RAMP-01  style/main.scss L334-L402  the `@while` generation loop, ported
- *                                          as `computeTileTheme`
- *   TR-RAMP-02  style/main.scss L336-L337  the `$gold-percent` interpolation,
- *                                          ported as `goldPercent` and
- *                                          `sassMix`
- *   TR-RAMP-03  style/main.scss L339-L349  the `$special-colors` accent list,
- *                                          ported as `tileSpecialColors`
- *   TR-RAMP-04  style/main.scss L351-L356  the bright-text threshold, ported as
- *                                          `TileTheme.brightText`
- *   TR-RAMP-05  style/main.scss L358-L370  the `$glow-opacity` term and its
- *                                          two-part shadow, ported as
- *                                          `haloAlpha`, `insetAlpha` and
- *                                          `glowSuppressed`
- *   TR-RAMP-06  style/main.scss L372-L380  the `tile-super` band above the
- *                                          ramp's last value
- *   TR-RAMP-07  target-only row            `parseHexColor`, `quantiseColor` and
- *                                          `formatHexColor`
- *   TR-RAMP-08  target-only row            `rampValue`, `rampExponent` and
- *                                          `tileRampConstants`
- *
- * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
- * only so the construct can be found from the log:
- *   DL-RAMP-01  the ramp implemented as the same generative function the
- *               stylesheet runs, never as a copied table
- *   DL-RAMP-02  the unquantised `color` channel as the fill source
- *   DL-RAMP-03  the palette supplied as input, so a theme changes hue and not
- *               the ramp's shape
- *   DL-RAMP-04  the `colorHex` form retained, reproducing the fills the
- *               pre-migration generated stylesheet shipped
+ * Decisions: DL-RAMP-01, DL-RAMP-02, DL-RAMP-03, DL-RAMP-04
+ * (docs/DECISION_LOG.md).
  */
 
 import {
@@ -70,8 +30,6 @@ import {
   tileFontSizeThresholds,
   tileGoldColor,
 } from './tokens';
-
-/* ===== 1. Colour primitives ===== */
 
 /**
  * A colour with floating-point channels, the form every mix in this module
@@ -179,7 +137,7 @@ export function formatHexColor(color: RampColor): string {
 }
 
 /**
- * Sass's legacy `mix()`: a linear interpolation in plain sRGB over 0-255
+ * Sass's legacy `mix`: a linear interpolation in plain sRGB over 0-255
  * channels, with the weight applied to the FIRST colour and adjusted for the
  * difference in alpha between the two operands. Channels are returned
  * unrounded; quantise with `quantiseColor` or `formatHexColor` where an 8-bit
@@ -221,8 +179,6 @@ export function sassMix(
   });
 }
 
-/* ===== 2. Ramp constants ===== */
-
 /**
  * The constants the ramp is generated from, and the threshold above which a
  * tile leaves the ramp.
@@ -236,7 +192,7 @@ export const tileRampConstants = {
   base: 2,
 
   /**
-   * First exponent of the ramp. `pow()` of style/helpers.scss returns the base
+   * First exponent of the ramp. `pow` of style/helpers.scss returns the base
    * itself at this exponent, so the ramp's first value is `base`, not 1, and
    * the accent band at values 8 through 64 sits at exponents 3 through 6.
    */
@@ -249,7 +205,7 @@ export const tileRampConstants = {
 } as const;
 
 /**
- * The tile value one exponent stands for: the `pow()` of style/helpers.scss,
+ * The tile value one exponent stands for: the `pow` of style/helpers.scss,
  * restricted to the positive-exponent branch the ramp uses.
  *
  * @throws RangeError when `exponent` is not a finite integer at
@@ -293,8 +249,6 @@ export function rampExponent(value: number): number {
   return exponent;
 }
 
-/* ===== 3. The accent and bright-numeral source list ===== */
-
 /**
  * One entry of the ramp's accent and bright-numeral list: the pair
  * style/main.scss states per exponent, with the exponent and the tile value it
@@ -331,7 +285,7 @@ const SPECIAL_COLOR_SOURCE: readonly SpecialColorSource[] = [
 /**
  * The accent and bright-numeral list of style/main.scss, keyed by exponent.
  *
- * Sass reads that list with `nth()`, which indexes from 1, so the entry for
+ * Sass reads that list with `nth`, which indexes from 1, so the entry for
  * exponent 1 sits at array index 0 and the conversion below is `index +
  * exponentStart`. Each entry carries its own `exponent`, which
  * `specialColorAt` re-checks against the requested one on every lookup.
@@ -348,17 +302,7 @@ export const tileSpecialColors: readonly TileSpecialColor[] = Object.freeze(
   }),
 );
 
-/* ===== 4. The ramp's colour inputs ===== */
-
-/**
- * The colours and weights one ramp is generated from.
- *
- * The default palette below carries the values style/main.scss states.
- * style/_themes.scss generates its own ramps from the same key set —
- * `tile-low`, `tile-high`, `tile-accents`, `tile-accent-weight`, `text`,
- * `bright-text` and its own super tint and weight — and a themed
- * palette resolves through this interface.
- */
+/** The colours and weights one ramp is generated from. */
 export interface TileRampPalette {
   readonly lowColor: string;
   readonly highColor: string;
@@ -393,8 +337,6 @@ export const defaultTileRampPalette: TileRampPalette = Object.freeze({
   superWeight: 95 / FULL_PERCENT,
 });
 
-/* ===== 5. The resolved theme of one tile value ===== */
-
 /** Everything style/main.scss emits for one tile value, resolved. */
 export interface TileTheme {
   readonly value: number;
@@ -404,8 +346,7 @@ export interface TileTheme {
   /**
    * Share of the high anchor in the base interpolation, as a percentage.
    * Linear in the exponent and not in the value, so it steps `0, 10, 20 … 100`
-   * across the ramp; `100` for a super tile, whose base is the high anchor
-   * itself.
+   * across the ramp.
    */
   readonly goldPercent: number;
 
@@ -423,19 +364,14 @@ export interface TileTheme {
   readonly color: RampColor;
   readonly colorHex: string;
 
-  /**
-   * Whether the numeral takes the bright text colour. The stylesheet emits a
-   * `color` declaration only where this holds and lets the numeral inherit
-   * otherwise.
-   */
+  /** Whether the numeral takes the bright text colour. */
   readonly isBright: boolean;
   readonly numeralColor: string;
 
   /**
    * Glow strength, 0-1. Computed for every ramp exponent, as style/main.scss
    * computes it outside the branch that emits the shadow, so it is non-zero on
-   * two accented entries whose shadow is never emitted. Zero for a super tile,
-   * whose rule sits outside the loop.
+   * two accented entries whose shadow is never emitted.
    */
   readonly glowOpacity: number;
   readonly haloAlpha: number;
@@ -450,8 +386,6 @@ export interface TileTheme {
   readonly fontSize: number;
   readonly fontSizeMobile: number;
 }
-
-/* ===== 6. The generative ramp ===== */
 
 interface RampOverlay {
   /** Overlay colour, or `null` where the value takes none. */
@@ -510,12 +444,6 @@ function overlayBackground(
 
 /**
  * Resolves one tile value against a palette, without consulting the cache.
- *
- * Ports the body of the `@while` loop of style/main.scss for a value on the
- * ramp, and its `&.tile-super` rule for a value strictly above
- * `tileRampConstants.superThreshold`. Both take the same two steps — a base
- * interpolated between the anchors, then an overlay mixed over it — so a super
- * tile resolves as the ramp's last base under a different overlay.
  *
  * @returns Frozen theme for that value.
  * @throws RangeError when `value` is not such a power, or when `palette` is
@@ -579,14 +507,12 @@ export function computeTileTheme(
     // Suppressed exactly where an overlay was applied.
     glowSuppressed: overlay.color !== null,
 
-    // Resolved by `tileFontSize` of src/theme/tokens.ts, which carries the same
-    // thresholds.
+    // Resolved by `tileFontSize` of src/theme/tokens.ts, which carries the
+    // same thresholds.
     fontSize: tileFontSize(value, 'desktop'),
     fontSizeMobile: tileFontSize(value, 'mobile'),
   });
 }
-
-/* ===== 7. The memoised entry point ===== */
 
 const defaultThemeCache = new Map<number, TileTheme>();
 

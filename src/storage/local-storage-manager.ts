@@ -1,35 +1,8 @@
 /**
  * Web Storage persistence adapter.
  *
- * Construction runs the writability probe once and fixes the store for the
- * session; it performs no read. Every read, write and removal is guarded, so no
- * member throws on a storage failure, and `getBestScore()` keeps the frozen
- * `string | 0` contract. The two unprefixed legacy keys live in
- * ./storage-keys, and the in-memory fallback store in ./memory-storage.
- *
- * Ported from js/local_storage_manager.js, which is deleted. One traceability
- * row of docs/TRACEABILITY_MATRIX.md apiece, every row of this module's area
- * enumerated:
- *   TR-STORE-01  L22-L23  the two unprefixed key literals
- *   TR-STORE-02  L25-L26  the construction-time strategy selection
- *   TR-STORE-03  L29-L40  the writability probe
- *   TR-STORE-04  L43-L45  getBestScore(), the frozen `string | 0` contract
- *   TR-STORE-05  L47-L49  setBestScore()
- *   TR-STORE-06  L52-L55  getGameState(), whose unguarded `JSON.parse` is now
- *                         guarded
- *   TR-STORE-07  L57-L59  setGameState()
- *   TR-STORE-08  L61-L63  clearGameState()
- * TR-STORE-09 is the in-memory double, in ./memory-storage.
- *
- * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
- * only so the construct can be found from the log:
- *   DL-STORE-01  the key-minting validation every accepted key passes
- *   DL-STORE-02  the best-score accessor keeping the raw stored string, so the
- *                relational promotion comparison of js/game_manager.js
- *                L80-L82 behaves identically
- *   DL-STORE-03  every operation reporting failure by return value through an
- *                injected sink
- *   DL-STORE-04  the probe running once at construction, as L25-L26 did
+ * Decisions: DL-STORE-01, DL-STORE-02, DL-STORE-03, DL-STORE-04
+ * (docs/DECISION_LOG.md).
  */
 
 import {
@@ -46,7 +19,7 @@ export type { StorageLike } from './memory-storage';
 /**
  * Which store a manager reads and writes. `'injected'` belongs to a store
  * supplied through `LocalStorageManagerOptions.storage` and is never returned
- * by `probeWebStorage()`.
+ * by `probeWebStorage`.
  */
 export type StorageStrategy = 'localStorage' | 'memory' | 'injected';
 
@@ -54,17 +27,19 @@ export type StorageStrategy = 'localStorage' | 'memory' | 'injected';
  * The storage operation a `StorageFailure` describes.
  *
  * Every member is emitted. A probe that fails with an error reports one
- * failure under `STORAGE_PROBE_KEY` in addition to the complete probe
- * result; a probe that finds no global store at all catches nothing and
- * so reports no failure.
+ * failure under `STORAGE_PROBE_KEY` in addition to the complete probe result;
+ * a probe that finds no global store at all catches nothing and so reports no
+ * failure.
  */
 export type StorageOperation = 'probe' | 'read' | 'write' | 'remove';
 
-/**
- * Name reported for an operation refused because its key is not one the product
- * owns.
- */
 const REJECTED_KEY_ERROR_NAME = 'StorageKeyError';
+
+/**
+ * Name reported for a read refused because the stored text is larger than the
+ * key's declared ceiling.
+ */
+const OVERSIZE_ERROR_NAME = 'StorageSizeError';
 
 /**
  * Longest rejected key text a report carries. A rejected key comes from outside
@@ -73,32 +48,21 @@ const REJECTED_KEY_ERROR_NAME = 'StorageKeyError';
  */
 const MAX_REPORTED_KEY_LENGTH = 64;
 
-/**
- * A caught storage error reduced to serialisable fields.
- *
- * THE PUBLIC HALF, AND SAFE TO EXPORT. Every field here is bounded and derived
- * rather than carried: `name` is one of the recognised storage-error names or a
- * fixed substitute, and `message` is a description this module authored — never
- * the text the platform, an extension or a hostile `Error` subclass supplied.
- * A metrics or log export can therefore carry this shape without carrying
- * anything a source outside the product wrote. The value that WAS thrown
- * travels separately, on `StorageProbeResult.thrown` and
- * `StorageFailure.thrown`, for a sink that keeps more of it than a description.
- */
+/** A caught storage error reduced to serialisable fields. */
 export interface StorageErrorInfo {
   readonly name: string;
 
   /**
    * A description of what failed, chosen from this module's own vocabulary by
-   * `describeStorageError()`. Bounded, and free of source-provided text and of
+   * `describeStorageError`. Bounded, and free of source-provided text and of
    * any excerpt of a stored value.
    */
   readonly message: string;
 
   /**
-   * Whether the error reports exhausted storage rather than denied
-   * access: `QuotaExceededError`, `NS_ERROR_DOM_QUOTA_REACHED`, or the
-   * legacy exception code 22.
+   * Whether the error reports exhausted storage rather than denied access:
+   * `QuotaExceededError`, `NS_ERROR_DOM_QUOTA_REACHED`, or the legacy
+   * exception code 22.
    */
   readonly quota: boolean;
 }
@@ -107,10 +71,7 @@ export interface StorageErrorInfo {
 export interface StorageProbeResult {
   readonly supported: boolean;
 
-  /**
-   * The store this outcome selects: `'localStorage'` when supported,
-   * `'memory'` otherwise. Never `'injected'`.
-   */
+  /** The store this outcome selects: Never `'injected'`. */
   readonly strategy: StorageStrategy;
 
   /**
@@ -120,20 +81,7 @@ export interface StorageProbeResult {
    */
   readonly error?: StorageErrorInfo;
 
-  /**
-   * THE VALUE THAT WAS THROWN, exactly as it was caught and unconverted.
-   *
-   * Present whenever `error` is. It is the only member carrying the original
-   * `Error` — its `stack`, its `cause` chain, its subclass — or the non-`Error`
-   * value some environments throw instead. A reporter hands it to
-   * `Logger.failure`, whose serialiser keeps that structure; `error` above
-   * cannot, because reducing to a name, a message and a flag is what discards
-   * it.
-   *
-   * NOT FOR EXPORT. Typed `unknown` because nothing about its shape is
-   * guaranteed, and it may carry source-provided text: a consumer that
-   * publishes rather than logs reads `error` instead.
-   */
+  /** The value that was thrown, exactly as it was caught and unconverted. */
   readonly thrown?: unknown;
 }
 
@@ -149,7 +97,7 @@ export interface StorageFailure {
   readonly error: StorageErrorInfo;
 
   /**
-   * THE VALUE THAT WAS THROWN, exactly as it was caught and unconverted, on
+   * The value that was thrown, exactly as it was caught and unconverted, on
    * the same terms as `StorageProbeResult.thrown`.
    *
    * Absent on a failure no value was thrown for — a key this product does not
@@ -165,8 +113,7 @@ export interface StorageWriteInfo {
   /**
    * The adapter's own estimate of the serialised size, at two bytes per UTF-16
    * code unit. What a browser charges against its quota is
-   * implementation-defined and may differ. `0` when serialisation failed before
-   * any value existed.
+   * implementation-defined and may differ.
    */
   readonly byteLength: number;
 
@@ -175,16 +122,8 @@ export interface StorageWriteInfo {
 
 /**
  * Sink for probe results, failures and write attempts. Every member is
- * optional, so an adapter built without a reporter, or with a partial
- * one, reports only what the sink accepts.
- *
- * A member that throws is contained: the throw does not escape the
- * adapter, does not reach the caller of the storage operation being
- * reported, and does not change the value that operation returns. Each
- * contained throw is counted on `LocalStorageManager.reporterFaults`
- * and described by `LocalStorageManager.lastReporterFault`, and is
- * never handed back to the sink that raised it. `reporterFailures` is the
- * count under the name a diagnostics surface reads it by.
+ * optional, so an adapter built without a reporter, or with a partial one,
+ * reports only what the sink accepts.
  */
 export interface StorageReporter {
   readonly onProbe?: (result: StorageProbeResult) => void;
@@ -225,30 +164,173 @@ const QUOTA_ERROR_NAMES: readonly string[] = Object.freeze([
   'NS_ERROR_DOM_QUOTA_REACHED',
 ]);
 
-/**
- * Every error name this module will put in a report.
- *
- * THE ALLOWLIST. A caught value's `name` is kept only if it appears here, so a
- * name chosen outside the product — by a browser extension, or by an `Error`
- * subclass whose `name` getter returns whatever it likes — never reaches an
- * exportable record. Anything else is reported as `UNKNOWN_ERROR_NAME`.
- *
- * The two quota names are the ones `isQuotaError()` recognises; `SecurityError`
- * is what a blocked origin throws; `TypeError` is what a serialisation refusal
- * throws, including the one this module raises itself for a value JSON cannot
- * carry; and `StorageKeyError` is this module's own name for a refused key.
- */
+/** Every error name this module will put in a report. */
 const REPORTABLE_ERROR_NAMES: readonly string[] = Object.freeze([
   ...QUOTA_ERROR_NAMES,
   'SecurityError',
   'InvalidStateError',
   'TypeError',
   REJECTED_KEY_ERROR_NAME,
+  OVERSIZE_ERROR_NAME,
 ]);
 
 const LEGACY_QUOTA_EXCEEDED_CODE = 22;
 
 const BYTES_PER_UTF16_UNIT = 2;
+
+/* --------------------------------------------------------------------------
+ * Pre-parse size ceilings
+ * ----------------------------------------------------------------------- */
+
+/**
+ * Largest stored text, in bytes, that `readJson()` will hand to `JSON.parse`
+ * for a key this table names.
+ *
+ * WHY A PRE-PARSE GATE AT ALL. Web Storage is synchronous and shared by the
+ * whole origin: anything running on this host can write megabytes under one of
+ * the product's keys, and `JSON.parse` on that text blocks the main thread and
+ * materialises the whole graph BEFORE any schema guard can look at it. A bound
+ * applied after parsing is a bound applied too late, so the reading is taken off
+ * the raw string and the parse never happens above it.
+ *
+ * The ceilings are generous against the real payloads — a full board serialises
+ * to under 1 kB and a fully remapped keymap to a few — and are measured the way
+ * `writeRaw` already accounts for a write, at two bytes per UTF-16 code unit, so
+ * a value this adapter refuses to read is a value it would have refused to
+ * write.
+ *
+ * Keyed by the unqualified spellings so no import from ./storage-keys beyond the
+ * two frozen literals is needed; `DEFAULT_MAX_STORED_JSON_BYTES` covers every
+ * other owned key, so a key minted later is bounded on the day it is minted
+ * rather than on the day someone remembers to add it here.
+ */
+export const MAX_STORED_JSON_BYTES: Readonly<Record<string, number>> =
+  Object.freeze({
+    [GAME_STATE_KEY]: 65_536,
+    'roguelike2048:runState': 131_072,
+    'roguelike2048:keymap': 32_768,
+  });
+
+/** Ceiling applied to an owned key `MAX_STORED_JSON_BYTES` does not name. */
+export const DEFAULT_MAX_STORED_JSON_BYTES = 65_536;
+
+/**
+ * The ceiling in force for a key.
+ *
+ * @param key Owned key about to be read.
+ * @returns The key's declared ceiling, or the default.
+ */
+export function maxStoredJsonBytes(key: string): number {
+  return MAX_STORED_JSON_BYTES[key] ?? DEFAULT_MAX_STORED_JSON_BYTES;
+}
+
+/**
+ * Measures stored text the way Web Storage charges for it.
+ *
+ * @param text Stored text, before parsing.
+ * @returns Size of `text` in bytes.
+ */
+function measureStoredBytes(text: string): number {
+  return text.length * BYTES_PER_UTF16_UNIT;
+}
+
+/**
+ * Describes a read refused for size as a `StorageErrorInfo`, without
+ * constructing or throwing an error.
+ *
+ * The message carries the two measurements and no key and no excerpt of the
+ * value, on the same terms as `describeRejectedKey()`: the key travels on
+ * `StorageFailure.key`, and nothing a source outside the product wrote reaches
+ * an exportable record.
+ *
+ * @param bytes Size of the stored text.
+ * @param limit Ceiling it broke.
+ * @returns The reportable description of the refusal.
+ */
+function describeOversizeRead(bytes: number, limit: number): StorageErrorInfo {
+  return {
+    name: OVERSIZE_ERROR_NAME,
+    message:
+      `The stored value is ${String(bytes)} bytes, above the ` +
+      `${String(limit)}-byte ceiling for this key; the read was refused ` +
+      'and nothing was parsed.',
+    quota: false,
+  };
+}
+
+/**
+ * Describes a read the reading module's own payload limit refused.
+ *
+ * The adapter does not know that module's ceiling, so the description carries the
+ * measurement it does know and names the limit's owner rather than inventing a
+ * number. No key and no excerpt of the value is carried.
+ *
+ * @param bytes Size of the stored text.
+ * @returns The reportable description of the refusal.
+ */
+function describeRefusedByCaller(bytes: number): StorageErrorInfo {
+  return {
+    name: OVERSIZE_ERROR_NAME,
+    message:
+      `The stored value is ${String(bytes)} bytes and was refused by the ` +
+      'reading module\'s own payload limit; nothing was parsed.',
+    quota: false,
+  };
+}
+
+/**
+ * Nodes one memoised parse result may be frozen through.
+ *
+ * The freeze is what lets several consumers share one parse safely, and it walks
+ * the graph, so it is bounded rather than open-ended. A graph larger than this —
+ * reachable only from a payload just under the byte ceiling — is handed back
+ * partly frozen, which costs the sharing guarantee for that one value and
+ * nothing else.
+ */
+const MAX_FROZEN_NODES = 50_000;
+
+/**
+ * Freezes a parsed JSON graph, iteratively and within a node budget.
+ *
+ * ITERATIVE ON PURPOSE. A recursive walk over deeply nested JSON — which a
+ * hostile same-origin writer can produce inside the byte ceiling — overflows the
+ * stack, so the pending nodes are held in an explicit list instead.
+ *
+ * @param root Parsed value to freeze.
+ * @returns `root`, frozen as deeply as the budget allowed.
+ */
+function freezeParsed(root: unknown): unknown {
+  const pending: unknown[] = [root];
+  let visited = 0;
+
+  while (pending.length > 0 && visited < MAX_FROZEN_NODES) {
+    const node = pending.pop();
+
+    if (typeof node !== 'object' || node === null || Object.isFrozen(node)) {
+      continue;
+    }
+
+    visited += 1;
+    Object.freeze(node);
+
+    for (const value of Object.values(node)) {
+      if (typeof value === 'object' && value !== null) {
+        pending.push(value);
+      }
+    }
+  }
+
+  return root;
+}
+
+/** One key's most recent parse, held so the same text is parsed once. */
+interface ParsedEntry {
+  /** The exact stored text the result was parsed from. */
+  readonly raw: string;
+
+  /** The frozen parse result. */
+  readonly parsed: unknown;
+}
 
 const EMPTY_REPORTER: StorageReporter = Object.freeze({});
 
@@ -277,12 +359,6 @@ function readGlobalStorage(): StorageLike | undefined {
 
 /**
  * Reads one string property off a caught value without trusting the value.
- *
- * The membership test, the read and the value itself are all contained: a
- * `Proxy` throws from its `has` or `get` trap, and an `Error` subclass can
- * define `name` or `message` as a getter that throws. Either throw is read
- * as an absent property, so describing a storage failure — which happens
- * inside the `catch` that contains it — cannot raise a second one.
  *
  * @param error Caught value to read from.
  * @param field Property name to read.
@@ -317,12 +393,6 @@ function readErrorText(error: unknown, field: string): string | undefined {
 /**
  * Reduces a caught value's `name` to one this module recognises.
  *
- * ALLOWLISTED. A name is kept only where it is one of the recognised storage
- * error names; anything else — including a name a hostile `Error` subclass or a
- * browser extension chose — becomes `UNKNOWN_ERROR_NAME`. The name is a field
- * an export carries, so it is drawn from a closed set rather than from the
- * value.
- *
  * @param error Caught value to classify.
  * @returns A recognised name, or `UNKNOWN_ERROR_NAME`.
  */
@@ -340,14 +410,6 @@ function errorName(error: unknown): string {
 
 /**
  * Chooses the public message for a caught value.
- *
- * AUTHORED HERE, NEVER CARRIED. The value's own `message` is deliberately not
- * read: it is written by the platform, by a browser extension or by whatever
- * threw, it can carry an excerpt of the value that failed to store, and this
- * field reaches an exportable log and a downloadable metrics snapshot. The
- * message is therefore selected from this module's own vocabulary by what the
- * error IS, and the original text stays on `StorageFailure.thrown` where only a
- * logger reads it.
  *
  * @param name The allowlisted name.
  * @param quota Whether the error reports exhausted storage.
@@ -385,16 +447,7 @@ function isQuotaError(error: unknown, name: string): boolean {
 
 /**
  * Reduces any thrown value, error or not, to the bounded public
- * `StorageErrorInfo`. Never throws.
- *
- * Both fields are drawn from this module's own vocabulary: the name from
- * `REPORTABLE_ERROR_NAMES` and the message from what the error is. Nothing the
- * caught value carries as text survives, which is why the value itself travels
- * beside this description on `StorageFailure.thrown`.
- *
- * The quota test reads the value rather than the allowlisted name, so a
- * `DOMException` carrying the legacy code 22 is still recognised even where its
- * name is not one this module reports.
+ * `StorageErrorInfo`.
  *
  * @param error Caught value, of any type.
  * @returns The exportable description.
@@ -425,12 +478,8 @@ function truncateKey(key: string): string {
 }
 
 /**
- * Describes a refused operation as a `StorageErrorInfo`, without constructing or
- * throwing an error.
- *
- * The message names no key. The refused key travels on `StorageFailure.key`,
- * already shortened, so it is carried once in a field of its own rather than
- * interpolated into text an export publishes.
+ * Describes a refused operation as a `StorageErrorInfo`, without constructing
+ * or throwing an error.
  *
  * @returns The reportable description of the refusal.
  */
@@ -447,13 +496,11 @@ function describeRejectedKey(): StorageErrorInfo {
 /**
  * Probes Web Storage writability: the global store is read inside the `try`,
  * because the property access itself throws where storage is blocked, then a
- * probe key is written and immediately removed. Callable without constructing a
- * manager, which also runs it once at construction.
+ * probe key is written and immediately removed. Callable without constructing
+ * a manager, which also runs it once at construction.
  *
- * @returns `{ supported: true, strategy: 'localStorage' }` when both the write
- *   and the removal succeed. Otherwise `supported` is `false` with `strategy`
- *   `'memory'`, carrying `error` only when something threw; a global store that
- *   is absent altogether, as outside a browser, yields no error.
+ * @returns `{ supported: true, strategy: 'localStorage' }` when both the
+ *   write and the removal succeed.
  */
 export function probeWebStorage(): StorageProbeResult {
   try {
@@ -473,8 +520,6 @@ export function probeWebStorage(): StorageProbeResult {
       strategy: 'memory',
       error: describeStorageError(error),
 
-      // The value itself, beside its bounded description, so a reporter can
-      // hand the original to a logger rather than a reduction of it.
       thrown: error,
     };
   }
@@ -484,34 +529,38 @@ export function probeWebStorage(): StorageProbeResult {
  * Reads and writes the product's persisted state.
  *
  * Construction runs the writability probe once and fixes the store for the
- * session, in that order, and performs no read of its own; constructing with no
- * arguments is supported.
+ * session, in that order, and performs no read of its own; constructing with
+ * no arguments is supported.
  *
- * Every read, write and removal is guarded: setters report and return `false`
- * rather than throwing, a raw or JSON read falls back to `null`, and
- * `getBestScore()` falls back to the number `0`. Reporting is guarded on the
- * same terms: every reporter callback runs inside a no-throw boundary, so a
- * throwing sink can neither escape construction nor alter the result of the
- * operation it was reporting.
- *
- * Every key is checked against `isOwnedStorageKey()` before the store is
+ * Every key is checked against `isOwnedStorageKey` before the store is
  * touched, so the two frozen legacy keys and the product's namespaced keys are
- * the only keys this adapter can reach. A refused operation reports and returns
- * its failure value, and touches no storage.
+ * the only keys this adapter can reach. A refused operation reports and
+ * returns its failure value, and touches no storage.
  */
 export class LocalStorageManager {
   /** The construction-time probe result. */
   readonly probe: StorageProbeResult;
 
   /**
-   * The store actually in use. Equals `probe.strategy` unless a store
-   * was injected, in which case it is `'injected'`.
+   * The store actually in use. Equals `probe.strategy` unless a store was
+   * injected, in which case it is `'injected'`.
    */
   readonly strategy: StorageStrategy;
 
   private readonly storage: StorageLike;
 
   private readonly reporter: StorageReporter;
+
+  /**
+   * The most recent parse of each key, held so one stored text is parsed once.
+   *
+   * A `Map`, for the reason `DL-STORE-06` gives the in-memory double: keys reach
+   * this adapter from persisted and parsed data, and a plain object would read
+   * back a prototype member for `constructor` or `__proto__` as though it had
+   * been stored. The entry records the exact text it was parsed from, so the
+   * memo is consulted only when the stored text has not changed.
+   */
+  private readonly parsed = new Map<string, ParsedEntry>();
 
   /** Reporter callbacks that threw and were contained. */
   private faultCount = 0;
@@ -524,21 +573,20 @@ export class LocalStorageManager {
    *
    * `0` for a reporter that never throws, which is every reporter that
    * behaves. A non-zero count means instrumentation is failing while
-   * persistence is not: the storage operations themselves returned
-   * their true results.
+   * persistence is not: the storage operations themselves returned their true
+   * results.
    */
   get reporterFaults(): number {
     return this.faultCount;
   }
 
   /**
-   * The most recent contained reporter throw, or `undefined` when no
-   * reporter callback has thrown.
+   * The most recent contained reporter throw, or `undefined` when no reporter
+   * callback has thrown.
    *
-   * Reduced to the same serialisable shape as a storage error, so the
-   * fault is inspectable — by a diagnostics surface, or by a caller
-   * checking `reporterFaults` — without being re-delivered to the sink
-   * that raised it.
+   * Reduced to the same serialisable shape as a storage error, so the fault is
+   * inspectable — by a diagnostics surface, or by a caller checking
+   * `reporterFaults` — without being re-delivered to the sink that raised it.
    */
   get lastReporterFault(): StorageErrorInfo | undefined {
     return this.faultInfo;
@@ -576,19 +624,17 @@ export class LocalStorageManager {
 
   /**
    * Number of reporter invocations this manager contained because the reporter
-   * threw, under the name a diagnostics surface reads it by. `0` for a reporter
-   * that never throws; a non-zero value means reports have been lost and the
-   * sink is faulty. Read out of band, because a contained throw is deliberately
-   * not reported back through the sink that produced it.
+   * threw, under the name a diagnostics surface reads it by. `0` for a
+   * reporter that never throws; a non-zero value means reports have been lost
+   * and the sink is faulty.
    */
   get reporterFailures(): number {
     return this.faultCount;
   }
 
   /**
-   * Reads the persisted best score. Frozen contract: the raw stored string when
-   * a value is present, and the number `0` when it is absent or empty. Storage
-   * is read on every call and never cached.
+   * Reads the persisted best score. Frozen contract: the raw stored string
+   * when a value is present, and the number `0` when it is absent or empty.
    *
    * @returns The stored string, or the number `0`.
    */
@@ -641,10 +687,10 @@ export class LocalStorageManager {
    *
    * @param key Key to read. A key the product does not own is refused,
    *   reported, and reaches no store.
-   * @returns The stored string, or `null` when the key is absent, the
-   *   read threw, or the key was refused. The `undefined` an in-memory
-   *   store yields for an absent key is normalised to `null`; a stored
-   *   empty string is returned as `''`.
+   * @returns The stored string, or `null` when the key is absent, the read
+   *   threw, or the key was refused. The `undefined` an in-memory store yields
+   *   for an absent key is normalised to `null`; a stored empty string is
+   *   returned as `''`.
    */
   readRaw(key: OwnedStorageKey): string | null {
     if (!this.acceptKey('read', key)) {
@@ -661,8 +707,7 @@ export class LocalStorageManager {
   }
 
   /**
-   * Writes `value` under `key`. A failure, exhausted quota included, is reported
-   * and returned rather than thrown.
+   * Writes `value` under `key`.
    *
    * @param key Key to write. A key the product does not own is refused,
    *   reported, and reaches no store.
@@ -714,26 +759,75 @@ export class LocalStorageManager {
   }
 
   /**
-   * Reads and parses the JSON stored under `key`, guarding the parse.
+   * Reads and parses the JSON stored under `key`, bounding and then guarding the
+   * parse.
+   *
+   * THE SIZE GATE RUNS BEFORE THE PARSE. Web Storage is synchronous and shared by
+   * the whole origin, so a value written by anything on this host is untrusted
+   * text of unbounded length; `maxStoredJsonBytes(key)` is measured against the
+   * raw string and an oversized value is reported and refused with nothing
+   * parsed. A schema guard applied to the result cannot do this, because by then
+   * the parse has already run. Decision DL-STORE-07.
+   *
+   * THE PARSE IS MEMOISED per key on the exact stored text, so a text several
+   * consumers read is parsed once. That is what makes the run-state envelope one
+   * parse per boot even though the identity resolution, the relic pre-read and
+   * the authoritative load each ask for it. The raw string is re-read every call,
+   * so a value changed by another tab is never served stale. The memoised graph
+   * is frozen, so one consumer cannot influence another through it — every
+   * consumer of an `unknown` here validates and copies, which is the contract
+   * the return type already states.
    *
    * @param key Key to read. A key the product does not own is refused by
    *   `readRaw`, reported, and reaches no store.
+   * @param acceptText An additional bound on the raw text, applied after the
+   *   key's own ceiling and before the parse. A caller that declares its own
+   *   payload limit passes the predicate that measures it — the keymap layer's
+   *   `isKeymapPayloadWithinLimit` is the one such caller — so the tighter of the
+   *   two limits governs.
    * @returns The parsed value, or `null` when the key is absent, holds
-   *   an empty string, holds text that is not valid JSON, or was
-   *   refused.
+   *   an empty string, holds text above a ceiling, holds text that is not valid
+   *   JSON, or was refused.
    */
-  readJson(key: OwnedStorageKey): unknown {
+  readJson(
+    key: OwnedStorageKey,
+    acceptText?: (text: string) => boolean
+  ): unknown {
     const raw = this.readRaw(key);
 
     if (raw === null || raw.length === 0) {
       return null;
     }
 
+    const bytes = measureStoredBytes(raw);
+    const limit = maxStoredJsonBytes(key);
+
+    if (bytes > limit) {
+      this.refuseRead(key, describeOversizeRead(bytes, limit));
+
+      return null;
+    }
+
+    if (acceptText !== undefined && !acceptText(raw)) {
+      this.refuseRead(key, describeRefusedByCaller(bytes));
+
+      return null;
+    }
+
+    const memo = this.parsed.get(key);
+
+    if (memo !== undefined && memo.raw === raw) {
+      return memo.parsed;
+    }
+
     try {
-      const parsed: unknown = JSON.parse(raw);
+      const parsed: unknown = freezeParsed(JSON.parse(raw));
+
+      this.parsed.set(key, { raw, parsed });
 
       return parsed;
     } catch (error) {
+      this.parsed.delete(key);
       this.reportFailure('read', key, error);
 
       return null;
@@ -746,9 +840,9 @@ export class LocalStorageManager {
    * @param key Key to write. A key the product does not own is refused,
    *   reported, and reaches no store; nothing is serialised for it.
    * @param value Value to serialise.
-   * @returns `true` when both the serialisation and the write succeeded. Values
-   *   that serialise to no JSON text, such as `undefined`, a function or a
-   *   symbol, are reported as failures.
+   * @returns `true` when both the serialisation and the write succeeded.
+   *   Values that serialise to no JSON text, such as `undefined`, a function
+   *   or a symbol, are reported as failures.
    */
   writeJson(key: OwnedStorageKey, value: unknown): boolean {
     if (!this.acceptKey('write', key)) {
@@ -765,12 +859,27 @@ export class LocalStorageManager {
   }
 
   /**
-   * Decides whether an operation may proceed with `key`, reporting a refusal.
+   * Reports a read refused before the parse, and drops any memo for the key.
    *
-   * The check runs before the store is touched, so a refused operation performs
-   * no read, no write and no removal. It is a runtime check as well as a
-   * type-level one because a key can reach a call site from persisted or parsed
-   * data, where the type is not enforced.
+   * A refusal is not a failure of the store — nothing was touched beyond the
+   * `getItem` that measured the value — so it is delivered on the failure
+   * channel with a description and no `thrown`, exactly as a refused key is.
+   *
+   * @param key Key whose stored text was refused.
+   * @param error This module's own description of the refusal.
+   */
+  private refuseRead(key: OwnedStorageKey, error: StorageErrorInfo): void {
+    this.parsed.delete(key);
+    this.deliverFailure({
+      operation: 'read',
+      key,
+      strategy: this.strategy,
+      error,
+    });
+  }
+
+  /**
+   * Decides whether an operation may proceed with `key`, reporting a refusal.
    *
    * @param operation Operation being attempted.
    * @param key Key it targets.
@@ -781,8 +890,8 @@ export class LocalStorageManager {
       return true;
     }
 
-    // No value was thrown: the refusal happens before any store is touched,
-    // so the failure carries a description and no `thrown`.
+    // No value was thrown: the refusal happens before any store is touched, so
+    // the failure carries a description and no `thrown`.
     this.deliverFailure({
       operation,
       key: truncateKey(key),
@@ -795,8 +904,8 @@ export class LocalStorageManager {
 
   /**
    * Serialises `value`, reporting and returning `null` on failure — circular
-   * structures and `BigInt` throw, and `undefined`, functions and symbols yield
-   * no JSON text.
+   * structures and `BigInt` throw, and `undefined`, functions and symbols
+   * yield no JSON text.
    *
    * @param key Key the value was destined for, for reporting.
    * @param value Value to serialise.
@@ -830,13 +939,6 @@ export class LocalStorageManager {
   /**
    * Runs one reporter callback inside a no-throw boundary.
    *
-   * Every reporter invocation in this class goes through here, so a
-   * throwing sink is contained at the point of delivery: the operation
-   * that was being reported keeps its own outcome, and construction
-   * completes. A contained throw is counted on `reporterFaults` and
-   * described on `lastReporterFault` rather than being re-delivered to
-   * the sink that raised it.
-   *
    * @param deliver Reporter callback to run.
    * @param payload Report to hand it.
    */
@@ -850,19 +952,12 @@ export class LocalStorageManager {
   }
 
   /**
-   * Hands the construction-time probe result to the reporter, and a
-   * failed probe to the failure sink as well.
+   * Hands the construction-time probe result to the reporter, and a failed
+   * probe to the failure sink as well.
    *
-   * `StorageOperation` carries a `'probe'` member and `onFailure`
-   * receives every failed operation, so an unsupported probe that
-   * caught an error is reported on both channels: the complete result
-   * on `onProbe`, then one `StorageFailure` under `STORAGE_PROBE_KEY`.
-   * A probe that found no global store at all carries no error and so
-   * reports no failure.
-   *
-   * Runs once, at the end of construction, after the strategy is fixed
-   * — the strategy the failure carries is therefore the store the
-   * manager actually went on to use.
+   * Runs once, at the end of construction, after the strategy is fixed — the
+   * strategy the failure carries is therefore the store the manager actually
+   * went on to use.
    */
   private reportProbe(): void {
     const onProbe = this.reporter.onProbe;
@@ -909,19 +1004,18 @@ export class LocalStorageManager {
       error: describeStorageError(error),
 
       // The caught value travels unconverted, so the stack, the cause chain
-      // and a non-`Error` structure all survive to the logger. The reduction
-      // above is what an export carries; this is what a log record does.
+      // and a non-`Error` structure all survive to the logger.
       thrown: error,
     });
   }
 
   /**
-   * Delivers one already-described failure to the reporter, when one
-   * accepts it.
+   * Delivers one already-described failure to the reporter, when one accepts
+   * it.
    *
    * The single delivery point for `StorageFailure`: the read, write and
-   * removal paths reach it through `reportFailure`, and the probe path
-   * reaches it directly with the error the probe already reduced.
+   * removal paths reach it through `reportFailure`, and the probe path reaches
+   * it directly with the error the probe already reduced.
    *
    * @param failure Failure to deliver.
    */

@@ -3,38 +3,7 @@
 // (`frostbind`, `temporal-anchor`, `tumbler`, `culling-blade`,
 // `scouring-wind`).
 //
-// Three properties are asserted here, and one gate:
-//   property one    it fires on the hooks it binds and on no other
-//   property two    its effect is a value-preserving permutation of the board
-//   property three  its charge budget, including the zero-charge invocation
-//   the gate        seeded determinism, and which RNG substream it advances
-//
-// PROVENANCE OF THE LATTICE FACTS ASSERTED BELOW, from the deleted vanilla
-// sources this engine was ported from:
-//   js/grid.js L45-L64    `availableCells()` and `eachCell()` walk the board
-//                         x-outer and y-inner; that order is the order a
-//                         destination draw resolves against.
-//   js/grid.js L89-L95    `insertTile()` and `removeTile()` index
-//                         `cells[tile.x][tile.y]`, with no occupancy check on
-//                         the destination.
-//   js/grid.js L102-L117  `serialize()` yields `{ size, cells }`, occupied
-//                         cells as `{ position, value }` and empty cells kept
-//                         as `null`.
-//   js/tile.js L10-L17    `savePosition()` snapshots the current cell into a
-//                         fresh object; `updatePosition()` changes the current
-//                         cell and leaves `previousPosition` alone.
-//
 // AAP working assumption A2 places the shuffle relic in `board-manipulation`.
-//
-// The two figures this suite stands on, each named here and carried by the
-// document named beside it:
-//   Figure 5, "Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard
-//     and Error Isolation", in docs/architecture/hook-dispatch-sequence.md —
-//     the charge-guard path.
-//   Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
-//     Substreams", in docs/architecture/data-flow.md — whose legend states
-//     that substream separation is what makes relic composition safe, which is
-//     the property the cursor assertions below enforce.
 //
 // Every dispatch runs through a real `HookBus` against a real `Grid`, so the
 // charge guard, the per-handler randomness fork and the board-effect
@@ -101,10 +70,6 @@ import {
   createNearLossBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. Harness
- * ========================================================================== */
-
 /** Identifier the relic is registered and drawn under. */
 const TUMBLER_ID = 'tumbler';
 
@@ -135,10 +100,6 @@ const DRAW_STREAM: StreamName = 'relic-draw';
 /**
  * Cells opened in the fully-occupied fixture to put each board size inside the
  * relic's scarcity band, which is a quarter of the board rounded up.
- *
- * At size 4 the band is 4 cells and the four openings fill it, so each
- * destination draw resolves against more than one candidate. At size 3 the
- * band is 3 cells and at size 5 it is 7.
  */
 const OPENED_CELLS: Readonly<Record<number, readonly Position[]>> =
   Object.freeze({
@@ -159,12 +120,7 @@ const OPENED_CELLS: Readonly<Record<number, readonly Position[]>> =
     ]),
   });
 
-/**
- * The relic as the family declares it.
- *
- * Resolved once, asserted in section 5, and read through `tumbler()`, which
- * throws a named error on an identifier the family no longer declares.
- */
+/** The relic as the family declares it. */
 const DECLARED_TUMBLER: Relic | undefined =
   BOARD_MANIPULATION_FAMILY.relics.find(
     (relic: Relic): boolean => relic.id === TUMBLER_ID,
@@ -259,7 +215,8 @@ function benchFor(grid: Grid, seed: string, subscriber: HookSubscriber): Bench {
  * @param seed Run seed. Defaults to the suite seed.
  * @param charges Budget the subscription starts with. Defaults to the budget
  *   the definition declares.
- * @param state Slot the subscription starts with. Defaults to the definition's.
+ * @param state Slot the subscription starts with. Defaults to the
+ *   definition's.
  * @returns The bench.
  */
 function tumblerBench(
@@ -289,15 +246,6 @@ function tumble(bench: Bench): HookDispatchResult<'onBeforeMove'> {
     bench.environment,
   );
 }
-
-/* ==========================================================================
- * 2. Boards
- * ========================================================================== */
-
-// Every board below is built through `new Grid(size, cells)`, whose
-// `fromState` reads `state[x][y]` and therefore takes the CELL MATRIX rather
-// than the whole `{ size, cells }` fixture, and is opened through
-// `Grid.removeTile` rather than by writing into `Grid.cells`.
 
 /**
  * A live board restored from one fixture's cell matrix.
@@ -365,7 +313,7 @@ function fullBoard(size: number = DEFAULT_BOARD_SIZE): Grid {
   return gridFrom(createNearLossBoard(size).grid.cells, size);
 }
 
-/** The cell and value of the one tile `singleTileBoard()` places. */
+/** The cell and value of the one tile `singleTileBoard` places. */
 const LONE_TILE = Object.freeze({ x: 1, y: 2, value: 8 });
 
 /** A board of the default size holding exactly one tile. */
@@ -381,10 +329,6 @@ function singleTileBoard(): Grid {
 
   return grid;
 }
-
-/* ==========================================================================
- * 3. Lattice inspectors
- * ========================================================================== */
 
 /** One occupied cell, with the tile object that occupies it. */
 interface Occupant {
@@ -462,10 +406,6 @@ function relocationCount(before: Map<Tile, Position>): number {
 /**
  * Asserts the lattice is coherent: every occupant inside the bounds, in the
  * cell its own coordinates name, and alone in it.
- *
- * `Grid.insertTile` assigns `cells[tile.x][tile.y]` with no occupancy check
- * (js/grid.js L89-L91), so a tile whose coordinates disagree with its slot, and
- * a tile object sitting in two slots, are both silent corruption.
  *
  * @param grid Board to check.
  * @param label Name reported with each failure.
@@ -598,13 +538,9 @@ function cursorOf(cursors: RngCursorMap, name: StreamName): number {
   return cursors[name];
 }
 
-/* ==========================================================================
- * 4. A freshly built default per test
- * ========================================================================== */
-
 // `DEFAULT_RULES_CONFIG` is deep-frozen and shared, so the baseline every
 // rules assertion below compares against is built from
-// `createDefaultRulesConfig()` afresh for each test, exactly as each bench
+// `createDefaultRulesConfig` afresh for each test, exactly as each bench
 // builds the config it dispatches with.
 
 let baselineRules: RulesSnapshot;
@@ -612,10 +548,6 @@ let baselineRules: RulesSnapshot;
 beforeEach((): void => {
   baselineRules = snapshotRules(createDefaultRulesConfig());
 });
-
-/* ==========================================================================
- * 5. The definition
- * ========================================================================== */
 
 describe('the tumbler relic definition', () => {
   it('is declared by the board-manipulation family under its own id', () => {
@@ -649,10 +581,6 @@ describe('the tumbler relic definition', () => {
     expect(tumbler().state).toBeUndefined();
   });
 });
-
-/* ==========================================================================
- * 6. Property one: the hooks it binds, and only those
- * ========================================================================== */
 
 // The relic binds ONE hook, so a shared state slot across two bindings has no
 // subject here; the registry-owned single-slot contract is proved in
@@ -720,10 +648,6 @@ describe('the hooks the tumbler relic binds', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Property two: the effect is a value-preserving permutation
- * ========================================================================== */
-
 describe('the tumble inside the scarcity band', () => {
   it(
     'preserves the tile count and the sorted value multiset while ' +
@@ -764,10 +688,9 @@ describe('the tumble inside the scarcity band', () => {
   });
 
   it('records the cell every relocated tile came from', () => {
-    // js/tile.js L10-L17: `savePosition()` writes `previousPosition` as a fresh
+    // js/tile.js L10-L17: `savePosition` writes `previousPosition` as a fresh
     // object holding the coordinates at the time of the call, and
-    // `updatePosition()` then changes only the current coordinates. The two
-    // together are the from/to pair a view tweens.
+    // `updatePosition` then changes only the current coordinates.
     const bench = tumblerBench(tumblingBoard());
     const placements = placementsOf(bench.grid);
 
@@ -859,10 +782,6 @@ describe('the tumble inside the scarcity band', () => {
   });
 });
 
-/* ==========================================================================
- * 8. Property two, continued: board sizes other than four
- * ========================================================================== */
-
 describe('the tumble at a board size the run reconciled to', () => {
   for (const size of [3, 5] as const) {
     it(`conserves the value multiset and the lattice at size ${size}`, () => {
@@ -889,10 +808,6 @@ describe('the tumble at a board size the run reconciled to', () => {
     });
   }
 });
-
-/* ==========================================================================
- * 9. Property two, continued: boards outside the scarcity band
- * ========================================================================== */
 
 describe('a board outside the scarcity band', () => {
   const outside: readonly (readonly [string, () => Grid])[] = [
@@ -955,16 +870,7 @@ describe('a board outside the scarcity band', () => {
   });
 });
 
-/* ==========================================================================
- * 10. Property three: the charge budget, and the zero-charge invocation
- * ========================================================================== */
-
-// The notional charge a DIRECT call is made under. The bus builds the real
-// context — the frozen views, the per-handler randomness fork and the
-// board-effect transaction — and the probe below hands the relic's handler
-// that same context with `charges` alone replaced. Every collaborator the
-// direct call reads is therefore the production one. Decision DL-BOARD-01
-// records where the guard and the decrement live.
+// The notional charge a DIRECT call is made under.
 
 /** Identifier the probe subscribes under. */
 const PROBE_ID = 'tumbler-direct-call-probe';
@@ -1197,10 +1103,6 @@ describe('the charge budget of the tumbler relic', () => {
   });
 });
 
-/* ==========================================================================
- * 11. Seeded determinism and substream hygiene
- * ========================================================================== */
-
 describe('the seeded determinism of the tumble', () => {
   it('resolves one seed to one board across two built runs', () => {
     const first = tumblerBench(tumblingBoard(), SUITE_SEED);
@@ -1301,10 +1203,6 @@ describe('the seeded determinism of the tumble', () => {
     expect(source, 'no console call').not.toMatch(/console/u);
   });
 });
-
-/* ==========================================================================
- * 12. The catalogue definition is left as it shipped
- * ========================================================================== */
 
 describe('the catalogue definition after every case above', () => {
   it('still declares its own budget, and is still frozen', () => {

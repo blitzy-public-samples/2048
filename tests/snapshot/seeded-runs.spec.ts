@@ -1,45 +1,15 @@
-// Seeded run snapshots: the separately stored regression gate of AAP V1 and V2.
+// Seeded run snapshots: the separately stored regression gate of AAP V1 and
+// V2.
 //
-// PINNED VANILLA CONSTRUCTS, and the expectation each one supplies:
-//   js/application.js            L3        board size 4
-//   js/game_manager.js           L7        two start tiles
-//   js/game_manager.js           L36       setup() reads the snapshot once
-//   js/game_manager.js           L62-L76   addStartTiles, then addRandomTile
-//                                          taking the value draw before the
-//                                          position draw
-//   js/game_manager.js           L102-L110 serialize(), keepPlaying included
-//   js/game_manager.js           L134      the terminal-state guard
-//   js/game_manager.js           L156      canMerge: equal value, and the
-//                                          target not already merged
-//   js/game_manager.js           L157      produce: twice the value
-//   js/game_manager.js           L167      score += merged.value
-//   js/game_manager.js           L170      win value 2048
-//   js/grid.js                   L37-L43   randomAvailableCell, and its
-//                                          full-board guard with no else
-//   js/grid.js                   L45-L64   availableCells and eachCell,
-//                                          x-outer and y-inner
-//   js/grid.js                   L80-L86   cellContent, null off the lattice
-//   js/local_storage_manager.js  L22       the frozen best-score key
-//   js/local_storage_manager.js  L25-L26   the writability probe, once at
-//                                          construction
-//   js/local_storage_manager.js  L43-L45   getBestScore(): the stored string
-//                                          when a value is set
-//
-// The seeded substreams replace exactly two platform-randomness call sites, and
-// the repository held no others: js/game_manager.js L71, the spawn value, and
-// js/grid.js L41, the spawn position. Section 8 measures that the platform
-// generator itself is left unpatched, against the reference
-// tests/fixtures/math-random-reference.ts captured.
-//
-// The `snapshot` project runs in the `node` environment: no document and no Web
-// Storage. Every store below is a MemoryStorage behind the real manager.
+// The `snapshot` project runs in the `node` environment: no document and no
+// Web Storage. Every store below is a MemoryStorage behind the real manager.
 //
 // Snapshot artifacts land in tests/snapshot/__snapshots__/ through
 // `resolveSnapshotPath` of vitest.snapshot.config.ts.
 //
 // Decisions behind this file are recorded in docs/DECISION_LOG.md.
 
-// DECLARED FIRST. A module's dependencies are evaluated in the order their
+// Declared first. A module's dependencies are evaluated in the order their
 // declarations appear, and this one captures the platform generator in its own
 // body; it imports nothing.
 import {
@@ -66,12 +36,31 @@ import {
   DIRECTION_LEFT,
   DIRECTION_RIGHT,
   DIRECTION_UP,
+  type CorrelationId,
   type Direction,
+  type EngineReporter,
   type SerializedGameState,
   type SerializedTile,
 } from '../../src/engine/types';
+import { HOOK_NAMES } from '../../src/engine/hooks';
+import {
+  createLogger,
+  deriveCorrelationId,
+  type Logger,
+} from '../../src/observability/logger';
+import {
+  METRIC_PREFIX,
+  createMetricsRegistry,
+  type MetricsRegistry,
+  type SpawnDetail,
+} from '../../src/observability/metrics';
+import {
+  attachEngineTracing,
+  createTracer,
+  type Tracer,
+} from '../../src/observability/tracer';
 import { drawRelicOffers } from '../../src/relics/relic-draw';
-import { RELIC_CATALOGUE } from '../../src/relics/relic-registry';
+import { RELIC_CATALOGUE, RelicRegistry } from '../../src/relics/relic-registry';
 import type { Relic } from '../../src/relics/relic-types';
 import {
   RNG_STREAM_NAMES,
@@ -85,6 +74,10 @@ import {
   createFreshRunState,
   type RunState,
 } from '../../src/run/run-state';
+import {
+  RunController,
+  resolveRunIdentity,
+} from '../../src/run/run-controller';
 import { RunStateStore } from '../../src/run/run-state-store';
 import { LocalStorageManager } from '../../src/storage/local-storage-manager';
 import { MemoryStorage } from '../../src/storage/memory-storage';
@@ -101,24 +94,15 @@ import {
   copyBoard,
 } from '../fixtures/boards';
 
-/* ==========================================================================
- * 1. Harness
- * ========================================================================== */
-
 /** The run seed every leg below plays from. */
 const RUN_SEED = 'run-seed-2048';
 
 /** A second seed. Its board is compared against `RUN_SEED`'s. */
 const OTHER_RUN_SEED = 'run-seed-2049';
 
-/** Run identifier the persisted envelope carries, fixed rather than drawn. */
 const FIXED_RUN_ID = 'seeded-runs-fixture';
 
-/**
- * Directions every leg plays, in this order. Eight moves cycling all four
- * directions twice, which under `RUN_SEED` resolves eight turns, spawns eight
- * tiles and merges.
- */
+/** Directions every leg plays, in this order. */
 const MOVE_LIST: readonly Direction[] = [
   DIRECTION_UP,
   DIRECTION_RIGHT,
@@ -139,6 +123,14 @@ const TERMINAL_MOVE_LIST: readonly Direction[] = [
 
 /** Moves played before the run is interrupted and persisted. */
 const MOVES_BEFORE_RELOAD = 4;
+
+/**
+ * Moves played before the reward-carrying leg of section 6b is interrupted.
+ *
+ * Far enough in that a stage has been cleared and a relic taken, so the reload
+ * has a reward round and a held relic to carry rather than a board alone.
+ */
+const MOVES_BEFORE_REWARD_RELOAD = 30;
 
 /** Offer sets drawn in sequence, one per stage. */
 const OFFER_SET_COUNT = 3;
@@ -161,11 +153,6 @@ const EMPTY_CELL = '.';
 /** Width the substream names are padded to. */
 const STREAM_NAME_WIDTH = 16;
 
-/**
- * A pool declared here rather than read from `RELIC_CATALOGUE`. One relic per
- * tier of `RARITIES`, and no bound handler: nothing below registers these on a
- * bus.
- */
 const HAND_BUILT_POOL: readonly Relic[] = [
   {
     id: 'gate-common',
@@ -212,9 +199,6 @@ function createBacking(): MemoryStorage {
 /**
  * Removes every key `src/storage/storage-keys.ts` reports as owned from every
  * store this file built, and empties the registry.
- *
- * `BEST_SCORE_KEY` is removed by name as well as through the list: no member of
- * the vanilla manager removed it, and promotion only ever raised it.
  */
 function clearInjectedStores(): void {
   for (const backing of injectedStores) {
@@ -246,13 +230,7 @@ afterEach(() => {
   clearAmbientOwnedKeys();
 });
 
-/**
- * Renders one board snapshot as fixed-width columns under a metadata line.
- *
- * The walk is x-outer and y-inner, the traversal js/grid.js L58-L64 fixed and
- * the order `availableCells()` inherits from it, so each line is one column of
- * the persisted `cells[x][y]` matrix.
- */
+/** Renders one board snapshot as fixed-width columns under a metadata line. */
 function projectBoard(state: SerializedGameState): string {
   const size = state.grid.size;
   const lines: string[] = [
@@ -278,21 +256,23 @@ function projectBoard(state: SerializedGameState): string {
   return lines.join('\n');
 }
 
-/**
- * Renders a cursor map in `RNG_STREAM_NAMES` order rather than in the object's
- * own key order.
- */
 function projectCursors(cursors: RngCursorMap): string {
   return RNG_STREAM_NAMES.map(
     (name) => `  ${name.padEnd(STREAM_NAME_WIDTH)}${String(cursors[name])}`,
   ).join('\n');
 }
 
-/** Renders the nine members of one run-state envelope, in declared order. */
+/**
+ * Renders the SEEDED members of one run-state envelope, in declared order:
+ * eight of the nine, `runId` excluded.
+ *
+ * `runId` is run identity rather than seeded state — nothing about it is
+ * derived from the seed or the move list — so it is asserted against
+ * `FIXED_RUN_ID` in the case above rather than recorded in the artifact.
+ */
 function projectEnvelope(state: RunState): string {
   return [
     `schemaVersion  ${String(state.schemaVersion)}`,
-    `runId          ${state.runId}`,
     `seed           ${state.seed}`,
     `stageIndex     ${String(state.stageIndex)}`,
     `stageGoal      ${state.stageGoal.kind} ` +
@@ -325,11 +305,30 @@ interface RunLegOptions {
   /** Board to restore. A fresh board is seeded when absent. */
   readonly board?: SerializedGameState;
 
-  /** Bus the engine dispatches its hooks through. A private one when absent. */
+  /**
+   * Bus the engine dispatches its hooks through. A private one when absent.
+   */
   readonly hooks?: HookBus;
 
-  /** Runs after construction and before `setup()`. */
-  readonly attach?: (engine: Engine) => void;
+  /**
+   * Sink the engine's own counts and contained failures report through. The
+   * `NOOP_ENGINE_REPORTER` default of src/engine/engine.ts applies when absent,
+   * which is the observer-free baseline.
+   */
+  readonly reporter?: EngineReporter;
+
+  /**
+   * Identifier the engine stamps on those reports. Absent, the engine's own
+   * default applies; nothing about the board or the draw order reads it.
+   */
+  readonly correlationId?: CorrelationId;
+
+  /**
+   * Runs after construction and before `setup()`. The substreams are handed
+   * over as well, because a production observer reads the cursor map — see
+   * `MetricsRegistry.recordRngCursors` — and reading it must not advance it.
+   */
+  readonly attach?: (engine: Engine, streams: RngStreams) => void;
 
   /** Runs before each move. */
   readonly betweenMoves?: (streams: RngStreams) => void;
@@ -351,9 +350,11 @@ interface RunLeg {
 /**
  * Drives one seeded run and reports what it produced.
  *
- * No reporter, logger, tracer, metrics collector, relic registry, run
- * controller or renderer is wired: every one of those is a subscriber, and the
- * `NOOP_*` defaults of src/engine/ apply where none is passed.
+ * Wires only what the caller supplies. With no `reporter` and no `attach`, no
+ * logger, tracer, metrics collector, relic registry, run controller or renderer
+ * is wired: every one of those is a subscriber, and the `NOOP_*` defaults of
+ * src/engine/ apply where none is passed. That absence is what makes a leg the
+ * baseline the observed leg of section 8 is compared against.
  */
 function driveRun(options: RunLegOptions): RunLeg {
   const config = createDefaultRulesConfig();
@@ -362,13 +363,15 @@ function driveRun(options: RunLegOptions): RunLeg {
     config,
     streams,
     hooks: options.hooks,
+    reporter: options.reporter,
+    correlationId: options.correlationId,
     storage: new LocalStorageManager({ storage: createBacking() }),
   });
 
-  options.attach?.(engine);
+  options.attach?.(engine, streams);
 
-  // js/game_manager.js L13 called setup() from the constructor; here the
-  // caller does, after a subscriber has attached.
+  // js/game_manager.js L13 called setup from the constructor; here the caller
+  // does, after a subscriber has attached.
   engine.setup(options.board);
 
   const resolved: boolean[] = [];
@@ -401,7 +404,8 @@ function renderLeg(leg: RunLeg): string {
 
 /**
  * Draws `OFFER_SET_COUNT` sets of `OFFERS_PER_SET` offers from `pool`, taking
- * the first offer of each set into the owned list before the next set is drawn.
+ * the first offer of each set into the owned list before the next set is
+ * drawn.
  *
  * @returns The identifiers of each set, in draw order.
  */
@@ -440,6 +444,262 @@ function projectOfferSets(sets: readonly (readonly string[])[]): string {
     .join('\n');
 }
 
+/* --------------------------------------------------------------------------
+ * 1b. The real observability stack, as one attachable set
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Family the engine's own counts land in when the observed leg's reporter
+ * records them. One family with the dotted metric name carried as a label,
+ * which is the collapsing src/main.ts applies, and the real `METRIC_PREFIX` so
+ * the name is as well-formed as a production family. DL-METRIC-04.
+ */
+const ENGINE_COUNTER_NAME = `${METRIC_PREFIX}snapshot_engine_reports_total`;
+
+/** Records `logger.recent()` is asked for. Above any one leg can produce. */
+const LOG_RECORD_LIMIT = 5000;
+
+/** What one real-observer attachment recorded, read after its leg has run. */
+interface ObserverEvidence {
+  readonly logRecords: number;
+  readonly metricSeries: number;
+  readonly spansStarted: number;
+  readonly spansEnded: number;
+  readonly spansOpen: number;
+  readonly traceFaults: number;
+
+  /** Counts the engine reported through `EngineReporter.onCount`. */
+  readonly engineCounts: number;
+
+  /**
+   * Series the registry actually stored those counts as. Read from the
+   * registry's own snapshot rather than from a local tally, so the evidence
+   * covers the recording path and not only the callback.
+   */
+  readonly engineCountSeries: number;
+
+  /** Event emissions the metric feed observed. */
+  readonly eventsObserved: number;
+
+  /** Times an observer read the substream cursor map. */
+  readonly cursorsRead: number;
+}
+
+/**
+ * The production observability stack, wired as one set and attachable to one
+ * engine.
+ *
+ * THE REAL MODULES, not a stand-in: `createLogger`, `createMetricsRegistry`,
+ * `createTracer` and `attachEngineTracing` of src/observability, wired at the
+ * seams src/main.ts wires them at — the engine reporter, `attachEngineTracing`
+ * over the emitter, one `recordEngineEvent` feed per member of
+ * `ENGINE_EVENT_NAMES`, and a cursor read per commit.
+ */
+interface RealObservers {
+  readonly correlationId: CorrelationId;
+  readonly reporter: EngineReporter;
+  readonly attach: (engine: Engine, streams: RngStreams) => void;
+
+  /** Detaches every listener and closes whatever span is still open. */
+  readonly release: () => void;
+
+  readonly evidence: () => ObserverEvidence;
+}
+
+/**
+ * Builds the real observer set for one seed.
+ *
+ * `consoleOutput` is off: the records are read back through `logger.recent()`,
+ * and a snapshot run writes nothing to the console it does not assert on.
+ *
+ * @param seed Seed the correlation identifier derives from.
+ * @returns The set, unattached.
+ */
+function createRealObservers(seed: string): RealObservers {
+  const correlationId = deriveCorrelationId(seed, FIXED_RUN_ID);
+  const logger: Logger = createLogger({
+    correlationId,
+    subsystem: 'seeded-runs',
+
+    // The most attached posture there is: `debug` retains every record the
+    // observers emit, where the `info` default of src/observability/logger.ts
+    // would drop the per-event ones and leave the evidence assertion vacuous.
+    level: 'debug',
+    consoleOutput: false,
+  });
+  const metrics: MetricsRegistry = createMetricsRegistry({ logger });
+  const tracer: Tracer = createTracer({ logger, metrics, correlationId });
+  const engineLog = logger.child('engine');
+  const stops: (() => void)[] = [];
+
+  let engineCounts = 0;
+  let eventsObserved = 0;
+  let cursorsRead = 0;
+
+  const reporter: EngineReporter = {
+    onCount(report): void {
+      engineCounts += 1;
+      metrics
+        .counter(ENGINE_COUNTER_NAME, { metric: report.metric })
+        .inc(report.value);
+    },
+
+    onHookError(report): void {
+      engineLog.failure('error', `A ${report.hook} handler threw.`, {
+        fields: { hook: report.hook, subscriber: report.subscriberId },
+        thrown: report.error,
+      });
+    },
+
+    onListenerError(report): void {
+      engineLog.failure('error', `A ${report.event} listener threw.`, {
+        fields: { event: report.event, listenerIndex: report.listenerIndex },
+        thrown: report.error,
+      });
+    },
+  };
+
+  return {
+    correlationId,
+    reporter,
+
+    attach: (engine, streams): void => {
+      // The turn and stage spans, subscribed through `on` alone.
+      stops.push(attachEngineTracing(engine.events, tracer));
+
+      for (const name of ENGINE_EVENT_NAMES) {
+        stops.push(
+          engine.events.on(name, (payload): void => {
+            eventsObserved += 1;
+            metrics.recordEngineEvent(
+              name,
+              name === 'tile:spawn' ? (payload as SpawnDetail) : undefined,
+            );
+            engineLog.debug('an engine event was observed', { event: name });
+          }),
+        );
+      }
+
+      // A READING observer, and the one that matters most here: the cursor
+      // gauge family is fed from the same map the run envelope persists, so
+      // this leg proves that reading the substreams does not advance them.
+      stops.push(
+        engine.events.on('state:commit', (): void => {
+          cursorsRead += 1;
+          metrics.recordRngCursors(streams.snapshotCursors());
+        }),
+      );
+    },
+
+    release: (): void => {
+      for (const stop of stops) {
+        stop();
+      }
+
+      stops.length = 0;
+    },
+
+    evidence: (): ObserverEvidence => {
+      const spans = tracer.snapshot();
+      const { series } = metrics.snapshot();
+
+      return {
+        logRecords: logger.recent(LOG_RECORD_LIMIT).length,
+        metricSeries: series.length,
+        spansStarted: spans.started,
+        spansEnded: spans.ended,
+        spansOpen: spans.open,
+        traceFaults: spans.faults,
+        engineCounts,
+        engineCountSeries: series.filter(
+          (entry) => entry.name === ENGINE_COUNTER_NAME,
+        ).length,
+        eventsObserved,
+        cursorsRead,
+      };
+    },
+  };
+}
+
+/* --------------------------------------------------------------------------
+ * 1c. The reward scenario both legs of section 8 play
+ * ------------------------------------------------------------------------ */
+
+/** What one leg of the reward scenario produced. */
+interface RewardScenario {
+  readonly leg: RunLeg;
+
+  /** Offer identifiers of each set, in draw order. */
+  readonly offerSets: readonly (readonly string[])[];
+}
+
+/**
+ * Drives `MOVE_LIST` under `RUN_SEED` with `OFFER_SET_COUNT` reward draws
+ * interleaved, and optionally with the real observer set attached.
+ *
+ * THE DRAWS TAKE FROM THE RUN'S OWN SUBSTREAMS rather than from a generator of
+ * their own, which is what makes the offer identifiers a non-interference
+ * probe: an observer that consumed from any substream would move the board, the
+ * cursors AND the offers, and each is compared separately below.
+ *
+ * @param observers Observer set to attach, or `undefined` for the baseline.
+ * @returns The leg and the offer identifiers it drew.
+ */
+function driveRewardScenario(observers?: RealObservers): RewardScenario {
+  const owned: string[] = [];
+  const offerSets: string[][] = [];
+  let movesPlayed = 0;
+
+  const leg = driveRun({
+    seed: RUN_SEED,
+    reporter: observers?.reporter,
+    correlationId: observers?.correlationId,
+    attach: observers?.attach,
+    betweenMoves: (streams): void => {
+      const index = movesPlayed;
+
+      movesPlayed += 1;
+
+      // One draw per stage, taken before the earliest moves so the remaining
+      // moves are played with the draws already behind them.
+      if (index >= OFFER_SET_COUNT) {
+        return;
+      }
+
+      const ids = drawRelicOffers({
+        pool: RELIC_CATALOGUE,
+        ownedIds: owned,
+        count: OFFERS_PER_SET,
+        streams,
+      }).map((relic) => relic.id);
+
+      offerSets.push(ids);
+
+      const taken = ids[0];
+
+      if (taken !== undefined) {
+        owned.push(taken);
+      }
+    },
+  });
+
+  observers?.release();
+
+  return { leg, offerSets };
+}
+
+/**
+ * Renders one reward-scenario leg as the text the artifact pins: the board, the
+ * cursors every substream reached, the turn count and the offer sets.
+ */
+function projectRewardScenario(scenario: RewardScenario): string {
+  return [
+    renderLeg(scenario.leg),
+    'offers',
+    projectOfferSets(scenario.offerSets),
+  ].join('\n');
+}
+
 /** Renders a dispatch record one line per dispatch, numbered from 1. */
 function projectDispatchPairs(record: readonly string[]): string {
   const lines: string[] = [];
@@ -452,10 +712,6 @@ function projectDispatchPairs(record: readonly string[]): string {
 
   return lines.join('\n');
 }
-
-/* ==========================================================================
- * 2. The frozen rule literals
- * ========================================================================== */
 
 describe('js/application.js L3 — the sole board-size literal', () => {
   it('configures a board four cells to an edge', () => {
@@ -516,7 +772,6 @@ describe('js/game_manager.js L157 — the merge producer', () => {
 describe('js/game_manager.js L167 — self.score += merged.value', () => {
   it('adds the merged value and not the value of the moving tile', () => {
     // MERGE_PAIR_BOARD holds two tiles of value 2, so one move merges them.
-    // The merged value is 4 and the moving tile's value is 2.
     const leg = driveRun({
       seed: RUN_SEED,
       board: copyBoard(MERGE_PAIR_BOARD),
@@ -527,10 +782,6 @@ describe('js/game_manager.js L167 — self.score += merged.value', () => {
     expect(leg.serialized.score).toBe(4);
   });
 });
-
-/* ==========================================================================
- * 3. Spawn accounting and the board walk
- * ========================================================================== */
 
 describe('js/game_manager.js L62-L76 — addRandomTile', () => {
   it('takes two value draws and two position draws at setup', () => {
@@ -677,10 +928,6 @@ describe('js/game_manager.js L170 — won is raised at the win value', () => {
   });
 });
 
-/* ==========================================================================
- * 4. The recorded boards — AAP V1
- * ========================================================================== */
-
 describe('js/game_manager.js L102-L110 — serialize()', () => {
   it('carries the five frozen members, keepPlaying among them', () => {
     const leg = driveRun({ seed: RUN_SEED });
@@ -740,10 +987,6 @@ describe('js/game_manager.js L36-L45 — a restored run', () => {
   });
 });
 
-/* ==========================================================================
- * 5. One seed and one move list, twice — AAP V2
- * ========================================================================== */
-
 describe('AAP V2 — two engines from one seed and one move list', () => {
   it('reaches the same board, the same cursors and the same turns', () => {
     const first = driveRun({ seed: RUN_SEED });
@@ -795,10 +1038,6 @@ describe('createSeededRng — a start cursor fast-forwards', () => {
   });
 });
 
-/* ==========================================================================
- * 6. The same run across a reload — AAP V2
- * ========================================================================== */
-
 /** What the interrupted half of the reload leg produced. */
 interface Interruption {
   readonly backing: MemoryStorage;
@@ -845,10 +1084,6 @@ function interruptRun(): Interruption {
 /**
  * Reads the envelope back through a reader stack built after the write, and
  * plays the remaining moves.
- *
- * js/local_storage_manager.js L25-L26 probed Web Storage once at construction
- * and js/game_manager.js L36 read the snapshot once at setup, so the manager,
- * the store and the engine are all constructed after the fixture is in place.
  */
 function resumeRun(backing: MemoryStorage): RunLeg {
   const manager = new LocalStorageManager({ storage: backing });
@@ -915,9 +1150,17 @@ describe('AAP Contract 5 — the persisted run envelope', () => {
   });
 
   it('reproduces its recorded envelope', () => {
-    expect(projectEnvelope(interruptRun().envelope)).toMatchSnapshot(
-      'envelope at the interruption',
-    );
+    const interrupted = interruptRun();
+    const projected = projectEnvelope(interrupted.envelope);
+
+    // The run identifier is carried by the envelope and NOT by the artifact:
+    // asserted here against the fixed fixture value, and absent from the text
+    // the snapshot records.
+    expect(interrupted.envelope.runId).toBe(FIXED_RUN_ID);
+    expect(projected).not.toContain(FIXED_RUN_ID);
+    expect(projected).not.toContain('runId');
+
+    expect(projected).toMatchSnapshot('envelope at the interruption');
   });
 });
 
@@ -939,6 +1182,398 @@ describe('AAP V2 — a run interrupted and resumed from storage', () => {
   it('reproduces the recorded board after the resume', () => {
     expect(renderLeg(resumeRun(interruptRun().backing))).toMatchSnapshot(
       'resumed run',
+    );
+  });
+});
+
+/* ==========================================================================
+ * 6b. A REWARD ROUND carried across the reload — AAP V2
+ * ==========================================================================
+ *
+ * Section 6 interrupts and resumes a run, and section 7 draws offer sets. Both
+ * are true and neither is the guarantee: section 6 composes an `Engine` and
+ * nothing else, so no reward is ever offered and only the two spawn substreams
+ * move; section 7 draws from a generator that was never persisted. So the half
+ * of validation gate V2 (0.8.2) that says a run replayed from the same seed
+ * yields identical board state AND IDENTICAL RELIC DRAWS across a reload had no
+ * case standing behind it: a resume that recovered the board and lost the reward
+ * cursors, or recovered the cursors and lost the held relics, passed both.
+ *
+ * This section closes it by composing what src/main.ts composes — a
+ * `RelicRegistry` over `RELIC_CATALOGUE`, a `RunController` over a
+ * `RunStateStore`, `drawRelicOffers` as the draw port and a real `Engine` over
+ * the shared hook bus — playing a fixed move list, TAKING A REAL RELIC from a
+ * real offer, then throwing the whole stack away, rebuilding it over the same
+ * storage, and playing on. What it compares against is the same run played
+ * straight through, with no interruption at all.
+ */
+
+/**
+ * Directions the reward-carrying leg plays.
+ *
+ * Long enough that three stages clear and a relic is taken at each — two before
+ * the interruption and one after it — and SHORT ENOUGH THAT THE RUN IS STILL
+ * LIVE at the end. A list that played on to a loss would have both legs comparing
+ * a finished run whose controller had already opened a fresh one, which is a
+ * weaker statement than the one this section makes.
+ */
+const REWARD_MOVE_LIST: readonly Direction[] = Array.from(
+  { length: 44 },
+  (_value, index): Direction =>
+    [DIRECTION_UP, DIRECTION_RIGHT, DIRECTION_DOWN, DIRECTION_LEFT][
+      index % 4
+    ] as Direction,
+);
+
+/** One reward round as this section records it. */
+interface RewardRound {
+  readonly stageIndex: number;
+  readonly offered: readonly string[];
+  readonly taken: string;
+}
+
+/** The whole production stack, composed the way src/main.ts composes it. */
+interface ProductionStack {
+  readonly controller: RunController;
+  readonly engine: Engine;
+  readonly registry: RelicRegistry;
+  readonly streams: () => RngStreams;
+  readonly stop: () => void;
+}
+
+/**
+ * Composes the run controller, the relic registry, the draw port and the engine
+ * over one storage backing.
+ *
+ * Nothing here is a double: the registry holds the shipped catalogue, the draw
+ * is `drawRelicOffers`, and the controller's two ports delegate to the registry
+ * on every call rather than capturing a snapshot, so a relic picked up between
+ * calls is seen.
+ *
+ * @param seed Seed a FRESH run would be played under. A stored envelope's own
+ *   seed wins, which is what makes the resumed leg continue rather than restart.
+ * @param backing Storage the envelope is written to and read from.
+ * @returns The composed stack, and the release for the controller's subscription.
+ */
+function composeProductionStack(
+  seed: string,
+  backing: MemoryStorage,
+): ProductionStack {
+  const manager = new LocalStorageManager({ storage: backing });
+  const config = createDefaultRulesConfig();
+  const stages = createDefaultStageConfig();
+  const tokens = [seed, FIXED_RUN_ID];
+
+  let nextToken = 0;
+  const createToken = (): string =>
+    tokens[nextToken++] ?? `token-${String(nextToken)}`;
+
+  const hooks = createHookBus({ correlationId: seed });
+  const registry = new RelicRegistry({ catalogue: RELIC_CATALOGUE, bus: hooks });
+
+  let streams: RngStreams | null = null;
+
+  const controller = new RunController({
+    store: new RunStateStore({ storage: manager, config }),
+    identity: resolveRunIdentity({ storage: manager, createToken }),
+    config,
+    stages,
+    createToken,
+    relics: {
+      snapshotRelics: () => registry.serialize(),
+      activateRelic: (relicId) =>
+        registry.pickUp(relicId) === undefined
+          ? null
+          : (registry.serialize().find((held) => held.id === relicId) ?? null),
+      ownedRelicIds: () => registry.ownedIds(),
+      restoreRelics: (relics) => {
+        registry.restore(relics);
+      },
+      resolveRelic: (relicId) => {
+        const known = registry
+          .catalogue()
+          .find((relic) => relic.id === relicId);
+
+        return known === undefined
+          ? null
+          : Object.freeze({
+              id: known.id,
+              ...(known.charges === undefined ? {} : { charges: known.charges }),
+            });
+      },
+    },
+    rewards: {
+      draw: ({ count, ownedIds }) =>
+        streams === null
+          ? []
+          : drawRelicOffers({
+              pool: registry.catalogue(),
+              ownedIds,
+              count,
+              streams,
+            }).map((relic) => ({
+              id: relic.id,
+              name: relic.name,
+              rarity: relic.rarity,
+              description: relic.description,
+              hooks: Object.freeze(
+                HOOK_NAMES.filter((name) => relic.hooks[name] !== undefined),
+              ),
+              ...(relic.charges === undefined ? {} : { charges: relic.charges }),
+            })),
+
+      // The non-random projector: a round restored from the envelope is rebuilt
+      // from the catalogue by identifier, so no draw is repeated on a reload.
+      project: (relicIds) =>
+        relicIds.flatMap((relicId) => {
+          const known = registry
+            .catalogue()
+            .find((relic) => relic.id === relicId);
+
+          return known === undefined
+            ? []
+            : [
+                {
+                  id: known.id,
+                  name: known.name,
+                  rarity: known.rarity,
+                  description: known.description,
+                  hooks: Object.freeze(
+                    HOOK_NAMES.filter(
+                      (name) => known.hooks[name] !== undefined,
+                    ),
+                  ),
+                  ...(known.charges === undefined
+                    ? {}
+                    : { charges: known.charges }),
+                },
+              ];
+        }),
+    },
+  });
+
+  // `begin()` adopts the stored envelope where there is one — its seed, its
+  // cursors, its relics and any round left standing — and only then is the
+  // generator built, so a resumed leg continues the sequence it was on.
+  controller.begin();
+
+  streams = createRngStreams(controller.seed(), controller.cursors());
+
+  const engine = new Engine({
+    config,
+    streams,
+    storage: manager,
+    hooks,
+    stageContext: () => controller.stageContext(),
+    relicContext: () => controller.relicContext(),
+  });
+
+  const live = streams;
+  const stop = controller.observe(engine, () => live.snapshotCursors());
+
+  controller.openEngineBoard(engine);
+
+  return {
+    controller,
+    engine,
+    registry,
+    streams: (): RngStreams => live,
+    stop,
+  };
+}
+
+/**
+ * Plays a slice of `REWARD_MOVE_LIST` on a composed stack, taking every reward
+ * the run is offered.
+ *
+ * @param stack Stack to play on.
+ * @param from First move index to play, inclusive.
+ * @param to Last move index to play, exclusive.
+ * @param rounds Collector every reward round is appended to.
+ */
+function playTakingRewards(
+  stack: ProductionStack,
+  from: number,
+  to: number,
+  rounds: RewardRound[],
+): void {
+  for (const direction of REWARD_MOVE_LIST.slice(from, to)) {
+    stack.engine.move(direction);
+
+    if (stack.engine.serialize().over || !stack.controller.isRewardPending()) {
+      continue;
+    }
+
+    const cards = stack.controller.currentOffer();
+    const chosen = cards[0];
+
+    if (chosen === undefined) {
+      throw new Error('a pending reward held no card');
+    }
+
+    const stageIndex = stack.controller.stageIndex();
+    const selection = stack.controller.selectReward(chosen.id, stack.engine);
+
+    expect(selection.outcome).toBe('accepted');
+
+    rounds.push({
+      stageIndex,
+      offered: cards.map((card): string => card.id),
+      taken: chosen.id,
+    });
+  }
+}
+
+/** What one leg of the reward-carrying comparison produced. */
+interface RewardLeg {
+  readonly rounds: readonly RewardRound[];
+  readonly owned: readonly string[];
+  readonly board: SerializedGameState;
+  readonly cursors: RngCursorMap;
+  readonly stageIndex: number;
+}
+
+/** Reads a played stack's outcome and releases its subscription. */
+function closeLeg(
+  stack: ProductionStack,
+  rounds: readonly RewardRound[],
+): RewardLeg {
+  const leg: RewardLeg = {
+    rounds,
+    owned: stack.registry.ownedIds(),
+    board: stack.engine.serialize(),
+    cursors: stack.streams().snapshotCursors(),
+    stageIndex: stack.controller.stageIndex(),
+  };
+
+  stack.stop();
+
+  return leg;
+}
+
+/** Plays the whole move list on one stack, with no interruption. */
+function playStraightThrough(): RewardLeg {
+  const stack = composeProductionStack(RUN_SEED, createBacking());
+  const rounds: RewardRound[] = [];
+
+  playTakingRewards(stack, 0, REWARD_MOVE_LIST.length, rounds);
+
+  return closeLeg(stack, rounds);
+}
+
+/**
+ * Plays the same move list, throwing the entire stack away partway and
+ * rebuilding it over the same storage.
+ *
+ * The rebuild is what a reload is: a new manager, a new store, a new registry,
+ * a new controller, a new generator and a new engine, with nothing carried in
+ * memory across the boundary.
+ */
+function playAcrossReload(): { readonly leg: RewardLeg; readonly halfway: number } {
+  const backing = createBacking();
+  const first = composeProductionStack(RUN_SEED, backing);
+  const rounds: RewardRound[] = [];
+
+  playTakingRewards(first, 0, MOVES_BEFORE_REWARD_RELOAD, rounds);
+
+  const roundsBeforeReload = rounds.length;
+
+  first.stop();
+
+  const second = composeProductionStack(RUN_SEED, backing);
+
+  playTakingRewards(
+    second,
+    MOVES_BEFORE_REWARD_RELOAD,
+    REWARD_MOVE_LIST.length,
+    rounds,
+  );
+
+  return { leg: closeLeg(second, rounds), halfway: roundsBeforeReload };
+}
+
+/** Renders a leg's rounds, relics, board and cursors as one artifact. */
+function renderRewardLeg(leg: RewardLeg): string {
+  return [
+    'reward rounds, in the order they were offered',
+    ...leg.rounds.map(
+      (round): string =>
+        `  stage ${String(round.stageIndex + 1)}  TAKEN ${round.taken.padEnd(
+          18,
+        )}offered ${round.offered.join(', ')}`,
+    ),
+    '',
+    `relics held, in pickup order: ${leg.owned.join(', ')}`,
+    `stage reached: ${String(leg.stageIndex + 1)}`,
+    '',
+    projectBoard(leg.board),
+    'rngCursor',
+    projectCursors(leg.cursors),
+  ].join('\n');
+}
+
+describe('AAP V2 — a REWARD ROUND survives the reload', () => {
+  it('takes relics on BOTH sides of the interruption, so the case has teeth', () => {
+    const { leg, halfway } = playAcrossReload();
+
+    // Guards the whole section: were the move slice ever to stop clearing a
+    // stage, every assertion below would compare two runs that had never been
+    // offered anything and would pass without meaning. A round on each side is
+    // what makes this a continuation rather than a replay.
+    expect(halfway).toBeGreaterThan(0);
+    expect(leg.rounds.length).toBeGreaterThan(halfway);
+
+    // And the run is still in progress, so the comparison is between two live
+    // runs rather than two finished ones.
+    expect(leg.board.over).toBe(false);
+  });
+
+  it('reaches the board the uninterrupted run reached', () => {
+    expect(playAcrossReload().leg.board).toEqual(playStraightThrough().board);
+  });
+
+  it('holds the same relics, in the same pickup order', () => {
+    const resumed = playAcrossReload().leg;
+    const straight = playStraightThrough();
+
+    expect(resumed.owned).toEqual(straight.owned);
+    expect(resumed.owned.length).toBeGreaterThan(0);
+  });
+
+  it('is offered the same cards, in the same order, at every stage', () => {
+    const resumed = playAcrossReload().leg;
+    const straight = playStraightThrough();
+
+    // The offer identifiers themselves, not their count: this is the assertion
+    // that the reward substreams resumed where they stood.
+    expect(resumed.rounds).toEqual(straight.rounds);
+  });
+
+  it('reaches all four cursors the uninterrupted run reached', () => {
+    const resumed = playAcrossReload().leg;
+    const straight = playStraightThrough();
+
+    expect(resumed.cursors).toEqual(straight.cursors);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(resumed.cursors[name]).toBe(straight.cursors[name]);
+    }
+
+    // And the reward substreams actually moved, so the equality above is not two
+    // runs agreeing that nothing happened.
+    expect(resumed.cursors['relic-draw']).toBeGreaterThan(0);
+    expect(resumed.cursors['rarity-weight']).toBeGreaterThan(0);
+  });
+
+  it('reaches the same stage', () => {
+    expect(playAcrossReload().leg.stageIndex).toBe(
+      playStraightThrough().stageIndex,
+    );
+  });
+
+  it('reproduces its recorded rounds, relics, board and cursors', () => {
+    expect(renderRewardLeg(playAcrossReload().leg)).toMatchSnapshot(
+      'a reward round carried across a reload',
     );
   });
 });
@@ -1009,10 +1644,6 @@ describe('AAP V2 — the reward offers of one seed', () => {
   });
 });
 
-/* ==========================================================================
- * 8. The properties the published figures rest on
- * ========================================================================== */
-
 describe('AAP Contract 6 — the four substreams are independent', () => {
   it('leaves the board and the spawn cursors at the baseline', () => {
     const baseline = driveRun({ seed: RUN_SEED });
@@ -1063,7 +1694,7 @@ describe('AAP Contract 2 — dispatch follows pickup order', () => {
     const bus = createHookBus();
 
     // Registered without a pickupOrder, so each is appended to the end of the
-    // order: 'first' then 'second'.
+    // order.
     for (const id of ['first', 'second']) {
       expect(
         bus.register({
@@ -1138,7 +1769,6 @@ describe('AAP Contract 2 — dispatch follows pickup order', () => {
 
 describe('AAP Contract 6 — the platform generator is never patched', () => {
   it('captured the platform implementation, not an installed one', () => {
-    // A replacement would be an ordinary function, whose source is its body.
     expect(Function.prototype.toString.call(PLATFORM_MATH_RANDOM)).toContain(
       '[native code]',
     );
@@ -1157,8 +1787,6 @@ describe('AAP Contract 6 — the platform generator is never patched', () => {
   it('holds the descriptor the platform installed it under', () => {
     driveRun({ seed: RUN_SEED });
 
-    // A replacement made through Object.defineProperty rather than by
-    // assignment changes the descriptor even where the functions compare equal.
     expect(Object.getOwnPropertyDescriptor(Math, 'random')).toEqual(
       PLATFORM_MATH_RANDOM_DESCRIPTOR,
     );
@@ -1184,6 +1812,123 @@ describe('AAP Rule 3 — an appended subscriber is omittable', () => {
     expect(watched.serialized).toEqual(baseline.serialized);
     expect(watched.cursors).toEqual(baseline.cursors);
     expect(renderLeg(watched)).toBe(renderLeg(baseline));
+  });
+});
+
+/*
+ * The gate above proves the append-only property with one collector. The gate
+ * below proves it with the PRODUCTION observability stack — the real logger, the
+ * real metrics registry, the real tracer and `attachEngineTracing` — over a run
+ * that also draws its reward offers from the substreams the board consumes, so
+ * every consumer of Contract 6 is compared at once: the serialised board byte
+ * for byte, the cursor text in `RNG_STREAM_NAMES` order, and the offer
+ * identifiers in draw order. The observed leg's projection is pinned, so the
+ * artifact is the expectation for a run WITH observability enabled.
+ *
+ * Decision DL-TEST-07.
+ */
+
+describe('AAP Rule 3 — the real observer stack is omittable', () => {
+  it('serialises the board to the same bytes as the observer-free leg', () => {
+    const baseline = driveRewardScenario();
+    const observed = driveRewardScenario(createRealObservers(RUN_SEED));
+
+    // Byte for byte, not member by member: a reordered or re-typed member is a
+    // difference in the persisted board even where a deep compare passes.
+    expect(JSON.stringify(observed.leg.serialized)).toBe(
+      JSON.stringify(baseline.leg.serialized),
+    );
+    expect(observed.leg.serialized).toEqual(baseline.leg.serialized);
+    expect(observed.leg.resolved).toEqual(baseline.leg.resolved);
+  });
+
+  it('reaches the same cursor on every substream', () => {
+    const baseline = driveRewardScenario();
+    const observed = driveRewardScenario(createRealObservers(RUN_SEED));
+
+    // The rendered text, in `RNG_STREAM_NAMES` order rather than in whatever
+    // order the object's own keys happen to be in.
+    expect(projectCursors(observed.leg.cursors)).toBe(
+      projectCursors(baseline.leg.cursors),
+    );
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(observed.leg.cursors[name]).toBe(baseline.leg.cursors[name]);
+    }
+
+    // The scenario consumed from every substream, so an observer that consumed
+    // one would move a cursor this assertion pins rather than one it ignores.
+    expect(observed.leg.cursors['spawn-value']).toBeGreaterThan(0);
+    expect(observed.leg.cursors['spawn-position']).toBeGreaterThan(0);
+    expect(observed.leg.cursors['relic-draw']).toBe(
+      OFFER_SET_COUNT * OFFERS_PER_SET,
+    );
+    expect(observed.leg.cursors['rarity-weight']).toBe(
+      OFFER_SET_COUNT * OFFERS_PER_SET,
+    );
+  });
+
+  it('draws the same relic offers in the same order', () => {
+    const baseline = driveRewardScenario();
+    const observed = driveRewardScenario(createRealObservers(RUN_SEED));
+
+    expect(projectOfferSets(observed.offerSets)).toBe(
+      projectOfferSets(baseline.offerSets),
+    );
+    expect(observed.offerSets).toEqual(baseline.offerSets);
+    expect(observed.offerSets).toHaveLength(OFFER_SET_COUNT);
+
+    for (const ids of observed.offerSets) {
+      expect(ids).toHaveLength(OFFERS_PER_SET);
+      expect(new Set(ids).size).toBe(ids.length);
+    }
+  });
+
+  it('pins the observed board, cursors and offers', () => {
+    const observed = projectRewardScenario(
+      driveRewardScenario(createRealObservers(RUN_SEED)),
+    );
+
+    // Recorded from the OBSERVED leg, and asserted to be what the observer-free
+    // leg renders as well, so one pinned artifact is the expectation for both
+    // and a divergence in either direction fails this gate.
+    expect(projectRewardScenario(driveRewardScenario())).toBe(observed);
+    expect(observed).toMatchSnapshot('observed run: board, cursors and offers');
+  });
+
+  it('ran the real observers rather than nothing at all', () => {
+    const observers = createRealObservers(RUN_SEED);
+
+    driveRewardScenario(observers);
+
+    const evidence = observers.evidence();
+
+    // Without these the gate would pass with nothing attached, which is exactly
+    // the way an observer-omittable assertion goes quietly vacuous.
+    expect(evidence.eventsObserved).toBeGreaterThan(0);
+    expect(evidence.cursorsRead).toBeGreaterThan(0);
+    expect(evidence.engineCounts).toBeGreaterThan(0);
+    expect(evidence.engineCountSeries).toBeGreaterThan(0);
+    expect(evidence.logRecords).toBeGreaterThan(0);
+    expect(evidence.metricSeries).toBeGreaterThan(0);
+    expect(evidence.spansStarted).toBeGreaterThan(0);
+
+    // Released after the leg, so every span the tracer opened is closed and
+    // none was faulted.
+    expect(evidence.spansEnded).toBe(evidence.spansStarted);
+    expect(evidence.spansOpen).toBe(0);
+    expect(evidence.traceFaults).toBe(0);
+  });
+
+  it('holds the platform generator unpatched with the stack attached', () => {
+    driveRewardScenario(createRealObservers(RUN_SEED));
+
+    const { random: platformRandomNow } = Math;
+
+    expect(platformRandomNow).toBe(PLATFORM_MATH_RANDOM);
+    expect(Object.getOwnPropertyDescriptor(Math, 'random')).toEqual(
+      PLATFORM_MATH_RANDOM_DESCRIPTOR,
+    );
   });
 });
 

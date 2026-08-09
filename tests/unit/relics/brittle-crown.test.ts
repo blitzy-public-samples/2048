@@ -2,53 +2,14 @@
 // family: AAP R3, AAP Contract 2 and AAP Contract 5, one relic per file.
 //
 // The three properties AAP 0.6.3 Group 5 states, in its order: the relic fires
-// only on the hooks it binds, it produces its specified effect, and it respects
-// `charges` — a dispatch carrying zero of them included.
+// only on the hooks it binds, it produces its specified effect, and it
+// respects `charges` — a dispatch carrying zero of them included.
 //
-// The specified effect has two halves separated by a whole stage.
-// `onStageStart` saves the spawn distribution in force and installs a skewed
-// one; `onStageEnd` restores the saved distribution and releases the slot. The
-// saved value travels between the two halves in the subscriber state slot,
-// which is the one channel that survives a reload.
-//
-// Provenance of the numbers asserted below:
-//   js/game_manager.js L71             `Math.random() < 0.9 ? 2 : 4`, the
-//                                      vanilla distribution the default rules
-//                                      carry as values [2, 4] at weights
-//                                      [0.9, 0.1], now `RulesConfig.spawn`
-//   js/local_storage_manager.js L52-55 `getGameState()` read the snapshot
-//                                      through an unguarded `JSON.parse`, and
-//                                      the snapshot carried no version and no
-//                                      checksum field. Every value this relic
-//                                      persists is plain JSON
-//   AAP Contract 5                     the persisted relic triple
-//                                      `{ id, charges?, state? }`, which is
-//                                      what carries the saved weights across a
-//                                      reload
-//
-// Traceability rows this suite evidences: TR-DEFAULT-04, js/game_manager.js L71
-// onto `RulesConfig.spawn`; and TR-RISK-03, `brittle-crown` at `onStageStart`
-// and `onStageEnd`. The decision behind the write channel the relic records
-// through, named so the construct can be found from docs/DECISION_LOG.md:
-// DL-RISK-02.
-//
-// Named figures this suite is a mechanical proof of: Figure 6, "Screen Flow
-// State Machine: Run Start to Run Summary", of docs/architecture/, whose
-// Stage -> StageClear -> Reward -> Stage cycle is the exact span these two
-// hooks bracket; and Figure 7, "Seeded Determinism: One Run Seed Fanned into
-// Named RNG Substreams", of docs/architecture/data-flow.md, whose `spawn-value`
-// edge consumes the weights this relic skews.
-//
-// The dispatch below is hand-built. The charge guard, the pickup ordering and
-// the per-handler transaction belong to src/engine/hook-bus.ts and are asserted
-// over the real bus by the suites of tests/unit/engine, and are not re-proved
-// here. The context assembled below carries the run correlation identifier,
-// every collaborator as the frozen view src/engine/hooks.ts declares, and a
-// state slot copied in and out as JSON.
-//
-// No DOM, no clock, no timer, no `Math.random()` and no snapshot file: this
+// No DOM, no clock, no timer, no `Math.random` and no snapshot file: this
 // suite runs in the `unit:dom-free` project under the `test` script with no
 // server, browser or network.
+//
+// Decisions: DL-RISK-02 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -89,11 +50,11 @@ import type {
   RngStreams,
   StreamName,
 } from '../../../src/rng/rng-streams';
+import {
+  createSeededRng,
+  deriveStreamSeed,
+} from '../../../src/rng/seeded-rng';
 import { createMergePairBoard } from '../../fixtures/boards';
-
-/* ==========================================================================
- * Constants
- * ========================================================================== */
 
 /** Id of the unit under test, as the family declares it. */
 const RELIC_ID = 'brittle-crown';
@@ -113,8 +74,8 @@ const UNBOUND_HOOKS: readonly HookName[] = [
 ];
 
 /**
- * Seed every context in this suite is built from, as a literal: no clock and no
- * `Math.random()` reaches this file.
+ * Seed every context in this suite is built from, as a literal: no clock and
+ * no `Math.random` reaches this file.
  */
 const SUITE_SEED = 'brittle-crown-spawn-skew';
 
@@ -133,7 +94,6 @@ const VANILLA_SPAWN_WEIGHTS: readonly number[] = [0.9, 0.1];
 /**
  * Distribution the relic installs over the vanilla one: the weight of 4, the
  * highest configured value, four times over, and the weight of 2 as it stood.
- * `0.1 * 4 === 0.4` exactly in IEEE-754 double arithmetic.
  */
 const SKEWED_SPAWN_WEIGHTS: readonly number[] = [0.9, 0.4];
 
@@ -164,14 +124,8 @@ const WIDE_SPAWN_WEIGHTS: readonly number[] = [0.5, 0.3, 0.2];
 /** The distribution the relic installs over it: 0.2 raised fourfold. */
 const WIDE_SKEWED_WEIGHTS: readonly number[] = [0.5, 0.3, 0.8];
 
-/** Draws taken from each substream in the spawn-outcome comparison. */
+/** Draws resolved against both distributions in the spawn-outcome comparison. */
 const DRAW_SAMPLE_SIZE = 24;
-
-/** Highest-value draws the vanilla distribution yields over that sample. */
-const VANILLA_HIGHEST_DRAWS = 6;
-
-/** Highest-value draws the skewed distribution yields over that sample. */
-const SKEWED_HIGHEST_DRAWS = 12;
 
 /** Board size the default rules carry, and the fixture board edge length. */
 const BOARD_SIZE = 4;
@@ -179,19 +133,15 @@ const BOARD_SIZE = 4;
 /** Win value the default rules carry. From js/game_manager.js L170. */
 const WIN_VALUE = 2048;
 
-/** Opening tile count the default rules carry. From js/game_manager.js L7. */
+/** Opening tile count the default rules carry. */
 const START_TILES = 2;
-
-/* ==========================================================================
- * The declaration under test
- * ========================================================================== */
 
 /**
  * Reaches the relic through the family that declares it.
  *
  * @returns The `brittle-crown` declaration.
- * @throws {Error} If the family declares no relic under that id, which is what
- *   a rename of the id fails on rather than passing silently.
+ * @throws {Error} If the family declares no relic under that id, which is
+ *   what a rename of the id fails on rather than passing silently.
  */
 function declaredCrown(): Relic {
   const found = RISK_REWARD_CURSED_FAMILY.relics.find(
@@ -262,13 +212,10 @@ function handlerSources(): readonly string[] {
   return [stageStartHandler().toString(), stageEndHandler().toString()];
 }
 
-/* ==========================================================================
- * Harness: the collaborators one dispatch is handed
- * ========================================================================== */
-
 /**
- * Reports whether a value can be read by member name: an object that is neither
- * `null` nor an array, which is the shape a JSON state slot round-trips as.
+ * Reports whether a value can be read by member name: an object that is
+ * neither `null` nor an array, which is the shape a JSON state slot
+ * round-trips as.
  *
  * @param value Candidate value.
  * @returns `true` when the value can be read by member name.
@@ -278,9 +225,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Copies a value the way src/engine/hook-bus.ts copies a state slot and the way
- * the run envelope of src/run/run-state.ts persists one: through JSON. Anything
- * JSON drops — a function, a symbol, a `bigint` member — does not survive.
+ * Copies a value the way src/engine/hook-bus.ts copies a state slot and the
+ * way the run envelope of src/run/run-state.ts persists one: through JSON.
  *
  * @param value Value to copy.
  * @returns A fresh value sharing no object with the argument.
@@ -296,9 +242,6 @@ function copyJson(value: unknown): unknown {
 }
 
 /**
- * Reads the `savedWeights` member a state slot holds, so an assertion names the
- * saved array rather than the slot around it.
- *
  * @param slot The slot as it stands.
  * @returns The member, or `undefined` where the slot holds none.
  */
@@ -309,8 +252,7 @@ function savedWeightsOf(slot: unknown): unknown {
 /**
  * Reports whether a weight list is one `RngStream.pickWeighted` can resolve
  * against: one weight per configured value, every entry a finite number at or
- * above zero, and at least one above zero. The acceptance rule
- * src/engine/board-effects.ts documents for `setSpawnWeights`.
+ * above zero, and at least one above zero.
  *
  * @param valueCount How many spawn values the rules carry.
  * @param weights Weight list to judge.
@@ -355,9 +297,6 @@ interface CrownBench {
 /**
  * Builds a bench: default rules, the suite seed, the merge-pair fixture board
  * and the opening state slot the declaration carries.
- *
- * `createDefaultRulesConfig()` and not `DEFAULT_RULES_CONFIG`: the deep-frozen
- * template refuses the spawn-weight write this relic drives.
  *
  * @returns A bench sharing no object with any earlier one.
  */
@@ -451,8 +390,8 @@ interface RngProbe {
 }
 
 /**
- * The randomness a handler draws from: memoised forks of the run substreams, so
- * a draw taken here moves the fork and never the run.
+ * The randomness a handler draws from: memoised forks of the run substreams,
+ * so a draw taken here moves the fork and never the run.
  *
  * @param streams The run substreams.
  * @returns The view and its request counter.
@@ -511,10 +450,9 @@ interface QueueProbe {
 }
 
 /**
- * Opens a recording queue over a bench: every command of
- * `BOARD_EFFECT_NAMES` is accepted, validated and recorded, and nothing is
- * written through to the board. The five query members read the live board,
- * which this relic records no lattice command against.
+ * Opens a recording queue over a bench: every command of `BOARD_EFFECT_NAMES`
+ * is accepted, validated and recorded, and nothing is written through to the
+ * board.
  *
  * @param bench The bench the queue projects from.
  * @returns The queue and its record.
@@ -658,8 +596,8 @@ function openQueue(bench: CrownBench): QueueProbe {
 
 /**
  * Writes every recorded spawn-weight command to the live rules, in record
- * order and as a fresh array, which is what src/engine/hook-bus.ts commits once
- * a handler has returned and its return has validated.
+ * order and as a fresh array, which is what src/engine/hook-bus.ts commits
+ * once a handler has returned and its return has validated.
  *
  * @param config The live rules.
  * @param commands The commands recorded by one dispatch.
@@ -683,10 +621,6 @@ function applySpawnWeights(
   return applied;
 }
 
-/* ==========================================================================
- * Harness: one hand-built dispatch
- * ========================================================================== */
-
 /** The context handed to one handler, with the probes that watched it. */
 interface ContextBuild {
   readonly context: HookContext;
@@ -701,11 +635,6 @@ interface ContextBuild {
 }
 
 /**
- * Assembles one `HookContext` exactly as src/engine/hooks.ts declares it: the
- * three frozen collaborator views, the recording write channel, the run
- * correlation identifier, the dispatch identity, the charge budget the bus
- * would have carried, and a state slot that is a COPY of the bench slot.
- *
  * @param bench The live collaborators.
  * @param hook The hook being dispatched.
  * @param charges The budget the subscription carries, absent for none.
@@ -750,7 +679,6 @@ function buildContext(
   };
 }
 
-/** Everything one dispatch produced, observed rather than inferred. */
 interface DispatchRecord<P> {
   /** The payload returned, and `undefined` where the handler returned none. */
   readonly returned: P | undefined;
@@ -821,9 +749,6 @@ function settle<P>(
 }
 
 /**
- * The `onStageStart` payload, with the stage goal taken from the default
- * progression curve rather than written as a literal.
- *
  * @param boardSize Edge length the stage grid was built at.
  * @param stageIndex Zero-based stage position.
  * @returns A fresh payload.
@@ -940,8 +865,7 @@ function expectDrawableDistribution(config: RulesConfig): void {
 
 /**
  * Asserts a state slot is whole: either empty, or carrying one complete array
- * of finite non-negative saved weights. A slot in any other shape is a
- * half-written save.
+ * of finite non-negative saved weights.
  *
  * @param slot The slot as it stands.
  */
@@ -967,46 +891,52 @@ function expectWholeSlot(slot: unknown): void {
 }
 
 /**
- * Draws a fixed sample from the `spawn-value` substream of a run seeded with
- * the suite seed, resolving each draw against one distribution.
+ * The fraction of the unit interval one distribution resolves to its FIRST
+ * value over.
  *
- * @param values Spawn values to draw from.
- * @param weights Distribution to resolve against.
- * @returns The values drawn, in draw order.
+ * `pickWeighted` of src/rng/rng-streams.ts multiplies the draw by the weight
+ * total and returns the first entry whose running total exceeds it, so the
+ * first value is selected exactly while `weights[0] > draw * total` — a
+ * boundary at `weights[0] / total`. Raising a later weight raises the total and
+ * therefore narrows this band, which is the whole of what a skew does to an
+ * outcome.
+ *
+ * @param weights Distribution to measure.
+ * @returns The boundary the first value is selected below.
  */
-function drawSample(
-  values: readonly number[],
-  weights: readonly number[],
-): number[] {
-  const stream = createRngStreams(SUITE_SEED).stream('spawn-value');
-  const drawn: number[] = [];
+function firstValueBand(weights: readonly number[]): number {
+  const total = weights.reduce((running, weight) => running + weight, 0);
 
-  for (let draw = 0; draw < DRAW_SAMPLE_SIZE; draw += 1) {
-    const picked = stream.pickWeighted(values, weights);
-
-    if (picked === undefined) {
-      throw new Error('The spawn draw resolved against no value.');
-    }
-
-    drawn.push(picked);
-  }
-
-  return drawn;
+  return (weights[0] ?? 0) / total;
 }
 
-/* ==========================================================================
- * The bench each test is given
- * ========================================================================== */
+/**
+ * The value one distribution resolves a single draw to, derived from
+ * `pickWeighted`'s own arithmetic rather than from a table.
+ *
+ * @param values Spawn values, of which two are expected.
+ * @param weights Distribution to resolve against.
+ * @param drawn Draw in [0, 1) to resolve.
+ * @returns The value the walk selects.
+ */
+function resolveDraw(
+  values: readonly number[],
+  weights: readonly number[],
+  drawn: number,
+): number {
+  const total = weights.reduce((running, weight) => running + weight, 0);
+  const selected = (weights[0] ?? 0) > drawn * total ? values[0] : values[1];
+
+  expect(selected).toBeTypeOf('number');
+
+  return selected as number;
+}
 
 let bench: CrownBench;
 
 beforeEach(() => {
   bench = createBench();
 });
-
-/* ==========================================================================
- * 1. The declaration: brittle-crown fires only on the hooks it binds
- * ========================================================================== */
 
 describe('the brittle-crown declaration', () => {
   it('is declared by the risk-reward-cursed family under that exact id', () => {
@@ -1064,10 +994,6 @@ describe('the brittle-crown declaration', () => {
     expect(JSON.parse(JSON.stringify(CROWN.state))).toEqual({});
   });
 });
-
-/* ==========================================================================
- * 2. The skew brittle-crown installs at onStageStart
- * ========================================================================== */
 
 describe('the skew brittle-crown installs at onStageStart', () => {
   it('records one spawn-weight command and returns no payload', () => {
@@ -1213,10 +1139,6 @@ describe('the skew brittle-crown installs at onStageStart', () => {
   });
 });
 
-/* ==========================================================================
- * 3. The restore brittle-crown performs at onStageEnd
- * ========================================================================== */
-
 describe('the restore brittle-crown performs at onStageEnd', () => {
   it('restores the exact original weights, element by element', () => {
     const original = [...bench.config.spawn.weights];
@@ -1347,10 +1269,6 @@ describe('the restore brittle-crown performs at onStageEnd', () => {
   });
 });
 
-/* ==========================================================================
- * 4. The save survives a reload
- * ========================================================================== */
-
 describe('the save brittle-crown holds survives a reload', () => {
   it('saves plain JSON, so the slot round-trips through the envelope', () => {
     const started = startStage(bench);
@@ -1437,10 +1355,6 @@ describe('the save brittle-crown holds survives a reload', () => {
   });
 });
 
-/* ==========================================================================
- * 5. The charge budget brittle-crown does not carry
- * ========================================================================== */
-
 describe('brittle-crown carries no charge budget', () => {
   it('skews without throwing when the dispatch carries zero charges', () => {
     const started = startStage(bench, undefined, 0);
@@ -1503,10 +1417,6 @@ describe('brittle-crown carries no charge budget', () => {
   });
 });
 
-/* ==========================================================================
- * 6. Neither handler holds machinery of its own
- * ========================================================================== */
-
 describe('neither brittle-crown handler holds machinery of its own', () => {
   it('reads no charge budget, the guard belonging to the bus', () => {
     for (const source of handlerSources()) {
@@ -1531,10 +1441,6 @@ describe('neither brittle-crown handler holds machinery of its own', () => {
     }
   });
 });
-
-/* ==========================================================================
- * 7. The randomness a stage cycle consumes
- * ========================================================================== */
 
 describe('the randomness a brittle-crown stage cycle consumes', () => {
   it('advances no substream cursor at onStageStart', () => {
@@ -1600,27 +1506,66 @@ describe('the randomness a brittle-crown stage cycle consumes', () => {
     expect(plain.cursor).toBe(skewed.cursor);
   });
 
-  it('raises how often the highest value is drawn over a fixed sample', () => {
-    const values = bench.config.spawn.values;
-    const plain = drawSample(values, VANILLA_SPAWN_WEIGHTS);
-    const skewed = drawSample(values, SKEWED_SPAWN_WEIGHTS);
-    const highest = 4;
+  it('narrows the band of the unit interval that yields the lowest value',
+    () => {
+      const vanillaBand = firstValueBand(VANILLA_SPAWN_WEIGHTS);
+      const skewedBand = firstValueBand(SKEWED_SPAWN_WEIGHTS);
 
-    expect(plain.filter((drawn) => drawn === highest)).toHaveLength(
-      VANILLA_HIGHEST_DRAWS,
-    );
-    expect(skewed.filter((drawn) => drawn === highest)).toHaveLength(
-      SKEWED_HIGHEST_DRAWS,
-    );
-    expect(skewed).not.toEqual(plain);
-    expect(plain).toHaveLength(DRAW_SAMPLE_SIZE);
-    expect(skewed).toHaveLength(DRAW_SAMPLE_SIZE);
-  });
+      // Exact, from the two weight vectors: 0.9 / 1.0 against 0.9 / 1.3.
+      expect(vanillaBand).toBe(0.9);
+      expect(skewedBand).toBe(0.9 / 1.3);
+      expect(skewedBand).toBeLessThan(vanillaBand);
+
+      // Every draw in the band the skew gave up now yields the HIGHEST value
+      // where it used to yield the lowest, and no draw moves the other way.
+      const values = bench.config.spawn.values;
+
+      expect(resolveDraw(values, VANILLA_SPAWN_WEIGHTS, skewedBand)).toBe(2);
+      expect(resolveDraw(values, SKEWED_SPAWN_WEIGHTS, skewedBand)).toBe(4);
+      expect(resolveDraw(values, VANILLA_SPAWN_WEIGHTS, 0)).toBe(2);
+      expect(resolveDraw(values, SKEWED_SPAWN_WEIGHTS, 0)).toBe(2);
+    });
+
+  it('resolves every draw of one seeded substream as its weights predict',
+    () => {
+      const values = bench.config.spawn.values;
+      const plain = createRngStreams(SUITE_SEED).stream('spawn-value');
+      const skewed = createRngStreams(SUITE_SEED).stream('spawn-value');
+
+      // The draws BOTH substreams take, read from a third generator built on
+      // the same derived seed, so each assertion below is against the exact
+      // value `pickWeighted` was handed.
+      const source = createSeededRng(
+        deriveStreamSeed(SUITE_SEED, 'spawn-value'),
+      );
+      let moved = 0;
+
+      for (let draw = 0; draw < DRAW_SAMPLE_SIZE; draw += 1) {
+        const value = source.next();
+
+        expect(plain.pickWeighted(values, VANILLA_SPAWN_WEIGHTS)).toBe(
+          resolveDraw(values, VANILLA_SPAWN_WEIGHTS, value),
+        );
+        expect(skewed.pickWeighted(values, SKEWED_SPAWN_WEIGHTS)).toBe(
+          resolveDraw(values, SKEWED_SPAWN_WEIGHTS, value),
+        );
+
+        if (
+          resolveDraw(values, VANILLA_SPAWN_WEIGHTS, value) !==
+          resolveDraw(values, SKEWED_SPAWN_WEIGHTS, value)
+        ) {
+          moved += 1;
+        }
+      }
+
+      // The two substreams stood at the same cursor throughout, so the only
+      // difference between the two walks is the weight vector.
+      expect(plain.cursor).toBe(DRAW_SAMPLE_SIZE);
+      expect(skewed.cursor).toBe(DRAW_SAMPLE_SIZE);
+      expect(source.cursor).toBe(DRAW_SAMPLE_SIZE);
+      expect(moved).toBeGreaterThan(0);
+    });
 });
-
-/* ==========================================================================
- * 8. The suite leaves the catalogue and the defaults as it found them
- * ========================================================================== */
 
 describe('the suite leaves the catalogue and the defaults as found', () => {
   it('has not mutated the frozen brittle-crown declaration', () => {

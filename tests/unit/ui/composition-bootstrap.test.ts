@@ -1,28 +1,8 @@
 // Contract suite for the BOOT DEFERRAL, the successor of js/application.js
 // L1-L4.
 //
-// WHAT THE VANILLA ENTRY DID, AND WHY IT MATTERS
-//   Its whole body was one `window.requestAnimationFrame` callback wrapping the
-//   composition. Deferring by exactly ONE FRAME is what let the browser paint
-//   the styled, empty board before any of the game's own work ran; composing
-//   immediately instead delays that first paint by however long the whole object
-//   graph takes to build, which on this build is a Three.js scene, a preference
-//   store, an input layer, an audio layer and an observability stack.
-//
-//   The rewrite had replaced that with a `DOMContentLoaded` listener and an
-//   otherwise immediate call, which is a different thing: a module script is
-//   deferred by definition, so on a normal load the listener never fires and the
-//   composition runs synchronously during evaluation — the exact behaviour the
-//   original avoided.
-//
-// WHAT THIS SUITE PINS
-//   That the composition is deferred by exactly one scheduled callback, that the
-//   readiness guard defers rather than composes, that the guard is armed once,
-//   and that a CALLER composing first supersedes the automatic boot so one
-//   document never hosts two applications.
-//
-// `bootstrap` takes its document, its scheduler and its composer as options, so
-// the deferral is observable without waiting on a real frame and without
+// `bootstrap` takes its document, its scheduler and its composer as options,
+// so the deferral is observable without waiting on a real frame and without
 // building the real application more than once.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -52,20 +32,12 @@ const MARKUP = `
 
 let application: Application | null = null;
 
-/** A composer that records its calls instead of building anything. */
 interface Composer {
   readonly compose: (ownerDocument: Document) => Application;
   readonly calls: number[];
 }
 
-/**
- * A stand-in for `start`.
- *
- * It returns an object carrying only the two members `publishForInspection`
- * reads — a logger to report a failed publish through, and a dispose — so the
- * boot path runs in full without a second real application being built over the
- * same markup.
- */
+/** A stand-in for `start`. */
 const createComposer = (): Composer => {
   const calls: number[] = [];
 
@@ -97,10 +69,6 @@ afterEach(() => {
   clearOwnedStorage();
 });
 
-/* ==========================================================================
- * The deferral
- * ========================================================================== */
-
 describe('the boot deferral', () => {
   it('schedules the composition instead of running it', () => {
     const composer = createComposer();
@@ -114,8 +82,6 @@ describe('the boot deferral', () => {
       compose: composer.compose,
     });
 
-    // Nothing has been composed yet, which is the whole point: the frame the
-    // browser paints comes first.
     expect(outcome).toBe('scheduled');
     expect(composer.calls).toHaveLength(0);
     expect(scheduled).toHaveLength(1);
@@ -152,8 +118,7 @@ describe('the boot deferral', () => {
 
     scheduled[0]?.();
 
-    // One frame, as js/application.js L2 deferred by one. A second scheduling
-    // would be a poll, and a poll would paint late on a slow first frame.
+    // One frame, as js/application.js L2 deferred by one.
     expect(scheduled).toHaveLength(1);
     expect(composer.calls).toHaveLength(1);
   });
@@ -171,14 +136,11 @@ describe('the boot deferral', () => {
       });
     });
 
-    // The default scheduler is `requestAnimationFrame`, so one frame is enough.
+    // The default scheduler is `requestAnimationFrame`, so one frame is
+    // enough.
     expect(composer.calls).toHaveLength(1);
   });
 });
-
-/* ==========================================================================
- * The readiness guard
- * ========================================================================== */
 
 describe('the readiness guard', () => {
   it('waits for the document while it is still parsing', () => {
@@ -201,8 +163,9 @@ describe('the readiness guard', () => {
       compose: composer.compose,
     });
 
-    // Neither composed NOR scheduled: the composition reads several markup mount
-    // points, and a module script can be evaluated while the document loads.
+    // Neither composed NOR scheduled: the composition reads several markup
+    // mount points, and a module script can be evaluated while the document
+    // loads.
     expect(outcome).toBe('awaiting-document');
     expect(scheduled).toHaveLength(0);
     expect(composer.calls).toHaveLength(0);
@@ -242,10 +205,6 @@ describe('the readiness guard', () => {
   });
 });
 
-/* ==========================================================================
- * One document, one application
- * ========================================================================== */
-
 describe('a caller that composes first', () => {
   it('supersedes the pending boot', () => {
     const composer = createComposer();
@@ -264,8 +223,6 @@ describe('a caller that composes first', () => {
 
     scheduled[0]?.();
 
-    // The boot stands down rather than binding the same markup a second time:
-    // every control would be bound twice and every keystroke handled twice.
     expect(composer.calls).toHaveLength(0);
   });
 

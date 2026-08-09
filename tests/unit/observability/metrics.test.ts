@@ -10,60 +10,7 @@
 // names, the text exposition, the snapshot-to-text round trip and the
 // registry's reporting and download surfaces.
 //
-// WHAT THIS SUITE PINS. A metric must measure the boundary it names. Two of
-// those boundaries are events and one is not, and conflating them is the
-// defect the suite exists to prevent:
-//
-//   spawns_total            one tile:spawn emission carrying a position, so
-//                           one tile that entered the lattice
-//   spawn_attempts_total    one engine spawn entry, which is the engine's own
-//                           `engine.spawn.attempt` counter and NOT an event
-//   spawn_suppressed_total  one engine spawn that inserted nothing
-//
-// The distinction comes from the retired sources. js/grid.js L40 guarded
-// `randomAvailableCell` with `if (cells.length)` and had no else branch, so it
-// returned `undefined` on a full board and js/game_manager.js L72-L75
-// inserted no tile. src/engine/engine.ts carries that forward by returning
-// BEFORE it dispatches `onSpawn` and before it emits, which is what keeps a
-// full board free of draws — so a full-board attempt emits nothing at all and
-// a counter fed from emissions cannot see it. Attempts are therefore counted
-// at the engine boundary and nowhere else, and section 7 drives the real
-// engine to prove the two agree.
-//
-// It also pins that an emission count does not vary with observers, and that
-// the event dimension of a count report is the only dimension an emission is
-// read from: an event name arriving in the `hook` dimension is refused rather
-// than folded under that hook.
-//
-// Validation gate: AAP 0.8.8 V8, third bullet — the metrics snapshot exports
-// in Prometheus text format, and the families it exports are true. Sections 12
-// and 13 are that gate: the exposition is read back through the structural
-// validator of section 8 and reconciled against `snapshot()`, which is the
-// pair docs/dashboards/dashboard.html and docs/dashboards/dashboard.json
-// consume.
-//
-// Coverage owned by sibling suites and not repeated here: the logger's own
-// buffer, level and sink mechanics (tests/unit/observability/logger.test.ts),
-// the dynamic-series caches for spans, health checks and RNG substreams
-// (tests/unit/observability/metrics-series-cache.test.ts), and the hook-bus
-// counters this registry folds (tests/unit/engine/hook-bus.test.ts). What
-// sections 11 and 14 add is the registry's side of those seams: the per-hook
-// series it holds, and the records its rejections reach an injected logger
-// with.
-//
-// Sections 2 through 13 read no DOM and no storage; the engine's persistence
-// port is a hand-written double and every logger built here writes to no
-// console. Section 14 exercises `download`, which is the module's one member
-// that reaches a document: it spies on the three globals that member
-// feature-detects — `URL.createObjectURL`, `URL.revokeObjectURL` and the
-// anchor's `click` — and asserts the module's documented guard where the
-// active environment supplies none of them. `vitest.config.ts` sets
-// `restoreMocks`, and section 14 also restores explicitly.
-// tests/fixtures/storage.ts is loaded as a setup file for every unit suite and
-// removes every owned key after each test.
-//
-// Decisions behind this file: DL-METRIC-01 and DL-METRIC-02 in
-// docs/DECISION_LOG.md.
+// Decisions: DL-METRIC-01, DL-METRIC-02 (docs/DECISION_LOG.md).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -111,8 +58,6 @@ import type {
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import { createBlockedBoard } from '../../fixtures/boards';
 
-/* ===== 1. Helpers ===== */
-
 /** A cell a successful spawn reports. */
 const SPAWNED_CELL = Object.freeze({ x: 1, y: 2 });
 
@@ -121,8 +66,7 @@ const RUN_SEED = 'metrics-spawn-boundary-seed';
 
 /**
  * Counter name the emitter raises once per emission, before it looks a
- * listener up. Declared privately by src/engine/engine-events.ts, so the
- * literal is repeated here rather than imported.
+ * listener up.
  */
 const EMIT_METRIC = 'engine.event.emit';
 
@@ -132,14 +76,7 @@ const SPAWN_ATTEMPT_METRIC = 'engine.spawn.attempt';
 /** Counter name the engine raises for a spawn that inserted nothing. */
 const SPAWN_SUPPRESSED_METRIC = 'engine.spawn.suppressed';
 
-/**
- * Counter name the engine raises once per move that changed the board.
- *
- * The literal is repeated here rather than imported, like the three above it:
- * the name is the wire contract the turn family is fed through, so a rename in
- * src/engine/engine.ts has to fail here rather than silently flatten
- * `game2048_turns_total` to zero.
- */
+/** Counter name the engine raises once per move that changed the board. */
 const MOVE_RESOLVED_METRIC = 'engine.move.resolved';
 
 /**
@@ -306,8 +243,6 @@ function dispatchTotal(registry: MetricsRegistry): number {
   return total;
 }
 
-/* ===== 2. The three spawn families (F7) ===== */
-
 describe('the spawn families', () => {
   it('names attempts, insertions and suppressions separately', () => {
     expect(METRIC_NAMES.spawnAttemptsTotal).toBe(
@@ -358,12 +293,11 @@ describe('the spawn families', () => {
     expect(counts.suppressed).toBe(1);
   });
 
-  it('counts an insertion from the emission and NOT an attempt (F7)', () => {
+  it('counts an insertion from the emission and NOT an attempt', () => {
     const registry = createMetricsRegistry();
 
-    // The emission is the insertion signal alone. Counting an attempt here
-    // is the defect: the engine returns before emitting on a full board, so
-    // the emissions are a subset of the attempts.
+    // A position on the emission is the insertion signal; the attempt is only
+    // observable at the engine's own counter.
     registry.recordEngineEvent('tile:spawn', {
       position: SPAWNED_CELL,
     });
@@ -379,8 +313,7 @@ describe('the spawn families', () => {
     const registry = createMetricsRegistry();
 
     // The payload an `onSpawn` handler produces by returning the payload
-    // without a cell. The suppression itself is counted at the engine
-    // boundary, so this emission adds to no spawn family.
+    // without a cell.
     registry.recordEngineEvent('tile:spawn', { position: undefined });
 
     const counts = spawnCounts(registry);
@@ -409,10 +342,8 @@ describe('the spawn families', () => {
   it('keeps insertions at or below attempts over a mixed sequence', () => {
     const registry = createMetricsRegistry();
 
-    // One turn per entry: the engine counts every attempt at its own
-    // boundary, then either emits an insertion or counts a suppression. The
-    // family relationship, not the individual counts, is what this asserts —
-    // an emission-fed attempt counter breaks it on the `false` entries.
+    // One turn per entry: the engine counts every attempt at its own boundary,
+    // then either emits an insertion or counts a suppression.
     const inserted: readonly boolean[] = [
       true,
       true,
@@ -442,12 +373,11 @@ describe('the spawn families', () => {
     expect(counts.inserted ?? 0).toBeLessThanOrEqual(counts.attempts ?? 0);
   });
 
-  it('sees a full-board attempt that emits nothing at all (F7)', () => {
+  it('sees a full-board attempt that emits nothing at all', () => {
     const registry = createMetricsRegistry();
 
-    // What the engine does on a full board: it counts the attempt, counts
-    // the suppression, and returns before any emission. A counter fed from
-    // `tile:spawn` would report zero attempts for this turn.
+    // What the engine does on a full board: it counts the attempt, counts the
+    // suppression, and returns before any emission.
     registry.recordSpawnAttempt();
     registry.recordSpawnSuppressed();
 
@@ -561,8 +491,6 @@ describe('the spawn families', () => {
   });
 });
 
-/* ===== 3. recordEngineEvent, every other event ===== */
-
 describe('recordEngineEvent', () => {
   it('counts every emission in the per-event family', () => {
     const registry = createMetricsRegistry();
@@ -592,9 +520,8 @@ describe('recordEngineEvent', () => {
       const registry = createMetricsRegistry();
 
       // The engine emits `move:after` for every turn that reached the walk and
-      // carries `moved: false` on one that moved nothing, so the emission counts
-      // turns ATTEMPTED. A turn family fed from it counted a press into a wall
-      // as a turn.
+      // carries `moved: false` on one that moved nothing, so the emission
+      // counts turns ATTEMPTED.
       registry.recordEngineEvent('move:after');
       registry.recordEngineEvent('move:after');
 
@@ -683,8 +610,6 @@ describe('recordEngineEvent', () => {
   });
 });
 
-/* ===== 4. recordEngineEventCount, the event dimension (F8) ===== */
-
 describe('recordEngineEventCount reads the event dimension', () => {
   it('counts one emission from a report carrying no value', () => {
     const registry = createMetricsRegistry();
@@ -724,7 +649,7 @@ describe('recordEngineEventCount reads the event dimension', () => {
     expect(snapshot.rejected).toBe(0);
   });
 
-  it('refuses an event name arriving in the hook dimension (F8)', () => {
+  it('refuses an event name arriving in the hook dimension', () => {
     const logger = createSilentLogger('run-hook-dimension');
     const registry = createMetricsRegistry({ logger });
 
@@ -831,8 +756,6 @@ describe('recordEngineEventCount reads the event dimension', () => {
   });
 });
 
-/* ===== 5. The canonical tuples drive construction (F9) ===== */
-
 describe('the canonical event tuple drives construction', () => {
   it('is frozen at its declaration', () => {
     expect(Object.isFrozen(ENGINE_EVENT_NAMES)).toBe(true);
@@ -857,8 +780,8 @@ describe('the canonical event tuple drives construction', () => {
     const logger = createSilentLogger('run-bounded-validation');
     const registry = createMetricsRegistry({ logger });
 
-    // The freeze protects the tuple; the validation protects the registry
-    // from a name that never came from it. Both hold at once.
+    // The freeze protects the tuple; the validation protects the registry from
+    // a name that never came from it.
     registry.recordEngineEvent('game2048_evil{label="x"}' as EngineEventName);
     registry.recordEngineEventCount({ event: 'x'.repeat(400) });
 
@@ -872,8 +795,6 @@ describe('the canonical event tuple drives construction', () => {
     }
   });
 });
-
-/* ===== 6. foldHookDispatchCounts rejects before folding (F6) ===== */
 
 describe('foldHookDispatchCounts rejects before folding', () => {
   it('folds a snapshot whose identifier matches the registry', () => {
@@ -933,7 +854,7 @@ describe('foldHookDispatchCounts rejects before folding', () => {
     expect(loggedReasons(logger)).toEqual(['noCorrelationId']);
   });
 
-  it('folds nothing from a foreign run (F6)', () => {
+  it('folds nothing from a foreign run', () => {
     const logger = createSilentLogger('run-mine');
     const registry = createMetricsRegistry({ logger });
 
@@ -1038,8 +959,6 @@ describe('foldHookDispatchCounts rejects before folding', () => {
   });
 });
 
-/* ===== 7. The engine boundary, end to end (F7, F8) ===== */
-
 describe('the engine boundary agrees with the spawn families', () => {
   /**
    * Wires a registry to a real engine the way a composition root does: the
@@ -1112,7 +1031,7 @@ describe('the engine boundary agrees with the spawn families', () => {
       );
     });
 
-  it('counts an attempt and a suppression for a suppressed spawn (F7)',
+  it('counts an attempt and a suppression for a suppressed spawn',
     () => {
       const registry = createMetricsRegistry();
       const engine = createWiredEngine(registry);
@@ -1129,14 +1048,14 @@ describe('the engine boundary agrees with the spawn families', () => {
 
       const counts = spawnCounts(registry);
 
-      // The attempt and its suppression are both visible, and no insertion
-      // was counted from the emission that carried no position.
+      // The attempt and its suppression are both visible, and no insertion was
+      // counted from the emission that carried no position.
       expect(counts.attempts).toBe((before.attempts ?? 0) + 1);
       expect(counts.suppressed).toBe((before.suppressed ?? 0) + 1);
       expect(counts.inserted).toBe(before.inserted);
     });
 
-  it('counts every emission through the event dimension (F8)', () => {
+  it('counts every emission through the event dimension', () => {
     const registry = createMetricsRegistry();
     const engine = createWiredEngine(registry);
 
@@ -1178,18 +1097,13 @@ describe('the engine boundary agrees with the spawn families', () => {
     const snapshot = registry.snapshot();
     const counts = spawnCounts(registry);
 
-    // THE DEFECT THIS PINS. Every one of those ten inputs emitted `move:after`
-    // as its completion signal, so a turn family fed from the emission read ten
-    // turns for a run in which nothing resolved — and every rate derived from
-    // it, merges and spawns and score per turn, was skewed with it. Only a
-    // bare registry driven by hand could miss it, which is why this case drives
-    // the engine.
+    // The defect this pins. Every one of those ten inputs emitted `move:after`
+    // as its completion signal, so a turn family fed from the emission read
+    // ten turns for a run in which nothing resolved — and every rate derived
+    // from it, merges and spawns and score per turn, was skewed with it.
     expect(counterValue(snapshot, METRIC_NAMES.turnsTotal)).toBe(0);
     expect(eventCounterValue(snapshot, 'move:after')).toBe(idle.length);
 
-    // Every adjacent family agrees with the turn family: nothing merged,
-    // nothing spawned, and no spawn was even attempted, because a spawn belongs
-    // to a move that moved.
     expect(counterValue(snapshot, METRIC_NAMES.mergesTotal)).toBe(0);
     expect(counts.inserted).toBe(0);
     expect(counts.attempts).toBe(0);
@@ -1226,10 +1140,6 @@ describe('the engine boundary agrees with the spawn families', () => {
 
     const snapshot = registry.snapshot();
 
-    // Both counts are read from the attempts rather than assumed, so the case
-    // holds on any seed: the turn family tracks the moves that resolved, and
-    // the per-event family tracks every turn that reached the walk. The list
-    // contains at least one of each, which is what makes the two differ.
     expect(resolved).toBeGreaterThan(0);
     expect(reachedTheWalk).toBeGreaterThan(resolved);
     expect(counterValue(snapshot, METRIC_NAMES.turnsTotal)).toBe(resolved);
@@ -1261,8 +1171,6 @@ describe('the engine boundary agrees with the spawn families', () => {
       );
     });
 });
-
-/* ===== 8. The structural exposition validator ===== */
 
 /** The exposition format's metric name grammar. */
 const PROMETHEUS_METRIC_NAME = /^[a-zA-Z_:][a-zA-Z0-9_:]*$/;
@@ -1419,11 +1327,6 @@ interface ParsedLabels {
 
 /**
  * Reads a label block back, and reports every way it is malformed.
- *
- * The pairs are matched, then RECONSTRUCTED and compared against the block
- * they came from, so a block whose quoting does not close — an unescaped
- * double quote inside a value, a missing comma, trailing text — fails here
- * rather than parsing as a shorter label set.
  *
  * @param inner Block content, between the braces.
  * @returns The labels and the problems.
@@ -1609,10 +1512,6 @@ function histogramSeriesIdentity(
 
 /**
  * Resolves the family a sample name belongs to.
- *
- * An exact `# TYPE` declaration wins, so a counter named `x_count` resolves to
- * itself rather than to a histogram it merely looks like. Only when there is
- * none is a generated suffix stripped.
  *
  * @param name Sample name.
  * @param kinds Declared kind of every family, keyed by family name.
@@ -2058,8 +1957,8 @@ function declaredHelp(
 }
 
 /**
- * Projects a snapshot into the sample identities and values a valid
- * exposition of the same registry state must carry, generated names included.
+ * Projects a snapshot into the sample identities and values a valid exposition
+ * of the same registry state must carry, generated names included.
  *
  * @param snapshot Snapshot to project.
  * @returns Every expected sample, keyed by series identity.
@@ -2175,9 +2074,6 @@ function capturedReasons(harness: RegistryHarness): readonly string[] {
 
   return reasons;
 }
-
-
-/* ===== 9. The counter, gauge and histogram primitives ===== */
 
 describe('a counter only rises', () => {
   let harness: RegistryHarness;
@@ -2600,8 +2496,6 @@ describe('a histogram buckets its observations cumulatively', () => {
     );
 
     // Both observations fall in the 100 bucket, whose edges are 10 and 100.
-    // Every estimate is interpolated between those two edges, so the bucket's
-    // width bounds the estimate's accuracy.
     histogram.observe(40);
     histogram.observe(60);
 
@@ -2649,8 +2543,6 @@ describe('a histogram buckets its observations cumulatively', () => {
         [1000],
       );
 
-      // The first bucket is unbounded below, so its lower edge is the
-      // smallest observation rather than zero.
       histogram.observe(400);
 
       expect(histogram.quantile(0)).toBe(400);
@@ -2836,26 +2728,20 @@ describe('reset returns every value to zero', () => {
   });
 });
 
-
-/* ===== 10. DEFAULT_DURATION_BUCKETS carries the product's own timing budget,
- * extracted from js/animframe_polyfill.js and style/main.scss ===== */
+/*
+ * ===== 10. DEFAULT_DURATION_BUCKETS carries the product's own timing budget,
+ * extracted from js/animframe_polyfill.js and style/main.scss =====
+ */
 
 /**
- * The frame budget of js/animframe_polyfill.js L13,
- * `var timeToCall = Math.max(0, 16 - (currTime - lastTime));`.
+ * The frame budget of js/animframe_polyfill.js L13, `var timeToCall =
+ * Math.max(0, 16 - (currTime - lastTime));`.
  */
 const FRAME_BUDGET_MS = 16;
 
 /**
  * The animation cadence of the retired stylesheet, each boundary at the line
  * it was read from.
- *
- * style/main.scss L22  `$transition-speed: 100ms`, the move transition of L329
- * style/main.scss L430 `appear 200ms ease $transition-speed`, the spawn
- * style/main.scss L450 `pop 200ms ease $transition-speed`, the merge
- * style/main.scss L104 `move-up 600ms ease-in`, the score delta
- * style/main.scss L234 `fade-in 800ms ease $transition-speed * 12`, the
- *                      terminal overlay's 800 ms fade after its 1200 ms delay
  */
 const STYLESHEET_CADENCE_MS: readonly number[] = Object.freeze([
   100, 200, 600, 800, 1200,
@@ -3033,9 +2919,6 @@ describe('a duration histogram exposes the default layout', () => {
     expect(histogram.sum).toBe(1216.5);
   });
 });
-
-
-/* ===== 11. The canonical metric names ===== */
 
 /** Every canonical family name, as the module declares them. */
 const CANONICAL_NAMES: readonly string[] = Object.freeze(
@@ -3260,8 +3143,9 @@ describe('the canonical names are valid, distinct and prefixed', () => {
   });
 });
 
-
-/* ===== 12. The text exposition is VALID Prometheus (V8, third bullet) ===== */
+/*
+ * ===== 12. The text exposition is VALID Prometheus (V8, third bullet) =====
+ */
 
 /** Family the escaping cases below are emitted under. */
 const ESCAPE_FAMILY = 'suite_escaped_total';
@@ -3272,7 +3156,7 @@ const AWKWARD_LABEL_VALUE = 'a"b\\c\nd';
 /** A help text carrying a newline and a backslash. */
 const AWKWARD_HELP = 'first line\nsecond \\ line';
 
-/** Observations the exposed histogram below records. Sum is exactly 1360. */
+/** Observations the exposed histogram below records. */
 const EXPOSED_OBSERVATIONS: readonly number[] = Object.freeze([
   8, 16, 100, 36, 1200,
 ]);
@@ -3703,9 +3587,6 @@ describe('a registry with nothing recorded still exposes valid text', () => {
   });
 });
 
-
-/* ===== 13. snapshot() and toPrometheusText() describe one state ===== */
-
 describe('the snapshot and the exposition agree', () => {
   let harness: RegistryHarness;
 
@@ -3836,8 +3717,7 @@ describe('the snapshot and the exposition agree', () => {
 
     expect(revived).toEqual(snapshot);
 
-    // `generatedAt` and `elapsedMs` are clock readings. The comparison below
-    // covers the remaining members; the two readings are checked for shape.
+    // `generatedAt` and `elapsedMs` are clock readings.
     expect(withoutClockReadings(JSON.parse(harness.registry.toJson()))).toEqual(
       withoutClockReadings(revived),
     );
@@ -3855,8 +3735,6 @@ describe('the snapshot and the exposition agree', () => {
     expect(Object.isFrozen(snapshot.series)).toBe(true);
   });
 });
-
-/* ===== 14. Registry reporting, isolation and download ===== */
 
 describe('the registry reports through the logger it was given', () => {
   let harness: RegistryHarness;
@@ -4079,8 +3957,8 @@ function stubAnchorClick(onClick: (anchor: HTMLAnchorElement) => void): void {
 }
 
 /**
- * Reads a captured payload back as text through whichever accessor the
- * active environment's `Blob` supplies.
+ * Reads a captured payload back as text through whichever accessor the active
+ * environment's `Blob` supplies.
  *
  * @param blob Payload `download` built.
  * @returns The payload as text.
@@ -4243,9 +4121,6 @@ describe('download exports the same bytes the exposition carries', () => {
     expect(globalThis.document.querySelectorAll('a')).toHaveLength(0);
   });
 });
-
-
-/* ===== 15. The validator of section 8 rejects a malformed exposition ===== */
 
 /**
  * Replaces the first line satisfying a test, or removes it.

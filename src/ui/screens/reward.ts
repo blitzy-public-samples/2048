@@ -1,74 +1,8 @@
 // The reward screen: the choose-one-of-three relic offer, rendered for the
 // router state `reward`.
 //
-// WHAT ARRIVES AND FROM WHERE
-//   The offer is DRAWN ELSEWHERE and handed to this module. It arrives on the
-//   `reward` screen context of ../screen-router as `drawn` (relics) and
-//   `offers` (the same offer as plain card data), both in draw order.
-//   src/relics/relic-draw.ts is sampled once per cleared stage by
-//   ../../run/run-controller.ts; this module neither imports it nor calls it,
-//   and no member here samples, shuffles, re-orders or re-requests an offer.
-//
-// WHAT LEAVES AND TO WHERE
-//   A card activation publishes the `selectReward` action of ../../input/keymap
-//   carrying the activated card's ZERO-BASED OFFER INDEX, which is the payload
-//   type that action declares. The relic identifier is handed to the injected
-//   `onSelect` callback beside it. Applying the choice belongs to
-//   `RunController.resolveReward` and assigning pickup order belongs to
-//   `RelicRegistry.pickUp`: neither is called here, no run state is written
-//   here and no stage is advanced here.
-//
-// WHAT IT OWNS
-//   the `.reward-panel` chrome — heading and hint — inside the container
-//   index.html declares at `#screen-reward`;
-//   the offer list, through `createRelicCardGrid` of ../components/relic-card;
-//   the focus trap over that container while the offer stands;
-//   the once-per-offer selection guard;
-//   nothing else. It resolves no rule, holds no engine reference, writes no
-//   `hidden` attribute and touches no input context — ../screen-router owns
-//   the container's shown state and the input manager's `setContext`/`suspend`.
-//
-// SINGLE-OWNER CONTRACT
-//   This module takes ownership of its container's children, so a composition
-//   that registers it as the router's `reward` screen must not also drive
-//   `ScreenRouter.showReward` for the same container. A list already rendered
-//   into the container by another surface is reported and replaced rather than
-//   stacked, and a trap already engaged on the container is adopted rather
-//   than stacked.
-//
-// PROVENANCE OF THE GUARDED LOOKUPS
-//   js/html_actuator.js L2-L5 performed four `document.querySelector` calls
-//   and null-checked none of them, so a renamed class was a startup failure
-//   (I12). Every lookup here goes through `resolveMount` of ../a11y/settings
-//   and every miss is reported. The tile layer that was one of those four no
-//   longer exists, and no selector of it appears anywhere in this module.
-//
-// Rows of docs/TRACEABILITY_MATRIX.md. Every row is TARGET-ONLY: the reward
-// screen has NO vanilla source construct — the pre-migration product had one
-// screen, no router, no relic and no offer — so the reverse direction of the
-// matrix maps none of these to a `js/` construct, and that absence is declared
-// rather than left as a gap:
-//   TR-REWARDSCREEN-01  target-only row  `createRewardScreen()` and the
-//                                        `Screen` lifecycle it implements
-//   TR-REWARDSCREEN-02  target-only row  the panel chrome and the offer list
-//                                        hosted inside it
-//   TR-REWARDSCREEN-03  target-only row  the `selectReward` publication and
-//                                        the once-per-offer selection guard
-//   TR-REWARDSCREEN-04  target-only row  the focus trap, its adoption and its
-//                                        release on every exit path
-//   TR-REWARDSCREEN-05  target-only row  the three-tier offer resolution and
-//                                        the view-only projection
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-REWARD-05  the offer arriving on the context, never drawn here
-//   DL-REWARD-06  `selectReward` carrying the offer index rather than the
-//                 relic identifier
-//   DL-REWARD-07  the once-per-offer selection guard living in this screen
-//   DL-REWARD-08  the trap adopted rather than stacked, and released on every
-//                 exit path
-//   DL-REWARD-09  the three-tier offer resolution and the view-only projection
-//   DL-REWARD-10  a duplicate offer reported rather than de-duplicated
+// Decisions: DL-REWARD-05, DL-REWARD-06, DL-REWARD-07, DL-REWARD-08,
+// DL-REWARD-09, DL-REWARD-10 (docs/DECISION_LOG.md).
 
 import type {
   RewardCard,
@@ -108,24 +42,13 @@ import { motion, zIndex } from '../../theme/tokens';
 import type { RarityTier, ThemeId } from '../../theme/themes';
 import { rarityTiers, resolveRarityColor } from '../../theme/themes';
 
-/* ==========================================================================
- * 1. Selectors, classes, layer and motion
- * ========================================================================== */
-
 /**
  * Container this screen renders into, as index.html L99 declares it and as
- * `SCREEN_MOUNTS` of ../screen-router routes it. Read from the routing table
- * rather than restated here.
+ * `SCREEN_MOUNTS` of ../screen-router routes it.
  */
 export const REWARD_SCREEN_MOUNT_SELECTOR: string = SCREEN_MOUNTS.reward;
 
-/**
- * Every class this module applies.
- *
- * The three panel names are the ones style/_reward.scss already styles; the
- * list name belongs to ../components/relic-card and is imported rather than
- * restated here.
- */
+/** Every class this module applies. */
 export const rewardScreenClasses = Object.freeze({
   /** The dialog surface holding the heading, the hint and the list. */
   panel: 'reward-panel',
@@ -171,11 +94,6 @@ export const REWARD_SCREEN_ENTRANCE = Object.freeze({
 /**
  * Offers one reward presents, per AAP R8 and §0.6.4 — the choice is one of
  * three.
- *
- * `drawRelicOffers` of src/relics/relic-draw.ts is the authority that samples
- * that many without replacement; this constant is what the screen measures the
- * offer it was handed against, so a short or long set is reported rather than
- * silently presented as if it were expected.
  */
 export const EXPECTED_OFFER_COUNT = 3;
 
@@ -203,16 +121,8 @@ const LABELLED_BY_ATTRIBUTE = 'aria-labelledby';
 /** Identifier stem the heading is addressed by. */
 const HEADING_ID_PREFIX = 'reward-heading-';
 
-/**
- * The action a card activation publishes.
- *
- * `satisfies` proves the name is a member of the input vocabulary at compile
- * time while keeping the literal type, so `emit` narrows its payload to the
- * zero-based index that action declares.
- */
+/** The action a card activation publishes. */
 const SELECT_REWARD_ACTION = 'selectReward' satisfies InputEventName;
-
-/* ---- Report names ---- */
 
 /** Counter raised once per offer rendered. */
 const RENDERED_METRIC = 'ui.rewardScreen.rendered';
@@ -241,7 +151,6 @@ const OFFER_COUNT_METRIC = 'ui.rewardScreen.offerCountUnexpected';
 /** Counter raised where one offer held the same relic twice. */
 const DUPLICATE_OFFER_METRIC = 'ui.rewardScreen.offerDuplicate';
 
-/** Counter raised where a card had to be projected from plain card data. */
 const PROJECTED_OFFER_METRIC = 'ui.rewardScreen.offerProjected';
 
 /** Counter raised where another surface had already rendered a list. */
@@ -268,10 +177,6 @@ const SEMANTICS_SUPPLIED_METRIC = 'ui.rewardScreen.semanticsSupplied';
 /** Counter raised where a rarity accent could not be sampled. */
 const ACCENT_UNRESOLVED_METRIC = 'ui.rewardScreen.rarityAccentUnresolved';
 
-/* ==========================================================================
- * 2. Copy
- * ========================================================================== */
-
 /** The prose this screen renders. */
 export interface RewardScreenCopy {
   /** The offer's heading, which also names the dialog. */
@@ -297,10 +202,6 @@ export const defaultRewardScreenCopy: RewardScreenCopy = Object.freeze({
   announcement: SCREEN_ANNOUNCEMENTS.reward,
 });
 
-/* ==========================================================================
- * 3. Construction parameters
- * ========================================================================== */
-
 /** Everything `createRewardScreen` accepts. All members are optional. */
 export interface RewardScreenOptions {
   /**
@@ -314,7 +215,7 @@ export interface RewardScreenOptions {
    * Container this screen renders into, already resolved. `null` marks a
    * container the caller looked for and did not find, which is reported.
    *
-   * ../screen-router injects it through `mount`, which supersedes this.
+   * /screen-router injects it through `mount`, which supersedes this.
    */
   readonly host?: Element | null;
 
@@ -342,9 +243,9 @@ export interface RewardScreenOptions {
 
   /**
    * Reduced-motion value overriding both the store and the media query. `true`
-   * withholds the entrance marker; the cards still render at full size,
-   * because style/_reward.scss declares the entrance only inside its
-   * `motion-allowed` block.
+   * withholds the entrance marker; the cards still render at full size, since
+   * style/_reward.scss declares the entrance only inside its `motion-allowed`
+   * block.
    */
   readonly reducedMotion?: boolean;
 
@@ -369,12 +270,36 @@ export interface RewardScreenOptions {
   readonly input?: InputEmitter | null;
 
   /**
-   * Called with the chosen relic's identifier and its zero-based offer index.
+   * Called with the chosen relic's identifier and its zero-based offer index,
+   * and REPORTS BACK whether the transaction accepted the choice.
    *
-   * The whole of what a selection does here. Applying it belongs to
-   * `RunController.resolveReward`.
+   * Applying a choice belongs to `RunController.resolveReward`; this screen
+   * only reports the press and reads the answer. `false` leaves the offer
+   * standing, every card live and nothing announced, so a refused choice can be
+   * made again. A handler answering nothing is read as acceptance. Decision
+   * DL-REWARD-12.
    */
-  readonly onSelect?: (relicId: string, index: number) => void;
+  readonly onSelect?: (relicId: string, index: number) => boolean | void;
+
+  /**
+   * Whether this screen engages a focus trap of its own. Defaults to `true`.
+   *
+   * `false` is for a composition whose router owns every screen trap: the trap
+   * is engaged over this same container by that owner, and this screen neither
+   * engages nor adopts one. Decision DL-REWARD-12.
+   */
+  readonly trapFocus?: boolean;
+
+  /**
+   * Whether this screen places initial focus and announces on entry. Defaults
+   * to `true`.
+   *
+   * `false` is for a composition whose router places focus and reads the entry
+   * line, which `announcement()` below composes. The acquisition announcement
+   * is left on either way: it reports the transaction, not the entry. Decision
+   * DL-REWARD-12.
+   */
+  readonly announceEntry?: boolean;
 
   /**
    * Called when Escape is pressed while this screen's own trap holds focus.
@@ -388,8 +313,8 @@ export interface RewardScreenOptions {
    *
    * A FUNCTION, not an element, and called once per engage: the parallel board
    * layer uses a roving tab stop, so the element that can take focus is
-   * whichever cell currently carries it. Returning `null` leaves the trap's own
-   * fallback in charge, which restores to whatever held focus before.
+   * whichever cell currently carries it. Returning `null` leaves the trap's
+   * own fallback in charge, which restores to whatever held focus before.
    */
   readonly restoreFocusTo?: () => Element | null;
 
@@ -416,10 +341,6 @@ export interface RewardScreenOptions {
   /** Overrides for any subset of the card component's own copy. */
   readonly cardCopy?: Partial<RelicCardCopy>;
 }
-
-/* ==========================================================================
- * 4. The mounted screen
- * ========================================================================== */
 
 /**
  * The mounted reward screen: the router lifecycle, plus readers over what is
@@ -470,18 +391,12 @@ export interface RewardScreen extends Screen {
   destroy(): void;
 }
 
-/* ==========================================================================
- * 5. Reading the context
- * ========================================================================== */
-
 function readAmbientDocument(): Document | null {
   return typeof document === 'undefined' ? null : document;
 }
 
 /**
  * Narrows a context to the `reward` one.
- *
- * The discriminant is read off the value rather than through `instanceof`.
  *
  * @param context Context handed to a lifecycle member.
  * @returns The reward context, or `null` for any other state.
@@ -535,9 +450,9 @@ function isRarityTier(value: string): value is RarityTier {
  *
  * A handler returning nothing leaves the accumulated payload as it stands, so
  * this marks a binding for the badge derivation of ../components/relic-card —
- * which tests each of `HOOK_NAMES` for a function — while transforming nothing
- * if it were ever dispatched. A projected relic is used for rendering alone and
- * is never handed to the engine, the hook bus or the registry.
+ * which tests each of `HOOK_NAMES` for a function — while transforming
+ * nothing if it were ever dispatched. A projected relic is used for rendering
+ * alone and is never handed to the engine, the hook bus or the registry.
  */
 function viewOnlyHookMarker(): void {
   return;
@@ -576,12 +491,8 @@ function markBoundHooks(
 }
 
 /**
- * Projects plain card data as the relic shape ../components/relic-card renders.
- *
- * VIEW ONLY. The seven-member declaration is neither widened nor narrowed: the
- * rarity is carried through where it names a tier, the hook table carries the
- * neutral marker, and the charge budget is carried through where the card
- * stated one.
+ * Projects plain card data as the relic shape ../components/relic-card
+ * renders.
  *
  * @param card The offer as the context carried it.
  * @param reporter Contained sink.
@@ -623,16 +534,6 @@ function projectCardAsRelic(card: RewardCard, reporter: UiReporter): Relic {
 
 /**
  * Resolves the offer to render, in three tiers.
- *
- * 1. `context.drawn` — the relics themselves, which is what a composition
- *    supplies when it carries the offer through the trigger payload.
- * 2. `resolveRelic` over `context.offers` — the catalogue answer for an offer
- *    that arrived as plain card data.
- * 3. the view-only projection of that card data, so three complete cards render
- *    rather than an empty panel.
- *
- * Nothing is sampled, re-ordered or de-duplicated: the order returned is the
- * order the context carried, which is draw order.
  *
  * @param context The reward context.
  * @param resolver Catalogue resolver, where the caller supplied one.
@@ -707,8 +608,6 @@ function safeResolve(
 
 /**
  * Reports an offer whose shape does not match what one reward presents.
- *
- * A duplicate is REPORTED AND RENDERED, never removed. Decision DL-REWARD-10.
  *
  * @param offer The offer about to be rendered.
  * @param reporter Contained sink.
@@ -790,13 +689,10 @@ function sameOffer(
 /**
  * Samples one accent per rarity tier off the shared ramp.
  *
- * The accents are the ramp's own interpolation, resolved by
- * `resolveRarityColor` of ../../theme/themes. No colour is declared in this
- * module.
- *
  * @param theme Palette to sample under, or `undefined` for the active one.
  * @param reporter Contained sink.
- * @returns One 6-digit hex per tier, and an empty string per tier that raised.
+ * @returns One 6-digit hex per tier, and an empty string per tier that
+ *   raised.
  */
 function readRarityAccents(
   theme: ThemeId | undefined,
@@ -845,10 +741,6 @@ function mergeCopy(
 /** Sequence making each panel's heading identifier unique in one document. */
 let headingSequence = 0;
 
-/* ==========================================================================
- * 6. Construction
- * ========================================================================== */
-
 /**
  * Mounts the reward screen.
  *
@@ -859,7 +751,6 @@ let headingSequence = 0;
  *
  * @param options Container, document, collaborators, copy and report sink.
  * @returns The mounted screen, whether or not the container resolved.
- *
  * @example
  * ```ts
  * const screen = createRewardScreen({
@@ -1080,10 +971,6 @@ export function createRewardScreen(
   /**
    * Reports a list another surface had already rendered into the container.
    *
-   * The single-owner contract: this screen replaces the container's children,
-   * and the collision is reported rather than resolved silently. Decision
-   * DL-REWARD-11.
-   *
    * @param host Container in force.
    */
   const auditForeignSurface = (host: Element): void => {
@@ -1113,12 +1000,12 @@ export function createRewardScreen(
   };
 
   /**
-   * Withdraws every card from activation, which is the selection guard's teeth:
-   * a withdrawn card calls no handler at all, so a second activation cannot
-   * publish a second `selectReward` from one offer.
+   * Withdraws every card from activation, which is the selection guard's
+   * teeth: a withdrawn card calls no handler at all, so a second activation
+   * cannot publish a second `selectReward` from one offer.
    *
-   * A withdrawn card stays focusable and announceable, as
-   * style/_reward.scss's `aria-disabled` block expects.
+   * A withdrawn card stays focusable and announceable, as style/_reward.scss's
+   * `aria-disabled` block expects.
    *
    * @param chosenId Identifier of the card that was chosen.
    */
@@ -1178,15 +1065,18 @@ export function createRewardScreen(
   /**
    * Publishes the action for one activation.
    *
-   * The payload is the card's ZERO-BASED OFFER INDEX, which is what
+   * The payload is the card's zero-based offer index, which is what
    * `selectReward` of ../../input/keymap declares and what a subscriber
    * resolves against the offer the controller is standing on. The identifier
    * travels to `onSelect` instead.
    *
    * @param index Zero-based position of the chosen card in the offer.
    * @param relicId Identifier of the chosen relic.
+   * @returns Whether the transaction accepted the choice. An absent handler,
+   *   and one answering nothing, both read as acceptance; a handler that raises
+   *   reads as a refusal.
    */
-  const publishSelection = (index: number, relicId: string): void => {
+  const publishSelection = (index: number, relicId: string): boolean => {
     if (emitter !== null) {
       try {
         emitter.emit(SELECT_REWARD_ACTION, index);
@@ -1202,17 +1092,19 @@ export function createRewardScreen(
     const select = options.onSelect;
 
     if (select === undefined) {
-      return;
+      return true;
     }
 
     try {
-      select(relicId, index);
+      return select(relicId, index) !== false;
     } catch (error: unknown) {
       reporter.error('reward selection handler threw', error, {
         context: REPORT_CONTEXT,
         relicId,
         index,
       });
+
+      return false;
     }
   };
 
@@ -1267,6 +1159,22 @@ export function createRewardScreen(
       return;
     }
 
+    // THE TRANSACTION ANSWERS FIRST. Nothing is disabled, marked chosen,
+    // announced or released until the controller has accepted the relic: a
+    // refused press leaves the offer exactly as it was, so the player can
+    // choose again. Decision DL-REWARD-12.
+    const accepted = publishSelection(position, relicId);
+
+    if (!accepted) {
+      reporter.count(SELECT_REFUSED_METRIC, {
+        context: REPORT_CONTEXT,
+        reason: 'not-accepted',
+        relicId,
+      });
+
+      return;
+    }
+
     selected = relicId;
     closeOffer(relicId);
 
@@ -1276,24 +1184,20 @@ export function createRewardScreen(
       index: position,
     });
 
-    publishSelection(position, relicId);
     announceAcquisition(relic);
 
     // Selection is an exit path, so the trap is released here as well as in
-    // `leave`, after the announcement. The release is idempotent, so the later
-    // `leave` is a no-op. Decision DL-REWARD-08.
+    // `leave`, after the announcement.
     releaseTrap();
   };
 
-  /* ---- The focus trap ---- */
-
   /**
    * Releases the trap this screen engaged, which restores focus and lifts every
-   * inertness it applied. An adopted trap is let go of without releasing it,
-   * because the surface that engaged it owns its lifetime.
+   * inertness it applied. An adopted trap is let go of without releasing it:
+   * the surface that engaged it owns its lifetime.
    *
-   * Called on every exit path — selection is not one, because the choice is
-   * resolved by the router leaving the state — so no trap is ever leaked.
+   * Called on every exit path, so no trap is leaked. Selection is not such a
+   * path; the router leaving the state resolves it.
    */
   const releaseTrap = (): void => {
     const engaged = engagedTrap;
@@ -1403,8 +1307,6 @@ export function createRewardScreen(
     ownsTrap = true;
   };
 
-  /* ---- Rendering ---- */
-
   /**
    * Takes the panel down: every card is destroyed through the list's own
    * teardown and the panel is detached. The trap is untouched, so a re-render
@@ -1434,8 +1336,9 @@ export function createRewardScreen(
    * Renders one offer, in the order it was handed over.
    *
    * Nothing here samples: `next` is what the context carried. The panel is
-   * built, the list is created inside it through `createRelicCardGrid`, and the
-   * container's children are replaced so exactly one offer is ever on screen.
+   * built, the list is created inside it through `createRelicCardGrid`, and
+   * the container's children are replaced so exactly one offer is ever on
+   * screen.
    *
    * @param next The offer to present, in draw order.
    * @param context Reward context, where one is at hand.
@@ -1487,9 +1390,8 @@ export function createRewardScreen(
     // The list appends itself to the panel, so the panel reaches the container
     // already carrying it and the container is written exactly once.
     //
-    // `announcer` is deliberately withheld from the cards: this screen makes
-    // the acquisition announcement itself, in `announceAcquisition`. Decision
-    // DL-REWARD-07.
+    // `announcer` is withheld from the cards: this screen makes the acquisition
+    // announcement itself, in `announceAcquisition`. Decision DL-REWARD-07.
     const built = createRelicCardGrid({
       relics: next,
       host: surface,
@@ -1558,10 +1460,6 @@ export function createRewardScreen(
     }
   };
 
-  /* ------------------------------------------------------------------------
-   * The lifecycle
-   * ---------------------------------------------------------------------- */
-
   const mount = (host: Element): void => {
     if (refuseAfterUnmount('mount')) {
       return;
@@ -1577,6 +1475,37 @@ export function createRewardScreen(
 
     mountedHost = host;
     ensureDialogSemantics(host);
+  };
+
+  /** Whether this screen engages a trap of its own. DL-REWARD-12. */
+  const ownTrap = options.trapFocus ?? true;
+
+  /** Whether this screen places focus and announces on entry. DL-REWARD-12. */
+  const ownEntry = options.announceEntry ?? true;
+
+  /**
+   * The line the router reads on entry: the offer, card by card, in the order
+   * the digits address them.
+   *
+   * The same words this screen speaks for itself where it owns its entry, so
+   * the announcement does not depend on which layer is speaking. Decision
+   * DL-REWARD-12.
+   *
+   * @param context The context the entry carried.
+   * @returns The line, or `null` for any other state.
+   */
+  const announcement = (context: ScreenContext): string | null => {
+    const reward = asRewardContext(context);
+
+    if (reward === null) {
+      return null;
+    }
+
+    const named = reward.offers
+      .map((card, index): string => `${index + 1}, ${card.name}`)
+      .join('; ');
+
+    return named === '' ? copy.announcement : `${copy.announcement} ${named}.`;
   };
 
   const enter = (context: ScreenContext): void => {
@@ -1603,12 +1532,14 @@ export function createRewardScreen(
       return;
     }
 
-    if (host !== null) {
+    if (host !== null && ownTrap) {
       engageTrap(host, readReducedMotion(reward));
     }
 
-    focusFirstCard();
-    announceScreen();
+    if (ownEntry) {
+      focusFirstCard();
+      announceScreen();
+    }
   };
 
   const update = (context: ScreenContext): void => {
@@ -1630,10 +1561,7 @@ export function createRewardScreen(
 
     const resolved = resolveOffer(reward, options.resolveRelic, reporter);
 
-    // IDEMPOTENT AND NON-REDRAWING. A refresh carrying the standing offer
-    // leaves the cards, their entrance and the selection exactly as they are;
-    // one carrying no offer at all leaves the standing offer up rather than
-    // blanking the panel. Neither path asks for or generates an offer.
+    // Idempotent and non-redrawing.
     if (resolved.length === 0 || sameOffer(offer, resolved)) {
       reporter.count(REFRESH_METRIC, {
         context: REPORT_CONTEXT,
@@ -1679,6 +1607,7 @@ export function createRewardScreen(
     mount,
     enter,
     update,
+    announcement,
     leave,
     unmount,
 

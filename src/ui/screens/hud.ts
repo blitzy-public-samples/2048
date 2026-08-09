@@ -27,7 +27,11 @@
 //   through `render`, a router context through `enter` and `update`, and this
 //   module subscribes to no emitter;
 //   pickup order, stage-goal evaluation, charge budgets and board size, each
-//   read as supplied and none recomputed here.
+//   read as supplied and none recomputed here;
+//   focus placement and the entry announcement in a composition that supplies
+//   `focusContainer: null`, which src/main.ts does: src/ui/screen-router.ts
+//   places focus for every state and reads the entry line, which this module
+//   supplies through `announcement()`.
 //
 // PORTED BEHAVIOUR
 //   js/html_actuator.js L24-L25    the write order: the score, then the best
@@ -90,9 +94,15 @@
 //   DL-HUD-09  the commit push retained beside the router lifecycle, and the
 //              score write skipped for an unchanged context refresh
 //   DL-HUD-10  the goal track decorative rather than a `role="progressbar"`
+//   DL-HUD-11  the entry line supplied to the router through `announcement()`
+//   DL-HUD-12  focus placement opted out of through `focusContainer: null` in
+//              the composed root
 //
 // Nothing is read or written at import time: every lookup, every report and
 // every DOM write happens inside a call.
+//
+// Decisions: DL-HUD-01, DL-HUD-02, DL-HUD-03, DL-HUD-07, DL-HUD-08, DL-HUD-09,
+// DL-HUD-10 (docs/DECISION_LOG.md).
 
 import type { StageGoal } from '../../config/stage-config';
 import type { StateCommitEvent } from '../../engine/engine-events';
@@ -121,10 +131,6 @@ import type { ScorePanel } from '../components/score-panel';
 import { createScorePanel } from '../components/score-panel';
 import type { Screen, ScreenContext } from '../screen-router';
 
-/* ==========================================================================
- * 1. Selectors, classes, attributes and copy
- * ========================================================================== */
-
 /** Selector of the terminal overlay. index.html. */
 const MESSAGE_SELECTOR = '.game-message';
 
@@ -149,22 +155,10 @@ const STAGE_SELECTOR = '#hud-stage';
 /** Selector of the active-relic tray. index.html. */
 const RELIC_TRAY_SELECTOR = '#relic-tray';
 
-/**
- * Selector of the region focus is placed inside on entry.
- *
- * index.html declares `#board-a11y` inside `#game-main` and outside
- * `#screen-hud`, and `SCREEN_INITIAL_FOCUS.stage` of ../a11y/focus-manager
- * names that cell layer as this state's designated target.
- */
+/** Selector of the region focus is placed inside on entry. */
 const FOCUS_CONTAINER_SELECTOR = '#game-main';
 
-/**
- * The state this screen renders, as ../a11y/focus-manager names it.
- *
- * A literal type rather than the wider union, so a context is narrowed to
- * `StageScreenContext` by comparing its `screen` against this constant, and the
- * `satisfies` keeps the agreement with that module's own name set.
- */
+/** The state this screen renders, as ../a11y/focus-manager names it. */
 const STAGE_SCREEN = 'stage' as const satisfies FocusScreenName;
 
 /** Class of the unconfirmed-status notice. style/_hud.scss. */
@@ -223,8 +217,8 @@ const REPORT_CONTEXT = 'hud';
  * The rung this surface occupies, read from `zIndex` of ../../theme/tokens and
  * declared by `.hud` in style/_hud.scss.
  *
- * The first step of the ladder extension above the retained ceiling of 100, and
- * below `zIndex.diagnosticsOverlay`.
+ * The first step of the ladder extension above the retained ceiling of 100,
+ * and below `zIndex.diagnosticsOverlay`.
  */
 export const HUD_Z_INDEX: number = zIndex.hud;
 
@@ -242,8 +236,8 @@ const NO_HOOKS = Object.freeze({});
  * without editing this module.
  *
  * `relicCharges` and `relicRarity` are handed to `createRelicTrayItem` as its
- * `chargesRemaining` and `rarityText`, so one override reaches the tray rows as
- * well as this module.
+ * `chargesRemaining` and `rarityText`, so one override reaches the tray rows
+ * as well as this module.
  */
 export const hudCopy = Object.freeze({
   /** js/html_actuator.js L129, verbatim. */
@@ -288,6 +282,15 @@ export const hudCopy = Object.freeze({
    */
   relicRarity: (rarity: string): string => `Rarity: ${rarity}`,
 
+  /**
+   * The line the router reads on entry to the stage state, composed from the
+   * stage number on screen. Decision DL-HUD-11.
+   */
+  stageAnnouncement: (stage: number | null): string =>
+    stage === null
+      ? 'Stage. The board is playable.'
+      : `Stage ${String(stage)}. The board is playable.`,
+
   /** Announced when a held relic's remaining budget changed. */
   chargeAnnouncement: (name: string, charges: number): string =>
     `${name}: ${charges} left.`,
@@ -301,10 +304,6 @@ export const hudCopy = Object.freeze({
 });
 
 export type HudCopy = typeof hudCopy;
-
-/* ==========================================================================
- * 2. Report names
- * ========================================================================== */
 
 /** Counter raised once per completed construction. */
 const MOUNTED_METRIC = 'ui.hud.mounted';
@@ -357,10 +356,6 @@ const ANNOUNCED_METRIC = 'ui.hud.announced';
 /** Counter raised per injected reader that raised or answered badly. */
 const READER_FAULT_METRIC = 'ui.hud.reader.faulted';
 
-/* ==========================================================================
- * 3. Public API
- * ========================================================================== */
-
 /** Which terminal state the overlay is showing, and `null` for none. */
 export type HudTerminalState = 'won' | 'over' | null;
 
@@ -370,9 +365,9 @@ export interface HudSnapshot {
 
   /**
    * The best score exactly as the payload carried it: the raw stored string
-   * when a value is present and the number `0` when it is absent, which is what
-   * js/local_storage_manager.js L43-L45 returned and js/game_manager.js L95
-   * placed in the payload. Neither coerced nor formatted here.
+   * when a value is present and the number `0` when it is absent, which is
+   * what js/local_storage_manager.js L43-L45 returned and js/game_manager.js
+   * L95 placed in the payload. Neither coerced nor formatted here.
    */
   readonly bestScore: BestScoreValue;
 
@@ -384,8 +379,8 @@ export interface HudSnapshot {
 
   /**
    * One-based stage number shown, and `null` where no indicator resolved or no
-   * stage was measurable. One-based because it is player-facing copy; the
-   * engine's own index stays zero-based everywhere else.
+   * stage was measurable. One-based here as player-facing copy; the engine's
+   * own index stays zero-based everywhere else.
    */
   readonly stage: number | null;
 
@@ -399,15 +394,17 @@ export interface HudSnapshot {
   readonly boardSize: number | null;
 
   /**
-   * Whether the payload reported its terminal or stage status as unestablished.
-   * Recorded whether or not a run-status outlet resolved to show it.
+   * Whether the payload reported its terminal or stage status as
+   * unestablished. Recorded whether or not a run-status outlet resolved to
+   * show it.
    */
   readonly degraded: boolean;
 }
 
 /**
- * The part of the announcer this screen drives, as ../a11y/live-region declares
- * it. A structural subset, so the announcer is exercisable with a stand-in.
+ * The part of the announcer this screen drives, as ../a11y/live-region
+ * declares it. A structural subset, so the announcer is exercisable with a
+ * stand-in.
  */
 export type HudAnnouncerPort = Pick<
   LiveRegionAnnouncer,
@@ -427,7 +424,7 @@ export type HudAnnouncerSource =
 /**
  * Reads the relics a run holds, in pickup order.
  *
- * `RelicRegistry.active()` of src/relics/relic-registry.ts has this shape: it
+ * `RelicRegistry.active` of src/relics/relic-registry.ts has this shape: it
  * returns the held relics in pickup order with the charge budgets the hook bus
  * holds. Called on every write, so a budget spent between turns is observed.
  */
@@ -449,8 +446,7 @@ export interface HudOptions {
 
   /**
    * Terminal overlay. A selector is resolved against `document`; an element is
-   * used as given; `null` marks an outlet the caller looked for and did not
-   * find.
+   * used as given.
    */
   readonly messageContainer?: Element | string | null;
 
@@ -469,15 +465,14 @@ export interface HudOptions {
 
   /**
    * The region focus is placed inside on entry. A selector is resolved against
-   * `document`; an element is used as given; `null` opts this screen out of
-   * placing focus at all. Defaults to `FOCUS_CONTAINER_SELECTOR`.
+   * `document`; an element is used as given.
    */
   readonly focusContainer?: Element | string | null;
 
   /**
    * Reads the held relics in pickup order, which is what the tray renders.
-   * Absent, the tray is rendered from the payload's own relic slice and the two
-   * resolvers below.
+   * Absent, the tray is rendered from the payload's own relic slice and the
+   * two resolvers below.
    */
   readonly relics?: HudRelicSource;
 
@@ -492,8 +487,8 @@ export interface HudOptions {
    *
    * A payload's relic slice carries an identifier and a charge count and
    * nothing else, and the catalogue that holds a display name lives in
-   * src/relics, which this module does not import. Absent, or returning a blank
-   * string, falls back to the identifier.
+   * src/relics, which this module does not import. Absent, or returning a
+   * blank string, falls back to the identifier.
    */
   readonly relicName?: (relicId: string) => string;
 
@@ -513,11 +508,10 @@ export interface HudOptions {
   readonly announceCharges?: boolean;
 
   /**
-   * Whether a relic appearing in the tray for the first time is announced as an
-   * acquisition. Defaults to `false`: a composition whose reward transaction
-   * announces the pickup itself leaves this off, and one with no such
-   * transaction turns it on. The relics standing at the first write are never
-   * announced, whatever this carries.
+   * Whether a relic appearing in the tray for the first time is announced as
+   * an acquisition. Defaults to `false`: a composition whose reward
+   * transaction announces the pickup itself leaves this off, and one with no
+   * such transaction turns it on.
    */
   readonly announceAcquisitions?: boolean;
 
@@ -537,8 +531,9 @@ export interface HudOptions {
  */
 export interface Hud extends Screen {
   /**
-   * Receives the container the router resolved for this state, once. Any outlet
-   * that did not resolve at construction is resolved inside that container.
+   * Receives the container the router resolved for this state, once. Any
+   * outlet that did not resolve at construction is resolved inside that
+   * container.
    *
    * @param host The resolved container.
    */
@@ -547,8 +542,8 @@ export interface Hud extends Screen {
   /**
    * Renders one entry to this state and places focus.
    *
-   * @param context The context the router built. A context for another state is
-   *   reported and refused.
+   * @param context The context the router built. A context for another state
+   *   is reported and refused.
    */
   enter(context: ScreenContext): void;
 
@@ -568,8 +563,8 @@ export interface Hud extends Screen {
 
   /**
    * Writes one commit: the score, then the best score, then the overlay, then
-   * the run-status half, which is the order js/html_actuator.js L24-L27
-   * wrote the first three in.
+   * the run-status half, which is the order js/html_actuator.js L24-L27 wrote
+   * the first three in.
    *
    * @param commit The commit to write.
    * @returns What was written.
@@ -585,6 +580,18 @@ export interface Hud extends Screen {
   /** Whether the terminal overlay resolved. */
   hasOverlay(): boolean;
 
+  /**
+   * Clears the terminal overlay and records it cleared, without a commit.
+   *
+   * The commit path clears the overlay on the payload that reports no terminal
+   * state, which is how restart and keep-playing clear it (TR-HUD-04). A run
+   * that ENDED takes no further commit, so the flow reaching a screen carrying
+   * its own verdict calls this instead. DL-HUD-13.
+   *
+   * @returns Whether a verdict was on screen to clear.
+   */
+  clearTerminalOverlay(): boolean;
+
   /** The score component this screen drives, for a caller that reads it. */
   readonly scorePanel: ScorePanel;
 
@@ -596,22 +603,15 @@ export interface Hud extends Screen {
 
   /**
    * Removes every node this screen created, releases the score component and
-   * the tray rows, and clears the overlay classes it added. Every later call is
-   * a reported no-op.
+   * the tray rows, and clears the overlay classes it added. Every later call
+   * is a reported no-op.
    */
   destroy(): void;
 }
 
-/* ==========================================================================
- * 4. The normalised view one write renders
- * ========================================================================== */
-
 /**
  * One payload reduced to what this screen writes, whichever member of the
  * public surface delivered it.
- *
- * `render` builds one from a `StateCommitEvent` and `enter`/`update` build one
- * from a `StageScreenContext`, so the write path below is single.
  */
 interface HudView {
   readonly score: number;
@@ -685,12 +685,6 @@ function mergeCopy(overrides: Partial<HudCopy> | undefined): HudCopy {
 /**
  * Maps a reported fraction into the closed interval [0, 1].
  *
- * Applied to the raw number a commit's stage slice carries, so the readout and
- * the track are driven by one value and a provider reporting outside the
- * interval cannot produce a readout above its own target. The
- * `StageGoalProgress` a router context carries is already clamped by
- * `evaluateStageGoal` of ../../config/stage-config and is used verbatim.
- *
  * @param fraction Reported fraction.
  * @returns The fraction, clamped, and `0` where it is not finite.
  */
@@ -705,12 +699,9 @@ function clampFraction(fraction: number): number {
 /**
  * Reads a board's dimension without holding the board.
  *
- * TOTAL, and read on every write rather than captured: a board-mutating relic
- * changes the dimension mid-run, and `reconcileBoardSize` of
- * ../../run/run-state-store.ts can change it again on load.
- *
  * @param board The board a payload carried, by reference and never written.
- * @returns The dimension, or `null` where the value is not a positive integer.
+ * @returns The dimension, or `null` where the value is not a positive
+ *   integer.
  */
 function readBoardSizeOf(board: unknown): number | null {
   if (board === null || typeof board !== 'object') {
@@ -728,8 +719,8 @@ function readBoardSizeOf(board: unknown): number | null {
  * Reads the terminal state a commit reports.
  *
  * Ported from js/html_actuator.js L27-L33: the overlay is decided from the
- * terminal flags alone, and a loss takes precedence over a win because a board
- * can carry both.
+ * terminal flags alone, and a loss takes precedence over a win, which a board
+ * carrying both flags resolves to.
  *
  * @param commit Commit to read.
  * @returns The terminal state, and `null` while play continues.
@@ -755,22 +746,12 @@ interface TrayEntry {
   readonly item: RelicTrayItem;
 }
 
-/* ==========================================================================
- * 5. Construction
- * ========================================================================== */
-
 /**
  * Mounts the in-run HUD.
  *
- * Nothing is read or written here beyond the outlet lookups: an absent
- * outlet is reported and its writes are skipped, and the outlets that did
- * resolve keep working. `ScorePanel.isReady()` reports the score half
- * separately, so a caller can react to an unresolved surface rather than
- * discover it as a crash.
- *
- * @param options Pre-resolved outlets, readers, document, copy and report sink.
+ * @param options Pre-resolved outlets, readers, document, copy and report
+ *   sink.
  * @returns The mounted screen, whether or not every outlet resolved.
- *
  * @example
  * ```ts
  * const hud = createHud({
@@ -812,8 +793,7 @@ export function createHud(options: HudOptions = {}): Hud {
   /**
    * Resolves one outlet: a supplied element is used as given, a selector is
    * resolved through the guarded lookup, and nothing falls back to this
-   * module's own selector for the mount. A miss is reported and counted
-   * rather than raised, so the outlets that resolved keep working (I12).
+   * module's own selector for the mount.
    *
    * @param supplied Element or selector the caller injected.
    * @param fallback Selector used where the caller injected neither.
@@ -862,8 +842,7 @@ export function createHud(options: HudOptions = {}): Hud {
     MESSAGE_MOUNT,
   );
 
-  // The three run-status outlets. Mutable: `mount` fills in whichever did not
-  // resolve here, from the container the router injects.
+  // The three run-status outlets. Mutable.
   let hudGroup = resolveOutlet(
     options.hudContainer,
     HUD_SELECTOR,
@@ -880,7 +859,9 @@ export function createHud(options: HudOptions = {}): Hud {
     RELIC_TRAY_MOUNT,
   );
 
-  /** The container the router injected, held so `enter` can fall back to it. */
+  /**
+   * The container the router injected, held so `enter` can fall back to it.
+   */
   let mountedHost: Element | null = null;
 
   let destroyed = false;
@@ -934,16 +915,8 @@ export function createHud(options: HudOptions = {}): Hud {
     });
   };
 
-  /* ------------------------------------------------------------------------
-   * Announcements
-   * ---------------------------------------------------------------------- */
-
   /**
    * Resolves the announcer for one announcement.
-   *
-   * Contained and total: a reader that raises yields no announcer, and the
-   * announcement is skipped rather than failing the write. Read per call, so a
-   * composition whose announcer is built after this screen is reached.
    *
    * @returns The announcer, or `null` where none is available.
    */
@@ -1002,8 +975,8 @@ export function createHud(options: HudOptions = {}): Hud {
   };
 
   /**
-   * Announces one relic taken through the structured `relicAcquired` variant of
-   * ../a11y/live-region.
+   * Announces one relic taken through the structured `relicAcquired` variant
+   * of ../a11y/live-region.
    *
    * PRIMITIVES, not the relic: that variant is typed over a name, a tier and a
    * budget, so the three fields are read off the declaration and passed as
@@ -1043,9 +1016,10 @@ export function createHud(options: HudOptions = {}): Hud {
    * Announces what changed about the tray, and records the budgets the next
    * write compares against.
    *
-   * A budget is read from the relic the write rendered, so what is announced is
-   * what the row shows. The relics standing at the first write are the run's
-   * restored loadout and are recorded without an acquisition announcement.
+   * A budget is read from the relic the write rendered, so what is announced
+   * is what the row shows. The relics standing at the first write are the
+   * run's restored loadout and are recorded without an acquisition
+   * announcement.
    *
    * @param relics The relics just rendered, in the order supplied.
    */
@@ -1090,10 +1064,6 @@ export function createHud(options: HudOptions = {}): Hud {
     seenRelics = true;
   };
 
-  /* ------------------------------------------------------------------------
-   * The run-status group
-   * ---------------------------------------------------------------------- */
-
   /** Releases the run-status group's `hidden`, once, on the first write. */
   const revealGroup = (): void => {
     if (hudGroup !== null && hudGroup.hidden) {
@@ -1104,15 +1074,9 @@ export function createHud(options: HudOptions = {}): Hud {
   /**
    * Shows or clears the unconfirmed-status notice.
    *
-   * ONE FLAG, TWO CHANNELS: the group carries `data-degraded` for the
-   * stylesheet, and the notice carries the state as real text for a screen
-   * reader that reaches the group. No live-region role is added here, so the
-   * state is not announced twice: the once-per-transition announcement
-   * belongs to src/ui/a11y/engine-announcer.ts.
-   *
    * @param degraded What the payload reported.
-   * @returns The flag, so a snapshot records what was asked for even where no
-   *   outlet resolved to write it into.
+   * @returns The flag, so a snapshot records what was asked for even where
+   *   no outlet resolved to write it into.
    */
   const renderDegraded = (degraded: boolean): boolean => {
     if (hudGroup === null) {
@@ -1142,10 +1106,6 @@ export function createHud(options: HudOptions = {}): Hud {
 
     return degraded;
   };
-
-  /* ------------------------------------------------------------------------
-   * The stage indicator
-   * ---------------------------------------------------------------------- */
 
   /**
    * Builds one labelled readout: a label above a value, which is the pattern
@@ -1185,9 +1145,6 @@ export function createHud(options: HudOptions = {}): Hud {
   /**
    * Builds the goal track, whose fill the reported fraction drives.
    *
-   * DECORATIVE: the track carries `aria-hidden`, and the quantity it depicts
-   * is announced by the `.hud-value` sibling beside it. See `DL-HUD-10`.
-   *
    * @param doc Document the nodes are created in.
    * @param fraction Fraction of the goal reached, in [0, 1].
    * @returns The track.
@@ -1211,9 +1168,9 @@ export function createHud(options: HudOptions = {}): Hud {
    * Writes the stage indicator: the stage number, the goal readout with its
    * track, and the live board dimension.
    *
-   * The board dimension is read from the view on every call and nothing derived
-   * from it is held, so a board-mutating relic is reflected on the turn it
-   * takes effect and again after a reload.
+   * The board dimension is read from the view on every call and nothing
+   * derived from it is held, so a board-mutating relic is reflected on the
+   * turn it takes effect and again after a reload.
    *
    * @param view The payload's normalised view.
    * @returns The one-based stage number written, or `null` where none was.
@@ -1248,9 +1205,6 @@ export function createHud(options: HudOptions = {}): Hud {
     const goal = view.goal;
     const fraction = view.goalFraction;
 
-    // The measured quantity as the payload stated it, and otherwise derived
-    // from the target and the reported fraction, so the readout carries exactly
-    // the progress the run reported and cannot disagree with it.
     const measured =
       goal === null
         ? 0
@@ -1318,16 +1272,8 @@ export function createHud(options: HudOptions = {}): Hud {
     return number;
   };
 
-  /* ------------------------------------------------------------------------
-   * The active-relic tray
-   * ---------------------------------------------------------------------- */
-
   /**
    * Reads one relic's display name through the injected resolver.
-   *
-   * Contained and total, as every read of an injected collaborator here is: a
-   * resolver that raises, or answers with anything but a non-empty string,
-   * yields the identifier rather than failing the write.
    *
    * @param relicId Identifier to resolve.
    * @returns The name, or the identifier.
@@ -1394,12 +1340,6 @@ export function createHud(options: HudOptions = {}): Hud {
   /**
    * Builds a held record from a payload's relic entry.
    *
-   * A payload's slice carries an identifier and a charge count, so the name and
-   * the tier come from the two resolvers and the remaining declaration members
-   * are the neutral ones a tray row does not render. `pickupOrder` is the
-   * entry's position in the slice, which the provider supplies in pickup
-   * order.
-   *
    * @param entry Entry to build from.
    * @param index Position in the slice.
    * @returns The held record.
@@ -1412,9 +1352,10 @@ export function createHud(options: HudOptions = {}): Hud {
       id: entry.id,
       name: readName(entry.id),
 
-      // The resolver's answer verbatim: a tier outside the ladder and the empty
-      // string are both carried as they arrive, and ../components/relic-card
-      // reports the former and writes no attribute for the latter.
+      // The resolver's answer verbatim: a tier outside the ladder and the
+      // empty string are both carried as they arrive, and
+      // ../components/relic-card reports the former and writes no attribute
+      // for the latter.
       rarity: readRarity(entry.id) as Rarity,
       description: '',
       hooks: NO_HOOKS,
@@ -1427,8 +1368,8 @@ export function createHud(options: HudOptions = {}): Hud {
   /**
    * Reads the held relics through the injected reader.
    *
-   * @returns The relics, or `null` where no reader is supplied or it answered
-   *   with anything but an array.
+   * @returns The relics, or `null` where no reader is supplied or it
+   *   answered with anything but an array.
    */
   const readLiveRelics = (): readonly ActiveRelic[] | null => {
     const read = options.relics;
@@ -1466,14 +1407,7 @@ export function createHud(options: HudOptions = {}): Hud {
   };
 
   /**
-   * The relics one write renders, IN THE ORDER SUPPLIED.
-   *
-   * The injected reader is `RelicRegistry.active()`, which returns the held
-   * relics in pickup order with the budgets the hook bus holds; the payload's
-   * own slice is the fallback. Neither is sorted, grouped, filtered or
-   * reversed here: pickup order is the order src/engine/hook-bus.ts dispatches
-   * in, so the tray's order is what lets a player predict how two relics on
-   * one hook compound.
+   * The relics one write renders, in the order supplied.
    *
    * @param slice The payload's relic slice, already in pickup order.
    * @returns The relics to render.
@@ -1504,8 +1438,8 @@ export function createHud(options: HudOptions = {}): Hud {
    *
    * A REAL list item carrying no role of its own, so the implicit `listitem` of
    * an `<li>` inside a `<ul>` stands and the `role="list"` on the tray keeps a
-   * permitted child. It is marked `data-relic-empty` because it is not a relic:
-   * style/_hud.scss suppresses the slot counter on it.
+   * permitted child. Marked `data-relic-empty`, which style/_hud.scss reads to
+   * suppress the slot counter on it.
    */
   const showEmptyRow = (): void => {
     if (relicTray === null) {
@@ -1569,12 +1503,7 @@ export function createHud(options: HudOptions = {}): Hud {
   };
 
   /**
-   * Writes the active-relic tray IN PICKUP ORDER, reusing the rows on screen.
-   *
-   * IN PLACE: a payload arrives on every turn, so a row already showing a relic
-   * is updated through `RelicTrayItem.update` and only a relic that joined or
-   * left costs a row. A budget is read from the relic at this call rather than
-   * from anything captured, so a count reaches zero and stays legible.
+   * Writes the active-relic tray in pickup order, reusing the rows on screen.
    *
    * @param relics The relics to show, in the order supplied.
    * @returns The identifiers written, in that order.
@@ -1590,9 +1519,6 @@ export function createHud(options: HudOptions = {}): Hud {
       return ids;
     }
 
-    // Restated on every write rather than trusted from the markup, so a tray
-    // supplied by a caller carries the same accessible name as the one
-    // index.html declares.
     relicTray.setAttribute('aria-label', copy.relicTrayLabel);
 
     if (relics.length === 0) {
@@ -1673,22 +1599,9 @@ export function createHud(options: HudOptions = {}): Hud {
     return ids;
   };
 
-  /* ------------------------------------------------------------------------
-   * The score outlets and the terminal overlay
-   * ---------------------------------------------------------------------- */
-
   /**
    * Writes the score pair through `ScorePanel`, which is the only component
    * that touches either outlet.
-   *
-   * The best score is handed over EXACTLY as it arrived: never coerced,
-   * never compared, never cached and never formatted.
-   * js/local_storage_manager.js L43-L45 returns the raw stored string when a
-   * value is present and the number `0` when it is absent, and
-   * js/game_manager.js L80-L82 relies on the relational coercion of that
-   * string.
-   * The value rendered is the one js/game_manager.js L95 re-read from storage
-   * after the possible write, so what is shown equals what is persisted.
    *
    * @param score Score the payload carried.
    * @param best Best score the payload carried.
@@ -1715,9 +1628,9 @@ export function createHud(options: HudOptions = {}): Hud {
 
     lastScore = { score, best };
 
-    // The score first, then the best score: the order of
-    // js/html_actuator.js L24-L25, and the order the delta depends on, since
-    // the delta is computed against the score the component last wrote.
+    // The score first, then the best score: the order of js/html_actuator.js
+    // L24-L25, and the order the delta depends on, since the delta is computed
+    // against the score the component last wrote.
     scorePanel.update({ score, bestScore: best });
   };
 
@@ -1725,9 +1638,9 @@ export function createHud(options: HudOptions = {}): Hud {
    * Shows the terminal overlay.
    *
    * Ported from js/html_actuator.js L127-L132: the state class first, then the
-   * verdict into the overlay's own paragraph. An overlay carrying no
-   * paragraph is reported and still receives its class, which is what the
-   * stylesheet fades in.
+   * verdict into the overlay's own paragraph. An overlay carrying no paragraph
+   * is reported and still receives its class, which is what the stylesheet
+   * fades in.
    *
    * @param won Whether the verdict is the winning one.
    * @returns The verdict written, or the verdict that would have been.
@@ -1762,8 +1675,8 @@ export function createHud(options: HudOptions = {}): Hud {
    * Clears the terminal overlay.
    *
    * Ported from js/html_actuator.js L135-L139, which the manager reached
-   * through `continueGame()` L38-L41 on restart and on keep-playing. Both
-   * arrive here as a payload reporting no terminal state.
+   * through `continueGame` L38-L41 on restart and on keep-playing. Both arrive
+   * here as a payload reporting no terminal state.
    */
   const clearMessage = (): void => {
     if (overlay === null) {
@@ -1773,10 +1686,6 @@ export function createHud(options: HudOptions = {}): Hud {
     overlay.classList.remove(WON_CLASS);
     overlay.classList.remove(OVER_CLASS);
   };
-
-  /* ------------------------------------------------------------------------
-   * The single write path
-   * ---------------------------------------------------------------------- */
 
   /**
    * Writes one normalised view and records what it put on screen.
@@ -1850,9 +1759,9 @@ export function createHud(options: HudOptions = {}): Hud {
    * Reads the board dimension one payload reports: the payload's own value
    * first, then the injected reader.
    *
-   * NOTHING IS CACHED. A board-mutating relic changes the dimension mid-run, so
-   * a value captured at mount goes stale; every consumer of it below derives
-   * from this call.
+   * Nothing is cached. A board-mutating relic changes the dimension mid-run,
+   * so a value captured at mount goes stale; every consumer of it below
+   * derives from this call.
    *
    * @param supplied The dimension the payload carried, or `null`.
    * @returns The dimension, or `null` where neither source answered.
@@ -1917,9 +1826,9 @@ export function createHud(options: HudOptions = {}): Hud {
    * context for another state.
    *
    * `StageGoalProgress.progress` is used VERBATIM: `evaluateStageGoal` of
-   * ../../config/stage-config already clamped it to the closed interval [0, 1],
-   * and `achieved` is the measured quantity it stated, so neither is rescaled
-   * here.
+   * ../../config/stage-config already clamped it to the closed interval [0,
+   * 1], and `achieved` is the measured quantity it stated, so neither is
+   * rescaled here.
    *
    * @param context Context the router built.
    * @param member Lifecycle member carried into the report.
@@ -1960,18 +1869,8 @@ export function createHud(options: HudOptions = {}): Hud {
     };
   };
 
-  /* ------------------------------------------------------------------------
-   * Focus placement
-   * ---------------------------------------------------------------------- */
-
   /**
    * Resolves the container focus is placed inside on entry.
-   *
-   * An injected element is used as given, a selector is resolved through the
-   * guarded lookup, an explicit `null` opts out, and nothing falls back to
-   * `FOCUS_CONTAINER_SELECTOR` and then to the container the entry carried. The
-   * designated target `SCREEN_INITIAL_FOCUS.stage` names, `#board-a11y`, is
-   * a descendant of that region and not of `#screen-hud`.
    *
    * @param host Container the entry carried, or `null`.
    * @returns The container, or `null`.
@@ -2031,10 +1930,6 @@ export function createHud(options: HudOptions = {}): Hud {
     });
   };
 
-  /* ------------------------------------------------------------------------
-   * Teardown
-   * ---------------------------------------------------------------------- */
-
   /** Removes every node this screen created and releases its collaborators. */
   const destroy = (): void => {
     if (destroyed) {
@@ -2049,8 +1944,8 @@ export function createHud(options: HudOptions = {}): Hud {
     clearMessage();
 
     // The notice and the empty-state row are this module's own elements, so
-    // they leave with it, and the group is left carrying no state attribute
-    // of ours.
+    // they leave with it, and the group is left carrying no state attribute of
+    // ours.
     degradedNotice?.remove();
     degradedNotice = null;
     hideEmptyRow();
@@ -2091,9 +1986,6 @@ export function createHud(options: HudOptions = {}): Hud {
 
       mountedHost = host;
 
-      // The router is the authority that resolves and injects the container, so
-      // the outlets that did not resolve at construction are resolved INSIDE it
-      // rather than through a second document-wide lookup.
       hudGroup = hudGroup ?? asHtmlElement(host);
       stageOutlet =
         stageOutlet ??
@@ -2179,6 +2071,11 @@ export function createHud(options: HudOptions = {}): Hud {
       destroy();
     },
 
+    // The words the router reads on entry, taken from the stage number this
+    // screen has on screen. Decision DL-HUD-11.
+    announcement: (): string =>
+      copy.stageAnnouncement(rendered?.stage ?? lastStageNumber),
+
     render(commit: StateCommitEvent): HudSnapshot {
       return write(viewFromCommit(commit), true);
     },
@@ -2188,6 +2085,25 @@ export function createHud(options: HudOptions = {}): Hud {
     isActive: (): boolean => active,
 
     hasOverlay: (): boolean => overlay !== null,
+
+    clearTerminalOverlay(): boolean {
+      if (destroyed) {
+        reportAfterDestroy('clearTerminalOverlay');
+
+        return false;
+      }
+
+      const cleared = rendered !== null && rendered.terminal !== null;
+
+      clearMessage();
+
+      if (rendered !== null) {
+        rendered = Object.freeze({ ...rendered, terminal: null,
+          verdict: null });
+      }
+
+      return cleared;
+    },
 
     hasStageIndicator: (): boolean => stageOutlet !== null,
 

@@ -1,46 +1,13 @@
 // The audio layer: one synthesised Web Audio voice per sounded moment.
 //
-// WHAT THIS MODULE OWNS
-//   the capability probe for an AudioContext constructor, standard or
-//   prefixed;
-//   the creation and the resume of the one context it uses, both on a user
-//   gesture;
-//   the master gain every voice passes through, and the mute state and
-//   volume applied to it;
-//   one voice per play request, built from a descriptor in
-//   src/audio/sound-map.ts and scheduled on the context's own clock;
-//   the readable state `getState()` reports.
+// How it attaches subscribe calls `on` on the source it is handed and nothing
+// else. A handler returns nothing, mutates no payload and lets nothing escape.
 //
-// WHAT IT DOES NOT OWN
-//   no markup, no DOM query for a control and no key binding: mute and
-//   volume are methods, and no module drives them today;
-//   no persistence: nothing here reads or writes a store;
-//   no health probe: getState() is the readable surface;
-//   no audio file and no second runtime dependency: every voice is
-//   synthesised from an oscillator or from a generated noise buffer.
+// Every duration in a descriptor is in milliseconds and every time handed to
+// the Web Audio API is in seconds.
 //
-// HOW IT ATTACHES
-//   subscribe() calls `on` on the source it is handed and nothing else. A
-//   handler returns nothing, mutates no payload and lets nothing escape.
-//
-// Every duration in a descriptor is in milliseconds and every time handed
-// to the Web Audio API is in seconds.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated, all target-only because js/ plays no sound:
-//   TR-AUDIO-01  `createSoundEngine()` and the audio context created and
-//                resumed on a user gesture
-//   TR-AUDIO-02  the oscillator and noise-buffer voices
-//   TR-AUDIO-03  `subscribe()` and the per-event voice selection
-//   TR-AUDIO-04  the mute and volume surface, and `getState()`
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-AUDIO-01  the descriptor timings, declared in ./sound-map
-//   DL-AUDIO-02  every voice synthesised from an oscillator or a generated
-//                noise buffer, with no binary asset shipped
-//   DL-AUDIO-03  the context created and resumed on a user gesture
-//   DL-AUDIO-04  `getState()` as this module's whole readable state
+// Decisions: DL-AUDIO-01, DL-AUDIO-02, DL-AUDIO-03, DL-AUDIO-04
+// (docs/DECISION_LOG.md).
 
 import {
   DEFAULT_MUTED,
@@ -61,10 +28,6 @@ import {
   soundMap,
   terminalEffectName,
 } from './sound-map';
-
-/* ==========================================================================
- * 1. Reporting and metrics
- * ========================================================================== */
 
 /** Severity a report carries. */
 export type SoundReportLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -112,17 +75,7 @@ export interface SoundReport {
   readonly details?: SoundReportDetails;
 }
 
-/**
- * Sink every report reaches.
- *
- * A structured logger satisfies this through one adapter member: the level,
- * the message, the details and the caught value are all carried on the
- * report. `report` runs synchronously on the calling path, and a `report`
- * that throws is contained — the throw reaches neither the caller of the
- * audio operation being reported nor the sink that raised it, and it is
- * counted on `SoundEngineState.reporterFaults` and described by
- * `SoundEngineState.lastReporterFault`.
- */
+/** Sink every report reaches. */
 export interface SoundReporter {
   /**
    * Receives one report.
@@ -194,10 +147,6 @@ const METRIC_FAILURE = 'audio.failure';
 /** Counter incremented once per state change of the context. */
 const METRIC_STATE_CHANGED = 'audio.context.statechange';
 
-/* --------------------------------------------------------------------------
- * Containment
- * ----------------------------------------------------------------------- */
-
 /** Counters and descriptions the module's report boundary accumulates. */
 interface DiagnosticsTotals {
   /** Contained failures of this module's own work. */
@@ -227,8 +176,8 @@ interface Diagnostics {
   reportOnce(key: string, report: SoundReport): void;
 
   /**
-   * Records a contained failure of this module's own work and reports it
-   * once for `key`.
+   * Records a contained failure of this module's own work and reports it once
+   * for `key`.
    *
    * @param key Identifier this report is deduplicated by.
    * @param code Machine-readable identifier of the failure.
@@ -262,15 +211,10 @@ const UNREADABLE_THROWN = 'An unreadable value was thrown.';
 /**
  * Reads one string property off a caught value without trusting the value.
  *
- * Both the membership test and the read are contained: a `Proxy` throws
- * from its `has` or `get` trap, and an `Error` subclass can define `message`
- * or `name` as a getter that throws. Either throw is read as an absent
- * property, so describing a failure cannot raise a second one.
- *
  * @param source Value to read from.
  * @param field Property name to read.
- * @returns The value, capped, or `undefined` where it is absent,
- *   unreadable, not a string or empty.
+ * @returns The value, capped, or `undefined` where it is absent, unreadable,
+ *   not a string or empty.
  */
 function readThrownText(source: object, field: string): string | undefined {
   let candidate: unknown;
@@ -291,13 +235,6 @@ function readThrownText(source: object, field: string): string | undefined {
 
 /**
  * Describes a caught value as text, preserving an `Error`'s own message.
- *
- * TOTAL. Every read of the value is contained and every conversion of it is
- * contained: a getter that throws, a `Symbol.toStringTag` that throws and a
- * `toString` that throws all yield fixed text rather than a second throw.
- * That matters most on the paths that call it — describing a fault raised by
- * the reporter or the recorder itself, where there is no second sink a throw
- * could be reported to and a throw would escape into the audio path.
  *
  * @param thrown The caught value.
  * @returns Text describing `thrown`, capped at `MAX_DESCRIPTION_LENGTH`.
@@ -340,10 +277,6 @@ function describeThrown(thrown: unknown): string {
 
 /**
  * Builds the boundary the reporter and the recorder are called through.
- *
- * A throw from either sink is contained on `totals` — counted on
- * `reporterFaults` and described on `lastReporterFault` — and is not handed
- * back to the sink that raised it.
  *
  * @param reporter Sink reports are delivered to.
  * @param metrics Sink counter increments are delivered to.
@@ -423,16 +356,12 @@ function createDiagnostics(
   };
 }
 
-/* ==========================================================================
- * 2. Public surface
- * ========================================================================== */
-
 /**
  * A listener the event source calls with one payload.
  *
- * The payload arrives untyped and is narrowed at the point of use. A
- * listener returns nothing: the value a handler returns is not read back,
- * and the payload it received is not written to.
+ * The payload arrives untyped and is narrowed at the point of use. A listener
+ * returns nothing: the value a handler returns is not read back, and the
+ * payload it received is not written to.
  *
  * @param payload The event's payload.
  */
@@ -441,19 +370,6 @@ export type EngineEventHandler = (payload: unknown) => void;
 /**
  * The event source this module attaches to: the engine's own `on`, with its
  * `off` optional.
- *
- * TAKEN FROM `EngineEvents` RATHER THAN RESTATED. The previous declaration was
- * this module's own paraphrase — `on(eventName: string, handler: (payload:
- * unknown) => void)` — which accepted event names the engine never emits and
- * payload types the engine never carries, so a name or payload drifting apart
- * from the engine's contract compiled here and simply never fired. Naming the
- * engine's members through `Pick` makes the five names below check against the
- * contract that emits them.
- *
- * The import is TYPE-ONLY, so this module still pulls no engine code into the
- * audio bundle and the two layers stay decoupled at runtime; `off` stays
- * optional because a source that returns a release handle from `on` needs no
- * `off` at all.
  */
 export type EngineEventSource = Pick<EngineEvents, 'on'> &
   Partial<Pick<EngineEvents, 'off'>>;
@@ -482,9 +398,9 @@ export interface SoundPreferenceSource {
 }
 
 /**
- * A target the gesture listeners are installed on, declared by the two
- * members this module calls. A `Document`, a `Window` and any other
- * `EventTarget` all satisfy it.
+ * A target the gesture listeners are installed on, declared by the two members
+ * this module calls. A `Document`, a `Window` and any other `EventTarget` all
+ * satisfy it.
  */
 export interface UnlockTarget {
   /**
@@ -520,15 +436,7 @@ export interface SoundEngineOptions {
   /** Sink counter increments are delivered to. A no-op sink when omitted. */
   readonly metrics?: SoundMetricsRecorder;
 
-  /**
-   * The preference store this engine reads mute and volume from.
-   *
-   * Supplied, it is the SINGLE source of truth: the engine takes its starting
-   * mute and volume from it, follows it for the rest of its life, and
-   * `setMuted`/`setVolume` are refused so the two cannot diverge. Omitted, the
-   * engine holds its own state from `muted` and `volume` below, which is how a
-   * caller with no accessibility surface drives it.
-   */
+  /** The preference store this engine reads mute and volume from. */
   readonly preferences?: SoundPreferenceSource;
 
   /**
@@ -545,20 +453,20 @@ export interface SoundEngineOptions {
   readonly volume?: number;
 
   /**
-   * Targets the gesture listeners are installed on. The document when
-   * omitted, and no target at all where there is no document.
+   * Targets the gesture listeners are installed on. The document when omitted,
+   * and no target at all where there is no document.
    */
   readonly unlockTargets?: readonly UnlockTarget[];
 
   /**
-   * Voices allowed to sound at once. `DEFAULT_MAX_VOICES` when omitted or
-   * when the value is not a positive finite number; a larger value is
-   * capped at `VOICE_CEILING_LIMIT`.
+   * Voices allowed to sound at once. `DEFAULT_MAX_VOICES` when omitted or when
+   * the value is not a positive finite number; a larger value is capped at
+   * `VOICE_CEILING_LIMIT`.
    */
   readonly maxConcurrentVoices?: number;
 }
 
-/** The engine's state, as `getState()` reports it. */
+/** The engine's state, as `getState` reports it. */
 export interface SoundEngineState {
   /** Whether an AudioContext constructor was found. */
   readonly available: boolean;
@@ -609,9 +517,9 @@ export interface SoundEngineState {
 /**
  * The audio layer.
  *
- * Every member is safe to call at any time, in any order, however many
- * times, and on an engine that found no AudioContext constructor, was never
- * unlocked, or has been disposed. No member throws.
+ * Every member is safe to call at any time, in any order, however many times,
+ * and on an engine that found no AudioContext constructor, was never unlocked,
+ * or has been disposed. No member throws.
  */
 export interface SoundEngine {
   /**
@@ -626,8 +534,8 @@ export interface SoundEngine {
   /**
    * Sounds one effect.
    *
-   * Nothing sounds while there is no running context, while muted, while
-   * the voice ceiling is reached, or after disposal.
+   * Nothing sounds while there is no running context, while muted, while the
+   * voice ceiling is reached, or after disposal.
    *
    * @param name Effect to sound.
    */
@@ -636,9 +544,9 @@ export interface SoundEngine {
   /**
    * Creates the context on first call and brings it to `'running'`.
    *
-   * Called from a user-gesture handler. Repeated calls create one context,
-   * one master gain and one report; a call made while a resume is in flight
-   * starts no second resume.
+   * Called from a user-gesture handler. Repeated calls create one context, one
+   * master gain and one report; a call made while a resume is in flight starts
+   * no second resume.
    */
   unlock(): void;
 
@@ -658,8 +566,8 @@ export interface SoundEngine {
   /**
    * Sets the volume the master gain is held at while not muted.
    *
-   * A finite value outside `MIN_VOLUME` through `MAX_VOLUME` is brought
-   * into the range; a value that is not finite leaves the volume unchanged.
+   * A finite value outside `MIN_VOLUME` through `MAX_VOLUME` is brought into
+   * the range; a value that is not finite leaves the volume unchanged.
    *
    * @param volume Volume to hold.
    */
@@ -672,23 +580,14 @@ export interface SoundEngine {
   getState(): SoundEngineState;
 
   /**
-   * Removes every listener installed, stops and disconnects every live
-   * voice, disconnects the master gain and closes the context.
+   * Removes every listener installed, stops and disconnects every live voice,
+   * disconnects the master gain and closes the context.
    *
    * `getState` remains readable and truthful afterwards, and every other
    * member remains safe to call.
    */
   dispose(): void;
 }
-
-/* ==========================================================================
- * 3. Bounds and fixed values
- * ========================================================================== */
-
-// The four bounds below are imported from src/audio/sound-map.ts rather than
-// declared here. This module's own `DEFAULT_VOLUME` was 0.6 while the
-// accessibility surface's was 1, so the volume a listener heard depended on
-// which of the two had last written the master gain.
 
 /** Voices allowed to sound at once when the caller supplies none. */
 const DEFAULT_MAX_VOICES = 12;
@@ -699,10 +598,7 @@ const VOICE_CEILING_LIMIT = 64;
 /** Milliseconds in one second. */
 const MS_PER_SECOND = 1000;
 
-/**
- * Gain an envelope starts and ends an exponential ramp at.
- * `exponentialRampToValueAtTime` requires a target strictly above zero.
- */
+/** Gain an envelope starts and ends an exponential ramp at. */
 const GAIN_EPSILON = 0.0001;
 
 /** Seconds a mute or volume change is ramped over. */
@@ -752,20 +648,10 @@ const RUNNING_STATE = 'running';
 const CLOSED_STATE = 'closed';
 
 
-/* ==========================================================================
- * 4. Platform lookups
- * ========================================================================== */
-
 /** The constructor an AudioContext is created through. */
 type AudioContextConstructor = new () => AudioContext;
 
-/**
- * The global members this module reads.
- *
- * Every member is optional. A host that carries none of them is read the
- * same way as one that carries all three, and no global declaration is
- * added for the prefixed constructor.
- */
+/** The global members this module reads. */
 interface AudioCapableGlobal {
   readonly AudioContext?: AudioContextConstructor;
 
@@ -801,11 +687,10 @@ function resolveAudioContextConstructor(): AudioContextConstructor | null {
 }
 
 /**
- * The targets gesture listeners are installed on when the caller names
- * none.
+ * The targets gesture listeners are installed on when the caller names none.
  *
- * @returns The document in a single-entry list, or an empty list where
- *   there is no document to listen on.
+ * @returns The document in a single-entry list, or an empty list where there
+ *   is no document to listen on.
  */
 function resolveDefaultUnlockTargets(): readonly UnlockTarget[] {
   const doc = audioGlobal().document;
@@ -857,10 +742,6 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
 
   return 'then' in value && typeof value.then === 'function';
 }
-
-/* ==========================================================================
- * 5. Numbers
- * ========================================================================== */
 
 /**
  * Converts a duration to seconds, treating a value that is not finite or is
@@ -985,10 +866,6 @@ function clampDetune(value: number | undefined): number {
   return value;
 }
 
-/* ==========================================================================
- * 6. Payload reading
- * ========================================================================== */
-
 /** Narrows a value to one whose named fields can be read. */
 function isReadableRecord(
   value: unknown,
@@ -1017,11 +894,6 @@ function readFiniteNumber(payload: unknown, field: string): number | null {
 /**
  * Reports whether a `tile:spawn` payload names a cell a tile was inserted at.
  *
- * `SpawnPayload.position` in src/engine/hooks.ts is optional, and its absence
- * means NO TILE WAS INSERTED: the engine emits the event either way, so the
- * member is what separates a spawn from a suppressed one. Total over any
- * payload shape, including one whose accessors throw.
- *
  * @param payload The event's payload.
  * @returns `true` when the payload carries a position with two finite
  *   coordinates.
@@ -1045,15 +917,8 @@ function hasSpawnPosition(payload: unknown): boolean {
   );
 }
 
-/* ==========================================================================
- * 7. Noise
- * ========================================================================== */
-
 /**
  * Fills a channel with the fixed sequence a noise voice is built from.
- *
- * The sequence is a linear congruence over the sample index, started from
- * `NOISE_SEED`. One buffer of one length is always the same samples.
  *
  * @param channel Channel data to fill, in place.
  */
@@ -1066,10 +931,6 @@ function fillNoiseChannel(channel: Float32Array): void {
   }
 }
 
-
-/* ==========================================================================
- * 8. Voice construction
- * ========================================================================== */
 
 /** One sounding voice, as the engine holds it until it ends. */
 interface Voice {
@@ -1137,9 +998,6 @@ function scheduleFor(
  * Schedules a voice's gain: up to the descriptor's peak, held, then down to
  * silence.
  *
- * Every exponential ramp targets a value strictly above zero, and the hard
- * zero is set once the ramps are done.
- *
  * @param gain Per-voice gain the envelope is written to.
  * @param effect Descriptor supplying the peak.
  * @param schedule Times the envelope is laid out on.
@@ -1204,10 +1062,6 @@ function applyPitch(
   oscillator.frequency.exponentialRampToValueAtTime(to, schedule.endsAt);
 }
 
-/* ==========================================================================
- * 9. The engine
- * ========================================================================== */
-
 /**
  * Builds the audio layer.
  *
@@ -1262,12 +1116,7 @@ export function createSoundEngine(
   const voices = new Set<Voice>();
   const subscribedSources = new Set<EngineEventSource>();
 
-  /**
-   * One release handle per registered handler, across every source.
-   *
-   * `subscribe()` appends to this and `dispose()` drains it, so a disposed
-   * engine is genuinely detached rather than merely refusing to make a sound.
-   */
+  /** One release handle per registered handler, across every source. */
   const releases: (() => void)[] = [];
 
   /** One installed gesture listener, as it is removed by. */
@@ -1280,10 +1129,6 @@ export function createSoundEngine(
   const armed: ArmedListener[] = [];
 
   let stateListener: (() => void) | null = null;
-
-  /* ----------------------------------------------------------------------
-   * Node teardown
-   * ------------------------------------------------------------------- */
 
   /**
    * Disconnects one node.
@@ -1342,10 +1187,6 @@ export function createSoundEngine(
       releaseVoice(voice);
     }
   };
-
-  /* ----------------------------------------------------------------------
-   * Master gain
-   * ------------------------------------------------------------------- */
 
   /** Ramps the master gain to the volume the mute state selects. */
   const applyMasterGain = (): void => {
@@ -1412,10 +1253,6 @@ export function createSoundEngine(
   };
 
 
-  /* ----------------------------------------------------------------------
-   * Gesture listeners
-   * ------------------------------------------------------------------- */
-
   /** Removes every gesture listener currently installed. */
   const disarmUnlockListeners = (): void => {
     while (armed.length > 0) {
@@ -1440,8 +1277,8 @@ export function createSoundEngine(
   };
 
   /**
-   * Installs one one-shot gesture listener per type per target, after
-   * removing any still installed.
+   * Installs one one-shot gesture listener per type per target, after removing
+   * any still installed.
    *
    * Does nothing once the context is running, once disposed, or where no
    * constructor was found.
@@ -1474,10 +1311,6 @@ export function createSoundEngine(
     }
   };
 
-  /* ----------------------------------------------------------------------
-   * Unlocking
-   * ------------------------------------------------------------------- */
-
   /** Records that the context is running and stops listening for gestures. */
   const markUnlocked = (): void => {
     const first = !unlocked;
@@ -1499,8 +1332,7 @@ export function createSoundEngine(
   };
 
   /**
-   * Records that the context is not running and listens for the next
-   * gesture.
+   * Records that the context is not running and listens for the next gesture.
    */
   const markLocked = (): void => {
     unlocked = false;
@@ -1753,10 +1585,6 @@ export function createSoundEngine(
   };
 
 
-  /* ----------------------------------------------------------------------
-   * Sounding
-   * ------------------------------------------------------------------- */
-
   /**
    * The noise buffer every noise voice reads, created on first use.
    *
@@ -1809,8 +1637,7 @@ export function createSoundEngine(
   };
 
   /**
-   * Builds one voice for a descriptor and schedules it on the context's
-   * clock.
+   * Builds one voice for a descriptor and schedules it on the context's clock.
    *
    * @param effect Descriptor being sounded.
    * @returns Whether a voice reached the graph.
@@ -1938,8 +1765,7 @@ export function createSoundEngine(
       return;
     }
 
-    // A voice is scheduled only while the context is running. A context in
-    // any other state holds its clock.
+    // A voice is scheduled only while the context is running.
     if (readContextState(activeContext) !== RUNNING_STATE) {
       dropPlay(METRIC_PLAY_SUSPENDED);
 
@@ -2014,10 +1840,6 @@ export function createSoundEngine(
   };
 
 
-  /* ----------------------------------------------------------------------
-   * Subscribed handlers
-   * ------------------------------------------------------------------- */
-
   /**
    * Wraps one handler body. Nothing thrown inside it escapes.
    *
@@ -2062,15 +1884,7 @@ export function createSoundEngine(
     playEffect(effectForMerge(resultValue));
   });
 
-  /**
-   * Sounds the spawn effect, for an actual spawn alone.
-   *
-   * `tile:spawn` carries no position where the spawn was SUPPRESSED — an
-   * `onSpawn` handler returned the payload without one — and no tile was
-   * inserted in that case, so there is nothing to sound. The position is read
-   * for that reason: sounding unconditionally announced a tile that never
-   * appeared.
-   */
+  /** Sounds the spawn effect, for an actual spawn alone. */
   const handleSpawn = contained('tile:spawn', (payload: unknown): void => {
     if (!hasSpawnPosition(payload)) {
       return;
@@ -2150,9 +1964,7 @@ export function createSoundEngine(
     }
 
     // Normalised to one shape, so disposal has a single thing to call however
-    // the source expressed removal. Discarding this was what left every handler
-    // registered after `dispose()`: a disposed engine went on receiving
-    // every event for the lifetime of the emitter.
+    // the source expressed removal.
     if (typeof result === 'function') {
       const release = result as () => unknown;
 
@@ -2241,8 +2053,7 @@ export function createSoundEngine(
     subscribedSources.add(events);
 
     // Every name registered for is one the engine's own contract declares and
-    // emits. `move:before` and `stage:start` are deliberately not registered
-    // for; nothing is registered for a name no emitter produces.
+    // emits.
     const names: readonly [EngineEventName, EngineEventHandler][] = [
       ['tile:merge', handleMerge],
       ['tile:spawn', handleSpawn],
@@ -2267,9 +2078,6 @@ export function createSoundEngine(
       taken.push(release);
     }
 
-    // A partial subscription is undone rather than kept: half a set of handlers
-    // sounds some effects and not others, and the ones that did register would
-    // otherwise outlive an engine the caller may treat as unattached.
     if (failed) {
       for (const release of taken) {
         try {
@@ -2292,10 +2100,6 @@ export function createSoundEngine(
     releases.push(...taken);
   };
 
-  /* ----------------------------------------------------------------------
-   * Preferences, state and teardown
-   * ------------------------------------------------------------------- */
-
   /**
    * Holds the master gain at silence, or returns it to the stored volume.
    *
@@ -2304,7 +2108,7 @@ export function createSoundEngine(
   const setMuted = (nextMuted: boolean): void => {
     if (preferences !== null) {
       // The store owns the value, so writing it here would create the second
-      // owner this option exists to remove. The caller sets it on the store.
+      // owner this option exists to remove.
       diagnostics.reportOnce('preference-owned:muted', {
         level: 'warn',
         code: 'preference-owned',
@@ -2353,12 +2157,7 @@ export function createSoundEngine(
     applyMasterGain();
   };
 
-  /**
-   * Released by `dispose()`; `null` where no store is followed.
-   *
-   * Subscribed rather than polled, so a mute toggled mid-run silences the next
-   * effect without the engine being asked.
-   */
+  /** Released by `dispose`; `null` where no store is followed. */
   const releasePreferences: (() => void) | null = ((): (() => void) | null => {
     if (preferences === null) {
       return null;
@@ -2488,10 +2287,6 @@ export function createSoundEngine(
 
     closeContext(activeContext);
   };
-
-  /* ----------------------------------------------------------------------
-   * Wiring
-   * ------------------------------------------------------------------- */
 
   if (!available) {
     diagnostics.reportOnce('audio-unavailable', {

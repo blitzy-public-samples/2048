@@ -1,24 +1,5 @@
-// Integration suite for the observability wiring at the composition root,
-// Rule 3.
-//
-// Four composition defects are covered. Every one was a composition defect
-// rather than a module defect — the logger, the metrics registry, the tracer,
-// the health surface and every reporter adapter were already built and tested:
-//
-//   the root constructed NEITHER the logger nor the registry. It wrote
-//     diagnostics straight to `console` and discarded every count and every
-//     timing, so nothing carried a correlation identifier, no counter ever
-//     moved, and the diagnostics host stayed empty for the life of the page;
-//   the correlation identifier was derived from the seed alone, so every
-//     replay of one seed shared it and two runs could not be told apart in a
-//     stream — which is the one thing a correlation identifier is for;
-//   the tracer had no runtime caller at all, so no span of the input ->
-//     engine -> hook bus -> relic handler -> render -> frame chain was ever
-//     opened and the diagnostics trace panel had nothing to show;
-//   and the health surface was bypassed by a set of booleans assembled at the
-//     root, which substituted `input.isListening()` for the pointer-family
-//     probe and carried neither the three-state verdict nor the two readiness
-//     decisions.
+// Integration suite for the observability wiring at the composition root, Rule
+// 3.
 //
 // These cases therefore drive the REAL `start(document)` and assert on what
 // actually reached the sinks, not that a constructor was called.
@@ -45,39 +26,20 @@ import { resetWebGLSupportProbe } from '../../../src/render/webgl-support';
 import { BOUNDARY_SPAN_NAMES } from '../../../src/observability/tracer';
 import type { TraceSnapshot } from '../../../src/observability/tracer';
 import { RELIC_CATALOGUE } from '../../../src/relics/relic-registry';
-import { GAME_STATE_KEY } from '../../../src/storage/storage-keys';
+import {
+  GAME_STATE_KEY,
+  RUN_STATE_KEY,
+  namespacedKey,
+} from '../../../src/storage/storage-keys';
+import { COMPOSITION_MARKUP, beginRun } from '../../fixtures/composition';
 import { clearOwnedStorage } from '../../fixtures/storage';
 
-/** The markup `start` looks up, matching index.html's nesting. */
-const MARKUP = `
-  <main id="game-main">
-    <div class="score-container"><span class="visually-hidden">Score</span>0</div>
-    <div class="best-container"><span class="visually-hidden">Best score</span>0</div>
-    <button type="button" class="restart-button">New Game</button>
-    <button type="button" class="settings-button" id="settings-button"
-            aria-haspopup="dialog" aria-controls="settings-panel">Settings</button>
-    <div class="game-container">
-      <div class="game-message">
-        <p></p>
-        <button type="button" class="keep-playing-button">Keep going</button>
-        <button type="button" class="retry-button">Try again</button>
-      </div>
-      <div class="board-host" id="board-host">
-        <canvas class="board-canvas" id="board-canvas" aria-hidden="true"></canvas>
-        <div class="board-number-only" id="board-number-only" hidden></div>
-        <div class="board-a11y" id="board-a11y" role="grid" aria-busy="true"></div>
-      </div>
-    </div>
-    <div class="on-screen-controls" id="on-screen-controls"></div>
-  </main>
-  <div class="screen-layer" id="screen-layer">
-    <div class="settings-panel" id="settings-panel" role="dialog"
-         aria-modal="true" aria-label="Settings" hidden></div>
-  </div>
-  <div class="diagnostics-overlay" id="diagnostics-overlay" hidden></div>
-  <div class="visually-hidden live-region" id="live-region" role="status"
-       aria-live="polite" aria-atomic="true"></div>
-`;
+/**
+ * The markup `start` looks up, from tests/fixtures/composition.ts, so this
+ * suite reads the document index.html declares rather than a private copy of
+ * part of it.
+ */
+const MARKUP = COMPOSITION_MARKUP;
 
 let application: Application | null = null;
 
@@ -93,7 +55,73 @@ afterEach(() => {
   document.body.innerHTML = '';
   window.localStorage.removeItem('bestScore');
   window.localStorage.removeItem('gameState');
+  window.localStorage.removeItem(RUN_STATE_KEY);
 });
+
+/**
+ * The envelope this suite resumes from: a fixed seed, stage 0, no relics, and a
+ * board of two unequal tiles that clears no goal.
+ *
+ * RESUMED RATHER THAN BEGUN. A load that resumed nothing holds the run-start
+ * screen, whose input context withholds movement, so a case that drives turns
+ * needs a run open — and beginning one rotates the correlation scope, which
+ * is the very thing most of these cases assert about. Resuming opens the board
+ * under ONE identifier, derived from this seed, for the whole session.
+ */
+const SEEDED_ENVELOPE = JSON.stringify({
+  schemaVersion: 1,
+  runId: 'observability-run',
+  seed: 'observability-seed',
+  rngCursor: {
+    'spawn-value': 2,
+    'spawn-position': 2,
+    'relic-draw': 0,
+    'rarity-weight': 0,
+  },
+  stageIndex: 0,
+  stageGoal: { kind: 'highest-tile', target: 16 },
+  goalProgress: 0.125,
+  relics: [],
+  board: {
+    grid: {
+      size: 4,
+      cells: [
+        [{ position: { x: 0, y: 0 }, value: 2 }, null, null, null],
+        [{ position: { x: 1, y: 0 }, value: 4 }, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ],
+    },
+    score: 0,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  },
+});
+
+/**
+ * Composes the application over the seeded envelope, so a PLAYABLE BOARD is on
+ * screen and no run rotation has happened.
+ *
+ * A case that wants a fresh boot calls `start(document)` itself.
+ *
+ * @returns The composed application, with the seeded run open.
+ */
+const startPlaying = (): Application => {
+  if (window.localStorage.getItem(RUN_STATE_KEY) === null) {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+  }
+
+  const started = start(document);
+
+  application = started;
+
+  if (started.router.current() === 'runStart') {
+    beginRun();
+  }
+
+  return started;
+};
 
 const press = (key: string, code: string): void => {
   document.dispatchEvent(
@@ -101,15 +129,7 @@ const press = (key: string, code: string): void => {
   );
 };
 
-/**
- * Plays one move in every direction.
- *
- * All four, deliberately. The engine returns before emitting `move:after` when a
- * move changed nothing, so a single direction is a bet on where the run's seed
- * happened to place the two starting tiles. Two tiles cannot be blocked on all
- * four sides of a 4x4 board, so playing every direction guarantees at least one
- * real turn, a spawn and a commit — which is what these cases measure.
- */
+/** Plays one move in every direction. */
 const playEveryDirection = (): void => {
   press('ArrowDown', 'ArrowDown');
   press('ArrowLeft', 'ArrowLeft');
@@ -117,13 +137,7 @@ const playEveryDirection = (): void => {
   press('ArrowRight', 'ArrowRight');
 };
 
-/**
- * Waits for the render loop to turn over twice.
- *
- * The frame callback runs on `requestAnimationFrame`, the system's only
- * asynchronous boundary, so the frame span and the frame metric cannot be
- * asserted synchronously.
- */
+/** Waits for the render loop to turn over twice. */
 const awaitFrames = async (): Promise<void> => {
   await new Promise<void>((resolve) => {
     requestAnimationFrame(() => {
@@ -172,43 +186,36 @@ const histogramSeries = (
     : undefined;
 };
 
-/* ==========================================================================
- * The logger is real, and everything reports through it
- * ========================================================================== */
-
 describe('the structured logger is wired', () => {
   it('is exposed by the root, carrying a correlation identifier', () => {
-    application = start(document);
+    application = startPlaying();
 
     expect(application.logger.correlationId).not.toBe('');
     expect(application.logger.correlationId.startsWith('run-')).toBe(true);
   });
 
   it('has recorded structured records by the time boot finishes', () => {
-    application = start(document);
+    application = startPlaying();
 
     const records = application.logger.recent();
 
-    // Console-only writing left nothing to read back. Anything here is the fix.
+    // Console-only writing left nothing to read back.
     expect(records.length).toBeGreaterThan(0);
   });
 
   it('stamps every record with the one correlation identifier', () => {
-    application = start(document);
+    application = startPlaying();
 
     const expected = application.logger.correlationId;
     const records = application.logger.recent(100);
 
-    // One identifier for the run: a record that carried its own would make a
-    // stream unjoinable, which is the failure mode the single authority exists
-    // to prevent.
     for (const record of records) {
       expect(record.correlationId).toBe(expected);
     }
   });
 
   it('routes a subsystem s reports under that subsystem, not under main', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowDown', 'ArrowDown');
 
@@ -216,13 +223,11 @@ describe('the structured logger is wired', () => {
       application.logger.recent(200).map((record) => record.subsystem),
     );
 
-    // The sink tags each record with the reporting module's own source, so a
-    // stream is filterable by layer rather than being one flat blob.
     expect(subsystems.size).toBeGreaterThan(1);
   });
 
   it('exports its records as JSON lines', () => {
-    application = start(document);
+    application = startPlaying();
 
     const lines = application.logger
       .toJsonLines()
@@ -231,7 +236,7 @@ describe('the structured logger is wired', () => {
 
     expect(lines.length).toBeGreaterThan(0);
 
-    // Structured, so each line parses. A console string would not.
+    // Structured, so each line parses.
     const parsed: unknown = JSON.parse(lines[0]);
 
     expect(typeof parsed).toBe('object');
@@ -241,13 +246,9 @@ describe('the structured logger is wired', () => {
   });
 });
 
-/* ==========================================================================
- * Counts and timings land in the registry
- * ========================================================================== */
-
 describe('the metrics registry is wired', () => {
   it('is exposed by the root and has non-empty series after boot', () => {
-    application = start(document);
+    application = startPlaying();
 
     const snapshot = application.metrics.snapshot();
 
@@ -256,7 +257,7 @@ describe('the metrics registry is wired', () => {
   });
 
   it('has counters that actually moved, where every count was discarded before', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowDown', 'ArrowDown');
     press('ArrowLeft', 'ArrowLeft');
@@ -271,7 +272,7 @@ describe('the metrics registry is wired', () => {
   });
 
   it('exports Prometheus text, the stand-in for a scrape', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowRight', 'ArrowRight');
 
@@ -282,21 +283,18 @@ describe('the metrics registry is wired', () => {
   });
 
   it('names every series in the Prometheus namespace', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowUp', 'ArrowUp');
 
     for (const series of application.metrics.snapshot().series) {
-      // A dotted report name would be rejected by a scrape, so the sink
-      // carries it as a label of a namespaced family rather than as a name.
-      // Anything unnamespaced here means a bypass.
       expect(series.name.startsWith('game2048_')).toBe(true);
       expect(series.name).toMatch(/^[a-zA-Z_:][a-zA-Z0-9_:]*$/);
     }
   });
 
   it('populates the CANONICAL families a dashboard would be keyed to', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -310,19 +308,15 @@ describe('the metrics registry is wired', () => {
         : -1;
     };
 
-    // These are the families the registry declares with real help text, and the
-    // only names a dashboard or an alert would use. The generic report counters
-    // moved all along while every one of these read a flat zero, because they
-    // have purpose-built recorders that nothing was calling — so a dashboard
-    // would have shown nothing happening while the game was being played.
+    // These are the families the registry declares with real help text, and
+    // the only names a dashboard or an alert would use.
     expect(value('game2048_turns_total')).toBeGreaterThan(0);
     expect(value('game2048_spawns_total')).toBeGreaterThan(0);
   });
 
   it('counts no turn for an idle input, and one for a resolved move', () => {
     // ONE tile in the top-left corner, so `ArrowUp` and `ArrowLeft` resolve
-    // nothing on every seed while `ArrowRight` resolves. Written before
-    // `start()`, which is when the board is read.
+    // nothing on every seed while `ArrowRight` resolves.
     window.localStorage.setItem(
       GAME_STATE_KEY,
       JSON.stringify({
@@ -342,7 +336,7 @@ describe('the metrics registry is wired', () => {
       }),
     );
 
-    application = start(document);
+    application = startPlaying();
 
     const counter = (name: string, labels: Readonly<Record<string, string>> =
       {}): number => {
@@ -367,12 +361,6 @@ describe('the metrics registry is wired', () => {
       press('ArrowUp', 'ArrowUp');
     }
 
-    // THE SEAM THIS PINS, through the REAL composition root rather than a
-    // hand-driven registry. Each of those inputs emitted `move:after` as the
-    // completion signal of a turn that moved nothing, and the root once
-    // forwarded every emission into the turn family — so pressing into a wall
-    // read as a turn and every rate derived from `game2048_turns_total` was
-    // skewed by the number of idle inputs.
     expect(
       counter('game2048_engine_events_total', { event: 'move:after' }),
     ).toBe(idleInputs);
@@ -389,11 +377,8 @@ describe('the metrics registry is wired', () => {
   });
 
   it('counts rendered frames, the one previously unmeasured boundary', async () => {
-    application = start(document);
+    application = startPlaying();
 
-    // Awaited rather than asserted synchronously: the frame callback runs on
-    // `requestAnimationFrame`, which is the system's only asynchronous boundary
-    // and the reason this counter needs a turn of the loop to move.
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -412,7 +397,7 @@ describe('the metrics registry is wired', () => {
   });
 
   it('breaks engine events down per event name', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -433,7 +418,7 @@ describe('the metrics registry is wired', () => {
   });
 
   it('carries every generic report on ONE labelled family', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -449,11 +434,11 @@ describe('the metrics registry is wired', () => {
       (name) => !canonical.has(name) && name !== reportFamily,
     );
 
-    // THE SEAM THIS PINS. The root once rendered each dotted report name into
+    // The seam this pins. The root once rendered each dotted report name into
     // a Prometheus family of its own, so the open set of report names competed
-    // with the declared vocabulary for the registry's bounded family budget and
-    // the reports raised last — the teardown ones — were the ones rejected.
-    // DL-METRIC-04, DL-MAIN-11.
+    // with the declared vocabulary for the registry's bounded family budget
+    // and the reports raised last — the teardown ones — were the ones
+    // rejected.
     expect(outside).toEqual([]);
 
     const reports = application.metrics
@@ -476,12 +461,12 @@ describe('the metrics registry is wired', () => {
   });
 
   it('folds the hook bus dispatch counts in when the surface reads', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
     // The registry integrates with the bus by PULL, so these stay empty unless
-    // something asks the bus for them. The surface asks, before it snapshots.
+    // something asks the bus for them.
     application.diagnostics.open();
 
     const hooks = application.diagnostics
@@ -497,7 +482,7 @@ describe('the metrics registry is wired', () => {
   });
 
   it('separates a spawn that placed a tile from one that could not', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -509,8 +494,8 @@ describe('the metrics registry is wired', () => {
       (series) => series.name === 'game2048_spawn_attempts_total',
     );
 
-    // The distinction rests on the spawn payload's `position`, which the generic
-    // counter cannot express and the purpose-built recorder reads.
+    // The distinction rests on the spawn payload's `position`, which the
+    // generic counter cannot express and the purpose-built recorder reads.
     expect(spawns?.kind === 'counter' ? spawns.value : -1).toBeGreaterThan(0);
     expect(attempts?.kind === 'counter' ? attempts.value : -1).toBeGreaterThan(
       0,
@@ -518,7 +503,7 @@ describe('the metrics registry is wired', () => {
   });
 
   it('keeps the report name as a label rather than in the metric name', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowDown', 'ArrowDown');
 
@@ -526,26 +511,20 @@ describe('the metrics registry is wired', () => {
       .snapshot()
       .series.filter((series) => 'report' in series.labels);
 
-    // Bounded cardinality: the dotted name is a label, and the unbounded detail
-    // stays in the log record rather than minting a series per value.
     expect(labelled.length).toBeGreaterThan(0);
   });
 });
 
-/* ==========================================================================
- * The diagnostics surface is reachable
- * ========================================================================== */
-
 describe('the diagnostics surface is wired', () => {
   it('is exposed by the root, available and closed', () => {
-    application = start(document);
+    application = startPlaying();
 
     expect(application.diagnostics.available).toBe(true);
     expect(application.diagnostics.isOpen()).toBe(false);
   });
 
   it('renders the run, health and metrics panels when opened', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowDown', 'ArrowDown');
     application.diagnostics.open();
@@ -561,7 +540,7 @@ describe('the diagnostics surface is wired', () => {
   });
 
   it('reports the six capability probes, WebGL included', () => {
-    application = start(document);
+    application = startPlaying();
     application.diagnostics.open();
 
     const text = (
@@ -583,7 +562,7 @@ describe('the diagnostics surface is wired', () => {
   });
 
   it('puts the health verdicts into the snapshot as well as on screen', () => {
-    application = start(document);
+    application = startPlaying();
     application.diagnostics.open();
 
     const health = application.diagnostics
@@ -594,7 +573,7 @@ describe('the diagnostics surface is wired', () => {
   });
 
   it('is emptied and closed by dispose', () => {
-    application = start(document);
+    application = startPlaying();
     application.diagnostics.open();
     application.dispose();
     application = null;
@@ -606,14 +585,10 @@ describe('the diagnostics surface is wired', () => {
   });
 });
 
-/* ==========================================================================
- * The tracer is real, and every module boundary is spanned
- * ========================================================================== */
-
 describe('the tracer is wired', () => {
   it('is exposed by the root, enabled and sharing the correlation ' +
     'identifier', () => {
-    application = start(document);
+    application = startPlaying();
 
     expect(application.tracer.isEnabled()).toBe(true);
     expect(application.tracer.correlationId).toBe(
@@ -622,7 +597,7 @@ describe('the tracer is wired', () => {
   });
 
   it('opens the turn span the engine emitter drives', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -635,7 +610,7 @@ describe('the tracer is wired', () => {
 
   it('spans the input, move-resolution, hook-dispatch and render-commit ' +
     'boundaries of one turn', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -652,7 +627,7 @@ describe('the tracer is wired', () => {
   });
 
   it('spans a relic handler invocation through the hook bus', () => {
-    application = start(document);
+    application = startPlaying();
 
     application.engine.hooks.register({
       id: 'traced-relic',
@@ -672,7 +647,7 @@ describe('the tracer is wired', () => {
   });
 
   it('nests every boundary span of one turn under the input dispatch', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowDown', 'ArrowDown');
     press('ArrowLeft', 'ArrowLeft');
@@ -688,20 +663,16 @@ describe('the tracer is wired', () => {
       (record) => record.name === 'engine.move.resolve',
     );
 
-    // THE CHAIN, LINK BY LINK: the input dispatch is the outermost span of a
+    // The chain, link by link: the input dispatch is the outermost span of a
     // turn, the turn span opens inside it on `move:before`, and the resolution
-    // span opens inside the turn around the traversal walk alone. Asserting the
-    // resolution's parent to be the input span directly would only hold with the
-    // resolution wrapped around `Engine.move()` from out here, which opens it
-    // BEFORE `move:before` is emitted and makes the resolution the parent of the
-    // turn it is part of.
+    // span opens inside the turn around the traversal walk alone.
     expect(input).toBeDefined();
     expect(turn?.parentId).toBe(input?.id);
     expect(resolve?.parentId).toBe(turn?.id);
   });
 
   it('opens render.commit INSIDE the turn span that produced it', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -717,10 +688,7 @@ describe('the tracer is wired', () => {
     expect(commits.length).toBeGreaterThan(0);
     expect(turns.length).toBeGreaterThan(0);
 
-    // A COMMIT MADE BY A TURN BELONGS TO THAT TURN. The listener that closes the
-    // turn span is another `state:commit` listener, and it used to be registered
-    // FIRST, so the turn was closed before the renderer's span was opened and
-    // every `render.commit` of a turn was recorded as a root span.
+    // A commit made by a turn belongs to that turn.
     const inTurn = commits.filter(
       (record) => record.parentId !== undefined && turnIds.has(record.parentId),
     );
@@ -729,7 +697,7 @@ describe('the tracer is wired', () => {
   });
 
   it('keeps render.commit inside the turn after a renderer swap', () => {
-    application = start(document);
+    application = startPlaying();
 
     // The number-only board takes over, which re-subscribes a renderer and so
     // re-registers a `state:commit` listener after the tracing subscription's.
@@ -757,11 +725,12 @@ describe('the tracer is wired', () => {
   });
 
   it('closes a withdrawn turn as cancelled rather than as idle', () => {
-    application = start(document);
+    application = startPlaying();
 
-    // A relic that withdraws every move, which is the valid hook-veto path: the
-    // veto is cast AFTER `move:before` was emitted, so no listener can see it and
-    // the caller's outcome is the only thing that can classify the turn.
+    // A relic that withdraws every move, which is the valid hook-veto path:
+    // the veto is cast AFTER `move:before` was emitted, so no listener can see
+    // it and the caller's outcome is the only thing that can classify the
+    // turn.
     application.engine.hooks.register({
       id: 'vetoes-everything',
       hooks: {
@@ -776,8 +745,8 @@ describe('the tracer is wired', () => {
       .filter((record) => record.name === SPAN_NAMES.engineTurn)
       .at(-1);
 
-    // `unmoved` is what a boolean return produced for this turn, which reported
-    // the player pressing into a wall.
+    // `unmoved` is what a boolean return produced for this turn, which
+    // reported the player pressing into a wall.
     expect(turn?.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
       SPAN_OUTCOMES.cancelled,
     );
@@ -785,15 +754,15 @@ describe('the tracer is wired', () => {
   });
 
   it('closes a failed attempt as failed and raises no anomaly', () => {
-    application = start(document);
+    application = startPlaying();
 
     const engine = application.engine;
     const failing = (): boolean => {
       throw new Error('move failed');
     };
 
-    // The attempt itself throws, which the outcome taxonomy could not express at
-    // all: the turn span stayed open until the next input superseded it.
+    // The attempt itself throws, which the outcome taxonomy could not express
+    // at all: the turn span stayed open until the next input superseded it.
     Object.defineProperty(engine, 'attemptMove', {
       configurable: true,
       value: (direction: 0 | 1 | 2 | 3): never => {
@@ -823,9 +792,10 @@ describe('the tracer is wired', () => {
   });
 
   it('covers EVERY boundary span validation gate V8 enumerates', async () => {
-    application = start(document);
+    application = startPlaying();
 
-    // A relic on the bus, so the `relic.handler` boundary has a handler to span.
+    // A relic on the bus, so the `relic.handler` boundary has a handler to
+    // span.
     application.engine.hooks.register({
       id: 'gate-relic',
       hooks: {
@@ -837,7 +807,7 @@ describe('the tracer is wired', () => {
 
     const observed = observedSpanNames();
 
-    // THE GATE IS THE LIST, not a sample of it: input, engine turn, move
+    // The gate is the list, not a sample of it: input, engine turn, move
     // resolution, hook dispatch, relic handler, render commit, frame callback.
     for (const name of BOUNDARY_SPAN_NAMES) {
       expect(observed.has(name)).toBe(true);
@@ -845,20 +815,19 @@ describe('the tracer is wired', () => {
   });
 
   it('reports lifecycle commits rather than counting them as anomalies', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
     application.engine.restart();
 
     const snapshot = application.tracer.snapshot();
 
-    // `setup()`, `restart()` through `setup()` and `endStage()` all commit with
-    // no move in flight. Those are lifecycle commits, and reading them as
-    // orphaned turn commits is what raised an anomaly for a healthy boot.
+    // `setup`, `restart` through `setup` and `endStage` all commit with no
+    // move in flight.
     expect(snapshot.lifecycleCommits).toBeGreaterThan(0);
     expect(snapshot.anomalies).toBe(0);
 
-    // THE SAME COMMITS, BROKEN DOWN. Every commit the run made is accounted to
+    // The same commits, broken down. Every commit the run made is accounted to
     // one of the three attributions, the turns among them counted separately,
     // and nothing lands in `unattributed`.
     expect(snapshot.commits.lifecycle).toBe(snapshot.lifecycleCommits);
@@ -867,20 +836,20 @@ describe('the tracer is wired', () => {
   });
 
   it('observes the turn latency of a committed turn', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
     const latency = histogramSeries('game2048_turn_latency_milliseconds');
 
     // Measured from the turn span's own open to the turn's OWN commit, so a
-    // stage resolution a commit subscriber triggers afterwards is not counted as
-    // turn time. Zero samples here means the turn span never closed on a commit.
+    // stage resolution a commit subscriber triggers afterwards is not counted
+    // as turn time.
     expect(latency?.count ?? 0).toBeGreaterThan(0);
   });
 
   it('records span durations into the shared histogram family', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -889,14 +858,14 @@ describe('the tracer is wired', () => {
       value: SPAN_NAMES.engineTurn,
     });
 
-    // One sample per closed turn span, whatever each move did: a move the engine
-    // refused opens none, and a move that changed nothing is closed by the
-    // caller that knows it was idle.
+    // One sample per closed turn span, whatever each move did: a move the
+    // engine refused opens none, and a move that changed nothing is closed by
+    // the caller that knows it was idle.
     expect(turns?.count ?? 0).toBeGreaterThan(0);
   });
 
   it('spans the frame callback, the one asynchronous boundary', async () => {
-    application = start(document);
+    application = startPlaying();
 
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => {
@@ -912,7 +881,7 @@ describe('the tracer is wired', () => {
   });
 
   it('reaches the diagnostics trace panel', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
     application.diagnostics.open();
@@ -930,13 +899,12 @@ describe('the tracer is wired', () => {
 
   it('records the run-start commit on the stage span rather than reporting ' +
     'it as an anomaly', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
-    // `setup()` commits before any move, so that commit belongs to the stage
-    // and not to a turn. It is recorded on the still-open stage span, which is
-    // why no anomaly is raised and no warning is logged on a page load.
+    // `setup` commits before any move, so that commit belongs to the stage and
+    // not to a turn.
     expect(application.tracer.snapshot(200).anomalies).toBe(0);
     expect(
       application.logger
@@ -947,7 +915,7 @@ describe('the tracer is wired', () => {
   });
 
   it('closes every span it left open when dispose runs', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
     application.dispose();
@@ -960,13 +928,9 @@ describe('the tracer is wired', () => {
   });
 });
 
-/* ==========================================================================
- * The health surface is real, and it is the one the page reports
- * ========================================================================== */
-
 describe('the health surface is wired', () => {
   it('is exposed by the root and reports all six checks', () => {
-    application = start(document);
+    application = startPlaying();
 
     const report = application.health.report();
 
@@ -982,7 +946,7 @@ describe('the health surface is wired', () => {
   });
 
   it('reuses the five legacy probes and marks the WebGL one added', () => {
-    application = start(document);
+    application = startPlaying();
 
     const dispositions = new Map(
       application.health
@@ -1000,21 +964,21 @@ describe('the health surface is wired', () => {
 
   it('resolves the pointer family through its own probe rather than the ' +
     'input manager', () => {
-    application = start(document);
+    application = startPlaying();
 
     const pointer = application.health
       .report()
       .checks.find((check) => check.id === 'pointerEvents');
 
-    // The bypassed provider reported `input.isListening()` here, which answers
-    // a different question. The owning probe reports the resolved family.
+    // The bypassed provider reported `input.isListening` here, which answers a
+    // different question.
     expect(pointer?.source.performedBy).toBe('detectPointerEventFamily');
     expect(pointer?.data['touchstart']).toBeDefined();
   });
 
   it('carries the two readiness verdicts the renderer and storage decisions ' +
     'rest on', () => {
-    application = start(document);
+    application = startPlaying();
 
     const readiness = application.health.readiness();
 
@@ -1026,7 +990,7 @@ describe('the health surface is wired', () => {
   });
 
   it('logs the readiness verdict during composition', () => {
-    application = start(document);
+    application = startPlaying();
 
     const messages = application.logger
       .recent()
@@ -1036,7 +1000,7 @@ describe('the health surface is wired', () => {
   });
 
   it('is the surface the diagnostics health panel reads', () => {
-    application = start(document);
+    application = startPlaying();
     application.diagnostics.open();
 
     const text = (
@@ -1056,19 +1020,14 @@ describe('the health surface is wired', () => {
   });
 });
 
-/* ==========================================================================
- * The frame metric has exactly one writer
- * ========================================================================== */
-
 // `metrics.recordFrame(context.delta)` recorded the gap since the previous
 // frame as though it were how long the frame callbacks occupied the frame: the
-// first sample is always zero, ordinary 60 Hz cadence reads as over budget, and
-// a long pause is clamped. Wiring the tracer's frame hooks without removing
-// that call would have double-counted every frame on top.
+// first sample is always zero, ordinary 60 Hz cadence reads as over budget,
+// and a long pause is clamped.
 
 describe('the frame metric', () => {
   it('is written once per frame, by the tracer alone', async () => {
-    application = start(document);
+    application = startPlaying();
 
     await awaitFrames();
 
@@ -1076,8 +1035,7 @@ describe('the frame metric', () => {
 
     expect(frames).toBeGreaterThan(0);
 
-    // EXACT parity. Two writers would leave the counter at twice the tracer's
-    // frame count, which is the regression this pins.
+    // EXACT parity.
     expect(counterValue('game2048_frames_rendered_total')).toBe(frames);
     expect(histogramSeries('game2048_frame_time_milliseconds')?.count).toBe(
       frames,
@@ -1085,21 +1043,21 @@ describe('the frame metric', () => {
   });
 
   it('records the measured occupancy rather than the inter-frame gap', async () => {
-    application = start(document);
+    application = startPlaying();
 
     await awaitFrames();
 
     const observed = histogramSeries('game2048_frame_time_milliseconds');
     const traced = application.tracer.snapshot().frames;
 
-    // The loop measures how long its own callbacks occupied the frame and hands
-    // that value to the tracer, so the histogram's sum is the traced total and
-    // not a sum of scheduler gaps.
+    // The loop measures how long its own callbacks occupied the frame and
+    // hands that value to the tracer, so the histogram's sum is the traced
+    // total and not a sum of scheduler gaps.
     expect(observed?.sum).toBeCloseTo(traced.totalFrameMs, 6);
   });
 
   it('publishes the inter-frame gap under a name of its own', async () => {
-    application = start(document);
+    application = startPlaying();
 
     await awaitFrames();
 
@@ -1108,15 +1066,9 @@ describe('the frame metric', () => {
       value: 'render.frame.interval',
     });
 
-    // Kept, but separated: cadence is a real measurement and losing it would be
-    // a regression of its own. It simply is not frame occupancy.
     expect(cadence?.count ?? 0).toBeGreaterThan(0);
   });
 });
-
-/* ==========================================================================
- * A caught value reaches the sink whole
- * ========================================================================== */
 
 describe('a contained failure', () => {
   /** The records the logger buffered, newest last. */
@@ -1124,7 +1076,7 @@ describe('a contained failure', () => {
     subject.logger.snapshot().records;
 
   it('carries an engine listener s throw with its stack and cause', () => {
-    application = start(document);
+    application = startPlaying();
 
     const cause = new Error('the cause');
     const thrown = new Error('the listener threw', { cause });
@@ -1139,16 +1091,14 @@ describe('a contained failure', () => {
       (record) => record.error?.message === 'the listener threw',
     );
 
-    // A NAME AND A MESSAGE WERE ALL THIS SEAM KEPT. `serializeError` reads the
-    // stack and the whole cause chain off the value itself, and it can only do
-    // that if the value itself was forwarded.
+    // A NAME AND A message were all this seam kept.
     expect(reported).toBeDefined();
     expect(reported?.error?.stack).toBeDefined();
     expect(reported?.error?.cause?.message).toBe('the cause');
   });
 
   it('carries a settings failure s throw with its stack and cause', () => {
-    application = start(document);
+    application = startPlaying();
 
     const cause = new Error('the underlying cause');
     const stop = application.preferences.subscribe((): void => {
@@ -1171,10 +1121,6 @@ describe('a contained failure', () => {
   });
 });
 
-/* ==========================================================================
- * The correlation identifier identifies a run, not a seed
- * ========================================================================== */
-
 describe('the correlation identifier', () => {
   it('differs between two runs of the application', () => {
     const first = start(document);
@@ -1182,9 +1128,6 @@ describe('the correlation identifier', () => {
 
     first.dispose();
 
-    // The stored run is discarded, so the second composition starts a NEW run
-    // rather than resuming this one. Without this the two are the same run and
-    // share an identifier by design — which the case below pins.
     clearOwnedStorage();
     document.body.innerHTML = MARKUP;
     resetWebGLSupportProbe();
@@ -1194,18 +1137,22 @@ describe('the correlation identifier', () => {
 
     application = second;
 
-    // Two runs, two identifiers. A seed-only derivation would still differ here
-    // because each run mints a fresh seed, so the case two below is the one that
-    // actually pins the correction.
+    // Two runs, two identifiers.
     expect(firstId).not.toBe(secondId);
   });
 
   it('is preserved across a reload that resumes the same run', () => {
     const first = start(document);
+
+    // The run is BEGUN here rather than resumed, because this case is about
+    // what survives a reload of a run that started in this page load.
+    beginRun();
+
     const firstId = first.logger.correlationId;
 
     // A move, so a commit persists the run: the identifier is read back out of
-    // the stored envelope, and an envelope only exists once something committed.
+    // the stored envelope, and an envelope only exists once something
+    // committed.
     playEveryDirection();
     first.dispose();
 
@@ -1217,24 +1164,22 @@ describe('the correlation identifier', () => {
     application = second;
 
     // The SAME run, continued. `runId` is persisted and the seed is persisted,
-    // so both derivation inputs come back unchanged and one run's records carry
-    // one identifier however many times the page was loaded. This is the
-    // property that makes the identifier worth correlating on at all.
+    // so both derivation inputs come back unchanged and one run's records
+    // carry one identifier however many times the page was loaded.
     expect(second.logger.correlationId).toBe(firstId);
     expect(second.run.identity.resumed).toBe(true);
   });
 
   it('is the run-instance form, longer than the seed-grouping form', () => {
-    application = start(document);
+    application = startPlaying();
 
     // 18 characters is the seed-grouping form; 26 is the form that appends the
-    // run-instance segment. The root must use the latter, or two replays of one
-    // seed collapse onto one identifier.
+    // run-instance segment.
     expect(application.logger.correlationId).toHaveLength(26);
   });
 
   it('is shared by the logger, the metrics registry and the diagnostics surface', () => {
-    application = start(document);
+    application = startPlaying();
     application.diagnostics.open();
 
     const expected = application.logger.correlationId;
@@ -1244,7 +1189,7 @@ describe('the correlation identifier', () => {
   });
 
   it('rotates across the WHOLE pipeline when a new run starts', () => {
-    application = start(document);
+    application = startPlaying();
     playEveryDirection();
 
     const before = application.logger.correlationId;
@@ -1256,10 +1201,6 @@ describe('the correlation identifier', () => {
     // A new run, a new identity, a new identifier.
     expect(after).not.toBe(before);
 
-    // EVERY per-run observer follows it, not the logger alone: the registry, the
-    // tracer, the health surface, the engine, the emitter, the hook bus, the
-    // relic registry and the run controller each used to carry the identifier
-    // they were constructed with for the life of the page.
     expect(application.metrics.snapshot().correlationId).toBe(after);
     expect(application.tracer.snapshot().correlationId).toBe(after);
     expect(application.health.check().correlationId).toBe(after);
@@ -1272,7 +1213,7 @@ describe('the correlation identifier', () => {
   });
 
   it('rotates BEFORE the new run s first emission', () => {
-    application = start(document);
+    application = startPlaying();
     playEveryDirection();
 
     const before = application.logger.correlationId;
@@ -1284,19 +1225,16 @@ describe('the correlation identifier', () => {
       .snapshot()
       .records.filter((record) => record.message === 'A new run started.');
 
-    expect(records.length).toBeGreaterThan(0);
+    // EVERY BEGIN IS ATTRIBUTED TO THE RUN IT STARTED, and this page records
+    // exactly one: the seeded envelope resumes, so the boot opens the run it
+    // read rather than beginning one, and the only begin is the rotation just
+    // made. A page that presses begin from the run-start screen first records
+    // two, the earlier one under the identifier in force before its rotation.
+    expect(records).toHaveLength(1);
+    expect(records.at(-1)?.correlationId).toBe(after);
     expect(records.every((record) => record.correlationId === after)).toBe(true);
+    expect(after).not.toBe(before);
 
-    // The stage the new run opened on, and the commit that opened it, are the
-    // FIRST emissions of the run: the rotation used to happen after them, so
-    // both were attributed to the run that had just ended.
-    //
-    // MEASURED ON THE SPANS THE NEW RUN CLOSED, because a span is keyed to the
-    // run that OPENED it and keeps that key at close — see the tracer suite's
-    // 'keys a span crossing a rotation to the run that opened it'. The new run's
-    // own stage span is therefore still open and files no record yet, while the
-    // last stage RECORD is the ended run's, closed as superseded after the
-    // rotation and correctly still keyed to the run it belonged to.
     const records2 = application.tracer.snapshot().spans;
     const stages = records2.filter(
       (span) => span.name === SPAN_NAMES.engineStage,
@@ -1318,16 +1256,15 @@ describe('the correlation identifier', () => {
     ).toBeGreaterThan(0);
 
     // The new run's stage span is still open — it is detached and closes on a
-    // `stage:end` of its own — so it files no record here, and at least one span
-    // is open for it. The newest stage RECORD is therefore the ended run's, and
-    // it agrees with its own identifier.
+    // `stage:end` of its own — so it files no record here, and at least one
+    // span is open for it.
     expect(application.tracer.snapshot().open).toBeGreaterThan(0);
     expect(stages.at(-1)?.correlationId).toBe(before);
     expect(stages.at(-1)?.id.startsWith(before)).toBe(true);
   });
 
   it('leaves the records of the finished run under its own identifier', () => {
-    application = start(document);
+    application = startPlaying();
     playEveryDirection();
 
     const before = application.logger.correlationId;
@@ -1339,9 +1276,9 @@ describe('the correlation identifier', () => {
 
     application.startNewRun();
 
-    // Records already written are NOT relabelled: they were true when they were
-    // written, so a stream partitioned by identifier still shows the run that
-    // ended as its own partition.
+    // Records already written are NOT relabelled: they were true when they
+    // were written, so a stream partitioned by identifier still shows the run
+    // that ended as its own partition.
     expect(
       application.logger
         .snapshot()
@@ -1350,21 +1287,9 @@ describe('the correlation identifier', () => {
   });
 });
 
-/* ==========================================================================
- * A second run in one page load rotates EVERY reporter
- *
- * The logger's identifier was the only rotatable one: the tracer, the engine,
- * the hook bus, the relic registry, the run-state store, the run controller,
- * the metrics registry and the health surface each captured a string at
- * construction, and the root rotated the logger only after the new run had
- * already opened its board. A second run therefore reported partly under its
- * own identifier and partly under the ended run's, which is the one thing a
- * correlation identifier exists to prevent.
- * ========================================================================== */
-
 describe('the run correlation scope', () => {
   it('rotates every reporter together when a second run starts', () => {
-    application = start(document);
+    application = startPlaying();
 
     const firstId = application.logger.correlationId;
 
@@ -1387,7 +1312,7 @@ describe('the run correlation scope', () => {
   });
 
   it('is in force before the second run reports that it started', () => {
-    application = start(document);
+    application = startPlaying();
 
     const firstId = application.logger.correlationId;
 
@@ -1410,7 +1335,7 @@ describe('the run correlation scope', () => {
   });
 
   it('keys the spans of the second run to the second run', () => {
-    application = start(document);
+    application = startPlaying();
 
     application.startNewRun();
 
@@ -1436,7 +1361,7 @@ describe('the run correlation scope', () => {
   });
 
   it('still folds the hook bus counts into the registry after a rotation', () => {
-    application = start(document);
+    application = startPlaying();
 
     application.startNewRun();
     playEveryDirection();
@@ -1446,32 +1371,13 @@ describe('the run correlation scope', () => {
       .recent(300)
       .filter((record) => record.message === 'hook dispatch fold rejected');
 
-    // The registry refuses a snapshot carrying an identifier other than its
-    // own, so the bus and the registry have to rotate as one: rotating the bus
-    // alone would make its own counts foreign to the registry folding them.
     expect(rejected).toHaveLength(0);
     expect(snapshot.correlationId).toBe(application.logger.correlationId);
     expect(snapshot.hooks.length).toBeGreaterThan(0);
   });
 });
 
-/* ==========================================================================
- * The tracer is constructed, and every module boundary is spanned
- * ========================================================================== */
-
-/**
- * A board where pressing Left changes nothing.
- *
- * One tile, already against the left wall. `Engine.move()` compares positions,
- * finds none changed, counts the turn as idle and RETURNS `false` — emitting no
- * `move:after`, no `state:commit` and nothing else at all. That silence is why
- * the turn span needs a caller to close it, and this fixture is how the case
- * below reaches it deterministically rather than by betting on where a seed put
- * the opening tiles.
- *
- * Written to storage BEFORE `start()`, because the engine reads the snapshot
- * once during setup.
- */
+/** A board where pressing Left changes nothing. */
 const IDLE_LEFT_STATE = JSON.stringify({
   grid: {
     size: 4,
@@ -1488,15 +1394,7 @@ const IDLE_LEFT_STATE = JSON.stringify({
   keepPlaying: false,
 });
 
-/**
- * The tracer's snapshot as the diagnostics surface exports it.
- *
- * Read through `snapshot()` rather than `lastSnapshot()`: the latter is the
- * metrics snapshot the last render was built from, while the former is the
- * four-section export — health, traces, metrics and logs — that
- * docs/dashboards/dashboard.html renders and that carries the trace section at
- * all.
- */
+/** The tracer's snapshot as the diagnostics surface exports it. */
 const traces = (subject: Application): TraceSnapshot => {
   const taken = subject.diagnostics.snapshot().traces;
 
@@ -1513,7 +1411,7 @@ const spanNames = (subject: Application): readonly string[] =>
 
 describe('the tracer is wired', () => {
   it('reaches the diagnostics surface, which reported no tracer before', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
     application.diagnostics.open();
@@ -1536,7 +1434,7 @@ describe('the tracer is wired', () => {
   });
 
   it('opens and closes spans as a turn is played', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -1547,7 +1445,7 @@ describe('the tracer is wired', () => {
   });
 
   it('spans the INPUT boundary, naming the action', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowRight', 'ArrowRight');
 
@@ -1557,11 +1455,6 @@ describe('the tracer is wired', () => {
 
     expect(input.length).toBeGreaterThan(0);
 
-    // ONE OPENER, and it is the manager's own: it reports the event it is
-    // dispatching as `input.dispatch.<event>`, and the tracer's span vocabulary
-    // is closed, so the event reaches the span as its `action` attribute rather
-    // than as a name of its own. A wrapper out here around each subscription
-    // would open a SECOND span per key and double the boundary's count.
     expect(
       input.some(
         (record) => record.attributes.action === 'input.dispatch.move',
@@ -1575,7 +1468,7 @@ describe('the tracer is wired', () => {
   });
 
   it('spans the ENGINE TURN, from the move through the commit', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -1590,7 +1483,7 @@ describe('the tracer is wired', () => {
   });
 
   it('spans the MOVE RESOLUTION inside the turn', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -1598,7 +1491,7 @@ describe('the tracer is wired', () => {
   });
 
   it('spans each HOOK DISPATCH, carrying the hook name', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -1616,7 +1509,7 @@ describe('the tracer is wired', () => {
   });
 
   it('spans the RENDER COMMIT, the fifth boundary of the chain', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -1624,7 +1517,7 @@ describe('the tracer is wired', () => {
   });
 
   it('spans the FRAME CALLBACK, the one asynchronous boundary', async () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowUp', 'ArrowUp');
 
@@ -1645,7 +1538,7 @@ describe('the tracer is wired', () => {
   });
 
   it('stamps every span with the run correlation identifier', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -1666,7 +1559,7 @@ describe('the tracer is wired', () => {
 
     window.localStorage.setItem('gameState', IDLE_LEFT_STATE);
 
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowLeft', 'ArrowLeft');
 
@@ -1675,13 +1568,9 @@ describe('the tracer is wired', () => {
       (record) => record.name === SPAN_NAMES.engineTurn,
     );
 
-    // An idle move emits nothing after `move:before`, so an unclosed span would
-    // stay open until the next input and record the player's think time as turn
-    // latency. The move subscription closes it, because it holds the `false`.
-    //
-    // `unmoved` rather than `unwound` is the assertion that matters: an unwound
-    // turn is one its parent span closed on the way out, which is what happened
-    // while the close was made after the input span had already ended.
+    // An idle move emits nothing after `move:before`, so an unclosed span
+    // would stay open until the next input and record the player's think time
+    // as turn latency.
     expect(turns.length).toBe(1);
     expect(turns[0]?.attributes.outcome).toBe('unmoved');
 
@@ -1690,11 +1579,11 @@ describe('the tracer is wired', () => {
   });
 
   it('leaves nothing but the in-flight stage open as turns are played', () => {
-    application = start(document);
+    application = startPlaying();
 
     // One span is open before any input: the STAGE, which runs `stage:start`
     // through `stage:end` and is therefore open for as long as the stage is
-    // being played. That is the whole of what may be open between turns.
+    // being played.
     const settled = application.tracer.snapshot().open;
 
     playEveryDirection();
@@ -1704,16 +1593,14 @@ describe('the tracer is wired', () => {
     const after = application.tracer.snapshot().open;
 
     // Every other span the chain opens is closed by the boundary that opened
-    // it, so the count never GROWS with the turns played — which is the property
-    // that distinguishes an in-flight span from a leak. It may FALL: a stage
-    // whose goal is met during these turns closes its own span, and whether
-    // twelve moves clear the opening stage is a property of the run's seed.
+    // it, so the count never GROWS with the turns played — which is the
+    // property that distinguishes an in-flight span from a leak.
     expect(settled).toBe(1);
     expect(after).toBeLessThanOrEqual(settled);
   });
 
   it('records no tracer fault or anomaly over a played run', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
     playEveryDirection();
@@ -1726,7 +1613,7 @@ describe('the tracer is wired', () => {
   });
 
   it('closes the spans it still held when the application is disposed', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -1735,14 +1622,11 @@ describe('the tracer is wired', () => {
     application.dispose();
     application = null;
 
-    // Detaching closes the turn and stage spans rather than abandoning them,
-    // which is what keeps a disposed application from holding an open span for
-    // the life of the document.
     expect(tracer.snapshot().open).toBe(0);
   });
 
   it('is the same tracer the diagnostics surface reads', () => {
-    application = start(document);
+    application = startPlaying();
 
     playEveryDirection();
 
@@ -1756,20 +1640,12 @@ describe('the tracer is wired', () => {
   });
 });
 
-/* ==========================================================================
- * The health surface is constructed, and its verdicts are acted on
- * ========================================================================== */
-
 describe('the health surface is wired', () => {
   it('is exposed by the root, reporting all six checks', () => {
-    application = start(document);
+    application = startPlaying();
 
     const report = application.health.report();
 
-    // The root used to carry an inline reader that re-expressed four of these
-    // as boolean expressions written into the composition body. The surface
-    // owns them, so there is one implementation of each check and one place a
-    // seventh would be added.
     expect(report.checks).toHaveLength(HEALTH_CHECK_COUNT);
     expect(report.checks.map((check) => check.id)).toEqual([
       ...HEALTH_CHECK_IDS,
@@ -1777,7 +1653,7 @@ describe('the health surface is wired', () => {
   });
 
   it('carries the three-valued status, not a boolean', () => {
-    application = start(document);
+    application = startPlaying();
 
     const statuses = new Set(
       application.health.report().checks.map((check) => check.status),
@@ -1798,7 +1674,7 @@ describe('the health surface is wired', () => {
   });
 
   it('records the provenance of each check: reused or added', () => {
-    application = start(document);
+    application = startPlaying();
 
     const report = application.health.report();
     const reused = report.checks.filter(
@@ -1806,8 +1682,7 @@ describe('the health surface is wired', () => {
     );
 
     // Rule 3 requires the existing checks to be REUSED and what was reused
-    // versus added to be documented. Five of the six already ran in the vanilla
-    // sources and reported nowhere; only the WebGL check is new.
+    // versus added to be documented.
     expect(reused).toHaveLength(HEALTH_CHECK_COUNT - 1);
     expect(
       report.checks.find((check) => check.id === 'webgl')?.source.disposition,
@@ -1815,16 +1690,15 @@ describe('the health surface is wired', () => {
   });
 
   it('resolves the pointer check from the platform, not from the input manager', () => {
-    application = start(document);
+    application = startPlaying();
 
     const pointer = application.health
       .report()
       .checks.find((check) => check.id === 'pointerEvents');
 
-    // The inline reader used `input.isListening()`, which reports whether the
+    // The inline reader used `input.isListening`, which reports whether the
     // root had bound its listeners — a fact about this composition, not about
-    // the platform's pointer capability. The check now names the event family
-    // the owning module resolved, and its detail no longer mentions a renderer.
+    // the platform's pointer capability.
     expect(pointer?.data.resolved).toBe(true);
     expect(pointer?.data.touchstart).toBe('touchstart');
     expect(pointer?.detail).not.toContain('renderer');
@@ -1832,7 +1706,7 @@ describe('the health surface is wired', () => {
   });
 
   it('reuses the storage manager probe rather than probing again', () => {
-    application = start(document);
+    application = startPlaying();
 
     const storage = application.health
       .report()
@@ -1845,7 +1719,7 @@ describe('the health surface is wired', () => {
   });
 
   it('exposes readiness verdicts, which nothing did before', () => {
-    application = start(document);
+    application = startPlaying();
 
     const readiness = application.health.readiness();
 
@@ -1855,13 +1729,12 @@ describe('the health surface is wired', () => {
   });
 
   it('ACTS on the renderer verdict: no context means the number board', () => {
-    application = start(document);
+    application = startPlaying();
 
     const readiness = application.health.readiness();
 
     // jsdom implements no rendering context, so the verdict and the board on
-    // screen have to agree. Reporting the verdict without acting on it is the
-    // state the review found.
+    // screen have to agree.
     expect(readiness.mayMountWebGLRenderer).toBe(false);
     expect(readiness.requiresNumberOnlyFallback).toBe(true);
     expect(application.renderer.mode).toBe('number-only');
@@ -1869,7 +1742,7 @@ describe('the health surface is wired', () => {
   });
 
   it('counts the readiness verdicts it acted on at boot', () => {
-    application = start(document);
+    application = startPlaying();
 
     const readiness = application.metrics
       .snapshot()
@@ -1880,8 +1753,7 @@ describe('the health surface is wired', () => {
       );
 
     // Named `health.readiness` by the root and carried by the sink as the
-    // `report` label of the one report family. A verdict taken and not counted
-    // is a verdict nobody can see was acted on.
+    // `report` label of the one report family.
     expect(readiness.length).toBeGreaterThan(0);
     expect(
       readiness.some(
@@ -1891,7 +1763,7 @@ describe('the health surface is wired', () => {
   });
 
   it('passes the surface itself to diagnostics, so the panel shows readiness', () => {
-    application = start(document);
+    application = startPlaying();
     application.diagnostics.open();
 
     const text = (
@@ -1907,7 +1779,7 @@ describe('the health surface is wired', () => {
   });
 
   it('puts the report and the readiness into the exported snapshot', () => {
-    application = start(document);
+    application = startPlaying();
 
     const health = application.diagnostics.snapshot().health;
 
@@ -1916,7 +1788,7 @@ describe('the health surface is wired', () => {
   });
 
   it('still reports all six probes by name on the panel', () => {
-    application = start(document);
+    application = startPlaying();
     application.diagnostics.open();
 
     const text = (
@@ -1929,7 +1801,7 @@ describe('the health surface is wired', () => {
   });
 
   it('reports through the one correlation identifier', () => {
-    application = start(document);
+    application = startPlaying();
 
     expect(application.health.correlationId).toBe(
       application.logger.correlationId,
@@ -1938,18 +1810,9 @@ describe('the health surface is wired', () => {
   });
 });
 
-/* ==========================================================================
- * The tracer is wired
- *
- * Every span name, the engine attachment, the boundary wrappers and the
- * frame-callback seam were reachable ONLY FROM TESTS: the root constructed no
- * tracer at all, so the whole tracing layer was dead code in production and the
- * diagnostics surface was handed no tracer to read.
- * ========================================================================== */
-
 describe('the tracer is wired, at every boundary', () => {
   it('is exposed by the root, keyed to the run correlation identifier', () => {
-    application = start(document);
+    application = startPlaying();
 
     expect(application.tracer.correlationId).toBe(
       application.logger.correlationId,
@@ -1958,11 +1821,8 @@ describe('the tracer is wired, at every boundary', () => {
   });
 
   it('opens a stage span when the engine opens its board', () => {
-    application = start(document);
+    application = startPlaying();
 
-    // A stage span stays OPEN for the length of the stage, so it is the open
-    // count rather than the completed records that shows it was started.
-    // `snapshot().spans` carries only what has ended.
     expect(application.tracer.snapshot().open).toBe(1);
 
     application.engine.endStage(false);
@@ -1974,7 +1834,7 @@ describe('the tracer is wired, at every boundary', () => {
   });
 
   it('records a turn span for a move that resolved', () => {
-    application = start(document);
+    application = startPlaying();
     playEveryDirection();
 
     const spans = application.tracer.snapshot().spans;
@@ -1993,22 +1853,11 @@ describe('the tracer is wired, at every boundary', () => {
   });
 
   it('leaves no turn span open after an idle attempt', () => {
-    application = start(document);
+    application = startPlaying();
     playEveryDirection();
     playEveryDirection();
 
-    // NO TURN SPAN stays open, which is what this case is about. At least one of
-    // those eight attempts moved nothing, and the engine emits no `move:after`
-    // for it; `settleTurn()` at the input boundary is what closes it, and
-    // without the call the span stayed open until the next attempt superseded
-    // it.
-    //
-    // MEASURED BY NAME, not by the open count. The stage span is the only other
-    // span that can still be open, and whether it is depends on where the run's
-    // random seed placed the tiles: eight attempts clear stage 1 for roughly one
-    // seed in fifteen, and a cleared stage closes that span and opens no
-    // successor until the reward is taken. Asserting `open === 1` therefore
-    // failed on those seeds for a reason this case does not measure.
+    // No turn span stays open, which is what this case is about.
     expect(application.tracer.hasOpenSpan(SPAN_NAMES.engineTurn)).toBe(false);
     expect(application.tracer.snapshot().open).toBeLessThanOrEqual(1);
 
@@ -2016,11 +1865,6 @@ describe('the tracer is wired, at every boundary', () => {
       .snapshot()
       .spans.filter((span): boolean => span.name === SPAN_NAMES.engineTurn);
 
-    // EVERY ONE of the eight attempts is accounted for, closed rather than left
-    // open — which is the leak `settleTurn()` closes. Whether any of the eight
-    // was idle depends on where the seed placed the opening tiles, so the
-    // 'unmoved' outcome itself is asserted by the tracer's own unit suite; what
-    // is asserted here is that no attempt can leak a span regardless.
     expect(turns).toHaveLength(8);
 
     for (const span of turns) {
@@ -2031,7 +1875,7 @@ describe('the tracer is wired, at every boundary', () => {
   });
 
   it('records an input-boundary span for every key that arrived', () => {
-    application = start(document);
+    application = startPlaying();
     playEveryDirection();
 
     const names = application.tracer
@@ -2042,15 +1886,9 @@ describe('the tracer is wired, at every boundary', () => {
   });
 
   it('reports no anomaly across a whole boot and four moves', () => {
-    application = start(document);
+    application = startPlaying();
     playEveryDirection();
 
-    // Asserted as the MESSAGES rather than the count alone. A count names
-    // nothing, and the wiring produced two distinct anomaly families: the
-    // non-turn commits four of the engine's five commit paths emit, and a turn
-    // span left open across the end of the input span that opened it, which the
-    // tracer reports once as an out-of-order end and then again for every
-    // attribute and for the second end arriving on the closed span.
     const anomalies = application.logger
       .recent(400)
       .filter(
@@ -2065,9 +1903,8 @@ describe('the tracer is wired, at every boundary', () => {
   });
 
   it('closes an idle turn inside the input span that opened it', () => {
-    // A board with ONE tile in the top-left corner, so `ArrowUp` is a move that
-    // changes nothing on every seed. Written before `start()`, which is when
-    // the board is read.
+    // A board with ONE tile in the top-left corner, so `ArrowUp` is a move
+    // that changes nothing on every seed.
     window.localStorage.setItem(
       GAME_STATE_KEY,
       JSON.stringify({
@@ -2087,7 +1924,7 @@ describe('the tracer is wired, at every boundary', () => {
       }),
     );
 
-    application = start(document);
+    application = startPlaying();
     press('ArrowUp', 'ArrowUp');
 
     const spans = application.tracer.recent(50);
@@ -2101,10 +1938,9 @@ describe('the tracer is wired, at every boundary', () => {
     expect(turnIndex).toBeGreaterThanOrEqual(0);
     expect(inputIndex).toBeGreaterThanOrEqual(0);
 
-    // The idle attempt emits `move:before` and then nothing, so only the caller
-    // holding the return value can close the turn span — and it must do so
-    // BEFORE the input span it is a child of ends. Records are stored at end,
-    // so the child ending first is the child appearing first.
+    // The idle attempt emits `move:before` and then nothing, so only the
+    // caller holding the return value can close the turn span — and it must do
+    // so BEFORE the input span it is a child of ends.
     expect(turnIndex).toBeLessThan(inputIndex);
     expect(spans[turnIndex].parentId).toBe(spans[inputIndex].id);
     expect(spans[turnIndex].attributes[SPAN_ATTRIBUTES.outcome]).toBe(
@@ -2114,7 +1950,7 @@ describe('the tracer is wired, at every boundary', () => {
   });
 
   it('gives the diagnostics surface the tracer to read', () => {
-    application = start(document);
+    application = startPlaying();
     playEveryDirection();
 
     const traces = application.diagnostics.snapshot().traces;
@@ -2125,12 +1961,13 @@ describe('the tracer is wired, at every boundary', () => {
   });
 
   it('measures the frame callback, the one asynchronous boundary', () => {
-    application = start(document);
+    application = startPlaying();
 
     const hooks = application.tracer.frameLifecycleHooks();
 
-    // The loop was constructed WITH these, so the seam is instrumented; driving
-    // them here proves the pair the root passed is the pair that records.
+    // The loop was constructed WITH these, so the seam is instrumented;
+    // driving them here proves the pair the root passed is the pair that
+    // records.
     hooks.onFrameBegin(undefined);
     hooks.onFrameEnd(undefined, 8);
 
@@ -2142,18 +1979,9 @@ describe('the tracer is wired, at every boundary', () => {
   });
 });
 
-/* ==========================================================================
- * The health surface is wired
- *
- * `HealthSurface` was never constructed. The root built a boolean-only
- * `{name, healthy}` list instead, which threw away the three-state status, the
- * reused-versus-added provenance, the per-check gauges and every readiness
- * verdict.
- * ========================================================================== */
-
 describe('the health surface is wired, whole', () => {
   it('reports all six checks, not a boolean projection of them', () => {
-    application = start(document);
+    application = startPlaying();
 
     const report = application.health.report();
 
@@ -2164,7 +1992,7 @@ describe('the health surface is wired, whole', () => {
   });
 
   it('carries the three-state status a boolean could not', () => {
-    application = start(document);
+    application = startPlaying();
 
     for (const check of application.health.report().checks) {
       expect(['pass', 'fail', 'not-applicable']).toContain(check.status);
@@ -2172,14 +2000,14 @@ describe('the health surface is wired, whole', () => {
   });
 
   it('carries the reused-versus-added provenance of each check', () => {
-    application = start(document);
+    application = startPlaying();
 
     const dispositions = application.health
       .report()
       .checks.map((check): string => check.source.disposition);
 
-    // Five probes the vanilla sources already performed and discarded, plus the
-    // one the Three.js renderer introduced.
+    // Five probes the vanilla sources already performed and discarded, plus
+    // the one the Three.js renderer introduced.
     expect(dispositions.filter((value): boolean => value === 'reused'))
       .toHaveLength(HEALTH_CHECK_COUNT - 1);
     expect(dispositions.filter((value): boolean => value === 'added'))
@@ -2187,7 +2015,7 @@ describe('the health surface is wired, whole', () => {
   });
 
   it('reports readiness verdicts, which had no source at all before', () => {
-    application = start(document);
+    application = startPlaying();
 
     const readiness = application.health.readiness();
 
@@ -2197,7 +2025,7 @@ describe('the health surface is wired, whole', () => {
   });
 
   it('reuses the WebGL probe result, taking no second context', () => {
-    application = start(document);
+    application = startPlaying();
 
     const first = application.health.report();
     const second = application.health.report();
@@ -2210,12 +2038,10 @@ describe('the health surface is wired, whole', () => {
   });
 
   it('gives the diagnostics surface the report and the readiness', () => {
-    application = start(document);
+    application = startPlaying();
 
     const health = application.diagnostics.snapshot().health;
 
-    // Both were `null` for the life of the page before, because a probe-view
-    // source carries neither.
     expect(health.report).not.toBeNull();
     expect(health.readiness).not.toBeNull();
     expect(health.checks).toHaveLength(HEALTH_CHECK_COUNT);
@@ -2223,7 +2049,7 @@ describe('the health surface is wired, whole', () => {
   });
 
   it('writes a status gauge for every check', () => {
-    application = start(document);
+    application = startPlaying();
     application.health.check();
 
     const names = application.metrics
@@ -2243,23 +2069,56 @@ describe('the health surface is wired, whole', () => {
  * hook bus, so it was displayed and never fired.
  * ========================================================================== */
 
+/**
+ * The identifier of the catalogue's charge-limited `onMerge` relic.
+ *
+ * Resolved from the catalogue rather than written as a literal, so a rename
+ * fails the lookup here instead of silently testing nothing.
+ */
+const FROSTBIND_ID: string =
+  RELIC_CATALOGUE.find((relic): boolean => relic.id === 'frostbind')?.id ?? '';
+
+/**
+ * A board carrying one mergeable pair on the top row.
+ *
+ * Pressing Left walks the tile at x=1 into the tile at x=0 and resolves a merge,
+ * which is the one dispatch a charge-limited `onMerge` relic acts on. Written to
+ * storage BEFORE `start()`, because the engine reads the snapshot once during
+ * setup.
+ */
+const MERGEABLE_PAIR_STATE = JSON.stringify({
+  grid: {
+    size: 4,
+    cells: [
+      [{ position: { x: 0, y: 0 }, value: 2 }, null, null, null],
+      [{ position: { x: 1, y: 0 }, value: 2 }, null, null, null],
+      [null, null, null, null],
+      [null, null, null, null],
+    ],
+  },
+  score: 0,
+  over: false,
+  won: false,
+  keepPlaying: false,
+});
+
 describe('the relic registry is wired', () => {
   it('is exposed by the root, over the real catalogue', () => {
-    application = start(document);
+    application = startPlaying();
 
     expect(application.relics.catalogue()).toBe(RELIC_CATALOGUE);
     expect(application.relics.catalogue()).toHaveLength(16);
   });
 
   it('is registered against the engine s own hook bus', () => {
-    application = start(document);
+    application = startPlaying();
 
     const picked = application.relics.pickUp(RELIC_CATALOGUE[0].id);
 
     expect(picked).toBeDefined();
 
-    // THE POINT OF THE BINDING. A relic in the envelope but not on the bus is a
-    // relic that never fires.
+    // The point of the binding. A relic in the envelope but not on the bus is
+    // a relic that never fires.
     expect(
       application.engine.hooks
         .subscribers()
@@ -2268,7 +2127,7 @@ describe('the relic registry is wired', () => {
   });
 
   it('is bound to the run controller as its registry port', () => {
-    application = start(document);
+    application = startPlaying();
     application.run.recordRewardOffer([RELIC_CATALOGUE[0].id]);
 
     const resolution = application.run.resolveReward(RELIC_CATALOGUE[0].id);
@@ -2280,7 +2139,7 @@ describe('the relic registry is wired', () => {
   });
 
   it('refuses a reward the player was never offered', () => {
-    application = start(document);
+    application = startPlaying();
 
     const resolution = application.run.resolveReward(RELIC_CATALOGUE[0].id);
 
@@ -2289,37 +2148,127 @@ describe('the relic registry is wired', () => {
     expect(application.relics.ownedIds()).toEqual([]);
   });
 
-  it('spends a charge budget through the activation path', () => {
+  it('restores an unresolved reward round from the envelope, without drawing', () => {
+    // Three real catalogue relics, recorded as a round the interrupted run had
+    // drawn and not yet resolved. Written before `start()`, because the envelope
+    // is read once during composition.
+    const offered = RELIC_CATALOGUE.slice(0, 3).map(
+      (relic): string => relic.id,
+    );
+
+    window.localStorage.setItem(
+      RUN_STATE_KEY,
+      JSON.stringify({
+        schemaVersion: 1,
+        runId: 'pending-round-run',
+        seed: 'pending-round-seed',
+        rngCursor: {
+          'spawn-value': 3,
+          'spawn-position': 3,
+          'relic-draw': 3,
+          'rarity-weight': 3,
+        },
+        stageIndex: 0,
+        stageGoal: { kind: 'highest-tile', target: 64 },
+        goalProgress: 0,
+        relics: [],
+        pendingReward: { stageIndex: 0, offeredRelicIds: offered },
+        board: {
+          grid: {
+            size: 4,
+            cells: [
+              [{ position: { x: 0, y: 0 }, value: 2 }, null, null, null],
+              [null, null, null, null],
+              [null, null, null, null],
+              [null, null, null, null],
+            ],
+          },
+          score: 0,
+          over: false,
+          won: false,
+          keepPlaying: false,
+        },
+      }),
+    );
+
+    application = start(document);
+
+    // THE SAME THREE CARDS, rebuilt from the catalogue by identifier: the round
+    // was lost on every reload before, because the offer lived only in memory.
+    expect(application.rewards.offers().map((card): string => card.id)).toEqual(
+      offered,
+    );
+
+    // A FULL CARD, not a bare identifier: the screen needs the name, the rarity,
+    // the description and the hook badges, and all four come from the catalogue.
+    const first = application.rewards.offers()[0];
+
+    expect(first?.name).toBe(RELIC_CATALOGUE[0].name);
+    expect(first?.rarity).toBe(RELIC_CATALOGUE[0].rarity);
+    expect(first?.hooks.length).toBeGreaterThan(0);
+
+    // PROJECTED, NOT REDRAWN. Every cursor is exactly where the envelope left it,
+    // so restoring the round cost the run no randomness and the seed still
+    // determines the offer sequence (AAP V2, Contract 6).
+    expect(application.run.cursors()).toEqual({
+      'spawn-value': 3,
+      'spawn-position': 3,
+      'relic-draw': 3,
+      'rarity-weight': 3,
+    });
+
+    // And it is a LIVE round: the card can be taken through the composed path.
+    expect(application.rewards.choose(offered[0] ?? '')).toBe(true);
+    expect(application.relics.ownedIds()).toEqual([offered[0]]);
+  });
+
+  it('exposes no charge-spending member on the run controller', () => {
     const started = start(document);
 
     application = started;
 
-    const charged = RELIC_CATALOGUE.find(
-      (relic): boolean => relic.charges !== undefined,
-    );
+    // THE ACTIVATION PATH IS GONE, AND DELIBERATELY SO. Every charge-limited
+    // relic in the catalogue is automatic — each fires on a hook it bound and
+    // asks for its charge on that one dispatch — so a controller member that
+    // debited a budget from a player's press debited it for no effect. The
+    // absence is asserted rather than described, because a re-introduced member
+    // would restore exactly that defect. DL-RUNCTL-18.
+    const surface = started.run as unknown as Record<string, unknown>;
 
-    expect(charged).toBeDefined();
+    expect(surface.activateRelic).toBeUndefined();
+    expect(surface.consumeCharge).toBeUndefined();
+    expect(surface.spendCharge).toBeUndefined();
+  });
 
-    const id = charged?.id ?? '';
+  it('spends a charge budget on the merge the relic acted on', () => {
+    // Frostbind is the catalogue's charge-limited `onMerge` relic, so one merge
+    // is one toggle and one charge. The board is written before `start()`
+    // because the engine reads the snapshot once during setup, and the pair sits
+    // on one row so pressing Left resolves a merge deterministically rather than
+    // betting on where the run seed put the opening tiles.
+    window.localStorage.setItem('gameState', MERGEABLE_PAIR_STATE);
 
-    started.run.recordRewardOffer([id]);
-    started.run.resolveReward(id);
+    const started = start(document);
 
-    const before = started.relics.find(id)?.charges;
-    const outcome = started.run.activateRelic(
-      started.engine,
-      () => started.streams.snapshotCursors(),
-      id,
-    );
+    application = started;
 
-    // No production path called `consumeCharge` at all, so a charge-limited
-    // relic fired for the whole run on a budget that never fell.
-    expect(outcome.consumed).toBe(1);
-    expect(started.relics.find(id)?.charges).toBe((before ?? 0) - 1);
+    started.run.recordRewardOffer([FROSTBIND_ID]);
+
+    expect(started.run.resolveReward(FROSTBIND_ID).accepted).toBe(true);
+
+    const before = started.relics.find(FROSTBIND_ID)?.charges ?? 0;
+
+    expect(before).toBeGreaterThan(0);
+
+    press('ArrowLeft', 'ArrowLeft');
+
+    // The bus spent it, on the dispatch that ran the handler: the budget is the
+    // number of merges the relic acts on, and it moves only when one resolved.
+    expect(started.relics.find(FROSTBIND_ID)?.charges).toBe(before - 1);
   });
 
   it('carries the held relics into every commit', () => {
-    application = start(document);
+    application = startPlaying();
     application.run.recordRewardOffer([RELIC_CATALOGUE[0].id]);
     application.run.resolveReward(RELIC_CATALOGUE[0].id);
 
@@ -2339,16 +2288,103 @@ describe('the relic registry is wired', () => {
   });
 
   it('opens the board the run resolved, not the legacy key', () => {
-    application = start(document);
+    application = startPlaying();
 
-    // A fresh run adopts no envelope, so the engine opens fresh and seeds its
-    // start tiles; the assertion is that the board is playable, which an empty
-    // supplied snapshot would have prevented.
     const cells = application.engine
       .serialize()
       .grid.cells.flat()
       .filter((cell): boolean => cell !== null);
 
     expect(cells).toHaveLength(application.config.startTiles);
+  });
+});
+
+/* ==========================================================================
+ * A refusal is reported as a refusal, not as a failure
+ * ========================================================================== */
+
+describe('the storage sink separates a refusal from a failure', () => {
+  /** Reads the storage records the boot produced. */
+  const storageRecords = (): LogRecord[] =>
+    (application as Application).logger
+      .recent(400)
+      .filter((record) => record.subsystem === 'storage');
+
+  it('reports an over-ceiling read at warning, worded as a refusal', () => {
+    // Half a megabyte under a key whose ceiling is 65,536 bytes. The adapter
+    // measures the raw text and declines; nothing is thrown and nothing is
+    // parsed, so the record must not claim the read failed.
+    window.localStorage.setItem('gameState', `"${'p'.repeat(60_000)}"`);
+
+    application = start(document);
+
+    const refusals = storageRecords().filter((record) =>
+      record.message.includes('refused'),
+    );
+
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]?.level).toBe('warn');
+    expect(refusals[0]?.message).toBe('Storage read refused for gameState.');
+    expect(refusals[0]?.fields?.refused).toBe(true);
+    expect(refusals[0]?.error?.name).toBe('StorageSizeError');
+
+    // No record on this boot claims a failure.
+    expect(
+      storageRecords().filter((record) => record.message.includes('failed')),
+    ).toEqual([]);
+  });
+
+  it('still reports a genuine parse failure at error, worded as a failure', () => {
+    // Well under the ceiling, so the size gate cannot fire and the value
+    // reaches `JSON.parse`, which throws. That IS a failure.
+    window.localStorage.setItem('gameState', '{"grid":');
+
+    application = start(document);
+
+    const failures = storageRecords().filter((record) =>
+      record.message.includes('failed'),
+    );
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.level).toBe('error');
+    expect(failures[0]?.message).toBe('Storage read failed for gameState.');
+    expect(failures[0]?.fields?.refused).toBe(false);
+  });
+
+  it('fabricates no error for a run refused on its size', () => {
+    // The run-state loader refuses before parsing, so it catches nothing. A
+    // record that forwarded an absent throwable serialised a made-up
+    // `UnknownError`, which read as an exception the loader never saw.
+    window.localStorage.setItem(
+      namespacedKey('runState'),
+      `{"schemaVersion":1,"pad":"${'p'.repeat(80_000)}"}`,
+    );
+
+    application = start(document);
+
+    const refused = (application as Application).logger
+      .recent(400)
+      .filter(
+        (record) =>
+          record.subsystem === 'run/state' &&
+          record.message.includes('refused'),
+      );
+
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.level).toBe('warn');
+    expect(refused[0]?.error).toBeUndefined();
+    expect(String(refused[0]?.fields?.problems)).toContain('ceiling');
+
+    // And the run still started, from scratch. A refused envelope resumes
+    // nothing, so the flow holds run start and the board opens on the begin-run
+    // control — the same two steps a first-ever load takes.
+    expect(beginRun()).toBe(true);
+
+    expect(
+      (application as Application).engine
+        .serialize()
+        .grid.cells.flat()
+        .filter((cell): boolean => cell !== null),
+    ).toHaveLength((application as Application).config.startTiles);
   });
 });

@@ -73,9 +73,14 @@ import type {
   HookName,
   ReadonlyGridView,
   SpawnPayload,
-  StageStartPayload,
 } from '../../../src/engine/hooks';
 import { Tile } from '../../../src/engine/tile';
+import { createHookBus } from '../../../src/engine/hook-bus';
+import type {
+  HookBus,
+} from '../../../src/engine/hook-bus';
+import type { HookEnvironment } from '../../../src/engine/hooks';
+import { NOOP_ENGINE_REPORTER } from '../../../src/engine/types';
 import type {
   CorrelationId,
   Position,
@@ -84,9 +89,13 @@ import type {
 import {
   SPAWN_CONTROL_FAMILY,
 } from '../../../src/relics/families/spawn-control';
-import { findRelicById } from '../../../src/relics/relic-registry';
+import {
+  RelicRegistry,
+  findRelicById,
+} from '../../../src/relics/relic-registry';
 import { RARITIES } from '../../../src/relics/relic-types';
 import type { Relic } from '../../../src/relics/relic-types';
+import type { PersistedRelic } from '../../../src/run/run-state';
 import {
   RNG_STREAM_NAMES,
   createRngStreams,
@@ -117,11 +126,12 @@ const DECLARATION_INDEX = 2;
 /** Relics the family declares. */
 const FAMILY_RELIC_COUNT = 4;
 
-/** The two hook names the relic binds, in declaration order. */
-const BOUND_HOOKS: readonly HookName[] = ['onStageStart', 'onSpawn'];
+/** The one hook name the relic binds. */
+const BOUND_HOOKS: readonly HookName[] = ['onSpawn'];
 
-/** The four hook names the relic leaves unbound. */
+/** The five hook names the relic leaves unbound. */
 const UNBOUND_HOOKS: readonly HookName[] = [
+  'onStageStart',
   'onBeforeMove',
   'onMerge',
   'onAfterMove',
@@ -130,7 +140,7 @@ const UNBOUND_HOOKS: readonly HookName[] = [
 
 /**
  * Run correlation identifier carried on every context this file builds, so the
- * correlation plumbing is exercised on both dispatches.
+ * correlation plumbing is exercised on the relic's one dispatch.
  */
 const RUN_CORRELATION_ID: CorrelationId = 'run-prospectors-eye';
 
@@ -145,9 +155,6 @@ const SPAWN_VALUE = 2;
  * carries `value` through untransformed while it steers `position`.
  */
 const OTHER_SPAWN_VALUE = 4;
-
-/** Target of the goal the `onStageStart` payload carries. */
-const STAGE_GOAL_TARGET = 64;
 
 /** Board sizes the ring assertions run at. */
 const BOARD_SIZES: readonly number[] = [3, 4, 5];
@@ -242,26 +249,9 @@ function spawnHandler(): HookHandler<'onSpawn'> {
   return handler;
 }
 
-/**
- * Resolves the `onStageStart` handler, failing loudly when the binding is
- * absent.
- *
- * @returns The bound handler.
- * @throws {Error} If the relic binds no `onStageStart` handler.
- */
-function stageStartHandler(): HookHandler<'onStageStart'> {
-  const handler = EYE.hooks.onStageStart;
-
-  if (handler === undefined) {
-    throw new Error(`${RELIC_ID} binds no onStageStart handler.`);
-  }
-
-  return handler;
-}
-
-/** The bodies of both bound handlers, as source text. */
+/** The body of the one bound handler, as source text. */
 function boundHandlerSources(): string[] {
-  return [String(stageStartHandler()), String(spawnHandler())];
+  return [String(spawnHandler())];
 }
 
 /* ==========================================================================
@@ -509,29 +499,6 @@ function spawnWithoutCell(value: number = SPAWN_VALUE): SpawnPayload {
 }
 
 /**
- * Builds an `onStageStart` payload. The goal is typed through
- * `StageStartPayload['goal']`, so no module outside this suite's dependency set
- * is named.
- *
- * @param stageIndex Stage the payload opens.
- * @param boardSize Reconciled edge length the stage's grid was built at.
- * @param seed Seed of the run in progress.
- * @returns The payload.
- */
-function stageStartPayload(
-  stageIndex: number,
-  boardSize: number,
-  seed: string,
-): StageStartPayload {
-  const goal: StageStartPayload['goal'] = {
-    kind: 'highest-tile',
-    target: STAGE_GOAL_TARGET,
-  };
-
-  return { stageIndex, goal, seed, boardSize };
-}
-
-/**
  * Dispatches one spawn through a bench.
  *
  * @param target Bench to dispatch on.
@@ -634,10 +601,14 @@ function cursorDelta(
  * 5. Property 1: the relic fires only on the hooks it binds
  * ========================================================================== */
 
-describe('prospectors-eye binds onStageStart and onSpawn alone', () => {
-  it('declares exactly those two hook keys, in declaration order', () => {
-    expect(Object.keys(EYE.hooks)).toEqual(['onStageStart', 'onSpawn']);
-    expect(Object.keys(EYE.hooks)).toHaveLength(2);
+describe('prospectors-eye binds onSpawn alone', () => {
+  it('declares exactly that one hook key', () => {
+    // THE RING IS READ LIVE. `context.config.boardSize` is what the spawn
+    // handler measures against, so an edge length recorded at stage start would
+    // be state nothing reads; the relic binds no stage hook rather than
+    // persisting one.
+    expect(Object.keys(EYE.hooks)).toEqual(['onSpawn']);
+    expect(Object.keys(EYE.hooks)).toHaveLength(1);
   });
 
   it('declares only names the engine publishes in HOOK_NAMES', () => {
@@ -648,19 +619,19 @@ describe('prospectors-eye binds onStageStart and onSpawn alone', () => {
     expect(HOOK_NAMES).toHaveLength(6);
   });
 
-  it('omits the other four hook names rather than binding undefined', () => {
+  it('omits the other five hook names rather than binding undefined', () => {
     for (const name of UNBOUND_HOOKS) {
       expect(Object.prototype.hasOwnProperty.call(EYE.hooks, name)).toBe(false);
       expect(name in EYE.hooks).toBe(false);
     }
 
-    expect(UNBOUND_HOOKS).toHaveLength(4);
+    expect(UNBOUND_HOOKS).toHaveLength(5);
     expect([...BOUND_HOOKS, ...UNBOUND_HOOKS].sort()).toEqual(
       [...HOOK_NAMES].sort(),
     );
   });
 
-  it('binds a function at each of its two hook names', () => {
+  it('binds a function at its one hook name', () => {
     for (const name of BOUND_HOOKS) {
       expect(EYE.hooks[name]).toBeTypeOf('function');
     }
@@ -909,7 +880,7 @@ describe('prospectors-eye carries no charge budget and reads none', () => {
     expect(EYE.charges).not.toBeNull();
   });
 
-  it('names neither charges nor spendCharge in either handler body', () => {
+  it('names neither charges nor spendCharge in its handler body', () => {
     // AAP Contract 2 places the charge guard and the decrement in
     // src/engine/hook-bus.ts.
     for (const source of boundHandlerSources()) {
@@ -917,7 +888,7 @@ describe('prospectors-eye carries no charge budget and reads none', () => {
       expect(source).not.toContain('spendCharge');
     }
 
-    expect(boundHandlerSources()).toHaveLength(2);
+    expect(boundHandlerSources()).toHaveLength(1);
   });
 
   it('steers a spawn without throwing when the budget in force is zero', () => {
@@ -1030,7 +1001,7 @@ describe('prospectors-eye draws only from the substream a relic owns', () => {
     expect(steered.size).toBeGreaterThan(1);
   });
 
-  it('names no unseeded randomness in either handler body', () => {
+  it('names no unseeded randomness in its handler body', () => {
     for (const source of boundHandlerSources()) {
       expect(source).not.toContain('Math.random');
       expect(source).not.toContain('crypto');
@@ -1043,28 +1014,18 @@ describe('prospectors-eye draws only from the substream a relic owns', () => {
  * ========================================================================== */
 
 describe('prospectors-eye owns no observability and no error handling', () => {
-  it('receives the run correlation identifier on both of its hooks', () => {
+  it('receives the run correlation identifier on its hook', () => {
     const spawnBench = bench({ seed: 'eye-correlation-spawn' });
-    const stageBench = bench({
-      seed: 'eye-correlation-stage',
-      hook: 'onStageStart',
-    });
 
     expect(spawnBench.context.correlationId).toBe(RUN_CORRELATION_ID);
-    expect(stageBench.context.correlationId).toBe(RUN_CORRELATION_ID);
 
     requireCell(resolveSpawn(spawnBench, spawnAt({ x: 1, y: 1 })));
-    stageStartHandler()(
-      stageStartPayload(0, DEFAULT_BOARD_SIZE, 'eye-correlation-stage'),
-      stageBench.context,
-    );
 
     expect(spawnBench.context.correlationId).toBe(RUN_CORRELATION_ID);
-    expect(stageBench.context.correlationId).toBe(RUN_CORRELATION_ID);
     expect(RUN_CORRELATION_ID.length).toBeGreaterThan(0);
   });
 
-  it('names no console call and no catch in either handler body', () => {
+  it('names no console call and no catch in its handler body', () => {
     for (const source of boundHandlerSources()) {
       expect(source).not.toContain('console');
       expect(source).not.toContain('catch');
@@ -1072,25 +1033,247 @@ describe('prospectors-eye owns no observability and no error handling', () => {
     }
   });
 
-  it('records the opening board size in its state slot as plain JSON', () => {
-    const target = bench({
-      seed: 'eye-stage-start',
-      hook: 'onStageStart',
-    });
-    const returned = stageStartHandler()(
-      stageStartPayload(0, DEFAULT_BOARD_SIZE, 'eye-stage-start'),
-      target.context,
+  it('writes no state slot of its own, having none to write', () => {
+    const target = bench({ seed: 'eye-stage-start' });
+    const slotBefore = target.context.state;
+
+    requireCell(resolveSpawn(target, spawnAt({ x: 1, y: 1 })));
+
+    // The relic declares no `state` and its handler writes none, so nothing of
+    // it reaches the persisted envelope beyond its identifier.
+    expect(target.context.state).toBe(slotBefore);
+    expect(EYE.state).toBeUndefined();
+    expect(target.chargeRequests).toEqual([]);
+  });
+});
+
+/* ==========================================================================
+ * 9a. The relic across a persistence round trip
+ *
+ * The entry travels out through `RelicRegistry.serialize()`, through Web Storage
+ * as JSON, and back through `restoreRelics()` onto a bus that has never
+ * dispatched. IT CARRIES AN IDENTIFIER ALONE. This relic binds `onSpawn` and
+ * nothing else, and reads the ring from `config.boardSize` at the moment of the
+ * spawn, so a reload needs nothing recorded to steer correctly — including onto a
+ * board a cursed relic reconciled smaller while the run was away. An earlier
+ * design recorded the stage size at `onStageStart` and steered from the live size
+ * anyway, which is the state slot these cases prove is neither written nor
+ * needed. Decisions DL-SPAWN-02, DL-SPAWN-03.
+ *
+ * The dispatches here go through a real `RelicRegistry` and a real `HookBus`,
+ * which is the pair a reload restores onto; the direct-invocation bench above
+ * cannot show a restore because it builds its own context.
+ * ========================================================================== */
+
+/** Board size the run is seated at, before any reconciliation. */
+const SEATED_BOARD_SIZE = DEFAULT_BOARD_SIZE;
+
+/** Board size the restored rules carry, deliberately the smaller one. */
+const RESTORED_CONFIG_SIZE = REDUCED_BOARD_SIZE;
+
+/** One world the relic is seated in, with a live registry behind it. */
+interface SeatedEye {
+  readonly registry: RelicRegistry;
+  readonly bus: HookBus;
+  readonly config: RulesConfig;
+  readonly grid: Grid;
+  readonly environment: HookEnvironment;
+}
+
+/**
+ * Builds a bus, a registry and the rules a dispatch runs against.
+ *
+ * @param boardSize Edge length the RULES carry.
+ * @param latticeSize Edge length the lattice is built at.
+ * @param seed Seed the substreams are derived from.
+ * @returns The world, with nothing seated on its bus yet.
+ */
+function eyeWorld(
+  boardSize: number,
+  latticeSize: number,
+  seed: string,
+): SeatedEye {
+  const config = createDefaultRulesConfig();
+
+  config.boardSize = boardSize;
+
+  const grid = new Grid(latticeSize);
+  const bus = createHookBus({
+    correlationId: RUN_CORRELATION_ID,
+    reporter: NOOP_ENGINE_REPORTER,
+  });
+  const registry = new RelicRegistry({
+    bus,
+    reporter: NOOP_ENGINE_REPORTER,
+    correlationId: RUN_CORRELATION_ID,
+  });
+
+  return {
+    registry,
+    bus,
+    config,
+    grid,
+    environment: { config, rng: createRngStreams(seed), grid },
+  };
+}
+
+/**
+ * Seats the relic through a pickup, which is the path a reward selection takes.
+ *
+ * @param boardSize Edge length the rules carry.
+ * @param latticeSize Edge length the lattice is built at.
+ * @param seed Seed the substreams are derived from.
+ * @returns The seated world.
+ */
+function seatEye(
+  boardSize: number,
+  latticeSize: number,
+  seed = DEFAULT_SEED,
+): SeatedEye {
+  const world = eyeWorld(boardSize, latticeSize, seed);
+
+  expect(world.registry.pickUp(RELIC_ID)?.definition.id).toBe(RELIC_ID);
+
+  return world;
+}
+
+/**
+ * Reads the entry the run envelope would carry, through JSON.
+ *
+ * @param world World to read.
+ * @returns The persisted entry.
+ */
+function persistEye(world: SeatedEye): PersistedRelic {
+  const serialized = JSON.parse(
+    JSON.stringify(world.registry.serialize()),
+  ) as PersistedRelic[];
+  const entry = serialized.find((held) => held.id === RELIC_ID);
+
+  expect(entry, `the envelope carries ${RELIC_ID}`).toBeDefined();
+
+  return entry as PersistedRelic;
+}
+
+/**
+ * Restores one entry onto a world built after the write.
+ *
+ * @param persisted Entry as it came back out of JSON.
+ * @param boardSize Edge length the restored rules carry.
+ * @param latticeSize Edge length the restored lattice is built at.
+ * @param seed Seed the restored substreams are derived from.
+ * @returns The restored world.
+ */
+function restoreEye(
+  persisted: PersistedRelic,
+  boardSize: number,
+  latticeSize: number,
+  seed = DEFAULT_SEED,
+): SeatedEye {
+  const world = eyeWorld(boardSize, latticeSize, seed);
+
+  world.registry.restoreRelics([persisted]);
+
+  expect(world.registry.has(RELIC_ID)).toBe(true);
+
+  return world;
+}
+
+/** The slot the registry holds for the relic under test. */
+function slotOf(world: SeatedEye): unknown {
+  return world.registry.find(RELIC_ID)?.state;
+}
+
+describe('prospectors-eye through a persistence round trip', () => {
+  it('persists as an identifier alone, with no slot and no budget', () => {
+    const world = seatEye(SEATED_BOARD_SIZE, SEATED_BOARD_SIZE);
+    const persisted = persistEye(world);
+
+    expect(persisted.id).toBe(RELIC_ID);
+
+    // NOTHING TO CARRY. The relic holds no state and declares no budget, so the
+    // entry carries neither member rather than one holding `undefined`, and the
+    // JSON boundary is therefore lossless.
+    expect('state' in persisted).toBe(false);
+    expect('charges' in persisted).toBe(false);
+    expect(slotOf(world)).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(persisted))).toEqual(persisted);
+  });
+
+  it('is restored onto a bus that has never dispatched, and fires there', () => {
+    const restored = restoreEye(
+      persistEye(seatEye(SEATED_BOARD_SIZE, SEATED_BOARD_SIZE)),
+      SEATED_BOARD_SIZE,
+      SEATED_BOARD_SIZE,
+    );
+    const resolved = restored.bus.dispatch(
+      'onSpawn',
+      spawnAt({ x: 1, y: 1 }),
+      restored.environment,
     );
 
-    expect(returned).toBeUndefined();
-    expect(target.context.state).toEqual({
-      stageBoardSize: DEFAULT_BOARD_SIZE,
-    });
-    expect(JSON.parse(JSON.stringify(target.context.state))).toEqual({
-      stageBoardSize: DEFAULT_BOARD_SIZE,
-    });
-    expect(target.chargeRequests).toEqual([]);
-    expect(cursorsOf(target)).toEqual(NO_DRAWS);
+    expect(resolved.invoked).toBe(1);
+    expect(resolved.failed).toBe(0);
+    expect(resolved.rejected).toBe(0);
+    expect(
+      isOnOuterRing(resolved.payload.position as Position, SEATED_BOARD_SIZE),
+    ).toBe(true);
+  });
+
+  it('steers a spawn onto the ring of the size in force after the reload', () => {
+    const world = seatEye(SEATED_BOARD_SIZE, SEATED_BOARD_SIZE);
+    const restored = restoreEye(
+      persistEye(world),
+      RESTORED_CONFIG_SIZE,
+      RESTORED_CONFIG_SIZE,
+    );
+
+    expect(restored.config.boardSize).not.toBe(SEATED_BOARD_SIZE);
+
+    const resolved = restored.bus.dispatch(
+      'onSpawn',
+      spawnAt({ x: 1, y: 1 }),
+      restored.environment,
+    );
+    const cell = resolved.payload.position;
+
+    expect(resolved.invoked).toBe(1);
+    expect(resolved.failed).toBe(0);
+    expect(cell).toBeDefined();
+
+    // THE SIZE THE RULES CARRY AT THE MOMENT OF THE SPAWN, which is the whole
+    // reason nothing has to be recorded: the run was seated on a four-wide board
+    // and resumes on a three-wide one, and the ring is the resumed board's.
+    expect(isOnOuterRing(cell as Position, RESTORED_CONFIG_SIZE)).toBe(true);
+    expect((cell as Position).x).toBeLessThan(RESTORED_CONFIG_SIZE);
+    expect((cell as Position).y).toBeLessThan(RESTORED_CONFIG_SIZE);
+
+    // And the spawn wrote no slot on the way through.
+    expect(slotOf(restored)).toBeUndefined();
+    expect('state' in persistEye(restored)).toBe(false);
+  });
+
+  it('resumes from an entry carrying a slot it never wrote', () => {
+    // What an older or hand-edited payload can carry: the earlier design's
+    // recorded stage size. The relic reads no slot, so the entry restores, the
+    // dispatch holds, and the ring is still the resumed board's.
+    const restored = restoreEye(
+      { id: RELIC_ID, state: { stageBoardSize: 'not a number' } },
+      RESTORED_CONFIG_SIZE,
+      RESTORED_CONFIG_SIZE,
+    );
+
+    expect(slotOf(restored)).toEqual({ stageBoardSize: 'not a number' });
+
+    const resolved = restored.bus.dispatch(
+      'onSpawn',
+      spawnAt({ x: 1, y: 1 }),
+      restored.environment,
+    );
+
+    expect(resolved.failed).toBe(0);
+    expect(
+      isOnOuterRing(resolved.payload.position as Position, RESTORED_CONFIG_SIZE),
+    ).toBe(true);
   });
 });
 

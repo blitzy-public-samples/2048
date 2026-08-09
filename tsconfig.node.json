@@ -36,15 +36,17 @@
     // node_modules/@types being auto-included, so no ambient global reaches
     // these files implicitly and the installed `@types/seedrandom` and
     // `@types/three` — both browser-context declarations — stay out of this
-    // project. package.json declares no @types/node dependency. `vite`,
+    // project. `@types/node` IS declared in package.json, as a devDependency
+    // at an exact version, so the one entry below resolves from the manifest
+    // rather than arriving transitively; decision DL-BUILD-14. `vite`,
     // `vitest/config` and `@playwright/test` are typed through their own
     // resolved declaration packages, which this list does not affect, and the
     // `/// <reference types="node" />` in vite's own declaration entry point is
     // covered by `skipLibCheck` below.
-    // `node` is listed for tests/unit/quality/formatting.test.ts, the read-only
-    // formatting gate, which opens files with `node:fs`. It is listed HERE and
-    // not in tsconfig.json so the application's own type universe stays
-    // browser-only: nothing under src/ can reach a Node global.
+    // `node` is listed for the three read-only gates under tests/unit/quality/,
+    // each of which opens files with `node:fs`. It is listed HERE and not in
+    // tsconfig.json so the application's own type universe stays browser-only:
+    // nothing under src/ can reach a Node global.
     "types": ["node"],
 
     // Permits the explicit `.ts` specifier vite.config.ts uses to reach
@@ -96,7 +98,24 @@
     // The read-only stylesheet-contract gate, here for the same reason: it reads
     // the SCSS sources through `node:fs` and compiles the sheet through the
     // `sass` API, which is a Node-context module.
-    "tests/unit/quality/stylesheet-contract.test.ts"
+    "tests/unit/quality/stylesheet-contract.test.ts",
+
+    // The read-only Content Security Policy gate, here for the same reason: it
+    // reads index.html, README.md, vite.config.ts and the src/ tree through
+    // `node:fs`. It parses the markup with `DOMParser`, which the DOM libraries
+    // above declare and the jsdom project supplies at run time.
+    "tests/unit/quality/content-security-policy.test.ts",
+
+    // The read-only decision-log gate, here for the same reason: it reads
+    // docs/DECISION_LOG.md, CONTRIBUTING.md and every citing source file through
+    // `node:fs` to hold the log’s column count and its identifier namespace.
+    "tests/unit/quality/decision-log.test.ts",
+
+    // The read-only decision-log integrity gate, here for the same reason: it
+    // walks the source tree and reads docs/DECISION_LOG.md and CONTRIBUTING.md
+    // through `node:fs`, and resolves the repository root from
+    // `import.meta.dirname` rather than from the cwd.
+    "tests/unit/quality/decision-log-integrity.test.ts"
   ],
 
   "exclude": [

@@ -6,12 +6,15 @@
 // WHAT THIS FILE PINS
 //   seed authority     an empty or whitespace-only field publishes NO seed, so
 //                      the run controller originates one; a typed seed is
-//                      reduced by `normalizeEnteredSeed` and by nothing else.
-//                      The screen mints no seed and reads no randomness.
-//   shown = played     a seed the reduction changed is written back into the
-//                      field, shown in the notice and announced before it is
-//                      emitted, so no run begins under a seed the player was
-//                      not shown.
+//                      published VERBATIM and reduced by the controller alone.
+//                      The screen mints no seed, reduces no seed and reads no
+//                      randomness.
+//   shown = played     the seed the run is played under is read back through the
+//                      `seedInForce` port and written into the field, shown in
+//                      the notice and announced, so the field never keeps a
+//                      value the run is not being played under. The port below
+//                      is backed by the production `normalizeEnteredSeed`, which
+//                      is what `RunController.startRun` applies.
 //   one placement      the seed field carries the focus marker AND is the first
 //                      focusable descendant, so `focusInitial`'s marker step
 //                      and a focus trap's first-focusable default resolve to
@@ -31,6 +34,7 @@ import { zIndex } from '../../../src/theme/tokens';
 import {
   RUN_START_IDS,
   RUN_START_LAYER,
+  SEED_INPUT_MAX_LENGTH,
   createRunStartScreen,
   runStartCopy,
 } from '../../../src/ui/screens/run-start';
@@ -50,6 +54,10 @@ import type {
 } from '../../../src/ui/screen-router';
 import type { UiReportFields, UiReporter } from '../../../src/ui/a11y/settings';
 import { MAX_RUN_SEED_LENGTH } from '../../../src/rng/rng-streams';
+import {
+  MAX_ENTERED_SEED_LENGTH,
+  normalizeEnteredSeed,
+} from '../../../src/run/run-controller';
 
 interface Report {
   readonly kind: 'log' | 'count' | 'error';
@@ -177,10 +185,30 @@ function mounted(options: Partial<RunStartOptions> = {}): Harness {
   const reporter = sink();
   const input = emitter();
   const voice = announcer();
+
+  /**
+   * The seed the run would be played under, through the PRODUCTION reduction.
+   *
+   * `RunController.startRun` applies `normalizeEnteredSeed()` to the payload it
+   * receives and `originateRunSeed()` where it receives none, so this reads the
+   * last payload the screen emitted and reduces it exactly as the controller
+   * would. It stands in for `() => run.seed()`, which is what src/main.ts wires.
+   */
+  const seedInForce = (): string | null => {
+    const last = input.emitted[input.emitted.length - 1];
+
+    if (last === undefined || typeof last.payload !== 'string') {
+      return null;
+    }
+
+    return normalizeEnteredSeed(last.payload);
+  };
+
   const screen = createRunStartScreen({
     input,
     announcer: voice,
     reporter,
+    seedInForce,
     ...options,
   });
 
@@ -473,7 +501,10 @@ describe('beginning a run', () => {
     expect(harness.reporter.counts('ui.runStart.seed.adjusted')).toHaveLength(
       1,
     );
-    expect(harness.input.emitted[0]?.payload).toBe('padded-seed');
+
+    // THE PAYLOAD IS THE RAW TEXT. The controller is the normaliser, so what
+    // travels is what the player typed and what is shown is what came back.
+    expect(harness.input.emitted[0]?.payload).toBe('  padded-seed  ');
   });
 
   it('surfaces a seed the reduction had to shorten', () => {
@@ -490,6 +521,63 @@ describe('beginning a run', () => {
     expect(harness.status.hidden).toBe(false);
   });
 
+  it('caps what a player can type at the accepted seed domain', () => {
+    // `maxlength` is the platform-enforced ceiling on ENTRY: a paste above it is
+    // cut visibly, in the field the player is looking at, rather than being
+    // accepted and silently reduced afterwards. Decision DL-RUNSTART-07.
+    const harness = mounted();
+
+    expect(SEED_INPUT_MAX_LENGTH).toBe(MAX_RUN_SEED_LENGTH);
+    expect(harness.seed.maxLength).toBe(SEED_INPUT_MAX_LENGTH);
+    expect(harness.seed.getAttribute('maxlength')).toBe(
+      String(MAX_RUN_SEED_LENGTH),
+    );
+  });
+
+  it('bounds a programmatically assigned value before reading it', () => {
+    // `maxlength` governs user entry alone, so an assignment ignores it — which
+    // is why the screen bounds the text itself before the whole-string presence
+    // test, and why the reduction bounds what it is handed.
+    const harness = mounted();
+
+    harness.seed.value = 'w'.repeat(1_000_000);
+
+    const outcome = harness.screen.beginRun();
+
+    expect(outcome.supplied).toBe(true);
+    expect(outcome.seed).toBe('w'.repeat(MAX_RUN_SEED_LENGTH));
+    expect(outcome.adjusted).toBe(true);
+
+    // WHAT TRAVELS IS BOUNDED BUT NOT REDUCED. The screen caps the text it reads
+    // at `MAX_ENTERED_SEED_LENGTH` before any whole-string work, so a megabyte
+    // assignment never reaches the presence test or the event; the reduction to
+    // the accepted domain is the controller's alone, and it is what comes back.
+    // Decisions DL-RUNCTL-11, DL-RUNSTART-01.
+    const travelled = harness.input.emitted[0]?.payload;
+
+    expect(typeof travelled).toBe('string');
+    expect(travelled).toBe('w'.repeat(MAX_ENTERED_SEED_LENGTH));
+    expect((travelled as string).length).toBeLessThanOrEqual(
+      MAX_ENTERED_SEED_LENGTH,
+    );
+    expect(normalizeEnteredSeed(travelled as string)).toBe(outcome.seed);
+  });
+
+  it('treats a field filled past the ceiling with whitespace as empty', () => {
+    // The presence test and the reduction read the SAME bounded text, so the two
+    // agree on emptiness — the invariant DL-RUNSTART-01 names. Both see only
+    // whitespace here, so no seed is supplied and the controller originates one.
+    const harness = mounted();
+
+    harness.seed.value = ' '.repeat(MAX_ENTERED_SEED_LENGTH + 10);
+
+    const outcome = harness.screen.beginRun();
+
+    expect(outcome.supplied).toBe(false);
+    expect(outcome.seed).toBeNull();
+    expect(harness.input.emitted[0]?.payload).toBeUndefined();
+  });
+
   it('clears a standing notice on the next unadjusted attempt', () => {
     const harness = mounted();
 
@@ -502,18 +590,26 @@ describe('beginning a run', () => {
     expect(harness.status.textContent).toBe('');
   });
 
-  it('reduces one typed seed to one value however often it is pressed', () => {
+  it('reflects one typed seed as one value however often it is pressed', () => {
     const harness = mounted();
 
     harness.seed.value = '  Seed-42  ';
-    harness.screen.beginRun();
-    harness.seed.value = '  Seed-42  ';
-    harness.screen.beginRun();
 
+    const first = harness.screen.beginRun();
+
+    harness.seed.value = '  Seed-42  ';
+
+    const second = harness.screen.beginRun();
+
+    // The PAYLOAD is the raw text both times, because the controller is the
+    // normaliser; the seed REFLECTED is the reduced one both times, because the
+    // reduction is idempotent and is read back from the run.
     expect(harness.input.emitted.map((entry) => entry.payload)).toEqual([
-      'Seed-42',
-      'Seed-42',
+      '  Seed-42  ',
+      '  Seed-42  ',
     ]);
+    expect([first.seed, second.seed]).toEqual(['Seed-42', 'Seed-42']);
+    expect(harness.seed.value).toBe('Seed-42');
   });
 
   it('begins from a pointer press and from Enter, but not from Space', () => {
@@ -736,8 +832,8 @@ describe('driven by the real router', () => {
       reporter,
       autoFlush: false,
 
-      // Synchronous, so the clear-then-write sequence completes inside
-      // `flush()` and the region can be read straight afterwards.
+      // Synchronous, so the clear-then-write sequence completes inside `flush`
+      // and the region can be read straight afterwards.
       schedule: (callback): { cancel(): void } => {
         callback();
 
@@ -748,14 +844,23 @@ describe('driven by the real router', () => {
         };
       },
     });
-    const screen = createRunStartScreen({ input, announcer: voice, reporter });
+    const screen = createRunStartScreen({
+      input,
+      announcer: voice,
+      reporter,
+
+      // The controller's own reduction, read back: src/main.ts wires
+      // `() => run.seed()` here.
+      seedInForce: (): string =>
+        normalizeEnteredSeed(
+          (input.emitted[input.emitted.length - 1]?.payload as string) ?? '',
+        ),
+    });
     const router = createScreenRouter({
       document,
       reporter,
       screens: { runStart: screen },
 
-      // The same announcer the screen holds, so the duplicate line the two
-      // would otherwise read is proved to compose into one.
       announcer: voice,
     });
 
@@ -787,9 +892,12 @@ describe('driven by the real router', () => {
       .querySelector<HTMLButtonElement>(`#${RUN_START_IDS.begin}`)
       ?.click();
 
+    // VERBATIM: the field's own text travels, and the reduced value came back
+    // through `seedInForce` and was written into the field.
     expect(input.emitted).toEqual([
-      { event: 'startRun', payload: 'seeded-run' },
+      { event: 'startRun', payload: ' seeded-run ' },
     ]);
+    expect(seed?.value).toBe('seeded-run');
 
     // The state machine's only outgoing edge, taken by whoever answers the
     // action: the screen leaves, its field is cleared and the container hides.

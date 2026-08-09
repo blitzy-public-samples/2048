@@ -1,17 +1,5 @@
 // The frozen best-score contract, pinned assertion by assertion.
 //
-// Provenance of every behaviour asserted below, from the deleted vanilla
-// sources: the frozen unprefixed best-score key literal; the writability probe
-// running once at construction and fixing the store for the session;
-// `getBestScore()` returning `getItem(bestScoreKey) || 0`; `setBestScore()`
-// returning nothing and writing `setItem(bestScoreKey, score)`; the store
-// coercing with `String(val)`; an absent key reading back as `undefined`;
-// `setGameState()` persisting `JSON.stringify(state)`; `clearGameState()`
-// removing the snapshot key alone, no vanilla member removing the best score;
-// the promotion guard being a RELATIONAL comparison against the stored value;
-// the best score being re-read from storage after the possible write; and the
-// value reaching the DOM through `textContent`.
-//
 // The subject is src/storage/local-storage-manager.ts. Every construction here
 // injects a store. The key literals are imported from
 // src/storage/storage-keys.ts and appear nowhere in this file;
@@ -21,9 +9,7 @@
 // failure path are covered by
 // tests/unit/storage/local-storage-manager.test.ts, not here.
 //
-// Decisions this suite is the evidence for: DL-STORE-02 in
-// docs/DECISION_LOG.md. Traceability rows: TR-STORE-01 and TR-STORE-04
-// through TR-STORE-05 of docs/TRACEABILITY_MATRIX.md.
+// Decisions: DL-STORE-02 (docs/DECISION_LOG.md).
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -539,9 +525,6 @@ describe('teardown hygiene (js/local_storage_manager.js calls removeItem ' +
       expect(storage.getItem(BEST_SCORE_KEY)).toBe('9876');
       expect(manager.getBestScore()).toBe('9876');
 
-      // The exported helper tests/fixtures/storage.ts registers as the
-      // suite-wide `afterEach`, called here directly so this case stands
-      // alone rather than reading what a predecessor left behind.
       clearOwnedStorage();
 
       const afterTeardown = manager.getBestScore();

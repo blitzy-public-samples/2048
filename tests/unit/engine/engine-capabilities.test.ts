@@ -1,5 +1,5 @@
-// Contract suite for the four engine capabilities the hook surface gained:
-// the stage transition, the one-shot stage end, the board-effect channel and the
+// Contract suite for the four engine capabilities the hook surface gained: the
+// stage transition, the one-shot stage end, the board-effect channel and the
 // transformable spawn count, plus the degraded terminal state.
 //
 // Scope boundaries. The move walk, the merge branch and vanilla parity ->
@@ -7,9 +7,9 @@
 // hook-bus.test.ts; stage progression and reward resolution ->
 // tests/unit/run/run-controller.test.ts.
 //
-// Every collaborator arrives through the engine's single options object, so this
-// suite needs no mocking library. It reads no DOM and no storage, and runs in the
-// `unit:dom-free` project of vitest.config.ts.
+// Every collaborator arrives through the engine's single options object, so
+// this suite needs no mocking library. It reads no DOM and no storage, and
+// runs in the `unit:dom-free` project of vitest.config.ts.
 
 import { describe, expect, it } from 'vitest';
 
@@ -47,26 +47,13 @@ import {
   copyBoard,
 } from '../../fixtures/boards';
 
-/* ===== 0. Constants, doubles and helpers ===== */
-
 /** Run seed every deterministic case below is built from. */
 const RUN_SEED = 'engine-capabilities-seed-1';
 
-/**
- * Row of column 0 the excision case removes a tile from.
- *
- * `createBlockedBoard()` fills column 0 top to bottom, so any row holds a tile;
- * the last one is taken so the cell freed is not the one a merge would have
- * used.
- */
+/** Row of column 0 the excision case removes a tile from. */
 const EXCISED_Y = DEFAULT_BOARD_SIZE - 1;
 
-/**
- * Face value the stage-goal cases target.
- *
- * Above every value `createBlockedBoard()` carries at the default board size,
- * so a goal set to it is unmet until a handler installs the tile.
- */
+/** Face value the stage-goal cases target. */
 const GOAL_TILE_VALUE = 2 ** (DEFAULT_BOARD_SIZE + 2);
 
 /**
@@ -156,8 +143,6 @@ function createStageSource(target: number): {
     index: (): number => index,
   };
 }
-
-/* ===== 1. The stage transition (C2) ===== */
 
 describe('the stage transition', () => {
   it('ends a stage exactly once, however many times it is asked to', () => {
@@ -279,8 +264,6 @@ describe('the stage transition', () => {
   });
 });
 
-/* ===== 2. The board-effect channel (M1, M4) ===== */
-
 describe('the board-effect channel', () => {
   it('installs a lattice a pre-move handler assembled', () => {
     const bus = createHookBus();
@@ -289,7 +272,6 @@ describe('the board-effect channel', () => {
       onBeforeMove: (payload: BeforeMovePayload, context: HookContext) => {
         const board = payload.board.serialize();
 
-        // Empty every cell, which is a lattice no move could have produced.
         for (const column of board.cells) {
           for (let y = 0; y < column.length; y += 1) {
             column[y] = null;
@@ -314,8 +296,6 @@ describe('the board-effect channel', () => {
       .toBe(true);
     expect(engine.score).toBe(99);
 
-    // A withdrawn move that reseated the board still commits, so no view is
-    // left showing tiles the engine no longer holds.
     expect(commits).toHaveLength(1);
   });
 
@@ -364,15 +344,13 @@ describe('the board-effect channel', () => {
 
     const cells = engine.serialize().grid.cells.flat();
 
-    // The excision stands, and NOTHING was spawned to refill the cell it freed:
-    // a spawn belongs to a move that moved.
+    // The excision stands, and NOTHING was spawned to refill the cell it
+    // freed: a spawn belongs to a move that moved.
     expect(cells.filter((cell) => cell !== null)).toHaveLength(
       DEFAULT_BOARD_SIZE - 1,
     );
     expect(spawns).toHaveLength(0);
 
-    // The board changed, so the turn published and persisted it rather than
-    // leaving every view and the stored snapshot on the pre-effect board.
     expect(commits).toHaveLength(1);
     expect(
       commits[0]?.board.cells.flat().filter((cell) => cell !== null),
@@ -385,9 +363,6 @@ describe('the board-effect channel', () => {
   it('reports an effect-only turn as idle AND committed', () => {
     const bus = createHookBus();
 
-    // The same excision as the case above, whose slide moves nothing: this one
-    // measures what `attemptMove()` REPORTS about that turn rather than what it
-    // persisted, because the two answers are resolved on separate lines.
     register(bus, 'blade', {
       onBeforeMove: (payload: BeforeMovePayload, context: HookContext) => {
         context.effects.removeTile({ x: 0, y: EXCISED_Y });
@@ -405,8 +380,7 @@ describe('the board-effect channel', () => {
 
     // `resolution` and `moved` report the SLIDE, which moved nothing, while
     // `committed` reports that the turn nevertheless committed the board the
-    // effect left. A turn that says it committed nothing while a commit was
-    // emitted would misreport the one path where the two differ.
+    // effect left.
     expect(attempt.resolution).toBe('idle');
     expect(attempt.moved).toBe(false);
     expect(attempt.committed).toBe(true);
@@ -492,8 +466,8 @@ describe('the board-effect channel', () => {
       ends.push(event.cleared);
     });
 
-    // The highest tile on the board the move is pressed on is below the target,
-    // so only the restored lattice can clear the stage.
+    // The highest tile on the board the move is pressed on is below the
+    // target, so only the restored lattice can clear the stage.
     engine.setup(copyBoard(BLOCKED_BOARD));
 
     const commits = captureCommits(engine);
@@ -641,8 +615,6 @@ describe('the board-effect channel', () => {
   });
 });
 
-/* ===== 3. The transformable spawn count (M2) ===== */
-
 describe('the spawn count', () => {
   it('inserts one tile when no handler raises the count', () => {
     const engine = new Engine({ streams: streamsFor() });
@@ -720,8 +692,8 @@ describe('the spawn count', () => {
     const bus = createHookBus();
     const recording = createRecordingReporter();
 
-    // The merged tile's cell: a LEFT move on the merge-pair fixture merges into
-    // (0, 0), so this is in bounds, and occupied, at the moment the spawn
+    // The merged tile's cell: a LEFT move on the merge-pair fixture merges
+    // into (0, 0), so this is in bounds, and occupied, at the moment the spawn
     // resolves.
     register(bus, 'squatter', {
       onSpawn: (payload: SpawnPayload): SpawnPayload => ({
@@ -749,9 +721,7 @@ describe('the spawn count', () => {
 
     const occupant = engine.serialize().grid.cells[0]?.[0];
 
-    // THE TILE THAT WAS THERE IS STILL THERE. A spawn draws an empty cell, so a
-    // transformed position that names an occupied one inserts nothing rather
-    // than replacing what the board holds.
+    // The tile that was there is still there.
     expect(occupant?.value).toBe((merged?.value ?? 0) * 2);
     expect(recording.metric('engine.spawn.suppressed')).toBeGreaterThan(0);
 
@@ -781,17 +751,9 @@ describe('the spawn count', () => {
   });
 });
 
-/* ===== 4. The degraded terminal state (N3) ===== */
-
 describe('a terminal-state measurement that cannot be taken', () => {
   /**
    * A full board carrying exactly one mergeable pair.
-   *
-   * The shape the loss probe is reachable from: a LEFT move merges the pair and
-   * frees one cell, the spawn refills it, and the board is then full — which is
-   * the only state in which `movesAvailable` walks the neighbour pairs and
-   * therefore the only state in which the configured merge predicate is read by
-   * the probe rather than by the move walk.
    *
    * @returns The snapshot.
    */
@@ -835,9 +797,7 @@ describe('a terminal-state measurement that cannot be taken', () => {
     const predicate = config.merge.canMerge;
     let armed = false;
 
-    // Armed BETWEEN the move walk and the loss probe: `tile:spawn` is emitted
-    // by the spawn that follows the walk and precedes the probe, so the walk
-    // resolves normally and only the probe is made to raise.
+    // Armed BETWEEN the move walk and the loss probe.
     const rules: RulesConfig = {
       ...config,
       merge: {
@@ -865,9 +825,6 @@ describe('a terminal-state measurement that cannot be taken', () => {
 
     const commits = captureCommits(engine);
 
-    // The turn completes rather than raising out of a move whose board has
-    // already changed, and it does not claim a terminal status it could not
-    // measure.
     expect(() => {
       engine.move(DIRECTION_LEFT);
     }).not.toThrow();
@@ -881,9 +838,9 @@ describe('a terminal-state measurement that cannot be taken', () => {
   it('resolves no stage from a measurement it could not take', () => {
     const recording = createRecordingReporter();
 
-    // A goal `evaluateStageGoal` refuses: it raises on a kind it does not know,
-    // and the engine is the resolving authority, so the measurement is taken
-    // inside the turn.
+    // A goal `evaluateStageGoal` refuses: it raises on a kind it does not
+    // know, and the engine is the resolving authority, so the measurement is
+    // taken inside the turn.
     const engine = new Engine({
       streams: streamsFor(),
       reporter: recording.reporter,
@@ -914,10 +871,6 @@ describe('a terminal-state measurement that cannot be taken', () => {
   });
 
   it('publishes a degradation the stage measurement raised, in a following commit', () => {
-    // The stage resolution runs AFTER the commit its turn ended with, so a
-    // measurement that raises there records the degradation on an engine whose
-    // last published commit said otherwise. The state is published again from
-    // the degradation now recorded.
     const engine = new Engine({
       streams: streamsFor(),
       stageResolution: 'engine',
@@ -945,12 +898,10 @@ describe('a terminal-state measurement that cannot be taken', () => {
   });
 
   it('is treated as non-terminal by the engine and by what it persists', () => {
-    // WHAT THE COMPROMISE IS, ASSERTED. The commit path may not throw — the
-    // storage port case in tests/unit/engine/engine.test.ts pins that for its own
-    // reason — so a turn whose terminal status could not be measured commits with
-    // the board and score the walk produced. What must not happen is anything
-    // downstream reading that turn AS terminal, which is what would end a run on
-    // a measurement that was never taken.
+    // What the compromise is, asserted. The commit path may not throw — the
+    // storage port case in tests/unit/engine/engine.test.ts pins that for its
+    // own reason — so a turn whose terminal status could not be measured
+    // commits with the board and score the walk produced.
     const recording = createRecordingReporter();
     const config = createDefaultRulesConfig();
     const predicate = config.merge.canMerge;
@@ -995,15 +946,13 @@ describe('a terminal-state measurement that cannot be taken', () => {
 
     expect(engine.isDegraded()).toBe(true);
 
-    // Not terminal to the engine, not terminal in the snapshot a resumed session
-    // would load, and not terminal on the wire either.
+    // Not terminal to the engine, not terminal in the snapshot a resumed
+    // session would load, and not terminal on the wire either.
     expect(engine.isGameTerminated()).toBe(false);
     expect(saved.at(-1)?.over).toBe(false);
     expect(commits.at(-1)?.over).toBe(false);
     expect(commits.at(-1)?.terminated).toBe(false);
 
-    // The degradation is what a consumer reads instead, and it is on the commit
-    // itself rather than only in a metric.
     expect(commits.at(-1)?.degraded).toBe(true);
   });
 
@@ -1016,8 +965,6 @@ describe('a terminal-state measurement that cannot be taken', () => {
     expect(engine.isDegraded()).toBe(false);
   });
 });
-
-/* ===== 5. The monotonic turn (M9) ===== */
 
 describe('the monotonic turn', () => {
   it('rises once per commit and is carried by the granular events', () => {
@@ -1069,8 +1016,6 @@ describe('the monotonic turn', () => {
   });
 });
 
-/* ===== 6. Serialised snapshot of the new members ===== */
-
 describe('the commit payload', () => {
   it('carries the turn and the degraded flag on every commit', () => {
     const engine = new Engine({ streams: streamsFor() });
@@ -1085,10 +1030,6 @@ describe('the commit payload', () => {
     expect(commits[0]?.degraded).toBe(false);
   });
 });
-
-/* ==========================================================================
- * The accumulated onAfterMove payload
- * ========================================================================== */
 
 describe('the accumulated onAfterMove payload', () => {
   it('adopts a handler-transformed score into state, the event and the commit', () => {
@@ -1120,8 +1061,8 @@ describe('the accumulated onAfterMove payload', () => {
     engine.move(DIRECTION_LEFT);
 
     // The dispatch's RESULT is what the engine adopted, so one transformation
-    // reaches the engine's own score, the granular event and the commit alike —
-    // there is no path on which the pre-dispatch payload survives.
+    // reaches the engine's own score, the granular event and the commit alike
+    // — there is no path on which the pre-dispatch payload survives.
     expect(afters.at(-1)).toBeGreaterThanOrEqual(1000);
     expect(commits.at(-1)).toBe(afters.at(-1));
     expect(engine.serialize().score).toBe(afters.at(-1));
@@ -1130,8 +1071,8 @@ describe('the accumulated onAfterMove payload', () => {
   it('measures the stage goal against the transformed score, not the original', () => {
     const bus = createHookBus();
 
-    // A score-threshold goal of 1000 that the turn's own merge cannot reach: only
-    // the handler's transformation can clear it.
+    // A score-threshold goal of 1000 that the turn's own merge cannot reach:
+    // only the handler's transformation can clear it.
     const goal: StageGoal = { kind: 'score-threshold', target: 1000 };
     const stage = (): StageCommitContext =>
       Object.freeze({ stageIndex: 0, goal, goalProgress: 0 });
@@ -1150,8 +1091,7 @@ describe('the accumulated onAfterMove payload', () => {
       stageContext: stage,
 
       // The engine resolves its own stage here, so the clear is observable
-      // without a run controller. `'observer'` is the default, under which the
-      // controller owns resolution.
+      // without a run controller.
       stageResolution: 'engine',
     });
 
@@ -1162,9 +1102,7 @@ describe('the accumulated onAfterMove payload', () => {
     engine.setup(copyBoard(MERGE_PAIR_BOARD));
     engine.move(DIRECTION_LEFT);
 
-    // The stage cleared, which it could only do on the transformed score. This is
-    // the property the hook protocol promises: a relic can move goal progress
-    // deterministically.
+    // The stage cleared, which it could only do on the transformed score.
     expect(ends).toEqual([true]);
   });
 
@@ -1194,9 +1132,6 @@ describe('the accumulated onAfterMove payload', () => {
     engine.setup(copyBoard(MERGE_PAIR_BOARD));
     engine.move(DIRECTION_LEFT);
 
-    // A move that resolved reports `moved: true` whatever a handler returned:
-    // the bus refuses the whole return when an invariant member moved, so the
-    // adoption above cannot be used to rewrite what happened.
     expect(afters).toEqual([true]);
   });
 
@@ -1224,8 +1159,6 @@ describe('the accumulated onAfterMove payload', () => {
 
     expect(last?.over).toBe(true);
 
-    // `terminated` is DERIVED from the adopted flags rather than read back, so a
-    // handler cannot leave a commit whose flags contradict each other.
     expect(last?.terminated).toBe(true);
   });
 });

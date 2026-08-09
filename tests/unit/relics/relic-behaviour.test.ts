@@ -1,18 +1,6 @@
-// Contract suite for the sixteen relics: the catalogue's shape, the effect each
-// relic actually has on board state, charge exhaustion end to end, and the
-// determinism every one of them has to keep.
-//
-// Each case drives a real `Engine` with a real `HookBus` and a real
-// `RelicRegistry`, because the properties under test are properties of the
-// engine + bus + registry composition rather than of a handler in isolation:
-// a relic that returns a transformed payload no engine reads has no effect, and
-// that is precisely the class of defect these cases exist to catch.
-//
-// Gates covered, from AAP 0.8.6 (V6): relics on one hook fire in pickup order
-// and compound; charge-limited relics stop firing once exhausted; a zero-charge
-// invocation neither throws nor corrupts state; a board-size-altering relic
-// corrupts no position and breaks no win/lose check, including after a reload;
-// RNG-affecting relics stay deterministic under a fixed seed.
+// Contract suite for the sixteen relics: the catalogue's shape, the effect
+// each relic actually has on board state, charge exhaustion end to end, and
+// the determinism every one of them has to keep.
 //
 // This suite reads no DOM, installs no mock library and writes no snapshot.
 
@@ -50,8 +38,6 @@ import { SPAWN_CONTROL_FAMILY } from '../../../src/relics/families/spawn-control
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import type { RngStreams } from '../../../src/rng/rng-streams';
 
-/* ===== 0. Constants and helpers ===== */
-
 /** Run seed every deterministic case below is built from. */
 const RUN_SEED = 'relic-behaviour-seed-1';
 
@@ -73,10 +59,6 @@ const RELIC_ALLOWED_MEMBERS = new Set([
 
 /**
  * Builds a lattice from a row-major table of face values.
- *
- * The store is x-major — `cells[x][y]` — so the rows a reader writes here are
- * transposed into columns, which keeps the fixtures legible without changing the
- * order the engine walks.
  *
  * @param rows Face values by row, `0` standing for an empty cell.
  * @returns The snapshot.
@@ -179,8 +161,6 @@ function compose(
   return { engine, bus, registry, config, streams };
 }
 
-/* ===== 1. The catalogue (AAP R3, Contract 3) ===== */
-
 describe('the relic catalogue', () => {
   it('declares sixteen relics across four families, four apiece', () => {
     expect(RELIC_CATALOGUE).toHaveLength(CATALOGUE_SIZE);
@@ -224,7 +204,7 @@ describe('the relic catalogue', () => {
     }
   });
 
-  it('freezes every declaration and every handler table (N8)', () => {
+  it('freezes every declaration and every handler table', () => {
     expect(Object.isFrozen(RELIC_CATALOGUE)).toBe(true);
 
     for (const relic of RELIC_CATALOGUE) {
@@ -246,8 +226,6 @@ describe('the relic catalogue', () => {
     }
   });
 });
-
-/* ===== 2. Charge exhaustion, end to end (C4, gate V6) ===== */
 
 describe('charge accounting through the registry and the bus', () => {
   it('spends a charge for every turn a charge relic acted on, and stops', () => {
@@ -272,7 +250,6 @@ describe('charge accounting through the registry and the bus', () => {
 
     engine.move(DIRECTION_LEFT);
 
-    // Exhausted: the relic no longer fires, so no second column is cleared.
     expect(registry.find('scouring-wind')?.charges).toBe(0);
     expect(values(engine.serialize()).length).toBeGreaterThanOrEqual(
       afterFirst,
@@ -345,8 +322,6 @@ describe('charge accounting through the registry and the bus', () => {
   });
 });
 
-/* ===== 3. Board manipulation reaches the board (M1) ===== */
-
 describe('the board-manipulation family', () => {
   it('pulls the board back to the last roomy position (temporal-anchor)', () => {
     // Two empty cells, and a mergeable pair in column x = 0, so the first move
@@ -371,9 +346,7 @@ describe('the board-manipulation family', () => {
     expect(anchor.board).not.toBeNull();
     expect(anchored.grid.cells.flat().some((cell) => cell === null)).toBe(true);
 
-    // The board is now filled outright, which is the state the undo arms on. A
-    // full board is never anchored, so the roomy position above stays the one
-    // the undo restores.
+    // The board is now filled outright, which is the state the undo arms on.
     const full = boardFrom([
       [2, 4, 8, 16],
       [32, 64, 128, 256],
@@ -441,9 +414,6 @@ describe('the board-manipulation family', () => {
 
   it('excises the single smallest tile before the move resolves ' +
     '(culling-blade)', () => {
-    // One 4 standing among 2s, so the lowest value on the board is unambiguous
-    // and the cell the blade takes is decided by the tie break rather than by
-    // the value: x-outer, y-inner, which is the first 2 at { x: 0, y: 1 }.
     const { engine, registry } = compose(['culling-blade'], {
       board: boardFrom([
         [4, 2, 2, 2],
@@ -461,7 +431,6 @@ describe('the board-manipulation family', () => {
 
     // ONE tile, not every tile of that value: the blade takes the first lowest
     // cell it finds and no other, so the board still holds the rest of the 2s.
-    // A move that merged and spawned leaves the count no higher than it was.
     expect(values(after).length).toBeGreaterThan(1);
     expect(values(after).length).toBeLessThan(before);
     expect(registry.find('culling-blade')?.charges).toBe(1);
@@ -497,8 +466,6 @@ describe('the board-manipulation family', () => {
     );
   });
 });
-
-/* ===== 4. Spawn control reaches the board (M2) ===== */
 
 describe('the spawn-control family', () => {
   it('sprouts a second tile with every spawn (fertile-ground)', () => {
@@ -536,8 +503,6 @@ describe('the spawn-control family', () => {
     expect(play()).toBe(play());
   });
 });
-
-/* ===== 5. Merge magic reaches the board (M3) ===== */
 
 describe('the merge-magic family', () => {
   it('writes the raised value onto the board (alloy-forge)', () => {
@@ -618,20 +583,16 @@ describe('the merge-magic family', () => {
     index += 1;
     engine.startStage(engine.serialize());
 
-    // THE GOAL IS NOT THE CHANNEL. Frost is a merge-family effect: it installs a
-    // predicate that refuses a merge into a frosted cell, and the stage's target
-    // is carried across exactly as the provider set it. A relic that moved the
-    // goal instead would be rewriting the stage rather than the rules.
+    // The goal is not the channel. Frost is a merge-family effect: it installs
+    // a predicate that refuses a merge into a frosted cell, and the stage's
+    // target is carried across exactly as the provider set it.
     expect(goals.at(-1)).toBe(target);
 
-    // The ledger reaches the stage that opened, which is what makes the frost a
-    // real effect rather than a record nothing reads: the rule in force refuses
-    // a merge into the frosted cell.
     const frozen = engine.config.merge.canMerge;
 
-    // The predicate reads the operands' cells where they carry them, exactly as
-    // src/engine/move-resolver.ts hands it the live tile pair, so the operands
-    // here are `Tile`s standing in the frosted cell.
+    // The predicate reads the operands' cells where they carry them, exactly
+    // as src/engine/move-resolver.ts hands it the live tile pair, so the
+    // operands here are `Tile`s standing in the frosted cell.
     const frostedPair = new Tile({ x: 0, y: 0 }, 2);
 
     expect(frozen(frostedPair, frostedPair)).toBe(false);
@@ -643,8 +604,6 @@ describe('the merge-magic family', () => {
     expect(frozen(thawedPair, thawedPair)).toBe(true);
   });
 });
-
-/* ===== 6. The cursed family changes the live board (M4, gate V6) ===== */
 
 describe('the risk-reward-cursed family', () => {
   it('collapses the live board and keeps every surviving cell (collapsing-vault)', () => {
@@ -678,7 +637,8 @@ describe('the risk-reward-cursed family', () => {
       }
     }
 
-    // And the declaration is on the relic slot, which is what survives a reload.
+    // And the declaration is on the relic slot, which is what survives a
+    // reload.
     expect(registry.find('collapsing-vault')?.state).toEqual({
       boardSize: DEFAULT_BOARD_SIZE - 1,
     });
@@ -704,8 +664,6 @@ describe('the risk-reward-cursed family', () => {
     expect(engine.serialize().grid.cells).toHaveLength(config.boardSize);
   });
 });
-
-/* ===== 7. State isolation between runs (N8) ===== */
 
 describe('relic state isolation', () => {
   it('gives each registry its own deep copy of a declaration slot', () => {
@@ -744,10 +702,6 @@ describe('relic state isolation', () => {
   });
 });
 
-/* ==========================================================================
- * Validated hydration
- * ========================================================================== */
-
 describe('hydrating a run from a persisted relic set', () => {
   it('reconstructs pickup order from the order the envelope carried', () => {
     const registry = new RelicRegistry({ bus: createHookBus() });
@@ -758,8 +712,9 @@ describe('hydrating a run from a persisted relic set', () => {
       { id: 'frostbind' },
     ]);
 
-    // Pickup order is the DISPATCH order, so it has to survive a reload exactly:
-    // it decides how effects compound and the order handlers consume randomness.
+    // Pickup order is the DISPATCH order, so it has to survive a reload
+    // exactly: it decides how effects compound and the order handlers consume
+    // randomness.
     expect(registry.active().map((relic) => relic.definition.id)).toEqual([
       'scouring-wind',
       'twin-seed',
@@ -795,12 +750,9 @@ describe('hydrating a run from a persisted relic set', () => {
       { id: 'echo-chamber' },
     ]);
 
-    // THE CATALOGUE IS THE AUTHORITY. An identifier it does not carry has no
-    // handler to bind, so holding it would leave the run reporting a relic that
-    // cannot fire.
+    // The catalogue is the authority.
     expect(registry.ownedIds()).toEqual(['twin-seed', 'echo-chamber']);
 
-    // And pickup order closes over the gap rather than leaving a hole.
     expect(registry.active().map((relic) => relic.pickupOrder)).toEqual([0, 1]);
   });
 
@@ -835,9 +787,9 @@ describe('hydrating a run from a persisted relic set', () => {
 
     engine.setup(null);
 
-    // HYDRATION IS A SUBSCRIPTION, not a record: the relic is dispatched to from
-    // the first dispatch of the engine that shares the bus, without being picked
-    // up again.
+    // Hydration is A SUBSCRIPTION, not a record: the relic is dispatched to
+    // from the first dispatch of the engine that shares the bus, without being
+    // picked up again.
     expect(registry.active()).toHaveLength(1);
     expect(spawns).toBeGreaterThan(0);
   });
@@ -848,8 +800,8 @@ describe('hydrating a run from a persisted relic set', () => {
     registry.restore([{ id: 'twin-seed' }, { id: 'frostbind' }]);
     registry.restore([{ id: 'echo-chamber' }]);
 
-    // `restore` clears first, so a second run cannot inherit the first's relics
-    // and pickup order restarts at zero.
+    // `restore` clears first, so a second run cannot inherit the first's
+    // relics and pickup order restarts at zero.
     expect(registry.ownedIds()).toEqual(['echo-chamber']);
     expect(registry.active()[0]?.pickupOrder).toBe(0);
   });
@@ -862,9 +814,6 @@ describe('hydrating a run from a persisted relic set', () => {
       { id: 'frostbind', charges: 2 },
     ]);
 
-    // The projection is what the run controller adopts into the envelope, so the
-    // refusal is persisted rather than repeated on every load. `frostbind`
-    // carries a state slot, which the projection carries with it.
     expect(registry.serialize()).toEqual([
       { id: 'frostbind', charges: 2, state: { frozen: [] } },
     ]);

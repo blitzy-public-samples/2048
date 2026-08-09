@@ -1,82 +1,13 @@
 // Extruded block geometry, instance management, and the generated board of the
 // WebGL renderer.
 //
-// This module owns every geometry the 2.5D board is built from — the tile
-// block, the board field, the empty-cell plate and the numeral plane — and the
-// mapping from a zero-based engine cell coordinate to a world position. The
-// materials that dress those geometries come from src/render/tile-materials.ts
-// and are owned by the cache that builds them; the geometries and the numeral
-// textures are created here and are released by `dispose()`.
-//
-// The board is generated from the board size the configuration carries, which
-// is what replaced the sixteen static `.grid-cell` elements and the empty
-// `.tile-container` of index.html. The size is read from the `RulesConfig` of
-// src/config/rules-config.ts on every build; `gridRowCells` of
-// src/theme/tokens.ts is the stylesheet's presentation of the same dimension
-// and is not read here.
-//
-// The three extrusion depths are `depthScale` of src/theme/tokens.ts, each an
-// arithmetic expression on `gridSpacing`; no length in this module is stated as
-// a literal. `bevelSize` of `ExtrudeGeometry` grows the footprint outward and
-// `bevelThickness` grows the z-extent at both ends, so the outline is built at
-// `tileSize - 2 * depthScale.bevel` and extruded `depthScale.tile -
-// 2 * depthScale.bevel`, which resolves the block's bounding box to exactly
-// `tileSize` square by `depthScale.tile` deep.
-//
 // The mobile scale is the mobile-threshold block of style/main.scss, which
 // re-invokes the game field with the mobile lengths. Both scales resolve
 // through `geometryScales` of src/theme/tokens.ts, and the scale is selected
 // once per factory.
 //
-// This module holds no scene, camera, renderer or engine reference; it reads no
-// clock, consumes no randomness and performs no I/O; it imports nothing from
-// src/engine or src/observability and no stylesheet. Its only contact with the
-// document is the canvas a numeral texture is drawn on, which is created, drawn
-// and handed to a texture without ever being appended; `OffscreenCanvas` is
-// used where the platform provides it. Reporting is injected and defaults to
-// the no-op sink. One geometry is shared by every mesh of a given shape, one
-// numeral texture is shared by every mesh carrying a given value, and every
-// geometry, texture and material this module creates is released by
-// `dispose()`.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-MESH-01  index.html L43-L68            the sixteen static `.grid-cell`
-//                                             elements, replaced by the
-//                                             generated board
-//   TR-MESH-02  index.html L70-L72            the empty `.tile-container`,
-//                                             replaced by the tile layer of
-//                                             `BoardMeshes`
-//   TR-MESH-03  js/html_actuator.js L97-L104  `normalizePosition` and
-//                                             `positionClass`, ported as
-//                                             `cellToWorld()` and
-//                                             `cellToWorldIn()`
-//   TR-MESH-04  style/main.scss L171-L194     the field geometry, as
-//                                             `resolveBoardGeometry()`
-//   TR-MESH-05  style/main.scss L475-L548     the mobile scale, selected once
-//                                             per factory through
-//                                             `geometryScales`
-//   TR-MESH-06  style/main.scss L404-L430     the tile numeral sizes, as
-//                                             `resolveNumeralLayout()` and
-//                                             `NumeralLayout`
-//   TR-MESH-07  target-only row               the extruded block geometry and
-//                                             `tileOutlineSize()`
-//   TR-MESH-08  target-only row               `boardLayers`, the z-order the
-//                                             stylesheet's stacking replaced
-//   TR-MESH-09  target-only row               the numeral texture cache,
-//                                             `numeralCacheBounds` and
-//                                             `isDrawableTileValue()`
-//   TR-MESH-10  target-only row               `createTileMeshFactory()` and
-//                                             `cellArrayIndex()`
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-MESH-01  the extrusion depths expressed as arithmetic on `gridSpacing`
-//   DL-MESH-02  the outline and extrusion inset by the bevel, so a block's
-//               bounding box resolves to exactly `tileSize` by `depthScale.tile`
-//   DL-MESH-03  one shared geometry per shape and one shared numeral texture
-//               per value
-//   DL-MESH-04  the mobile scale selected once per factory
+// Decisions: DL-MESH-01, DL-MESH-02, DL-MESH-03, DL-MESH-04
+// (docs/DECISION_LOG.md).
 
 import {
   CanvasTexture,
@@ -171,51 +102,20 @@ const NUMERAL_POLYGON_OFFSET = -1;
 
 const MIN_TILE_VALUE = 2;
 
-/**
- * Base every drawable tile value is a power of.
- *
- * A count, not a length: `tileRampConstants.base` of src/theme/tile-ramp.ts
- * states the same base, and `rampExponent` there accepts a value only where
- * `base ** exponent` reproduces it exactly.
- */
+/** Base every drawable tile value is a power of. */
 const NUMERAL_VALUE_BASE = 2;
 
-/**
- * Lowest exponent whose numeral is drawn.
- *
- * `tileRampConstants.exponentStart` of src/theme/tile-ramp.ts, which is the
- * exponent `MIN_TILE_VALUE` stands for.
- */
+/** Lowest exponent whose numeral is drawn. */
 const MIN_NUMERAL_EXPONENT = 1;
 
-/**
- * Highest exponent whose numeral is drawn.
- *
- * `NUMERAL_VALUE_BASE ** 52` is the largest power of the base that is a safe
- * integer, so it is the largest value `String(value)` prints the digits of
- * exactly rather than in exponent notation.
- */
+/** Highest exponent whose numeral is drawn. */
 const MAX_NUMERAL_EXPONENT = 52;
 
-/**
- * Numeral materials held at once.
- *
- * A count, not a length. It exceeds the sixteen cells of the default board, so
- * every value a 4x4 board carries at one time is held together.
- */
+/** Numeral materials held at once. */
 const MAX_CACHED_NUMERALS = 24;
 
-/**
- * Refusal diagnostics emitted over one factory's life.
- *
- * A count, not a length: the refusal counter and its metric carry every
- * refusal, and this bounds only how many of them are also described.
- */
+/** Refusal diagnostics emitted over one factory's life. */
 const MAX_REPORTED_NUMERAL_REFUSALS = 8;
-
-/* ==========================================================================
- * 3. Board geometry resolution
- * ========================================================================== */
 
 /**
  * Rejects an argument that is not a positive integer.
@@ -235,13 +135,6 @@ function assertPositiveInteger(name: string, value: number): void {
 
 /**
  * Rejects a board edge length the product does not support.
- *
- * `isSupportedBoardSize` of src/config/default-config.ts is the single
- * board-edge ceiling, and every OTHER consumer of a candidate edge —
- * persistence, the number-only renderer and the parallel accessibility board —
- * already measures against it. This module measured only that the value was a
- * positive integer, so a size the rest of the product refuses reached geometry
- * construction and a `size` by `size` plate allocation here.
  *
  * @param name Parameter name, for the thrown message.
  * @param value Candidate edge length.
@@ -269,13 +162,6 @@ function assertFiniteNumber(name: string, value: number): void {
 /**
  * Resolves the lengths one board size occupies at one of the stylesheet's two
  * scales.
- *
- * `tileSize` is `(fieldWidth - gridSpacing * (boardSize + 1)) / boardSize` and
- * is therefore a function of the board size: a board rebuilt at another size
- * recomputes it rather than reusing the four-cell value. `fieldWidth`,
- * `gridSpacing` and `tileBorderRadius` are the scale's own, so both the
- * default scale of style/main.scss and its `smaller($mobile-threshold)` scale
- * resolve through this one call.
  *
  * @throws RangeError when `boardSize` is not an integer from 1 through
  *   `MAX_BOARD_SIZE`.
@@ -321,17 +207,8 @@ export const boardLayers = Object.freeze({
   tileSurface: depthScale.bevel + depthScale.tile,
 });
 
-/* ==========================================================================
- * 4. Cell coordinate to world position
- * ========================================================================== */
-
 /**
  * Step from the board field's leading edge to one cell index, in px.
- *
- * `tilePositionStep` of src/theme/tokens.ts is the port of
- * `math.floor(($tile-size + $grid-spacing) * ($x - 1))` at style/main.scss
- * L492-L493, and it accepts a non-negative integer alone. This is the anchor
- * every coordinate is measured from.
  *
  * @param index Zero-based cell index along one axis.
  * @param geometry Resolved lengths for the board size and scale in force.
@@ -342,29 +219,20 @@ function cellAxisAnchor(index: number, geometry: GeometryScale): number {
     return tilePositionStep(index, geometry);
   }
 
-  // Outside the lattice, where the Sass loop states no position; the
-  // unfloored expression continues the same line.
+  // Outside the lattice, where the Sass loop states no position; the unfloored
+  // expression continues the same line.
   return (geometry.tileSize + geometry.gridSpacing) * index;
 }
 
 /**
- * Offset of a cell's centre from the board field's leading edge along one axis,
- * in px.
- *
- * ONE CONTINUOUS FUNCTION over both integer and fractional coordinates. The
- * snapping policy lives entirely in the anchors: every integer coordinate
- * resolves to `cellAxisAnchor`, which is the floored Sass step, and a
- * fractional coordinate — the state a `MoveTweenValue` of
- * src/render/animations.ts carries between two cells — interpolates linearly
- * between the anchors of the two integers bracketing it. The function is
- * therefore exact at every cell AND continuous across every cell boundary;
- * flooring only the integer case left a discontinuity of up to a pixel at each
- * boundary, which a move tween crossed on its way through.
+ * Offset of a cell's centre from the board field's leading edge along one
+ * axis, in px.
  *
  * @param coordinate Zero-based cell coordinate along one axis; may be
  *   fractional.
  * @param geometry Resolved lengths for the board size and scale in force.
- * @returns Distance from the field's leading edge to the cell's centre, in px.
+ * @returns Distance from the field's leading edge to the cell's centre, in
+ *   px.
  */
 function cellAxisOffset(coordinate: number, geometry: GeometryScale): number {
   const lower = Math.floor(coordinate);
@@ -380,12 +248,6 @@ function cellAxisOffset(coordinate: number, geometry: GeometryScale): number {
 
 /**
  * World position of the tile that occupies one cell.
- *
- * Cell `{x, y}` maps to world `x` rightward and world `-y` downward, and z to
- * `boardLayers.tileBase`; the board is centred on the origin by subtracting
- * half the field width along both axes. Coordinates are the engine's
- * zero-based ones — the `+1` normalisation of js/html_actuator.js L97-L104
- * built CSS class names and has no counterpart here.
  *
  * @returns `target`, or the newly allocated vector.
  * @throws RangeError when `boardSize` is not a positive integer, or when
@@ -540,10 +402,6 @@ function createNumeralPlaneGeometry(geometry: GeometryScale): PlaneGeometry {
   return new PlaneGeometry(geometry.tileSize, geometry.tileSize);
 }
 
-/* ==========================================================================
- * 6. Numeral layout and its texture
- * ========================================================================== */
-
 /**
  * The bounds a factory holds its numeral textures within, as the names the
  * renderer and its tests read them by.
@@ -573,13 +431,6 @@ export const numeralCacheBounds = Object.freeze({
 
 /**
  * Whether a tile value's numeral is drawn at all.
- *
- * The domain is the one `rampExponent` of src/theme/tile-ramp.ts accepts — a
- * power of `NUMERAL_VALUE_BASE` at `MIN_NUMERAL_EXPONENT` or above — narrowed
- * at the top to the exponent whose value is still a safe integer, so the
- * decimal digits `drawNumeral` writes are the value's own. Every other value,
- * including a non-integer, a negative, a non-finite and a power of another
- * base, is outside it.
  *
  * @param value Tile value.
  * @returns Whether a numeral texture is drawn and cached for `value`.
@@ -616,12 +467,6 @@ export interface NumeralLayout {
 
 /**
  * Resolves how one tile value's numeral is laid out.
- *
- * The canvas is the tile box of style/main.scss multiplied by the
- * texel-density multiplier, and the numeral takes the digit-count step
- * style/main.scss declares, which `tileFontSize`
- * of src/theme/tokens.ts resolves. The drawable width insets the box by one
- * `tileBorderRadius` a side.
  *
  * @throws RangeError when `value` is not a finite positive number.
  */
@@ -730,8 +575,8 @@ function drawNumeral(
   context.textAlign = 'center';
   context.textBaseline = 'middle';
 
-  // `font-weight: bold` at style/main.scss, and the stack of
-  // `fontFamily` in src/theme/tokens.ts.
+  // `font-weight: bold` at style/main.scss, and the stack of `fontFamily` in
+  // src/theme/tokens.ts.
   context.font = `bold ${layout.fontSize}px ${fontFamily}`;
 
   let condensed = false;
@@ -825,13 +670,6 @@ export interface TileMeshFactory {
   /**
    * Generates the board at one size, replacing any board generated before.
    *
-   * A build at a size other than the previous one releases every geometry and
-   * numeral texture the previous size resolved: all four are functions of
-   * `tileSize`, and `tileSize` is a function of the board size. A build at the
-   * same size reuses them. Either way the meshes of the previous build are
-   * detached, so a board-mutating relic that changes the size gets a board
-   * whose every world position is re-derived from the new size.
-   *
    * @throws RangeError when the resolved size is not a positive integer.
    * @throws Error when the factory has been disposed.
    */
@@ -841,12 +679,7 @@ export interface TileMeshFactory {
 
   acquireTileMesh(value: number): TileMesh;
 
-  /**
-   * Returns a block to the pool, detaching it and hiding it.
-   *
-   * A mesh this factory did not hand out, and a mesh already idle, are refused
-   * and reported rather than admitted twice.
-   */
+  /** Returns a block to the pool, detaching it and hiding it. */
   releaseTileMesh(mesh: TileMesh): boolean;
 
   /**
@@ -898,15 +731,8 @@ const SCALE_NAMES: readonly ScaleName[] = Object.freeze([
   'mobile',
 ]);
 
-
 /**
  * Builds the geometry owner for the WebGL board.
- *
- * Nothing is constructed at call time: the options are validated and the
- * injected collaborators are held, and every geometry is built by the first
- * `buildBoard()` call. The board size is read from `options.config` at each
- * build rather than captured, so a board-mutating relic that changes it is
- * followed by the next build.
  *
  * @returns A frozen factory.
  * @throws TypeError when `config` or `materials` is absent.
@@ -980,8 +806,6 @@ export function createTileMeshFactory(
     }
   }
 
-  /* ---- State ---- */
-
   let geometries: SizedGeometries | null = null;
   let resolvedGeometry: GeometryScale | null = null;
   let board: BoardMeshes | null = null;
@@ -990,21 +814,10 @@ export function createTileMeshFactory(
   /**
    * Numeral material per tile value, holding `null` for a drawable value whose
    * own numeral could not be drawn.
-   *
-   * Only a value `isDrawableTileValue` accepts is ever a key, and the map holds
-   * at most `MAX_CACHED_NUMERALS` of them: a write past that releases the least
-   * recently used entry no block on the board wears, and where every entry is
-   * worn the numeral is refused instead. Iteration order is insertion order and
-   * a read reinserts, so the first key is the least recently used one.
    */
   const numeralMaterials = new Map<number, MeshBasicMaterial | null>();
 
-  /**
-   * Whether no two-dimensional drawing surface is reachable.
-   *
-   * Latched by the first probe that finds none, so the platform is probed once
-   * rather than once per value and no cache entry stands for it.
-   */
+  /** Whether no two-dimensional drawing surface is reachable. */
   let numeralSurfaceUnavailable = false;
 
   /** Every block handed out, keyed by the block itself. */
@@ -1165,10 +978,6 @@ export function createTileMeshFactory(
    * Counts one refusal and describes the first `MAX_REPORTED_NUMERAL_REFUSALS`
    * of them.
    *
-   * The value is carried as the string it prints as, so a value outside the
-   * drawable domain — which a non-finite and a non-integer both are — is
-   * reported as itself rather than as the `null` a JSON scalar reduces it to.
-   *
    * @param value Tile value the numeral was refused for.
    * @param reason Which bound refused it.
    * @param message What the diagnostic states.
@@ -1205,15 +1014,6 @@ export function createTileMeshFactory(
   /**
    * The numeral material for one tile value, drawing its texture on first
    * request.
-   *
-   * Nothing is allocated or cached for a value outside the domain
-   * `isDrawableTileValue` accepts, nor once the cache stands full of entries
-   * blocks in use wear; both refuse the numeral, which leaves the block wearing
-   * the shared blank material its plane draws nothing from. The numeral colour
-   * and the block material of every value above the ramp's last one resolve to
-   * the one entry src/render/tile-materials.ts shares between them; the digits
-   * differ per value, so the texture drawn here is per value and the cache
-   * ceiling is what bounds them.
    *
    * @param value Tile value.
    * @param geometry The lengths in force.
@@ -1295,8 +1095,6 @@ export function createTileMeshFactory(
 
     const surface = createNumeralSurface(layout.canvasPixels);
     if (surface === null) {
-      // Latched rather than cached against the value: the condition is the
-      // platform's, so it holds for every value and needs no entry.
       numeralSurfaceUnavailable = true;
       numeralsUnavailable += 1;
       reporter.onCount({
@@ -1354,8 +1152,6 @@ export function createTileMeshFactory(
       map: texture,
       transparent: true,
       depthWrite: false,
-      // The plane is coplanar with the block's top face, so it is biased
-      // toward the viewer by a polygon-offset unit rather than by a length.
       polygonOffset: true,
       polygonOffsetFactor: NUMERAL_POLYGON_OFFSET,
       polygonOffsetUnits: NUMERAL_POLYGON_OFFSET,
@@ -1462,9 +1258,6 @@ export function createTileMeshFactory(
     const requested = boardSize ?? config.boardSize;
     assertSupportedBoardSize('boardSize', requested);
 
-    // `tileSize` falls as the board size rises, and the bevel takes
-    // `depthScale.bevel` off each side of the outline, so a size beyond which
-    // no outline remains is refused here rather than at the extrusion.
     if (tileOutlineSize(resolveBoardGeometry(requested, scale)) <= 0) {
       throw new RangeError(
         `tile-mesh-factory: boardSize ${requested} leaves no tile outline ` +
@@ -1514,8 +1307,7 @@ export function createTileMeshFactory(
     group.add(field);
 
     // One plate per cell, x-major, replacing the sixteen static `.grid-cell`
-    // elements of index.html and the rule-per-cell loop of
-    // style/main.scss.
+    // elements of index.html and the rule-per-cell loop of style/main.scss.
     const plateMaterial = materials.getEmptyCellMaterial();
     const cells: Mesh<ExtrudeGeometry, MeshStandardMaterial>[] = [];
     for (let x = 0; x < requested; x += 1) {
@@ -1577,8 +1369,7 @@ export function createTileMeshFactory(
     }
 
     // Resolved before the pool is touched, so a cache that refuses the call —
-    // a destroyed one — leaves the pool and the records untouched. A value
-    // off the ramp is dressed by the cache rather than refused.
+    // a destroyed one — leaves the pool and the records untouched.
     const tileMaterial = materials.getTileMaterial(value);
 
     const pooled = pool.pop();
@@ -1720,9 +1511,6 @@ export function createTileMeshFactory(
 
     const held = board;
     if (held !== null) {
-      // The cache re-dresses its materials in place, so these are already the
-      // right instances; they are reassigned so a cache that ever hands back a
-      // different instance is followed rather than silently ignored.
       held.field.material = materials.getBoardFieldMaterial();
 
       const plate = materials.getEmptyCellMaterial();
@@ -1828,8 +1616,7 @@ export function createTileMeshFactory(
   };
 
   // Follows the theme in force, so a palette switch rebinds every live mesh
-  // without a caller having to know it happened. A pinned material cache
-  // reports the same theme throughout, and the refresh is then a no-op.
+  // without a caller having to know it happened.
   releaseTheme = subscribeToThemeChange((): void => {
     refreshTheme();
   });

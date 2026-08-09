@@ -1,13 +1,21 @@
 // The hook bus: pickup-order dispatch of the six engine hooks.
 //
-// Supersedes the three-name publish/subscribe bus of
-// js/keyboard_input_manager.js L18-L32, whose `on()` appended a callback to
-// the array keyed by event name and whose `emit()` invoked each callback
-// inline with one argument, returning nothing. That append-and-invoke-inline
-// shape is carried forward, with four properties added:
+// This module reads no DOM, performs no I/O, consumes no randomness of its
+// own, reads no clock, and is synchronous throughout. Nothing it hands a
+// handler re-enters dispatch, and it branches on no subscriber identity.
 //
-// row TR-HOOKBUS-01 of docs/TRACEABILITY_MATRIX.md. Four properties are
-// row, TR-HOOKBUS-02 through TR-HOOKBUS-05, in the order below:
+// That superseded bus is row TR-HOOKBUS-01 of
+// docs/TRACEABILITY_MATRIX.md, and the four properties added to it are one
+// row each:
+//   TR-HOOKBUS-01  js/keyboard_input_manager.js L18-L32
+//                                the append-only `on` and the synchronous
+//                                in-order `emit` this bus supersedes
+//   TR-HOOKBUS-02  target-only row  pickup-order dispatch
+//   TR-HOOKBUS-03  target-only row  the charge guard, applied before a
+//                                   handler is reached
+//   TR-HOOKBUS-04  target-only row  per-subscriber error isolation
+//   TR-HOOKBUS-05  target-only row  the compounding payload protocol
+// The four are described in the order below:
 //
 //   pickup order      every subscriber carries a pickup-order index and
 //                     dispatch walks the subscribers bound to a hook in
@@ -17,8 +25,12 @@
 //                     dispatch is deferred until the walk returns.
 //   charge guard      a subscriber whose `charges` is present and not
 //                     above zero is skipped before its handler is
-//                     reached, and one deduction rule inside this module
-//                     is the only thing that writes a budget. It is
+//                     reached, on every hook `isChargeGuardedHook` of
+//                     ./hooks reports guarded — which is every hook but
+//                     the stage-preparation `onStageStart`, where a
+//                     subscriber reinstalls the standing rules its own
+//                     persisted state records. One deduction rule inside
+//                     this module is the only thing that writes a budget. It is
 //                     reached from `consumeCharge`, which a collaborator
 //                     calls, and from the per-handler commit below, which
 //                     spends what a handler asked for through
@@ -86,7 +98,10 @@
 // Decisions behind this file: DL-HOOKBUS-01, the charge guard living in
 // the bus; DL-HOOKBUS-02, the pickup-order index deciding dispatch order;
 // DL-HOOKBUS-03, the compounding return protocol in which a handler that
-// returns nothing leaves the payload as it stands; and DL-HOOKBUS-04, the
+// returns nothing leaves the payload as it stands; DL-HOOKBUS-04, the error
+// isolation that marks a throwing subscriber degraded and completes the
+// dispatch; and DL-HOOKBUS-05, the payload validation a return is measured
+// against.
 
 import type {
   HookContext,
@@ -102,12 +117,20 @@ import type {
   ReadonlyRulesView,
   ReadonlyTileView,
 } from './hooks';
-import { HOOK_NAMES } from './hooks';
+import { HOOK_NAMES, isChargeGuardedHook } from './hooks';
+import type {
+  EngineEventName,
+  EngineEventPayloadMap,
+  EngineEventSubscription,
+  EngineEvents,
+} from './engine-events';
+import { ENGINE_EVENT_NAMES, createEngineEvents } from './engine-events';
 import type { BoardEffect, BoardEffectTransaction } from './board-effects';
 import { INERT_BOARD_EFFECTS, openBoardEffects } from './board-effects';
 import type {
   CorrelationId,
   CorrelationSource,
+  EngineListenerErrorReport,
   EngineReporter,
   Position,
   SerializedGrid,
@@ -121,14 +144,6 @@ import {
   correlationReader,
 } from './types';
 
-
-/* --------------------------------------------------------------------------
- * Collaborator types, derived rather than imported
- * ----------------------------------------------------------------------- */
-
-// The rules object, the board and the substream table are named through
-// `HookEnvironment` and `ReadonlyRngView` instead of through their own
-// modules, so this file's import surface stays ./hooks and ./types.
 
 /** The rules in force, as `HookEnvironment` declares them. */
 type EnvironmentRules = HookEnvironment['config'];
@@ -172,8 +187,7 @@ const REMOVED_METRIC = 'engine.hook.subscriber.removed';
 const CHARGE_METRIC = 'engine.hook.charge.consumed';
 
 /**
- * Counter name for one injected tracing wrapper that failed and was
- * contained.
+ * Counter name for one injected tracing wrapper that failed and was contained.
  */
 const TRACING_FAULT_METRIC = 'engine.hook.tracing.fault';
 
@@ -182,6 +196,12 @@ const EFFECT_APPLIED_METRIC = 'engine.hook.effect.applied';
 
 /** Board and rules commands dropped with a refused or failed handler. */
 const EFFECT_DROPPED_METRIC = 'engine.hook.effect.dropped';
+
+/** Listeners registered by one `attachEvents` call, counted once per call. */
+const RELAY_ATTACHED_METRIC = 'engine.hook.events.attached';
+
+/** An `attachEvents` call naming an emitter this bus already relays. */
+const RELAY_REATTACHED_METRIC = 'engine.hook.events.reattached';
 
 /**
  * What is registered on the bus: the behavioural slice of the relic data
@@ -199,17 +219,14 @@ export interface HookSubscriber {
    * Position in pickup order, which is the ordering authority of every
    * dispatch. Absent on a subscriber appended to the end of the order, which
    * is the default path: the bus then assigns an index above every index it
-   * has assigned or been given. A value that is not a finite number is
-   * treated as absent.
+   * has assigned or been given.
    */
   readonly pickupOrder?: number;
 
   /**
-   * Charges remaining. Absent on a subscriber carrying no charge budget,
-   * which is never charge-guarded; present and not above zero, every handler
-   * of the subscriber is skipped. Written by `consumeCharge` and by the
-   * per-handler commit of a spend a handler requested through
-   * `HookContext.spendCharge`, and by nothing else on the bus.
+   * Charges remaining. Absent on a subscriber carrying no charge budget, which
+   * is never charge-guarded; present and not above zero, every handler of the
+   * subscriber is skipped.
    */
   readonly charges?: number;
 
@@ -234,8 +251,8 @@ export interface HookDispatchResult<K extends HookName> {
    * Charges this dispatch spent, across every handler it invoked.
    *
    * A budget-carrying handler pays what it asked for through
-   * `HookContext.spendCharge`, and one charge where it asked for nothing but had
-   * a board command accepted. Zero for a dispatch that changed nothing.
+   * `HookContext.spendCharge`, and one charge where it asked for nothing but
+   * had a board command accepted. Zero for a dispatch that changed nothing.
    */
   readonly chargesConsumed: number;
 
@@ -244,40 +261,26 @@ export interface HookDispatchResult<K extends HookName> {
    * return was accepted.
    *
    * Reported so a CALLER can tell a dispatch that reseated the board from one
-   * that only read it — the withdrawn-move-plus-undo pairing being the case that
-   * needs it — without reaching for the lattice itself.
+   * that only read it — the withdrawn-move-plus-undo pairing being the case
+   * that needs it — without reaching for the lattice itself.
    */
   readonly effectsApplied: number;
 
   /**
    * The commands this dispatch wrote, in the order they were written.
    *
-   * The count above answers "did anything change"; this answers "what". Carried
-   * so the engine can account for the write it does not itself make — the score
-   * a restore reinstates, and the reconciliation a resize forces on the win and
-   * loss checks — without inspecting the lattice for a difference.
+   * The count above answers "did anything change"; this answers "what".
+   * Carried so the engine can account for the write it does not itself make —
+   * the score a restore reinstates, and the reconciliation a resize forces on
+   * the win and loss checks — without inspecting the lattice for a difference.
    */
   readonly effects: readonly BoardEffect[];
 
-  /**
-   * Commands this dispatch REFUSED, across every handler it invoked.
-   *
-   * A refusal is not an error: an off-lattice cell, an occupied destination, an
-   * unsupported edge length or an undrawable weight list each change nothing and
-   * are reported here instead of raising out of the turn.
-   */
+  /** Commands this dispatch REFUSED, across every handler it invoked. */
   readonly effectsRefused: number;
 }
 
-/**
- * The outcome of one `consumeCharge` call.
- *
- * `held` and `limited` separate the three states a caller distinguishes
- * without consulting the subscriber: an identifier that is not registered
- * reports `held: false`; a registered subscriber carrying no charge budget
- * reports `limited: false`; and a charge-carrying subscriber reports both as
- * `true` with `remaining` present.
- */
+/** The outcome of one `consumeCharge` call. */
 export interface ChargeConsumption {
   readonly held: boolean;
   readonly limited: boolean;
@@ -285,8 +288,8 @@ export interface ChargeConsumption {
 
   /**
    * Charges the subscriber holds after the call: a whole number at or above
-   * zero. Absent on an unregistered identifier and on a subscriber carrying
-   * no charge budget.
+   * zero. Absent on an unregistered identifier and on a subscriber carrying no
+   * charge budget.
    */
   readonly remaining?: number | undefined;
 }
@@ -347,15 +350,41 @@ export interface HookBusMetrics {
   readonly subscribers: readonly HookSubscriberMetrics[];
 }
 
-/* --------------------------------------------------------------------------
- * Bus
- * ----------------------------------------------------------------------- */
-
 /**
- * The bus. Frozen: the eight members below are its whole surface, and it
+ * The bus. Frozen: the ten members below are its whole surface, and it
  * exposes no way to reach itself from a handler.
  */
 export interface HookBus {
+  /**
+   * The shared event channel every NON-RELIC peer subscribes to: the renderer,
+   * the screen flow and the observability layer.
+   *
+   * Carries the seven engine events under their own names and payloads, each
+   * relayed from the emitter `attachEvents` was given, BY REFERENCE and
+   * unwrapped. A payload a peer receives here is the object the engine emitted.
+   *
+   * Emits nothing of its own: an event reaches this channel only because a
+   * relayed source emitted it. A peer that throws is contained, reported
+   * through the injected reporter's listener channel, and the remaining peers
+   * still receive the event. DL-HOOKBUS-06.
+   */
+  readonly events: EngineEvents;
+
+  /**
+   * Relays one emitter's seven events onto `events`, which is what makes this
+   * bus the one channel relics and peers share.
+   *
+   * Registers one listener per name in `ENGINE_EVENT_NAMES` on `source`, in
+   * that order, and re-emits each payload unchanged. Because those listeners
+   * are appended in one call, a peer's position relative to a listener
+   * registered DIRECTLY on `source` is decided by when this call was made.
+   *
+   * @param source Emitter to relay. The engine's own, in the composed app.
+   * @returns A handle removing every listener this call registered. Calling it
+   *   more than once removes nothing further.
+   */
+  attachEvents(source: EngineEvents): EngineEventSubscription;
+
   /**
    * Registers a subscriber. One carrying no `pickupOrder` is appended to the
    * end of pickup order, which is the default path; one carrying a finite
@@ -369,9 +398,7 @@ export interface HookBus {
 
   /**
    * Removes a subscriber. Removing an identifier that is not held changes
-   * nothing and reports `false`, so a repeated call is safe. A removal made
-   * while a dispatch is walking takes effect within that walk: the
-   * subscriber's remaining handlers are skipped.
+   * nothing and reports `false`, so a repeated call is safe.
    */
   unregister(id: string): boolean;
 
@@ -400,12 +427,6 @@ export interface HookBus {
    * deduction rule — the other being the per-handler commit, which spends what
    * a handler requested through `HookContext.spendCharge`.
    *
-   * Deducts at most the charges the subscriber holds, so the budget never
-   * falls below zero and a call against a spent budget deducts nothing. A
-   * stored budget that is not a whole number at or above zero is normalised
-   * to ZERO as it is read, so an invalid budget is spent rather than
-   * replenished.
-   *
    * @param amount Charges to deduct. Rounded towards zero and clamped to
    *   zero from below; defaults to `1`.
    */
@@ -413,16 +434,16 @@ export interface HookBus {
 
   /**
    * Reads the identifiers of the registrations marked degraded, in pickup
-   * order. A registration is marked when one of its handlers throws and
-   * stays marked for the rest of its registration; registering the
-   * identifier again after removing it clears the mark.
+   * order. A registration is marked when one of its handlers throws and stays
+   * marked for the rest of its registration; registering the identifier again
+   * after removing it clears the mark.
    */
   degraded(): readonly string[];
 
   /**
    * Reads the subscriptions bound to one hook, in pickup order, including
-   * those of a degraded registration, which `degraded()` reports separately.
-   * The array is frozen and built fresh on each call, and its `charges` and
+   * those of a degraded registration, which `degraded` reports separately. The
+   * array is frozen and built fresh on each call, and its `charges` and
    * `state` members carry the subscriber's values as at the call.
    */
   subscriptions<K extends HookName>(
@@ -431,8 +452,7 @@ export interface HookBus {
 
   /**
    * Reads the registered subscribers in pickup order: a frozen array built
-   * fresh on each call, whose elements are the registered objects
-   * themselves.
+   * fresh on each call, whose elements are the registered objects themselves.
    */
   subscribers(): readonly HookSubscriber[];
 
@@ -446,23 +466,6 @@ export interface HookBus {
 /**
  * The two wrappers a caller may inject to measure this bus's boundaries: one
  * per dispatch, and one per handler invocation inside it.
- *
- * Declared HERE and satisfied structurally, so no module under src/engine imports
- * src/observability: `BoundaryTracing` of src/observability/tracer.ts is
- * assignable to this interface, and the composition root is what connects the
- * two. Each wrapper receives a synchronous function it is expected to call
- * exactly once and to return the value of, so a wrapper is a measurement and
- * never a transformation. Either wrapper may be absent, in which case that
- * boundary runs directly.
- *
- * A wrapper that throws, one that returns without calling the function it was
- * given, one that calls it more than once, and one that returns a value of its
- * own are all contained: the wrapped work runs EXACTLY ONCE and the value and
- * the throw the bus acts on are the work's own, so no wrapper can suppress,
- * repeat or substitute a dispatch or a handler invocation. This bus's no-throw
- * guarantee does not depend on the caller's instrumentation behaving, and a
- * contained fault is counted under `engine.hook.tracing.fault`. Decision
- * DL-HOOKBUS-05.
  */
 export interface HookDispatchTracing {
   /** Wraps one whole dispatch of one hook. */
@@ -481,16 +484,9 @@ export type HookBusTracing = HookDispatchTracing;
 
 export interface HookBusOptions {
   /**
-   * Correlation identifier of the run, carried into every report and
-   * every dispatch context. Injected, never derived here: the one
-   * authority is `deriveCorrelationId` in src/observability/logger.ts.
-   * Defaults to the empty string.
-   *
-   * A READER IS ACCEPTED: pass a function and every report resolves the
-   * identifier at the moment it is made, so a bus that outlives the run it
-   * was built for reports under the run that is actually playing rather than
-   * under the first one. A string pins one identifier, which is what a caller
-   * with one run per page passes.
+   * Correlation identifier of the run, carried into every report and every
+   * dispatch context. Injected, never derived here: the one authority is
+   * `deriveCorrelationId` in src/observability/logger.ts.
    */
   readonly correlationId?: CorrelationSource;
 
@@ -502,8 +498,8 @@ export interface HookBusOptions {
 
   /**
    * Spans the dispatch and each handler are run inside. Absent by default, in
-   * which case the bus runs them directly, traces nothing and behaves exactly as
-   * it does uninstrumented — which is what keeps this module free of any
+   * which case the bus runs them directly, traces nothing and behaves exactly
+   * as it does uninstrumented — which is what keeps this module free of any
    * observability dependency.
    */
   readonly tracing?: HookDispatchTracing;
@@ -557,8 +553,7 @@ interface SubscriberCounterRow extends HandlerCounterRow {
 /**
  * A registration as the bus holds it. `pickupIndex` and `sequence` are fixed
  * at registration, so a subscriber's position and tie-break survive the
- * removal of an earlier one. `degraded` and `removed` are the two flags
- * dispatch reads.
+ * removal of an earlier one.
  */
 interface Registration {
   readonly id: string;
@@ -575,16 +570,7 @@ function isHandler(value: unknown): boolean {
   return typeof value === 'function';
 }
 
-/* --------------------------------------------------------------------------
- * State ownership
- * ----------------------------------------------------------------------- */
-
-/**
- * Nesting depth a state slot is copied to. A slot is JSON data that the run
- * envelope persists, so it has a finite depth by contract; the bound is what
- * makes the copy terminate on any input, a cycle included. A branch deeper
- * than this is dropped rather than aliased.
- */
+/** Nesting depth a state slot is copied to. */
 const MAX_STATE_DEPTH = 8;
 
 /** Members one level of a state slot will carry. */
@@ -592,19 +578,6 @@ const MAX_STATE_MEMBERS = 256;
 
 /**
  * Copies one state slot, all the way down.
- *
- * THE STATE-OWNERSHIP BOUNDARY. A slot is JSON data — the run envelope
- * persists it — so a copy of it is a copy in full, and the bus holds a slot no
- * caller and no handler shares an object with. Previously the slot was taken
- * over BY REFERENCE at registration and handed to the context by reference, so
- * a handler that wrote into a nested member and then threw left that write
- * behind: the reassignment was rolled back, the mutation was not. Copying at
- * every crossing is what makes the rollback total.
- *
- * A value JSON cannot carry — a function, a symbol, `undefined` inside an
- * object — is dropped exactly as `JSON.stringify` would drop it, so a slot
- * that survives a copy is a slot that survives persistence. `NaN` and the
- * infinities are kept as they are, because the slot is not serialised here.
  *
  * @param value Slot to copy.
  * @param depth Levels already descended.
@@ -665,8 +638,7 @@ function copyState(value: unknown, depth = 0): unknown {
 /**
  * Reports whether a handler table is usable: at least one of the six names of
  * `HOOK_NAMES` bound to a callable value, and none of them bound to a value
- * that is neither callable nor absent. A member under any other key is
- * neither required to be callable nor counted.
+ * that is neither callable nor absent.
  */
 function isUsableTable(hooks: unknown): boolean {
   if (typeof hooks !== 'object' || hooks === null) {
@@ -694,8 +666,8 @@ function isUsableTable(hooks: unknown): boolean {
 }
 
 /**
- * Reports whether a handler's return value is accepted as the payload the
- * next handler receives: a non-null object that is not an array.
+ * Reports whether a handler's return value is accepted as the payload the next
+ * handler receives: a non-null object that is not an array.
  */
 function copyHandlerTable(hooks: HookHandlerTable): HookHandlerTable {
   const copy: Record<string, unknown> = {};
@@ -712,8 +684,8 @@ function copyHandlerTable(hooks: HookHandlerTable): HookHandlerTable {
 }
 
 /**
- * Reports whether `value` is a plain object: an object that is neither
- * `null` nor an array.
+ * Reports whether `value` is a plain object: an object that is neither `null`
+ * nor an array.
  *
  * @param value Value to test.
  * @returns `true` for a plain object.
@@ -745,13 +717,8 @@ function isNonNegativeInteger(value: unknown): boolean {
 }
 
 /**
- * Reports whether a candidate payload carries exactly the named members
- * and no others.
- *
- * Extension with no vanilla source. Own enumerable keys are compared
- * against the declared set, so a member the payload type does not declare
- * refuses the return: a handler extends behaviour through its own `state`
- * slot, never by widening a payload the engine reads back.
+ * Reports whether a candidate payload carries exactly the named members and no
+ * others.
  *
  * @param value Candidate payload.
  * @param required Members every payload of the hook carries.
@@ -806,8 +773,8 @@ function isCellPosition(value: unknown, size: number): boolean {
  * Reports whether `value` is one of the four declared move directions.
  *
  * @param value Candidate direction.
- * @returns `true` for `DIRECTION_UP`, `DIRECTION_RIGHT`, `DIRECTION_DOWN`
- *   or `DIRECTION_LEFT`.
+ * @returns `true` for `DIRECTION_UP`, `DIRECTION_RIGHT`, `DIRECTION_DOWN` or
+ *   `DIRECTION_LEFT`.
  */
 function isDirection(value: unknown): boolean {
   return (
@@ -819,8 +786,7 @@ function isDirection(value: unknown): boolean {
 }
 
 /**
- * Reports whether `value` is the stage goal shape the payload declares:
- * `{ kind, target }` with a string kind and a finite target.
+ * Reports whether `value` is the stage goal shape the payload declares.
  *
  * @param value Candidate goal.
  * @returns `true` for that shape.
@@ -835,22 +801,12 @@ function isStageGoalShape(value: unknown): boolean {
 }
 
 /**
- * Validates a handler's return against the exact payload the hook
- * declares.
- *
- * Extension with no vanilla source, and the whole of it: a return the
- * engine reads back is measured member by member. Every member the type
- * declares must be present with the right kind and, where it is numeric,
- * finite and in range; nothing the type does not declare may be present;
- * and every member that arrived as a live object — the board on
- * `onBeforeMove` and `onAfterMove`, the two tiles on `onMerge` — must be
- * the same object it arrived as, so a handler transforms a payload's
- * values and never substitutes what the engine is holding.
+ * Validates a handler's return against the exact payload the hook declares.
  *
  * @param hook Hook being dispatched.
  * @param candidate Value the handler returned.
- * @param dispatched Payload the handler was given, read for the
- *   identities the return has to preserve.
+ * @param dispatched Payload the handler was given, read for the identities
+ *   the return has to preserve.
  * @param environment The collaborators in force, read for the board.
  * @returns `true` when the candidate is that hook's payload exactly.
  */
@@ -918,10 +874,10 @@ function isValidPayload<K extends HookName>(
       const position: unknown = candidate.position;
       const count: unknown = candidate.count;
 
-      // SHAPE AND BOUNDS, NOT VACANCY. The board effects recorded during this
-      // same dispatch are applied after the return is adopted, so a cell that is
-      // empty while this runs can be occupied by the time the spawn inserts:
-      // occupancy is therefore tested at the insertion boundary in
+      // Shape and bounds, not vacancy. The board effects recorded during this
+      // same dispatch are applied after the return is adopted, so a cell that
+      // is empty while this runs can be occupied by the time the spawn
+      // inserts: occupancy is therefore tested at the insertion boundary in
       // src/engine/engine.ts, which is the last point before the write, and an
       // occupied cell suppresses the spawn there.
       return (
@@ -929,10 +885,7 @@ function isValidPayload<K extends HookName>(
         (position === undefined || isCellPosition(position, size)) &&
         isFiniteNumber(candidate.value) &&
         candidate.value > 0 &&
-        // The count is the number of tiles the spawn inserts. A whole number at
-        // or above one, or absent; the engine clamps it to the cells the board
-        // has left, so an unreachably large count is legal and simply fills the
-        // board.
+        // The count is the number of tiles the spawn inserts.
         (count === undefined ||
           (isFiniteNumber(count) && Number.isInteger(count) && count >= 1))
       );
@@ -951,12 +904,7 @@ function isValidPayload<K extends HookName>(
           'terminated',
         ]) &&
         typeof candidate.moved === 'boolean' &&
-        // INVARIANT, exactly as src/engine/hooks.ts declares it. Without this a
-        // handler could return `moved: false` for a move that had already
-        // resolved and the engine would emit that on `move:after` — a granular
-        // event contradicting the commit beside it. Enforcing it here refuses
-        // the whole return, which is what keeps a handler to transforming what
-        // it is allowed to transform.
+        // INVARIANT, exactly as src/engine/hooks.ts declares it.
         candidate.moved === original.moved &&
         candidate.board === original.board &&
         isFiniteNumber(candidate.score) &&
@@ -986,19 +934,11 @@ function isValidPayload<K extends HookName>(
 /**
  * Projects one dispatch-input payload onto the payload handlers see.
  *
- * Extension with no vanilla source. The live `Grid` of `onBeforeMove` and
- * `onAfterMove` is replaced by `readonlyGridView`, and the two live `Tile`s of
- * `onMerge` by `readonlyTileView`; every other member is carried across
- * unchanged. Called ONCE per dispatch, before the first handler, so all
- * handlers of one dispatch share one view object per member and the identity
- * checks of `isValidPayload` compare against that shared object rather than a
- * per-handler rebuild.
- *
  * @param hook Hook being dispatched.
  * @param payload Payload the caller supplied, carrying live engine objects.
- * @param board The board view built for this dispatch, reused as the payload's
- *   `board` so a handler reads the same view through the payload and through
- *   its context.
+ * @param board The board view built for this dispatch, reused as the
+ *   payload's `board` so a handler reads the same view through the payload and
+ *   through its context.
  * @returns The payload handlers receive.
  */
 function viewedPayload<K extends HookName>(
@@ -1028,13 +968,6 @@ function viewedPayload<K extends HookName>(
 
 /**
  * Copies one payload for one handler.
- *
- * Extension with no vanilla source. Shallow over the declared members, so the
- * frozen board view and the two frozen tile views `viewedPayload` substituted
- * travel by reference — they carry no write of any kind — while the plain-data
- * members a handler might rewrite in place — `goal` and `position` — are
- * rebuilt. The handler therefore writes into a payload of its own, and the
- * bus decides whether that payload is adopted.
  *
  * @param hook Hook being dispatched.
  * @param payload Payload to copy.
@@ -1066,10 +999,6 @@ function copyPayload<K extends HookName>(
 /**
  * Reports whether a charge budget is spent.
  *
- * An absent budget is unlimited. A present budget is spent unless it is
- * a number above zero, which covers zero, negative and non-finite
- * values.
- *
  * @param charges Budget carried by the subscriber.
  * @returns `true` when the handler is to be skipped.
  */
@@ -1093,12 +1022,6 @@ function normaliseCharges(value: number): number {
 /**
  * Projects the rules in force to the frozen view a handler reads.
  *
- * Extension with no vanilla source. Built once per dispatch, so each
- * dispatch reads the rule values in force at that moment — `boardSize`
- * included, which is the value a board-mutating relic may have changed
- * during the run. The two merge members are the configured functions
- * themselves: calling one reads its operands and mutates neither.
- *
  * @param config Rules in force.
  * @returns The frozen view.
  */
@@ -1120,18 +1043,6 @@ function readonlyRulesView(config: EnvironmentRules): ReadonlyRulesView {
 
 /**
  * Builds the frozen query facade a handler reads the board through.
- *
- * Extension with no vanilla source. Every method delegates to the live
- * board, so a read resolves against the board as it stands; `size` is a
- * getter for the same reason. `insertTile`, `removeTile`, the `cells`
- * matrix and the live `Tile` objects are absent, and `cellValue` returns a
- * face value where `Grid.cellContent` returns the tile itself.
- *
- * EXPORTED because the same facade is what `BeforeMovePayload.board` and
- * `AfterMovePayload.board` carry: src/engine/engine.ts builds one when it
- * assembles those two payloads, so a handler reaches the board through this
- * surface whether it reads the payload or the context, and through the live
- * lattice through neither.
  *
  * @param grid Live board.
  * @returns The frozen facade.
@@ -1170,24 +1081,11 @@ function readonlyGridView(grid: EnvironmentGrid): ReadonlyGridView {
   return Object.freeze(view);
 }
 
-/**
- * One live tile, as the merge dispatch payload declares it.
- *
- * Named through `HookDispatchPayloadMap` rather than by importing `Tile`, for
- * the same reason the three collaborator types above are derived: this module
- * declares no engine class of its own.
- */
+/** One live tile, as the merge dispatch payload declares it. */
 type DispatchTile = HookDispatchPayloadMap['onMerge']['source'];
 
 /**
  * Builds the frozen projection a handler reads one tile through.
- *
- * Extension with no vanilla source. The three coordinates are READ AT
- * PROJECTION TIME, not delegated: a merge's two tiles are already out of
- * `grid.cells` when `onMerge` dispatches, so their values are settled and a
- * snapshot of them cannot go stale within the dispatch. `previousPosition` is
- * copied into a fresh frozen pair, so writing through it reaches nothing, and
- * `savePosition`, `updatePosition` and `mergedFrom` are absent.
  *
  * @param tile Live tile.
  * @returns The frozen projection.
@@ -1210,11 +1108,6 @@ function readonlyTileView(tile: DispatchTile): ReadonlyTileView {
  * Projects a merge payload's tile member where it is a tile, and carries the
  * member across untouched where it is not.
  *
- * The bus reports rather than throws, and a caller can force a mistyped
- * dispatch input past the type system. A member that is not an object is
- * therefore left as it is and refused later by `isValidPayload`, exactly as it
- * was before the views were introduced.
- *
  * @param candidate Value the payload carried.
  * @returns The frozen projection, or `candidate` unchanged.
  */
@@ -1236,36 +1129,21 @@ interface RngTransaction {
 
   /**
    * Adopts the draws the handler took, advancing each real substream by the
-   * number of draws its fork consumed. Because a fork shares its substream's
-   * seed and position, replaying that many draws reproduces the values the
-   * handler already received, so the run's sequence lands exactly where a
-   * direct draw would have left it.
+   * number of draws its fork consumed.
    */
   commit(): void;
 
   /**
    * Abandons the draws the handler took. The forks are dropped and no real
-   * substream has moved, so a handler that drew and then threw has consumed
-   * no randomness and the sequences the engine and every later handler read
-   * are unchanged.
+   * substream has moved, so a handler that drew and then threw has consumed no
+   * randomness and the sequences the engine and every later handler read are
+   * unchanged.
    */
   rollback(): void;
 }
 
 /**
  * Opens one handler's randomness transaction over the run's substreams.
- *
- * THE RANDOMNESS BOUNDARY. `stream` hands back a FORK of the named substream
- * rather than the substream itself, memoised so the instance-stability
- * contract holds within one dispatch: a handler that addresses one name twice
- * draws from one fork. The real substreams are advanced only by `commit()`.
- * Previously the facade returned the live substream, so a draw taken before a
- * throw stayed consumed and shifted every later spawn — which is what made a
- * failed handler able to change a seeded run.
- *
- * `snapshotCursors` reports the fork's position for a substream the handler
- * has drawn from and the real position for the rest, so a handler observes its
- * own consumption.
  *
  * @param rng The run's substreams.
  * @returns The transaction.
@@ -1332,10 +1210,6 @@ function openRngTransaction(rng: EnvironmentRng): RngTransaction {
 /**
  * A transaction that records nothing and resolves to nothing, for a dispatch
  * whose environment carries no usable board or no usable rules.
- *
- * A caller can force a malformed environment past the type system, and the
- * board-effect queue would otherwise be the one context member able to raise
- * on such a dispatch. This keeps every member of the context safe to call.
  */
 const INERT_EFFECT_TRANSACTION: BoardEffectTransaction = Object.freeze({
   queue: INERT_BOARD_EFFECTS,
@@ -1346,15 +1220,11 @@ const INERT_EFFECT_TRANSACTION: BoardEffectTransaction = Object.freeze({
 /**
  * Opens one handler's board-effect transaction over the dispatch environment.
  *
- * The live board is BOTH the projection source and the write target: the queue
- * projects it once, on the handler's first command or query, and writes back to
- * it only on commit.
- *
  * @param environment The dispatch's live collaborators.
- * @param hook Hook being dispatched, which decides which of the two write bands
- *   the queue accepts.
- * @returns The transaction, or the inert one where the environment carries no
- *   board with a `serialize` member or no rules object.
+ * @param hook Hook being dispatched, which decides which of the two write
+ *   bands the queue accepts.
+ * @returns The transaction, or the inert one where the environment carries
+ *   no board with a `serialize` member or no rules object.
  */
 function openEffectTransaction(
   environment: HookEnvironment,
@@ -1374,11 +1244,7 @@ function openEffectTransaction(
   }
 
   // `onMerge` is dispatched from inside the move walk, so its queue refuses
-  // every cell write and accepts the two rules commands alone. `onSpawn` is
-  // dispatched from `addRandomTile()` with a position already drawn, so it
-  // accepts the three cell-local commands — an extra tile is what a spawn relic
-  // is for — and refuses the two that rebuild the whole lattice underneath the
-  // spawn in flight. Every other hook writes freely.
+  // every cell write and accepts the two rules commands alone.
   return openBoardEffects(grid, grid, config, {
     lattice: hook !== 'onMerge',
     rebuild: hook !== 'onMerge' && hook !== 'onSpawn',
@@ -1390,8 +1256,7 @@ function openEffectTransaction(
  *
  * @param requested Index the subscriber declared, where it declared one.
  * @param appended Index the bus assigns to an appended subscriber.
- * @returns `requested` when it is a finite number, and `appended`
- *   otherwise.
+ * @returns `requested` when it is a finite number, and `appended` otherwise.
  */
 function resolvePickupIndex(
   requested: number | undefined,
@@ -1402,11 +1267,7 @@ function resolvePickupIndex(
     : appended;
 }
 
-/**
- * Orders two registrations by pickup index, then by registration sequence.
- * Both keys are finite numbers assigned by the bus and the sequence is
- * unique, so the order this produces is total.
- */
+/** Orders two registrations by pickup index, then by registration sequence. */
 function byPickupOrder(left: Registration, right: Registration): number {
   return left.pickupIndex === right.pickupIndex
     ? left.sequence - right.sequence
@@ -1488,11 +1349,6 @@ function freezeSubscriberMetrics(
 /** Text reported for a caught value that offered nothing readable. */
 const UNREADABLE_THROWN = 'unreadable thrown value';
 
-/**
- * Reads text from a caught value: its message where it is an `Error`, the
- * value itself where it is a string, its string form where it has one, and a
- * fixed placeholder otherwise.
- */
 function describeError(value: unknown): string {
   if (typeof value === 'string') {
     return value;
@@ -1547,19 +1403,12 @@ const UNLIMITED_CONSUMPTION: ChargeConsumption = Object.freeze({
  */
 export function createHookBus(options: HookBusOptions = {}): HookBus {
   // A READER, not a captured value: `HookBusOptions.correlationId` may be a
-  // shared scope, and every report below reads it at report time. A page load
-  // can play more than one run, and a captured value keeps attributing to the
-  // first of them.
+  // shared scope, and every report below reads it at report time.
   const readCorrelationId = correlationReader(options.correlationId);
   const reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
   const tracing = options.tracing;
 
-  /**
-   * Registrations held now, kept in pickup order by `byPickupOrder`.
-   *
-   * `register` inserts at the position that order gives rather than appending,
-   * so every walk reads this array as it stands and no walk sorts.
-   */
+  /** Registrations held now, kept in pickup order by `byPickupOrder`. */
   const registrations: Registration[] = [];
 
   /**
@@ -1576,8 +1425,8 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   const hookRows = new Map<HookName, HookCounterRow>();
 
   /**
-   * Counter rows keyed by subscriber identifier, created on first use and
-   * kept after the subscriber is removed.
+   * Counter rows keyed by subscriber identifier, created on first use and kept
+   * after the subscriber is removed.
    */
   const subscriberRows = new Map<string, SubscriberCounterRow>();
 
@@ -1629,31 +1478,8 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
    * injected.
    *
    * The wrapper is expected to call `body` once and to return its value.
-   * `body` RUNS EXACTLY ONCE whatever the wrapper does, and the value and the
-   * throw a caller sees are the body's own:
-   *
-   *   the body throws        the throw is rethrown as it stands and the body is
-   *                          NOT run again, whether the wrapper propagated the
-   *                          throw or swallowed it. A retry re-entered the work
-   *                          inside a transaction that was already open, so a
-   *                          second attempt could commit a second set of draws,
-   *                          board commands, state and charge requests.
-   *   the wrapper throws
-   *   on its own account     a completed body's value is returned, and a body
-   *                          the wrapper never started is run directly.
-   *   the wrapper never
-   *   calls the body         the body is run directly, rather than the wrapper's
-   *                          own return value standing in for work that never
-   *                          happened.
-   *   the wrapper calls the
-   *   body more than once    the first outcome is replayed — the held value, or
-   *                          the held throw — and the body is not re-entered.
-   *   the wrapper returns
-   *   something else         the body's value is returned, so a wrapper is a
-   *                          measurement and never a transformation.
-   *
-   * Every contained wrapper fault is counted under `engine.hook.tracing.fault`.
-   * Decision DL-HOOKBUS-05.
+   * `body` runs exactly once whatever the wrapper does, and the value and the
+   * throw a caller sees are the body's own.
    *
    * @param wrap The injected wrapper, or `undefined`.
    * @param hook Hook the work belongs to, carried into the fault count.
@@ -1805,23 +1631,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   };
 
   /**
-   * Counts the board and rules commands one handler's transaction resolved to,
-   * and says nothing at all for a handler that recorded none — which is every
-   * handler that only reads.
-   *
-   * @param metric Counter the amount is added to.
-   * @param hook Hook the commands were recorded under.
-   * @param resolved How many commands were written or dropped.
-   */
-
-  /**
    * Deducts charges from one registration, and is the ONE writer of `charges`.
-   *
-   * Both `consumeCharge()` and the dispatch walk's own spend go through here, so
-   * the ledger, the per-subscriber row and the counter cannot diverge between
-   * the two paths. Deducts at most what the registration holds, and normalises a
-   * stored budget that is not a whole number at or above zero to zero, so an
-   * invalid budget is spent rather than replenished.
    *
    * @param registration Registration to deduct from. Must carry a budget.
    * @param amount Charges to deduct.
@@ -1849,6 +1659,15 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     return taken;
   };
 
+  /**
+   * Counts the board and rules commands one handler's transaction resolved to,
+   * and says nothing at all for a handler that recorded none — which is every
+   * handler that only reads.
+   *
+   * @param metric Counter the amount is added to.
+   * @param hook Hook the commands were recorded under.
+   * @param resolved How many commands were written or dropped.
+   */
   const countEffects = (
     metric: string,
     hook: HookName,
@@ -1896,8 +1715,8 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     );
 
   /**
-   * Reads the registrations still held, skipping any whose removal is
-   * deferred behind a dispatch in progress.
+   * Reads the registrations still held, skipping any whose removal is deferred
+   * behind a dispatch in progress.
    *
    * @returns A fresh array on each call, in pickup order.
    */
@@ -1950,12 +1769,6 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   /**
    * Reads the registrations in pickup order.
    *
-   * The array itself: `insertOrdered` keeps it in the order `byPickupOrder`
-   * gives, and `applyOrDefer` keeps it stable for the length of a dispatch, so
-   * neither a copy nor a sort is taken per walk. The pickup index remains the
-   * ordering authority; the position a registration holds in the array is the
-   * expression of it rather than a second source.
-   *
    * @returns The live array, in pickup order.
    */
   const ordered = (): readonly Registration[] => registrations;
@@ -1999,13 +1812,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   };
 
   /**
-   * Builds the read-only snapshot of one registration `subscribers()`
-   * returns.
-   *
-   * Extension with no vanilla source. Frozen, and carrying the bus's own
-   * `charges` and a COPY of its `state` as at the call, so a caller reads
-   * the registration it made rather than reaching the object the bus
-   * dispatches from — and writing into what it reads reaches neither.
+   * Builds the read-only snapshot of one registration `subscribers` returns.
    *
    * @param registration Registration to read.
    * @returns The frozen snapshot.
@@ -2020,14 +1827,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     });
 
   /**
-   * THE ONE PATH THAT WRITES A CHARGE BUDGET.
-   *
-   * Reached from two callers and no others: `consumeCharge`, which a collaborator
-   * calls directly, and the dispatch's per-handler commit, which spends the
-   * charge a handler requested through `HookContext.spendCharge` once its return
-   * has been accepted. Both spend through here, so the deduction rule — at most
-   * the budget held, so it never falls below zero, and a stored budget that is
-   * not a whole number at or above zero read as ZERO — is written once.
+   * The one path that writes A CHARGE BUDGET.
    *
    * @param id Subscriber to deduct from.
    * @param amount Charges to deduct.
@@ -2044,9 +1844,9 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       return UNLIMITED_CONSUMPTION;
     }
 
-    // Written by `spend` and by nothing else, so the ledger, the per-subscriber
-    // row and the counter cannot diverge between a manual activation and a
-    // handler's own request.
+    // Written by `spend` and by nothing else, so the ledger, the
+    // per-subscriber row and the counter cannot diverge between a manual
+    // activation and a handler's own request.
     const taken = spend(registration, amount);
 
     return Object.freeze({
@@ -2057,7 +1857,80 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     });
   };
 
+  /* ------------------------------------------------------------------------
+   * The shared event channel
+   * ---------------------------------------------------------------------- */
+
+  /**
+   * The channel peers subscribe to.
+   *
+   * Constructed with a reporter carrying the LISTENER CHANNEL ALONE: a relayed
+   * event is already counted by the emitter that emitted it, and a second count
+   * here would double every `engine.event.emit`. A peer that throws is still
+   * reported, because containment that reports nothing is indistinguishable
+   * from a peer that never ran. DL-HOOKBUS-06.
+   */
+  const relayReporter: EngineReporter = Object.freeze({
+    onListenerError: (report: EngineListenerErrorReport): void => {
+      deliver((): void => {
+        reporter.onListenerError?.(report);
+      });
+    },
+  });
+
+  const events = createEngineEvents({
+    correlationId: options.correlationId,
+    reporter: relayReporter,
+  });
+
+  /** Emitters already relayed, so a repeated attach registers no second set. */
+  const relayed = new Set<EngineEvents>();
+
+  const attachEvents = (source: EngineEvents): EngineEventSubscription => {
+    if (relayed.has(source)) {
+      count(RELAY_REATTACHED_METRIC);
+
+      return (): void => {
+        // Nothing was registered: the source was already relayed, and the
+        // handle of the call that registered it is the one that removes it.
+        return;
+      };
+    }
+
+    relayed.add(source);
+
+    // One listener per name, appended in `ENGINE_EVENT_NAMES` order. The
+    // payload is passed on as it arrived: the board, the tiles and the score
+    // travel by reference exactly as they do on the source.
+    const releases: EngineEventSubscription[] = ENGINE_EVENT_NAMES.map(
+      <K extends EngineEventName>(name: K): EngineEventSubscription =>
+        source.on(name, (payload: EngineEventPayloadMap[K]): void => {
+          events.emit(name, payload);
+        }),
+    );
+
+    count(RELAY_ATTACHED_METRIC, undefined, releases.length);
+
+    let released = false;
+
+    return (): void => {
+      if (released) {
+        return;
+      }
+
+      released = true;
+      relayed.delete(source);
+
+      for (const release of releases) {
+        release();
+      }
+    };
+  };
+
   return Object.freeze({
+    events,
+    attachEvents,
+
     register(subscriber: HookSubscriber): boolean {
       const id: unknown = subscriber.id;
 
@@ -2078,12 +1951,6 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
         nextPickupIndex,
       );
 
-      // The record is built from the subscriber rather than holding it:
-      // the identifier and the handler table are copied out and the table
-      // is frozen, the charge budget is taken over by the bus, and the
-      // state slot is COPIED all the way down, so a later edit to the
-      // caller's object — at any depth — changes neither what a dispatch
-      // invokes, what a report names, nor what a rollback restores.
       const registration: Registration = {
         id,
         hooks: copyHandlerTable(subscriber.hooks),
@@ -2144,7 +2011,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
       environment: HookEnvironment,
     ): HookDispatchResult<K> {
       // The walk below is the dispatch; this member is the injected wrapper's
-      // seam around it. With no wrapper injected the call is direct.
+      // seam around it.
       const traceDispatchBoundary = tracing?.traceHookDispatch;
       const wrap =
         typeof traceDispatchBoundary === 'function'
@@ -2161,27 +2028,9 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
         // The board is projected once per dispatch and frozen: every member
         // delegates to the live lattice, so one facade reports the board as it
         // stands however many handlers have written to it.
-        //
-        // The rules are projected PER HANDLER, because `readonlyRulesView`
-        // copies its values rather than delegating and a handler's recorded
-        // effect can substitute the merge predicate, the spawn weights or the
-        // board size. A facade built once per dispatch would report the rules
-        // the dispatch opened with to every handler after the first one that
-        // changed them.
-        //
-        // Randomness and the board-effect queue are per handler for the same
-        // reason as each other: both are transactional, and both are resolved
-        // with the handler's return.
         const board = readonlyGridView(environment.grid);
 
-        // The payload as the last handler that returned and validated left
-        // it. A handler that throws, or returns something that is not this
-        // hook's payload, leaves it where it stood.
-        //
-        // The live board and the live merge tiles are replaced by the frozen
-        // views here, once, before any handler runs: from this point on nothing
-        // reachable through the payload can write engine state, so a handler
-        // that mutates and then throws has nothing left behind to roll back.
+        // The payload as the last handler that returned and validated left it.
         let accumulated = viewedPayload(hook, payload, board);
         let invoked = 0;
         let skipped = 0;
@@ -2192,9 +2041,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
         let effectsRefused = 0;
         const appliedEffects: BoardEffect[] = [];
 
-        // Order and membership are read once, ahead of the walk. A
-        // registration added during the walk is reached by the next dispatch;
-        // one removed during it is skipped by this one.
+        // Order and membership are read once, ahead of the walk.
         const walking = ordered();
 
         dispatchDepth += 1;
@@ -2225,8 +2072,16 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
 
             const charges = subscription.charges;
 
-            // The charge guard.
-            if (isChargeSpent(charges)) {
+            // THE CHARGE GUARD, and the one place a spent budget withholds a
+            // handler. It is withheld from the hooks that ACT inside a stage and
+            // not from the ones that PREPARE one: `STANDING_HOOK_NAMES` of
+            // ./hooks names the second set, and `onStageStart` is its only
+            // member, so a subscriber whose budget is spent still reinstalls the
+            // standing rules its own persisted state records. Nothing is given
+            // away by that — the commit below deducts only what the handler ASKS
+            // for and a budget at zero can pay for nothing, so an exhausted
+            // relic still cannot fire. DL-HOOKBUS-06.
+            if (isChargeSpent(charges) && isChargeGuardedHook(hook)) {
               skipped += 1;
               noteSkip(hook, id, 'exhausted');
 
@@ -2242,15 +2097,8 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
             // lattice and the rules only if its return is adopted.
             const effects = openEffectTransaction(environment, hook);
 
-            // The handler's charge request, accumulated across however many times
-            // it asks and spent only by the commit below. Recording the request
-            // rather than applying it is what puts the decrement in the same
-            // transaction as the state slot, the randomness and the commands.
-            //
-            // The window CLOSES with the handler's return, on the returning path
-            // and on the throwing one: a handler that stashed its context and
-            // asked afterwards belongs to no transaction, and refusing that call
-            // is what keeps a request from reaching a commit it had no part in.
+            // The handler's charge request, accumulated across however many
+            // times it asks and spent only by the commit below.
             let requested = 0;
             let requestsOpen = true;
 
@@ -2265,9 +2113,6 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
               pickupOrder: subscription.pickupOrder,
               charges,
               spendCharge: (amount = 1): boolean => {
-                // A subscriber carrying no budget has nothing to spend, and a
-                // call arriving after the handler returned belongs to no
-                // transaction: both are refused rather than deferred.
                 if (!requestsOpen || charges === undefined) {
                   return false;
                 }
@@ -2290,14 +2135,11 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
               },
 
               // A COPY of the slot, so a handler that writes into a nested
-              // member writes into its own copy. The bus's slot is replaced
-              // only by the commit below.
+              // member writes into its own copy.
               state: copyState(registration.state),
             };
 
-            // The handler writes into a payload of its own. An in-place
-            // assignment therefore reaches this copy and not the payload the
-            // caller passed or the one the handler before it produced.
+            // The handler writes into a payload of its own.
             const working = copyPayload(hook, accumulated);
 
             invoked += 1;
@@ -2317,9 +2159,9 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
                 hook,
                 (): unknown => subscription.handler(working, context),
               );
-              // The request window closes with the return, before the return is
-              // judged, so nothing a handler asks for after this point can join
-              // the commit below.
+              // The request window closes with the return, before the return
+              // is judged, so nothing a handler asks for after this point can
+              // join the commit below.
               requestsOpen = false;
 
               const candidate: unknown =
@@ -2328,12 +2170,10 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
               if (isValidPayload(hook, candidate, accumulated, environment)) {
                 accumulated = candidate as HookPayloadMap[K];
 
-                // The state slot, the draws and the board effects are committed
-                // with the payload, so a handler's carried-over state, the
-                // randomness it consumed and the board and rules it wrote are
-                // adopted together or not at all. The slot is copied again on
-                // the way in, so the bus keeps no object the handler still
-                // holds.
+                // The state slot, the draws and the board effects are
+                // committed with the payload, so a handler's carried-over
+                // state, the randomness it consumed and the board and rules it
+                // wrote are adopted together or not at all.
                 registration.state = copyState(context.state);
                 draws.commit();
 
@@ -2349,20 +2189,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
                 effectsApplied += written;
                 countEffects(EFFECT_APPLIED_METRIC, hook, written);
 
-                // THE CHARGE SPEND, and the only one on the dispatch path. The
-                // HANDLER decides whether its trigger condition held, because only
-                // it knows, and it says so by ASKING through
-                // `HookContext.spendCharge`; the BUS decides what that costs and
-                // whether the budget can pay. A handler that asked pays what it
-                // asked for, accumulated across repeated requests and never taking
-                // the budget below zero. An invocation that did not ask pays
-                // nothing, whatever else it did: a transformed payload member and
-                // a written board command are both effects whose TRIGGER only the
-                // relic can judge, and a stage-start rule installation is the
-                // clearest case — it writes a command and must cost nothing,
-                // because it prepares the rule rather than using it. The request
-                // is therefore the whole rule, and nothing here is
-                // relic-specific.
+                // The charge spend, and the only one on the dispatch path.
                 if (requested > 0) {
                   chargesSpent += spend(registration, requested);
                 }
@@ -2375,11 +2202,7 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
             } catch (error: unknown) {
               requestsOpen = false;
 
-              // Nothing the handler wrote, drew or recorded is kept:
-              // `accumulated` still holds the payload it was handed a copy of,
-              // `registration.state` still holds the slot it entered with, the
-              // run's substreams still stand where they stood, and not one
-              // recorded command reached the lattice or the rules.
+              // Nothing the handler wrote, drew or recorded is kept.
               draws.rollback();
               countEffects(EFFECT_DROPPED_METRIC, hook, effects.rollback());
               failed += 1;
@@ -2416,9 +2239,10 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     },
 
     consumeCharge(id: string, amount = 1): ChargeConsumption {
-      // Through the one deduction rule, which `HookContext.spendCharge`'s commit
-      // also reaches, so a manual activation and a handler's own request cannot
-      // diverge in the ledger, the per-subscriber row or the counter.
+      // Through the one deduction rule, which `HookContext.spendCharge`'s
+      // commit also reaches, so a manual activation and a handler's own
+      // request cannot diverge in the ledger, the per-subscriber row or the
+      // counter.
       return deductCharge(id, amount);
     },
 
@@ -2443,9 +2267,8 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     },
 
     subscribers(): readonly HookSubscriber[] {
-      // Extension with no vanilla source. Each element is a frozen
-      // snapshot built by `snapshotOf`, never the object the caller
-      // registered.
+      // Extension with no vanilla source. Each element is a frozen snapshot
+      // built by `snapshotOf`, never the object the caller registered.
       return Object.freeze(ordered().map(snapshotOf));
     },
 

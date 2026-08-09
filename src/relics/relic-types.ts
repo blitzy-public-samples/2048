@@ -1,5 +1,6 @@
 // The relic data vocabulary: the shape one relic is declared in, the two
-// ladders it is classified by, and the two records it is held and persisted as.
+// ladders it is classified by, and the two records it is held and persisted
+// as.
 //
 // The leaf of src/relics/: every other module in the folder imports this one,
 // and this one imports nothing from the folder. Type declarations, two frozen
@@ -9,22 +10,7 @@
 // This module reads no DOM, performs no I/O, consumes no randomness, reads no
 // clock and reports nothing.
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, all target-only
-// because no vanilla construct declared a relic:
-//   TR-RELIC-01  `RARITIES` and `Rarity`, the rarity ladder
-//   TR-RELIC-02  `DEFAULT_RARITY_WEIGHTS`, the draw weighting
-//   TR-RELIC-03  `RELIC_FAMILY_NAMES`, `RelicFamilyName` and `RelicFamily`
-//   TR-RELIC-04  `Relic` and `RelicHooks`, the seven-member declaration shape
-//                AAP Contract 3 mandates
-//   TR-RELIC-05  `ActiveRelic` and `PersistedRelic`, the held and persisted
-//                records
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-RELIC-01  relic behaviour living in hook-bound handler functions rather
-//                than in members of the data object
-//   DL-RELIC-02  the persisted relic carrying the identifier, the charge
-//                budget and the state slot, and nothing else
+// Decisions: DL-RELIC-01, DL-RELIC-02 (docs/DECISION_LOG.md).
 
 import type { HookHandlerTable } from '../engine/hooks';
 
@@ -51,11 +37,6 @@ export type Rarity = (typeof RARITIES)[number];
 
 /**
  * The default draw weight of each tier.
- *
- * RELATIVE WEIGHTS, NOT PROBABILITIES. They are not required to sum to one and
- * are not to be rescaled so that they do: `pickWeighted` of
- * src/rng/rng-streams.ts divides by the total of the weights it is given. Each
- * tier's weight is half the tier before it.
  *
  * Frozen, so the shared table cannot be mutated through this reference. A draw
  * that weights the tiers differently passes a table of its own and leaves this
@@ -84,9 +65,7 @@ export type RelicFamilyName = (typeof RELIC_FAMILY_NAMES)[number];
 
 /**
  * The handler table a relic binds, keyed by hook name: `HookHandlerTable` of
- * src/engine/hooks.ts under this folder's name for it. Every key is optional,
- * and each key's handler is narrowed to that hook's own payload, so a handler
- * bound to the wrong hook does not compile.
+ * src/engine/hooks.ts under this folder's name for it.
  */
 export type RelicHooks = HookHandlerTable;
 
@@ -118,13 +97,6 @@ export interface Relic {
   /**
    * Charge budget a run starts this relic with. Absent on a relic that fires
    * for the rest of the run, which is never charge-guarded.
-   *
-   * A budget is SPENT BY THE RELIC'S OWN EFFECT: a handler calls
-   * `HookContext.spendCharge()` on the path where its effect takes hold, and
-   * src/engine/hook-bus.ts deducts the charge once that handler's return has
-   * been accepted. A dispatch that reached a handler which then did nothing
-   * spends nothing, and once the budget reaches zero the bus's guard skips
-   * every handler the relic binds.
    */
   readonly charges?: number;
 
@@ -149,34 +121,19 @@ export interface RelicFamily {
   readonly relics: readonly Relic[];
 }
 
-/**
- * One relic a run holds. Wraps a declaration: `definition` is the shared
- * template, and `charges` and `state` are this run's own values, taken from the
- * template at pickup. Writing either leaves the template as it stands.
- */
+/** One relic a run holds. Wraps a declaration. */
 export interface ActiveRelic {
   readonly definition: Relic;
 
   /**
-   * Zero-based position in acquisition order: the order
-   * src/engine/hook-bus.ts dispatches handlers in. Assigned at pickup and
-   * never reassigned.
+   * Zero-based position in acquisition order: the order src/engine/hook-bus.ts
+   * dispatches handlers in. Assigned at pickup and never reassigned.
    */
   readonly pickupOrder: number;
 
   /**
    * Charges remaining, counting down from `definition.charges`. `undefined` on
-   * a relic with no charge budget, which is never charge-guarded; `0` on one
-   * whose budget is spent, whose handlers are skipped.
-   *
-   * WRITTEN ONLY BY THE BUS. src/engine/hook-bus.ts reads this member to guard
-   * a handler and is the only construct that deducts from it. A dispatch does
-   * not spend a charge merely by invoking a handler: it spends one when the
-   * handler asks it to, through `HookContext.spendCharge`, and only once that
-   * handler's return has been accepted. `HookBus.consumeCharge` is the other
-   * entry point, which a manual activation reaches. A handler never writes this
-   * member, and the two paths draw on this ONE budget however many hooks the
-   * relic binds.
+   * a relic with no charge budget, which is never charge-guarded.
    */
   charges: number | undefined;
 
@@ -184,24 +141,15 @@ export interface ActiveRelic {
    * The relic's own state slot for this run, initialised from
    * `definition.state`. JSON data only, as `Relic.state` is.
    *
-   * OWNED BY THE BUS, NOT SHARED WITH IT. src/engine/hook-bus.ts copies the
-   * slot in full when the relic is registered, copies it again into
-   * `HookContext.state` on every dispatch, and copies what the handler left
-   * back onto its own record only once that handler has returned and its
-   * return has been accepted. Three properties follow from that:
+   * Writing this member after registration does not reach the value a dispatch
+   * reads; a live relic's state changes only through the relic's own handler.
    *
-   *   Writing this member after registration does not reach the value a
-   *   dispatch reads; a live relic's state changes only through the relic's own
-   *   handler.
+   * Reading it back — here, or from a bus snapshot — never yields an object a
+   * handler still holds.
    *
-   *   Reading it back — here, or from a bus snapshot — never yields an object
-   *   a handler still holds.
-   *
-   *   A handler that writes into a nested member and then throws changes
-   *   nothing: the copy it wrote into is discarded with the rest of its
-   *   transaction, including any randomness it drew.
-   *
-   * Decision DL-RELIC-02.
+   * A handler that writes into a nested member and then throws changes
+   * nothing: the copy it wrote into is discarded with the rest of its
+   * transaction, including any randomness it drew.
    */
   state: unknown;
 }

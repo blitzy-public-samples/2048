@@ -1,47 +1,19 @@
-// The announcement queue behind the `aria-live` region declared in
-// index.html: announcements are enqueued, coalesced into the smallest correct
-// set of utterances, and written to that region one utterance per task.
-//
-// index.html declares ONE region — `#live-region`, carrying `role="status"`,
-// `aria-live="polite"` and `aria-atomic="true"` — so both polarities are
-// written to it and its `aria-live` attribute is never mutated after
-// construction. A markup that declares a polite and an assertive region
-// instead is served by the two assertive options below.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated, all target-only because the retired sources
-// announced nothing:
-//   TR-LIVE-01  `createLiveRegionAnnouncer` and the single `#live-region` host
-//   TR-LIVE-02  the announcement queue and its bound
-//   TR-LIVE-03  `composeAnnouncements` and the coalescing rules
-//   TR-LIVE-04  the clear-then-write sequence, one utterance per task
-//   TR-LIVE-05  the polite default and the two assertive options
-//   TR-LIVE-06  the move, merge and spawn announcement vocabulary
-//   TR-LIVE-07  the stage and score announcement vocabulary
-//   TR-LIVE-08  `TerminalVerdict` and its labels
-//   TR-LIVE-09  the injected report sink and the per-listener error isolation
+// The announcement queue behind the `aria-live` region declared in index.html:
+// announcements are enqueued, coalesced into the smallest correct set of
+// utterances, and written to that region one utterance per task.
 //
 // The region's visually-hidden treatment is the `.visually-hidden` class of
 // style/_a11y.scss, which clips the paint region and keeps the box. Nothing
 // here assigns a style property, and no hiding mechanism that would take the
 // region out of the accessibility tree is used anywhere in this module.
 //
-// Imports are limited to ./settings. The module reads no storage and declares
-// no visual value. `AnnouncedDirection` restates `Direction` of
-// src/engine/types.ts and of src/input/keymap.ts rather than importing either.
-//
 // No exported function throws. A missing region, an environment with no task
 // scheduler, an unrecognised announcement, a non-finite number, an absent
 // spawn position, a refused subscription, a throwing listener and a failed DOM
 // write are each reported through the injected sink and the call continues.
 //
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-LIVE-01  the coalescing rules
-//   DL-LIVE-02  the clear-then-write sequence
-//   DL-LIVE-03  the polite default with two assertive options
-//   DL-LIVE-04  the queue bound
-//   DL-A11Y-08  the parallel DOM beside an `aria-hidden` canvas
+// Decisions: DL-LIVE-01, DL-LIVE-02, DL-LIVE-03, DL-LIVE-04
+// (docs/DECISION_LOG.md).
 
 import type {
   MountRoot,
@@ -81,7 +53,9 @@ const DROPPED_METRIC = 'ui.liveRegion.dropped';
  */
 const DROPPED_PROTECTED_METRIC = 'ui.liveRegion.dropped.protected';
 
-/** Counter raised with the number of pending utterances the bound discarded. */
+/**
+ * Counter raised with the number of pending utterances the bound discarded.
+ */
 const OUTBOX_DROPPED_METRIC = 'ui.liveRegion.outbox.dropped';
 
 /** Counter raised where an assertive request is served politely instead. */
@@ -535,14 +509,19 @@ function reportRejection(
 /**
  * Validates a candidate and returns the frozen announcement to enqueue.
  *
- * Every field is narrowed here rather than at composition, so no composed
- * utterance can contain `NaN`, `null` or `undefined`. A candidate whose
- * direction, verdict or text cannot be used is rejected outright and reported;
- * a numeric field that cannot be used is reported and replaced.
+ * Every field is narrowed here, so no composed utterance can carry `NaN`,
+ * `null` or `undefined`: a candidate whose kind, direction, verdict or text
+ * cannot be used is rejected outright and reported, while a numeric field that
+ * cannot be used is reported and replaced.
  *
+ * @param input Candidate announcement, of any type. A value that is not an
+ *   object, or whose `kind` is not one of the declared kinds, is rejected.
  * @param sink Report sink, contained at entry. Defaults to
  *   `NOOP_UI_REPORTER`.
- * @returns The announcement to enqueue, or `null` where it was rejected.
+ * @param context Label every rejection and every count is reported under.
+ *   Defaults to `DEFAULT_CONTEXT`.
+ * @returns The frozen announcement to enqueue, or `null` where it was
+ *   rejected. Nothing throws for any input.
  */
 export function normalizeAnnouncement(
   input: unknown,
@@ -858,23 +837,7 @@ function collapseRepeats(utterances: readonly Utterance[]): {
 /**
  * Coalesces a batch of announcements into the smallest correct set of lines.
  *
- * Pure: it reads nothing, writes nothing and reports nothing, so a caller and
- * a test both compose the same batch to the same result. An argument that is
- * not an array composes to nothing, and each item is passed through
- * `normalizeAnnouncement` first, so no clause below can read a field as
- * `undefined` and no line can contain `NaN`, `null` or `undefined`.
- *
- * The rules it applies, in order:
- *
- * 1. A move that changed nothing contributes nothing and is counted.
- * 2. A verdict supersedes every gameplay kind of the batch, which are
- *    counted; `relicAcquired` and `text` items survive it.
- * 3. The surviving gameplay items become ONE line whose clauses are the move,
- *    the merges, the spawn, the stage and the score, in that order.
- * 4. `relicAcquired` and `text` items each become one line, in the order they
- *    were announced.
- * 5. The verdict becomes the last line, written with `ASSERTIVE_POLARITY`.
- * 6. A line identical to the one before it is dropped and counted.
+ * The rules it applies, in order.
  */
 export function composeAnnouncements(
   items: readonly Announcement[],
@@ -889,9 +852,6 @@ export function composeAnnouncements(
   let unchangedMoves = 0;
 
   for (const candidate of source) {
-    // Normalisation is idempotent, so an item that already came through
-    // `announce` is unchanged, and one that did not can hold no field a
-    // clause below would read as `undefined`.
     const item = normalizeAnnouncement(candidate);
 
     if (item === null) {
@@ -1066,7 +1026,8 @@ export const DEFAULT_MAX_QUEUED_ANNOUNCEMENTS = 32;
  * How many times the queue bound the outbox may hold.
  *
  * One announcement can compose into more than one utterance, so the outbox
- * needs headroom above the queue bound; it does not need an independent option.
+ * needs headroom above the queue bound; it does not need an independent
+ * option.
  */
 export const OUTBOX_CAPACITY_MULTIPLE = 2;
 
@@ -1093,8 +1054,8 @@ export interface PreferenceAnnouncementSource {
 /** What `createLiveRegionAnnouncer` accepts. Every field has a default. */
 export interface LiveRegionAnnouncerOptions {
   /**
-   * The region itself, where the caller resolved it already. `null` states that
-   * there is none and disables the announcer.
+   * The region itself, where the caller resolved it already. `null` states
+   * that there is none and disables the announcer.
    */
   readonly region?: Element | null;
   readonly selector?: string;
@@ -1120,9 +1081,7 @@ export interface LiveRegionAnnouncerOptions {
    * Announcements the queue holds. Reaching it discards the oldest gameplay
    * item, then the oldest free text, then a superseded verdict, and only then
    * the oldest `relicAcquired` or `terminal`; the queue never holds more than
-   * this many, whatever kinds they are. Defaults to
-   * `DEFAULT_MAX_QUEUED_ANNOUNCEMENTS`. A value that is not a positive
-   * integer is reported and the default is used.
+   * this many, whatever kinds they are.
    */
   readonly maxQueued?: number;
   readonly schedule?: AnnouncerScheduler;
@@ -1135,9 +1094,7 @@ export interface LiveRegionAnnouncerOptions {
 
   /**
    * Renders a theme id as the prose name a preference change is announced
-   * with. Defaults to reading the id with its hyphens as spaces. A caller can
-   * supply the `name` of the src/theme/themes.ts catalogue entry, the module
-   * this one does not import.
+   * with. Defaults to reading the id with its hyphens as spaces.
    */
   readonly describeTheme?: (theme: string) => string;
 }
@@ -1146,7 +1103,7 @@ export interface LiveRegionAnnouncerOptions {
  * The announcer a caller holds and drives.
  *
  * No member throws, and every member is a safe no-op once the region is
- * unavailable or `destroy()` has been called.
+ * unavailable or `destroy` has been called.
  */
 export interface LiveRegionAnnouncer {
   announce(input: Announcement): void;
@@ -1157,7 +1114,7 @@ export interface LiveRegionAnnouncer {
   /** Announcements queued plus lines composed and not yet written. */
   pending(): number;
 
-  /** Whether a region is available and `destroy()` has not been called. */
+  /** Whether a region is available and `destroy` has not been called. */
   isEnabled(): boolean;
   observePreferences(source: PreferenceAnnouncementSource): () => void;
 
@@ -1328,16 +1285,6 @@ function resolveCapacity(
 /**
  * Index of the oldest announcement the queue bound discards next.
  *
- * Four tiers, in the order the semantics allow: a gameplay kind, then free
- * text, then a `terminal` a later `terminal` already supersedes — which
- * `composeAnnouncements` would discard anyway, since it composes the last
- * verdict of a batch and no other — and only then the oldest remaining
- * `relicAcquired` or `terminal`.
- *
- * Total for a non-empty queue: the fourth tier returns index `0`, so the
- * bound always has a victim and `enforceCapacity` always makes progress.
- * `NOT_FOUND` is returned for an empty queue alone.
- *
  * @param items The queue.
  * @returns The index, or `NOT_FOUND` for an empty queue.
  */
@@ -1478,9 +1425,6 @@ export function createLiveRegionAnnouncer(
   const autoFlush = settings.autoFlush !== false;
   const capacity = resolveCapacity(settings.maxQueued, reporter, context);
 
-  // Derived from the queue bound rather than configured separately, so one
-  // option governs the whole pipeline. A composition can emit more than one
-  // utterance per announcement, hence the multiple.
   const outboxCapacity = capacity * OUTBOX_CAPACITY_MULTIPLE;
   const describeTheme = settings.describeTheme ?? humanizeThemeId;
   const politeSelector = settings.selector ?? DEFAULT_LIVE_REGION_SELECTOR;
@@ -1517,9 +1461,9 @@ export function createLiveRegionAnnouncer(
   }
 
   /**
-   * Whether THIS module created `assertiveRegion`, and must therefore remove it
-   * again on destruction. An assertive region the markup declares is left in
-   * place, exactly as the polite one is.
+   * Whether THIS module created `assertiveRegion`, and must therefore remove
+   * it again on destruction. An assertive region the markup declares is left
+   * in place, exactly as the polite one is.
    */
   let ownsAssertiveRegion = false;
 
@@ -1556,8 +1500,6 @@ export function createLiveRegionAnnouncer(
       return assertiveRegion;
     }
 
-    // Created on first assertive use rather than eagerly, so a run that never
-    // announces assertively adds nothing to the document.
     if (createAssertiveRegion()) {
       return assertiveRegion;
     }
@@ -1569,12 +1511,6 @@ export function createLiveRegionAnnouncer(
 
   /**
    * Creates an owned assertive region beside the polite one.
-   *
-   * A polite `role="status"` region does not interrupt, so routing an assertive
-   * request into it is not an assertive announcement. The markup declares only
-   * the polite region, so the assertive one is built here, given
-   * `role="alert"`, `aria-live="assertive"` and the same visually-hidden
-   * treatment, and inserted next to its polite sibling.
    *
    * @returns Whether an assertive region is now in place.
    */
@@ -1600,8 +1536,8 @@ export function createLiveRegionAnnouncer(
       created.setAttribute('aria-live', 'assertive');
       created.setAttribute('aria-atomic', ARIA_TRUE);
 
-      // Beside the polite region, so both live regions sit in the same place in
-      // the document and neither is nested inside the other.
+      // Beside the polite region, so both live regions sit in the same place
+      // in the document and neither is nested inside the other.
       parent.insertBefore(created, sibling.nextSibling);
 
       assertiveRegion = created;
@@ -1624,13 +1560,7 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /**
-   * Reports, once, that an assertive request is being served politely.
-   *
-   * Stated rather than silent: a caller asking for an assertive announcement
-   * and receiving a polite one has had its request downgraded, and that is a
-   * behavioural difference an operator needs to be able to see.
-   */
+  /** Reports, once, that an assertive request is being served politely. */
   function reportAssertiveDowngrade(): void {
     reporter.count(ASSERTIVE_DOWNGRADE_METRIC, { context });
 
@@ -1737,8 +1667,8 @@ export function createLiveRegionAnnouncer(
       runWriteStep();
     });
 
-    // False where `deferTask` ran the callback inline, in which case the
-    // token is spent and holding it would block the next step.
+    // False where `deferTask` ran the callback inline, in which case the token
+    // is spent and holding it would block the next step.
     if (writePending) {
       writeTask = task;
     }
@@ -1810,17 +1740,7 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /**
-   * Brings the queue back within its bound, reporting what it discarded.
-   *
-   * The bound is structural: the loop runs until `queue.length <= capacity`,
-   * and `indexOfEvictable` yields a victim for every non-empty queue, so a
-   * run of `terminal` and `relicAcquired` announcements cannot carry the
-   * queue past `capacity`. The tiers `indexOfEvictable` applies are what
-   * keeps the semantics: a protected item is discarded only once no gameplay
-   * item, no free text and no superseded verdict remains, and that count is
-   * reported separately from the rest.
-   */
+  /** Brings the queue back within its bound, reporting what it discarded. */
   function enforceCapacity(): void {
     if (queue.length <= capacity) {
       return;
@@ -1875,14 +1795,7 @@ export function createLiveRegionAnnouncer(
     }
   }
 
-  /**
-   * Brings the outbox back within its bound.
-   *
-   * Composed utterances were pushed with no ceiling, so a burst that outran the
-   * write cadence grew the outbox without limit. The OLDEST are discarded: an
-   * utterance still waiting behind a long backlog is stale by the time it would
-   * be spoken, and the newest state is the one worth announcing.
-   */
+  /** Brings the outbox back within its bound. */
   function enforceOutboxCapacity(): void {
     if (outbox.length <= outboxCapacity) {
       return;

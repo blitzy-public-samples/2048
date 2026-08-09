@@ -86,6 +86,8 @@ import {
   createSeededRng,
   deriveStreamSeed,
 } from '../../../src/rng/seeded-rng';
+import { drawRelicOffers } from '../../../src/relics/relic-draw';
+import { RELIC_CATALOGUE } from '../../../src/relics/relic-registry';
 import { createFreshRunState } from '../../../src/run/run-state';
 import type { RunReporter, RunState } from '../../../src/run/run-state';
 import { RunStateStore } from '../../../src/run/run-state-store';
@@ -801,26 +803,6 @@ describe('a run recreated from the persisted cursor continues', () => {
 /** Start cursors the fast-forward is verified at, `0` among them. */
 const FAST_FORWARD_CURSORS: readonly number[] = Object.freeze([0, 2, 5]);
 
-/** Draws read from the ambient generator when its behaviour is measured. */
-const AMBIENT_DRAW_COUNT = 8;
-
-/**
- * Reads `AMBIENT_DRAW_COUNT` draws from the ambient `Math.random`. Used only by
- * section 9, on the generator itself rather than for any expected value: no
- * assertion in this file derives test data from it.
- *
- * @returns The values read, in draw order.
- */
-function ambientDraws(): number[] {
-  const drawn: number[] = [];
-
-  for (let index = 0; index < AMBIENT_DRAW_COUNT; index += 1) {
-    drawn.push(Math.random());
-  }
-
-  return drawn;
-}
-
 describe('the fast-forward every resume is built on', () => {
   it('stands at the draw a start cursor of that many discards reaches', () => {
     const straight = createSeededRng(RUN_SEED);
@@ -968,61 +950,154 @@ describe('the seed each substream is derived from', () => {
   });
 });
 
-/* ===== 7. The relic-draw stream: identical offers across a reload ===== */
+/* ===== 7. The reward draw: identical offers across a reload ===== */
 
 describe('relic offers reproduce across a reload', () => {
   /**
-   * Draws three distinct entries without replacement, the way a reward offer is
-   * assembled: one draw per selection from the relic-draw substream.
+   * Offers drawn THROUGH THE PRODUCTION DRAW, from the production catalogue.
    *
-   * @param streams Substreams to draw from.
-   * @param pool Candidates to select from.
-   * @returns The three selected identifiers, in selection order.
+   * This section used to assemble offers with a private helper of its own that
+   * took one draw per selection from `relic-draw` alone, over a pool of eight
+   * invented identifiers. That helper agreed with itself across a reload no
+   * matter what `drawRelicOffers` did, and it was wrong about the accounting in
+   * the one way that matters here: the production draw is rarity-weighted, so it
+   * consumes ONE `rarity-weight` draw AND ONE `relic-draw` draw per offer it
+   * RETURNS. A cursor map that resumed `relic-draw` and lost `rarity-weight`
+   * would have satisfied every assertion the helper could make, while giving a
+   * resumed run a different offer from the run it continued — which is exactly
+   * the half of validation gate V2 (0.8.2) this file exists to hold.
+   *
+   * @param streams Substreams the draw consumes.
+   * @param ownedIds Identifiers a run already holds, excluded from the pool.
+   * @returns The offered identifiers, in draw order.
    */
-  function offerThree(streams: RngStreams, pool: readonly string[]): string[] {
-    const remaining = [...pool];
-    const offered: string[] = [];
-    const stream = streams.stream('relic-draw');
+  const offer = (
+    streams: RngStreams,
+    ownedIds: readonly string[] = []
+  ): readonly string[] =>
+    drawRelicOffers({
+      pool: RELIC_CATALOGUE,
+      streams,
+      count: OFFER_COUNT,
+      ownedIds,
+    }).map((relic): string => relic.id);
 
-    for (let index = 0; index < 3; index += 1) {
-      const chosen = stream.nextInt(remaining.length);
+  /** Cards one reward round offers, which AAP 0.6.4 fixes at three. */
+  const OFFER_COUNT = 3;
 
-      offered.push(remaining[chosen]);
-      remaining.splice(chosen, 1);
-    }
-
-    return offered;
-  }
-
-  const POOL: readonly string[] = Object.freeze([
-    'relic-a',
-    'relic-b',
-    'relic-c',
-    'relic-d',
-    'relic-e',
-    'relic-f',
-    'relic-g',
-    'relic-h',
+  /**
+   * The identifiers `RUN_SEED` offers once the substreams stand at
+   * `DRAWS_BEFORE_SAVE`, captured in the file rather than recomputed by a second
+   * copy of the algorithm.
+   *
+   * Written out so a change in the draw arithmetic is caught here as a changed
+   * expectation, instead of two sides of the comparison moving together and the
+   * suite staying green through it.
+   */
+  const OFFERED_AFTER_SAVE: readonly string[] = Object.freeze([
+    'echo-chamber',
+    'gilded-rot',
+    'temporal-anchor',
   ]);
 
   it('offers the same three relics a resumed run would have offered', () => {
     const { resumed } = roundTrip();
+    const uninterrupted = reference();
 
-    expect(offerThree(resumed, POOL)).toEqual(offerThree(reference(), POOL));
+    // ONE ROUND EACH, from the two sides: the resumed streams and a reference
+    // that never left. A second round on either side would draw the NEXT set and
+    // compare two different rounds.
+    expect(offer(resumed)).toEqual(offer(uninterrupted));
+  });
+
+  it('offers exactly the three the seed names at that cursor', () => {
+    const { resumed } = roundTrip();
+
+    expect(offer(resumed)).toEqual(OFFERED_AFTER_SAVE);
+  });
+
+  it('offers three DISTINCT relics, which is sampling without replacement', () => {
+    const { resumed } = roundTrip();
+    const offered = offer(resumed);
+
+    expect(offered).toHaveLength(OFFER_COUNT);
+    expect(new Set(offered).size).toBe(OFFER_COUNT);
+  });
+
+  it('advances BOTH reward substreams, one draw each per offer returned', () => {
+    const { resumed } = roundTrip();
+
+    offer(resumed);
+
+    // THE ACCOUNTING THE PRIVATE HELPER MISSED. `rarity-weight` picks the tier
+    // and `relic-draw` picks within it, so a three-card offer costs three draws
+    // on each. A resume that recovered one and not the other would draw a
+    // different set from the run it claims to continue.
+    expect(resumed.stream('relic-draw').cursor).toBe(
+      DRAWS_BEFORE_SAVE['relic-draw'] + OFFER_COUNT
+    );
+    expect(resumed.stream('rarity-weight').cursor).toBe(
+      DRAWS_BEFORE_SAVE['rarity-weight'] + OFFER_COUNT
+    );
+  });
+
+  it('continues both cursors from the persisted map, not from zero', () => {
+    const { resumed, savedCursor } = roundTrip();
+
+    // THE PERSISTED MAP IS THE STARTING POINT, read back through the store
+    // rather than assumed: a resume that restarted either stream would stand at
+    // `OFFER_COUNT` after one round instead of past the saved cursor.
+    expect(resumed.stream('rarity-weight').cursor).toBe(
+      savedCursor['rarity-weight']
+    );
+    expect(resumed.stream('relic-draw').cursor).toBe(savedCursor['relic-draw']);
+
+    offer(resumed);
+
+    expect(resumed.stream('rarity-weight').cursor).toBeGreaterThan(OFFER_COUNT);
+    expect(resumed.stream('relic-draw').cursor).toBeGreaterThan(OFFER_COUNT);
+  });
+
+  it('leaves the resumed run on the same two reward cursors as the reference', () => {
+    const { resumed } = roundTrip();
+    const untouched = reference();
+
+    offer(resumed);
+    offer(untouched);
+
+    expect(resumed.stream('relic-draw').cursor).toBe(
+      untouched.stream('relic-draw').cursor
+    );
+    expect(resumed.stream('rarity-weight').cursor).toBe(
+      untouched.stream('rarity-weight').cursor
+    );
   });
 
   it('offers a different set after the reload than at the run start', () => {
     const { resumed } = roundTrip();
 
-    expect(offerThree(resumed, POOL)).not.toEqual(
-      offerThree(createRngStreams(RUN_SEED), POOL)
-    );
+    expect(offer(resumed)).not.toEqual(offer(createRngStreams(RUN_SEED)));
+  });
+
+  it('continues the offer sequence rather than repeating it', () => {
+    const { resumed } = roundTrip();
+    const first = offer(resumed);
+    const second = offer(resumed, first);
+
+    // The second round draws from where the first left off, and excludes what
+    // the run took, so no identifier can appear in both.
+    expect(second).toHaveLength(OFFER_COUNT);
+    expect(new Set(second).size).toBe(OFFER_COUNT);
+
+    for (const id of second) {
+      expect(first).not.toContain(id);
+    }
   });
 
   it('leaves the spawn substreams unmoved by a reward draw', () => {
     const { resumed } = roundTrip();
 
-    offerThree(resumed, POOL);
+    offer(resumed);
 
     // Substream separation, asserted across the persistence boundary: a relic
     // drawn after a reload cannot shift the spawn sequence.
@@ -1189,19 +1264,18 @@ describe('the resume leaves the run RNG contract intact', () => {
     // identity against the reference read at module scope: a generator
     // installed over the built-in would still answer `typeof 'function'`.
     expect(Math.random).toBe(PLATFORM_MATH_RANDOM);
-  });
 
-  it('leaves Math.random unseeded after a seeded run is built', () => {
-    const before = ambientDraws();
+    // And by property descriptor, which is what a `defineProperty` install
+    // leaves behind: the member is still the platform's own writable,
+    // non-enumerable, configurable value property and carries no accessor.
+    const descriptor = Object.getOwnPropertyDescriptor(Math, 'random');
 
-    createSeededRng(RUN_SEED);
-    createRngStreams(RUN_SEED);
-    roundTrip();
-
-    const after = ambientDraws();
-
-    expect(new Set(before).size).toBeGreaterThan(1);
-    expect(after).not.toEqual(before);
+    expect(descriptor?.value).toBe(PLATFORM_MATH_RANDOM);
+    expect(descriptor?.get).toBeUndefined();
+    expect(descriptor?.set).toBeUndefined();
+    expect(descriptor?.writable).toBe(true);
+    expect(descriptor?.enumerable).toBe(false);
+    expect(descriptor?.configurable).toBe(true);
   });
 
   it('adds no own property to globalThis', () => {

@@ -8,16 +8,17 @@
 //   src/ui/screen-router.ts and to index.html.
 //
 // WHAT IT DOES NOT DO
-//   it originates no seed, builds no engine, seeds no generator and starts no
-//   run. `originateRunSeed()` and `RunController.startRun()` are not
-//   called from here and `Math.random` is not read; the one seed
-//   transformation is `normalizeEnteredSeed()` of
-//   src/run/run-controller.ts, and the run itself is started by whoever
-//   subscribes to the `startRun` action this screen emits.
+//   it originates no seed, REDUCES no seed, builds no engine, seeds no
+//   generator and starts no run. `originateRunSeed()`,
+//   `normalizeEnteredSeed()` and `RunController.startRun()` are none of them
+//   called from here and `Math.random` is not read: the field's text is emitted
+//   verbatim, `RunController.startRun` is the ONE normaliser, and the seed the
+//   run is played under is read back through the `seedInForce` port and
+//   reflected into the field.
 //
 // PROVENANCE of each borrowed construct — what it is, and where it came from:
-//   src/run/run-controller.ts   `normalizeEnteredSeed()`, the single reduction
-//                               applied to a typed seed
+//   src/run/run-controller.ts   `startRun`'s own reduction of a typed seed, read
+//                               back through the `seedInForce` port
 //   src/input/keymap.ts         `startRun`, the action name this screen emits,
 //                               whose payload is the seed or `undefined`
 //   src/ui/screen-router.ts     `SCREEN_MOUNTS.runStart`, the container
@@ -61,7 +62,12 @@
 
 import type { InputEmitter } from '../../input/input-manager';
 import type { InputEventName } from '../../input/keymap';
-import { normalizeEnteredSeed } from '../../run/run-controller';
+import { MAX_RUN_SEED_LENGTH } from '../../rng/rng-streams';
+
+// The pre-parse ceiling this screen bounds the field's text to before it tests
+// it for presence. The reduction itself is the run controller's.
+// DL-RUNSTART-07.
+import { MAX_ENTERED_SEED_LENGTH } from '../../run/run-controller';
 import { zIndex } from '../../theme/tokens';
 import { focusInitial } from '../a11y/focus-manager';
 import type { LiveRegionAnnouncer } from '../a11y/live-region';
@@ -78,20 +84,12 @@ import type {
   ScreenContext,
 } from '../screen-router';
 
-/* ==========================================================================
- * 1. Names, selectors and layers
- * ========================================================================== */
-
 /** Label naming this module in every report. */
 const REPORT_CONTEXT = 'run-start';
 
 /** State this screen renders, as both name unions spell it. */
 const SCREEN_NAME = 'runStart' as const;
 
-/**
- * Container selector, read from `SCREEN_MOUNTS` rather than restated:
- * index.html is the authority for it and the router resolves the same entry.
- */
 const HOST_SELECTOR: string = SCREEN_MOUNTS[SCREEN_NAME];
 
 /** Logical name of the container mount, carried into every report. */
@@ -116,10 +114,6 @@ export const RUN_START_LAYER: number = zIndex.screenOverlay;
 /**
  * Attribute `focusInitial` resolves its marker step against, declared at
  * src/ui/a11y/focus-manager.ts as `FOCUS_INITIAL_ATTRIBUTE`.
- *
- * Written on the seed field, which is also the first focusable descendant, so
- * the marker step of `focusInitial` and the first-focusable default of the
- * router's focus trap resolve to one element. Decision DL-RUNSTART-02.
  */
 const FOCUS_MARKER_ATTRIBUTE = 'data-focus-initial';
 
@@ -137,6 +131,7 @@ export const RUN_START_IDS = Object.freeze({
   seedHint: 'run-start-seed-hint',
   seedStatus: 'run-start-seed-status',
   begin: 'run-start-begin',
+  settings: 'run-start-settings',
   previous: 'run-start-previous',
 });
 
@@ -160,9 +155,21 @@ const CLASSES = Object.freeze({
  *
  * A PRESENCE TEST, not a reduction: it decides whether the player supplied a
  * seed at all, and the value handed on is always the field's own text.
- * `normalizeEnteredSeed()` remains the only function that transforms a seed.
+ * `RunController.startRun` remains the only thing that transforms a seed.
  */
 const SEED_PRESENT = /\S/u;
+
+/**
+ * Longest text the field will hold, as the `maxlength` attribute.
+ *
+ * The accepted seed domain, so the field cannot hold text the run would refuse
+ * to play: a paste above this is cut by the platform, visibly, in the field the
+ * player is looking at, rather than being accepted and silently reduced later.
+ * `normalizeEnteredSeed()` still bounds what it is handed, because `maxlength`
+ * governs user entry alone and a programmatic assignment ignores it.
+ * Decision DL-RUNSTART-07.
+ */
+export const SEED_INPUT_MAX_LENGTH = MAX_RUN_SEED_LENGTH;
 
 /* ==========================================================================
  * 2. Report names
@@ -210,15 +217,8 @@ const CONTEXT_MISMATCH_METRIC = 'ui.runStart.context.unexpected';
 /** Counter raised per outlet a write needed and did not have. */
 const OUTLET_MISSING_METRIC = 'ui.runStart.outlet_missing';
 
-/* ==========================================================================
- * 3. Copy
- * ========================================================================== */
-
 /**
  * Renders a relic count with its noun agreeing in number.
- *
- * Declared beside the copy rather than inside it, so the recap below reaches it
- * without the copy object referring to itself.
  *
  * @param relics Relics the run just ended held.
  * @returns `1 relic` for one, and `N relics` for every other count.
@@ -262,6 +262,16 @@ export const runStartCopy = Object.freeze({
   /** Label of the begin-run control. */
   beginLabel: 'Begin run',
 
+  /**
+   * Label of the settings control this screen renders INSIDE its own subtree.
+   *
+   * The state is modal and its trap holds the subtree, so a trigger outside it
+   * cannot be reached; the accessibility settings — remapping, the palettes,
+   * number-only mode and reduced motion — must be reachable before a run
+   * starts. Decision DL-RUNSTART-08.
+   */
+  settingsLabel: 'Settings',
+
   /** Shown and announced when the seed emitted differs from the text typed. */
   seedAdjusted: (seed: string): string => `Seed adjusted to ${seed}.`,
 
@@ -280,16 +290,12 @@ export const runStartCopy = Object.freeze({
 /** The copy this screen renders, as `runStartCopy` declares it. */
 export type RunStartCopy = typeof runStartCopy;
 
-/* ==========================================================================
- * 4. Public API
- * ========================================================================== */
-
 /**
  * The part of src/input/input-manager.ts this screen invokes.
  *
  * Narrowed to `emit`: this screen publishes the action, subscribes to nothing,
- * and binds no element other than the two it renders. `InputManager`
- * satisfies it.
+ * and binds no element other than the two it renders. `InputManager` satisfies
+ * it.
  */
 export type RunStartInputPort = Pick<InputEmitter, 'emit'>;
 
@@ -311,12 +317,13 @@ export interface RunStartBegin {
   readonly supplied: boolean;
 
   /**
-   * The seed emitted, and `null` where none was: an empty field emits no seed
-   * at all, so the run controller originates one.
+   * The seed the run is played under, as `seedInForce` read it back, falling
+   * back to the text emitted where no reader was supplied. `null` where the
+   * field held no seed at all, in which case the run controller originates one.
    */
   readonly seed: string | null;
 
-  /** Whether the seed emitted differs from the text the field held. */
+  /** Whether the seed in force differs from the text the field held. */
   readonly adjusted: boolean;
 
   /** Subscribers the action reached. `0` means the run was not started. */
@@ -335,8 +342,33 @@ export interface RunStartOptions {
   /** Announcer the entry line and any seed adjustment are spoken through. */
   readonly announcer?: RunStartAnnouncer | null;
 
+  /**
+   * Reads the seed the run is played under, called immediately after the
+   * `startRun` action has been delivered.
+   *
+   * THE SCREEN NORMALISES NO SEED. `RunController.startRun` reduces what it is
+   * given and originates what it is not, so the field's text is emitted verbatim
+   * and this is what the field is reflected from. Absent, the field keeps the
+   * text the player typed and no adjustment is reported. Decision
+   * `DL-RUNSTART-03`.
+   */
+  readonly seedInForce?: () => string | null;
+
   /** Store the effective reduced-motion value is read from. */
   readonly preferences?: RunStartPreferencePort | null;
+
+  /**
+   * Whether focus is placed on entry. Defaults to `true`.
+   *
+   * SET FALSE WHERE A CALLER TRAPS THIS CONTAINER. A focus trap records the
+   * element that held focus at the moment it engages, so that it can hand focus
+   * back on release; a caller that traps the container AFTER this screen has
+   * already placed focus inside it records a target inside its own trap, which
+   * it cannot restore to and reports. The marked target is also the container's
+   * first focusable element — `DL-RUNSTART-02` — so a trap placing focus itself
+   * lands on the same element and the entrance is unchanged.
+   */
+  readonly placeFocus?: boolean;
 
   /**
    * The container, as an element already resolved or as a selector resolved
@@ -354,6 +386,21 @@ export interface RunStartOptions {
 
   /** Sink every miss, every write and every refusal reports through. */
   readonly reporter?: UiReporter;
+
+  /**
+   * Called when the settings control inside this screen is activated. Absent,
+   * the control is not rendered, so nothing offers an action that goes nowhere.
+   * Decision DL-RUNSTART-08.
+   */
+  readonly onOpenSettings?: () => void;
+
+  /**
+   * Whether this screen announces the entry line. Defaults to `true`. `false`
+   * is for a composition whose router reads it, which it takes from
+   * `announcement()`. The seed-adjustment notice is left on either way: it
+   * reports an action, not an entry. Decision DL-RUNSTART-09.
+   */
+  readonly announceEntry?: boolean;
 }
 
 /**
@@ -362,13 +409,7 @@ export interface RunStartOptions {
  * `mount` and after `unmount` included.
  */
 export interface RunStartScreen extends Screen {
-  /**
-   * Whether a container resolved and the subtree was built.
-   *
-   * Every rendered element — the seed field included — exists exactly when
-   * this is `true`: the subtree is built in one pass rather than looked up
-   * piecemeal.
-   */
+  /** Whether a container resolved and the subtree was built. */
   isMounted(): boolean;
 
   /** The text the seed field holds, and `''` while nothing is mounted. */
@@ -378,8 +419,9 @@ export interface RunStartScreen extends Screen {
   readLastBegin(): RunStartBegin | null;
 
   /**
-   * Reduces the field's text through `normalizeEnteredSeed()` and publishes the
-   * `startRun` action, which is the whole of starting a run from this screen.
+   * Publishes the field's text verbatim through the `startRun` action, which is
+   * the whole of starting a run from this screen, then reflects the seed the run
+   * is played under back into the field.
    *
    * Called by the begin-run control and by Enter inside the seed field. It
    * throws for nothing: an absent emitter, an absent field and a raising
@@ -389,10 +431,6 @@ export interface RunStartScreen extends Screen {
    */
   beginRun(): RunStartBegin;
 }
-
-/* ==========================================================================
- * 5. Construction
- * ========================================================================== */
 
 /** The document, where there is one. */
 function readAmbientDocument(): Document | null {
@@ -417,6 +455,7 @@ function mergeCopy(overrides: Partial<RunStartCopy> | undefined): RunStartCopy {
     seedLabel: overrides.seedLabel ?? runStartCopy.seedLabel,
     seedHint: overrides.seedHint ?? runStartCopy.seedHint,
     beginLabel: overrides.beginLabel ?? runStartCopy.beginLabel,
+    settingsLabel: overrides.settingsLabel ?? runStartCopy.settingsLabel,
     seedAdjusted: overrides.seedAdjusted ?? runStartCopy.seedAdjusted,
     announcement: overrides.announcement ?? runStartCopy.announcement,
     relicCount: overrides.relicCount ?? runStartCopy.relicCount,
@@ -440,15 +479,16 @@ interface RunStartElements {
 
   /** The begin-run control. */
   readonly begin: HTMLButtonElement;
+
+  /**
+   * The settings control, and `null` where the caller wired no settings action.
+   * DL-RUNSTART-08.
+   */
+  readonly settings: HTMLButtonElement | null;
 }
 
 /**
  * Builds the screen's subtree, in the DOM order its focus contract requires.
- *
- * The seed field precedes every other focusable node, so the marker step of
- * `focusInitial` and the first-focusable default of the router's focus trap
- * resolve to the same element. Every class comes from style/_screens.scss and
- * no colour, length, radius or duration is written here.
  *
  * @param owner Document the elements are created in.
  * @param copy The copy in force.
@@ -457,6 +497,7 @@ interface RunStartElements {
 function buildSubtree(
   owner: Document,
   copy: RunStartCopy,
+  withSettings: boolean,
 ): RunStartElements {
   const panel = owner.createElement('section');
 
@@ -496,6 +537,10 @@ function buildSubtree(
   seedInput.type = 'text';
   seedInput.id = RUN_START_IDS.seedInput;
   seedInput.className = CLASSES.seedInput;
+
+  // The accepted seed domain as a platform-enforced ceiling on entry, so the
+  // field cannot hold more than a run can play. DL-RUNSTART-07.
+  seedInput.maxLength = SEED_INPUT_MAX_LENGTH;
   seedInput.autocomplete = 'off';
   seedInput.spellcheck = false;
   seedInput.setAttribute('autocapitalize', 'off');
@@ -513,7 +558,7 @@ function buildSubtree(
   hint.textContent = copy.seedHint;
 
   // NOT a live region: index.html declares one announcer for the page, and a
-  // seed adjustment is spoken through that one. Decision DL-RUNSTART-05.
+  // seed adjustment is spoken through that one.
   const seedStatus = owner.createElement('p');
 
   seedStatus.id = RUN_START_IDS.seedStatus;
@@ -532,6 +577,19 @@ function buildSubtree(
   begin.textContent = copy.beginLabel;
   actions.append(begin);
 
+  // INSIDE THE TRAPPED SUBTREE, after the begin control in DOM order so the
+  // primary action still leads. Rendered only where a settings action was
+  // wired, so nothing offers a control that goes nowhere. DL-RUNSTART-08.
+  const settings = withSettings ? owner.createElement('button') : null;
+
+  if (settings !== null) {
+    settings.type = 'button';
+    settings.id = RUN_START_IDS.settings;
+    settings.className = CLASSES.button;
+    settings.textContent = copy.settingsLabel;
+    actions.append(settings);
+  }
+
   const previous = owner.createElement('p');
 
   previous.id = RUN_START_IDS.previous;
@@ -549,7 +607,14 @@ function buildSubtree(
     previous,
   );
 
-  return Object.freeze({ panel, seedInput, seedStatus, previous, begin });
+  return Object.freeze({
+    panel,
+    seedInput,
+    seedStatus,
+    previous,
+    begin,
+    settings,
+  });
 }
 
 /**
@@ -562,10 +627,6 @@ function readCount(value: number): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-/* ==========================================================================
- * 6. The screen
- * ========================================================================== */
-
 /**
  * Builds the run-start screen.
  *
@@ -576,7 +637,6 @@ function readCount(value: number): number | null {
  *
  * @param options Ports, container, document, copy and report sink.
  * @returns The screen, whether or not a container resolved.
- *
  * @example
  * ```ts
  * const runStart = createRunStartScreen({ input, announcer, preferences });
@@ -590,10 +650,13 @@ export function createRunStartScreen(
 ): RunStartScreen {
   const reporter = createSafeUiReporter(options.reporter ?? NOOP_UI_REPORTER);
   const copy = mergeCopy(options.copy);
+
   const input = options.input ?? null;
   const announcer = options.announcer ?? null;
   const preferences = options.preferences ?? null;
+  const placeFocusOnEntry = options.placeFocus !== false;
   const owner = options.document ?? readAmbientDocument();
+  const announceOnEntry = options.announceEntry !== false;
 
   /** The container in force, and `null` while none has resolved. */
   let host: Element | null = null;
@@ -609,10 +672,6 @@ export function createRunStartScreen(
 
   /** Whether `unmount` has been called. */
   let unmounted = false;
-
-  /* ------------------------------------------------------------------------
-   * Containment
-   * ---------------------------------------------------------------------- */
 
   /**
    * Runs one listener body so nothing raises out of an event handler.
@@ -659,10 +718,6 @@ export function createRunStartScreen(
       name: HOST_MOUNT,
     });
   };
-
-  /* ------------------------------------------------------------------------
-   * The subtree
-   * ---------------------------------------------------------------------- */
 
   /** Detaches every listener and removes the one node this module appended. */
   const teardownSubtree = (): void => {
@@ -724,21 +779,29 @@ export function createRunStartScreen(
       }, 'seedEnter');
     };
 
+    const onSettings = (): void => {
+      contain((): void => {
+        options.onOpenSettings?.();
+      }, 'settings');
+    };
+
     built.begin.addEventListener('click', onBegin);
     built.seedInput.addEventListener('keydown', onSeedKeydown);
+    built.settings?.addEventListener('click', onSettings);
 
     detachListeners = (): void => {
       built.begin.removeEventListener('click', onBegin);
       built.seedInput.removeEventListener('keydown', onSeedKeydown);
+      built.settings?.removeEventListener('click', onSettings);
     };
   };
 
   /**
    * Builds the subtree once.
    *
-   * Idempotent: a second call with a subtree already in place is a no-op, which
-   * is what keeps `update` from rebuilding the field and discarding text the
-   * player has typed into it.
+   * Idempotent: a second call with a subtree already in place is a no-op,
+   * which is what keeps `update` from rebuilding the field and discarding text
+   * the player has typed into it.
    *
    * @returns Whether a subtree is in place afterwards.
    */
@@ -770,7 +833,11 @@ export function createRunStartScreen(
       return false;
     }
 
-    const built = buildSubtree(owner, copy);
+    const built = buildSubtree(
+      owner,
+      copy,
+      options.onOpenSettings !== undefined,
+    );
 
     host.append(built.panel);
     elements = built;
@@ -779,10 +846,6 @@ export function createRunStartScreen(
 
     return true;
   };
-
-  /* ------------------------------------------------------------------------
-   * Writes
-   * ---------------------------------------------------------------------- */
 
   /**
    * Writes the seed notice, hiding it while it carries no text.
@@ -862,8 +925,8 @@ export function createRunStartScreen(
   };
 
   /**
-   * Reads the effective reduced-motion value: the transition's own value first,
-   * then the preference store, and otherwise nothing so the focus layer
+   * Reads the effective reduced-motion value: the transition's own value
+   * first, then the preference store, and otherwise nothing so the focus layer
    * resolves the platform query itself.
    *
    * @param context The context in force, or `null` where none was supplied.
@@ -892,7 +955,7 @@ export function createRunStartScreen(
   };
 
   /**
-   * Places focus for this entry.
+   * Places focus for this entry, unless the caller placed it.
    *
    * Deterministic: the seed field carries the marker attribute `focusInitial`
    * resolves before every other step, and it is also the first focusable
@@ -900,9 +963,16 @@ export function createRunStartScreen(
    * element. The effective reduced-motion value decides whether the target is
    * scrolled with animation.
    *
+   * `placeFocus: false` hands the placement to that caller, which is the whole
+   * of what the option does: nothing else about the entrance changes.
+   *
    * @param context The context in force, or `null` where none was supplied.
    */
   const placeFocus = (context: RunStartScreenContext | null): void => {
+    if (!placeFocusOnEntry) {
+      return;
+    }
+
     if (host === null) {
       reporter.count(OUTLET_MISSING_METRIC, {
         context: REPORT_CONTEXT,
@@ -919,10 +989,6 @@ export function createRunStartScreen(
       reducedMotion: readReducedMotion(context),
     });
   };
-
-  /* ------------------------------------------------------------------------
-   * Beginning a run
-   * ---------------------------------------------------------------------- */
 
   /**
    * Publishes the `startRun` action.
@@ -981,29 +1047,35 @@ export function createRunStartScreen(
   };
 
   /**
-   * Reduces the field's text to the seed that will be played.
+   * Reads the seed the run is actually being played under, after the action has
+   * been delivered.
    *
-   * `normalizeEnteredSeed()` of src/run/run-controller.ts is the ONE reduction
-   * applied to a typed seed anywhere in the product: nothing here trims,
-   * case-folds, hashes, parses or validates the text. The invariant is that the
-   * seed this screen shows and the seed the run plays are one value.
-   * A raise — which that function documents it does not perform — is
-   * reported and answered with no seed, and a run still begins.
+   * THIS SCREEN NORMALISES NOTHING. `RunController.startRun` applies
+   * `normalizeEnteredSeed()` to what it is given, so the field's text is emitted
+   * verbatim and the reduced value is read back from here — one normaliser, and
+   * it is the controller's. A reader that raises, or that is absent, leaves the
+   * field as the player typed it. Decision `DL-RUNSTART-03`.
    *
-   * @param typed The field's own text.
-   * @returns The seed to carry, or `null` where it could not be reduced.
+   * @returns The seed in force, or `null` where none could be read.
    */
-  const reduceSeed = (typed: string): string | null => {
+  const readSeedInForce = (): string | null => {
+    const read = options.seedInForce;
+
+    if (read === undefined) {
+      return null;
+    }
+
     try {
-      return normalizeEnteredSeed(typed);
+      const seed = read();
+
+      return typeof seed === 'string' && seed.length > 0 ? seed : null;
     } catch (error) {
       reporter.count(BEGIN_REFUSED_METRIC, {
         context: REPORT_CONTEXT,
-        cause: 'seed-reduction-raised',
+        cause: 'seed-readback-raised',
       });
-      reporter.error('the entered seed could not be reduced', error, {
+      reporter.error('the seed in force could not be read back', error, {
         context: REPORT_CONTEXT,
-        typedLength: typed.length,
       });
 
       return null;
@@ -1067,12 +1139,22 @@ export function createRunStartScreen(
       });
     }
 
-    const typed = field.value;
+    // Bounded to the same ceiling `normalizeEnteredSeed()` applies, BEFORE the
+    // presence test below reads it. `maxLength` governs user entry alone, so a
+    // programmatically assigned value can be arbitrarily long, and the presence
+    // test is a whole-string operation. Both steps therefore read the same
+    // bounded text, which is also what keeps this test agreeing with the
+    // normaliser's own emptiness rule. DL-RUNSTART-01, DL-RUNSTART-07.
+    const held = field.value;
+    const typed =
+      held.length > MAX_ENTERED_SEED_LENGTH
+        ? held.slice(0, MAX_ENTERED_SEED_LENGTH)
+        : held;
 
     // A PRESENCE TEST, not a reduction. An empty or whitespace-only field
-    // carries no seed at all, and `normalizeEnteredSeed()` answers such a field
-    // by originating one, so the field is not handed to it in that case:
-    // origination is the run controller's. Decision DL-RUNSTART-01.
+    // carries no seed at all, so no seed is emitted and the run controller
+    // originates one: origination is the controller's, as reduction is.
+    // Decision DL-RUNSTART-01.
     if (!SEED_PRESENT.test(typed)) {
       writeStatus('');
 
@@ -1084,25 +1166,18 @@ export function createRunStartScreen(
       });
     }
 
-    const seed = reduceSeed(typed);
-
-    if (seed === null) {
-      writeStatus('');
-
-      return recordBegin({
-        supplied: true,
-        seed: null,
-        adjusted: false,
-        delivered: emitStartRun(null),
-      });
-    }
-
+    // THE TEXT IS EMITTED VERBATIM. `RunController.startRun` is the one
+    // normaliser, so nothing here trims, case-folds, hashes, parses or bounds
+    // the value; the reduced seed is read back below.
+    const delivered = emitStartRun(typed);
+    const inForce = readSeedInForce();
+    const seed = inForce ?? typed;
     const adjusted = seed !== typed;
 
     if (adjusted) {
-      // WRITTEN BACK BEFORE THE EMISSION, and announced: the seed on screen is
-      // the seed the run is played under, and no run starts under a seed the
-      // player was not shown. Decision DL-RUNSTART-03.
+      // REFLECTED FROM THE CONTROLLER, and announced: the seed on screen is the
+      // seed the run is played under, read back from the authority that decided
+      // it rather than recomputed here. Decision `DL-RUNSTART-03`.
       field.value = seed;
       writeStatus(copy.seedAdjusted(seed));
       announce(copy.seedAdjusted(seed));
@@ -1111,7 +1186,7 @@ export function createRunStartScreen(
         typedLength: typed.length,
         seedLength: seed.length,
       });
-      reporter.log('info', 'the entered seed was reduced before it was sent', {
+      reporter.log('info', 'the entered seed was reduced by the run', {
         context: REPORT_CONTEXT,
         typedLength: typed.length,
         seedLength: seed.length,
@@ -1124,20 +1199,12 @@ export function createRunStartScreen(
       supplied: true,
       seed,
       adjusted,
-      delivered: emitStartRun(seed),
+      delivered,
     });
   };
 
-  /* ------------------------------------------------------------------------
-   * The lifecycle
-   * ---------------------------------------------------------------------- */
-
   /**
    * Narrows a lifecycle context to this screen's own.
-   *
-   * A context for another state is reported and answered with `null`: the
-   * screen keeps whatever it has on show rather than rendering another state's
-   * data.
    *
    * @param context Context received.
    * @param member Lifecycle member carried into the report.
@@ -1242,6 +1309,17 @@ export function createRunStartScreen(
     });
   };
 
+  /**
+   * The line the router reads on entry.
+   *
+   * `SCREEN_ANNOUNCEMENTS.runStart` is what `copy.announcement` already
+   * carries, so the words are identical whichever layer speaks them.
+   * DL-RUNSTART-04.
+   *
+   * @returns The entry line.
+   */
+  const announcement = (): string | null => copy.announcement;
+
   const enter = (context: ScreenContext): void => {
     if (refuseAfterUnmount('enter')) {
       return;
@@ -1264,13 +1342,17 @@ export function createRunStartScreen(
     // adjustment does not describe the field as it now is.
     writeStatus('');
     writePrevious(entered);
-    placeFocus(entered);
 
-    // The line is `SCREEN_ANNOUNCEMENTS.runStart`, which a router that
-    // announces entries speaks as well; the announcer composes a line identical
-    // to the one before it into one, so entry is read once either way.
-    // Decision DL-RUNSTART-04.
-    announce(copy.announcement);
+    // Both are the router's where it owns them, and this screen's where it does
+    // not: the words the router reads come from `announcement()` below.
+    // Decisions DL-RUNSTART-04, DL-RUNSTART-09.
+    if (placeFocusOnEntry) {
+      placeFocus(entered);
+    }
+
+    if (announceOnEntry) {
+      announce(copy.announcement);
+    }
 
     reporter.count(ENTERED_METRIC, {
       context: REPORT_CONTEXT,
@@ -1293,7 +1375,7 @@ export function createRunStartScreen(
       return;
     }
 
-    // THE FIELD IS NOT WRITTEN HERE, and neither is focus moved nor the entry
+    // The field is not written here, and neither is focus moved nor the entry
     // line re-announced: a refresh that rebuilt the field would discard text
     // the player has already typed into it.
     writePrevious(refreshed);
@@ -1319,9 +1401,8 @@ export function createRunStartScreen(
         member: 'leave',
       });
     } else {
-      // The visit's own state is cleared: a later visit opens on an empty field
-      // and a run begun from it carries no seed the player did not type.
-      // Decision DL-RUNSTART-06.
+      // The visit's own state is cleared: a later visit opens on an empty
+      // field and a run begun from it carries no seed the player did not type.
       built.seedInput.value = '';
       writeStatus('');
     }
@@ -1344,6 +1425,7 @@ export function createRunStartScreen(
     mount,
     enter,
     update,
+    announcement,
     leave,
     unmount,
     isMounted: (): boolean => elements !== null,

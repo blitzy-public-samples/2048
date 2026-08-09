@@ -1,21 +1,7 @@
 // Contract suite for src/engine/engine-events.ts: the typed engine event
-// contract and its emitter. The engine emits and holds no view reference, where
-// the retired controller pushed to an actuator; the assertions below are the
-// executable evidence that the second replaced the first.
-//
-// Constructs pinned, and the vanilla construct each came from: the listener
-// table, `on()` and `emit()` of js/keyboard_input_manager.js; `setup()`, now
-// stage:start; the `move()` entry, now move:before; the merge branch, now
-// tile:merge; `addRandomTile()`, now tile:spawn, together with
-// `randomAvailableCell()` and the absent spawn position; the post-move branch,
-// now move:after; and `actuate()`, now state:commit. `ENGINE_EVENT_NAMES`,
-// `EngineEventPayloadMap`, stage:end and `off()` have no vanilla analogue.
-//
-// The assertions hold those constructs to the consumers the retired view was:
-// `actuate(grid, metadata)`, `grid.cells` walked by reference,
-// `previousPosition` and `value` read off a tile, `mergedFrom` read off a
-// merged tile, `bestScore` arriving as a string or 0, and the relational
-// `bestScore` comparison.
+// contract and its emitter. The engine emits and holds no view reference,
+// where the retired controller pushed to an actuator; the assertions below are
+// the executable evidence that the second replaced the first.
 //
 // Not pinned here: pickup order, the charge guard, error isolation and payload
 // compounding, which belong to tests/unit/engine/hook-bus.test.ts, and the
@@ -24,10 +10,7 @@
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock library and writes no snapshot.
 //
-// Decisions this suite is the evidence for, in docs/DECISION_LOG.md:
-// DL-EVENT-01, DL-EVENT-02 and DL-EVENT-03. Traceability rows: TR-EVENT-01,
-// TR-EVENT-02, TR-EVENT-03, TR-EVENT-04, TR-EVENT-05, TR-EVENT-06,
-// TR-EVENT-07 and TR-EVENT-08
+// Decisions: DL-EVENT-01, DL-EVENT-02, DL-EVENT-03 (docs/DECISION_LOG.md).
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -296,12 +279,12 @@ describe('ENGINE_EVENT_NAMES (AAP Contract 1)', () => {
     expect(namesAreExactTuple).toBe(true);
   });
 
-  it('is frozen at run time, not only readonly at compile time (F9)', () => {
+  it('is frozen at run time, not only readonly at compile time', () => {
     expect(Object.isFrozen(ENGINE_EVENT_NAMES)).toBe(true);
   });
 
   it('refuses a runtime write to an entry and keeps its contents exact ' +
-    '(F9)', () => {
+    '', () => {
     const mutable = ENGINE_EVENT_NAMES as unknown as string[];
 
     expect(() => {
@@ -310,7 +293,7 @@ describe('ENGINE_EVENT_NAMES (AAP Contract 1)', () => {
     expect([...ENGINE_EVENT_NAMES]).toEqual(EXPECTED_EVENT_NAMES);
   });
 
-  it('refuses a runtime push, pop and length change (F9)', () => {
+  it('refuses a runtime push, pop and length change', () => {
     const mutable = ENGINE_EVENT_NAMES as unknown as string[];
 
     expect(() => {
@@ -666,10 +649,7 @@ describe('EngineEvents.emit walks the listeners it began with ' +
   });
 
   // The remover is registered FIRST and the listener it removes SECOND, so the
-  // removal happens while the walk is still short of its target. A walk over
-  // the live array would skip that target; the copy taken before the walk
-  // reaches it anyway. Registered the other way round the target would have run
-  // before the removal and the case would pass either way.
+  // removal happens while the walk is still short of its target.
   it('invokes a listener removed during the emission (L28)', () => {
     const events = createEngineEvents();
     const order: string[] = [];
@@ -745,15 +725,10 @@ describe('EngineEvents.emit walks the listeners it began with ' +
     });
 });
 
-/* ===== 11. emit() contains a throwing listener ===== */
-
 // The charge guard, pickup-order dispatch and payload compounding are
 // src/engine/hook-bus.ts, pinned by tests/unit/engine/hook-bus.test.ts.
 // js/keyboard_input_manager.js L28-L30 iterated with no try/catch, so a
 // throwing view aborted the manager after it had already mutated the board.
-// The emitter contains each listener instead: the emission reaches every
-// listener in the snapshot, and the caught value is reported rather than
-// thrown.
 describe('EngineEvents.emit contains a throwing listener ' +
   '(js/keyboard_input_manager.js L25-L32)', () => {
   it('does not propagate a listener error to the caller that emitted', () => {
@@ -886,7 +861,7 @@ describe('EngineEvents.emit contains a throwing listener ' +
   });
 
   it('counts one emission and one contained listener error, on the event ' +
-    'dimension (F8)', () => {
+    'dimension', () => {
     const counts: {
       metric: string;
       value: number;
@@ -912,15 +887,14 @@ describe('EngineEvents.emit contains a throwing listener ' +
 
     events.emit('stage:end', createStageEnd());
 
-    // The event name is reported under `event`; `hook` names one of the six
-    // hooks and is absent, so a consumer can tell the two counts apart.
+    // The event name is reported under `event`.
     expect(counts).toEqual([
       { metric: 'engine.event.emit', value: 1, event: 'stage:end' },
       { metric: 'engine.event.listener.error', value: 1, event: 'stage:end' },
     ]);
   });
 
-  it('counts an emission with no listener registered at all (F8)', () => {
+  it('counts an emission with no listener registered at all', () => {
     const counts: { metric: string; event?: string }[] = [];
     const events = createEngineEvents({
       reporter: {
@@ -940,7 +914,7 @@ describe('EngineEvents.emit contains a throwing listener ' +
   });
 
   it('counts one emission per emit however many listeners are registered ' +
-    '(F8)', () => {
+    '', () => {
     const counts: string[] = [];
     const events = createEngineEvents({
       reporter: {
@@ -961,7 +935,7 @@ describe('EngineEvents.emit contains a throwing listener ' +
     expect(counts).toEqual(['stage:end', 'stage:end']);
   });
 
-  it('reports no event count under the hook dimension (F8)', () => {
+  it('reports no event count under the hook dimension', () => {
     const hooks: (string | undefined)[] = [];
     const events = createEngineEvents({
       reporter: {
@@ -1864,14 +1838,12 @@ describe('tile:spawn carries an absent position on a full board (js/grid.js ' +
   });
 
   it('emits once per RESOLVED spawn and is not the attempt boundary ' +
-    '(F7)', () => {
+    '', () => {
     const events = createEngineEvents();
     const received = recordEmissions(events, 'tile:spawn');
 
     // Two resolutions: one that inserted a tile, and one an onSpawn handler
-    // suppressed by returning the payload without a position. The full-board
-    // case reaches neither, because the engine returns before it emits — see
-    // the boundary suite in tests/unit/engine/engine-spawn.test.ts.
+    // suppressed by returning the payload without a position.
     events.emit('tile:spawn', createTileSpawn());
     events.emit('tile:spawn', { turn: 1, value: SPAWN_VALUE });
 
@@ -1880,7 +1852,7 @@ describe('tile:spawn carries an absent position on a full board (js/grid.js ' +
     expect(received[1]?.position).toBeUndefined();
   });
 
-  it('omits the position member rather than carrying it as null (F7)', () => {
+  it('omits the position member rather than carrying it as null', () => {
     const events = createEngineEvents();
     const received = recordEmissions(events, 'tile:spawn');
 

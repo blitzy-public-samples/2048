@@ -2,18 +2,6 @@
 // resolved hook payload the engine ADOPTS, which it holds invariant, and which
 // it derives.
 //
-// The engine dispatches six hooks and then has to decide what to do with each
-// resolved payload. Reporting a transformed member while executing the original
-// one is indistinguishable from a working relic until the board disagrees with
-// the event stream, so every member of the contract stated in
-// src/engine/hooks.ts is pinned here:
-//   onStageStart  `goal` adopted; `stageIndex`, `seed`, `boardSize` invariant
-//   onBeforeMove  `direction` and `cancelled` adopted; `board` invariant
-//   onMerge       `resultValue` and `scoreDelta` adopted; the two tiles invariant
-//   onSpawn       `position` and `value` adopted
-//   onAfterMove   `score`, `over`, `won` adopted; `terminated` DERIVED
-//   onStageEnd    `cleared` and `score` adopted, before the commit reads the score
-//
 // It also pins the separation the hook and event contracts now carry: a hook
 // handler receives frozen capability views of the board and of a merge's two
 // tiles, while an event subscriber receives the live `Grid` and the live
@@ -97,9 +85,9 @@ function createHarness(
 }
 
 /**
- * A board holding exactly one mergeable pair, on row 0 at columns 0 and 1, so a
- * left move resolves one merge and a right move resolves the same merge in the
- * other direction.
+ * A board holding exactly one mergeable pair, on row 0 at columns 0 and 1, so
+ * a left move resolves one merge and a right move resolves the same merge in
+ * the other direction.
  */
 function createPairSnapshot(): SerializedGameState {
   const cells: (SerializedGameState['grid']['cells'][number][number])[][] = [];
@@ -157,15 +145,13 @@ describe('onStageStart: the resolved goal is adopted, not discarded', () => {
 
     engine.setup();
 
-    // The emitted stage start carries the adopted goal. An event carries it BY
-    // VALUE, as a frozen copy, so the comparison is by value rather than by
-    // identity: no subscriber can write the goal the engine is running.
+    // The emitted stage start carries the adopted goal.
     expect(startEvents).toHaveLength(1);
     expect(startEvents[0]?.goal).toEqual(substituted);
     expect(Object.isFrozen(startEvents[0]?.goal)).toBe(true);
 
-    // ...and so does the commit that immediately follows it, so a HUD reading
-    // the commit and a subscriber reading the event agree.
+    // and so does the commit that immediately follows it, so a HUD reading the
+    // commit and a subscriber reading the event agree.
     expect(commits).toHaveLength(1);
     expect(commits[0]?.goal).toEqual(substituted);
     expect(commits[0]?.stageIndex).toBe(3);
@@ -248,7 +234,7 @@ describe('onBeforeMove: the resolved direction is the one executed', () => {
     // direction the caller asked for...
     expect(emitted).toEqual([DIRECTION_LEFT]);
 
-    // ...while the board proves the REDIRECTED direction is what ran: the pair
+    // while the board proves the REDIRECTED direction is what ran: the pair
     // merged against the RIGHT wall, at column 3, not against the left one.
     const merged = engine.grid.cellContent({ x: 3, y: 0 });
 
@@ -315,8 +301,6 @@ describe('onBeforeMove: the resolved direction is the one executed', () => {
     // Read inside the emission, before the move resolved the pair.
     expect(seen.valueAtEmission).toBe(2);
 
-    // Read at the emission the board is pre-move; read now it is post-move,
-    // which is what carrying the object rather than a snapshot means.
     expect(seen.valueAtEmission).toBe(2);
     expect(seen.event?.cells[0]?.[0]?.value).toBe(4);
   });
@@ -381,7 +365,8 @@ describe('onAfterMove: score, over and won are adopted; terminated is derived', 
     engine.move(DIRECTION_LEFT);
 
     // The handler declared the game over and `terminated: false` in the same
-    // breath; the engine derives the flag, so the contradiction cannot survive.
+    // breath; the engine derives the flag, so the contradiction cannot
+    // survive.
     expect(emitted).toEqual([true]);
     expect(engine.isGameTerminated()).toBe(true);
   });
@@ -406,7 +391,8 @@ describe('onAfterMove: score, over and won are adopted; terminated is derived', 
 
     engine.move(DIRECTION_LEFT);
 
-    // The whole return is refused, so the rescore inside it is refused with it.
+    // The whole return is refused, so the rescore inside it is refused with
+    // it.
     expect(engine.grid).toBe(board);
     expect(engine.score).not.toBe(7);
   });
@@ -466,11 +452,9 @@ describe('onMerge: the event carries the live tiles and the hook a projection of
     expect(seen.source?.previousPosition).not.toBeNull();
     expect(seen.source).toHaveProperty('mergedFrom');
 
-    // The HOOK is handed a projection of the same two tiles, read at the moment
-    // the merge resolved: the source still standing in the cell it merged out
-    // of, carrying the position it began the turn in. A relic reads that and
-    // writes the board through `context.effects`, so the objects the merge
-    // consumed stay the engine's own.
+    // The HOOK is handed a projection of the same two tiles, read at the
+    // moment the merge resolved: the source still standing in the cell it
+    // merged out of, carrying the position it began the turn in.
     expect(seen.hook?.source).not.toBe(seen.source);
     expect(seen.hook?.source.value).toBe(seen.source?.value);
     expect(seen.hook?.source.x).toBe(1);
@@ -562,7 +546,6 @@ describe('a redirected move still resolves through the ordinary pipeline', () =>
     expect(engine.move(DIRECTION_UP)).toBe(true);
     expect(spawns).toHaveLength(1);
 
-    // The two tiles slid to the bottom row rather than the top one.
     expect(engine.grid.cellContent({ x: 0, y: 3 })?.value).toBe(2);
     expect(engine.grid.cellContent({ x: 1, y: 3 })?.value).toBe(2);
   });

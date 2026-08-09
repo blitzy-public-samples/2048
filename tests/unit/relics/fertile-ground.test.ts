@@ -1,51 +1,13 @@
-// Isolation suite for the `spawn-control` relic `fertile-ground`, the one relic
-// of its family that writes the lattice. AAP R3, and the three properties AAP
-// 0.6.3 Group 5 requires of every relic: the hooks it binds, the effect it
-// produces, and its relationship to `charges`.
+// Isolation suite for the `spawn-control` relic `fertile-ground`, the one
+// relic of its family that writes the lattice. AAP R3, and the three
+// properties AAP 0.6.3 Group 5 requires of every relic: the hooks it binds,
+// the effect it produces, and its relationship to `charges`.
 //
-// The handler is invoked DIRECTLY against the `HookContext` section 4 builds,
-// so no `HookBus` takes part here. Dispatch order, the charge guard, error
-// isolation and the transaction that applies a recorded command belong to
-// src/engine/hook-bus.ts, and are asserted by
-// tests/unit/engine/hook-bus.test.ts.
+// This suite reads no DOM, no storage and no clock, opens no server, browser
+// or network connection, takes no draw from the global random source, and
+// installs no fake timer and no mock library.
 //
-// Ported constructs the relic is held against:
-//   js/game_manager.js L69-L76  addRandomTile: the `cellsAvailable` guard, one
-//                               value, one cell, one `insertTile`
-//   js/game_manager.js L71      the spawn value literal the rules now carry as
-//                               `config.spawn.values`
-//   js/grid.js L37-L43          randomAvailableCell: no `else` branch, so a
-//                               full board yields no cell
-//   js/grid.js L45-L55          availableCells, x-outer and y-inner
-//   js/grid.js L89-L91          insertTile, indexed by `tile.x` and `tile.y`
-//   js/grid.js L93-L95          removeTile, indexed the same way
-//   js/grid.js L102-L117        serialize: `{ size, cells }`, square, with an
-//                               empty cell kept as `null`
-//   js/tile.js L1-L8            the constructor flattening `position` onto
-//                               `x`/`y`, `value || 2`, `previousPosition` null
-//
-// Traceability rows of docs/TRACEABILITY_MATRIX.md this suite evidences:
-//   TR-SPAWN-02  fertile-ground, bound to onSpawn
-//   TR-GRID-04   randomAvailableCell and its full-board boundary
-//   TR-GRID-11   insertTile, the one lattice write
-//   TR-GRID-14   serialize, the round trip the board assertions read
-//
-// Decisions the suite holds the relic to, argued in docs/DECISION_LOG.md and
-// named here only so the construct can be found from the log:
-//   DL-SPAWN-01  a spawn relic acting through the payload's `value`, `position`
-//                and `count` members alone
-//   DL-SPAWN-02  the substreams a spawn relic draws from
-//   DL-RELIC-01  relic behaviour living in hook-bound handler functions
-//
-// Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
-// Substreams", of docs/architecture/data-flow.md carries the four substreams
-// and labels the vanilla call sites two of them replace; section 11 asserts the
-// cursor arithmetic that figure describes. Board layouts are named through the
-// fixtures of tests/fixtures/boards.ts rather than drawn here.
-//
-// This suite reads no DOM, no storage and no clock, opens no server, browser or
-// network connection, takes no draw from the global random source, and installs
-// no fake timer and no mock library.
+// Decisions: DL-SPAWN-01, DL-SPAWN-02, DL-RELIC-01 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -91,17 +53,15 @@ import {
   createNearLossBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. The relic under test
- * ========================================================================== */
-
 /** Identifier the family declares the relic under test with. */
 const RELIC_ID = 'fertile-ground';
 
 /** Name the declaration carries. */
 const RELIC_NAME = 'Fertile Ground';
 
-/** Seed every bench derives its substreams from unless a case names another. */
+/**
+ * Seed every bench derives its substreams from unless a case names another.
+ */
 const SEED = 'fertile-ground-suite';
 
 /** Run correlation identifier every dispatch below carries. */
@@ -130,9 +90,7 @@ const FAMILY_ORDER: readonly string[] = [
 /**
  * The declaration under test, read from the catalogue by identifier.
  *
- * @returns The declaration. Fails the calling case, and then throws, when the
- *   catalogue no longer carries the identifier, which is what a rename
- *   produces.
+ * @returns The declaration.
  */
 function relic(): Relic {
   const found = findRelicById(RELIC_ID);
@@ -149,8 +107,7 @@ function relic(): Relic {
 /**
  * The `onSpawn` handler under test.
  *
- * @returns The bound handler. Fails the calling case, and then throws, when the
- *   declaration no longer binds the hook.
+ * @returns The bound handler.
  */
 function spawnHandler(): HookHandler<'onSpawn'> {
   const handler = relic().hooks.onSpawn;
@@ -195,10 +152,6 @@ function fingerprint(declaration: Relic): Record<string, unknown> {
 /** The fingerprint as the suite found it, before any case has run. */
 const FOUND_AS: Record<string, unknown> = fingerprint(relic());
 
-/* ==========================================================================
- * 2. Board helpers
- * ========================================================================== */
-
 /** One occupied cell, as an assertion below reads it. */
 interface Occupant {
   readonly x: number;
@@ -215,9 +168,6 @@ interface Held {
 
 /**
  * Builds a live board from a fixture.
- *
- * js/grid.js L21-L34 rehydrates from `state[x][y]`, so the constructor takes
- * the CELL MATRIX rather than the whole `{ size, cells }` projection.
  *
  * @param board Fixture board, freshly built and unfrozen.
  * @returns A live grid holding one tile per non-null fixture cell.
@@ -327,9 +277,6 @@ function clearCell(grid: Grid, cell: Position): void {
  * `null` or a `Tile` whose own coordinates match the slot it sits in, and
  * js/grid.js L80-L86's off-lattice read still yielding `null`.
  *
- * A tile whose `x`/`y` disagree with its slot is the corruption js/grid.js
- * L89-L91's coordinate convention makes possible and only this check catches.
- *
  * @param grid Board to read.
  */
 function expectCoherentLattice(grid: Grid): void {
@@ -380,9 +327,9 @@ function expectHeldUndisturbed(grid: Grid, before: readonly Held[]): void {
 }
 
 /**
- * Asserts a board round-trips through js/grid.js L102-L117: a fresh
- * `{ size, cells }` projection, square, with an empty cell kept as `null`, from
- * which js/grid.js L21-L34 rebuilds the same occupancy.
+ * Asserts a board round-trips through js/grid.js L102-L117: a fresh `{ size,
+ * cells }` projection, square, with an empty cell kept as `null`, from which
+ * js/grid.js L21-L34 rebuilds the same occupancy.
  *
  * @param grid Board to project and rebuild.
  */
@@ -400,21 +347,10 @@ function expectSerialisationRoundTrip(grid: Grid): void {
     .toEqual(occupants(grid));
 }
 
-/* ==========================================================================
- * 3. The board-effect queue a dispatch records into
- * ========================================================================== */
-
 /** One recorded insertion, narrowed out of the command union. */
 type InsertCommand = Extract<BoardEffect, { kind: 'insertTile' }>;
 
-/**
- * A recording board-effect queue, and the writes its commands resolve to.
- *
- * `HookContext.effects` is transactional: src/engine/hooks.ts declares that a
- * handler's commands reach the lattice only once the handler has returned and
- * its return has been accepted. This double holds the same shape - record now,
- * write on `apply()` - and its records stay readable after `apply()` has run.
- */
+/** A recording board-effect queue, and the writes its commands resolve to. */
 interface TestEffects {
   /** The queue the dispatch context carries. */
   readonly queue: BoardEffectQueue;
@@ -449,8 +385,8 @@ function isFaceValue(value: number): boolean {
  * Reports whether a weight list can be drawn from.
  *
  * @param weights Weights to test.
- * @returns `true` when every weight is finite and non-negative and at least one
- *   is above zero.
+ * @returns `true` when every weight is finite and non-negative and at least
+ *   one is above zero.
  */
 function isDrawable(weights: readonly number[]): boolean {
   return (
@@ -531,11 +467,6 @@ function applyEffect(
 
 /**
  * Opens a recording queue over a live board and the rules in force.
- *
- * Each command is validated against the board the commands before it project,
- * which is the board a handler's next command is validated against. The two
- * whole-lattice commands are refused, as src/engine/hook-bus.ts refuses them
- * on `onSpawn`.
  *
  * @param grid Live board the queue projects from and writes to.
  * @param config Live rules a rules command writes.
@@ -743,10 +674,6 @@ function openTestEffects(grid: Grid, config: RulesConfig): TestEffects {
   };
 }
 
-/* ==========================================================================
- * 4. The dispatch context
- * ========================================================================== */
-
 /** One assembled dispatch: its collaborators, its context and its requests. */
 interface Bench {
   readonly grid: Grid;
@@ -774,10 +701,6 @@ interface BenchOptions {
 /**
  * Builds the query-only board view a handler is handed.
  *
- * `Grid` carries js/grid.js L80-L86's `cellContent`, which yields the live
- * tile; `ReadonlyGridView` publishes `cellValue` in its place, so the face
- * value is projected here and no live tile is reachable through the view.
- *
  * @param grid Live board to read through.
  * @returns The frozen view, reading the board at call time.
  */
@@ -802,10 +725,6 @@ function readonlyGrid(grid: Grid): ReadonlyGridView {
  * Assembles one dispatch over a live board: fresh rules, substreams derived
  * from a fixed literal seed, a recording effect queue, the run correlation
  * identifier, and the subscriber's own mutable state slot.
- *
- * The rules come from `createDefaultRulesConfig()`, freshly allocated and
- * unfrozen; the deep-frozen `DEFAULT_RULES_CONFIG` is read nowhere in this
- * file.
  *
  * @param grid Live board the dispatch reads and its commands write.
  * @param options Seed, charge budget and initial state slot.
@@ -966,10 +885,6 @@ function hasOccupiedNeighbour(grid: Grid, cell: Position): boolean {
   );
 }
 
-/* ==========================================================================
- * 5. The scenario the effect cases dispatch
- * ========================================================================== */
-
 /** Cell the engine resolved in the merge-pair scenario. */
 const SPAWN_CELL: Position = { x: 3, y: 3 };
 
@@ -1008,8 +923,8 @@ const FULL_BOARD_CANDIDATES: readonly string[] = [
 const REDUCED_BOARD_CANDIDATES: readonly string[] = ['0,1', '1,0'];
 
 /**
- * Builds a bench over the merge-pair fixture: two tiles of 2 at (0, 0) and
- * (1, 0), every other cell empty.
+ * Builds a bench over the merge-pair fixture: two tiles of 2 at (0, 0) and (1,
+ * 0), every other cell empty.
  *
  * @param options Seed, charge budget and initial state slot.
  * @returns The assembled bench.
@@ -1055,10 +970,6 @@ function reducedBoardSprout(seed: string, boardSize: number): string {
 
   return cellKey(recorded[0].cell);
 }
-
-/* ==========================================================================
- * 6. Property 1: the hooks the declaration binds
- * ========================================================================== */
 
 describe('the fertile-ground declaration', () => {
   it('carries the five members of the relic data shape and no others', () => {
@@ -1111,14 +1022,9 @@ describe('the fertile-ground declaration', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Property 2: the effect the handler produces
- * ========================================================================== */
-
 describe('the fertile-ground effect on a spawn', () => {
-  // A fresh board, fresh rules from `createDefaultRulesConfig()` and fresh
-  // substreams before every case. Two of the cases below write the rules in
-  // force.
+  // A fresh board, fresh rules from `createDefaultRulesConfig` and fresh
+  // substreams before every case.
   let target: Bench;
 
   beforeEach(() => {
@@ -1278,10 +1184,6 @@ describe('the fertile-ground effect on a spawn', () => {
   });
 });
 
-/* ==========================================================================
- * 8. Property 2: the boundaries the effect respects
- * ========================================================================== */
-
 describe('the fertile-ground boundaries', () => {
   it('sprouts nothing and takes no draw when the payload carries no cell',
     () => {
@@ -1350,8 +1252,6 @@ describe('the fertile-ground boundaries', () => {
       const held = heldTiles(target.grid);
       const snapshot = target.grid.serialize();
 
-      // js/grid.js L102-L117 keeps an empty cell as `null` rather than
-      // omitting it, so the projection stays square.
       expect(snapshot.size).toBe(DEFAULT_BOARD_SIZE);
       expect(snapshot.cells).toHaveLength(DEFAULT_BOARD_SIZE);
       expect(snapshot.cells[cell.x][cell.y]).toBeNull();
@@ -1407,10 +1307,6 @@ describe('the fertile-ground boundaries', () => {
     });
 });
 
-/* ==========================================================================
- * 9. Property 2: the lattice discipline, read from the handler's source
- * ========================================================================== */
-
 describe('the fertile-ground handler source', () => {
   it('records its insertion through the effect queue', () => {
     expect(handlerSource()).toMatch(/effects\s*\.\s*insertTile/u);
@@ -1437,10 +1333,6 @@ describe('the fertile-ground handler source', () => {
     expect(source).not.toMatch(/\bconsole\b/u);
   });
 });
-
-/* ==========================================================================
- * 10. Property 3: charges
- * ========================================================================== */
 
 describe('fertile-ground and charges', () => {
   it('declares no charge budget and no state slot', () => {
@@ -1495,10 +1387,6 @@ describe('fertile-ground and charges', () => {
     expect(target.effects.inserts()).toHaveLength(1);
   });
 });
-
-/* ==========================================================================
- * 11. Determinism and substream hygiene
- * ========================================================================== */
 
 describe('fertile-ground determinism', () => {
   it('advances the relic-draw cursor exactly once and no other cursor', () => {
@@ -1555,10 +1443,6 @@ describe('fertile-ground determinism', () => {
     expect([...observed].sort()).toEqual([...MERGE_PAIR_CANDIDATES]);
   });
 });
-
-/* ==========================================================================
- * 12. The catalogue after the suite
- * ========================================================================== */
 
 describe('the catalogue the suite read', () => {
   it('published a declaration this suite left exactly as it found it', () => {

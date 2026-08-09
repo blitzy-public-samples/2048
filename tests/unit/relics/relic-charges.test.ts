@@ -2,26 +2,9 @@
 // charge-carrying relics spends a charge, WHEN, and how a player's manual
 // activation spends one.
 //
-// The bus-level mechanics of the signal are pinned by
-// tests/unit/engine/hook-bus-charges.test.ts. This suite asserts the half only
-// the relics can state: that a charge is spent when the relic's effect ACTUALLY
-// TRIGGERS and not on a dispatch it declined to act on. `tumbler` is dispatched
-// on every move and shuffles only inside the scarcity band; `culling-blade`
-// cuts only once the small tiles have piled up; `scouring-wind` sweeps only when
-// a column is full; `temporal-anchor` rewinds only a move that filled the last
-// cell. A charge spent on a dispatch that changed nothing would be a charge the
-// player lost for free.
-//
-// It also asserts the manual-activation path the finding calls for: an
-// `activateRelic` press carries a zero-based index naming a slot of the HUD's
-// relic tray, that tray renders in PICKUP ORDER, and the index therefore
-// resolves against the registry's pickup order — with the deduction made through
-// the bus, so a manual activation and a handler's own request spend from one
-// shared pool.
-//
 // And the prompt's zero-charge edge case at the relic level: each of the five,
-// invoked with no charges remaining, throws nothing, writes no board and leaves
-// the run state as it stands.
+// invoked with no charges remaining, throws nothing, writes no board and
+// leaves the run state as it stands.
 
 import { describe, expect, it } from 'vitest';
 
@@ -45,8 +28,6 @@ import {
   tileAt,
   type BoardLayout,
 } from '../../fixtures/relics';
-
-/* ===== Fixtures ===== */
 
 const GOAL: StageGoal = { kind: 'highest-tile', target: 512 };
 
@@ -83,15 +64,18 @@ const CULLABLE_BOARD: BoardLayout = [
   [null, null, null, null],
 ];
 
-/** Column x = 1 fully occupied. */
-const ONE_FULL_COLUMN: BoardLayout = [
-  [null, 2, null, null],
-  [null, 4, null, null],
-  [8, 8, null, null],
-  [null, 16, null, null],
+/**
+ * Row y = 1 fully occupied. A `BoardLayout` is written row-major — `layout[y][x]`
+ * — so one inner array is one row.
+ */
+const ONE_FULL_ROW: BoardLayout = [
+  [null, null, 8, null],
+  [2, 4, 8, 16],
+  [null, null, null, null],
+  [null, null, null, null],
 ];
 
-/** A board no relic here acts on: wide open, no full column, few tiles. */
+/** A board no relic here acts on: wide open, no full row, few tiles. */
 const OPEN_BOARD: BoardLayout = [
   [2, 4, null, null],
   [null, null, null, null],
@@ -142,8 +126,6 @@ function fillLastRow(harness: Harness): void {
   }
 }
 
-/* ===== The declarations ===== */
-
 describe('the charge-carrying relics', () => {
   it('are exactly five, and each declares a positive whole budget', () => {
     expect(CHARGED.map((entry) => entry.id).sort()).toEqual([
@@ -165,8 +147,6 @@ describe('the charge-carrying relics', () => {
     expect(RELIC_CATALOGUE.length - CHARGED.length).toBe(11);
   });
 });
-
-/* ===== A charge is spent when the effect triggers ===== */
 
 describe('frostbind spends a charge per frosted cell', () => {
   it('spends one on a merge', () => {
@@ -254,11 +234,10 @@ describe('temporal-anchor spends a charge per rewind', () => {
       layout: SCARCE_BOARD,
     });
 
-    // THE ORDER THE TWO HOOKS ACT IN. `recordAnchor` takes the anchor on
+    // The order the two hooks act in. `recordAnchor` takes the anchor on
     // `onAfterMove`, while the settled board still has room; the board then
-    // jams; and the NEXT `onBeforeMove` is where `holdAnchor` rewinds to it and
-    // withdraws the move. The rewind is applied before the move resolves, so the
-    // player is pulled back off the jam rather than undone after losing on it.
+    // jams; and the NEXT `onBeforeMove` is where `holdAnchor` rewinds to it
+    // and withdraws the move.
     harness.dispatch('onAfterMove', afterMove(harness, { score: 100 }));
     fillLastRow(harness);
 
@@ -414,7 +393,7 @@ describe('scouring-wind spends a charge per sweep', () => {
   it('spends its single charge on the sweep', () => {
     const harness = createRelicHarness({
       relics: [relic('scouring-wind')],
-      layout: ONE_FULL_COLUMN,
+      layout: ONE_FULL_ROW,
     });
 
     harness.dispatch('onAfterMove', afterMove(harness));
@@ -422,7 +401,7 @@ describe('scouring-wind spends a charge per sweep', () => {
     expect(harness.chargesOf('scouring-wind')).toBe(0);
   });
 
-  it('spends nothing when no column is full', () => {
+  it('spends nothing when no row is full', () => {
     const harness = createRelicHarness({
       relics: [relic('scouring-wind')],
       layout: OPEN_BOARD,
@@ -439,25 +418,23 @@ describe('scouring-wind spends a charge per sweep', () => {
   it('sweeps exactly once in a run, then never again', () => {
     const harness = createRelicHarness({
       relics: [relic('scouring-wind')],
-      layout: ONE_FULL_COLUMN,
+      layout: ONE_FULL_ROW,
     });
 
     harness.dispatch('onAfterMove', afterMove(harness));
 
-    // Refill the column and settle another move.
-    for (let y = 0; y < 4; y += 1) {
-      harness.grid.insertTile(tileAt(1, y, 2));
+    // Refill the row and settle another move.
+    for (let x = 0; x < 4; x += 1) {
+      harness.grid.insertTile(tileAt(x, 1, 2));
     }
 
     const second = harness.dispatch('onAfterMove', afterMove(harness));
 
     expect(second.invoked).toBe(0);
     expect(second.skipped).toBe(1);
-    expect(harness.grid.cellContent({ x: 1, y: 0 })?.value).toBe(2);
+    expect(harness.grid.cellContent({ x: 0, y: 1 })?.value).toBe(2);
   });
 });
-
-/* ===== Zero charges, at the relic level ===== */
 
 describe('every charge relic invoked with no charges remaining', () => {
   const layouts: Readonly<Record<string, BoardLayout>> = {
@@ -465,7 +442,7 @@ describe('every charge relic invoked with no charges remaining', () => {
     'temporal-anchor': SCARCE_BOARD,
     tumbler: SCARCE_BOARD,
     'culling-blade': CULLABLE_BOARD,
-    'scouring-wind': ONE_FULL_COLUMN,
+    'scouring-wind': ONE_FULL_ROW,
   };
 
   for (const entry of CHARGED) {
@@ -485,14 +462,22 @@ describe('every charge relic invoked with no charges remaining', () => {
       const before = harness.layout();
       let failed = 0;
       let invoked = 0;
+      let spent = 0;
 
-      // Every hook the relic binds, dispatched with a spent budget.
+      // STAGE PREPARATION IS DISPATCHED SEPARATELY. `STANDING_HOOK_NAMES` of
+      // src/engine/hooks.ts exempts `onStageStart` from the charge guard, so a
+      // relic that binds it reinstates the standing rules its own persisted slot
+      // records however little budget is left. What it must not do is act: no
+      // board write, no charge, no throw.
       const stage = harness.dispatch('onStageStart', {
         stageIndex: 0,
         goal: GOAL,
         seed: harness.rng.seed,
         boardSize: harness.grid.size,
       });
+
+      // The five EFFECT hooks, dispatched with a spent budget. Each must be
+      // refused at the guard.
       const opened = harness.dispatch('onBeforeMove', beforeMove(harness));
       const merged = harness.dispatch('onMerge', mergePayload());
       const settled = harness.dispatch('onAfterMove', afterMove(harness));
@@ -502,21 +487,25 @@ describe('every charge relic invoked with no charges remaining', () => {
         score: 100,
       });
 
-      for (const result of [stage, opened, merged, settled, ended]) {
+      for (const result of [opened, merged, settled, ended]) {
         failed += result.failed;
         invoked += result.invoked;
+        spent += result.chargesConsumed;
       }
 
       expect(failed).toBe(0);
       expect(invoked).toBe(0);
+      expect(spent).toBe(0);
+
+      expect(stage.failed).toBe(0);
+      expect(stage.chargesConsumed).toBe(0);
+
       expect(harness.layout()).toEqual(before);
       expect(harness.stateOf(entry.id)).toEqual(entry.state);
       expect(harness.chargesOf(entry.id)).toBe(0);
     });
   }
 });
-
-/* ===== Manual activation through the registry ===== */
 
 describe('RelicRegistry.activate', () => {
   function composeRegistry(ids: readonly string[]): {
@@ -584,7 +573,7 @@ describe('RelicRegistry.activate', () => {
 
   it('shares the pool with the handlers of the relic itself', () => {
     const { registry, bus } = composeRegistry(['scouring-wind']);
-    const harness = createRelicHarness({ relics: [], layout: ONE_FULL_COLUMN });
+    const harness = createRelicHarness({ relics: [], layout: ONE_FULL_ROW });
 
     // One registry, one bus: the harness is only used for its payloads, so the
     // dispatch below goes to the bus the registry registered with.
@@ -650,18 +639,6 @@ describe('RelicRegistry.activate', () => {
   });
 });
 
-/* ==========================================================================
- * An unusable stored budget, contained at every boundary
- *
- * A budget restored from storage or declared by a caller may be negative or not
- * a number at all. src/engine/hook-bus.ts stores such a value exactly as it was
- * written — `consumeCharge` is its one writer — and the guard reads it as spent,
- * so the handler never runs. What this suite pins is the other half: every
- * boundary that REPORTS or PERSISTS a remaining budget normalises it to a whole
- * number at or above zero, so an unusable value can never reach a projection, a
- * commit or the run envelope.
- * ========================================================================== */
-
 /** Every budget the guard reads as spent and no boundary may republish. */
 const UNUSABLE_BUDGETS: readonly { label: string; charges: number }[] =
   Object.freeze([
@@ -681,14 +658,12 @@ describe('a restored budget that is negative or not a number', () => {
 
       registry.restore([{ id: charged.id, charges }]);
 
-      // THE PROJECTION AND THE COMMIT SLICE, which are what a screen shows and
+      // The projection and the commit slice, which are what a screen shows and
       // what the run envelope carries.
       expect(registry.serialize()[0]?.charges).toBe(0);
       expect(registry.persistedEntry(charged.id)?.charges).toBe(0);
       expect(registry.relicContext()[0]?.charges).toBe(0);
 
-      // And the relic is held, so the zero is a spent budget rather than an
-      // absent relic.
       expect(registry.has(charged.id)).toBe(true);
     },
   );

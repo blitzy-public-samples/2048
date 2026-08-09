@@ -5,10 +5,10 @@
 // A component, not a screen. It declares no router lifecycle and implements no
 // `Screen` of src/ui/screen-router.ts; a screen mounts it.
 //
-// WHAT IT OWNS
-//   the element tree one relic occupies on each of the three surfaces, and the
-//   accessible name, description association and badge text that tree carries;
-//   the entrance marker, applied only where motion is permitted.
+// What it owns the element tree one relic occupies on each of the three
+// surfaces, and the accessible name, description association and badge text
+// that tree carries; the entrance marker, applied only where motion is
+// permitted.
 //
 // WHAT IT DOES NOT OWN
 //   `selectReward` and every other element-to-action binding, which
@@ -37,11 +37,11 @@
 // one it relies on is declared in style/_reward.scss, style/_hud.scss,
 // style/_summary.scss and style/_a11y.scss and is reached through the class
 // names and attributes below; the one colour that crosses into script is the
-// rarity accent, which `resolveRarityColor` of src/theme/themes.ts samples off
-// the shared ramp, and no member writes a colour into the tree. It names no
-// observability module — the report sink is injected — reads no storage, holds
-// no timer, and performs no lookup, no `matchMedia` call and no DOM write at
-// import time.
+// rarity accent, which `resolveRarityColor` of src/theme/themes.ts samples
+// off the shared ramp, and no member writes a colour into the tree. It names
+// no observability module — the report sink is injected — reads no storage,
+// holds no timer, and performs no lookup, no `matchMedia` call and no DOM
+// write at import time.
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
 // module's area enumerated. All are target-only: no construct of js/ rendered a
@@ -78,14 +78,18 @@
 //               with the tray row and the summary row left non-interactive
 //   DL-CARD-02  the accessible name carrying the relic's name and tier, with
 //               the description and the badge row associated by reference
-//   DL-CARD-03  keyboard activation installed with `preventDefault` and a
-//               key-activation guard
+//   DL-CARD-03  SUPERSEDED by DL-CARD-07: keyboard activation installed with
+//               `preventDefault` and a key-activation guard
+//   DL-CARD-07  the native button's click as the whole of activation, with no
+//               key handling, no suppression and no guard
 //   DL-CARD-04  the entrance marker applied only where motion is permitted,
 //               beside the stylesheet's own `motion-allowed` gate
 //   DL-CARD-05  the rarity accent sampled from the shared ramp and exposed to
 //               callers rather than written into the tree
 //   DL-CARD-06  an absent `charges` rendered as no counter and `0` rendered as
 //               an exhausted counter
+//   DL-CARD-07  the activation source read off `MouseEvent.detail` rather than
+//               tracked across a key sequence
 
 import { HOOK_NAMES } from '../../engine/hooks';
 import type { HookName } from '../../engine/hooks';
@@ -102,10 +106,6 @@ import {
   createSafeUiReporter,
   resolveMount,
 } from '../a11y/settings';
-
-/* ==========================================================================
- * 1. Class names, attributes and selectors
- * ========================================================================== */
 
 /**
  * Every class this module applies, so style/_reward.scss, style/_hud.scss,
@@ -182,7 +182,9 @@ export const relicCardClasses = Object.freeze({
   /** The remaining charges on the summary row. style/_summary.scss. */
   summaryCharges: 'run-summary-relic-charges',
 
-  /** The visually-hidden utility of style/_a11y.scss, imported not restated. */
+  /**
+   * The visually-hidden utility of style/_a11y.scss, imported not restated.
+   */
   visuallyHidden: VISUALLY_HIDDEN_CLASS,
 });
 
@@ -247,13 +249,6 @@ const DESCRIPTION_ID_PREFIX = 'relic-card-description-';
 /** Id prefix of the element a card's badge row is associated by. */
 const HOOKS_ID_PREFIX = 'relic-card-hooks-';
 
-/** Keys a native control is activated by. src/input/on-screen-controls.ts. */
-const ACTIVATION_KEYS: ReadonlySet<string> = new Set([
-  'Enter',
-  ' ',
-  'Spacebar',
-]);
-
 /**
  * Raised once per element pair an id is generated for.
  *
@@ -261,10 +256,6 @@ const ACTIVATION_KEYS: ReadonlySet<string> = new Set([
  * happens here.
  */
 let idSequence = 0;
-
-/* ==========================================================================
- * 2. Copy
- * ========================================================================== */
 
 /**
  * Every string this module renders.
@@ -294,9 +285,8 @@ export interface RelicCardCopy {
   readonly hooksLabel: string;
 
   /**
-   * Written between two adjacent runs of text that would otherwise be read as
-   * one word: the badge row's label and its badges, and the tray and summary
-   * rows' own runs.
+   * Written between two adjacent runs of text: the badge row's label and its
+   * badges, and the tray and summary rows' own runs.
    */
   readonly separator: string;
 
@@ -335,17 +325,12 @@ export const defaultRelicCardCopy: RelicCardCopy = Object.freeze({
       : `${name}, ${rarity} relic, ${charges}`,
 });
 
-/* ==========================================================================
- * 3. Report names
- * ========================================================================== */
-
 /** Counter raised once per card rendered. */
 const CARD_RENDERED_METRIC = 'ui.relicCard.rendered';
 
 /** Counter raised once per activation this module reported out. */
 const CARD_SELECTED_METRIC = 'ui.relicCard.selected';
 
-/** Counter raised per activation refused, carrying the reason. */
 const CARD_REFUSED_METRIC = 'ui.relicCard.selection_refused';
 
 /** Counter raised per host the document did not supply. */
@@ -380,10 +365,6 @@ const TRAY_RENDERED_METRIC = 'ui.relicTrayItem.rendered';
 
 /** Counter raised once per tray row `destroy`. */
 const TRAY_DESTROYED_METRIC = 'ui.relicTrayItem.destroyed';
-
-/* ==========================================================================
- * 4. Public API
- * ========================================================================== */
 
 /**
  * Which surface a relic is being rendered on.
@@ -445,7 +426,9 @@ export interface RelicCardSharedOptions {
    */
   readonly reducedMotion?: boolean;
 
-  /** Palette the rarity accent is sampled under. Defaults to the active one. */
+  /**
+   * Palette the rarity accent is sampled under. Defaults to the active one.
+   */
   readonly theme?: ThemeId;
 
   /** Overrides for any subset of the copy. */
@@ -518,8 +501,8 @@ export interface RelicCard {
    * Re-renders the card for a relic.
    *
    * @param relic Relic to show, used as given.
-   * @param charges Charges remaining, where the caller tracks them. Absent, the
-   *   declaration's own budget is rendered.
+   * @param charges Charges remaining, where the caller tracks them. Absent,
+   *   the declaration's own budget is rendered.
    * @param slot One-based pickup slot. Absent, the slot the card was created
    *   with stands.
    */
@@ -567,9 +550,8 @@ export interface RelicCard {
 /** Everything `createRelicCardGrid` accepts. */
 export interface RelicCardGridOptions extends RelicCardSharedOptions {
   /**
-   * The drawn offer, rendered IN THE ORDER SUPPLIED — the order
-   * src/relics/relic-draw.ts sampled it in. No member re-sorts it. Defaults to
-   * an empty offer, which renders an empty list.
+   * The drawn offer, rendered in the order supplied — the order
+   * src/relics/relic-draw.ts sampled it in. No member re-sorts it.
    */
   readonly relics?: readonly Relic[];
 
@@ -612,9 +594,9 @@ export interface RelicCardGrid {
 /** Everything `createRelicTrayItem` accepts. */
 export interface RelicTrayItemOptions extends RelicCardSharedOptions {
   /**
-   * The held relic, as `RelicRegistry.active()` returns it. Its
-   * `pickupOrder` is rendered as the row's slot and its `charges` as the
-   * count; neither is recomputed here.
+   * The held relic, as `RelicRegistry.active` returns it. Its `pickupOrder` is
+   * rendered as the row's slot and its `charges` as the count; neither is
+   * recomputed here.
    */
   readonly relic: ActiveRelic;
 }
@@ -640,18 +622,14 @@ export interface RelicTrayItem {
   /**
    * The tier's accent under the palette in force.
    *
-   * @returns The accent as 6-digit hex, or an empty string where it could not
-   *   be resolved.
+   * @returns The accent as 6-digit hex, or an empty string where it could
+   *   not be resolved.
    */
   rarityAccent(): string;
 
   /** Removes the created row. */
   destroy(): void;
 }
-
-/* ==========================================================================
- * 5. Shared internals
- * ========================================================================== */
 
 /**
  * Reads the ambient document.
@@ -712,10 +690,6 @@ interface HostRequest {
 
 /**
  * Resolves the host the created root is appended to.
- *
- * The guarded form of the lookups at js/html_actuator.js L3-L4: a miss returns
- * `null`, is reported with the selector attached, and leaves the factory
- * returning a usable component whose root is detached.
  *
  * @param request The lookup to run.
  * @param reporter Contained sink.
@@ -785,9 +759,6 @@ function isKnownRarity(value: string): value is Rarity {
 /**
  * Reads a relic's tier, reporting one the ladder does not carry.
  *
- * The value is returned either way: `data-rarity` states what the data says,
- * and the report names the mismatch.
- *
  * @param rarity Tier as the relic declares it.
  * @param relicId Identifier carried into the report.
  * @param reporter Contained sink.
@@ -817,10 +788,6 @@ function readRarity(
 
 /**
  * The hooks a relic binds, IN `HOOK_NAMES` ORDER.
- *
- * Iterates the fixed tuple and tests membership, so badge order is the order
- * one turn reaches the six hooks in whatever order a family module wrote them,
- * and a key outside the six never renders.
  *
  * @param hooks The relic's handler table.
  * @returns The bound hook names, frozen.
@@ -922,8 +889,8 @@ function readRelicFields(relic: Relic, reporter: UiReporter): RelicFields {
  * @param rarity Tier to sample.
  * @param theme Palette to sample under, or `undefined` for the active one.
  * @param reporter Contained sink.
- * @returns The accent as 6-digit hex, or an empty string where the tier or the
- *   palette could not be resolved.
+ * @returns The accent as 6-digit hex, or an empty string where the tier or
+ *   the palette could not be resolved.
  */
 function readRarityAccent(
   rarity: string,
@@ -957,10 +924,6 @@ function readRarityAccent(
 }
 
 /**
- * Reads the effective reduced-motion value: the explicit override, then the
- * store, and otherwise motion permitted. The style layer carries the media
- * query itself, in style/_a11y.scss.
- *
  * @param options Options the factory received.
  * @param reporter Contained sink.
  * @returns Whether motion is to be reduced.
@@ -1071,9 +1034,6 @@ function createElement(
 /**
  * Creates one element carrying a class and text.
  *
- * Text is written with `textContent`, never as markup: a relic's description is
- * plain data.
- *
  * @param doc Document the node is created in.
  * @param tag Element name.
  * @param className Class to carry.
@@ -1124,12 +1084,6 @@ function detach(element: Element | null): void {
 }
 
 /**
- * Reads the charges a surface shows: the caller's value where it supplied one,
- * and the declaration's budget otherwise.
- *
- * `0` is a value, not an absence: it renders the exhausted state, while an
- * absent budget renders no counter at all.
- *
  * @param supplied Charges the caller tracked, or `undefined`.
  * @param declared Charges the declaration carries, or `undefined`.
  * @returns The charges to render, or `undefined` for none.
@@ -1142,10 +1096,6 @@ function readCharges(
 
   return tracked === undefined ? declared : tracked;
 }
-
-/* ==========================================================================
- * 6. One relic, on any of the three surfaces
- * ========================================================================== */
 
 /**
  * Renders one relic.
@@ -1160,7 +1110,6 @@ function readCharges(
  *
  * @param options The relic, the surface, and the collaborators.
  * @returns The rendered card.
- *
  * @example
  * ```ts
  * // `panel` is the element the reward screen resolved and injected.
@@ -1207,9 +1156,6 @@ export function createRelicCard(options: RelicCardOptions): RelicCard {
   let disabled = options.disabled === true;
   let destroyed = false;
 
-  /** Whether the activation for the key now held has already been served. */
-  let keyActivation = false;
-
   const teardown: (() => void)[] = [];
 
   if (doc === null) {
@@ -1229,8 +1175,7 @@ export function createRelicCard(options: RelicCardOptions): RelicCard {
       const button = owner.createElement('button');
 
       // The successor of the hrefless `<a>` controls at index.html L31, L38 and
-      // L39: a real button is in the tab order and activates from Enter and
-      // Space without a role, a `tabindex` or a rule of its own.
+      // L39. DL-CARD-01.
       button.type = 'button';
       button.className = relicCardClasses.card;
 
@@ -1662,45 +1607,20 @@ export function createRelicCard(options: RelicCardOptions): RelicCard {
   if (interactive && root !== null) {
     const element = root;
 
-    /** Pointer activation, and the click a key press was already served for. */
-    const onClick = (): void => {
-      if (keyActivation) {
-        keyActivation = false;
-
-        return;
-      }
-
-      activate('pointer');
-    };
-
     /**
-     * Keyboard activation. `preventDefault` stops the page scrolling on Space
-     * and stops the activation behaviour that would synthesise a click; the
-     * guard skips a click that arrives after a key press was served.
+     * The one activation path. `<button>` synthesises this event from Enter and
+     * from Space as well as from a pointer, so the key press and the pointer
+     * press arrive here as the same event and neither is served twice.
+     * `detail` names which: `0` for a key press, above `0` for a pointer.
+     * Decision DL-CARD-07.
      */
-    const onKeyDown = (event: KeyboardEvent): void => {
-      const key = readText(event.key);
-
-      if (!ACTIVATION_KEYS.has(key)) {
-        return;
-      }
-
-      event.preventDefault();
-      keyActivation = true;
-      activate('keyboard');
-    };
-
-    const onKeyUp = (): void => {
-      keyActivation = false;
+    const onClick = (event: MouseEvent): void => {
+      activate(event.detail > 0 ? 'pointer' : 'keyboard');
     };
 
     element.addEventListener('click', onClick);
-    element.addEventListener('keydown', onKeyDown);
-    element.addEventListener('keyup', onKeyUp);
     teardown.push((): void => {
       element.removeEventListener('click', onClick);
-      element.removeEventListener('keydown', onKeyDown);
-      element.removeEventListener('keyup', onKeyUp);
     });
   }
 
@@ -1840,10 +1760,6 @@ export function createRelicCard(options: RelicCardOptions): RelicCard {
   });
 }
 
-/* ==========================================================================
- * 7. The drawn offer
- * ========================================================================== */
-
 /** Role restated on the list, which `list-style: none` removes in engines. */
 const LIST_ROLE = 'list';
 
@@ -1851,14 +1767,13 @@ const LIST_ROLE = 'list';
  * Renders the drawn offer as `ul.reward-offers`, one `li.reward-offer` per
  * relic holding one reward card.
  *
- * ORDER IS THE ORDER SUPPLIED — the order src/relics/relic-draw.ts sampled the
- * offer in. Nothing here sorts, groups or reverses it, and style/_reward.scss
- * declares no `order`, no reversed direction and no dense placement, so
- * document order is what renders.
+ * ORDER IS THE ORDER SUPPLIED — the order src/relics/relic-draw.ts sampled
+ * the offer in. Nothing here sorts, groups or reverses it, and
+ * style/_reward.scss declares no `order`, no reversed direction and no dense
+ * placement, so document order is what renders.
  *
  * @param options The offer and the collaborators.
  * @returns The rendered list.
- *
  * @example
  * ```ts
  * const grid = createRelicCardGrid({
@@ -2002,9 +1917,7 @@ export function createRelicCardGrid(
         return false;
       }
 
-      // The list's own focusable children, enumerated in DOM order. The trap
-      // that contains focus while the screen is up is the reward screen's, from
-      // `trap()` of src/ui/a11y/focus-manager.ts, and is not duplicated here.
+      // The list's own focusable children, enumerated in DOM order.
       const focusable = collectFocusable(list, {
         reporter: options.reporter ?? NOOP_UI_REPORTER,
         context: REPORT_CONTEXT,
@@ -2061,15 +1974,8 @@ export function createRelicCardGrid(
   });
 }
 
-/* ==========================================================================
- * 8. One held relic, on the tray
- * ========================================================================== */
-
 /**
  * The declaration a tray row falls back to where the held record carries none.
- *
- * Frozen, and never handed to a caller: `relic()` returns what was supplied.
- * Its tier is the ladder's first, which is the ramp's low anchor.
  */
 const EMPTY_RELIC: Relic = Object.freeze({
   id: '',
@@ -2121,13 +2027,13 @@ function readDefinition(relic: ActiveRelic): Relic {
  *
  * The row is NOT interactive: it is a list row with no button and no
  * `tabindex`, and src/input/on-screen-controls.ts owns every element-to-action
- * binding. Its slot is the `pickupOrder` src/relics/relic-registry.ts assigned,
- * rendered as text as well as by the CSS counter style/_hud.scss increments,
- * and its count is the budget the registry holds — neither is recomputed here.
+ * binding. Its slot is the `pickupOrder` src/relics/relic-registry.ts
+ * assigned, rendered as text as well as by the CSS counter style/_hud.scss
+ * increments, and its count is the budget the registry holds — neither is
+ * recomputed here.
  *
  * @param options The held relic and the collaborators.
  * @returns The rendered row.
- *
  * @example
  * ```ts
  * // `registry.active()` is pickup-ordered and is iterated as it stands.

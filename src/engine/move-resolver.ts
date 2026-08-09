@@ -1,55 +1,36 @@
 // Move resolution: direction vectors, traversal ordering, the
 // farthest-position walk, tile preparation and the merge branch.
 //
-// Ported from js/game_manager.js, which is deleted: prepareTiles(), moveTile(),
-// getVector(), buildTraversals(), findFarthestPosition(), positionsEqual() and
-// the traversal walk with its merge branch.
-//
-// docs/TRACEABILITY_MATRIX.md:
-//   TR-MOVE-01  L113-L120 prepareTiles()         -> prepareTiles()
-//   TR-MOVE-02  L123-L127 moveTile()             -> moveTile()
-//   TR-MOVE-03  L138-L143 vector, traversals and -> resolveMove()
-//   TR-MOVE-04  L146-L180 traversal walk and     -> resolveMove()
-//   TR-MOVE-05  L194-L204 getVector()            -> vectorForDirection()
-//   TR-MOVE-06  L207-L220 buildTraversals()      -> buildTraversals()
-//   TR-MOVE-07  L222-L236 findFarthestPosition() -> findFarthestPosition()
-//   TR-MOVE-08  L270-L272 positionsEqual()       -> positionsEqual()
+// Ported from js/game_manager.js, which is deleted: prepareTiles, moveTile,
+// getVector, buildTraversals, findFarthestPosition, positionsEqual and the
+// traversal walk with its merge branch.
 //
 // The traversal reversal is preserved exactly: the x order is reversed when
 // the vector's x is 1 and the y order when its y is 1, so tiles are always
 // visited from the farthest cell in the direction of travel. The walk
 // terminates on the bounds valve of src/engine/grid.ts's `cellContent`.
 //
-// THREE CHANGES TO THE PORTED BEHAVIOUR
+// The vanilla merge condition is split: the `next &&` existence guard stays in
+// this module and the two remaining tests are `config.merge.canMerge`. The
+// face value the vanilla branch computed as `tile.value * 2` is
+// `config.merge.produce`.
 //
-//   The vanilla merge condition is split: the `next &&` existence guard stays
-//   in this module and the two remaining tests are `config.merge.canMerge`.
-//   The face value the vanilla branch computed as `tile.value * 2` is
-//   `config.merge.produce`.
+// The `onMerge` transformation reaches the merge branch through the callback
+// `resolveMove` takes in its options, which defaults to
+// `identityMergeDispatch`. This module names no hook bus.
 //
-//   The `onMerge` transformation reaches the merge branch through the callback
-//   `resolveMove` takes in its options, which defaults to
-//   `identityMergeDispatch`. This module names no hook bus.
+// The win test the vanilla merge branch performed inline is not performed
+// here. `MoveOutcome.merges` carries every tile a merge produced, and
+// src/engine/terminal-state.ts compares those values against
+// `RulesConfig.winValue`.
 //
-//   The win test the vanilla merge branch performed inline is not performed
-//   here. `MoveOutcome.merges` carries every tile a merge produced, and
-//   src/engine/terminal-state.ts compares those values against
-//   `RulesConfig.winValue`.
-//
-// The vanilla post-move branch — the spawn, the loss check and the
-// actuation — belongs to src/engine/engine.ts.
+// The vanilla post-move branch — the spawn, the loss check and the actuation —
+// belongs to src/engine/engine.ts.
 //
 // This module reads no DOM, performs no I/O, consumes no randomness and reads
 // no clock.
 //
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-MOVE-01  the merge condition split between the existence guard and
-//               `config.merge.canMerge`
-//   DL-MOVE-02  the `onMerge` transformation arriving as an injected callback,
-//               so this module names no bus
-//   DL-MOVE-03  the win test leaving this module for
-//               src/engine/terminal-state.ts
+// Decisions: DL-MOVE-01, DL-MOVE-02, DL-MOVE-03 (docs/DECISION_LOG.md).
 
 import type { RulesConfig } from '../config/rules-config';
 import type { Grid } from './grid';
@@ -57,14 +38,7 @@ import type { MergeDispatchPayload, MergePayload } from './hooks';
 import { Tile } from './tile';
 import type { Direction, Position, Vector } from './types';
 
-/* --------------------------------------------------------------------------
- * Direction vectors
- * ----------------------------------------------------------------------- */
-
-/**
- * The four movement vectors, keyed by direction. Frozen, and every returned
- * vector is frozen, so a caller cannot mutate the table a later move reads.
- */
+/** The four movement vectors, keyed by direction. */
 const VECTORS: Readonly<Record<Direction, Vector>> = Object.freeze({
   0: Object.freeze({ x: 0, y: -1 }),
   1: Object.freeze({ x: 1, y: 0 }),
@@ -121,8 +95,7 @@ export interface FarthestPosition {
  * Walks from a cell along a vector until an obstacle is reached: the loop
  * advances while the next cell is both within bounds and empty, so it stops on
  * the board edge or on the first occupied cell. `next` is that stopping cell
- * and `farthest` the last empty one before it. Each step allocates a fresh
- * position, so `farthest` never aliases `next`.
+ * and `farthest` the last empty one before it.
  */
 export function findFarthestPosition(
   grid: Grid,
@@ -143,15 +116,14 @@ export function findFarthestPosition(
   };
 }
 
-/* --------------------------------------------------------------------------
- * Position comparison
- * ----------------------------------------------------------------------- */
-
 /**
- * Reports whether two positions name the same cell. This comparison is the
- * SOLE signal that a move changed the board, applied to a tile's starting cell
- * and its cell after resolution. A `Tile` satisfies the parameter type,
- * because a tile carries its coordinates flattened onto `x` and `y`.
+ * Reports whether two positions name the same cell, applied to a tile's
+ * starting cell and its cell after resolution.
+ *
+ * This comparison is the sole signal the RESOLVER has that a tile slid, and it
+ * is where `MoveOutcome.moved` comes from. It is not the engine's only
+ * board-change signal: a turn changed by a hook effect alone commits with
+ * `moved === false`.
  */
 export function positionsEqual(
   first: Position,
@@ -163,8 +135,7 @@ export function positionsEqual(
 /**
  * Records every tile's cell and clears its merge history, in the vanilla order
  * of the two writes: `mergedFrom` is cleared first and the position recorded
- * second. The iteration is `Grid.eachCell`, x-outer and y-inner. The board is
- * mutated in place.
+ * second.
  */
 export function prepareTiles(grid: Grid): void {
   grid.eachCell((_x: number, _y: number, tile: Tile | null) => {
@@ -180,7 +151,7 @@ export function prepareTiles(grid: Grid): void {
  * order: the cell the tile is leaving is cleared through the tile's own
  * coordinates, which are still its pre-move ones, the destination cell is
  * written second, and the tile's coordinates are updated last. The grid and
- * the tile are mutated in place; `cell` is read only and not retained.
+ * the tile are mutated in place.
  */
 export function moveTile(grid: Grid, tile: Tile, cell: Position): void {
   grid.cells[tile.x][tile.y] = null;
@@ -228,17 +199,18 @@ export interface ResolvedMerge {
 
   /**
    * The live tile the merge produced, which is the tile now in the destination
-   * cell. Its `value` is the produced face value after the falsy-to-2
-   * coercion a tile applies.
+   * cell. Its `value` is the produced face value after the falsy-to-2 coercion
+   * a tile applies.
    */
   readonly merged: Tile;
   readonly scoreDelta: number;
 }
 
 /**
- * What one resolved move changed. `moved` is the position-comparison flag,
- * `scoreDelta` the sum of the merge additions, and `merges` every merge the
- * move resolved, in the order the traversal reached them.
+ * What one resolved move changed. `moved` is the position-comparison flag —
+ * true when the slide moved at least one tile, and the source of the engine's
+ * own `moved` — `scoreDelta` the sum of the merge additions, and `merges` every
+ * merge the move resolved, in the order the traversal reached them.
  */
 export interface MoveOutcome {
   readonly moved: boolean;

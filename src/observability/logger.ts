@@ -2,59 +2,10 @@
 // identifier, error serialisation, field sanitisation, the log record, the
 // level filter, the sink registry, the bounded recent-record buffer, the
 // JSON-lines export, and the three adapters that satisfy the reporter
-// contracts src/engine, src/input and src/storage each declare for
-// themselves.
+// contracts src/engine, src/input and src/storage each declare for themselves.
 //
-// Two properties of the emission path, both load-bearing:
-//   a throwable is identified by the ARGUMENT POSITION it arrives in, or by
-//   its presence on a `LogFailure`, never by its type — the type test that
-//   used to choose between two positions read a thrown plain object as
-//   fields and dropped it from the record;
-//   a field bag is DEEP-SANITISED rather than shallow-copied, so nothing a
-//   caller retains a reference to can change a buffered record, and no
-//   record carries a value that `JSON.stringify` would alter.
-//
-// `serializeError` is the target of the discarded-error `catch` in
-// js/local_storage_manager.js, which bound `error` and returned `false` without
-// reporting it. Two further silent-failure sites in that same file — an
-// unguarded `setItem` and an unguarded `JSON.parse` — report through
-// `createStorageReporter`.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-LOG-01  js/local_storage_manager.js  the discarded-error `catch`, whose
-//              L37-L39                      target is `serializeError`
-//   TR-LOG-02  js/local_storage_manager.js  the unguarded `setItem`, reported
-//              L47-L49                      through `createStorageReporter`
-//   TR-LOG-03  js/local_storage_manager.js  the unguarded `JSON.parse`,
-//              L54                          reported through the same adapter
-//   TR-LOG-04  target-only row              `deriveCorrelationId` and its
-//                                           two-hash rendering
-//   TR-LOG-05  target-only row              the log record, its level filter
-//                                           and the sink registry
-//   TR-LOG-06  target-only row              the bounded recent-record buffer
-//                                           and `Logger.recent`
-//   TR-LOG-07  target-only row              the JSON-lines export
-//   TR-LOG-08  target-only row              the three reporter adapters for
-//                                           src/engine, src/input and
-//                                           src/storage
-//
-// The module's only imports are the three reporter contracts, imported as types
-// and therefore erased at build time. It names no package, no sibling
-// observability module and no DOM node: `console` and `performance` are reached
-// through `globalThis`, and every access to them is guarded. Exported members
-// report rather than throw.
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-LOG-01  the correlation identifier as a deterministic hash of the run
-//              seed and the run identifier
-//   DL-LOG-02  the two-hash rendering of that identifier
-//   DL-LOG-03  the bounded recent-record buffer as the pull backend
-//   DL-LOG-04  the three reporter adapters living in this module
-//   DL-LOG-05  a throwable identified by its argument position, never by its
-//              type
-//   DL-LOG-06  a field bag deep-sanitised on the way into a record
+// Decisions: DL-LOG-01, DL-LOG-02, DL-LOG-03, DL-LOG-04, DL-LOG-05,
+// DL-LOG-06, DL-LOG-07 (docs/DECISION_LOG.md).
 
 import type {
   CorrelationId,
@@ -78,13 +29,7 @@ import type {
 
 const CORRELATION_ID_PREFIX = 'run-';
 
-/**
- * Separates the seed-derived prefix from the run-instance segment.
- *
- * A hyphen, so the seed-grouping prefix of an instance identifier is readable
- * at a glance and a log stream can be grouped by seed with a prefix match while
- * still distinguishing the runs within it.
- */
+/** Separates the seed-derived prefix from the run-instance segment. */
 const CORRELATION_ID_INSTANCE_SEPARATOR = '-';
 
 const FNV_OFFSET_BASIS = 0x811c9dc5;
@@ -125,75 +70,34 @@ function renderHash(hash: number): string {
 }
 
 /**
- * Derives the correlation identifier every log record carries.
+ * Derives the correlation identifier every log record carries. The one
+ * authority: no other module in src/ derives a value of this type.
  *
- * THE SINGLE AUTHORITY. This is the only function in src/ that derives a
- * `CorrelationId`. src/engine/, src/run/, src/input/, src/render/ and
- * src/audio/ each receive the identifier by injection and derive none of
- * their own, which is what keeps one run's records, hook reports, run
- * reports and metric snapshots under one identifier. src/main.ts calls it
- * once per run and injects the result.
+ * ONE CONTRACT, in two forms. The seed-derived prefix GROUPS: every
+ * run replaying one seed carries the same prefix, which is what lines a
+ * replay's records up against the original's. Passing `runId` — which the
+ * composition root always does — appends a run-instance component, so the FULL
+ * identifier differs whenever `runId` differs. Two replays of one seed share a
+ * prefix and never share a full identifier, and a consumer telling two runs of
+ * one seed apart reads either the full value or `RunState.runId` beside it.
  *
- * TWO IDENTIFIERS, ONE DERIVATION. What the identifier identifies depends on
- * whether a run instance is named:
+ * PSEUDONYMOUS, NOT ANONYMOUS. The derivation is unsalted and deterministic, so
+ * anyone can compute it: a party holding candidate seeds can hash each one and
+ * match it against the prefix, which recovers a low-entropy seed — a word, a
+ * date, a short phrase — by search. What it does give is that the seed TEXT is
+ * not carried in the record. It is neither a secret nor a safe carrier for a
+ * sensitive seed, so nothing in the product may put personal data in a seed.
  *
- * - `deriveCorrelationId(seed)` groups a SEED. Every run replaying that seed
- *   receives the same identifier, which is what correlates a replay's records
- *   with the original's. It is `run-` followed by two fixed-width base36
- *   hashes of the seed, FNV-1a then djb2.
- * - `deriveCorrelationId(seed, runId)` identifies a RUN INSTANCE. It appends a
- *   third hyphen-separated hash over the run instance, so two runs of one seed
- *   are distinguishable while the seed-derived prefix still groups them. This
- *   is the form src/main.ts uses.
- *
- * The second form exists because a correlation identifier's job is to let one
- * session's records be followed end to end. Seed-grouping alone cannot do that:
- * a seed replayed — which this product invites, since the seed is displayed and
- * copyable — puts two runs' records under one identifier with nothing in the
- * stream to separate them. `runId` is therefore the UNIQUENESS component, and
- * the seed is retained in the derivation only so the grouping property survives
- * beside the instance identity. Determinism of gameplay depends on the seed and
- * is untouched by either form: no engine behaviour reads this value.
- *
- * PSEUDONYMOUS, NOT ANONYMOUS. The identifier is not a secret, and it is what
- * a report carries in place of the seed, but it must not be described as
- * anonymising the seed. The derivation is unsalted and deterministic, so it can
- * be computed by anyone: a party holding a list of candidate seeds can hash
- * each one and match it against an identifier, which recovers a low-entropy or
- * guessable seed — a word, a date, a short phrase — by dictionary search. What
- * the derivation does guarantee is that the seed TEXT is not carried in the
- * record and cannot be read back out of the identifier by inversion; it does
- * not guarantee the seed cannot be identified by search.
- *
- * A SEED IS THEREFORE TREATED AS DATA THAT MAY BE PUBLISHED. Nothing in the
- * product may put personal data in a run seed, and no caller may treat this
- * identifier as a way to carry a sensitive seed into a log or an export
- * safely.
- *
- * It identifies a SEED, not a run instance. Every run replaying one seed
- * receives the same identifier, so records from different runs of one seed are
- * LINKABLE to each other: the identifier groups replays of a seed rather than
- * distinguishing runs, which is what makes it useful for comparing a replay
- * against the original. A consumer that has to tell two runs of one seed apart
- * reads `RunState.runId`, which src/run/run-state.ts persists with the envelope
- * and a report carries as an ordinary field beside this identifier; `runId` is
- * the per-instance identity, and this value is never a substitute for it.
- *
- * The derivation reads no clock and no randomness in either form: the same
- * inputs yield the same identifier, in this process and in any later one, which
- * is what makes a record's identifier reproducible from a persisted run.
- *
- * The identifier is not a secret and not reversible, and it is what a report
- * carries in place of the seed: a player-entered seed can hold personal data,
- * this value cannot be read back into one. The same applies to `runId`.
- *
- * Neither form is unique by construction — each concatenates 32-bit hashes — so
- * distinct inputs can collide, and a consumer that needs an exact identity
+ * Neither form is unique by construction — each concatenates 32-bit hashes —
+ * so distinct inputs can collide, and a consumer that needs an exact identity
  * compares the seed and `runId` themselves.
  *
+ * Reads no clock and no randomness in either form, so a record's identifier is
+ * reproducible from a persisted run.
+ *
  * A caller holding an identifier already derived supplies it as
- * `LoggerOptions.correlationId`, which is carried verbatim and takes
- * precedence over `runSeed`.
+ * `LoggerOptions.correlationId`, which is carried verbatim and takes precedence
+ * over `runSeed`.
  *
  * @param runSeed Seed of the run. Coerced with `String`, so any value is
  *   accepted and none throws.
@@ -217,9 +121,6 @@ export function deriveCorrelationId(
     return grouped;
   }
 
-  // Hashed over the run instance AND the seed rather than the run instance
-  // alone, so the segment cannot be read back as a bare hash of `runId` and
-  // two seeds sharing a run identifier still differ here.
   const instance = `${String(runId)}\u0000${seed}`;
 
   return `${grouped}${CORRELATION_ID_INSTANCE_SEPARATOR}${renderHash(
@@ -241,13 +142,7 @@ const TRUNCATED_VALUE = '[truncated]';
 /** Member name a normalised object carries its dropped-member marker under. */
 const TRUNCATED_FIELD_KEY = '__truncated__';
 
-/**
- * Member names a normalised object never carries.
- *
- * `__proto__` on an ordinary object literal reassigns that object's prototype
- * rather than adding a member, and `constructor` and `prototype` reach the
- * prototype chain of whatever rebuilds the bag from the record.
- */
+/** Member names a normalised object never carries. */
 const FORBIDDEN_FIELD_KEYS: ReadonlySet<string> = new Set<string>([
   '__proto__',
   'constructor',
@@ -262,7 +157,7 @@ const MAX_FIELD_DEPTH = 4;
 
 /**
  * Most members one normalised object, or elements one normalised array,
- * carries. It bounds the top-level bag as well as every structure inside it.
+ * carries.
  */
 const MAX_FIELD_BREADTH = 32;
 
@@ -277,11 +172,6 @@ const MAX_FIELD_KEY_LENGTH = 120;
 
 /**
  * Longest record this module emits, measured in characters of its JSON form.
- *
- * A record over the limit is reduced in three steps — its fields are
- * replaced with a marker, then the stack of its error is dropped, then its
- * message is clamped — so a record's size is bounded whatever a caller
- * passed and whatever was thrown.
  */
 const MAX_RECORD_LENGTH = 8192;
 
@@ -390,11 +280,10 @@ const POSIX_LOCATION_PATTERN =
 /**
  * How much of a stack a record carries.
  *
- * `'redacted'` replaces every source location in the stack text with
- * `REDACTED_LOCATION`, leaving the frame names and the shape of the stack.
- * `'full'` carries the stack text as it was thrown, for a private
- * development sink; the export surfaces redact regardless, so a downloaded
- * or snapshotted record never carries a location.
+ * `'redacted'` replaces the locations of the three forms `redactLocations`
+ * matches, leaving the frame names and the shape of the stack. `'full'` carries
+ * the stack text as it was thrown, for a private development sink; the export
+ * surfaces redact regardless.
  */
 export type StackDetail = 'redacted' | 'full';
 
@@ -402,15 +291,17 @@ export type StackDetail = 'redacted' | 'full';
 export const DEFAULT_STACK_DETAIL: StackDetail = 'redacted';
 
 /**
- * Replaces every source location in `text` with `REDACTED_LOCATION`.
+ * Replaces the source locations of three enumerated forms in `text` with
+ * `REDACTED_LOCATION`: an absolute URL, a Windows absolute path, and a POSIX
+ * path of at least two segments, each optionally followed by line and column.
  *
- * URLs, Windows absolute paths and POSIX absolute paths of two segments or
- * more are all replaced, with any trailing line and column of a POSIX path
- * replaced along with it. Deterministic and total: it reads no clock, no
- * randomness and no platform state, and it never throws.
+ * What it is NOT is a general guarantee that no location survives. A bare file
+ * name and a single-segment path match none of the three and are copied as they
+ * stand, and this is applied to stack text alone — a location a caller puts in
+ * a message or a field is untouched. Decision DL-LOG-08.
  *
  * @param text Text to redact.
- * @returns The text with every matched location replaced.
+ * @returns The text with every location of those three forms replaced.
  */
 function redactLocations(text: string): string {
   return text
@@ -438,9 +329,6 @@ function clamp(text: string, limit: number): string {
 /**
  * Every bound a record this module emits is held to, and the two markers a
  * bounded record carries.
- *
- * Exported so a caller reads the contract rather than inferring it, and so a
- * test asserts against the value in force rather than a copy of it. Frozen.
  */
 export const logRecordBounds = Object.freeze({
   /** Longest `SerializedError.name`, in characters. */
@@ -486,18 +374,18 @@ export const logRecordBounds = Object.freeze({
  *
  * Every member is bounded: `name` to `MAX_ERROR_NAME_LENGTH`, `message` to
  * `MAX_ERROR_MESSAGE_LENGTH`, `stack` to `MAX_ERROR_STACK_LENGTH` and the
- * `cause` chain to `MAX_CAUSE_DEPTH` links, so one caught value cannot grow
- * a record without limit however large the value that was thrown.
+ * `cause` chain to `MAX_CAUSE_DEPTH` links, so one caught value cannot grow a
+ * record without limit however large the value that was thrown.
  */
 export interface SerializedError {
   readonly name: string;
   readonly message: string;
 
   /**
-   * The value's own `stack`, absent when it carries none. Every source
-   * location in it is replaced with `REDACTED_LOCATION` unless the record
-   * was built by a logger carrying `stackDetail: 'full'`, and the export
-   * surfaces redact in either case.
+   * The value's own `stack`, absent when it carries none. Every location of
+   * the three forms `redactLocations` matches is replaced with
+   * `REDACTED_LOCATION` unless the record was built by a logger carrying
+   * `stackDetail: 'full'`, and the export surfaces redact in either case.
    */
   readonly stack?: string;
 
@@ -516,24 +404,14 @@ const FALLBACK_SERIALIZED_ERROR: SerializedError = Object.freeze({
 
 
 /**
- * Shortens text to a byte-bounded length.
- *
- * A thrown value carries text of any size — a message built from a whole
- * payload, a stack from a deep recursion — and a record is buffered, so
- * both are bounded here rather than retained whole.
- *
- * @param text Text to bound.
- * @param limit Characters to keep.
- * @returns `text` when it is within the limit, otherwise its prefix with
- *   `TRUNCATION_SUFFIX` appended.
- */
-/**
  * Reads one string-valued member off an object, without throwing.
+ *
+ * The value is returned UNCHANGED: this reader applies no bound of its own,
+ * so a caller that needs one applies it to the result.
  *
  * @param holder Object to read from.
  * @param key Member to read.
- * @param limit Characters of the value to keep.
- * @returns The string value, bounded, or `undefined` when the member is
+ * @returns The string value, unmodified, or `undefined` when the member is
  *   absent, is not a string, or its accessor throws.
  */
 function readStringMember(
@@ -591,8 +469,8 @@ function buildSerializedError(
   };
 
   if (stack !== undefined) {
-    // Redacted before it is clamped, so the limit measures the text the
-    // record actually carries.
+    // Redacted before it is clamped, so the limit measures the text the record
+    // actually carries.
     const resolved =
       stackDetail === 'full' ? stack : redactLocations(stack);
 
@@ -644,11 +522,6 @@ function serializeThrown(
 
 /**
  * Reduces any thrown value to `SerializedError`.
- *
- * Accepts an `Error` and every subclass of it, and equally a thrown string,
- * number, boolean, symbol, bigint, plain object, `null` or `undefined`. An
- * accessor that throws, a circular structure and a circular `cause` chain are
- * each contained and reduced to a record rather than raised.
  *
  * Target of the discarded-error `catch` in js/local_storage_manager.js.
  */
@@ -707,26 +580,14 @@ export type LogFieldValue =
   | readonly LogFieldValue[]
   | { readonly [key: string]: LogFieldValue };
 
-/**
- * The structured field bag a record carries.
- *
- * A bag a caller supplies is sanitised before it reaches a record: every
- * level is deep-copied onto a frozen null-prototype object, the depth, the
- * member count, the element count and the string length are bounded,
- * `__proto__`, `constructor` and `prototype` are dropped as names, and
- * `undefined`, the non-finite numbers, a bigint, a function, a symbol and a
- * cycle are each replaced by a value that survives `JSON.stringify`
- * unchanged. `LogRecord.fields` is therefore the sanitised tree and never
- * the caller's own object.
- */
+/** The structured field bag a record carries. */
 export interface LogFields {
   readonly [key: string]: LogFieldValue | undefined;
 }
 
 /**
  * One emitted log record. Every member is plain data: a record round-trips
- * through `JSON.parse(JSON.stringify(record))` unchanged. Records are frozen
- * before they reach the buffer, the console or a sink.
+ * through `JSON.parse(JSON.stringify(record))` unchanged.
  */
 export interface LogRecord {
   readonly level: LogLevel;
@@ -749,8 +610,8 @@ export interface LogRecord {
 
   /**
    * Structured fields, absent when the caller supplied none. Deep-normalised
-   * to bounded JSON data: the record shares no object with the caller's bag
-   * at any depth, and `logRecordBounds` states the depth, breadth, node and
+   * to bounded JSON data: the record shares no object with the caller's bag at
+   * any depth, and `logRecordBounds` states the depth, breadth, node and
    * string limits it was normalised within.
    */
   readonly fields?: LogFields;
@@ -765,14 +626,6 @@ export type LogSink = (record: LogRecord) => void;
 /**
  * One reported failure: the value that was thrown, and the fields that
  * describe where it was thrown.
- *
- * The presence of `thrown` is what decides whether the record carries a
- * `LogRecord.error`, and presence is read with `in` rather than by
- * comparing the value: `{ thrown: undefined }` reports a thrown
- * `undefined`, which is a value JavaScript permits throwing, while `{}`
- * reports no throwable at all. Nothing about the value is inspected to
- * decide it, so a plain object, an array, `null` and `undefined` are all
- * carried as throwables rather than being mistaken for fields.
  */
 export interface LogFailure {
   /**
@@ -784,10 +637,6 @@ export interface LogFailure {
   /** Structured fields describing the failure. */
   readonly fields?: LogFields;
 }
-
-/* --------------------------------------------------------------------------
- * Guarded platform access
- * ----------------------------------------------------------------------- */
 
 /** A reader of a millisecond clock. */
 type ClockReader = () => number;
@@ -827,26 +676,13 @@ function resolveClock(): ClockReader | null {
   return (): number => reader.call(host);
 }
 
-/**
- * The resolved clock reader, or `null` where the host exposes none.
- * `undefined` until the first read resolves it.
- */
+/** The resolved clock reader, or `null` where the host exposes none. */
 let cachedClockReader: ClockReader | null | undefined;
 
-/**
- * The `globalThis.performance` the cached reader was resolved from, so a host
- * whose clock member is replaced is re-probed rather than read through a
- * binding onto the object it replaced.
- */
 let cachedClockHost: unknown;
 
 /**
  * The host clock reader, resolved once and reused.
- *
- * Resolution walks `globalThis` and binds a closure, so doing it per read
- * allocated one closure for every record emitted and every span opened and
- * closed. The binding is therefore held, and re-probed only when
- * `globalThis.performance` is no longer the object it was bound to.
  *
  * @returns The reader, or `null` where the host exposes no usable clock.
  */
@@ -947,15 +783,15 @@ const DEFAULT_SUBSYSTEM = 'app';
 /** Settings `createLogger` accepts. */
 export interface LoggerOptions {
   /**
-   * Run seed the seed-grouping correlation identifier is derived from. Defaults
-   * to the empty string, which derives a stable identifier of its own.
+   * Run seed the seed-grouping correlation identifier is derived from.
+   * Defaults to the empty string, which derives a stable identifier of its
+   * own.
    */
   readonly runSeed?: string;
 
   /**
-   * Correlation identifier carried verbatim, as `deriveCorrelationId`
-   * returned it. Takes precedence over `runSeed` when it is a non-empty
-   * string.
+   * Correlation identifier carried verbatim, as `deriveCorrelationId` returned
+   * it. Takes precedence over `runSeed` when it is a non-empty string.
    */
   readonly correlationId?: CorrelationId;
 
@@ -973,14 +809,14 @@ export interface LoggerOptions {
   /**
    * How much of a stack the records this logger emits carry. Defaults to
    * `DEFAULT_STACK_DETAIL`, which is `'redacted'`; only the exact value
-   * `'full'` selects the unredacted form, and it is for a private
-   * development sink. `toJsonLines()` and `snapshot()` redact in either
-   * case.
+   * `'full'` selects the unredacted form, and it is for a private development
+   * sink. `toJsonLines()` and `snapshot()` redact in either case, to the extent
+   * `redactLocations` covers.
    */
   readonly stackDetail?: StackDetail;
 }
 
-/** A logger's state and its buffered records, as `snapshot()` reports them. */
+/** A logger's state and its buffered records, as `snapshot` reports them. */
 export interface LoggerSnapshot {
   /** Correlation identifier every record carries. */
   readonly correlationId: CorrelationId;
@@ -1004,19 +840,7 @@ export interface LoggerSnapshot {
   readonly records: readonly LogRecord[];
 }
 
-/**
- * Structured logger.
- *
- * `debug` and `info` take a message and optional fields. `warn` and `error`
- * take the same two arguments and a thrown value in a THIRD, FIXED
- * position; nothing about an argument's type decides which parameter it
- * belongs to. `failure` is the explicit form, which additionally
- * distinguishes a thrown `undefined` from no throwable at all.
- *
- * Every member reports rather than throws: a sink that throws, a console that
- * throws, a field accessor that throws and a circular field structure are all
- * contained.
- */
+/** Structured logger. */
 export interface Logger {
   /** Correlation identifier every record from this logger carries. */
   readonly correlationId: CorrelationId;
@@ -1030,9 +854,9 @@ export interface Logger {
    * Emits a record at `'warn'`.
    *
    * The third argument is the thrown value and the second is the fields;
-   * neither position is inferred from the value passed. Supplying the
-   * third argument at all — including as `undefined` — records a
-   * `LogRecord.error`; omit it when there is no throwable.
+   * neither position is inferred from the value passed. Supplying the third
+   * argument at all — including as `undefined` — records a `LogRecord.error`;
+   * omit it when there is no throwable.
    *
    * @param message Message to record.
    * @param fields Optional structured fields.
@@ -1044,9 +868,9 @@ export interface Logger {
    * Emits a record at `'error'`.
    *
    * The third argument is the thrown value and the second is the fields;
-   * neither position is inferred from the value passed. Supplying the
-   * third argument at all — including as `undefined` — records a
-   * `LogRecord.error`; omit it when there is no throwable.
+   * neither position is inferred from the value passed. Supplying the third
+   * argument at all — including as `undefined` — records a `LogRecord.error`;
+   * omit it when there is no throwable.
    *
    * @param message Message to record.
    * @param fields Optional structured fields.
@@ -1056,12 +880,6 @@ export interface Logger {
 
   /**
    * Emits a record for a caught value at a level chosen by the caller.
-   *
-   * The form every reporter adapter uses, because it is the one that
-   * carries a caught value whose type is unknown: the throwable travels in
-   * `detail.thrown`, its presence is read with `in`, and a plain object,
-   * an array, `null` and `undefined` are therefore all serialised onto
-   * `LogRecord.error` rather than any of them being read as fields.
    *
    * @param level Severity to record at. A value outside the four names
    *   records at `'info'`.
@@ -1083,13 +901,6 @@ export interface Logger {
   /**
    * Replaces the correlation identifier every later record carries, on this
    * logger and on every logger sharing its state.
-   *
-   * WHY THIS EXISTS. The identifier is derived from the run — its seed and its
-   * instance — so a page that starts a second run without reloading is emitting
-   * records for a run that is not the one this logger was constructed for. A
-   * stream partitioned by correlation identifier would then attribute the new
-   * run's records to the old run. Records already emitted are NOT rewritten:
-   * they were true when they were written.
    *
    * The one deriver of the value is still `deriveCorrelationId`; this only
    * carries a value that function produced. A blank or non-string value leaves
@@ -1126,8 +937,9 @@ interface SinkRegistration {
 
 interface LoggerState {
   /**
-   * Rotated by `setCorrelationId` when a second run starts in one page load, so
-   * every logger sharing this state carries the identifier of the run in force.
+   * Rotated by `setCorrelationId` when a second run starts in one page load,
+   * so every logger sharing this state carries the identifier of the run in
+   * force.
    */
   correlationId: CorrelationId;
   level: LogLevel;
@@ -1173,15 +985,11 @@ const NOOP_UNSUBSCRIBE = (): void => {
 /**
  * Builds the emission arguments of a `warn` or `error` call.
  *
- * The thrown value's POSITION is what identifies it, never its type: the
- * type test that used to decide between the two argument positions read a
- * thrown plain object as fields and dropped it from the record.
- *
  * @param fields Second argument of the call.
- * @param rest Remaining arguments; the first of them, if any, is the
- *   thrown value. Its length is what records the throwable's presence, so
- *   an explicitly passed `undefined` is a throwable and an omitted
- *   argument is not.
+ * @param rest Remaining arguments; the first of them, if any, is the thrown
+ *   value. Its length is what records the throwable's presence, so an
+ *   explicitly passed `undefined` is a throwable and an omitted argument is
+ *   not.
  * @returns The emission arguments.
  */
 function positionalArgs(
@@ -1232,21 +1040,6 @@ function toSubsystem(value: string | undefined): string {
 /**
  * Normalises one value inside a caller's field bag to bounded JSON data.
  *
- * Structural and recursive, and it shares nothing with its argument at any
- * depth: a string is clamped to `MAX_FIELD_STRING_LENGTH`, a finite number,
- * a boolean and `null` are carried as they are, an array and a plain object
- * are rebuilt entry by entry within `MAX_FIELD_BREADTH`, and every other
- * value — a function, a symbol, a bigint, a class instance, a `Date`, a
- * `Map`, a non-finite number — is reduced to a bounded printable
- * description. A repeated reference resolves to `CIRCULAR_PLACEHOLDER`, and
- * anything beyond `MAX_FIELD_DEPTH` or the shared node allowance resolves to
- * `TRUNCATED_VALUE`.
- *
- * Object members are written with `Object.defineProperty` and a member named
- * `__proto__` is dropped, so a caller's bag cannot reach the copy's
- * prototype. Total and non-throwing: every read is guarded and a member
- * whose accessor throws is carried as `UNREADABLE_VALUE`.
- *
  * @param value Value to normalise.
  * @param depth Enclosing objects and arrays already descended through.
  * @param budget Allowance shared by the whole normalisation.
@@ -1282,8 +1075,6 @@ function normalizeFieldValue(
   }
 
   if (value === undefined) {
-    // Carried as `null` rather than described or dropped, so the value a
-    // record holds is the value `JSON.stringify` would render.
     return null;
   }
 
@@ -1322,8 +1113,6 @@ function normalizeFieldValue(
   const prototype: unknown = Object.getPrototypeOf(value);
 
   if (prototype !== Object.prototype && prototype !== null) {
-    // A `Date`, a `Map`, a `Set` or a class instance is described rather
-    // than walked: its own enumerable members are not its contents.
     return clamp(describeValue(value), MAX_FIELD_STRING_LENGTH);
   }
 
@@ -1405,11 +1194,6 @@ function normalizeFieldRecord(
 /**
  * Normalises a caller's field bag to bounded JSON data.
  *
- * Replaces the shallow copy the bag used to receive: every value is
- * normalised through `normalizeFieldValue`, so a record cannot carry a
- * structure the caller keeps a reference into, one that grows without limit,
- * or one `JSON.stringify` cannot render.
- *
  * @param fields Bag as supplied.
  * @returns A frozen bounded copy, or `undefined` when there is nothing to
  *   carry.
@@ -1426,8 +1210,6 @@ function copyFields(fields: LogFields | undefined): LogFields | undefined {
   const budget: FieldBudget = { remaining: MAX_FIELD_NODES };
   const seen = new WeakSet<object>();
 
-  // The bag itself counts as entered, so a member referring back to it is cut
-  // at the first level rather than one level down.
   seen.add(fields);
 
   const normalised = normalizeFieldRecord(
@@ -1517,12 +1299,6 @@ function buildRecord(
 /**
  * Reduces a record until its JSON form fits `MAX_RECORD_LENGTH`.
  *
- * Three steps, in order, each measured before the next is taken: the
- * structured fields are replaced with a marker, the stack of the reported
- * error is dropped, and the message is clamped. A record that still does not
- * fit after all three is left as it stands — the remaining members are the
- * six fixed ones, whose combined size is bounded by their own limits.
- *
  * @param record Record to reduce, in place, before it is frozen.
  */
 function enforceRecordBudget(record: MutableRecord): void {
@@ -1556,8 +1332,8 @@ function enforceRecordBudget(record: MutableRecord): void {
  *
  * @param record Record to measure.
  * @returns The length in characters, or `MAX_RECORD_LENGTH + 1` where the
- *   record cannot be serialised at all, so an unserialisable record is
- *   reduced rather than passed through.
+ *   record cannot be serialised at all, so an unserialisable record is reduced
+ *   rather than passed through.
  */
 function measureRecord(record: MutableRecord): number {
   const text = safeStringify(record);
@@ -1586,8 +1362,9 @@ function stripStack(error: SerializedError): SerializedError {
 }
 
 /**
- * Rebuilds a serialised error with every source location in its stack — and
- * in the stack of every cause behind it — replaced.
+ * Rebuilds a serialised error with the locations of the three forms
+ * `redactLocations` covers replaced in its stack, and in the stack of every
+ * cause behind it.
  *
  * @param error Error to redact.
  * @returns The error itself where it carries no location to replace, and a
@@ -1627,8 +1404,9 @@ function redactSerializedError(error: SerializedError): SerializedError {
  * Redacts the reported error of one record for an export surface.
  *
  * Applied by `toJsonLines()` and by `snapshot()` whatever the logger's
- * `stackDetail` is, so a downloaded or snapshotted record never carries a
- * source location even where the sinks were given full stacks.
+ * `stackDetail` is, so an export carries no location of the three forms
+ * `redactLocations` covers even where the sinks were given full stacks. A form
+ * outside those three is not removed here either.
  *
  * @param record Record to redact.
  * @returns The record itself where it carries no location to replace, and a
@@ -1822,9 +1600,9 @@ function emit(
 
 function createBoundLogger(state: LoggerState, subsystem: string): Logger {
   const logger: Logger = {
-    // A GETTER, not a captured value: `setCorrelationId` rotates the identifier
-    // when a second run starts in one page load, and a captured value would go
-    // on reporting the identifier this logger was built with.
+    // A GETTER, not a captured value: `setCorrelationId` rotates the
+    // identifier when a second run starts in one page load, and a captured
+    // value would go on reporting the identifier this logger was built with.
     get correlationId(): CorrelationId {
       return state.correlationId;
     },
@@ -1949,8 +1727,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
 
 // src/engine/types.ts, src/input/keymap.ts and src/storage/
 // local-storage-manager.ts each declare their own reporter contract and import
-// nothing from this folder. The three factories below are the logger-backed
-// implementations of those contracts, for a composition root to inject.
+// nothing from this folder.
 
 const ENGINE_SUBSYSTEM = 'engine';
 
@@ -1959,16 +1736,14 @@ const INPUT_SUBSYSTEM = 'input';
 const STORAGE_SUBSYSTEM = 'storage';
 
 /**
- * Input field names this adapter never copies into a record.
+ * Input field names this adapter never copies into a record: a DENYLIST over
+ * the exact, case-sensitive names below — the verbatim members of a keyboard
+ * event and the free-text members of an editable field.
  *
- * `KeyboardEvent.key` and `KeyboardEvent.code` name the character a player
- * pressed. src/input/input-manager.ts no longer reports either — it reports
- * a bounded category instead — and this list is the second guard on the
- * same rule: a member under one of these names is dropped here whatever
- * reports it, so a keystroke cannot reach the log buffer, the console or a
- * sink even if a later input module were to offer one. The names cover the
- * verbatim members of a keyboard event and the free-text members of an
- * editable field.
+ * It is not a general guarantee. A field reported under any other name is
+ * copied, so the standing rule is the one src/input/input-manager.ts already
+ * follows — report a bounded category, never a keystroke — and this list only
+ * enforces it for the names it lists.
  */
 const REJECTED_INPUT_FIELDS: ReadonlySet<string> = new Set([
   'key',
@@ -1990,11 +1765,14 @@ const MAX_INPUT_FIELDS = 16;
 const MAX_INPUT_FIELD_LENGTH = 64;
 
 /**
- * Copies an input report's fields under this adapter's own bounds.
+ * Copies an input report's fields under this adapter's own bounds: a denied
+ * name is dropped, every string value is truncated to `MAX_INPUT_FIELD_LENGTH`
+ * characters, and the member count is capped at `MAX_INPUT_FIELDS` so one
+ * report cannot fill a record.
  *
- * Categorical and bounded: a rejected name is dropped, a string value is
- * capped short enough that no free text survives it, and the member count
- * is capped so one report cannot fill a record.
+ * Truncation BOUNDS free text rather than removing it — a longer value reaches
+ * the record as its leading characters — so a caller must still not report free
+ * text.
  *
  * @param fields Fields the input layer reported, if any.
  * @param into Bag the copies are written into.
@@ -2066,16 +1844,6 @@ function toLogLevel(level: InputReportLevel): LogLevel {
 /**
  * Builds the engine's reporter.
  *
- * Records every contained hook-handler throw and every contained event-listener
- * throw at `'error'`, with the thrown value serialised onto `LogRecord.error`,
- * and every engine counter at `'debug'`. ALL THREE members of `EngineReporter`
- * are implemented: `onListenerError` was previously omitted, so every error a
- * listener raised was contained by the emitter and then reported nowhere.
- *
- * `reportedCorrelationId` carries the identifier the engine was injected
- * with, beside the record's own `correlationId`, so a mismatch between the
- * two is visible in the log stream rather than silent.
- *
  * Each record carries both identifiers of its report: `correlationId`, which
  * is the same value `LogRecord.correlationId` holds when the logger was built
  * with the run's canonical identifier, and `runId`, which is the run-instance
@@ -2088,9 +1856,6 @@ export function createEngineReporter(logger: Logger): EngineReporter {
 
   const reporter: EngineReporter = Object.freeze({
     onHookError(report: EngineHookErrorReport): void {
-      // `failure` rather than the positional form: the report's `error` is
-      // `unknown`, so a handler that threw a plain object, an array, `null`
-      // or `undefined` still reaches `LogRecord.error`.
       scoped.failure('error', 'A hook handler threw and was contained.', {
         thrown: report.error,
         fields: {
@@ -2102,11 +1867,6 @@ export function createEngineReporter(logger: Logger): EngineReporter {
     },
 
     onListenerError(report: EngineListenerErrorReport): void {
-      // `failure` for the same reason as `onHookError`: the caught value
-      // arrives unconverted, so a listener that threw a non-`Error` — or an
-      // `Error` carrying a cause chain — reaches `LogRecord.error` whole.
-      // The listener's position in registration order is the only identity an
-      // event listener has, so it is the identity recorded.
       scoped.failure(
         'error',
         'An event listener threw and was contained; the emission continued.',
@@ -2123,9 +1883,7 @@ export function createEngineReporter(logger: Logger): EngineReporter {
 
     onCount(report: EngineCountReport): void {
       // `hook` and `event` are separate dimensions and a report carries at
-      // most one, so both are recorded and the absent one is `null`. Event
-      // names previously arrived under `hook`; recording only that field
-      // would now drop the event name from every event count.
+      // most one, so both are recorded and the absent one is `null`.
       scoped.debug('Engine counter incremented.', {
         reportedCorrelationId: report.correlationId,
         metric: report.metric,
@@ -2150,27 +1908,18 @@ function emitsAt(logger: Logger, level: LogLevel): boolean {
   return LOG_LEVEL_SEVERITY[level] >= LOG_LEVEL_SEVERITY[logger.getLevel()];
 }
 
-/**
- * The span handed back when the level a span records at is filtered out. One
- * frozen instance is shared, since it holds no state and its `end()` has
- * nothing to record.
- */
+/** The span handed back when the level a span records at is filtered out. */
 const DISCARDED_SPAN: InputSpan = Object.freeze({
   end(): void {
-    // The record this span would have written is filtered out.
   },
 });
 
 /**
  * Builds one timing span that records its own duration when it closes.
  *
- * Spans record at `'debug'`. Where that level is filtered out the shared
- * `DISCARDED_SPAN` is returned instead, so an open-and-close pair on a hot
- * path allocates nothing and reads no clock.
- *
  * @param logger Logger the span records through.
  * @param name Span name.
- * @returns A frozen span. A second `end()` records nothing further.
+ * @returns A frozen span. A second `end` records nothing further.
  */
 function createLoggedSpan(logger: Logger, name: string): InputSpan {
   if (!emitsAt(logger, 'debug')) {
@@ -2204,9 +1953,9 @@ function createLoggedSpan(logger: Logger, name: string): InputSpan {
  * `'debug'` with the elapsed `durationMs`. All three members of
  * `InputReporter` are implemented, the optional `startSpan` included.
  *
- * Every field a report carries passes through `copyInputFields`, which
- * drops the raw-keystroke names of `REJECTED_INPUT_FIELDS` and bounds what
- * remains, so no record carries a character a player typed.
+ * Every field a report carries passes through `copyInputFields`, which drops
+ * the raw-keystroke names of `REJECTED_INPUT_FIELDS` and bounds what remains,
+ * so no record carries a character a player typed.
  *
  * @param logger Logger the reports are recorded through.
  * @returns A frozen reporter tagged `'input'`.
@@ -2228,8 +1977,7 @@ export function createInputReporter(logger: Logger): InputReporter {
 
     count(metric: string, fields?: InputReportFields): void {
       // Counters record at `'debug'`, so the clone below is wasted work
-      // whenever that level is filtered out. Every input event counts at
-      // least once, which makes this the hottest path in the module.
+      // whenever that level is filtered out.
       if (!emitsAt(scoped, 'debug')) {
         return;
       }
@@ -2254,9 +2002,6 @@ export function createInputReporter(logger: Logger): InputReporter {
 
       copyInputFields(fields, bounded);
 
-      // The caught value arrives unconverted, so `serializeError` keeps the
-      // name, the message, the stack and the cause chain that a name-and-
-      // message reduction in src/input/ used to discard.
       scoped.failure(toLogLevel(level), message, {
         thrown,
         fields: bounded,
@@ -2273,29 +2018,6 @@ export function createInputReporter(logger: Logger): InputReporter {
 
 /**
  * Builds the storage layer's reporter.
- *
- * All three members of `StorageReporter` are implemented, and the three carry
- * DIFFERENT WEIGHTS, because the adapter is where the storage layer's two
- * report channels are deduplicated.
- *
- * ONE FAILURE, ONE ERROR-LEVEL RECORD. The storage layer reports a failed probe
- * on both `onProbe` and `onFailure`, and a failed write on both `onWrite` and
- * `onFailure`, which is deliberate: each channel answers a different
- * question. But reporting both at warning level or above produced two records
- * per failure. `onFailure` is therefore the ONE channel that records a failure
- * at `'warn'` or `'error'`; `onProbe` and `onWrite` are outcome-and-state
- * channels that record at `'debug'` whatever the outcome, except for a probe
- * that failed without anything being thrown, which reaches no failure channel
- * at all and so keeps its own `'warn'`.
- *
- * THE PUBLIC-MESSAGE POLICY. Every message and every field a record leads with
- * comes from this module or from the bounded `StorageErrorInfo` the storage
- * layer authored: neither carries text supplied by the platform, an extension
- * or whatever threw, and neither carries an excerpt of a stored value. The
- * value that WAS thrown reaches `LogRecord.error` through
- * `StorageFailure.thrown`, unconverted, so its stack, its cause chain and its
- * non-`Error` structure survive for diagnosis — which a reduction to a name and
- * a message could not carry.
  *
  * Sink for the two silent-failure sites at js/local_storage_manager.js L47-L49
  * and L54.
@@ -2323,17 +2045,14 @@ export function createStorageReporter(logger: Logger): StorageReporter {
 
       if (result.error === undefined) {
         // No value was caught — the origin exposes no store at all — so the
-        // storage layer raises no failure for it. This is the one probe
-        // outcome with no second channel, so it keeps the warning, and no
-        // `LogRecord.error` is invented for a value that does not exist.
+        // storage layer raises no failure for it.
         scoped.warn(message, fields);
 
         return;
       }
 
       // A probe that caught something is also delivered to `onFailure`, which
-      // records it at warning level with the thrown value. This record is
-      // therefore the outcome and the strategy alone, at `'debug'`.
+      // records it at warning level with the thrown value.
       scoped.debug(message, fields);
     },
 
@@ -2346,8 +2065,7 @@ export function createStorageReporter(logger: Logger): StorageReporter {
 
       // Both outcomes at `'debug'`: a write that did not complete has already
       // been delivered to `onFailure`, which records it at warning level with
-      // the thrown value, so raising this one would duplicate it. `ok` is what
-      // distinguishes the two records.
+      // the thrown value, so raising this one would duplicate it.
       scoped.debug(
         info.ok
           ? 'A storage write completed.'
@@ -2363,17 +2081,13 @@ export function createStorageReporter(logger: Logger): StorageReporter {
         strategy: failure.strategy,
         quota: failure.error.quota,
 
-        // The bounded description the storage layer authored. Recorded as a
-        // field so a consumer that publishes rather than diagnoses has a
-        // scrubbed string without reading `LogRecord.error`.
+        // The bounded description the storage layer authored.
         publicMessage: failure.error.message,
         errorName: failure.error.name,
       };
 
       // The ORIGINAL caught value, not the reduction of it: a `StorageFailure`
-      // carries both, and the reduction is already in the fields above. A
-      // refused key throws nothing, so `thrown` is absent there and the
-      // description stands in for it.
+      // carries both, and the reduction is already in the fields above.
       const thrown: unknown =
         'thrown' in failure && failure.thrown !== undefined
           ? failure.thrown

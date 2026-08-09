@@ -1,25 +1,9 @@
 // `EngineTracing`: the span wrapper the engine runs its own move resolution
 // inside.
 //
-// WHY THE ENGINE OWNS THIS PLACEMENT
-//   The composition root can only wrap `Engine.move()` as a whole, and the turn
-//   span opens from INSIDE that call, on `move:before`. Wrapping from outside
-//   therefore makes the resolution span the PARENT of the turn it belongs to —
-//   inverted nesting — and, worse, closes the turn span by unwinding it the
-//   moment the outer wrapper returns, so an idle turn is recorded as an unwind
-//   instead of as an idle turn.
-//
-//   Injecting the wrapper into the engine puts the span where the tracer's own
-//   documentation says it belongs: after `move:before` has been emitted and the
-//   veto resolved, around the traversal walk and the merge resolution alone.
-//
-// The properties pinned here:
-//   ORDER — the span opens after `move:before` and after the `onBeforeMove`
-//   dispatch, and closes before `move:after`.
-//   ONCE PER RESOLVED MOVE — a blocked move and a vetoed move never reach it.
-//   TRANSPARENT — the outcome the resolver produced is the outcome the turn
-//   uses, and a throw is not swallowed.
-//   OPTIONAL — an engine built with no port plays exactly as it did before.
+// Injecting the wrapper into the engine puts the span where the tracer's own
+// documentation says it belongs: after `move:before` has been emitted and the
+// veto resolved, around the traversal walk and the merge resolution alone.
 //
 // The port is declared in src/engine/engine.ts and satisfied structurally by
 // `BoundaryTracing` of src/observability/tracer.ts, so neither module imports
@@ -32,8 +16,6 @@ import { Engine } from '../../../src/engine/engine';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import type { RngCursorMap } from '../../../src/rng/rng-streams';
 import { DIRECTION_LEFT } from '../../../src/engine/types';
-
-/* ===== Harness ===== */
 
 const RUN_SEED = 'blitzy-engine-tracing';
 
@@ -118,10 +100,6 @@ function createEngine(
   return { engine, log };
 }
 
-/* ==========================================================================
- * Placement
- * ========================================================================== */
-
 describe('the injected resolution span', () => {
   it('runs once for a move that resolved', () => {
     const recorder = createRecorder();
@@ -139,9 +117,6 @@ describe('the injected resolution span', () => {
 
     engine.move(DIRECTION_LEFT);
 
-    // This ordering is the whole point of injecting the wrapper rather than
-    // wrapping `move()` from outside: the turn span opens on `move:before`, so
-    // the resolution span has to open after it to be its child.
     expect(log).toEqual([
       'move:before',
       'resolve:open',
@@ -156,11 +131,8 @@ describe('the injected resolution span', () => {
 
     expect(engine.move(DIRECTION_LEFT)).toBe(false);
 
-    // The walk RAN — it is how the engine learned nothing changed — so the time
-    // it took is real and belongs in the trace. The turn then closes on
-    // `move:after` carrying `moved: false`, which the engine emits from its
-    // no-op branch: the resolution span closes INSIDE that turn, before the
-    // completion signal that ends it.
+    // The walk RAN — it is how the engine learned nothing changed — so the
+    // time it took is real and belongs in the trace.
     expect(log).toEqual([
       'move:before',
       'resolve:open',
@@ -197,10 +169,6 @@ describe('the injected resolution span', () => {
   });
 });
 
-/* ==========================================================================
- * Transparency
- * ========================================================================== */
-
 describe('the wrapper is a measurement, not a transformation', () => {
   it('lets the outcome the resolver produced reach the turn unchanged', () => {
     const recorder = createRecorder();
@@ -211,7 +179,8 @@ describe('the wrapper is a measurement, not a transformation', () => {
     plain.engine.move(DIRECTION_LEFT);
 
     // The merge, the score and the spawn are identical with the wrapper and
-    // without it: the seed is the same, so the boards must match cell for cell.
+    // without it: the seed is the same, so the boards must match cell for
+    // cell.
     expect(traced.engine.serialize()).toEqual(plain.engine.serialize());
     expect(traced.engine.score).toBe(plain.engine.score);
   });
@@ -229,9 +198,10 @@ describe('the wrapper is a measurement, not a transformation', () => {
 
     engine.setup(MERGE_PAIR as never);
 
-    // A wrapper is composition-root code, not a relic handler: the bus contains
-    // a relic's fault deliberately, and swallowing a fault here would hide a
-    // broken tracer behind a game that silently stopped resolving moves.
+    // A wrapper is composition-root code, not a relic handler: the bus
+    // contains a relic's fault deliberately, and swallowing a fault here would
+    // hide a broken tracer behind a game that silently stopped resolving
+    // moves.
     expect(() => engine.move(DIRECTION_LEFT)).toThrow('tracer fault');
   });
 
@@ -256,10 +226,6 @@ describe('the wrapper is a measurement, not a transformation', () => {
     expect(engine.score).toBe(4);
   });
 });
-
-/* ==========================================================================
- * A wrapper that breaks its own contract
- * ========================================================================== */
 
 describe('a wrapper that breaks the exactly-once contract', () => {
   /** Counter name the engine raises for a contained wrapper violation. */
@@ -322,7 +288,7 @@ describe('a wrapper that breaks the exactly-once contract', () => {
     expect(traced.engine.move(DIRECTION_LEFT)).toBe(true);
     expect(plain.engine.move(DIRECTION_LEFT)).toBe(true);
 
-    // THE DEFECT THIS PINS. The second call re-walked an already-resolved
+    // The defect this pins. The second call re-walked an already-resolved
     // board, which reports `moved: false` with no score delta, and the turn
     // adopted that: the two tiles merged on the board while the score stayed 0
     // and no tile spawned — a half-resolved turn, silently.
@@ -332,8 +298,6 @@ describe('a wrapper that breaks the exactly-once contract', () => {
     expect(traced.cursors()).toEqual(plain.cursors());
     expect(runs).toBe(1);
 
-    // Contained rather than propagated, so the violation is visible in exactly
-    // one place: the counter.
     expect(traced.counts.get(TRACING_FAULT_METRIC)).toBe(1);
     expect(plain.counts.get(TRACING_FAULT_METRIC)).toBeUndefined();
   });
@@ -369,10 +333,6 @@ describe('a wrapper that breaks the exactly-once contract', () => {
     expect(traced.counts.get(TRACING_FAULT_METRIC)).toBeUndefined();
   });
 });
-
-/* ==========================================================================
- * The port is optional
- * ========================================================================== */
 
 describe('an engine with no tracing port', () => {
   it('resolves a move exactly as it did before tracing existed', () => {

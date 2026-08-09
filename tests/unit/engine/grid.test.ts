@@ -3,13 +3,6 @@
 // all thirteen ported methods are covered in the order the source declared
 // them.
 //
-// Two of those constructs changed rather than moved, and each is pinned as
-// changed: js/grid.js reached `Tile` as an ambient global and the port imports
-// it, so a rehydrated cell is asserted to hold a `Tile` instance; and it drew
-// the spawn position from the global random source where the port draws from
-// the `spawn-position` substream it is handed, so both the draw and the cursor
-// are asserted.
-//
 // Coverage owned by sibling suites and not repeated here: the substreams' own
 // sequence properties, prepareTiles, moveTile and the traversals, loss
 // detection, and saved-versus-configured board-size reconciliation.
@@ -18,12 +11,7 @@
 // global; the one test double below is hand-written. It runs in the
 // `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
 //
-// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
-// DL-GRID-01, DL-GRID-02.
-// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-GRID-01,
-// TR-GRID-02, TR-GRID-03, TR-GRID-04, TR-GRID-05, TR-GRID-06, TR-GRID-07,
-// TR-GRID-08, TR-GRID-09, TR-GRID-10, TR-GRID-11, TR-GRID-12, TR-GRID-13,
-// TR-GRID-14.
+// Decisions: DL-GRID-01, DL-GRID-02 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -305,13 +293,10 @@ describe('Grid.fromState (js/grid.js L21-L34)', () => {
   });
 
 
-  // A persisted matrix is only a matrix as far as the type system is concerned:
-  // it comes back out of JSON, where nothing guarantees it measures the
-  // size the
-  // grid is built at. js/grid.js L28 read `state[x][y]` unguarded, so a missing
-  // column threw there. The port's loops are bounded by the grid's own size and
-  // its column read is guarded, which is what these cases measure — the result
-  // is always size by size, whatever shape it was handed.
+  // A persisted matrix is only a matrix as far as the type system is
+  // concerned: it comes back out of JSON, where nothing guarantees it measures
+  // the size the grid is built at. js/grid.js L28 read `state[x][y]`
+  // unguarded, so a missing column threw there.
   it('absorbs a matrix missing whole columns (L26-L28)', () => {
     const board = copyBoard(MERGE_PAIR_BOARD);
     const ragged: CellMatrix<SerializedTile> = [board.grid.cells[0]];
@@ -324,8 +309,6 @@ describe('Grid.fromState (js/grid.js L21-L34)', () => {
       expect(column).toHaveLength(board.grid.size);
     }
 
-    // Column 0 was supplied and is rehydrated; the columns that were not
-    // supplied are empty rather than absent.
     expect(grid.cells[0][0]).toBeInstanceOf(Tile);
     expect(grid.cells[0][0]?.value).toBe(board.grid.cells[0][0]?.value);
 

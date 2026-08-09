@@ -137,12 +137,12 @@ function boardWith(count: number, value: number, size = BOARD_SIZE): Grid {
   return grid;
 }
 
-/** A board with column zero fully occupied and nothing else. */
-function boardWithFullColumn(size = BOARD_SIZE): Grid {
+/** A board with row zero fully occupied and nothing else. */
+function boardWithFullRow(size = BOARD_SIZE): Grid {
   const grid = new Grid(size);
 
-  for (let y = 0; y < size; y += 1) {
-    grid.insertTile(new Tile({ x: 0, y }, 2));
+  for (let x = 0; x < size; x += 1) {
+    grid.insertTile(new Tile({ x, y: 0 }, 2));
   }
 
   return grid;
@@ -236,7 +236,7 @@ describe('frostbind spends one charge per merge it frosts', () => {
     expect(chargesOf(bus, 'frostbind')).toBe(0);
   });
 
-  it('stops carrying its frost into a new stage once exhausted', () => {
+  it('keeps carrying its frost into a new stage once exhausted', () => {
     const { bus, env } = rig('frostbind');
     const board = new Grid(BOARD_SIZE);
     const stage = {
@@ -259,19 +259,33 @@ describe('frostbind spends one charge per merge it frosts', () => {
     expect(carried.effectsApplied).toBeGreaterThan(0);
     expect(chargesOf(bus, 'frostbind')).toBe(7);
 
-    // Spend the rest of the budget on merges, then the relic stops firing on
-    // BOTH of its bindings: one budget serves every hook a relic binds.
+    // Spend the rest of the budget on merges. The relic then stops FIRING —
+    // `onMerge` freezes nothing further — while its stage-start install goes on
+    // reinstating the ledger the spent charges built, because
+    // `STANDING_HOOK_NAMES` of src/engine/hooks.ts exempts stage preparation
+    // from the charge guard. One budget still serves every EFFECT hook.
     for (let spent = 1; spent < 8; spent += 1) {
       bus.dispatch('onMerge', merge(2, 2), env(board));
     }
 
     expect(chargesOf(bus, 'frostbind')).toBe(0);
 
+    const spentMerge = bus.dispatch('onMerge', merge(3, 3), env(board));
+
+    expect(spentMerge.invoked).toBe(0);
+    expect(spentMerge.skipped).toBe(1);
+
     const exhausted = bus.dispatch('onStageStart', stage, env(board));
 
     expect(exhausted.payload.goal.target).toBe(stage.goal.target);
-    expect(exhausted.invoked).toBe(0);
-    expect(exhausted.skipped).toBe(1);
+    expect(exhausted.invoked).toBe(1);
+    expect(exhausted.skipped).toBe(0);
+    expect(exhausted.effectsApplied).toBeGreaterThan(0);
+
+    // AND IT IS STILL FREE. The install asks for no charge, so an exhausted
+    // budget is not driven below zero by being carried forward.
+    expect(exhausted.chargesConsumed).toBe(0);
+    expect(chargesOf(bus, 'frostbind')).toBe(0);
   });
 
   it('reaches the persisted envelope with the budget that is left', () => {
@@ -539,8 +553,8 @@ describe('culling-blade spends one charge per excision', () => {
  * 5. scouring-wind: its single charge, spent once
  * ========================================================================== */
 
-describe('scouring-wind spends its single charge on the column it records', () => {
-  it('spends nothing on a board with no full column', () => {
+describe('scouring-wind spends its single charge on the row it records', () => {
+  it('spends nothing on a board with no full row', () => {
     const { bus, registry, env } = rig('scouring-wind');
     const open = boardWith(2, 2);
 
@@ -550,16 +564,16 @@ describe('scouring-wind spends its single charge on the column it records', () =
     expect(registry.serialize()[0].charges).toBe(1);
   });
 
-  it('spends its charge on the first full column and stops', () => {
+  it('spends its charge on the first full row and stops', () => {
     const { bus, registry, env } = rig('scouring-wind');
-    const swept = boardWithFullColumn();
+    const swept = boardWithFullRow();
     const first = bus.dispatch('onAfterMove', afterMove(swept), env(swept));
 
     expect(first.invoked).toBe(1);
     expect(chargesOf(bus, 'scouring-wind')).toBe(0);
     expect(registry.find('scouring-wind')?.state).toEqual({
       scours: 1,
-      column: { x: 0, values: [2, 2, 2, 2] },
+      row: { y: 0, values: [2, 2, 2, 2] },
     });
 
     const exhausted = bus.dispatch('onAfterMove', afterMove(swept), env(swept));
@@ -573,7 +587,7 @@ describe('scouring-wind spends its single charge on the column it records', () =
     expect(registry.serialize()[0]).toEqual({
       id: 'scouring-wind',
       charges: 0,
-      state: { scours: 1, column: { x: 0, values: [2, 2, 2, 2] } },
+      state: { scours: 1, row: { y: 0, values: [2, 2, 2, 2] } },
     });
   });
 });
@@ -591,11 +605,11 @@ describe('a relic restored with zero charges', () => {
       const config = createDefaultRulesConfig();
       const rng = createRngStreams(SEED);
 
-      // A full board and a board with a full column: between them every effect
+      // A full board and a board with a full row: between them every effect
       // condition the five relics guard on is met, so the only reason a handler
       // does not act is the budget of zero it was restored with.
       const full = fullBoard();
-      const swept = boardWithFullColumn();
+      const swept = boardWithFullRow();
       const environment: HookEnvironment = { config, rng, grid: full };
 
       registry.restore([{ id, charges: 0 }]);
@@ -643,7 +657,7 @@ describe('a relic restored with zero charges', () => {
 
   it('never lets a budget fall below zero however many hooks dispatch', () => {
     const { bus, env } = rig('scouring-wind');
-    const swept = boardWithFullColumn();
+    const swept = boardWithFullRow();
 
     for (let move = 0; move < 20; move += 1) {
       bus.dispatch('onAfterMove', afterMove(swept), env(swept));

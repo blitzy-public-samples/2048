@@ -86,6 +86,7 @@ import {
   findRelicById,
 } from '../../../src/relics/relic-registry';
 import type { Relic } from '../../../src/relics/relic-types';
+import type { PersistedRelic } from '../../../src/run/run-state';
 import {
   RNG_STREAM_NAMES,
   createRngStreams,
@@ -1252,6 +1253,474 @@ describe('charge exhaustion across a run', () => {
 
     expect(config.merge.canMerge(moving, frosted)).toBe(false);
     expect(config.merge.canMerge(moving, untouched)).toBe(true);
+  });
+});
+
+/* ==========================================================================
+ * 4a. The ledger across a persistence round trip
+ *
+ * The path a real reload takes: the frosted cells are written into the run
+ * envelope by `RelicRegistry.serialize()`, travel through Web Storage as JSON,
+ * come back through `restoreRelics()` onto a bus that has never dispatched, and
+ * are then carried into the stage by `onStageStart` — which is where every
+ * coordinate outside the RECONCILED board is dropped, because a cursed relic
+ * can have shrunk the board while the run was away.
+ *
+ * Nothing here reads storage: `run-state-store.ts` is the writer and its own
+ * suite owns it, so the JSON boundary is crossed with `JSON.parse(
+ * JSON.stringify(...))`, which is exactly what that store puts the entry
+ * through.
+ * ========================================================================== */
+
+/** Cell frosted below that survives the reconciled two-wide board. */
+const RETAINED_FROST: Position = { x: 1, y: 1 };
+
+/** Cell frosted below that the reconciled two-wide board drops. */
+const DROPPED_FROST: Position = { x: 3, y: 3 };
+
+/** Edge length the board is reconciled to after the reload. */
+const RECONCILED_BOARD_SIZE = 2;
+
+/** One world a restored ledger is carried into. */
+interface RestoredWorld {
+  readonly registry: RelicRegistry;
+  readonly bus: HookBus;
+  readonly config: RulesConfig;
+  readonly grid: Grid;
+  readonly environment: HookEnvironment;
+}
+
+/**
+ * Frosts three cells through a real registry, then reads the entry the run
+ * envelope would carry.
+ *
+ * @returns The seated world and its persisted entry, already JSON round-tripped.
+ */
+function frostThenPersist(): {
+  readonly seated: ReturnType<typeof benchWithRegistry>;
+  readonly persisted: PersistedRelic;
+} {
+  const seated = benchWithRegistry();
+
+  for (const cell of [DESTINATION, RETAINED_FROST, DROPPED_FROST]) {
+    const resolved = seated.bus.dispatch(
+      'onMerge',
+      mergeDispatch(cell).payload,
+      seated.environment,
+    );
+
+    expect(resolved.invoked).toBe(1);
+    expect(resolved.chargesConsumed).toBe(1);
+  }
+
+  const serialized = seated.registry.serialize();
+  const entry = JSON.parse(JSON.stringify(serialized)) as PersistedRelic[];
+  const persisted = entry.find((held) => held.id === RELIC_ID);
+
+  expect(persisted, `the envelope carries ${RELIC_ID}`).toBeDefined();
+
+  return { seated, persisted: persisted as PersistedRelic };
+}
+
+/**
+ * Restores one persisted entry onto a bus and registry built after the write,
+ * over a board reconciled to `boardSize`.
+ *
+ * @param persisted Entry as it came back out of JSON.
+ * @param boardSize Edge length the restored world is reconciled to.
+ * @returns The restored world.
+ */
+function restoreInto(
+  persisted: PersistedRelic,
+  boardSize: number,
+): RestoredWorld {
+  const restoredConfig = createDefaultRulesConfig();
+
+  restoredConfig.boardSize = boardSize;
+
+  const restoredGrid = new Grid(boardSize);
+  const bus = createHookBus({
+    correlationId: CORRELATION_ID,
+    reporter: NOOP_ENGINE_REPORTER,
+  });
+  const registry = new RelicRegistry({
+    bus,
+    reporter: NOOP_ENGINE_REPORTER,
+    correlationId: CORRELATION_ID,
+  });
+
+  registry.restoreRelics([persisted]);
+
+  return {
+    registry,
+    bus,
+    config: restoredConfig,
+    grid: restoredGrid,
+    environment: {
+      config: restoredConfig,
+      rng: createRngStreams(SEED),
+      grid: restoredGrid,
+    },
+  };
+}
+
+describe('a frosted ledger carried through a reload', () => {
+  it('persists as plain JSON, in the order the cells were frosted', () => {
+    const { persisted } = frostThenPersist();
+
+    expect(persisted.id).toBe(RELIC_ID);
+    expect(persisted.charges).toBe((declaredRelic().charges as number) - 3);
+    expect(persisted.state).toEqual({
+      frozen: [DESTINATION, RETAINED_FROST, DROPPED_FROST],
+    });
+
+    // Nothing was lost or reshaped by the round trip through JSON, which is the
+    // form src/run/run-state-store.ts writes.
+    expect(JSON.parse(JSON.stringify(persisted))).toEqual(persisted);
+  });
+
+  it('is reinstalled on the restored bus with its budget intact', () => {
+    const { persisted } = frostThenPersist();
+    const restored = restoreInto(persisted, RECONCILED_BOARD_SIZE);
+
+    expect(restored.registry.has(RELIC_ID)).toBe(true);
+    expect(restored.registry.find(RELIC_ID)?.charges).toBe(persisted.charges);
+    expect(restored.registry.find(RELIC_ID)?.state).toEqual(persisted.state);
+
+    // A restored run has dispatched nothing yet, so the rules it resumes on are
+    // the untouched defaults a fresh configuration carries.
+    expect(restored.config.merge.canMerge).toBe(defaultCanMerge);
+  });
+
+  it('is filtered for the reconciled board when the stage begins', () => {
+    const { persisted } = frostThenPersist();
+    const restored = restoreInto(persisted, RECONCILED_BOARD_SIZE);
+    const resolved = restored.bus.dispatch(
+      'onStageStart',
+      stageStartPayload(RECONCILED_BOARD_SIZE),
+      restored.environment,
+    );
+
+    expect(resolved.invoked).toBe(1);
+    expect(resolved.failed).toBe(0);
+
+    // The two cells inside the reconciled board are kept, in the order they
+    // were frosted in; the cell beyond its edge is gone.
+    expect(restored.registry.find(RELIC_ID)?.state).toEqual({
+      frozen: [DESTINATION, RETAINED_FROST],
+    });
+
+    // And the filtered ledger is what a later write would persist, so the
+    // dropped cell does not come back on the next reload.
+    expect(
+      restored.registry.serialize().find((held) => held.id === RELIC_ID)?.state,
+    ).toEqual({ frozen: [DESTINATION, RETAINED_FROST] });
+  });
+
+  it('reinstalls a predicate that refuses the retained cells alone', () => {
+    const { persisted } = frostThenPersist();
+    const restored = restoreInto(persisted, RECONCILED_BOARD_SIZE);
+
+    restored.bus.dispatch(
+      'onStageStart',
+      stageStartPayload(RECONCILED_BOARD_SIZE),
+      restored.environment,
+    );
+
+    const moving = new Tile(ORIGIN, OPERAND_VALUE);
+    const predicate = restored.config.merge.canMerge;
+
+    // The wrapper is in force again after the reload, over the fresh default.
+    expect(predicate).not.toBe(defaultCanMerge);
+
+    // Every retained cell still refuses a merge that lands on it.
+    for (const cell of [DESTINATION, RETAINED_FROST]) {
+      expect(
+        predicate(moving, new Tile(cell, OPERAND_VALUE)),
+        `frost at ${String(cell.x)},${String(cell.y)}`,
+      ).toBe(false);
+    }
+
+    // The dropped cell is no longer refused, so the reconciliation reached the
+    // rule the resolver applies and not only the slot.
+    expect(predicate(moving, new Tile(DROPPED_FROST, OPERAND_VALUE))).toBe(
+      true,
+    );
+
+    // The base rule beneath the wrapper is unchanged: an unequal pair and an
+    // already-merged target are still refused on an unfrosted cell.
+    const unfrosted = new Tile({ x: 1, y: 0 }, OPERAND_VALUE);
+
+    expect(predicate(moving, unfrosted)).toBe(true);
+    expect(
+      predicate(moving, new Tile({ x: 1, y: 0 }, OPERAND_VALUE * 2)),
+    ).toBe(false);
+  });
+
+  it('spends no charge to carry the ledger into the stage', () => {
+    const { persisted } = frostThenPersist();
+    const restored = restoreInto(persisted, RECONCILED_BOARD_SIZE);
+    const resolved = restored.bus.dispatch(
+      'onStageStart',
+      stageStartPayload(RECONCILED_BOARD_SIZE),
+      restored.environment,
+    );
+
+    expect(resolved.chargesConsumed).toBe(0);
+    expect(restored.registry.find(RELIC_ID)?.charges).toBe(persisted.charges);
+  });
+
+  it('keeps every cell where the board was not reconciled smaller', () => {
+    const { persisted } = frostThenPersist();
+    const restored = restoreInto(persisted, config.boardSize);
+
+    restored.bus.dispatch(
+      'onStageStart',
+      stageStartPayload(config.boardSize),
+      restored.environment,
+    );
+
+    expect(restored.registry.find(RELIC_ID)?.state).toEqual(persisted.state);
+
+    const moving = new Tile(ORIGIN, OPERAND_VALUE);
+
+    expect(
+      restored.config.merge.canMerge(
+        moving,
+        new Tile(DROPPED_FROST, OPERAND_VALUE),
+      ),
+    ).toBe(false);
+  });
+
+  it('resumes from a ledger whose entries are not all usable', () => {
+    // What a hand-edited or older payload can carry: the reader keeps the cell
+    // coordinates and drops everything else rather than raising.
+    const restored = restoreInto(
+      {
+        id: RELIC_ID,
+        charges: 2,
+        state: {
+          frozen: [
+            RETAINED_FROST,
+            { x: -1, y: 0 },
+            { x: 0 },
+            'not a cell',
+            null,
+          ],
+        },
+      } as PersistedRelic,
+      config.boardSize,
+    );
+
+    expect((): void => {
+      restored.bus.dispatch(
+        'onStageStart',
+        stageStartPayload(config.boardSize),
+        restored.environment,
+      );
+    }).not.toThrow();
+
+    expect(restored.registry.find(RELIC_ID)?.state).toEqual({
+      frozen: [RETAINED_FROST],
+    });
+    expect(restored.registry.find(RELIC_ID)?.charges).toBe(2);
+
+    const moving = new Tile(ORIGIN, OPERAND_VALUE);
+
+    expect(
+      restored.config.merge.canMerge(
+        moving,
+        new Tile(RETAINED_FROST, OPERAND_VALUE),
+      ),
+    ).toBe(false);
+    expect(
+      restored.config.merge.canMerge(
+        moving,
+        new Tile(DESTINATION, OPERAND_VALUE),
+      ),
+    ).toBe(true);
+  });
+});
+
+/* ==========================================================================
+ * 4b. Standing state across a reload
+ *
+ * A reload rebuilds the configuration from the defaults, so the wrapper an
+ * earlier session installed is gone and `onStageStart` is the one dispatch that
+ * puts it back. The ledger it rebuilds from is the persisted `state` slot, and
+ * the charges that FROZE those cells have already been spent — so the budget a
+ * resumed run restores is legitimately zero, and the standing rule must survive
+ * that. `STANDING_HOOK_NAMES` of src/engine/hooks.ts is what makes it survive.
+ * ========================================================================== */
+
+describe('restoring the frozen ledger at zero charges', () => {
+  /** The slot a session that spent every charge leaves behind. */
+  const PERSISTED_LEDGER = Object.freeze({
+    frozen: Object.freeze([DESTINATION, { x: 2, y: 2 }]),
+  });
+
+  /**
+   * Seats the relic at the budget and slot a written envelope restores.
+   *
+   * @param charges Budget the envelope carried.
+   * @param board Board the resumed stage begins on. `isValidPayload` of
+   *   src/engine/hook-bus.ts measures a returned `boardSize` against this
+   *   board's own edge length, so a reconciled size is expressed by the board
+   *   rather than by the payload alone.
+   * @returns The bench.
+   */
+  function reloaded(charges: number, board: Grid = grid): Bench {
+    const definition = declaredRelic();
+    const bus = createHookBus({
+      correlationId: CORRELATION_ID,
+      reporter: NOOP_ENGINE_REPORTER,
+    });
+
+    expect(
+      bus.register({
+        id: definition.id,
+        hooks: definition.hooks,
+        charges,
+
+        // The slot as `RunState.relics[i].state` carried it, which is plain
+        // JSON and never the declaration's own initial slot.
+        state: JSON.parse(JSON.stringify(PERSISTED_LEDGER)) as unknown,
+      }),
+      `the bus accepts the reloaded ${RELIC_ID} registration`,
+    ).toBe(true);
+
+    return {
+      config,
+      grid: board,
+      streams,
+      bus,
+      environment: { config, rng: streams, grid: board },
+    };
+  }
+
+  it('reinstalls the merge predicate the persisted ledger implies', () => {
+    const bench = reloaded(0);
+    const before = config.merge.canMerge;
+
+    const resolved = bench.bus.dispatch(
+      'onStageStart',
+      stageStartPayload(config.boardSize),
+      bench.environment,
+    );
+
+    // INVOKED, not skipped: the charge guard is withheld from every hook that
+    // acts inside a stage and not from the one that prepares it.
+    expect(resolved.invoked).toBe(1);
+    expect(resolved.skipped).toBe(0);
+    expect(resolved.failed).toBe(0);
+    expect(resolved.effectsApplied).toBe(1);
+
+    // AND IT COSTS NOTHING. The handler asks for no charge, so the budget the
+    // envelope restored is the budget it is left at.
+    expect(resolved.chargesConsumed).toBe(0);
+    expect(bench.bus.subscribers()[0]?.charges).toBe(0);
+
+    expect(config.merge.canMerge).not.toBe(before);
+
+    const moving = new Tile(ORIGIN, OPERAND_VALUE);
+
+    for (const cell of PERSISTED_LEDGER.frozen) {
+      expect(
+        config.merge.canMerge(moving, new Tile(cell, OPERAND_VALUE)),
+        `${JSON.stringify(cell)} is frozen again`,
+      ).toBe(false);
+    }
+
+    expect(
+      config.merge.canMerge(moving, new Tile({ x: 3, y: 3 }, OPERAND_VALUE)),
+    ).toBe(true);
+  });
+
+  it('still refuses to freeze anything further at zero charges', () => {
+    const bench = reloaded(0);
+
+    bench.bus.dispatch(
+      'onStageStart',
+      stageStartPayload(config.boardSize),
+      bench.environment,
+    );
+
+    const restored = config.merge.canMerge;
+    const resolved = bench.bus.dispatch(
+      'onMerge',
+      mergeDispatch({ x: 3, y: 3 }).payload,
+      bench.environment,
+    );
+
+    // The effect hook stays guarded, so the ledger gains no cell and the
+    // predicate in force is the one the restoration installed.
+    expect(resolved.invoked).toBe(0);
+    expect(resolved.skipped).toBe(1);
+    expect(resolved.chargesConsumed).toBe(0);
+    expect(config.merge.canMerge).toBe(restored);
+
+    const moving = new Tile(ORIGIN, OPERAND_VALUE);
+
+    expect(
+      config.merge.canMerge(moving, new Tile({ x: 3, y: 3 }, OPERAND_VALUE)),
+    ).toBe(true);
+  });
+
+  it('drops a persisted cell the resumed board no longer holds', () => {
+    const shrunk = 2;
+    const bench = reloaded(0, new Grid(shrunk));
+
+    bench.bus.dispatch(
+      'onStageStart',
+      stageStartPayload(shrunk),
+      bench.environment,
+    );
+
+    const slot = bench.bus.subscribers()[0]?.state as { frozen?: unknown };
+
+    expect(slot.frozen).toEqual([DESTINATION]);
+
+    const moving = new Tile(ORIGIN, OPERAND_VALUE);
+
+    expect(
+      config.merge.canMerge(moving, new Tile(DESTINATION, OPERAND_VALUE)),
+    ).toBe(false);
+    expect(
+      config.merge.canMerge(moving, new Tile({ x: 2, y: 2 }, OPERAND_VALUE)),
+    ).toBe(true);
+  });
+
+  it('restores the same standing rule whatever budget the envelope carried', () => {
+    const exhausted = reloaded(0);
+
+    exhausted.bus.dispatch(
+      'onStageStart',
+      stageStartPayload(config.boardSize),
+      exhausted.environment,
+    );
+
+    const fromExhausted = config.merge.canMerge;
+
+    config.merge.canMerge = defaultCanMerge;
+
+    const remaining = reloaded(1);
+
+    remaining.bus.dispatch(
+      'onStageStart',
+      stageStartPayload(config.boardSize),
+      remaining.environment,
+    );
+
+    const moving = new Tile(ORIGIN, OPERAND_VALUE);
+
+    for (const cell of PERSISTED_LEDGER.frozen) {
+      const target = new Tile(cell, OPERAND_VALUE);
+
+      expect(fromExhausted(moving, target)).toBe(
+        config.merge.canMerge(moving, target),
+      );
+      expect(config.merge.canMerge(moving, target)).toBe(false);
+    }
   });
 });
 

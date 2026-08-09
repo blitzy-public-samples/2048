@@ -1,19 +1,4 @@
 // Integration suite for the composition root's input wiring, AAP R8 and R9.
-//
-// The units are pinned by tests/unit/ui/screen-router.test.ts and
-// tests/unit/ui/settings-panel.test.ts. This suite pins that src/main.ts wires
-// them together, because every one of the four defects it closes was a WIRING
-// defect rather than a module defect:
-//
-//   the router existed nowhere, so nothing ever put the page into `'overlay'`;
-//   the settings control was bound to nothing at all;
-//   the three legacy controls had two binding owners, so each pointer
-//     activation published twice;
-//   and the generated controls were never refreshed, so their availability was
-//     frozen at whatever context held while they were being generated.
-//
-// The board is drawn by the number-only renderer here, because jsdom implements
-// no WebGL context. Nothing in this suite depends on which renderer draws.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -21,57 +6,26 @@ import { DEFAULT_KEY_BINDINGS, describeBinding } from '../../../src/input/keymap
 import { start } from '../../../src/main';
 import type { Application } from '../../../src/main';
 import { resetWebGLSupportProbe } from '../../../src/render/webgl-support';
+import { normalizeEnteredSeed } from '../../../src/run/run-controller';
 import { KEYMAP_KEY, RUN_STATE_KEY } from '../../../src/storage/storage-keys';
 import { applyTheme } from '../../../src/theme/themes';
 import {
   REDUCED_MOTION_ATTRIBUTE,
   readReflectedReducedMotion,
 } from '../../../src/ui/a11y/settings';
+import { COMPOSITION_MARKUP, beginRun } from '../../fixtures/composition';
+import { SCREEN_MOUNTS, TRANSITIONS } from '../../../src/ui/screen-router';
 import { readOwnedStorage } from '../../fixtures/storage';
 
 /**
- * The markup src/main.ts looks up, in the nesting index.html declares it in.
+ * The document, from tests/fixtures/composition.ts, so this suite reads the
+ * markup index.html declares rather than a private copy of part of it.
  *
- * `#game-main` is the region made inert for the dialog, `.game-message` is the
- * terminal overlay — OUTSIDE `.screen-layer`, exactly as index.html has it —
- * and `#settings-panel` is the dialog.
+ * `.container` is the page shell a modal screen makes inert, `.game-message` is
+ * the terminal overlay — OUTSIDE `.screen-layer`, exactly as index.html has
+ * it — and `#settings-panel` is the dialog.
  */
-const MARKUP = `
-  <main id="game-main">
-    <div class="score-container"><span class="visually-hidden">Score</span>0</div>
-    <div class="best-container"><span class="visually-hidden">Best score</span>0</div>
-    <button type="button" class="restart-button">New Game</button>
-    <button type="button" class="settings-button" id="settings-button"
-            aria-haspopup="dialog" aria-controls="settings-panel">Settings</button>
-    <div class="hud" id="screen-hud" data-screen="hud" role="group"
-         aria-label="Run status" hidden>
-      <div class="hud-stage" id="hud-stage"></div>
-      <ul class="relic-tray" id="relic-tray" role="list"
-          aria-label="Active relics, in pickup order"></ul>
-    </div>
-    <div class="game-container">
-      <div class="game-message">
-        <p></p>
-        <div class="lower">
-          <button type="button" class="keep-playing-button">Keep going</button>
-          <button type="button" class="retry-button">Try again</button>
-        </div>
-      </div>
-      <div class="board-host" id="board-host">
-        <canvas class="board-canvas" id="board-canvas" aria-hidden="true"></canvas>
-        <div class="board-number-only" id="board-number-only" hidden></div>
-        <div class="board-a11y" id="board-a11y" role="grid" aria-busy="true"></div>
-      </div>
-    </div>
-    <div class="on-screen-controls" id="on-screen-controls"></div>
-  </main>
-  <div class="screen-layer" id="screen-layer">
-    <div class="settings-panel" id="settings-panel" role="dialog"
-         aria-modal="true" aria-label="Settings" hidden></div>
-  </div>
-  <div class="visually-hidden live-region" id="live-region" role="status"
-       aria-live="polite" aria-atomic="true"></div>
-`;
+const MARKUP = COMPOSITION_MARKUP;
 
 /**
  * A board one move from the configured win value.
@@ -80,7 +34,7 @@ const MARKUP = `
  * once during setup. Two 1024 tiles side by side in the top row: one move left
  * merges them into 2048, which is `winValue`.
  */
-const NEAR_WIN_STATE = JSON.stringify({
+const NEAR_WIN_BOARD = {
   grid: {
     size: 4,
     cells: [
@@ -94,6 +48,36 @@ const NEAR_WIN_STATE = JSON.stringify({
   over: false,
   won: false,
   keepPlaying: false,
+};
+
+const NEAR_WIN_STATE = JSON.stringify(NEAR_WIN_BOARD);
+
+/**
+ * The run this board belongs to: STAGE 7, whose goal is `highest-tile: 2048`.
+ *
+ * The stage matters, and it is one the win does NOT clear. Every goal below
+ * stage 8 on the default curve is at or under 2048, so a run resumed at stage 0
+ * on this board has already cleared its stage: the controller draws the payout,
+ * the flow stops at stage clear, movement is withheld and the winning move
+ * never happens. Stage 8 targets 4096, so the merge to 2048 is a WIN and
+ * nothing else, which is what these cases are about. The stage that the win
+ * outranks is pinned in tests/unit/run/run-controller.test.ts.
+ */
+const NEAR_WIN_ENVELOPE = JSON.stringify({
+  schemaVersion: 1,
+  runId: 'near-win-run',
+  seed: 'near-win-seed',
+  rngCursor: {
+    'spawn-value': 0,
+    'spawn-position': 0,
+    'relic-draw': 0,
+    'rarity-weight': 0,
+  },
+  stageIndex: 8,
+  stageGoal: { kind: 'highest-tile', target: 4096 },
+  goalProgress: 0.25,
+  relics: [],
+  board: NEAR_WIN_BOARD,
 });
 
 let application: Application | null = null;
@@ -124,15 +108,34 @@ const press = (key: string, code: string): void => {
 };
 
 /**
+ * Composes the application and leaves a PLAYABLE BOARD on screen.
+ *
+ * A load that resumed nothing holds the run-start screen, whose input context
+ * withholds movement, so a case about a keystroke reaching the board begins a
+ * run first — otherwise it would pass while proving nothing. A load that DID
+ * resume one is already on the board, and beginning another would replace the
+ * very board the case seeded, so the press is made only from the run-start
+ * state.
+ *
+ * @returns The composed application, with a run open.
+ */
+const startPlaying = (): Application => {
+  const started = start(document);
+
+  application = started;
+
+  if (started.router.current() === 'runStart') {
+    beginRun();
+  }
+
+  return started;
+};
+
+/**
  * Waits for a condition to hold, checking on every task turn.
  *
- * Replaces a fixed sleep. A sleep encodes a guess about how long a deferred
- * write takes and turns a slow machine into a failing assertion; this returns as
- * soon as the condition holds, and fails with a real message when it never does.
- *
  * @param holds The condition to wait for.
- * @param timeoutMs How long to keep checking. Generous, because it costs nothing
- *   when the condition holds early.
+ * @param timeoutMs How long to keep checking.
  * @throws Error when the condition has not held by the deadline.
  */
 const waitFor = async (
@@ -152,6 +155,23 @@ const waitFor = async (
   }
 };
 
+/**
+ * Presses one control the way a real pointer or key press does: focus first,
+ * then the activation.
+ *
+ * `HTMLElement.click()` alone dispatches the event WITHOUT moving focus, which
+ * no real press does — and focus is what a dialog records as its restore
+ * target, so a case about restoring focus has to move it.
+ *
+ * @param selector Selector of the control to press.
+ */
+const pressControl = (selector: string): void => {
+  const element = control(selector);
+
+  element.focus();
+  element.click();
+};
+
 const control = (selector: string): HTMLElement => {
   const found = document.querySelector<HTMLElement>(selector);
 
@@ -162,7 +182,9 @@ const control = (selector: string): HTMLElement => {
   return found;
 };
 
-/** A control in the rendered settings dialog, addressed by its visible name. */
+/**
+ * A control in the rendered settings dialog, addressed by its visible name.
+ */
 const panelButton = (name: string): HTMLButtonElement => {
   const found = Array.from(
     document.querySelectorAll<HTMLButtonElement>('#settings-panel button'),
@@ -175,16 +197,7 @@ const panelButton = (name: string): HTMLButtonElement => {
   return found;
 };
 
-/**
- * Counts the move attempts that reach the engine.
- *
- * Deliberately NOT a board comparison. A move that changes nothing spawns
- * nothing, and whether `ArrowDown` changes a freshly seeded two-tile board
- * depends on where the run's seed put those two tiles — so a board comparison
- * asserts on the dice, not on the wiring. `move:before` is emitted for every
- * attempt the engine accepts, whether or not the board then changes, which is
- * exactly the boundary these cases are about: did the keystroke get through.
- */
+/** Counts the move attempts that reach the engine. */
 const countMoveAttempts = (): { readonly value: number; stop(): void } => {
   const app = application;
 
@@ -205,13 +218,9 @@ const countMoveAttempts = (): { readonly value: number; stop(): void } => {
   };
 };
 
-/* ==========================================================================
- * One binding owner
- * ========================================================================== */
-
 describe('one binding owner per markup control', () => {
   it('publishes one restart per click of the New Game control', () => {
-    application = start(document);
+    application = startPlaying();
 
     let commits = 0;
     const stop = application.engine.events.on('state:commit', (): void => {
@@ -227,7 +236,7 @@ describe('one binding owner per markup control', () => {
   });
 
   it('publishes one restart per click of the retry control', () => {
-    application = start(document);
+    application = startPlaying();
 
     let commits = 0;
     const stop = application.engine.events.on('state:commit', (): void => {
@@ -242,42 +251,31 @@ describe('one binding owner per markup control', () => {
   });
 
   it('withdraws only the control whose action the context refuses', () => {
-    application = start(document);
+    application = startPlaying();
 
     const keepPlaying = control('.keep-playing-button');
     const retry = control('.retry-button');
 
-    // Asymmetric ON PURPOSE, and the asymmetry follows the ACTION rather than
-    // the element. `keepPlaying` is legal in `'overlay'` alone, so outside the
-    // overlay its control is withdrawn — shown but dead would be a lie.
     expect(keepPlaying.hidden).toBe(true);
     expect(keepPlaying.getAttribute('aria-hidden')).toBe('true');
 
-    // `restart` is legal during ordinary play, so "Try again" is never withdrawn
-    // and never carries the unavailability attributes. It is unreachable before
-    // a terminal turn for a different reason entirely: the overlay that contains
-    // it is `display: none`, which takes it out of the tab order without any
-    // attribute being involved. Withdrawing it as well would wrongly imply
-    // restarting is unavailable mid-game.
+    // `restart` is legal during ordinary play, so "Try again" is never
+    // withdrawn and never carries the unavailability attributes.
     expect(retry.hidden).toBe(false);
     expect(retry.getAttribute('aria-hidden')).toBeNull();
     expect(retry.getAttribute('tabindex')).toBeNull();
   });
 });
 
-/* ==========================================================================
- * The settings dialog
- * ========================================================================== */
-
 describe('the settings dialog', () => {
   it('opens from the settings control, with its body rendered', () => {
-    application = start(document);
+    application = startPlaying();
 
     const panel = control('#settings-panel');
 
     expect(panel.hidden).toBe(true);
 
-    control('#settings-button').click();
+    pressControl('#settings-button');
 
     expect(panel.hidden).toBe(false);
     expect(panel.querySelectorAll('form')).toHaveLength(1);
@@ -295,22 +293,70 @@ describe('the settings dialog', () => {
     expect(panel.querySelector('input[type="range"]')).not.toBeNull();
   });
 
-  it('holds focus inside the dialog and makes the board inert', () => {
+  it('inerts the screen it opened over, and lifts only that on close', () => {
+    // A load that resumed nothing HOLDS run start, so the dialog opens from
+    // inside a trapped screen — the one case where a dialog stacks over an
+    // overlay root rather than over the board.
     application = start(document);
-    control('#settings-button').click();
 
-    expect(control('#game-main').hasAttribute('inert')).toBe(true);
+    expect(application.router.current()).toBe('runStart');
+
+    const screen = control('#screen-run-start');
+    const shell = control('.container');
+
+    expect(screen.hasAttribute('inert')).toBe(false);
+    expect(shell.hasAttribute('inert')).toBe(true);
+
+    pressControl('#run-start-settings');
+
+    expect(control('#settings-panel').hidden).toBe(false);
+
+    // The screen behind the dialog leaves the accessibility tree with the rest
+    // of the background: it lives inside the screen layer, which the shell's
+    // inertness does not cover.
+    expect(screen.hasAttribute('inert')).toBe(true);
+
+    document
+      .querySelector<HTMLButtonElement>('#settings-panel button')
+      ?.blur();
+
+    const close = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('#settings-panel button'),
+    ).find((candidate) => candidate.textContent === 'Close settings');
+
+    close?.focus();
+    close?.click();
+
+    expect(control('#settings-panel').hidden).toBe(true);
+
+    // Only what the dialog applied is lifted: the shell stays inert because the
+    // run-start screen is still up and still trapping.
+    expect(screen.hasAttribute('inert')).toBe(false);
+    expect(shell.hasAttribute('inert')).toBe(true);
+    expect(control('#screen-run-start').contains(document.activeElement)).toBe(
+      true,
+    );
+  });
+
+  it('holds focus inside the dialog and makes the board inert', () => {
+    application = startPlaying();
+    pressControl('#settings-button');
+
+    // THE WHOLE PAGE SHELL, not the game region alone: the heading and the
+    // footer are behind the dialog too, and `#game-main` is inside `.container`
+    // and therefore inert with it.
+    expect(control('.container').hasAttribute('inert')).toBe(true);
     expect(
       control('#settings-panel').contains(document.activeElement),
     ).toBe(true);
   });
 
   it('blocks a movement key while the dialog is open', () => {
-    application = start(document);
+    application = startPlaying();
 
     const moves = countMoveAttempts();
 
-    control('#settings-button').click();
+    pressControl('#settings-button');
     press('ArrowDown', 'ArrowDown');
 
     expect(moves.value).toBe(0);
@@ -319,8 +365,8 @@ describe('the settings dialog', () => {
   });
 
   it('closes on Escape, and movement resumes', () => {
-    application = start(document);
-    control('#settings-button').click();
+    application = startPlaying();
+    pressControl('#settings-button');
 
     expect(control('#settings-panel').hidden).toBe(false);
 
@@ -345,8 +391,8 @@ describe('the settings dialog', () => {
   });
 
   it('closes through the dialog s own control', () => {
-    application = start(document);
-    control('#settings-button').click();
+    application = startPlaying();
+    pressControl('#settings-button');
 
     const close = Array.from(
       document.querySelectorAll<HTMLButtonElement>('#settings-panel button'),
@@ -365,34 +411,39 @@ describe('the settings dialog', () => {
     // was trapping and warned about it on every open. The router owns it — it
     // has the trigger to restore focus to and the board to make inert, neither
     // of which the dialog knows — and the dialog defers (N7).
-    application = start(document);
+    const subject = startPlaying();
 
-    control('#settings-button').click();
-
-    const series = application.metrics.snapshot().series;
-
-    // Read by the `report` label, because every generic report is counted on
-    // one family rather than under a family name of its own. DL-MAIN-11.
     const valueOf = (report: string): number =>
-      series
-        .filter((entry) => entry.labels['report'] === report)
+      subject.metrics
+        .snapshot()
+        .series.filter((entry) => entry.labels['report'] === report)
         .reduce(
           (total, entry) =>
             total + (entry.kind === 'counter' ? entry.value : 0),
           0,
         );
 
+    // MEASURED AS A DELTA. Every trapping screen state engages one of its own
+    // — the run-start screen this case begins its run from is one — so what
+    // the dialog costs is the difference the open makes, not the total.
+    const engagedBefore = valueOf('ui.focus.trap.engaged');
+
+    pressControl('#settings-button');
+
     // ONE engagement for one open, and no warning about a restore target inside
     // the trapped container, which only a second trap over the same element
     // produces.
-    expect(valueOf('ui.focus.trap.engaged')).toBe(1);
+    expect(valueOf('ui.focus.trap.engaged') - engagedBefore).toBe(1);
     expect(valueOf('ui.focus.trap.restore_inside')).toBe(0);
 
     // Still contained and still inert, so the one trap does the whole job.
     expect(
       control('#settings-panel').contains(document.activeElement),
     ).toBe(true);
-    expect(control('#game-main').hasAttribute('inert')).toBe(true);
+    // THE WHOLE PAGE SHELL, not the game region alone: the heading and the
+    // footer are behind the dialog too, and `#game-main` is inside `.container`
+    // and therefore inert with it.
+    expect(control('.container').hasAttribute('inert')).toBe(true);
   });
 
   it('reaches the audio layer through the store alone', () => {
@@ -408,7 +459,7 @@ describe('the settings dialog', () => {
     // The dialog's own write is asserted against an available engine in
     // tests/unit/ui/settings-panel.test.ts; what this asserts is the WIRING —
     // that src/main.ts made the store the engine's source.
-    application = start(document);
+    application = startPlaying();
 
     expect(application.soundEngine.isMuted()).toBe(false);
 
@@ -420,8 +471,8 @@ describe('the settings dialog', () => {
 
     expect(application.soundEngine.getVolume()).toBeCloseTo(0.25, 5);
 
-    // The last non-zero volume survives a mute: silence is held at the gain, not
-    // by forgetting the volume, so unmuting returns to what was set.
+    // The last non-zero volume survives a mute: silence is held at the gain,
+    // not by forgetting the volume, so unmuting returns to what was set.
     application.preferences.setMuted(false);
 
     expect(application.soundEngine.isMuted()).toBe(false);
@@ -436,8 +487,8 @@ describe('the settings dialog', () => {
   });
 
   it('switches the palette from the dialog', () => {
-    application = start(document);
-    control('#settings-button').click();
+    application = startPlaying();
+    pressControl('#settings-button');
 
     const contrast = Array.from(
       document.querySelectorAll<HTMLButtonElement>('#settings-panel button'),
@@ -452,40 +503,15 @@ describe('the settings dialog', () => {
   });
 });
 
-/* ==========================================================================
- * What a dialog control reaches
- * ========================================================================== */
-
-// Each case below drives a control in the REAL rendered dialog and asserts the
-// effect in the layer that owns it, rather than asserting the store write the
-// dialog's own suite already pins.
-//
-// tests/unit/ui/settings-panel.test.ts asserts the dialog writes the store, and
-// each owning layer's suite asserts it follows the store — but a store write
-// that no layer is subscribed to satisfies both and reaches nothing. These are
-// the joins:
-//
-//   focus restoration  asserted at the router over a stand-in dialog body in
-//                      tests/unit/ui/screen-router.test.ts:535, and at the
-//                      manager in tests/unit/ui/a11y-lifecycle.test.ts:387;
-//                      never once with the real dialog standing in between.
-//   reduced motion     driven through the store or the attribute directly in
-//                      tests/unit/ui/reduced-motion.test.ts; never from the
-//                      dialog's own control.
-//   a rebind           asserted as far as the owner's table in
-//                      tests/unit/ui/settings-panel.test.ts:894 and through
-//                      `remap()` in tests/unit/input/input-dispatch.test.ts;
-//                      never as far as a keystroke that moves the board.
-//
-// The number-only mode's join is the fourth, and lives in
-// tests/unit/render/renderer-selection.test.ts, because it needs a WebGL
-// context to start from a 2.5D board and leave it.
 describe('what a settings control reaches', () => {
   it('returns focus to the settings control on Escape', () => {
-    application = start(document);
+    application = startPlaying();
 
     const trigger = control('#settings-button');
 
+    // Focus first: a real press moves focus to the control, and focus is what
+    // the trap records as its restore target.
+    trigger.focus();
     trigger.click();
 
     expect(document.activeElement).not.toBe(trigger);
@@ -498,24 +524,19 @@ describe('what a settings control reaches', () => {
       }),
     );
 
-    // The trigger, not the body: a dialog that hides without restoring leaves a
-    // keyboard user at the top of the document with their place lost. Verified
-    // by mutation — dropping the trap release fails this case.
-    //
-    // What this canNOT see is the ORDER of the release against the hide. The
-    // router releases first because focus cannot be restored into a subtree that
-    // has just become `hidden`, but jsdom computes no layout and will focus a
-    // hidden element, so reversing the two still passes here. That ordering is
-    // held by the comment at src/ui/screen-router.ts and was observed in a real
-    // browser, where Escape restored the trigger with `:focus-visible` set.
+    // The trigger, not the body: a dialog that hides without restoring leaves
+    // a keyboard user at the top of the document with their place lost.
     expect(document.activeElement).toBe(trigger);
   });
 
   it('returns focus to the settings control when the dialog closes itself', () => {
-    application = start(document);
+    application = startPlaying();
 
     const trigger = control('#settings-button');
 
+    // Focus first, for the reason the Escape case states: focus is the restore
+    // target the trap records.
+    trigger.focus();
     trigger.click();
 
     const close = Array.from(
@@ -528,8 +549,8 @@ describe('what a settings control reaches', () => {
   });
 
   it('reduces motion from the dialog, reaching the channel the style layer reads', () => {
-    application = start(document);
-    control('#settings-button').click();
+    application = startPlaying();
+    pressControl('#settings-button');
 
     panelButton('Reduce motion').click();
 
@@ -537,12 +558,11 @@ describe('what a settings control reaches', () => {
     expect(application.preferences.isReducedMotion()).toBe(true);
 
     // The reflected attribute is the single channel the style layer and the
-    // on-screen controls both read, and the value only reaches it by way of the
-    // RENDER layer's own store: the root pushes the preference in with
+    // on-screen controls both read, and the value only reaches it by way of
+    // the RENDER layer's own store: the root pushes the preference in with
     // `setReducedMotionOverride`, the store dispatches to every animating
     // member, and the root's subscription writes the attribute on the way back
-    // out. Verified by mutation — deleting that push fails this case — so this
-    // asserts the round trip through the renderer, not a local write.
+    // out.
     expect(readReflectedReducedMotion(document.documentElement)).toBe(true);
     expect(
       document.documentElement.getAttribute(REDUCED_MOTION_ATTRIBUTE),
@@ -550,15 +570,13 @@ describe('what a settings control reaches', () => {
 
     panelButton('Allow motion').click();
 
-    // Written explicitly false rather than removed, so an explicit allow is
-    // distinguishable from no preference at all.
     expect(application.preferences.isReducedMotion()).toBe(false);
     expect(readReflectedReducedMotion(document.documentElement)).toBe(false);
   });
 
   it('rebinds a movement key from the dialog, and the new key moves the board', () => {
-    application = start(document);
-    control('#settings-button').click();
+    application = startPlaying();
+    pressControl('#settings-button');
 
     const rebind = document.querySelector<HTMLButtonElement>(
       '#settings-panel button[data-settings-action="moveUp"]',
@@ -601,8 +619,6 @@ describe('what a settings control reaches', () => {
 
     expect(moves.value).toBe(1);
 
-    // And the key it replaced is inert, which is what makes this a rebind
-    // rather than an addition.
     press('ArrowUp', 'ArrowUp');
 
     expect(moves.value).toBe(1);
@@ -611,18 +627,8 @@ describe('what a settings control reaches', () => {
   });
 });
 
-/* ==========================================================================
- * Announcements
- * ========================================================================== */
-
 describe('the live region', () => {
-  /**
-   * Text of every live region in the document, whitespace collapsed.
-   *
-   * Both regions, because a verdict is assertive: the announcer creates an
-   * `aria-live="assertive"` sibling on first assertive use, since a polite
-   * `role="status"` region does not interrupt.
-   */
+  /** Text of every live region in the document, whitespace collapsed. */
   const announced = (): string =>
     Array.from(document.querySelectorAll('[aria-live]'))
       .map((live) => live.textContent ?? '')
@@ -631,28 +637,27 @@ describe('the live region', () => {
       .trim();
 
   it('is fed by the root, so a move is actually announced', async () => {
-    application = start(document);
+    application = startPlaying();
 
     expect(announced()).toBe('');
 
     press('ArrowDown', 'ArrowDown');
     press('ArrowLeft', 'ArrowLeft');
 
-    // POLLED, NOT SLEPT. The announcer writes on a later task and in two phases,
-    // so the region has to be read after the event loop has turned — but a fixed
-    // sleep encodes a guess about how long that takes, and a machine slower than
-    // the guess fails a test about correctness for a reason that has nothing to
-    // do with correctness. Polling waits exactly as long as it needs to and no
-    // longer.
+    // Polled, not slept. The announcer writes on a later task and in two
+    // phases, so the region has to be read after the event loop has turned —
+    // but a fixed sleep encodes a guess about how long that takes, and a
+    // machine slower than the guess fails a test about correctness for a
+    // reason that has nothing to do with correctness.
     await waitFor((): boolean => announced() !== '');
 
-    // Empty for the entire life of a run before the root constructed and fed an
-    // announcer. Anything at all here is the fix.
+    // Empty for the entire life of a run before the root constructed and fed
+    // an announcer.
     expect(announced()).not.toBe('');
   });
 
   it('is the only live region: the score outlets are labelled values', () => {
-    application = start(document);
+    application = startPlaying();
 
     const score = control('.score-container');
     const best = control('.best-container');
@@ -664,8 +669,6 @@ describe('the live region', () => {
     expect(best.getAttribute('role')).toBeNull();
     expect(best.getAttribute('aria-live')).toBeNull();
 
-    // Still named, though — by a real visually-hidden label rather than by an
-    // `aria-label` that would mask the value it precedes.
     expect(score.querySelector('.visually-hidden')?.textContent).toBe('Score');
     expect(best.querySelector('.visually-hidden')?.textContent).toBe(
       'Best score',
@@ -679,23 +682,20 @@ describe('the live region', () => {
   });
 });
 
-/* ==========================================================================
- * The terminal overlay
- * ========================================================================== */
-
 describe('the win overlay', () => {
   beforeEach(() => {
     window.localStorage.setItem('gameState', NEAR_WIN_STATE);
+    window.localStorage.setItem(RUN_STATE_KEY, NEAR_WIN_ENVELOPE);
   });
 
   it('makes Keep Going reachable, and continues play from the key', () => {
-    application = start(document);
+    application = startPlaying();
 
     const keepPlaying = control('.keep-playing-button');
     const overlay = control('.game-message');
 
-    // Before the win: unreachable, which is correct — and was the ONLY state it
-    // ever had.
+    // Before the win: unreachable, which is correct — and was the ONLY state
+    // it ever had.
     expect(keepPlaying.hidden).toBe(true);
 
     // One move left merges the two 1024 tiles into the configured win value.
@@ -709,8 +709,8 @@ describe('the win overlay', () => {
     expect(keepPlaying.getAttribute('aria-hidden')).not.toBe('true');
     expect(keepPlaying.getAttribute('tabindex')).not.toBe('-1');
 
-    // And the key reaches it, which nothing did before: the action had no key at
-    // all and its only context was one the page never entered.
+    // And the key reaches it, which nothing did before: the action had no key
+    // at all and its only context was one the page never entered.
     press('c', 'KeyC');
 
     expect(application.engine.isGameTerminated()).toBe(false);
@@ -718,7 +718,7 @@ describe('the win overlay', () => {
   });
 
   it('continues play from the control as well as the key', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowLeft', 'ArrowLeft');
 
@@ -730,7 +730,7 @@ describe('the win overlay', () => {
   });
 
   it('takes the movement controls out of reach while it is shown', () => {
-    application = start(document);
+    application = startPlaying();
 
     const moveUp = document.querySelector<HTMLElement>(
       '[data-action="moveUp"]',
@@ -740,8 +740,6 @@ describe('the win overlay', () => {
 
     press('ArrowLeft', 'ArrowLeft');
 
-    // Terminated: the engine refuses a move, so the control that publishes one
-    // says so rather than looking available and doing nothing.
     expect(moveUp?.hidden).toBe(true);
 
     control('.keep-playing-button').click();
@@ -750,7 +748,7 @@ describe('the win overlay', () => {
   });
 
   it('blocks a movement key while the overlay is shown', () => {
-    application = start(document);
+    application = startPlaying();
 
     press('ArrowLeft', 'ArrowLeft');
 
@@ -760,8 +758,8 @@ describe('the win overlay', () => {
 
     expect(moves.value).toBe(0);
 
-    // And released once the overlay is dismissed, so the block is the overlay's
-    // and not a permanent one.
+    // And released once the overlay is dismissed, so the block is the
+    // overlay's and not a permanent one.
     control('.keep-playing-button').click();
     press('ArrowDown', 'ArrowDown');
 
@@ -769,22 +767,41 @@ describe('the win overlay', () => {
 
     moves.stop();
   });
-});
 
-/* ==========================================================================
- * The renderer fallback keeps the application whole
- * ========================================================================== */
+  it('carries no verdict once the run has ended and the summary shows', () => {
+    application = startPlaying();
+
+    const overlay = control('.game-message');
+
+    press('ArrowLeft', 'ArrowLeft');
+
+    expect(overlay.classList.contains('game-won')).toBe(true);
+
+    // The run ENDS here rather than continuing, so no further commit arrives
+    // to clear the retained overlay: the flow reaching a screen that renders
+    // its own verdict is what clears it.
+    pressControl('#screen-game-over [data-action="endRun"]');
+
+    expect(application.router.current()).toBe('runSummary');
+    expect(overlay.classList.contains('game-won')).toBe(false);
+    expect(overlay.classList.contains('game-over')).toBe(false);
+
+    // And it stays clear through the edge that opens a fresh run.
+    pressControl('#screen-run-summary [data-action="newRun"]');
+
+    expect(application.router.current()).toBe('runStart');
+    expect(overlay.classList.contains('game-won')).toBe(false);
+  });
+});
 
 describe('a 2.5D renderer that cannot mount', () => {
   it('falls back to the number-only board without losing input, UI or focus', () => {
     // jsdom implements no WebGL context, so the probe reports the board
     // unavailable and this is the fallback path in production form.
-    application = start(document);
+    application = startPlaying();
 
     expect(application.renderer.mode).toBe('number-only');
 
-    // Reported as a FALLBACK rather than a choice, so the capability stays
-    // observable: this machine has no WebGL context, it was not asked for.
     expect(application.renderer.fallback).toBe(true);
     expect(application.renderer.chosen).toBe(false);
     expect(application.renderer.support.supported).toBe(false);
@@ -816,23 +833,32 @@ describe('a 2.5D renderer that cannot mount', () => {
     expect(application.preferences).toBeDefined();
     expect(document.getElementById('settings-panel')?.hidden).toBe(true);
 
-    // And the board is on screen in the fallback's own host rather than nowhere.
     expect(control('#board-number-only').hidden).toBe(false);
     expect(control('#board-canvas').hidden).toBe(true);
   });
 });
 
 /* ==========================================================================
- * Relic activation
+ * Relic inspection
  *
  * `activateRelic` was emitted by every input surface and subscribed to by
- * NOTHING, so a press reached the event bus and stopped there and no charge was
- * ever spent by a player. These cases pin the subscription, and pin that the
- * deduction goes through the hook bus so a manual activation and a relic
- * handler's own request draw on one pool.
+ * NOTHING, so a press reached the event bus and stopped there. The subscription
+ * written for it then DEBITED A CHARGE BUDGET AND PRODUCED NO EFFECT: every
+ * charge-limited relic in the catalogue is automatic — Temporal Anchor, Tumbler,
+ * Culling Blade and Scouring Wind each fire on a hook they bound, and Frostbind
+ * on the merge it freezes — and each asks for its charge on that one dispatch.
+ * There is no manual effect for a press to invoke, so a press that spent a
+ * charge bought nothing with it and made the relic fire fewer times than its
+ * budget declares.
+ *
+ * The press is now an INSPECTION: it reads the live budget and the relic's
+ * description out to the live region and spends nothing. These cases pin the
+ * subscription, pin that the press costs nothing however often it is made, and
+ * pin that the budget still falls — on the dispatch the relic acted on, which is
+ * the only place it may. DL-RUNCTL-18.
  * ========================================================================== */
 
-describe('the relic activation control', () => {
+describe('the relic inspection control', () => {
   /**
    * A stored run holding `frostbind`, which carries a charge budget.
    *
@@ -876,23 +902,81 @@ describe('the relic activation control', () => {
       .subscribers()
       .find((entry) => entry.id === id)?.charges;
 
+  /**
+   * The same stored run, holding `frostbind` on its LAST charge, over a board
+   * carrying two mergeable pairs on two different rows.
+   *
+   * Pressing Left resolves both pairs in one move, so `onMerge` is dispatched
+   * twice: the first dispatch spends the last charge and the second finds the
+   * budget exhausted. That is the whole life of a charge budget — spent by the
+   * effect that used it, then guarded — in a single keystroke.
+   */
+  const RUN_WITH_ONE_CHARGE_LEFT = JSON.stringify({
+    schemaVersion: 1,
+    runId: 'inspection-run',
+    seed: 'inspection-seed',
+    rngCursor: {
+      'spawn-value': 0,
+      'spawn-position': 0,
+      'relic-draw': 0,
+      'rarity-weight': 0,
+    },
+    stageIndex: 0,
+    stageGoal: { kind: 'highest-tile', target: 64 },
+    goalProgress: 0,
+    relics: [{ id: 'frostbind', charges: 1 }],
+    board: {
+      grid: {
+        size: 4,
+        cells: [
+          [
+            { position: { x: 0, y: 0 }, value: 2 },
+            { position: { x: 0, y: 1 }, value: 4 },
+            null,
+            null,
+          ],
+          [
+            { position: { x: 1, y: 0 }, value: 2 },
+            { position: { x: 1, y: 1 }, value: 4 },
+            null,
+            null,
+          ],
+          [null, null, null, null],
+          [null, null, null, null],
+        ],
+      },
+      score: 0,
+      over: false,
+      won: false,
+      keepPlaying: false,
+    },
+  });
+
   const activationControl = (): HTMLElement | null =>
     document.querySelector<HTMLElement>(
       '.on-screen-control[data-action="activateRelic"]',
     );
 
-  it('restores the stored relic onto the bus, so it can be activated at all', () => {
+  /** Text of every live region in the document, whitespace collapsed. */
+  const announcedText = (): string =>
+    Array.from(document.querySelectorAll('[aria-live]'))
+      .map((live) => live.textContent ?? '')
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  it('restores the stored relic onto the bus, so its budget is live at all', () => {
     window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
 
-    application = start(document);
+    application = startPlaying();
 
     expect(budgetOf('frostbind')).toBe(5);
   });
 
-  it('spends a charge when the activation control is used', () => {
+  it('reads the live budget out and spends nothing', async () => {
     window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
 
-    application = start(document);
+    application = startPlaying();
 
     const activate = activationControl();
 
@@ -900,13 +984,28 @@ describe('the relic activation control', () => {
 
     activate?.click();
 
-    expect(budgetOf('frostbind')).toBe(4);
+    // THE PRESS COSTS NOTHING. It debited one charge here, which bought no
+    // board effect: the relic's effect is its `onMerge` toggle and the press
+    // does not reach it.
+    expect(budgetOf('frostbind')).toBe(5);
+
+    // The boot's own announcement is already standing in the region, so the wait
+    // is for THIS press's reading rather than for any text at all.
+    await waitFor((): boolean => announcedText().includes('Slot 1'));
+
+    // What the press IS: the slot, the relic's name and the budget still
+    // standing, read from the live registry rather than the catalogue.
+    const spoken = announcedText();
+
+    expect(spoken).toContain('Slot 1');
+    expect(spoken).toContain('Frostbind');
+    expect(spoken).toContain('5 charges remaining');
   });
 
-  it('spends one charge per activation, down to zero and no further', () => {
+  it('spends nothing however many times the control is pressed', () => {
     window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
 
-    application = start(document);
+    application = startPlaying();
 
     const activate = activationControl();
 
@@ -914,7 +1013,32 @@ describe('the relic activation control', () => {
       activate?.click();
     }
 
+    // Seven presses drained the budget to zero and the relic then stopped
+    // firing for the rest of the run, having acted twice.
+    expect(budgetOf('frostbind')).toBe(5);
+    expect(application.engine.hooks.metrics().chargesConsumed).toBe(0);
+  });
+
+  it('spends a charge on the dispatch the relic acted on, and only there', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_ONE_CHARGE_LEFT);
+
+    application = startPlaying();
+
+    expect(budgetOf('frostbind')).toBe(1);
+
+    const skippedBefore =
+      application.engine.hooks.metrics().totals.skippedExhausted;
+
+    press('ArrowLeft', 'ArrowLeft');
+
+    // The merge is where the toggle happened, so the merge is where the charge
+    // went — and the second merge of the same move found the budget exhausted
+    // and was skipped rather than acting for free.
     expect(budgetOf('frostbind')).toBe(0);
+    expect(application.engine.hooks.metrics().chargesConsumed).toBe(1);
+    expect(
+      application.engine.hooks.metrics().totals.skippedExhausted,
+    ).toBeGreaterThan(skippedBefore);
   });
 
   /** The charge count the HUD tray currently shows for one relic. */
@@ -923,49 +1047,42 @@ describe('the relic activation control', () => {
       .querySelector(`#relic-tray .relic-tray-item[data-relic-id="${id}"]`)
       ?.getAttribute('data-charges') ?? null;
 
-  it('publishes the spent charge to the HUD before the next turn', () => {
+  it('publishes no presentation state, because an inspection is not one', () => {
     window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
 
-    application = start(document);
+    application = startPlaying();
 
     expect(trayCharges('frostbind')).toBe('5');
 
+    const written = application.hud.readRendered();
+
     activationControl()?.click();
 
-    // THE TRAY IS A PROJECTION OF THE COMMIT'S RELIC SLICE, and a manual
-    // activation spends a charge between turns. The activation persisted and was
-    // announced but published no presentation state, so the tray went on showing
-    // the budget the last commit carried until the player made a move.
-    expect(budgetOf('frostbind')).toBe(4);
-    expect(trayCharges('frostbind')).toBe('4');
+    // THE TRAY IS A PROJECTION OF THE COMMIT'S RELIC SLICE. A press changes no
+    // charge and no board, so there is nothing for it to publish and the tray
+    // rightly goes on showing what the last commit carried.
+    expect(application.hud.readRendered()).toBe(written);
+    expect(trayCharges('frostbind')).toBe('5');
     expect(application.hud.readRendered()?.relics).toContain('frostbind');
   });
 
-  it('publishes nothing when an activation spent nothing', () => {
-    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
+  it('shows the tray the charge an effect spent, on the next commit', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_ONE_CHARGE_LEFT);
 
-    application = start(document);
+    application = startPlaying();
 
-    const activate = activationControl();
+    expect(trayCharges('frostbind')).toBe('1');
 
-    for (let press = 0; press < 5; press += 1) {
-      activate?.click();
-    }
+    press('ArrowLeft', 'ArrowLeft');
 
-    expect(trayCharges('frostbind')).toBe('0');
-
-    const written = application.hud.readRendered();
-
-    // A refused activation is not a state change, so the exhausted budget is
-    // published once and a further press republishes nothing.
-    activate?.click();
-
-    expect(application.hud.readRendered()).toBe(written);
+    // The merge that spent it also committed, and the tray is a projection of
+    // that commit, so the budget the player sees is the budget the bus holds.
+    expect(budgetOf('frostbind')).toBe(0);
     expect(trayCharges('frostbind')).toBe('0');
   });
 
   it('spends nothing when the run holds no relic', () => {
-    application = start(document);
+    application = startPlaying();
 
     const activate = activationControl();
 
@@ -973,33 +1090,369 @@ describe('the relic activation control', () => {
     expect(application.engine.hooks.metrics().chargesConsumed).toBe(0);
   });
 
-  it('stops the relic firing once a player has spent its budget', () => {
-    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_A_CHARGED_RELIC);
+  it('stops the relic firing once its own effect has spent the budget', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, RUN_WITH_ONE_CHARGE_LEFT);
 
-    application = start(document);
+    application = startPlaying();
 
-    const activate = activationControl();
-
-    for (let press = 0; press < 5; press += 1) {
-      activate?.click();
-    }
+    press('ArrowLeft', 'ArrowLeft');
 
     expect(budgetOf('frostbind')).toBe(0);
 
     const before = application.engine.hooks.metrics().totals.skippedExhausted;
 
+    press('ArrowUp', 'ArrowUp');
     press('ArrowLeft', 'ArrowLeft');
 
-    // The move dispatched `onBeforeMove` and `onAfterMove`; `frostbind` binds
-    // neither, so the skip is counted on the hooks it does bind. What matters is
-    // that the relic is now guarded rather than still firing.
-    expect(
-      application.engine.hooks
-        .subscribers()
-        .find((entry) => entry.id === 'frostbind')?.charges,
-    ).toBe(0);
+    // Exhausted and therefore guarded: whatever merges the later moves resolve,
+    // the relic no longer acts on them.
+    expect(budgetOf('frostbind')).toBe(0);
     expect(
       application.engine.hooks.metrics().totals.skippedExhausted,
     ).toBeGreaterThanOrEqual(before);
+  });
+});
+
+/* ==========================================================================
+ * The three screen-flow actions
+ *
+ * `startRun`, `continueStage` and `endRun` are the three actions
+ * src/input/keymap.ts declares for a screen's own control, and src/main.ts
+ * L2963-2989 subscribes each one at the root: `startRun` starts a run through
+ * `startNewRun` with the payload forwarded, and the other two send a trigger to
+ * the router rather than acting on the run themselves.
+ *
+ * The five screen containers index.html declares are appended here, because the
+ * shared fixture above carries only the HUD and the dialog and the router
+ * resolves the rest by the selectors of `SCREEN_MOUNTS`. Appended BEFORE
+ * `start()`, since the router resolves every container while it is starting.
+ * ========================================================================== */
+
+describe('the three screen-flow actions', () => {
+  /** The five containers the router shows and hides, keyed by state. */
+  const FLOW_MOUNTS = Object.freeze([
+    SCREEN_MOUNTS.runStart,
+    SCREEN_MOUNTS.stageClear,
+    SCREEN_MOUNTS.reward,
+    SCREEN_MOUNTS.won,
+    SCREEN_MOUNTS.runSummary,
+  ]);
+
+  beforeEach(() => {
+    const layer = control('#screen-layer');
+
+    for (const selector of new Set(FLOW_MOUNTS)) {
+      const host = document.createElement('div');
+
+      host.className = 'screen';
+      host.id = selector.slice(1);
+      host.hidden = true;
+      layer.prepend(host);
+    }
+  });
+
+  /** Every flow container currently on screen, by selector. */
+  const shownScreens = (): readonly string[] =>
+    Array.from(new Set(FLOW_MOUNTS)).filter(
+      (selector) =>
+        document.querySelector<HTMLElement>(selector)?.hidden === false,
+    );
+
+  /** The generated on-screen control for one action. */
+  const generated = (action: string): HTMLButtonElement => {
+    const found = document.querySelector<HTMLButtonElement>(
+      `.on-screen-control[data-action="${action}"]`,
+    );
+
+    if (found === null) {
+      throw new Error(`no control was generated for ${action}`);
+    }
+
+    return found;
+  };
+
+  /** A board whose highest tile is 8, under stage 0's goal of tile 16. */
+  const OPEN_STATE = JSON.stringify({
+    grid: {
+      size: 4,
+      cells: [
+        [{ position: { x: 0, y: 0 }, value: 8 }, null, null, null],
+        [{ position: { x: 1, y: 0 }, value: 2 }, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ],
+    },
+    score: 8,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  });
+
+  /**
+   * A run one move from the win value under a goal it cannot meet.
+   *
+   * The seed is what makes the envelope adoptable: `resolveRunIdentity` reads
+   * the stored envelope's identity, so the composed run plays `won-seed` rather
+   * than originating one, and the unreachable `score-threshold` goal is what
+   * keeps `stage:end` from taking the board to the reward offer before the win
+   * is reached.
+   */
+  const NEAR_WIN_RUN = JSON.stringify({
+    schemaVersion: 1,
+    runId: 'flow-run',
+    seed: 'won-seed',
+    rngCursor: {
+      'spawn-value': 0,
+      'spawn-position': 0,
+      'relic-draw': 0,
+      'rarity-weight': 0,
+    },
+    stageIndex: 0,
+    stageGoal: { kind: 'score-threshold', target: 9_000_000 },
+    goalProgress: 0,
+    relics: [],
+    board: {
+      grid: {
+        size: 4,
+        cells: [
+          [{ position: { x: 0, y: 0 }, value: 1024 }, null, null, null],
+          [{ position: { x: 1, y: 0 }, value: 1024 }, null, null, null],
+          [null, null, null, null],
+          [null, null, null, null],
+        ],
+      },
+      score: 20_000,
+      over: false,
+      won: false,
+      keepPlaying: false,
+    },
+  });
+
+  /** Every router report the log holds that carries a trigger. */
+  const routerRecords = (): readonly Readonly<Record<string, unknown>>[] => {
+    const app = application;
+
+    if (app === null) {
+      throw new Error('start() has not run');
+    }
+
+    return app.logger
+      .snapshot()
+      .records.filter(
+        (entry) => entry.fields?.context === 'screen-router',
+      )
+      .map((entry) => ({ message: entry.message, ...entry.fields }));
+  };
+
+  it('binds no key to any of them and offers all three as controls', () => {
+    application = start(document);
+
+    // NO KEY, BY DECLARATION. Each is activated by a screen's own control, so
+    // the generated control is the only surface that publishes it, which is why
+    // the context gating below is the whole of their availability.
+    for (const action of ['startRun', 'continueStage', 'endRun'] as const) {
+      expect(DEFAULT_KEY_BINDINGS[action].keys).toEqual([]);
+      expect(DEFAULT_KEY_BINDINGS[action].codes).toEqual([]);
+      expect(DEFAULT_KEY_BINDINGS[action].contexts).toEqual(['overlay']);
+      expect(generated(action).getAttribute('data-action')).toBe(action);
+    }
+  });
+
+  it('withdraws all three while the board is in play, so each is inert', () => {
+    window.localStorage.setItem('gameState', OPEN_STATE);
+
+    application = start(document);
+
+    const seed = application.run.seed();
+    const runId = application.run.runId();
+
+    // The board is in play: the goal is tile 16 and the highest tile is 8, so
+    // no stage ended and the router holds `stage`.
+    expect(shownScreens()).toEqual([]);
+    expect(control(SCREEN_MOUNTS.stage).hidden).toBe(false);
+
+    for (const action of ['startRun', 'continueStage', 'endRun'] as const) {
+      const element = generated(action);
+
+      expect(element.hidden).toBe(true);
+      expect(element.disabled).toBe(true);
+      expect(element.getAttribute('aria-hidden')).toBe('true');
+      expect(element.getAttribute('tabindex')).toBe('-1');
+
+      element.click();
+    }
+
+    // AND NOTHING HAPPENED. All three are declared for `'overlay'` alone, so a
+    // press during play publishes nothing: the run is the one that was playing
+    // and the router is still on the board.
+    expect(application.run.seed()).toBe(seed);
+    expect(application.run.runId()).toBe(runId);
+    expect(shownScreens()).toEqual([]);
+    expect(control(SCREEN_MOUNTS.stage).hidden).toBe(false);
+  });
+
+  it('takes the win state to the run summary from the endRun control', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, NEAR_WIN_RUN);
+
+    application = start(document);
+
+    // The stored identity was adopted, so the run below is the run the envelope
+    // describes rather than a fresh one.
+    expect(application.run.seed()).toBe('won-seed');
+    expect(application.run.stageGoal()).toEqual({
+      kind: 'score-threshold',
+      target: 9_000_000,
+    });
+
+    press('ArrowLeft', 'ArrowLeft');
+
+    // `stage --winReached--> won`, whose container is the terminal one.
+    expect(application.engine.isGameTerminated()).toBe(true);
+    expect(shownScreens()).toEqual([SCREEN_MOUNTS.won]);
+
+    const endRun = generated('endRun');
+
+    // Reachable now, because the page is in the overlay context.
+    expect(endRun.hidden).toBe(false);
+    expect(endRun.disabled).toBe(false);
+    expect(endRun.getAttribute('tabindex')).toBe('0');
+
+    endRun.click();
+
+    // THE REAL EDGE, and the only one this state declares for the trigger.
+    expect(TRANSITIONS.won.endRun).toBe('runSummary');
+    expect(shownScreens()).toEqual([SCREEN_MOUNTS.runSummary]);
+    expect(control(SCREEN_MOUNTS.won).hidden).toBe(true);
+    expect(
+      routerRecords().some(
+        (record) =>
+          record.from === 'won' &&
+          record.to === 'runSummary' &&
+          record.trigger === 'endRun',
+      ),
+    ).toBe(true);
+  });
+
+  it('starts a fresh run from the begin control, back on the board', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, NEAR_WIN_RUN);
+
+    application = start(document);
+
+    press('ArrowLeft', 'ArrowLeft');
+    generated('endRun').click();
+
+    expect(shownScreens()).toEqual([SCREEN_MOUNTS.runSummary]);
+
+    // THE SUMMARY'S OWN EDGE COMES FIRST. A seed is entered on `runStart` and
+    // nowhere else, so the summary's New Run control sends the `newRun` trigger
+    // and the screen it lands on is the one that begins the run.
+    expect(TRANSITIONS.runSummary.newRun).toBe('runStart');
+
+    control(SCREEN_MOUNTS.runSummary)
+      .querySelector<HTMLElement>('[data-action="newRun"]')
+      ?.click();
+
+    expect(shownScreens()).toEqual([SCREEN_MOUNTS.runStart]);
+
+    // AND THE GENERATED CONTROL IS NOT THE SURFACE HERE. All three flow actions
+    // are declared for the `'overlay'` context alone, and the screen's trap puts
+    // focus in the seed field — a text field holding focus resolves the context
+    // to `'textEntry'`, which outranks every screen — so the layer withdraws it
+    // and the screen renders its own begin control instead. DL-ROUTER-06,
+    // DL-RUNSTART-02.
+    expect(application.router.context()).toBe('textEntry');
+    expect(generated('startRun').hidden).toBe(true);
+
+    // The begin control, which is the composed surface that publishes `startRun`.
+    expect(beginRun()).toBe(true);
+
+    // A NEW RUN, not a reseeded board: the seed and the run identifier are both
+    // replaced, and the seed is an originated token rather than the one the
+    // envelope carried.
+    expect(application.run.seed()).not.toBe('won-seed');
+    expect(application.run.runId()).not.toBe('flow-run');
+    expect(application.run.seed()).toHaveLength(32);
+
+    // And the board is playable again, with the flow back on the HUD.
+    expect(application.engine.isGameTerminated()).toBe(false);
+    expect(shownScreens()).toEqual([]);
+    expect(control(SCREEN_MOUNTS.stage).hidden).toBe(false);
+
+    const moves = countMoveAttempts();
+
+    press('ArrowDown', 'ArrowDown');
+
+    expect(moves.value).toBe(1);
+
+    moves.stop();
+  });
+
+  it('sends the stage-end trigger from the continueStage control', () => {
+    // The restored board's highest tile is already past stage 0's goal, so the
+    // stage ends as the board opens — and the flow STOPS at the interstitial:
+    // `readStageEnd` takes `stage -> stageClear` and no further, so the second
+    // edge is the player's. Decision DL-ROUTER-31.
+    window.localStorage.setItem('gameState', NEAR_WIN_STATE);
+
+    application = start(document);
+
+    expect(shownScreens()).toEqual([SCREEN_MOUNTS.stageClear]);
+
+    const continueStage = generated('continueStage');
+
+    // Offered on this state alone, which is the control gating the root applies.
+    expect(continueStage.hidden).toBe(false);
+
+    continueStage.click();
+
+    // THE EDGE THE ROOT'S TRIGGER TAKES, declared by the state machine and taken
+    // by that very trigger — which is what makes the subscription observable
+    // from here rather than only its effect.
+    expect(TRANSITIONS.stageClear.stageEnd).toBe('reward');
+    expect(
+      routerRecords().some(
+        (record) =>
+          record.from === 'stageClear' &&
+          record.to === 'reward' &&
+          record.trigger === 'stageEnd',
+      ),
+    ).toBe(true);
+    expect(shownScreens()).toEqual([SCREEN_MOUNTS.reward]);
+
+    // And the control goes out of reach with the state that offered it.
+    expect(generated('continueStage').hidden).toBe(true);
+  });
+
+  it('plays the seed a startRun payload carries, reduced only', () => {
+    application = start(document);
+
+    // `startNewRun` is what the root hands the forwarded payload to, and it
+    // applies the run-start screen's own reduction and nothing else. The screen
+    // side of the same chain — that the control emits the reduced seed as the
+    // payload — is pinned in tests/unit/ui/run-start.test.ts.
+    const played = application.startNewRun('  Seeded Run  ');
+
+    expect(played).toBe(normalizeEnteredSeed('  Seeded Run  '));
+    expect(played).toBe('Seeded Run');
+    expect(application.run.seed()).toBe(played);
+
+    // AND NO PAYLOAD ORIGINATES ONE, which is the other half of the forwarded
+    // `string | undefined`.
+    const originated = application.startNewRun();
+
+    expect(originated).not.toBe(played);
+    expect(originated).toHaveLength(32);
+    expect(application.run.seed()).toBe(originated);
+
+    // A seed that trims to nothing is not played as an empty string: the
+    // reduction originates a token for it, so the field's whitespace never
+    // reaches the substreams.
+    const blank = application.startNewRun('   ');
+
+    expect(blank).not.toBe('');
+    expect(blank.trim()).toBe(blank);
+    expect(blank).toHaveLength(32);
+    expect(application.run.seed()).toBe(blank);
+    expect(normalizeEnteredSeed('   ')).toHaveLength(32);
   });
 });

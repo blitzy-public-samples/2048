@@ -1,21 +1,6 @@
 // Spawn-integration suite of src/engine/engine.ts: the one place the engine
 // consumes randomness, and the two substreams it consumes it from.
 //
-// It pins the wiring of the two audited call sites of the vanilla game, which
-// AAP Figure 7 draws as the `spawn-value` and `spawn-position` substreams:
-//   js/game_manager.js L70  `cellsAvailable()` guards the spawn
-//   js/game_manager.js L71  the spawn value; drawn from `spawn-value`
-//   js/grid.js       L38  `randomAvailableCell()` supplies the cell
-//   js/grid.js       L41  the position draw; drawn from `spawn-position`
-//   js/game_manager.js L183 the post-move spawn
-//
-// The traceability row `js/grid.js L37-L43 -> Grid.randomAvailableCell` is
-// only satisfied if the production spawn actually calls that method, so
-// section 1 asserts the call rather than the equivalence of a duplicate. The
-// sequence properties of the substreams themselves belong to
-// tests/unit/rng/, and the method's own behaviour to
-// tests/unit/engine/grid.test.ts section 7; neither is repeated here.
-//
 // This suite reads no DOM and no storage; the storage port and the
 // stream-order recorder below are hand-written doubles. It runs in the
 // `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
@@ -32,8 +17,6 @@ import { Grid } from '../../../src/engine/grid';
 import type { SerializedGameState } from '../../../src/engine/types';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import type { RngStreams, StreamName } from '../../../src/rng/rng-streams';
-
-/* ===== Doubles ===== */
 
 /**
  * A port that reports no best score and holds the snapshot it is given.
@@ -68,7 +51,7 @@ function createPort(restored: SerializedGameState | null = null): {
  * Wraps a set of substreams, recording the order they are addressed in.
  *
  * @param streams Substreams to wrap.
- * @param addressed List each `stream()` call appends its name to.
+ * @param addressed List each `stream` call appends its name to.
  * @returns The wrapper.
  */
 function recordOrder(streams: RngStreams, addressed: StreamName[]): RngStreams {
@@ -105,8 +88,6 @@ function createEngine(
     storage: options.port ?? createPort().port,
   });
 }
-
-/* ===== 1. The production spawn draws through Grid ===== */
 
 describe('the spawn draws its cell through Grid.randomAvailableCell', () => {
   it('calls the method once per starting tile', () => {
@@ -149,8 +130,6 @@ describe('the spawn draws its cell through Grid.randomAvailableCell', () => {
   });
 });
 
-/* ===== 2. Draw order and cursor accounting ===== */
-
 describe('the value is drawn before the cell', () => {
   it('addresses spawn-value then spawn-position, once each per tile', () => {
     const addressed: StreamName[] = [];
@@ -190,9 +169,8 @@ describe('the value is drawn before the cell', () => {
 
     const before = streams.snapshotCursors();
 
-    // LEFT is the blocked fixture's blocked direction, so no position
-    // changes, `moved` is false and js/game_manager.js L182-L183 spawns
-    // nothing.
+    // LEFT is the blocked fixture's blocked direction, so no position changes,
+    // `moved` is false and js/game_manager.js L182-L183 spawns nothing.
     expect(engine.move(3)).toBe(false);
     expect(streams.snapshotCursors()).toEqual(before);
   });
@@ -213,8 +191,6 @@ describe('the value is drawn before the cell', () => {
     });
   });
 });
-
-/* ===== 3. Determinism, the property the wiring exists to keep ===== */
 
 describe('the same seed spawns the same board', () => {
   it('reproduces a twelve-move run exactly', () => {
@@ -247,8 +223,6 @@ describe('the same seed spawns the same board', () => {
   });
 
   it('spawns the pinned first two tiles for a fixed seed', () => {
-    // The value the seeded substreams produce for this seed, recorded so a
-    // change to the draw path is visible rather than merely equivalent.
     const engine = createEngine('seed-42');
 
     engine.setup();

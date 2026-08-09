@@ -4,28 +4,12 @@
 // writability probe, and the generic namespaced API the run-state envelope
 // rides on.
 //
-// The vanilla constructs exercised here, from the deleted
-// js/local_storage_manager.js: the in-memory fallback store, the manager with
-// its store chosen once at construction, the writability probe whose `catch`
-// discarded its error, the probe's setItem-then-removeItem pair, the
-// unguarded `setItem` of both writers, the unguarded `JSON.parse` of the
-// snapshot reader, and `clearGameState`.
-//
 // Scope split across tests/unit/storage/: the frozen best-score contract is
 // asserted in ./best-score.test.ts. Nothing here imports from src/run/ or
 // src/observability/.
 //
-// Every construction injects a store, so no assertion below depends on the
-// ambient Web Storage of the vitest environment. Storage keys come from
-// src/storage/storage-keys.ts and board snapshots from
-// tests/fixtures/boards.ts; this file declares neither a key literal nor a
-// board literal of its own.
-//
-// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
-// DL-STORE-01, DL-STORE-02, DL-STORE-03, DL-STORE-04.
-// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-STORE-01,
-// TR-STORE-02, TR-STORE-03, TR-STORE-04, TR-STORE-05, TR-STORE-06, TR-STORE-07,
-// TR-STORE-08.
+// Decisions: DL-STORE-01, DL-STORE-02, DL-STORE-03, DL-STORE-04
+// (docs/DECISION_LOG.md).
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -107,10 +91,6 @@ const KEY_TRUNCATION_SUFFIX = '…';
 
 /**
  * Keys the product does not own, each with the label its test title quotes.
- *
- * `OwnedStorageKey` excludes all of them, so each is cast at the call site: the
- * adapter's ownership check is a runtime guard as well as a type-level one.
- * Decision DL-STORE-01.
  */
 const UNOWNED_KEYS: readonly { label: string; key: string }[] = [
   { label: "another application's key", key: 'theme' },
@@ -130,10 +110,7 @@ const OVERLONG_UNOWNED_KEY = `unowned-${'k'.repeat(120)}`;
 
 /**
  * Values `JSON.stringify` cannot reduce to text, each with the label its test
- * title quotes and the name of the error the adapter reports. A circular
- * structure and a `BigInt` make `JSON.stringify` throw; `undefined`, a function
- * and a symbol make it return no string at all, which the adapter reports as a
- * `TypeError` of its own.
+ * title quotes and the name of the error the adapter reports.
  */
 const UNSERIALISABLE_VALUES: readonly {
   label: string;
@@ -189,13 +166,7 @@ const UNSERIALISABLE_VALUES: readonly {
   },
 ];
 
-/* ===== 2. Report collector ===== */
-
-/**
- * A `StorageReporter` that keeps every report it is handed. A plain object:
- * this suite uses no spy library, no module mock and no third-party storage
- * mock, and the adapter takes its reporter by injection.
- */
+/** A `StorageReporter` that keeps every report it is handed. */
 interface ReportCollector extends StorageReporter {
   readonly probes: StorageProbeResult[];
   readonly failures: StorageFailure[];
@@ -721,9 +692,8 @@ describe('probeWebStorage() — the reused capability probe (L29-L40)', () => {
         quota: true,
       },
 
-      // The failure channel carries the original alongside the description,
-      // so the logger adapter records the thrown value and not a summary of
-      // it.
+      // The failure channel carries the original alongside the description, so
+      // the logger adapter records the thrown value and not a summary of it.
       thrown: quota,
     });
   });
@@ -1315,13 +1285,8 @@ describe('reporter fault containment (reporterFaults)', () => {
   });
 });
 
-/* ===== 14. The ownership guard: a refused key reaches no store ===== */
-
-// `acceptKey()` runs before any store operation, so a key the product does not
-// own is refused, reported and never handed to the store. The static
-// `OwnedStorageKey` type already excludes such a key at a call site, and the
-// assertions below defeat the type deliberately to reach the runtime guard.
-// Decision DL-STORE-01.
+// `acceptKey` runs before any store operation, so a key the product does not
+// own is refused, reported and never handed to the store.
 describe('the ownership guard refuses an unowned key before the store', () => {
   /**
    * Builds a manager over a store that records every operation it receives.
@@ -1518,11 +1483,8 @@ describe('the ownership guard refuses an unowned key before the store', () => {
   });
 });
 
-/* ===== 15. writeJson over a value that reduces to no JSON text ===== */
-
-// `serialiseJson()` reports and returns null for both failure shapes: a
-// `JSON.stringify` that throws, and one that returns no string. Neither reaches
-// the store, and each is reported as a zero-length failed write.
+// `serialiseJson` reports and returns null for both failure shapes: a
+// `JSON.stringify` that throws, and one that returns no string.
 describe('writeJson refuses a value that cannot be serialised', () => {
   it.each(UNSERIALISABLE_VALUES)(
     'returns false for $label and stores nothing',

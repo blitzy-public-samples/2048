@@ -353,6 +353,146 @@ describe('the envelope carries exactly the nine Contract 5 members', () => {
   });
 });
 
+/* ==========================================================================
+ * 1b. The optional tenth member: an unresolved reward round
+ *
+ * The envelope recorded the relics a run HELD and nothing about a round still
+ * being chosen, so an offer drawn and not yet taken lived only in memory: a
+ * reload lost the three cards and, because a cleared stage's goal is still met
+ * on every later commit, resolved that stage's end a second time.
+ *
+ * Added as an OPTIONAL member at the SAME schema version, which is what makes it
+ * additive: an envelope written before it validates unchanged, and one written
+ * with it is read by a build that ignores it. The nine required members and
+ * `RUN_STATE_SCHEMA_VERSION` are both untouched (Contract 5).
+ * ========================================================================== */
+
+/** An envelope carrying an unresolved round, which a fresh one never does. */
+function buildEnvelopeWithPendingReward(
+  offeredRelicIds: readonly string[] = ['alpha', 'beta', 'gamma'],
+  stageIndex: number = INITIAL_STAGE_INDEX
+): RunState {
+  return {
+    ...buildEnvelope(),
+    pendingReward: { stageIndex, offeredRelicIds: offeredRelicIds.slice() },
+  };
+}
+
+describe('the unresolved reward round member', () => {
+  it('is absent from a fresh envelope, which has nothing pending', () => {
+    const fresh = buildEnvelope();
+
+    expect(fresh.pendingReward).toBeUndefined();
+    expect(Object.keys(fresh)).not.toContain('pendingReward');
+  });
+
+  it('does not raise the schema version, because it is additive', () => {
+    // An envelope written WITHOUT it is still current, so no migration is owed
+    // and no prior save is invalidated.
+    expect(buildEnvelopeWithPendingReward().schemaVersion).toBe(
+      RUN_STATE_SCHEMA_VERSION
+    );
+    expect(isCurrentRunState(buildEnvelope())).toBe(true);
+    expect(isCurrentRunState(buildEnvelopeWithPendingReward())).toBe(true);
+  });
+
+  it('validates as part of the envelope when it is well formed', () => {
+    const state = buildEnvelopeWithPendingReward();
+
+    expect(describeRunStateProblems(state)).toEqual([]);
+    expect(isRunStateShape(state)).toBe(true);
+  });
+
+  it('survives a JSON round trip with its order intact', () => {
+    const state = buildEnvelopeWithPendingReward(['one', 'two', 'three']);
+    const revived = JSON.parse(JSON.stringify(state)) as RunState;
+
+    // PRESENTATION ORDER IS THE POINT: the cards come back in the order they
+    // were offered in, so the slot a player was about to press is the same slot.
+    expect(revived.pendingReward?.offeredRelicIds).toEqual([
+      'one',
+      'two',
+      'three',
+    ]);
+    expect(revived.pendingReward?.stageIndex).toBe(INITIAL_STAGE_INDEX);
+    expect(isRunStateShape(revived)).toBe(true);
+  });
+
+  it('is carried by the write-side projection', () => {
+    const projected = projectCurrentRunState(
+      buildEnvelopeWithPendingReward(['x', 'y'])
+    );
+
+    expect(projected.pendingReward?.offeredRelicIds).toEqual(['x', 'y']);
+
+    // COPIED, NOT ALIASED, exactly as every other member of the projection is.
+    const source = buildEnvelopeWithPendingReward(['x', 'y']);
+    const copy = projectCurrentRunState(source);
+
+    expect(copy.pendingReward).not.toBe(source.pendingReward);
+    expect(copy.pendingReward?.offeredRelicIds).not.toBe(
+      source.pendingReward?.offeredRelicIds
+    );
+  });
+
+  it('is dropped by the projection when there is nothing pending', () => {
+    const projected = projectCurrentRunState(buildEnvelope());
+
+    // Absent rather than `undefined`-valued, so an envelope with nothing pending
+    // serialises to the same nine members it always did.
+    expect(Object.keys(projected)).not.toContain('pendingReward');
+  });
+
+  it('refuses a round that is not an object', () => {
+    for (const hostile of [null, 42, 'three cards', [], true]) {
+      const payload = { ...loosenEnvelope(), pendingReward: hostile };
+
+      expect(isRunStateShape(payload)).toBe(false);
+      expect(describeRunStateProblems(payload).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('refuses a round whose stage index is not a counting number', () => {
+    for (const hostile of [-1, 1.5, Number.NaN, '0', null]) {
+      const payload = {
+        ...loosenEnvelope(),
+        pendingReward: { stageIndex: hostile, offeredRelicIds: ['a'] },
+      };
+
+      expect(isRunStateShape(payload)).toBe(false);
+    }
+  });
+
+  it('refuses an empty, oversized, duplicated or non-string offer list', () => {
+    const hostileLists: readonly unknown[] = [
+      [],
+      'a,b,c',
+      ['a', 'a'],
+      ['a', ''],
+      ['a', 7],
+      Array.from({ length: MAX_PERSISTED_RELICS + 1 }, (_, i) => `r${String(i)}`),
+    ];
+
+    for (const offeredRelicIds of hostileLists) {
+      const payload = {
+        ...loosenEnvelope(),
+        pendingReward: { stageIndex: 0, offeredRelicIds },
+      };
+
+      expect(isRunStateShape(payload)).toBe(false);
+    }
+  });
+
+  it('reduces every hostile value to a verdict without throwing', () => {
+    for (const hostile of HOSTILE_INPUTS) {
+      const payload = { ...loosenEnvelope(), pendingReward: hostile };
+
+      expect(() => describeRunStateProblems(payload)).not.toThrow();
+      expect(() => isRunStateShape(payload)).not.toThrow();
+    }
+  });
+});
+
 /* ===== 2. The schema version, and the history that decides older ===== */
 
 describe('the schema version member', () => {

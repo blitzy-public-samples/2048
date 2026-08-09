@@ -66,12 +66,10 @@
     "vitest.snapshot.config.ts",
     "playwright.config.ts",
 
-    // The two read-only quality gates read the tree through `node:fs`, and the
-    // stylesheet gate compiles it through the `sass` API, so both are checked
-    // under tsconfig.node.json with the `node` types. Excluding them here keeps
-    // this project's `types` at `vite/client` alone, which is what stops an
-    // application module reaching a Node global.
     "tests/unit/quality/formatting.test.ts",
-    "tests/unit/quality/stylesheet-contract.test.ts"
+    "tests/unit/quality/stylesheet-contract.test.ts",
+    "tests/unit/quality/content-security-policy.test.ts",
+    "tests/unit/quality/decision-log.test.ts",
+    "tests/unit/quality/decision-log-integrity.test.ts"
   ]
 }

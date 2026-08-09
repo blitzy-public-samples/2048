@@ -1,30 +1,10 @@
 // The load half of the board-shrink contract: a run resumed after a
-// board-mutating relic collapsed the board must rebuild the lattice at the size
-// the relic left it, not the size the saved snapshot carried.
+// board-mutating relic collapsed the board must rebuild the lattice at the
+// size the relic left it, not the size the saved snapshot carried.
 //
-// WHY THIS SUITE EXISTS
-//   `collapsing-vault` performs its shrink at `onStageEnd` and records the edge
-//   length it collapsed to in its own state slot, inside the run envelope. The
-//   envelope's board, written by the commit that followed, therefore carries the
-//   SMALLER board — but the reconciliation that rebuilds a lattice on load
-//   weighs a relic-implied size above both the configured and the saved size,
-//   and nothing was supplying that value. A reload would then rebuild at
-//   whatever the configuration declared and silently undo the collapse.
-//
-//   Three collaborators close it, and all three are asserted here:
-//   `RunStateStore.peekRelics()` reads the stored entries with no
-//   reconciliation, breaking the cycle where the value needed to load the
-//   envelope lives inside it; `RelicRegistry.relicBoardSize()` derives the edge
-//   length from those entries GENERICALLY, naming no relic, as AAP Contract 3
-//   requires; and `RunController.begin()` passes the result into `load()`.
-//
-// The prompt's edge case this discharges: "board-size-altering cursed relics
-// (e.g. shrink board) must not corrupt existing tile positions or win/lose
-// check" — across a reload, which is where the corruption would have appeared.
-//
-// The store is injected over `MemoryStorage`, so every case behaves identically
-// in the DOM-free and the jsdom project and one test's storage never reaches
-// the next.
+// The store is injected over `MemoryStorage`, so every case behaves
+// identically in the DOM-free and the jsdom project and one test's storage
+// never reaches the next.
 
 import { describe, expect, it } from 'vitest';
 
@@ -42,8 +22,6 @@ import { RunStateStore } from '../../../src/run/run-state-store';
 import { LocalStorageManager } from '../../../src/storage/local-storage-manager';
 import { MemoryStorage } from '../../../src/storage/memory-storage';
 import { RUN_STATE_KEY } from '../../../src/storage/storage-keys';
-
-/* ===== Harness ===== */
 
 const CURSED_ID = 'collapsing-vault';
 
@@ -92,7 +70,7 @@ interface Loaded {
 
 /**
  * Writes an envelope, composes a controller with a real registry over it and
- * calls `begin()`, reporting what the load reconciled to.
+ * calls `begin`, reporting what the load reconciled to.
  *
  * @param relics Relic entries the stored envelope carries.
  * @param configuredSize Edge length the rules declare at load time.
@@ -141,8 +119,6 @@ function loadWith(
     restored: registry.ownedIds(),
   };
 }
-
-/* ===== The contract ===== */
 
 describe('board size implied by a persisted relic', () => {
   it('rebuilds the lattice at the size the relic recorded', () => {
@@ -246,22 +222,13 @@ describe('board size implied by a persisted relic', () => {
       false,
     );
 
-    // THE DECLARATION LIVES IN THE ENVELOPE, not in the registry. A registry is
-    // one source of it and the store reads the persisted relic slots as the
-    // other, so a run being played on a collapsed board does not spring back to
-    // the configured size just because the load had no registry attached to ask.
-    // That spring-back is the rehydration corruption the reconciliation exists
-    // to prevent.
+    // The declaration lives in the envelope, not in the registry.
     expect(loaded.boardSize).toBe(COLLAPSED_SIZE);
     expect(loaded.appliedSizes).toContain(COLLAPSED_SIZE);
 
-    // And with no registry there is nothing to restore into, which the load
-    // survives rather than raising on.
     expect(loaded.restored).toEqual([]);
   });
 });
-
-/* ===== The port keeps its receiver ===== */
 
 describe('RelicRegistryPort calls keep their receiver', () => {
   /**
@@ -312,7 +279,7 @@ describe('RelicRegistryPort calls keep their receiver', () => {
   it('resolves a reward through the registry, picking the relic up', () => {
     const { controller, registry, failures } = composeWithRegistry();
 
-    // A SELECTION IS MEASURED AGAINST THE OFFER, so the offer the screen
+    // A selection is measured against the offer, so the offer the screen
     // presented is recorded first; a pick nothing offered is refused, which is
     // what keeps a caller from taking any relic in the catalogue at will.
     controller.recordRewardOffer(['frostbind', 'tumbler', 'twin-seed']);
@@ -335,7 +302,7 @@ describe('RelicRegistryPort calls keep their receiver', () => {
     expect(registry.has('frostbind')).toBe(false);
     expect(controller.relics()).toEqual([]);
 
-    // THE OFFER STANDS after a refusal, so the same three cards are still
+    // The offer stands after a refusal, so the same three cards are still
     // choosable and the player is not stranded.
     expect(controller.resolveReward('tumbler').accepted).toBe(true);
   });
@@ -357,7 +324,7 @@ describe('RelicRegistryPort calls keep their receiver', () => {
 
     registry.pickUp('echo-chamber');
 
-    // `state()` reads the envelope in force; `projectRelics()` is reached by a
+    // `state` reads the envelope in force; `projectRelics` is reached by a
     // write, so a resolved reward is what exercises it here.
     controller.recordRewardOffer(['tumbler']);
     controller.resolveReward('tumbler');
@@ -372,8 +339,8 @@ describe('RelicRegistryPort calls keep their receiver', () => {
     controller.recordRewardOffer(['twin-seed', 'alloy-forge']);
     controller.resolveReward('twin-seed');
 
-    // Each reward stands on its own offer: the first selection clears the offer
-    // it was taken from, so the second is recorded before it is made.
+    // Each reward stands on its own offer: the first selection clears the
+    // offer it was taken from, so the second is recorded before it is made.
     controller.recordRewardOffer(['alloy-forge']);
     controller.resolveReward('alloy-forge');
 
@@ -384,8 +351,6 @@ describe('RelicRegistryPort calls keep their receiver', () => {
     ]);
   });
 });
-
-/* ===== peekRelics ===== */
 
 describe('RunStateStore.peekRelics', () => {
   function storeOver(raw: string | null): RunStateStore {

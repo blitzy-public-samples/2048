@@ -1,63 +1,21 @@
-// Per-relic suite for `loaded-dice`, the `spawn-control` relic that inverts the
-// configured spawn distribution. AAP requirement R3, and the one relic carrying
-// validation gate V6 row 5: an RNG-affecting relic stays deterministic under a
-// fixed seed.
+// Per-relic suite for `loaded-dice`, the `spawn-control` relic that inverts
+// the configured spawn distribution. AAP requirement R3, and the one relic
+// carrying validation gate V6 row 5: an RNG-affecting relic stays
+// deterministic under a fixed seed.
 //
 // Three mandatory properties, one describe block apiece, followed by the
 // determinism and substream-hygiene block the gate turns on and a closing
-// integrity block:
+// integrity block.
 //
-//   1. binding   the handler is bound to `onSpawn` and to no other hook.
-//   2. effect    the spawn value is re-drawn with the live
-//                `config.spawn.weights` reversed, on a copy.
-//   3. charges   the declaration carries no budget, and a dispatch made while a
-//                notional budget stands at zero neither throws nor corrupts
-//                anything.
-//
-// PROVENANCE
-//   The distribution this relic inverts is the ported vanilla one: values
-//   `[2, 4]` at weights `[0.9, 0.1]`, from the single expression at
-//   js/game_manager.js L71. That expression is randomness source #1 of exactly
-//   two in the vanilla codebase - the other is the spawn position at
-//   js/grid.js L41 - which is what made the seeded-RNG substitution an audited,
-//   closed change rather than a search. The traceability row this suite
-//   evidences maps js/game_manager.js L71 onto `RulesConfig.spawn` of
-//   src/config/rules-config.ts together with the `spawn-value` substream of
-//   src/rng/rng-streams.ts.
-//
-//   The absent-position dispatch below is the boundary at js/grid.js L37-L43,
-//   where `randomAvailableCell` carries no else branch and so yields no cell.
-//
-//   Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
-//   Substreams", in docs/architecture/data-flow.md, is the figure carrying the
-//   substream fan-out the cursor assertions here read: its `spawn-value` edge
-//   is labelled with the js/game_manager.js L71 call site it replaces, and its
-//   legend records that substream separation is what keeps relic composition
-//   safe.
-//
-//   Decision-log pointers, named only so each construct can be found from
-//   docs/DECISION_LOG.md: DL-SPAWN-01 and DL-SPAWN-02 for this family's payload
-//   and substream discipline, DL-DRAW-02 for the two substreams a reward offer
-//   consumes, DL-RELIC-01 for relic behaviour living in hook-bound handlers,
-//   and DL-RNG-04 for the run seed fanned into four named substreams.
-//
-// THE HANDLER IS INVOKED DIRECTLY, through a `HookContext` this file builds
-// member by member from the shape src/engine/hooks.ts declares. The bus is not
-// involved: the charge guard, the pickup-order dispatch and the per-handler
-// transaction are src/engine/hook-bus.ts mechanisms, and tests/unit/engine owns
-// their suites. The invariant that `Math.random` is never patched belongs to
-// tests/unit/rng; the assertion here reads this handler's own source alone.
-//
-// SUBSTREAM READ BY THIS RELIC. The family contract states that every draw a
-// spawn-control handler takes comes from the `relic-draw` substream, and that
-// the two spawn substreams are the engine's own and are never addressed. The
-// cursor assertions below therefore expect `relic-draw` to advance by exactly
-// one per acting dispatch, and `spawn-value`, `spawn-position` and
-// `rarity-weight` to stand still. Recorded under DL-SPAWN-02.
+// The absent-position dispatch below is the boundary at js/grid.js L37-L43,
+// where `randomAvailableCell` carries no else branch and so yields no cell.
 //
 // Every seed is a fixed literal. Nothing here reads a document, a clock,
 // `Math.random` or a timer, and this suite runs under `npm test` with no
 // server, browser or network.
+//
+// Decisions: DL-SPAWN-01, DL-SPAWN-02, DL-DRAW-02, DL-RELIC-01, DL-RNG-04
+// (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -91,10 +49,6 @@ import {
   createNearLossBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * Fixed inputs
- * ========================================================================== */
-
 /** Identifier the family declares and the catalogue indexes. */
 const RELIC_ID = 'loaded-dice';
 
@@ -117,11 +71,7 @@ const UNMOVED_STREAMS: readonly StreamName[] = [
   'rarity-weight',
 ];
 
-/**
- * Run seed every bench is built from unless a test names another. At this
- * seed's first `relic-draw` position the configured weights and the reversed
- * weights select DIFFERENT values, so the effect assertion is not vacuous.
- */
+/** Run seed every bench is built from unless a test names another. */
 const PRIMARY_SEED = 'loaded-dice-fixed';
 
 /**
@@ -160,11 +110,7 @@ const THREE_VALUE_WEIGHTS: readonly number[] = [0.7, 0.2, 0.1];
 /** A four-entry distribution, wide enough to separate reversal from a swap. */
 const FOUR_VALUE_SPAWN: readonly number[] = [2, 4, 8, 16];
 
-/**
- * Weights placing all of the mass on the third entry. Reversed they place it
- * on the second, while swapping the two ends leaves them where they are, so
- * the two transformations select different values at every cursor position.
- */
+/** Weights placing all of the mass on the third entry. */
 const THIRD_ENTRY_WEIGHTS: readonly number[] = [0, 0, 1, 0];
 
 /** A single-entry distribution, whose reversal is the identity. */
@@ -173,14 +119,36 @@ const SINGLE_VALUE_SPAWN: readonly number[] = [2];
 /** Weight of `SINGLE_VALUE_SPAWN`. */
 const SINGLE_VALUE_WEIGHTS: readonly number[] = [1];
 
+/**
+ * One weight vector that is ALIGNED with `THREE_VALUE_SPAWN` — three entries,
+ * none missing — and that a weighted draw still cannot select from.
+ */
+interface UnusableWeights {
+  /** How the vector is unusable, named in the case title. */
+  readonly name: string;
+  readonly weights: readonly number[];
+}
+
+/**
+ * The four aligned vectors `totalWeightOf` of src/rng/rng-streams.ts refuses:
+ * a total of zero, a negative entry, an entry that is not a number, and a total
+ * that is not finite. Each refusal is measured before a draw is taken.
+ */
+const UNUSABLE_WEIGHT_VECTORS: readonly UnusableWeights[] = Object.freeze([
+  { name: 'a vector of zeroes', weights: Object.freeze([0, 0, 0]) },
+  { name: 'a negative weight', weights: Object.freeze([0.5, -0.2, 0.7]) },
+  { name: 'a NaN weight', weights: Object.freeze([0.5, Number.NaN, 0.5]) },
+  {
+    name: 'an infinite weight',
+    weights: Object.freeze([0.5, Number.POSITIVE_INFINITY, 0.5]),
+  },
+]);
+
 /* ==========================================================================
  * Harness: the declaration, and the HookContext built member by member
  * ========================================================================== */
 
 /**
- * Reads the declaration from the catalogue, raising rather than returning
- * `undefined` so a renamed identifier fails loudly.
- *
  * @returns The `loaded-dice` declaration.
  */
 function catalogueRelic(): Relic {
@@ -211,9 +179,6 @@ function familyRelic(): Relic {
 }
 
 /**
- * Reads the bound `onSpawn` handler, raising rather than returning
- * `undefined` so an unbound hook fails loudly.
- *
  * @returns The handler the declaration binds to `onSpawn`.
  */
 function spawnHandler(): HookHandler<'onSpawn'> {
@@ -228,8 +193,6 @@ function spawnHandler(): HookHandler<'onSpawn'> {
 
 /**
  * Wraps a live `Grid` as the query-only board view a dispatch carries.
- * `cellValue` stands in for `cellContent`, reading the face value rather than
- * the mutable tile.
  *
  * @param grid Live board to read through.
  * @returns The capability view of that board.
@@ -260,8 +223,7 @@ interface EffectRecorder {
 }
 
 /**
- * Builds a recording board-command queue over a board view. Reads delegate to
- * the view; every write appends its own name and nothing reaches the board.
+ * Builds a recording board-command queue over a board view.
  *
  * @param view Board view the read members delegate to.
  * @param size Edge length the queue reports.
@@ -357,9 +319,6 @@ interface Bench {
  * recording command queue, the run correlation identifier and an empty state
  * slot.
  *
- * The config is ALWAYS `createDefaultRulesConfig()` and never the deep-frozen
- * `DEFAULT_RULES_CONFIG`, so a test may replace `spawn` in place.
- *
  * @param options Fixed inputs to override.
  * @returns The bench.
  */
@@ -404,10 +363,6 @@ function createBench(options: BenchOptions = {}): Bench {
   };
 }
 
-/* ==========================================================================
- * Harness: dispatch, parallel draws, and comparisons
- * ========================================================================== */
-
 /**
  * Builds a spawn payload carrying a cell.
  *
@@ -431,10 +386,6 @@ function spawnWithoutCell(value: number): SpawnPayload {
 }
 
 /**
- * Invokes the bound handler directly and requires a payload back, raising
- * rather than returning nothing so a handler that stops returning one fails
- * loudly.
- *
  * @param bench Environment to dispatch on.
  * @param payload Spawn the rules resolved.
  * @returns The payload the handler resolved to.
@@ -451,15 +402,14 @@ function dispatch(bench: Bench, payload: SpawnPayload): SpawnPayload {
 
 /**
  * Draws from a PARALLEL substream standing exactly where the live one stood,
- * built from the same seed and fast-forwarded to the recorded cursors. This is
- * what turns the effect claim into an exact value rather than a frequency.
+ * built from the same seed and fast-forwarded to the recorded cursors.
  *
  * @param seed Run seed the live substreams were derived from.
  * @param cursors Cursor snapshot taken before the live dispatch.
  * @param values Candidate values, read in index order.
  * @param weights Weights, read in the same index order.
- * @returns The value that draw selects, or `undefined` where the shape admits
- *   no selection.
+ * @returns The value that draw selects, or `undefined` where the shape
+ *   admits no selection.
  */
 function parallelPick(
   seed: string,
@@ -501,9 +451,6 @@ function endSwappedWeights(weights: readonly number[]): number[] {
 }
 
 /**
- * Replaces the live spawn distribution in place, which is how a test proves the
- * handler reads the rules in force rather than a captured constant.
- *
  * @param bench Environment whose rules are replaced.
  * @param values Values to install.
  * @param weights Weights to install.
@@ -518,7 +465,7 @@ function installDistribution(
 }
 
 /**
- * Compares two number vectors ELEMENT BY ELEMENT, length first.
+ * Compares two number vectors element by element, length first.
  *
  * @param actual Vector observed.
  * @param expected Vector required.
@@ -561,8 +508,8 @@ function handlerSource(): string {
 }
 
 /**
- * Resolves a sequence of spawns on one fresh bench, so each dispatch draws from
- * the position the one before it left.
+ * Resolves a sequence of spawns on one fresh bench, so each dispatch draws
+ * from the position the one before it left.
  *
  * @param seed Run seed to build the bench from.
  * @param count Dispatches to resolve.
@@ -617,10 +564,6 @@ let bench: Bench = createBench();
 beforeEach(() => {
   bench = createBench();
 });
-
-/* ==========================================================================
- * Property 1: the relic fires only on the hooks it binds
- * ========================================================================== */
 
 describe('loaded-dice is declared once and reachable by identifier', () => {
   it('resolves to the same frozen object through its family and the '
@@ -677,10 +620,6 @@ describe('loaded-dice binds onSpawn and fires on no other hook', () => {
   });
 });
 
-/* ==========================================================================
- * Property 2: the specified effect, the live weights reversed
- * ========================================================================== */
-
 describe('loaded-dice re-draws the spawn value with the live config spawn '
   + 'weights reversed', () => {
   it('resolves to the value the reversed weights select at that cursor, and '
@@ -699,8 +638,8 @@ describe('loaded-dice re-draws the spawn value with the live config spawn '
     );
     const configuredPick = parallelPick(bench.seed, before, values, weights);
 
-    // Non-vacuity guard: at this seed and cursor the two weight vectors
-    // select different values.
+    // Non-vacuity guard: at this seed and cursor the two weight vectors select
+    // different values.
     expect(reversedPick).not.toBe(configuredPick);
     expect(resolved.value).toBe(reversedPick);
     expect(resolved.value).not.toBe(configuredPick);
@@ -822,6 +761,67 @@ describe('loaded-dice re-draws the spawn value with the live config spawn '
 
     expect(resolved.value).toBe(INCOMING_VALUE);
   });
+
+  // The weight vectors below are ALIGNED with their values — same length, both
+  // non-empty — and are still unusable, which is the second family of refusals
+  // `totalWeightOf` of src/rng/rng-streams.ts applies: a total of zero, any
+  // negative weight, any weight that is not finite, and a total that overflows
+  // to infinity. Each is measured BEFORE a draw is taken, so a refusal costs no
+  // randomness.
+  for (const unusable of UNUSABLE_WEIGHT_VECTORS) {
+    it(`leaves the spawn, the cursors and the rules alone for ${unusable.name}`,
+      () => {
+        installDistribution(bench, THREE_VALUE_SPAWN, unusable.weights);
+
+        const before = bench.streams.snapshotCursors();
+        const boardBefore = bench.grid.serialize();
+        const payload = spawnAt(1, 2, INCOMING_VALUE);
+        const resolved = dispatch(bench, payload);
+        const after = bench.streams.snapshotCursors();
+
+        // The payload is the one the rules produced, member for member.
+        expect(resolved.value).toBe(INCOMING_VALUE);
+        expect(resolved.position).toEqual({ x: 1, y: 2 });
+        expect(resolved.count).toBe(payload.count);
+
+        // No cursor moved — the draw substream included — so a refused
+        // distribution cannot shift the sequence a seed reproduces.
+        expect(after[DRAW_STREAM]).toBe(before[DRAW_STREAM]);
+        expect(after[DRAW_STREAM]).toBe(0);
+        expectUnmovedStreams(before, after);
+        expect(after).toEqual(before);
+
+        // And the refusal is the substream's, not a shape this relic rejected
+        // first: the same vector refuses a direct weighted draw.
+        expect(
+          parallelPick(bench.seed, before, THREE_VALUE_SPAWN, unusable.weights),
+        ).toBeUndefined();
+
+        // Nothing else was written: not the rules, not the lattice, not the
+        // relic's own slot, and no board command or charge was requested.
+        expectSameNumbers(bench.config.spawn.values, THREE_VALUE_SPAWN);
+        expect(bench.config.spawn.weights).toEqual([...unusable.weights]);
+        expect(bench.config.boardSize).toBe(bench.grid.size);
+        expect(bench.grid.serialize()).toEqual(boardBefore);
+        expect(bench.context.state).toBeUndefined();
+        expect(bench.commands).toEqual([]);
+        expect(bench.chargeRequests).toEqual([]);
+      });
+  }
+
+  it('takes the reversal of an unusable vector no further than the draw', () => {
+    // The handler reverses the weights on a COPY before it draws, so a refused
+    // draw leaves the configured vector in its original order rather than
+    // reversed in place.
+    const negative = [0.5, -0.2, 0.7];
+
+    installDistribution(bench, THREE_VALUE_SPAWN, negative);
+
+    expect(dispatch(bench, spawnAt(0, 0, INCOMING_VALUE)).value).toBe(
+      INCOMING_VALUE,
+    );
+    expect(bench.config.spawn.weights).toEqual(negative);
+  });
 });
 
 describe('loaded-dice biases the value alone', () => {
@@ -873,10 +873,6 @@ describe('loaded-dice biases the value alone', () => {
     expect(bench.context.state).toBeUndefined();
   });
 });
-
-/* ==========================================================================
- * Property 3: charges, including a dispatch made at zero
- * ========================================================================== */
 
 describe('loaded-dice carries no charge budget', () => {
   it('omits the charges member from its declaration rather than declaring it '
@@ -943,10 +939,6 @@ describe('loaded-dice carries no charge budget', () => {
     expect(exhausted.commands).toEqual([]);
   });
 });
-
-/* ==========================================================================
- * Determinism and substream hygiene: validation gate V6 row 5
- * ========================================================================== */
 
 describe('loaded-dice stays deterministic under a fixed seed', () => {
   it('resolves the identical ten-value sequence from two independently built '
@@ -1069,11 +1061,6 @@ describe('loaded-dice keeps every substream but its own standing still', () => {
     expect(source).toContain('pickWeighted');
   });
 });
-
-/* ==========================================================================
- * Closing integrity: the suite left the shared declaration and the shared
- * default rules exactly as it found them
- * ========================================================================== */
 
 describe('loaded-dice and the default rules survive the suite', () => {
   it('leaves the shared catalogue declaration frozen and identical to the '

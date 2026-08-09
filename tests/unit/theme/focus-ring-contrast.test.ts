@@ -3,16 +3,6 @@
 // focus vocabulary added on top of it is the one place a contrast floor has to
 // be measured rather than assumed.
 //
-// style/_a11y.scss draws the ring as two bands — an inner `outline` in
-// `--theme-focus-ring-contrast` and an outer spread-only `box-shadow` in
-// `--theme-focus-ring` — so a control's focus is discernible whenever EITHER
-// band clears the WCAG 2.1 AA 3:1 minimum for a non-text boundary against the
-// surface behind it. The assertions below measure the stronger band against
-// every surface a focusable control sits on under each palette.
-//
-// The ratio is computed here rather than imported: the formula is WCAG 2.1's
-// own, and stating it in the suite is what makes the numbers checkable.
-//
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock library and writes no snapshot.
 
@@ -73,9 +63,6 @@ interface Channels {
 
 /**
  * Reads a `#rrggbb`, `rgb(r, g, b)` or `rgba(r, g, b, a)` declaration.
- *
- * Those are the three forms src/theme/themes.ts and src/theme/tokens.ts state a
- * colour in.
  *
  * @param declared Declaration to read.
  * @returns Its channels.
@@ -142,8 +129,8 @@ function luminance(color: Channels): number {
 }
 
 /**
- * Contrast ratio between two colour declarations, each composited over the page
- * background where it is translucent.
+ * Contrast ratio between two colour declarations, each composited over the
+ * page background where it is translucent.
  *
  * @param left First declaration.
  * @param right Second declaration.
@@ -162,9 +149,6 @@ function contrast(left: string, right: string, behind: string): number {
 
 /**
  * The surfaces a focusable control sits on under one theme, keyed by a label.
- *
- * Every ramp fill is included: a control drawn over the board can sit on any
- * tile, and the reward card takes the band above the ramp.
  *
  * @param theme Theme to read.
  * @returns The surfaces.
@@ -215,8 +199,6 @@ function strongerBand(theme: Theme, surface: string): number {
   );
 }
 
-/* ===== 1. Every palette clears the non-text minimum everywhere ===== */
-
 describe.each([
   ['default', defaultTheme],
   ['high-contrast', highContrastTheme],
@@ -240,8 +222,6 @@ describe.each([
     ).toBeGreaterThanOrEqual(NON_TEXT_MINIMUM);
   });
 });
-
-/* ===== 2. The default ring is the stated token derivation ===== */
 
 describe('the default focus ring is derived from the frozen text token', () => {
   it('takes the outer band from the derived focus-ring colour', () => {
@@ -293,8 +273,8 @@ describe('a tile numeral is clamped to the cell that holds it', () => {
         for (const value of [2, 128, 1024, 4096]) {
           const numeral = tileNumeralSize(value, scale, cell);
 
-          // At or below the declared size, and at or below the cell it is drawn
-          // in — except where the floor is what keeps it legible at all.
+          // At or below the declared size, and at or below the cell it is
+          // drawn in — except where the floor is what keeps it legible at all.
           expect(numeral).toBeLessThanOrEqual(tileFontSize(value, scale));
           expect(numeral).toBeLessThanOrEqual(
             Math.max(cell, minTileNumeralSize),
@@ -322,17 +302,14 @@ describe('a tile numeral is clamped to the cell that holds it', () => {
   });
 
   it('never draws below the legibility floor for a declared size above it', () => {
-    // A one-pixel cell would otherwise demand a numeral of half a pixel.
     expect(tileNumeralSize(2, 'desktop', 1)).toBe(minTileNumeralSize);
     expect(tileNumeralSize(4096, 'mobile', 1)).toBe(minTileNumeralSize);
   });
 
   it('mirrors the ratio the stylesheet clamps with', () => {
     // style/_tokens.scss declares $tile-numeral-cell-ratio and
-    // $tile-numeral-min-size; both must be these values or the two layers clamp
-    // differently. The ratio is the largest fraction of its cell any declared
-    // numeral occupies at the compiled board size: 35 / 57.5 at the mobile
-    // scale, rounded up to two places.
+    // $tile-numeral-min-size; both must be these values or the two layers
+    // clamp differently.
     expect(tileNumeralCellRatio).toBeCloseTo(0.61, 5);
     expect(minTileNumeralSize).toBe(6);
     expect(tileNumeralCellRatio).toBeGreaterThanOrEqual(

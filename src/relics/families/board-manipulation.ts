@@ -2,38 +2,19 @@
 // the `onBeforeMove` and `onAfterMove` hook points.
 //
 // Hook provenance. `onBeforeMove` is the seam of js/game_manager.js L134, the
-// terminal guard the move opened with, whose `prepareTiles()` at L113-L120
+// terminal guard the move opened with, whose `prepareTiles` at L113-L120
 // followed it; `onAfterMove` is the seam of L185-L189, the loss check and the
 // actuation call that closed the move.
 //
-// What a handler here can reach. src/engine/hook-bus.ts substitutes
-// `ReadonlyGridView` for the live `Grid` once per dispatch, before the first
-// handler runs, so `insertTile`, `removeTile`, the `cells` matrix and every
-// live `Tile` are absent from a handler's reach; it then measures a returned
-// payload against the exact member set its hook declares and against the
-// identity of the board it arrived with. The board is therefore READ through
-// that facade — `availableCells`, `cellValue`, `cellsAvailable`,
-// `withinBounds`, `serialize` — and a handler's effects leave through three
-// channels and no others:
-//   the transformable payload members its hook declares, `direction` and
-//     `cancelled`;
-//   its own persisted `state` slot;
-//   `HookContext.effects`, the transactional command queue
-//     src/engine/board-effects.ts declares. A handler RECORDS `restoreBoard`,
-//     `moveTile` or `removeTile`; each command is validated against a
-//     projection of the live board as it is recorded, and the bus applies the
-//     recorded commands to the lattice once the handler has returned and its
-//     return has validated — so a refused or throwing handler changes nothing.
-//
 // Charges are DECLARED here and deducted in src/engine/hook-bus.ts, which
 // skips a handler whose budget is spent and owns the only path that writes a
-// budget. A handler that acted calls `HookContext.spendCharge()` to mark the
+// budget. A handler that acted calls `HookContext.spendCharge` to mark the
 // invocation successful; it never reads, compares or writes the count itself.
 //
 // Each handler ASKS for its charge, through `HookContext.spendCharge()`, on the
 // one path where its effect takes hold — the withdrawal for `temporal-anchor`,
-// the redirection for `tumbler`, the turn for `culling-blade`, the recorded
-// column for `scouring-wind` — and on no other path, so a dispatch that reached
+// the redirection for `tumbler`, the turn for `culling-blade`, the cleared
+// row for `scouring-wind` — and on no other path, so a dispatch that reached
 // a handler which then changed nothing spends nothing. Without those calls the
 // four budgets declared below were never spent and the relics fired for the
 // whole run.
@@ -45,27 +26,11 @@
 // module-level mutable state and takes no unseeded randomness: the substream
 // named above is the only source of draws it reaches for.
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, in declaration
-// order, all target-only because no vanilla construct declared a relic:
-//   TR-BOARD-01  temporal-anchor   onBeforeMove
-//   TR-BOARD-02  tumbler           onBeforeMove
-//   TR-BOARD-03  culling-blade     onAfterMove
-//   TR-BOARD-04  scouring-wind     onAfterMove
-//   TR-BOARD-05  the frozen `BOARD_MANIPULATION_FAMILY` export
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-BOARD-01  the four charge-carrying relics declaring a budget and
-//                marking a successful invocation through
-//                `HookContext.spendCharge()` without reading, comparing or
-//                writing the count
-//   DL-BOARD-02  each effect carried by a transformable payload member, by the
-//                relic's own persisted state slot, or by a `context.effects`
-//                command the engine applies
-//
 // The catalogue of families, rarities, hooks and charge counts is
 // docs/RELICS.md; the charge guard and the compounding protocol are the named
 // figure of docs/architecture/hook-dispatch-sequence.md.
+//
+// Decisions: DL-BOARD-01, DL-BOARD-02 (docs/DECISION_LOG.md).
 
 import type {
   HookHandler,
@@ -82,14 +47,8 @@ import type { Relic, RelicFamily } from '../relic-types';
 import { RARITIES } from '../relic-types';
 
 
-/* --------------------------------------------------------------------------
- * Relic magnitudes
- * ----------------------------------------------------------------------- */
-
 // Each value below is intrinsic to one relic — its charge budget or its own
-// threshold — and is declared here as an immutable constant. Every GAME RULE
-// a handler needs, `boardSize` and the spawn distribution included, is read
-// from `HookContext.config` at use time instead.
+// threshold — and is declared here as an immutable constant.
 
 /** Charge budget a run starts `temporal-anchor` with. */
 const TEMPORAL_ANCHOR_CHARGES = 3;
@@ -103,57 +62,42 @@ const CULLING_BLADE_CHARGES = 2;
 /** Charge budget a run starts `scouring-wind` with. */
 const SCOURING_WIND_CHARGES = 1;
 
-/**
- * Share of the board `tumbler`'s scarcity band covers.
- *
- * Multiplied by the live cell count and rounded up, so the band follows the
- * `boardSize` in force at each dispatch.
- */
+/** Share of the board `tumbler`'s scarcity band covers. */
 const TUMBLER_TRIGGER_FRACTION = 0.25;
 
-/**
- * Tiles at the lowest spawn value that arm `culling-blade`.
- */
+/** Tiles at the lowest spawn value that arm `culling-blade`. */
 const CULLING_BLADE_ARMING_TILES = 6;
 
 /** The one substream this module draws from. */
 const RELIC_DRAW_STREAM: StreamName = 'relic-draw';
 
 
-/* --------------------------------------------------------------------------
- * State-slot shapes
- * ----------------------------------------------------------------------- */
-
 // Both shapes below are JSON data: the run envelope of src/run/run-state.ts
 // persists a relic's slot, and src/engine/hook-bus.ts copies it in and out of
-// every dispatch. Neither carries a `Tile`, a `Grid`, a function or a cycle.
+// every dispatch.
 
 /**
  * `temporal-anchor`'s slot: the board and the score it holds, or `null` for a
  * relic that has not recorded one yet.
- *
- * `board` is exactly what `ReadonlyGridView.serialize()` returns — `{ size,
- * cells }`, occupied cells as `{ position, value }` and empty cells kept as
- * `null` — so the anchor and the persisted board snapshot are one shape.
  */
 interface AnchorState {
   board: SerializedGrid | null;
   score: number;
 }
 
-/** One fully-occupied column, as `scouring-wind` records it. */
-interface ScouredColumn {
-  /** Column index: the fixed `x` the column occupies. */
-  x: number;
+/** One fully-occupied row, as `scouring-wind` records it. */
+interface ScouredRow {
+  /** Row index: the fixed `y` the row occupies. */
+  y: number;
 
-  /** Face values the column held, in ascending `y` order. */
+  /** Face values the row held, in ascending `x` order. */
   values: number[];
 }
 
-/** `scouring-wind`'s slot: how many columns it has swept, and the last one. */
+/** `scouring-wind`'s slot: how many rows it has swept, and the last one. */
 interface ScourState {
   scours: number;
-  column: ScouredColumn | null;
+  row: ScouredRow | null;
 }
 
 /** `temporal-anchor`'s slot before its first move. */
@@ -165,24 +109,14 @@ const INITIAL_ANCHOR_STATE: AnchorState = Object.freeze({
 /** `scouring-wind`'s slot before its first sweep. */
 const INITIAL_SCOUR_STATE: ScourState = Object.freeze({
   scours: 0,
-  column: null,
+  row: null,
 });
 
 
-/* --------------------------------------------------------------------------
- * Structural predicates
- * ----------------------------------------------------------------------- */
-
-// A slot arrives as `unknown`: the run envelope may have persisted it under
-// an older build, and storage may return it corrupted. Each predicate below
-// decides one shape and returns a verdict, so a slot that fails any of them
-// resolves to "nothing held". src/engine/hook-bus.ts is where a throw from a
-// handler is caught, reported through the injected reporter and the relic
-// marked degraded.
+// A slot arrives as `unknown`: the run envelope may have persisted it under an
+// older build, and storage may return it corrupted.
 
 /**
- * Reports whether `value` is a plain keyed object rather than an array.
- *
  * @param value Candidate value.
  * @returns `true` for a non-null, non-array object.
  */
@@ -212,7 +146,7 @@ function isCellIndex(value: unknown): value is number {
 
 /**
  * Reports whether `value` is one serialised tile: a cell pair and a positive
- * face value, the shape `Tile.serialize()` writes.
+ * face value, the shape `Tile.serialize` writes.
  *
  * @param value Candidate cell entry.
  * @returns `true` for a serialised tile.
@@ -235,8 +169,7 @@ function isSerializedTile(value: unknown): value is SerializedTile {
 }
 
 /**
- * Reports whether `value` is one column of a serialised board: `size`
- * entries, each a serialised tile or `null`.
+ * Reports whether `value` is one column of a serialised board.
  *
  * @param value Candidate column.
  * @param size Edge length the column is measured against.
@@ -284,8 +217,8 @@ function isSerializedGrid(value: unknown): value is SerializedGrid {
  * Reports whether `value` is `temporal-anchor`'s slot.
  *
  * @param value Candidate slot.
- * @returns `true` for a slot carrying a finite score and either no board or a
- *   well-formed one.
+ * @returns `true` for a slot carrying a finite score and either no board or
+ *   a well-formed one.
  */
 function isAnchorState(value: unknown): value is AnchorState {
   if (!isRecord(value)) {
@@ -311,15 +244,9 @@ function isScourState(value: unknown): value is ScourState {
 }
 
 
-/* --------------------------------------------------------------------------
- * Board readers
- * ----------------------------------------------------------------------- */
-
-// Every reader below walks the board x-outer and y-inner, the order
-// js/grid.js L45-L64 walked it in and the order `availableCells()` still
-// reports, and reads face values through `cellValue`, the view's stand-in for
-// `cellContent`. None of them sorts, filters or copies a list a draw resolves
-// against.
+// Every reader below walks the board x-outer and y-inner, the order js/grid.js
+// L45-L64 walked it in and the order `availableCells` still reports, and reads
+// face values through `cellValue`, the view's stand-in for `cellContent`.
 
 /**
  * Cells a square board of `size` holds.
@@ -394,23 +321,25 @@ function countTilesWithValue(
 }
 
 /**
- * The first fully-occupied column of the board, scanning columns in ascending
- * `x` and each column in ascending `y`.
+ * The first fully-occupied row of the board, scanning rows in ascending `y`
+ * and each row in ascending `x`.
  *
- * A column is one fixed `x` across every `y`, which is the outer index of the
- * x-major `cells[x][y]` store js/grid.js L88-L95 wrote through.
+ * A ROW is one fixed `y` across every `x`. The store js/grid.js L88-L95 wrote
+ * through is x-major — `cells[x][y]`, where `x` selects a column — so a row is
+ * read by holding `y` and walking `x`, which is the transpose of the store's own
+ * outer index.
  *
  * @param board The board in force.
- * @returns The row and the values it held, or `null` where no row is fully
- *   occupied.
+ * @returns The column's `x` and the values it held, or `null` where no column
+ *   is fully occupied.
  */
-function firstFullColumn(board: ReadonlyGridView): ScouredColumn | null {
+function firstFullRow(board: ReadonlyGridView): ScouredRow | null {
   const size = board.size;
 
-  for (let x = 0; x < size; x += 1) {
+  for (let y = 0; y < size; y += 1) {
     const values: number[] = [];
 
-    for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
       const value = board.cellValue({ x, y });
 
       if (value === null) {
@@ -421,7 +350,7 @@ function firstFullColumn(board: ReadonlyGridView): ScouredColumn | null {
     }
 
     if (values.length === size) {
-      return { x, values };
+      return { y, values };
     }
   }
 
@@ -430,10 +359,6 @@ function firstFullColumn(board: ReadonlyGridView): ScouredColumn | null {
 
 /**
  * The cell holding the board's lowest face value.
- *
- * `occupiedCells` reports the board x-outer and y-inner, so a tie between two
- * cells at the same value resolves to the earlier of that scan — the choice is
- * fixed by the board alone and takes no draw.
  *
  * @param occupied Occupied cells of the board, in scan order.
  * @returns The cell, or `null` where no cell is occupied.
@@ -457,11 +382,6 @@ function lowestOccupiedCell(
 
 /**
  * Cells of a held anchor that still fall on the live board.
- *
- * `withinBounds` reads the board's own edge length at call time and
- * `config.boardSize` is the edge length the rules in force declare, so an
- * anchor recorded at another size is measured against both rather than
- * trusted for the `size` it carries.
  *
  * @param snapshot Board the anchor holds.
  * @param board The board in force.
@@ -507,13 +427,9 @@ function isOnLiveBoard(
   );
 }
 
-/* --------------------------------------------------------------------------
- * Lattice transforms
- * ----------------------------------------------------------------------- */
-
-// Each transform below takes the lattice `ReadonlyGridView.serialize()`
-// returned — a fresh `{ size, cells }` per call, so writing into it reaches no
-// board — and returns the lattice a `restoreBoard` effect is requested with.
+// Each transform below takes the lattice `ReadonlyGridView.serialize` returned
+// — a fresh `{ size, cells }` per call, so writing into it reaches no board —
+// and returns the lattice a `restoreBoard` effect is requested with.
 // src/engine/engine.ts is the only writer of a board: a handler asks, and the
 // engine applies the request once the handler has returned and its return has
 // been accepted.
@@ -522,37 +438,21 @@ function isOnLiveBoard(
 
 
 
-/* --------------------------------------------------------------------------
- * Handlers
- * ----------------------------------------------------------------------- */
-
 // Each handler returns the payload it resolves to and records its board change
 // through `HookContext.effects`, which src/engine/board-effects.ts applies to
 // the live lattice once the handler has returned and its return has validated.
-// None reads or writes a charge budget: src/engine/hook-bus.ts guards the budget
-// and spends one charge for an invocation that recorded a command or asked
-// through `spendCharge`. The three trigger conditions on `onBeforeMove` are
-// disjoint: `holdAnchor` acts on a board with no empty cell, `tumbleMove` inside
-// the scarcity band above that, and `cullSmallest` only above the band.
 
 /**
  * `temporal-anchor` on `onAfterMove`: records the board the move settled on,
  * together with the score it settled at, replacing any anchor already held —
  * but only while that board still holds an empty cell.
  *
- * The anchor is taken AFTER the move, so it is the position the next
- * `onBeforeMove` rewinds to.
- *
  * @param payload The resolved move.
  * @param context The dispatch's collaborators and this relic's slot.
  * @returns The payload, unchanged.
  */
 const recordAnchor: HookHandler<'onAfterMove'> = (payload, context) => {
-  // THE LAST POSITION WITH ROOM, not simply the last position. A board with no
-  // empty cell is not anchored, because the undo arms on exactly that state: an
-  // anchor taken there would restore the board the player is already stuck on,
-  // and undoing would change nothing. Anchoring the last roomier position is
-  // what makes the undo restore something.
+  // The last position with room, not simply the last position.
   if (!payload.board.cellsAvailable()) {
     return payload;
   }
@@ -571,17 +471,6 @@ const recordAnchor: HookHandler<'onAfterMove'> = (payload, context) => {
  * `temporal-anchor` on `onBeforeMove`: while the board holds no empty cell and
  * an anchor is held, REWINDS the board to the anchored position and withdraws
  * the move.
- *
- * The rewind is recorded through `HookContext.effects.restoreBoard`, which
- * clears the lattice and re-inserts every anchored tile inside the live bound;
- * an anchored cell beyond that bound is dropped rather than written
- * off-lattice. Withdrawing is the veto js/game_manager.js L134 expressed by
- * returning before the move resolved: a withdrawn move moves no tile, resolves
- * no merge, spawns nothing and changes no score.
- *
- * A slot that is absent, malformed, empty, or recorded at cells that no longer
- * fall on the live board holds nothing to rewind to, and the move proceeds
- * untouched.
  *
  * @param payload The requested move.
  * @param context The dispatch's collaborators and this relic's slot.
@@ -608,34 +497,24 @@ const holdAnchor: HookHandler<'onBeforeMove'> = (payload, context) => {
     return payload;
   }
 
-  // A move another relic already withdrew is withdrawn: the anchor adds nothing
-  // to it, so it neither rewinds nor pays for it.
+  // A move another relic already withdrew is withdrawn: the anchor adds
+  // nothing to it, so it neither rewinds nor pays for it.
   if (payload.cancelled) {
     return payload;
   }
 
-  // THE UNDO. The recorded lattice and the score recorded with it are restored
-  // before the move would have resolved, and the move itself is then withdrawn,
-  // so the turn ends on the anchored position rather than on a board the anchor
-  // no longer describes. The score travels with the lattice, or the points the
-  // withdrawn move scored would survive the position that scored them. Every
-  // tile outside the live bounds is dropped by the command's own validation
-  // rather than repositioned, so an anchor taken at a larger board is applied
-  // without corrupting a single surviving cell. Vetoes ONLY on success.
+  // THE UNDO.
   if (!context.effects.restoreBoard(held.board, held.score)) {
     return payload;
   }
 
-  // The anchor is consumed with the undo, so the next undo stands on the
-  // position this one restored rather than on a board two turns old.
   context.state = { board: null, score: held.score };
 
   payload.cancelled = true;
 
-  // THE REWIND IS THE EFFECT, so the charge is asked for here and on no other
+  // The rewind is the effect, so the charge is asked for here and on no other
   // path: a turn that found no jam, held no usable anchor, or had its restore
-  // refused pays nothing. `spendCharge` is a request the bus fulfils once this
-  // return has been accepted; this handler neither reads nor writes the budget.
+  // refused pays nothing.
   context.spendCharge();
 
   return payload;
@@ -645,20 +524,6 @@ const holdAnchor: HookHandler<'onBeforeMove'> = (payload, context) => {
  * `tumbler` on `onBeforeMove`: while the empty cells left are inside the
  * scarcity band, the board tumbles — every tile relocates to a cell drawn from
  * those standing empty at the moment it is placed.
- *
- * Tiles are walked in the x-outer, y-inner order
- * `BoardEffectQueue.occupiedCells` reports them in, and each relocation frees
- * the cell it left, so a later tile can take an earlier tile's origin. Tile
- * identity is preserved by `moveTile` rather than being removed and
- * re-inserted, which is what makes a view tween each tile to its new cell
- * instead of popping it as a spawn.
- *
- * One draw per tile placed. `pick` on an empty candidate list yields
- * `undefined` and takes no draw, and the walk then stops with the tiles it has
- * already placed standing where they were placed.
- *
- * Never withdraws the move: the requested turn still resolves, in the
- * requested direction, against the tumbled board.
  *
  * @param payload The requested move.
  * @param context The dispatch's collaborators and its effect queue.
@@ -674,11 +539,6 @@ const tumbleMove: HookHandler<'onBeforeMove'> = (payload, context) => {
   const effects = context.effects;
   const stream = context.rng.stream(RELIC_DRAW_STREAM);
 
-  // THE TUMBLE: one seeded relocation per tile, recorded before the walk resolves
-  // so the move the player pressed resolves against the tumbled board rather
-  // than being withdrawn or redirected. Recorded as `moveTile` rather than as a
-  // whole-board restore, so tile IDENTITY survives the throw and a view tweens
-  // each tile to its new cell instead of popping it as a fresh spawn.
   let relocated = 0;
 
   for (const tile of effects.occupiedCells()) {
@@ -693,11 +553,9 @@ const tumbleMove: HookHandler<'onBeforeMove'> = (payload, context) => {
     }
   }
 
-  // THE TUMBLE IS THE EFFECT, and it is one effect however many tiles it moved,
-  // so one charge is asked for once at least one tile was actually relocated. A
-  // board that offered no destination relocated nothing and pays nothing — the
-  // draws it took are still consumed, which is what keeps the sequence a
-  // function of the seed alone.
+  // The tumble is the effect, and it is one effect however many tiles it
+  // moved, so one charge is asked for once at least one tile was actually
+  // relocated.
   if (relocated > 0) {
     context.spendCharge();
   }
@@ -709,10 +567,6 @@ const tumbleMove: HookHandler<'onBeforeMove'> = (payload, context) => {
  * `culling-blade` on `onBeforeMove`: while the board is still open and the
  * lowest spawn value has piled up on it, the blade EXCISES the single
  * lowest-valued tile on the board.
- *
- * The tile is chosen by face value and, among equal values, by the x-outer,
- * y-inner scan order, so the choice is fixed by the board alone and takes no
- * draw. Never withdraws the move and never touches the score.
  *
  * @param payload The requested move.
  * @param context The dispatch's collaborators and its effect queue.
@@ -735,12 +589,9 @@ const cullSmallest: HookHandler<'onBeforeMove'> = (payload, context) => {
     return payload;
   }
 
-  // THE EXCISION. The single lowest-valued tile is removed, chosen by face value
-  // and, among equal values, by the x-outer y-inner scan order — so the same
-  // board always yields the same excision and no draw is taken. Nothing is
-  // moved, so every surviving tile keeps the exact cell it occupied, and the
-  // direction the player pressed is untouched: the move resolves as pressed,
-  // against the thinned board.
+  // The excision. The single lowest-valued tile is removed, chosen by face
+  // value and, among equal values, by the x-outer y-inner scan order — so the
+  // same board always yields the same excision and no draw is taken.
   const effects = context.effects;
   const target = lowestOccupiedCell(effects.occupiedCells());
 
@@ -748,9 +599,9 @@ const cullSmallest: HookHandler<'onBeforeMove'> = (payload, context) => {
     return payload;
   }
 
-  // THE EXCISION IS THE EFFECT, so the charge is asked for only where the
-  // removal was actually recorded: a board the blade found nothing to take from
-  // pays nothing.
+  // The excision is the effect, so the charge is asked for only where the
+  // removal was actually recorded: a board the blade found nothing to take
+  // from pays nothing.
   if (effects.removeTile(target)) {
     context.spendCharge();
   }
@@ -760,9 +611,9 @@ const cullSmallest: HookHandler<'onBeforeMove'> = (payload, context) => {
 
 /**
  * `scouring-wind` on `onAfterMove`: sweeps the settled board for the first
- * fully-occupied row — one row being a single `x` across every `y`, which is
- * the outer index of the x-major `cells[x][y]` store js/grid.js L88-L95 wrote
- * through — and CLEARS every tile standing in it.
+ * fully-occupied ROW — one row being a single `y` across every `x` — and CLEARS
+ * every tile standing in it. The row-clear effect AAP §0.1.2.5 names among the
+ * charge-based relics.
  *
  * Every cell of the row is collected before a single removal is recorded.
  * Takes no draw, awards no score and returns the payload as it stands, so the
@@ -773,22 +624,22 @@ const cullSmallest: HookHandler<'onBeforeMove'> = (payload, context) => {
  * @param context The dispatch's collaborators and this relic's slot.
  * @returns The payload, unchanged.
  */
-const sweepColumn: HookHandler<'onAfterMove'> = (payload, context) => {
-  const column = firstFullColumn(payload.board);
+const sweepRow: HookHandler<'onAfterMove'> = (payload, context) => {
+  const row = firstFullRow(payload.board);
 
-  if (column === null) {
+  if (row === null) {
     return payload;
   }
 
-  // THE LINE CLEAR. The first fully-occupied column is emptied outright, one
-  // removal per cell, in ascending `y` and taking no draw. Nothing is moved, so
-  // every tile outside that column keeps the exact cell it occupied, and the
-  // loss probe that follows this dispatch reads the cleared board.
+  // THE LINE CLEAR. The first fully-occupied row is emptied outright, one
+  // removal per cell, in ascending `x` and taking no draw. Nothing is moved, so
+  // every tile outside that row keeps the exact cell it occupied, and the loss
+  // probe that follows this dispatch reads the cleared board.
   const effects = context.effects;
   let cleared = 0;
 
-  for (let y = 0; y < column.values.length; y += 1) {
-    if (effects.removeTile({ x: column.x, y })) {
+  for (let x = 0; x < row.values.length; x += 1) {
+    if (effects.removeTile({ x, y: row.y })) {
       cleared += 1;
     }
   }
@@ -796,15 +647,15 @@ const sweepColumn: HookHandler<'onAfterMove'> = (payload, context) => {
   const held: unknown = context.state;
   const record: ScourState = {
     scours: (isScourState(held) ? held.scours : 0) + 1,
-    column,
+    row,
   };
 
   context.state = record;
 
   // THE LINE CLEAR IS THE EFFECT, one effect however many cells it emptied, so
-  // one charge is asked for once a full column was found AND cleared. A move
-  // that settled on a board with no full column leaves nothing to clear and
-  // pays nothing.
+  // one charge is asked for once a full row was found AND cleared. A move that
+  // settled on a board with no full row leaves nothing to clear and pays
+  // nothing.
   if (cleared > 0) {
     context.spendCharge();
   }
@@ -813,14 +664,9 @@ const sweepColumn: HookHandler<'onAfterMove'> = (payload, context) => {
 };
 
 
-/* --------------------------------------------------------------------------
- * The family's relics
- * ----------------------------------------------------------------------- */
-
 // Each relic carries the seven members `Relic` declares and no others: the
 // family is the exported record's `name`, and the behaviour is the handlers
-// bound in `hooks`. Each rarity is read from one ordinal position of
-// `RARITIES`, in the order the four are declared below.
+// bound in `hooks`.
 
 /** Undo, on the common tier: rewinds a full board to its last record. */
 const TEMPORAL_ANCHOR: Relic = Object.freeze({
@@ -869,34 +715,24 @@ const CULLING_BLADE: Relic = Object.freeze({
   charges: CULLING_BLADE_CHARGES,
 });
 
-/** Row clear, on the legendary tier: clears a fully-occupied row. */
+/** Column clear, on the legendary tier: clears a fully-occupied column. */
 const SCOURING_WIND: Relic = Object.freeze({
   id: 'scouring-wind',
   name: 'Scouring Wind',
   rarity: RARITIES[3],
   description:
-    'After every move, sweeps away the first fully-occupied column — one ' +
-    'column being a single x across every y — and clears every tile standing ' +
-    'in it. Awards no score. Limited charges.',
+    'After every move, sweeps away the first fully-occupied row — one row ' +
+    'being a single y across every x — and clears every tile standing in it. ' +
+    'Awards no score. Limited charges.',
   hooks: Object.freeze({
-    onAfterMove: sweepColumn,
+    onAfterMove: sweepRow,
   }),
   charges: SCOURING_WIND_CHARGES,
   state: INITIAL_SCOUR_STATE,
 });
 
 
-/* --------------------------------------------------------------------------
- * The family
- * ----------------------------------------------------------------------- */
-
-/**
- * The `board-manipulation` family, and this module's whole export.
- *
- * `relics` is frozen and its order is the declaration order above. That order
- * is carried into the catalogue the reward draw samples, so it is read as a
- * fixed sequence rather than a set.
- */
+/** The `board-manipulation` family, and this module's whole export. */
 export const BOARD_MANIPULATION_FAMILY: RelicFamily = Object.freeze({
   name: 'board-manipulation',
   relics: Object.freeze([

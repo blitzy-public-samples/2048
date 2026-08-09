@@ -1,15 +1,14 @@
 // Pins the Web Storage key registry src/storage/storage-keys.ts declares: the
 // two frozen unprefixed literals ported from js/local_storage_manager.js, the
-// namespace and the keys minted from it, and the membership, order and freezing
-// of OWNED_STORAGE_KEYS.
+// namespace and the keys minted from it, and the membership, order and
+// freezing of OWNED_STORAGE_KEYS.
 //
 // The unit under test imports nothing and touches no storage. This suite reads
 // no `window`, no `document` and no `localStorage`, declares no mock and no
 // spy, and holds no state between tests. It passes in the `unit:dom` project
 // vitest.config.ts collects it into and under a DOM-free environment alike.
 //
-// Decisions this suite is the evidence for: DL-STORE-01 in
-// docs/DECISION_LOG.md. Traceability rows: TR-STORE-01 of
+// Decisions: DL-STORE-01 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -42,10 +41,8 @@ const REJECTED_KEY_NAMES: readonly string[] = [
 ];
 
 /**
- * Unqualified names `namespacedKey()` accepts, each non-empty and carrying
- * neither whitespace nor the delimiter. `'__proto__'` is included because a Web
- * Storage key of that name is legal and a store must treat it as an ordinary
- * string.
+ * Unqualified names `namespacedKey` accepts, each non-empty and carrying
+ * neither whitespace nor the delimiter.
  */
 const ACCEPTED_KEY_NAMES: readonly string[] = [
   'a',
@@ -60,7 +57,7 @@ const ACCEPTED_KEY_NAMES: readonly string[] = [
 
 /** One rejected name paired with the exact message it is rejected with. */
 interface RejectedName {
-  /** Name handed to `namespacedKey()`. */
+  /** Name handed to `namespacedKey`. */
   readonly name: string;
 
   /** Label quoted in the test title, since a raw name may be invisible. */
@@ -72,9 +69,7 @@ interface RejectedName {
 
 /**
  * The empty, whitespace-bearing and delimiter-bearing names, each with the
- * message `namespacedKey()` rejects it with. The guards run in that order, so
- * the last entry — carrying both a space and a delimiter — is reported as
- * whitespace.
+ * message `namespacedKey` rejects it with.
  */
 const REJECTED_NAME_REPORTS: readonly RejectedName[] = [
   {
@@ -145,10 +140,6 @@ const REJECTED_NAME_REPORTS: readonly RejectedName[] = [
 
 /**
  * Keys the product does not own, each with the label its test title quotes.
- * Every entry is a string `isOwnedStorageKey()` must reject: another
- * application's key, a near-match of a frozen literal, a near-match of the
- * namespace, a namespace with no name, and a namespaced key whose name breaks
- * one of the three conditions `namespacedKey()` enforces.
  */
 const UNOWNED_KEYS: readonly { key: string; label: string }[] = [
   { key: '', label: 'the empty string' },
@@ -183,9 +174,7 @@ const UNOWNED_KEYS: readonly { key: string; label: string }[] = [
 ];
 
 /**
- * The two keys `namespacedKey()` minted, typed as that function returns them.
- * NamespacedStorageKey admits only a key carrying the namespace: the
- * annotation is checked at compile time.
+ * The two keys `namespacedKey` minted, typed as that function returns them.
  */
 const MINTED_KEYS: readonly NamespacedStorageKey[] = [
   RUN_STATE_KEY,
@@ -354,8 +343,7 @@ describe('OWNED_STORAGE_KEYS registry completeness', () => {
       expect(OWNED_STORAGE_KEYS).toContain(RUN_STATE_KEY);
 
       // The remapped bindings, which a rebind persists through the input
-      // manager's own single api. Teardown has to reach it, or a remap made by
-      // one test would still be in force in the next (N2).
+      // manager's own single api.
       expect(OWNED_STORAGE_KEYS).toContain(KEYMAP_KEY);
       expect(OWNED_STORAGE_KEYS.length).toBe(EXPECTED_OWNED_KEYS.length);
     }
@@ -416,12 +404,9 @@ describe('OWNED_STORAGE_KEYS registry completeness', () => {
   );
 });
 
-/* ===== 5. The access boundary: every key the product does not own ===== */
-
 // src/storage/local-storage-manager.ts admits a key only when
-// isOwnedStorageKey() accepts it, so every entry rejected here is a key the
-// adapter refuses to read, write or remove. The two frozen literals are global
-// to the origin, which is why a near-match of either must not be accepted.
+// isOwnedStorageKey accepts it, so every entry rejected here is a key the
+// adapter refuses to read, write or remove.
 describe('isOwnedStorageKey() rejects every key outside the product', () => {
   it.each(UNOWNED_KEYS)('rejects $label', ({ key }: { key: string }) => {
     expect(isOwnedStorageKey(key)).toBe(false);
@@ -492,9 +477,6 @@ describe('namespacedKey() refuses exactly the names the predicate does', () => {
 
   it('would mint a key the predicate rejects, were the guard not there', () => {
     for (const { name } of REJECTED_NAME_REPORTS) {
-      // The key the function would have produced for a refused name is one
-      // isOwnedStorageKey() does not accept, which is why the guard throws
-      // instead of minting it.
       expect(isOwnedStorageKey(`${NAMESPACE_PREFIX}${name}`)).toBe(false);
     }
   });

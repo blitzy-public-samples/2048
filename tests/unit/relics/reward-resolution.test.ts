@@ -1,25 +1,10 @@
 // Contract suite for the ONE transition from a reward offer to a live,
 // persisted relic, AAP R3 and R6.
 //
-// WHY THIS SUITE EXISTS
-//   Two halves of that transition were missing, and each was reachable from any
-//   caller a reward screen would be built from:
-//
-//   admission   `recordRewardOffer()` copied whatever list it was handed, and
-//               `resolveReward()` never read it. A caller could therefore
-//               choose a catalogue relic that was never offered, or submit an
-//               unknown identifier, and the controller reported success and put
-//               it into run state.
-//   activation  the registry's `pickUp()` — the step that registers a relic's
-//               handlers with the hook bus — was unreachable from the
-//               controller. An accepted reward was appended to the controller's
-//               own list alone, fired on no hook, and was ERASED by the next
-//               commit, whose projection reads the unchanged registry.
-//
-//   AAP R3's own key flow is that a chosen relic's effects "immediately fire on
-//   subsequent moves/merges/spawns for rest of run", so both halves are pinned
-//   here against the real controller, the real registry, a real `HookBus`, a
-//   real `Engine` and a real `RunStateStore` over injected memory storage.
+// AAP R3's own key flow is that a chosen relic's effects "immediately fire on
+// subsequent moves/merges/spawns for rest of run", so both halves are pinned
+// here against the real controller, the real registry, a real `HookBus`, a
+// real `Engine` and a real `RunStateStore` over injected memory storage.
 
 import { describe, expect, it } from 'vitest';
 
@@ -60,10 +45,6 @@ import { RunStateStore } from '../../../src/run/run-state-store';
 import { LocalStorageManager } from '../../../src/storage/local-storage-manager';
 import { MemoryStorage } from '../../../src/storage/memory-storage';
 import { RUN_STATE_KEY } from '../../../src/storage/storage-keys';
-
-/* ==========================================================================
- * Harness
- * ========================================================================== */
 
 /** The offer every case below presents, in catalogue order. */
 const OFFER: readonly string[] = ['temporal-anchor', 'tumbler', 'echo-chamber'];
@@ -179,10 +160,6 @@ function play(engine: Engine, moves: readonly Direction[] = MOVES): void {
   }
 }
 
-/* ==========================================================================
- * 1. Offer admission (F-01)
- * ========================================================================== */
-
 describe('recordRewardOffer admits only the offer a seeded draw makes', () => {
   it('records a bounded set of distinct catalogue identifiers', () => {
     const { controller } = compose();
@@ -196,8 +173,6 @@ describe('recordRewardOffer admits only the offer a seeded draw makes', () => {
 
     expect(controller.recordRewardOffer([OFFER[0], UNKNOWN_ID])).toBe(false);
 
-    // Nothing stands, so neither of the two can be chosen — the offer is
-    // refused whole rather than reduced to the half that was usable.
     expect(controller.resolveReward(OFFER[0]).accepted).toBe(false);
     expect(controller.relics()).toEqual([]);
     expect(rewards[0].refusal).toBe('offer');
@@ -285,10 +260,6 @@ describe('recordRewardOffer admits only the offer a seeded draw makes', () => {
   });
 });
 
-/* ==========================================================================
- * 2. Selection admission (F-01)
- * ========================================================================== */
-
 describe('resolveReward admits only what was offered', () => {
   it('refuses a catalogue relic that was not in the offer', () => {
     const { controller, registry, rewards } = compose();
@@ -334,7 +305,8 @@ describe('resolveReward admits only what was offered', () => {
     expect(controller.resolveReward(UNOFFERED_ID).accepted).toBe(false);
     expect(controller.resolveReward(UNKNOWN_ID).accepted).toBe(false);
 
-    // The screen can still be answered: the refusals did not consume the offer.
+    // The screen can still be answered: the refusals did not consume the
+    // offer.
     expect(controller.resolveReward(OFFER[1]).accepted).toBe(true);
     expect(controller.relics().map((relic) => relic.id)).toEqual([OFFER[1]]);
   });
@@ -365,10 +337,6 @@ describe('resolveReward admits only what was offered', () => {
     expect(controller.relics()).toHaveLength(1);
   });
 });
-
-/* ==========================================================================
- * 3. Live activation and survival (F-02)
- * ========================================================================== */
 
 describe('a resolved reward is live from the next hook onwards', () => {
   it('registers the relic with the hook bus as it is resolved', () => {
@@ -503,10 +471,6 @@ describe('a resolved reward is live from the next hook onwards', () => {
   });
 });
 
-/* ==========================================================================
- * 4. A registry that refuses, or disagrees (F-02)
- * ========================================================================== */
-
 describe('resolveReward reports success only where the registry agrees', () => {
   it('appends nothing when the registry refuses the pickup', () => {
     const { controller, rewards } = compose({
@@ -606,8 +570,8 @@ describe('resolveReward reports success only where the registry agrees', () => {
 
     controller.begin();
 
-    // Without a registry there is no catalogue to consult, so the shape and the
-    // offer are the whole admission — and the entry persisted is the bare
+    // Without a registry there is no catalogue to consult, so the shape and
+    // the offer are the whole admission — and the entry persisted is the bare
     // identifier, which is what a relic carrying neither charges nor state is.
     expect(controller.recordRewardOffer(OFFER)).toBe(true);
     expect(controller.resolveReward(OFFER[0]).accepted).toBe(true);

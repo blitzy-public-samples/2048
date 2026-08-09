@@ -1,72 +1,34 @@
 // Stylesheet entry point. src/main.ts imports this file, and this one load
 // emits the whole style layer: helpers, tokens, the Clear Sans faces and the
-// six screen partials. Partials that need a token or an accessibility utility
-// `@use` it for themselves as well, because Sass `@use` is not transitive.
+// six screen partials.
 //
-// Dart Sass migration: divisions use math.div(), the colour and list functions
+// Dart Sass migration: divisions use math.div, the colour and list functions
 // are namespaced (color.mix, color.adjust, list.nth), and the token block that
 // stood at the top of this file now lives in style/_tokens.scss.
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
-// file's area enumerated:
-//   TR-SHEET-01  style/main.scss L1-L2      the two legacy `@import` rules,
-//                                           converted to `@use`
-//   TR-SHEET-02  style/main.scss L4-L22     the token block, moved to
-//                                           style/_tokens.scss
-//   TR-SHEET-03  style/main.scss L7, L357,  the six slash divisions, converted
-//                L377, L380, L381, L480     to `math.div()`
-//   TR-SHEET-04  style/main.css             the committed generated stylesheet,
-//                                           deleted and now produced by the
-//                                           build from this entry point
-//   TR-SHEET-05  index.html L7              the `<link>` to that generated file,
-//                                           replaced by the import in
-//                                           src/main.ts
-//   TR-SHEET-06  style/main.scss L299-L313  the position-generation loop, whose
-//                                           per-cell rules the renderer now owns
-//   TR-SHEET-07  style/main.scss L334-L402  the tile-value generation loop,
-//                                           retained as the ramp's authority
-//   TR-SHEET-08  target-only row            the six screen partials loaded from
-//                                           here, and the diagnostics surface
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-SHEET-01  one entry point emitting the whole style layer, with each
-//                partial loading its own dependencies because `@use` is not
-//                transitive
-//   DL-SHEET-02  the generated stylesheet deleted and produced by the build
-//   DL-SHEET-03  the tile-value generation loop retained as the colour ramp's
-//                authority, mirrored by src/theme/tile-ramp.ts
-//   DL-A11Y-01   the button label's text contrast, noted at the mixin below
+// Decisions: DL-SHEET-01, DL-SHEET-02, DL-SHEET-03 (docs/DECISION_LOG.md).
 
 // Intake for the authoritative token values. vite.config.ts renders
 // `sassTokenProjection` of src/theme/tokens.ts as a Sass map and prepends a
 // declaration of this variable through
-// `css.preprocessorOptions.scss.additionalData`; that declaration precedes this
-// one, so `!default` leaves it standing. Compiling this file with no such
-// prefix - `sass style/main.scss` run directly - leaves the map empty and
-// style/_tokens.scss resolves its own fallbacks. A variable declaration is
-// permitted ahead of the `@use` rules below because it configures a module one
-// of them loads.
+// `css.preprocessorOptions.scss.additionalData`; that declaration precedes
+// this one, so `!default` leaves it standing.
 $blitzy-token-projection: () !default;
 
 @use "sass:color";
 @use "sass:list";
 @use "sass:math";
 
-// Loaded `as *`, so the mixins and `pow()` used below resolve unqualified.
+// Loaded `as *`, so the mixins and `pow` used below resolve unqualified.
 @use "helpers" as *;
 
 // Design tokens, moved out of this file. Loaded `as *`, so the unqualified
 // token references in this file resolve to it, and configured with the
-// projection above. This is the first load of "tokens" in the compilation, so
-// it is the load that may configure it; the partials further down load it
-// unconfigured.
+// projection above.
 @use "tokens" as * with (
   $projection: $blitzy-token-projection
 );
 
-// The three `@font-face` blocks are emitted into this stylesheet rather than
-// fetched by a nested CSS `@import`; the build rebases their nine font URLs.
 @use "fonts/clear-sans";
 
 @use "a11y";
@@ -209,31 +171,9 @@ hr {
   }
 }
 
-// Base visibility for the `hidden` attribute: index.html toggles the six screen
-// containers, the settings panel, the diagnostics overlay and the number-only
-// board layer by that attribute alone, with no `!important`. Each selector
-// carries (0,2,0) specificity.
-//
-// This block is the hidden half of that protocol. Every element it names has a
-// shown half of matching specificity, scoped to `:not([hidden])`, and the two
-// selectors are mutually exclusive, so neither can override the other:
-//   .settings-panel      style/_screens.scss, the modal surface
-//   .diagnostics-overlay the block below, the overlay surface
-//   .screen              style/_screens.scss and style/_reward.scss
-//   .hud                 style/_hud.scss
-//   .board-number-only   `.board-canvas, .board-number-only` further down
-//
-// The last two selectors are the control layer
-// src/input/on-screen-controls.ts generates: it marks a control whose action is
-// inactive in the current input context with `hidden`, `aria-hidden`,
-// `disabled` and `tabindex="-1"`, and hides a group whose every control is
-// inactive the same way. Their shown halves are lower-specificity rather than
-// matching: `@mixin screen-control` of style/_screens.scss declares
-// `display: inline-block` at (0,1,0) through `.screen-button`, and the group
-// takes the unstyled block default, so both lose to the (0,2,0) selectors here
-// and neither can reinstate a hidden control. Without these two lines the
-// author-origin `display` of `.screen-button` outranks the user-agent
-// `[hidden]` rule and an inactive control stays painted.
+// Base visibility for the `hidden` attribute: index.html toggles the six
+// screen containers, the settings panel, the diagnostics overlay and the
+// number-only board layer by that attribute alone, with no `!important`.
 .screen[hidden],
 .hud[hidden],
 .settings-panel[hidden],
@@ -245,15 +185,8 @@ hr {
   display: none;
 }
 
-// The shown state of `#diagnostics-overlay`, the in-page surface that stands in
-// for the metrics endpoint a static bundle cannot serve. Its consumer renders
-// the health results, the frame-time and turn-latency spans, the per-hook
-// dispatch counts and the snapshot export into it, and toggles the `hidden`
-// attribute the block above reads.
-// This rule declares geometry, layering and typography only; the colours
-// stay with the palettes, and the accent is the third property they publish and
-// this its first consumer. Every length resolves to a token or a token
-// derivative.
+// The shown state of `#diagnostics-overlay`, the in-page surface that stands
+// in for the metrics endpoint a static bundle cannot serve.
 .diagnostics-overlay:not([hidden]) {
   position: fixed;
 
@@ -264,23 +197,20 @@ hr {
   inset-inline-start: $grid-spacing;
 
   // The topmost slot of the ladder style/_tokens.scss extends the stylesheet's
-  // own with. It is above `$z-index-modal`, so a readout stays legible while
-  // the settings modal or the reward screen is open, and above the 100 the
-  // terminal overlay carries.
+  // own with.
   z-index: $z-index-diagnostics;
 
   box-sizing: border-box;
   inline-size: math.div($field-width * 3, 5);
 
-  // Bounded on both axes against the viewport, which is the containing block of
-  // a fixed element, leaving the corner inset clear on the opposite side. A
-  // long readout scrolls inside the overlay instead of growing over the board.
+  // Bounded on both axes against the viewport, which is the containing block
+  // of a fixed element, leaving the corner inset clear on the opposite side.
   max-inline-size: calc(100% - #{$grid-spacing * 2});
   max-block-size: calc(100% - #{$grid-spacing * 2});
   overflow: auto;
 
-  // Keeps a scroll gesture that reaches the end of the readout from chaining to
-  // the page behind it.
+  // Keeps a scroll gesture that reaches the end of the readout from chaining
+  // to the page behind it.
   overscroll-behavior: contain;
 
   display: flex;
@@ -291,20 +221,18 @@ hr {
   border-radius: $tile-border-radius * 2;
 
   // The monospace stack style/_tokens.scss declares, so a metric name, a
-  // duration and a count line up in columns. `.seed-input` and the run
-  // summary's seed readout are set from the same token.
+  // duration and a count line up in columns.
   font-family: $diagnostics-font-family;
   font-size: $grid-spacing - a11y.$a11y-hairline * 2;
   line-height: $grid-spacing;
 
   // The readout is tabular, not prose: it is set flush to the inline start
-  // whatever the ancestor alignment, and the whitespace of an exported snapshot
-  // survives.
+  // whatever the ancestor alignment, and the whitespace of an exported
+  // snapshot survives.
   text-align: start;
   white-space: pre-wrap;
 
-  // The accent edge, drawn as an outline so it adds no layout box. This is the
-  // first consumer of the third diagnostics colour the palettes publish.
+  // The accent edge, drawn as an outline so it adds no layout box.
   outline: a11y.$a11y-hairline solid
     var(--theme-diagnostics-accent, #{$tile-gold-color});
   outline-offset: 0;
@@ -326,10 +254,6 @@ hr {
 }
 
 // Styles for buttons
-//
-// BLITZY [A11Y]: the label text in this mixin sits below the WCAG AA 4.5:1 text
-// threshold. It applies to `.restart-button`, `.settings-button` and the two
-// `.game-message` controls. Decision DL-A11Y-01.
 @mixin button {
   display: inline-block;
   background: color.adjust($game-container-background, $lightness: -20%);
@@ -350,17 +274,10 @@ hr {
   -webkit-appearance: none;
   appearance: none;
 
-  // Hover, activation and disabled treatment. The shared mixin in
-  // style/_a11y.scss is the single declaration of the three states; the same
-  // mixin is included by the screen-flow, relic-tray and run-summary controls.
-  // It writes only `box-shadow`, `cursor`, `pointer-events` and `opacity`, so
-  // no measure in this mixin changes and the focus ring is never overwritten.
+  // Hover, activation and disabled treatment.
   @include a11y.interactive-states;
 }
 
-// Game field mixin used to render CSS at different width. The six geometry
-// values are parameters defaulting to the token of the same name, so the
-// mobile block can pass its own.
 @mixin game-field(
   $field-width: $field-width,
   $grid-spacing: $grid-spacing,
@@ -446,26 +363,6 @@ hr {
     }
   }
 
-  // The four lattice selectors are scoped to `.board-number-only`, the element
-  // that produces them. index.html used to ship the lattice as sixteen static
-  // `.grid-cell` elements inside four `.grid-row` elements plus an empty
-  // `.tile-container`; that markup was removed so the board could be built at
-  // the configured size, which left these rules with no producer.
-  // src/render/number-only-renderer.ts is the producer now: it builds
-  // `.grid-container` holding one `.grid-row` per row holding one `.grid-cell`
-  // per column, and a sibling `.tile-container`, into the `#board-number-only`
-  // layer, at whatever size the configuration carries.
-  //
-  // Scoping states that ownership in the selector and bounds the rules to the
-  // layer that draws them: the sibling `#board-canvas` layer draws the same
-  // board as geometry inside a WebGL context and takes nothing from here.
-  // Emitted geometry is unchanged at both scales, the z-index ladder is not
-  // renumbered, and style/_themes.scss scopes its own `.grid-cell` palette
-  // override to match so it keeps superseding the compile-time cell colour.
-  //
-  // The `.tile` block below stays unscoped: its box, its position classes, its
-  // value ramp and the `appear`/`pop` rules are the vocabulary the palette ramp
-  // addresses, and they were never the selectors that lost a producer.
   .board-number-only {
     .grid-container {
       position: absolute;
@@ -508,21 +405,6 @@ hr {
   }
 
   // Board geometry at an edge length other than the compiled one.
-  //
-  // The four lengths above resolve $tile-size from $grid-row-cells at compile
-  // time, which is exact at that edge length and wrong at every other, so a
-  // board built at another size overlapped. src/render/number-only-renderer.ts
-  // writes the edge length in force into `--board-size` on this layer and into
-  // its `data-board-size` attribute; the selector matches only where the two
-  // disagree, so the compiled rules stand untouched at $grid-row-cells and this
-  // block restates them as calc() at every other size. Both lengths the
-  // expression reads are the same tokens the compiled form reads, restated as
-  // custom properties so calc() can reach them, and this mixin is invoked once
-  // per scale, so each scale publishes its own pair.
-  //
-  // Tile POSITION is not restated here: the renderer writes each tile's
-  // transform directly, from the same `tilePositionStep` of src/theme/tokens.ts
-  // that the `@for` loop below is the compile-time form of.
   .board-number-only:not([data-board-size="#{$grid-row-cells}"]) {
     --board-size: #{$grid-row-cells};
     --board-field-width: #{$field-width};
@@ -553,13 +435,7 @@ hr {
       }
 
       // Numeral clamped to the resolved cell, the CSS form of
-      // `tileNumeralSize` of src/theme/tokens.ts. The four declared sizes were
-      // authored against $grid-row-cells, so at every other edge length the
-      // declared numeral was taller than the cell holding it - a sixteen-cell
-      // desktop cell resolves to roughly 15.31px and carried the 55px base
-      // numeral. This is the fallback path: the renderer writes the clamped
-      // value into `--tile-numeral-size` itself, and this covers the tile it
-      // wrote no property for.
+      // `tileNumeralSize` of src/theme/tokens.ts.
       .tile-inner {
         font-size: max(
           $tile-numeral-min-size,
@@ -595,9 +471,7 @@ hr {
 
 @include game-field;
 
-// Board host and its two rendering layers. The host fills `.game-container`'s
-// content box — the tile field at either scale — and both layers fill the host
-// without adding a box to the flow.
+// Board host and its two rendering layers.
 .board-host {
   height: 100%;
 }
@@ -617,20 +491,6 @@ hr {
   .tile-inner {
     border-radius: $tile-border-radius;
 
-    // The three presentation declarations resolve through a two-step var()
-    // chain. src/render/number-only-renderer.ts writes `--tile-fill`,
-    // `--tile-numeral` and `--tile-numeral-size` onto each tile from
-    // src/theme/tile-ramp.ts, which is the same generative ramp the @while loop
-    // below is the compile-time form of; the loop no longer declares these
-    // three properties directly and publishes its compiled value under
-    // `--tile-*-compiled` instead. A tile the renderer wrote no property for —
-    // a value off the ramp, or a paint under a stand-in that rejected the write
-    // — therefore falls back to the compiled ramp value for its own class,
-    // and a tile carrying no value class at all falls back to the value below.
-    // The
-    // cascade resolves the compiled property from the per-value rule even
-    // though this declaration is less specific: a custom property cascades on
-    // its own.
     background: var(--tile-fill, var(--tile-fill-compiled, #{$tile-color}));
     color: var(--tile-numeral, var(--tile-numeral-compiled, inherit));
     text-align: center;
@@ -680,10 +540,7 @@ hr {
 
       @if $special-background {
         // The base is quantised before the accent is mixed over it, and the
-        // result quantised again by `quantised()` below. That is the two-step
-        // quantisation src/theme/tile-ramp.ts performs — `overlayBackground`
-        // under `quantiseIntermediate` — so the accent band's compiled fallback
-        // and the ramp module agree channel for channel.
+        // result quantised again by `quantised` below.
         $mixed-background: color.mix(
           $special-background,
           quantised($mixed-background),
@@ -775,19 +632,6 @@ hr {
 
 // The row seats three items - the intro copy plus `.restart-button` and
 // `.settings-button` - so it is an explicit flex row at both scales.
-// `.game-intro` bases on the whole line (`flex: 1 1 100%`), which removes the
-// free space that would otherwise admit one control onto the first line, so the
-// two controls always share the second line hugged to the inline end. A
-// flexible basis would not hold that pairing: flex breaks lines against each
-// item's hypothetical main size and applies `flex-grow` only afterwards, per
-// line.
-//
-// `gap` is the single declaration of the space between the controls -
-// $control-gap from style/_tokens.scss at both scales, the same token
-// separating the two `.game-message` controls - so the row carries no length of
-// its own. No clearfix is included: a `:after` would become a flex item and
-// consume one `gap`. Visual order follows DOM order, so `New Game` paints to
-// the left of `Settings`.
 .above-game {
   display: flex;
   flex-wrap: wrap;
@@ -798,8 +642,7 @@ hr {
 
 .game-intro {
   // Bases on the whole line, so it takes the first line alone and leaves the
-  // second to the pair of controls. The intrinsic minimum is released so a long
-  // word can never force the row wider than `.container`.
+  // second to the pair of controls.
   flex: 1 1 100%;
   min-width: 0;
 
@@ -820,9 +663,7 @@ hr {
 }
 
 // `.settings-button` accompanies `.restart-button` in index.html's
-// `.above-game` row. Same button vocabulary, and the same flex treatment; the
-// sibling gap is the row's `gap: $control-gap` rather than a margin on this
-// element, so one declaration separates every pair of controls on the row.
+// `.above-game` row.
 .settings-button {
   @include button;
   display: block;
@@ -832,19 +673,7 @@ hr {
 
 // The on-screen control region: the `#on-screen-controls` root index.html
 // declares empty, and the two `role="group"` rows and the controls
-// src/input/on-screen-controls.ts emits into it. That module emits class names
-// and data attributes only, so this block is the whole of the layer's
-// layout; the control vocabulary itself is `.screen-button` of
-// style/_screens.scss, and the focus ring is the `.container button` rule of
-// style/_a11y.scss.
-//
-// Both lengths are tokens: $grid-spacing separates the two rows and clears the
-// region from `.game-container`, and $control-gap separates two adjacent
-// controls, which is the same token `.above-game` and the two `.game-message`
-// controls use. The gap is load-bearing beyond rhythm: the focus ring is an
-// outline plus a spread shadow drawn outside the control's box, and a row of
-// flush-adjacent controls would let each neighbour paint over the ring of the
-// control before it.
+// src/input/on-screen-controls.ts emits into it.
 .on-screen-controls {
   display: flex;
   flex-direction: column;
@@ -865,11 +694,7 @@ hr {
 }
 
 @include smaller($mobile-threshold) {
-  // Redefine variables for smaller screens. The three lengths this block
-  // rescales are read from the $mobile-* tokens of style/_tokens.scss rather
-  // than restated here, so the locals below shadow only what this scale
-  // actually changes. Emitted geometry is unchanged: a 280px field, 10px
-  // gutters, 57.5px cells and a 17px offset.
+  // Redefine variables for smaller screens.
   $field-width: $mobile-field-width;
   $grid-spacing: $mobile-grid-spacing;
   $tile-size: math.div($field-width - $grid-spacing * ($grid-row-cells + 1), $grid-row-cells);
@@ -906,15 +731,7 @@ hr {
 
   // The percentage widths are gone. `.game-intro` was 55% and
   // `.restart-button` 42%, which left about 8px of the row for a third control
-  // that was never given a width, so `.settings-button` wrapped. The flex row
-  // above governs this scale too: the intro takes the first line at the full
-  // field width and the two controls share the second line, hugged to the
-  // inline end and separated by the row's $control-gap. Both controls keep the
-  // inline padding of the `button` mixin, so neither label touches its edge.
-  //
-  // `line-height` is the one declaration this scale still needs: the desktop
-  // row centres a single line against a 40px control with a 42px line box,
-  // while here the intro is copy that wraps and takes the body leading.
+  // that was never given a width, so `.settings-button` wrapped.
   .game-intro {
     display: block;
     box-sizing: border-box;

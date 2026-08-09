@@ -1,38 +1,7 @@
 // Integration suite for the composition root's RELIC wiring, AAP R3 and R5.
 //
-// WHAT WAS WRONG
-//   The entire relic subsystem was unreachable from `src/main.ts`. Sixteen
-//   relics, four family modules, a pickup-ordered registry, a rarity-weighted
-//   sampler and a charge-guarding bus all shipped complete and fully unit
-//   tested, and the composition root built NONE of it: no registry existed, no
-//   family handler was ever registered on the engine's bus, no draw was ever
-//   taken, and the engine built a hook bus of its own that no relic could reach.
-//   A relic could enter a run only by being written into storage by hand, and
-//   even then it appeared in the commit context while having no effect on
-//   anything at all.
-//
-// WHAT THIS SUITE PINS
-//   The whole path, end to end, through the real `start(document)`: a stage that
-//   clears draws an offer of three from the catalogue through the run's own
-//   substreams; taking one makes it BOTH a persisted member of the envelope and
-//   a live dispatching subscriber on the engine's bus; and the relic slice of a
-//   commit comes from the registry, so a charge spent this turn is in this
-//   turn's commit.
-//
-// WHY THE RUN IS SEEDED FROM AN ENVELOPE
-//   `start()` originates a fresh random seed, and the offer is drawn through the
-//   run's `rarity-weight` and `relic-draw` substreams — so on a random seed
-//   WHICH three relics are offered is random, and an assertion on any property
-//   of a particular relic would pass or fail by luck. Writing an envelope with a
-//   fixed seed and zero relic cursors makes the draw the same one every time,
-//   which is the reproducibility R5 exists to guarantee and is the only way this
-//   suite can assert on the relics it was handed.
-//
 // tests/unit/relics/** pins each relic, the registry and the sampler in
 // isolation. This suite pins only that the root joins them to the engine.
-//
-// The board is drawn by the number-only renderer here, because jsdom implements
-// no WebGL context. Nothing in this suite depends on which renderer draws.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -45,7 +14,9 @@ import type { RunState } from '../../../src/run/run-state';
 import { RUN_STATE_KEY } from '../../../src/storage/storage-keys';
 import { clearOwnedStorage } from '../../fixtures/storage';
 
-/** The markup src/main.ts looks up, in the nesting index.html declares it in. */
+/**
+ * The markup src/main.ts looks up, in the nesting index.html declares it in.
+ */
 const MARKUP = `
   <main id="game-main">
     <div class="score-container"><span class="visually-hidden">Score</span>0</div>
@@ -77,11 +48,6 @@ const RUN_SEED = 'stage-clear';
 
 /**
  * The three relics `RUN_SEED` offers on the first draw, in the order drawn.
- *
- * Asserted rather than discovered: this IS the reproducibility property, and a
- * change to the catalogue, to the rarity weights or to either substream has to
- * fail here rather than pass unnoticed. All three carry charges and all three
- * bind a per-move hook, which is why this seed was chosen for the suite.
  */
 const OPENING_OFFER: readonly string[] = Object.freeze([
   'temporal-anchor',
@@ -89,15 +55,7 @@ const OPENING_OFFER: readonly string[] = Object.freeze([
   'tumbler',
 ]);
 
-/**
- * A board one move from clearing the opening stage.
- *
- * The default curve's first goal is `highest-tile: 16`, so two 8s side by side
- * in the top row clear it in one move left.
- *
- * `cells` is column-major — `cells[x][y]` — the shape js/grid.js:L60-L69
- * serialised and this build preserves verbatim.
- */
+/** A board one move from clearing the opening stage. */
 const NEAR_CLEAR_BOARD = {
   grid: {
     size: 4,
@@ -115,8 +73,8 @@ const NEAR_CLEAR_BOARD = {
 };
 
 /**
- * The envelope this suite resumes from: a fixed seed, no relics, and both relic
- * cursors at zero so the first draw is the first draw of that seed.
+ * The envelope this suite resumes from: a fixed seed, no relics, and both
+ * relic cursors at zero so the first draw is the first draw of that seed.
  */
 const seededEnvelope = (): string =>
   JSON.stringify({
@@ -141,6 +99,7 @@ let application: Application | null = null;
 beforeEach(() => {
   document.body.innerHTML = MARKUP;
   resetWebGLSupportProbe();
+  spokenLines = [];
 });
 
 afterEach(() => {
@@ -203,13 +162,7 @@ const busRow = (
     .metrics()
     .subscribers.find((row) => row.id === relicId);
 
-/**
- * A report counter's value by report name, or `0` where it never moved.
- *
- * Every generic report is counted on one family with its own dotted name as
- * the `report` label, so the series is found by that label rather than by a
- * family name of its own. DL-METRIC-04, DL-MAIN-11.
- */
+/** A report counter's value by report name, or `0` where it never moved. */
 const counter = (subject: Application, report: string): number => {
   const series = subject.metrics
     .snapshot()
@@ -222,25 +175,41 @@ const counter = (subject: Application, report: string): number => {
   return series !== undefined && series.kind === 'counter' ? series.value : 0;
 };
 
-/** Lets the announcement queue flush: it clears and writes on separate tasks. */
+/** Every line the region has held while a settle was running. */
+let spokenLines: string[] = [];
+
+/** The text every `aria-live` region holds right now. */
+const regionText = (): string =>
+  Array.from(document.querySelectorAll('[aria-live]'))
+    .map((region) => region.textContent ?? '')
+    .join(' ');
+
+/**
+ * Lets the announcement queue flush, collecting each line as it appears.
+ *
+ * The region holds ONE line at a time — src/ui/a11y/live-region.ts clears it
+ * and writes on separate tasks — and one moment can produce several: the
+ * router reads an entry line for the state it enters and this root announces
+ * the offer and the acquisition. Collecting is what makes an assertion about
+ * what was said independent of how many lines were said around it.
+ */
 const settleAnnouncements = async (): Promise<void> => {
-  for (let turn = 0; turn < 6; turn += 1) {
+  for (let turn = 0; turn < 24; turn += 1) {
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 0);
     });
+
+    const text = regionText();
+
+    if (text.trim() !== '') {
+      spokenLines.push(text);
+    }
   }
 };
 
-/** Every aria-live region's text, lower-cased and joined. */
+/** Everything the regions have said, lower-cased and joined. */
 const announced = (): string =>
-  Array.from(document.querySelectorAll('[aria-live]'))
-    .map((region) => region.textContent ?? '')
-    .join(' ')
-    .toLowerCase();
-
-/* ==========================================================================
- * 1. The offer is drawn when a stage clears
- * ========================================================================== */
+  [...spokenLines, regionText()].join(' ').toLowerCase();
 
 describe('the reward offer', () => {
   it('is empty before any stage has cleared', () => {
@@ -252,8 +221,8 @@ describe('the reward offer', () => {
   it('is drawn when the opening stage clears', () => {
     const subject = clearOpeningStage();
 
-    // Nothing drew before this wiring existed: the sampler was never called from
-    // anywhere in the running application.
+    // Nothing drew before this wiring existed: the sampler was never called
+    // from anywhere in the running application.
     expect(subject.rewards.offers()).toHaveLength(3);
   });
 
@@ -270,8 +239,6 @@ describe('the reward offer', () => {
 
     const ids = subject.rewards.offers().map((offer) => offer.id);
 
-    // Sampling without replacement is what makes a duplicate structurally
-    // impossible rather than merely unlikely.
     expect(new Set(ids).size).toBe(ids.length);
 
     for (const id of ids) {
@@ -356,10 +323,6 @@ describe('the reward offer', () => {
   });
 });
 
-/* ==========================================================================
- * 2. Taking one makes it LIVE, not just persisted
- * ========================================================================== */
-
 describe('taking an offered relic', () => {
   it('joins the run and empties the offer', () => {
     const subject = clearOpeningStage();
@@ -376,8 +339,6 @@ describe('taking an offered relic', () => {
 
     subject.rewards.choose(id);
 
-    // THE defect: the engine used to build a hook bus of its own, so a relic the
-    // registry registered could never be dispatched to. One bus, shared.
     expect(busRow(subject, id)).toBeDefined();
     expect(busRow(subject, id)?.charges).toBe(
       RELIC_CATALOGUE.find((relic) => relic.id === id)?.charges,
@@ -402,8 +363,6 @@ describe('taking an offered relic', () => {
 
     subject.rewards.choose(id);
 
-    // A move, because the envelope is written on a commit: the pick alone
-    // changes the controller's state and the next commit persists it.
     press('ArrowDown', 'ArrowDown');
 
     expect(storedRun()?.relics.map((relic) => relic.id)).toEqual([id]);
@@ -419,8 +378,7 @@ describe('taking an offered relic', () => {
     expect(busRow(subject, notOffered)).toBeUndefined();
 
     // The offer is untouched by a refusal: the player still has a choice to
-    // make. Without this guard a caller could take any of the sixteen at will,
-    // which would make the seeded draw decorative.
+    // make.
     expect(subject.rewards.offers()).toHaveLength(3);
   });
 
@@ -462,10 +420,6 @@ describe('taking an offered relic', () => {
   });
 });
 
-/* ==========================================================================
- * 3. The relic slice of a commit comes from the registry
- * ========================================================================== */
-
 describe('the relic commit context', () => {
   it('carries the relic taken, from the turn after it was taken', () => {
     const subject = clearOpeningStage();
@@ -483,8 +437,9 @@ describe('the relic commit context', () => {
 
     const relics = (last as StateCommitEvent | null)?.relics ?? [];
 
-    // A relic in the commit context with no live effect is the state the review
-    // found; this asserts the other side of it — the slice and the bus agree.
+    // A relic in the commit context with no live effect is the state the
+    // review found; this asserts the other side of it — the slice and the bus
+    // agree.
     expect(relics.map((relic) => relic.id)).toContain(id);
   });
 
@@ -516,10 +471,7 @@ describe('the relic commit context', () => {
 
     subject.rewards.choose(OPENING_OFFER[1] ?? '');
 
-    // A SECOND OFFER, drawn the way the run draws one. `offerReward()` is the
-    // controller's own draw — the commit path calls exactly this once a stage's
-    // goal is met — so the second offer comes off the same two substreams, in
-    // sequence, rather than being staged by hand.
+    // A SECOND OFFER, drawn the way the run draws one.
     press('ArrowDown', 'ArrowDown');
     subject.run.advanceStage();
 

@@ -1,23 +1,4 @@
 // Integration suite for the composition root's RUN wiring, AAP R5 and R6.
-//
-// It sits beside tests/unit/ui/composition-input.test.ts because both drive the
-// real `start(document)` in jsdom rather than a module in isolation, and the
-// defect this one closes was a composition defect of exactly the same kind: the
-// versioned nine-member envelope, its guarded store and the engine's two
-// context provider seams all shipped complete, and nothing joined them. The
-// runtime persisted the legacy board snapshot alone, handed the engine the
-// neutral stage and relic contexts, and rebuilt its substreams from zero on
-// every load — so a reload silently restarted the deterministic sequence that
-// R5 exists to guarantee.
-//
-// tests/unit/run/run-controller.test.ts pins the controller itself, over an
-// injected store, in both test environments. This suite pins only that the root
-// composes it: that the envelope reaches real Web Storage, that the engine reads
-// its contexts, that the substreams are resumed from it, and that the two frozen
-// keys are untouched by any of it.
-//
-// The board is drawn by the number-only renderer here, because jsdom implements
-// no WebGL context. Nothing in this suite depends on which renderer draws.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -30,42 +11,26 @@ import {
   GAME_STATE_KEY,
   RUN_STATE_KEY,
 } from '../../../src/storage/storage-keys';
+import {
+  BLOCKED_BOARD,
+  NEAR_WIN_BOARD,
+  copyBoard,
+} from '../../fixtures/boards';
+import {
+  COMPOSITION_MARKUP,
+  beginRun,
+  chooseCard,
+  continueToReward,
+  offeredCards,
+} from '../../fixtures/composition';
 import { clearOwnedStorage } from '../../fixtures/storage';
+import { startWithRun } from '../../fixtures/application';
 
-/** The markup src/main.ts looks up, in the nesting index.html declares it in. */
-const MARKUP = `
-  <main id="game-main">
-    <div class="score-container"><span class="visually-hidden">Score</span>0</div>
-    <div class="best-container"><span class="visually-hidden">Best score</span>0</div>
-    <button type="button" class="restart-button">New Game</button>
-    <button type="button" class="settings-button" id="settings-button"
-            aria-haspopup="dialog" aria-controls="settings-panel">Settings</button>
-    <div class="game-container">
-      <div class="game-message">
-        <p></p>
-        <div class="lower">
-          <button type="button" class="keep-playing-button">Keep going</button>
-          <button type="button" class="retry-button">Try again</button>
-        </div>
-      </div>
-      <div class="board-host" id="board-host">
-        <canvas class="board-canvas" id="board-canvas" aria-hidden="true"></canvas>
-        <div class="board-number-only" id="board-number-only" hidden></div>
-        <div class="board-a11y" id="board-a11y" role="grid" aria-busy="true"></div>
-      </div>
-    </div>
-    <div class="on-screen-controls" id="on-screen-controls"></div>
-  </main>
-  <div class="screen-layer" id="screen-layer">
-    <div class="screen" id="screen-reward" data-screen="reward" role="dialog"
-         aria-modal="true" aria-label="Choose a relic" hidden></div>
-    <div class="settings-panel" id="settings-panel" role="dialog"
-         aria-modal="true" aria-label="Settings" hidden></div>
-  </div>
-  <div class="visually-hidden live-region" id="live-region" role="status"
-       aria-live="polite" aria-atomic="true"></div>
-  <div class="diagnostics-overlay" id="diagnostics-overlay" hidden></div>
-`;
+/**
+ * The document, from tests/fixtures/composition.ts, so this suite reads the
+ * markup index.html declares rather than a private copy of part of it.
+ */
+const MARKUP = COMPOSITION_MARKUP;
 
 let application: Application | null = null;
 
@@ -88,15 +53,7 @@ const press = (key: string, code: string): void => {
   );
 };
 
-/**
- * Plays one move in every direction.
- *
- * A single direction is a bet on the seed: the engine returns before committing
- * when a move changes nothing, and whether any one direction changes a freshly
- * seeded two-tile board depends on where that seed put the two tiles. Two tiles
- * on a 4x4 board cannot be blocked on all four sides, so at least one of these
- * resolves a real turn.
- */
+/** Plays one move in every direction. */
 const playEveryDirection = (): void => {
   press('ArrowUp', 'ArrowUp');
   press('ArrowRight', 'ArrowRight');
@@ -104,13 +61,7 @@ const playEveryDirection = (): void => {
   press('ArrowLeft', 'ArrowLeft');
 };
 
-/**
- * A legacy board snapshot carrying the given tiles.
- *
- * `cells` is column-major — `cells[x][y]` — the shape js/grid.js serialised and
- * this build preserves verbatim. Written to storage BEFORE `start()`, because
- * the engine reads the snapshot once during setup.
- */
+/** A legacy board snapshot carrying the given tiles. */
 const boardWithTiles = (
   tiles: readonly { x: number; y: number; value: number }[],
   size = 4,
@@ -138,13 +89,13 @@ const storedRun = (): RunState | null => {
   return raw === null ? null : (JSON.parse(raw) as RunState);
 };
 
-/* ==========================================================================
- * 1. The envelope reaches storage
- * ========================================================================== */
-
 describe('the run envelope', () => {
   it('is written under the namespaced key on the first commit', () => {
-    application = start(document);
+    application = startWithRun(document);
+
+    // A COLD LOAD RESUMES NOTHING, so the run is begun the way a player begins
+    // one: the envelope is written by the commit the opening board produces.
+    expect(beginRun()).toBe(true);
 
     const stored = storedRun();
 
@@ -152,8 +103,7 @@ describe('the run envelope', () => {
     expect(RUN_STATE_KEY).not.toBe(GAME_STATE_KEY);
     expect(RUN_STATE_KEY).not.toBe(BEST_SCORE_KEY);
 
-    // All nine members and no others. A tenth would not survive the store's own
-    // validation on the way back in.
+    // All nine members and no others.
     expect(Object.keys(stored ?? {}).sort()).toEqual([
       'board',
       'goalProgress',
@@ -169,6 +119,7 @@ describe('the run envelope', () => {
 
   it('carries the seed and run identifier the application is playing', () => {
     application = start(document);
+    beginRun();
 
     const stored = storedRun();
 
@@ -179,6 +130,7 @@ describe('the run envelope', () => {
 
   it('records the substream cursors, which is what a resume needs', () => {
     application = start(document);
+    beginRun();
 
     // Two starting tiles, so both spawn substreams have already advanced.
     expect(storedRun()?.rngCursor['spawn-value']).toBe(2);
@@ -194,6 +146,7 @@ describe('the run envelope', () => {
 
   it('wraps the same board the engine persisted under gameState', () => {
     application = start(document);
+    beginRun();
     playEveryDirection();
 
     const legacy = window.localStorage.getItem(GAME_STATE_KEY);
@@ -205,14 +158,8 @@ describe('the run envelope', () => {
   });
 });
 
-/* ==========================================================================
- * 2. The engine reads its contexts from the run
- * ========================================================================== */
-
 describe('the commit contexts', () => {
   it('carries the run stage rather than the neutral default', () => {
-    // A stage-3 run, written before `start()` because the envelope is read once
-    // during composition.
     window.localStorage.setItem(
       RUN_STATE_KEY,
       JSON.stringify({
@@ -228,13 +175,7 @@ describe('the commit contexts', () => {
         stageIndex: 3,
         stageGoal: { kind: 'score-threshold', target: 750 },
         goalProgress: 0.25,
-        // REAL CATALOGUE IDENTIFIERS. The relic registry is composed into the
-        // root and is authoritative over the envelope's `relics` member: it
-        // restores what the catalogue carries and the next write projects what
-        // it restored, so an invented identifier is dropped rather than kept
-        // forever as data nothing can dispatch. Both of these are bound to
-        // hooks that no-op on an open board, so neither changes the score this
-        // stage's goal is measured against.
+        // Real catalogue identifiers.
         relics: [{ id: 'temporal-anchor', charges: 2 }, { id: 'tumbler' }],
         board: {
           grid: {
@@ -294,9 +235,6 @@ describe('the commit contexts', () => {
       keepPlaying: false,
     };
 
-    // BOTH keys, because they hold different things: `gameState` is the board's
-    // home and the envelope wraps a copy of it. A resumed run whose board is
-    // restored takes no opening spawns.
     window.localStorage.setItem(GAME_STATE_KEY, JSON.stringify(board));
     window.localStorage.setItem(
       RUN_STATE_KEY,
@@ -320,9 +258,6 @@ describe('the commit contexts', () => {
 
     application = start(document);
 
-    // Fast-forwarded, not replayed: the cursors are exactly where the stored
-    // envelope left them, so the next spawn is the next draw of the sequence
-    // rather than the first.
     expect(application.streams.snapshotCursors()).toEqual({
       'spawn-value': 17,
       'spawn-position': 23,
@@ -335,13 +270,6 @@ describe('the commit contexts', () => {
   it('opens the engine on the ENVELOPE board when only the envelope survives', () => {
     // The two keys are written and cleared together, so this is reachable only
     // by something outside the product removing one of them.
-    //
-    // THE ENVELOPE'S BOARD IS THE AUTHORITY. `RunController.board()` reports the
-    // reconciled board of the envelope it adopted, and the root hands that to
-    // `Engine.setup()`, so the engine opens on the board the run saved and reads
-    // no storage of its own. The absence of the legacy `gameState` key is
-    // therefore irrelevant here, which is the point: the run's board is the run's
-    // board whether or not a second copy of it happens to exist.
     window.localStorage.setItem(
       RUN_STATE_KEY,
       JSON.stringify({
@@ -357,8 +285,9 @@ describe('the commit contexts', () => {
         stageIndex: 2,
         stageGoal: { kind: 'highest-tile', target: 64 },
         goalProgress: 0,
-        // A real catalogue identifier, bound to `onMerge` alone, so it survives
-        // the registry's restore and fires on nothing the board seeding does.
+        // A real catalogue identifier, bound to `onMerge` alone, so it
+        // survives the registry's restore and fires on nothing the board
+        // seeding does.
         relics: [{ id: 'echo-chamber' }],
         board: {
           grid: {
@@ -396,21 +325,18 @@ describe('the commit contexts', () => {
     });
 
     // A restored board seeds no opening tile, so both spawn substreams stand
-    // exactly where the envelope left them. Under the superseded dual-authority
-    // boot the engine re-read the absent legacy key, found nothing, and dealt two
-    // fresh tiles over the board the run had saved.
+    // exactly where the envelope left them.
     expect(application.streams.snapshotCursors()['spawn-value']).toBe(17);
     expect(application.streams.snapshotCursors()['spawn-position']).toBe(23);
   });
 });
 
-/* ==========================================================================
- * 3. Reload continuity
- * ========================================================================== */
-
 describe('reloading the page', () => {
   it('continues the same run rather than starting a new one', () => {
     const first = start(document);
+
+    beginRun();
+
     const seed = first.run.seed();
     const runId = first.run.runId();
 
@@ -430,13 +356,16 @@ describe('reloading the page', () => {
     expect(second.run.seed()).toBe(seed);
     expect(second.run.runId()).toBe(runId);
 
-    // The substreams pick up where the interrupted composition left them, which
-    // is the whole reason the cursors are persisted.
+    // The substreams pick up where the interrupted composition left them,
+    // which is the whole reason the cursors are persisted.
     expect(second.streams.snapshotCursors()).toEqual(cursorsBefore);
   });
 
   it('starts a new run once the stored envelope is gone', () => {
     const first = start(document);
+
+    beginRun();
+
     const seed = first.run.seed();
 
     first.dispose();
@@ -444,25 +373,30 @@ describe('reloading the page', () => {
     document.body.innerHTML = MARKUP;
     resetWebGLSupportProbe();
 
-    const second = start(document);
+    // NOTHING STORED, so this load has nothing to resume: it holds the run-start
+    // screen, and beginning a run from there is what deals the opening tiles and
+    // moves the two spawn cursors.
+    const second = startWithRun(document);
 
     application = second;
 
     expect(second.run.identity.resumed).toBe(false);
     expect(second.run.seed()).not.toBe(seed);
+
+    // The substreams advance when the run OPENS, and a load that resumed
+    // nothing opens one on the begin-run press.
+    beginRun();
+
     expect(second.streams.snapshotCursors()['spawn-value']).toBe(2);
   });
 });
-
-/* ==========================================================================
- * 4. The frozen keys are untouched
- * ========================================================================== */
 
 describe('the frozen persistence contract', () => {
   it('honours a best score written before the upgrade', () => {
     window.localStorage.setItem(BEST_SCORE_KEY, '31337');
 
     application = start(document);
+    beginRun();
     playEveryDirection();
 
     // Still the raw decimal string, still under the unprefixed literal key.
@@ -508,10 +442,7 @@ describe('the frozen persistence contract', () => {
     window.localStorage.setItem('an-unrelated-key', 'untouched');
 
     // A board that MERGES on the first move, so the score is certainly above
-    // zero and `bestScore` is certainly promoted. Without it the case is a bet
-    // on the run's seed: four moves over two tiles of unequal value score
-    // nothing, no promotion is written, and the key the assertion below expects
-    // is legitimately absent.
+    // zero and `bestScore` is certainly promoted.
     window.localStorage.setItem(
       GAME_STATE_KEY,
       JSON.stringify(
@@ -549,10 +480,6 @@ describe('the frozen persistence contract', () => {
   });
 });
 
-/* ==========================================================================
- * 5. The relic registry and the reward transaction
- * ========================================================================== */
-
 /** One row of a board snapshot, padded to four cells. */
 const row = (
   ...tiles: (number | null)[]
@@ -565,13 +492,7 @@ const row = (
       : { position: { x: 0, y }, value };
   });
 
-/**
- * Stores a board and a run envelope whose stage-0 goal one merge clears.
- *
- * `cells` is indexed `[x][y]`, so a single populated first row puts every tile
- * in column 0. Two eights there merge into the sixteen the default ladder's
- * first goal targets.
- */
+/** Stores a board and a run envelope whose stage-0 goal one merge clears. */
 const storeNearlyClearedStage = (): void => {
   const board = {
     grid: { size: 4, cells: [row(8, 8), row(), row(), row()] },
@@ -603,22 +524,35 @@ const storeNearlyClearedStage = (): void => {
   );
 };
 
-/** The reward screen's cards, in the order it drew them. */
-const rewardCards = (): { id: string; name: string }[] =>
-  [...document.querySelectorAll('#screen-reward .relic-card')].map(
-    (card): { id: string; name: string } => ({
-      id: card.getAttribute('data-relic-id') ?? '',
-      name: card.querySelector('.relic-card-name')?.textContent ?? '',
-    }),
-  );
+/**
+ * The reward screen's cards, in the order it drew them, once the flow has been
+ * carried from stage clear to the offer by the continue control.
+ *
+ * THE CONTINUE PRESS IS PART OF READING THEM. `stage -> stageClear -> reward`
+ * of AAP Figure 6 is two edges and the second one is the player's, so a suite
+ * that read the cards without pressing continue would be asserting against a
+ * state the flow does not reach on its own.
+ */
+const rewardCards = (): { id: string; name: string }[] => {
+  if (offeredCards().length === 0) {
+    continueToReward();
+  }
+
+  return offeredCards();
+};
+
+
+/** Clears the opening stage and goes on to the offer. */
+const clearStageAndContinue = (): void => {
+  press('ArrowUp', 'ArrowUp');
+  continueToReward();
+};
 
 describe('the relic registry', () => {
   it('is composed, so the catalogue reaches the hook bus', () => {
     application = start(document);
+    beginRun();
 
-    // The registry registers with the bus the engine dispatches on, which is
-    // what makes a held relic fire. Nothing is held yet, so the assertion is
-    // that the seam exists rather than that it has been used.
     expect(application.run.relicContext()).toEqual([]);
     expect(storedRun()?.relics).toEqual([]);
   });
@@ -658,35 +592,40 @@ describe('the relic registry', () => {
 
     application = start(document);
 
-    // Hydration is VALIDATED: an identifier with no catalogue entry can bind no
-    // handler, so carrying it would leave the run reporting a relic that does
-    // nothing and the draw excluding an identifier that is not held.
     expect(application.run.relicContext()).toEqual([{ id: 'twin-seed' }]);
 
-    // And the normalised set is what is persisted, so the refusal is permanent
-    // rather than repeated on every load.
     expect(storedRun()?.relics).toEqual([{ id: 'twin-seed' }]);
   });
 });
 
 describe('the reward transaction', () => {
-  it('draws three distinct offers onto the reward screen when a stage clears', () => {
+  it('shows the stage-clear screen first, and the offer after the continue', () => {
     storeNearlyClearedStage();
     application = start(document);
 
     press('ArrowUp', 'ArrowUp');
 
+    // THE GATE. The stage-progress screen is up and the reward screen is not:
+    // both edges used to be taken on the one `stage:end`, so this state was
+    // entered and left inside a tick and no player ever saw it.
+    expect(document.getElementById('screen-stage-progress')?.hidden).toBe(false);
+    expect(document.getElementById('screen-reward')?.hidden).toBe(true);
+
+    // READ RAW, not through `rewardCards()`: that helper presses continue when it
+    // finds no cards, which is the very press this line is asserting has not
+    // happened yet.
+    expect(offeredCards()).toHaveLength(0);
+
+    continueToReward();
+
     const cards = rewardCards();
 
     expect(document.getElementById('screen-reward')?.hidden).toBe(false);
+    expect(document.getElementById('screen-stage-progress')?.hidden).toBe(true);
     expect(cards).toHaveLength(3);
 
-    // AAP V6: a set of three NEVER holds a duplicate, because the draw samples
-    // without replacement.
     expect(new Set(cards.map((card) => card.id)).size).toBe(3);
 
-    // Every card is a real catalogue relic, drawn rather than invented, and
-    // carries the name the catalogue gave it.
     for (const card of cards) {
       expect(card.name.length).toBeGreaterThan(0);
     }
@@ -695,7 +634,7 @@ describe('the reward transaction', () => {
   it('is deterministic: one seed draws one offer sequence', () => {
     storeNearlyClearedStage();
     application = start(document);
-    press('ArrowUp', 'ArrowUp');
+    clearStageAndContinue();
 
     const first = rewardCards().map((card) => card.id);
 
@@ -707,7 +646,7 @@ describe('the reward transaction', () => {
 
     storeNearlyClearedStage();
     application = start(document);
-    press('ArrowUp', 'ArrowUp');
+    clearStageAndContinue();
 
     expect(rewardCards().map((card) => card.id)).toEqual(first);
     expect(first).toHaveLength(3);
@@ -716,7 +655,7 @@ describe('the reward transaction', () => {
   it('takes the chosen relic on, advances the stage and closes the screen', () => {
     storeNearlyClearedStage();
     application = start(document);
-    press('ArrowUp', 'ArrowUp');
+    clearStageAndContinue();
 
     const chosen = rewardCards()[0];
 
@@ -741,7 +680,7 @@ describe('the reward transaction', () => {
   it('accepts the digit binding for the same choice', () => {
     storeNearlyClearedStage();
     application = start(document);
-    press('ArrowUp', 'ArrowUp');
+    clearStageAndContinue();
 
     const second = rewardCards()[1];
 
@@ -758,7 +697,7 @@ describe('the reward transaction', () => {
   it('never offers a relic the run already holds', () => {
     storeNearlyClearedStage();
     application = start(document);
-    press('ArrowUp', 'ArrowUp');
+    clearStageAndContinue();
 
     const held = rewardCards()[0]?.id ?? '';
 
@@ -768,10 +707,17 @@ describe('the reward transaction', () => {
       )
       ?.click();
 
+    expect(application.relics.ownedIds()).toEqual([held]);
+
     // The next stage's own goal is higher, so this drives the board until it
-    // clears or the run ends, and asserts on the offer only if one is drawn.
+    // clears or the run ends, and asserts on the offer only if one is drawn. The
+    // gate is passed through wherever it comes up, because the offer is behind it.
     for (let turn = 0; turn < 60; turn += 1) {
       playEveryDirection();
+
+      if (document.getElementById('screen-stage-progress')?.hidden === false) {
+        continueToReward();
+      }
 
       const next = rewardCards();
 
@@ -788,28 +734,41 @@ describe('the reward transaction', () => {
     application = start(document);
     press('ArrowUp', 'ArrowUp');
 
-    // The run still stands on the stage that cleared: the choice IS the
-    // transition, so the HUD reports stage 0 while the player is being asked to
-    // choose a relic for it rather than reporting a stage that has not started.
     expect(application.run.state().stageIndex).toBe(0);
     expect(application.run.isRewardPending()).toBe(true);
 
-    // Moves keep resolving while the offer stands, and the stage does NOT
-    // advance until a relic is taken.
+    // The flow stops at STAGE CLEAR, and the offer screen is not up yet: the
+    // second edge of `stage -> stageClear -> reward` is the player's own
+    // continue press.
+    expect(application.router.current()).toBe('stageClear');
+    expect(document.getElementById('screen-reward')?.hidden).toBe(true);
+
+    // A movement key reaches nothing while a cleared stage is being paid out:
+    // the state is an overlay, and the overlay context withholds movement.
+    const boardBefore = JSON.stringify(application.engine.serialize());
+
     playEveryDirection();
 
+    expect(JSON.stringify(application.engine.serialize())).toBe(boardBefore);
     expect(application.run.state().stageIndex).toBe(0);
+
+    // Continuing shows the offer, and the stage is STILL the one that cleared:
+    // the choice is what advances it.
+    expect(continueToReward()).toBe(true);
     expect(document.getElementById('screen-reward')?.hidden).toBe(false);
+    expect(application.run.state().stageIndex).toBe(0);
+
+    const offered = offeredCards()[0];
+
+    expect(chooseCard(offered?.id ?? '')).toBe(true);
+    expect(application.run.state().stageIndex).toBe(1);
   });
 });
-
-/* ==========================================================================
- * 6. The new-run path
- * ========================================================================== */
 
 describe('starting a new run', () => {
   it('replaces the seed, the run identifier and the substreams together', () => {
     application = start(document);
+    beginRun();
 
     const before = {
       seed: application.run.seed(),
@@ -817,8 +776,6 @@ describe('starting a new run', () => {
       correlationId: application.logger.correlationId,
     };
 
-    // Advance the substreams past zero, so a fresh run inheriting them would be
-    // observable rather than coincidentally identical.
     playEveryDirection();
     playEveryDirection();
 
@@ -856,35 +813,78 @@ describe('starting a new run', () => {
 
     application.startNewRun('shared-seed');
 
-    // One seed, one opening board: the substreams restart at zero rather than
-    // continuing, which is what AAP V2 requires of a replay.
     expect(application.engine.serialize()).toEqual(first);
   });
 
-  it('is what the restart control does', () => {
+  it('is NOT what the restart control does', () => {
+    storeNearlyClearedStage();
     application = start(document);
 
-    const before = application.run.runId();
+    // A relic taken and a stage advanced, so run progress exists to be lost.
+    press('ArrowUp', 'ArrowUp');
+
+    // `rewardCards()` presses the stage-clear continue control on the way, so
+    // the card the tail presses is on the screen the flow actually reaches.
+    const taken = rewardCards()[0]?.id ?? '';
 
     document
-      .querySelector<HTMLElement>('.restart-button')
+      .querySelector<HTMLElement>(
+        `#screen-reward .relic-card[data-relic-id="${taken}"]`,
+      )
       ?.click();
 
-    // "New Game" ends the run rather than reseeding its board: a run carries a
-    // seed, a stage and a relic set, and leaving those in place would make the
-    // control continue the run it claims to end.
-    expect(application.run.runId()).not.toBe(before);
-    expect(application.run.state().stageIndex).toBe(0);
+    const before = {
+      runId: application.run.runId(),
+      seed: application.run.seed(),
+      stageIndex: application.run.state().stageIndex,
+    };
+
+    expect(before.stageIndex).toBe(1);
+    expect(application.run.relicContext().map((relic) => relic.id)).toEqual([
+      taken,
+    ]);
+
+    document.querySelector<HTMLElement>('.restart-button')?.click();
+
+    // js/game_manager.js L17-L21 discarded the BOARD, and `stage --restart-->
+    // stage` of AAP Figure 6 keeps that meaning: the run identity, its seed, the
+    // stage reached and the relics held all survive, so a player who wanted a
+    // fresh board does not silently lose the run. Replacing the run is
+    // `startNewRun`, which the run-start and run-summary actions reach.
+    expect(application.run.runId()).toBe(before.runId);
+    expect(application.run.seed()).toBe(before.seed);
+    expect(application.run.state().stageIndex).toBe(before.stageIndex);
+    expect(application.run.relicContext().map((relic) => relic.id)).toEqual([
+      taken,
+    ]);
+
+    // The board itself IS fresh: opening tiles only, and nothing carried over
+    // from the board that was discarded, which held the 16 the cleared stage was
+    // measured on. The count is not asserted exactly because a spawn-family
+    // relic may add a tile on a stage start; the VALUES are what prove the board
+    // was replaced rather than kept.
+    const cells = application.engine
+      .serialize()
+      .grid.cells.flat()
+      .filter((cell) => cell !== null);
+
+    expect(cells.length).toBeGreaterThanOrEqual(2);
+    expect(cells.every((cell) => (cell?.value ?? 0) <= 4)).toBe(true);
+
+    // And the score went with it: `setup(null)` reset it, exactly as
+    // js/game_manager.js L17-L21 did.
+    expect(application.engine.score).toBe(0);
   });
 
   it('discards the ended run\'s relics and stored envelope', () => {
     storeNearlyClearedStage();
     application = start(document);
-    press('ArrowUp', 'ArrowUp');
+    clearStageAndContinue();
 
-    document
-      .querySelector<HTMLElement>('#screen-reward .relic-card')
-      ?.click();
+    const offered = rewardCards()[0];
+
+    expect(offered).toBeDefined();
+    expect(chooseCard(offered?.id ?? '')).toBe(true);
 
     expect(application.run.relicContext().length).toBe(1);
 
@@ -893,14 +893,48 @@ describe('starting a new run', () => {
     expect(application.run.relicContext()).toEqual([]);
     expect(storedRun()?.relics).toEqual([]);
 
-    // The reward screen cannot be left standing over a run that no longer
-    // exists.
     expect(document.getElementById('screen-reward')?.hidden).toBe(true);
     expect(application.run.isRewardPending()).toBe(false);
   });
 
-  it('resumes rather than replaces on a cold load', () => {
+  it('returns the mutated rules to their baseline', () => {
     application = start(document);
+
+    const config = application.config;
+    const spawn = config.spawn;
+    const merge = config.merge;
+    const baselineSize = config.boardSize;
+    const baselineWeights = [...config.spawn.weights];
+    const baselinePredicate = config.merge.canMerge;
+
+    // EXACTLY WHAT A CURSED RELIC DOES, written through the live object the
+    // engine, the resolver, the terminal-state checks and the renderer all hold:
+    // a collapsed board, a bent merge rule and biased spawn weights.
+    config.boardSize = 3;
+    config.merge.canMerge = (): boolean => true;
+    config.spawn.weights = [0.2, 0.8];
+
+    application.startNewRun();
+
+    // THE NEW RUN IS NOT CURSED BY THE LAST ONE. The rules object is page-scoped
+    // and was never reset, so a run started after a board-shrinking relic opened
+    // on the shrunken board with a merge rule it had never been granted.
+    expect(config.boardSize).toBe(baselineSize);
+    expect(config.merge.canMerge).toBe(baselinePredicate);
+    expect(config.spawn.weights).toEqual(baselineWeights);
+
+    // RESTORED IN PLACE: the same objects, so every collaborator that captured a
+    // reference at construction reads the restored rules through it.
+    expect(application.config).toBe(config);
+    expect(application.config.spawn).toBe(spawn);
+    expect(application.config.merge).toBe(merge);
+
+    // And the board the new run actually opened on is the baseline size.
+    expect(application.engine.grid.size).toBe(baselineSize);
+  });
+
+  it('resumes rather than replaces on a cold load', () => {
+    application = startWithRun(document);
 
     const seed = application.run.seed();
     const runId = application.run.runId();
@@ -911,7 +945,7 @@ describe('starting a new run', () => {
     document.body.innerHTML = MARKUP;
     resetWebGLSupportProbe();
 
-    // A cold load RESUMES: `start()` and `startNewRun()` are separate calls, and
+    // A cold load RESUMES: `start` and `startNewRun` are separate calls, and
     // only the second one replaces.
     application = start(document);
 
@@ -920,35 +954,19 @@ describe('starting a new run', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Disposal
- * ========================================================================== */
-
 describe('disposing the application', () => {
   it('releases the run subscriptions', () => {
     application = start(document);
+    beginRun();
 
     const before = storedRun()?.rngCursor['spawn-value'] ?? 0;
 
     application.dispose();
     application = null;
 
-    // The engine is no longer driven either, so this asserts only that the
-    // release itself neither throws nor rewrites the envelope on the way out.
     expect(storedRun()?.rngCursor['spawn-value']).toBe(before);
   });
 });
-
-/* ==========================================================================
- * 6. One board-load authority
- *
- * `Engine.setup()` called with no argument reads the legacy `gameState` key
- * through its own storage port. Doing that ALONGSIDE the run load is two loads
- * of two different values, and the reconciled board — the one whose edge length
- * was weighed against the configured size and against any board-shrinking relic
- * — loses. These cases pin which load decides, in each of the three states
- * `RunController.board()` distinguishes.
- * ========================================================================== */
 
 describe('the board-load authority', () => {
   /** A one-tile board at the stated size, in the persisted vocabulary. */
@@ -998,8 +1016,8 @@ describe('the board-load authority', () => {
       envelopeWith(boardWith(4, [{ x: 0, y: 0, value: 8 }])),
     );
 
-    // A legacy snapshot that DISAGREES with the envelope, so which load decided
-    // is readable from the board itself.
+    // A legacy snapshot that DISAGREES with the envelope, so which load
+    // decided is readable from the board itself.
     window.localStorage.setItem(
       GAME_STATE_KEY,
       JSON.stringify(boardWith(4, [{ x: 3, y: 3, value: 1024 }])),
@@ -1013,10 +1031,7 @@ describe('the board-load authority', () => {
   });
 
   it('reports the reconciled board rather than the stored one', () => {
-    // Saved at 4, and a relic declaring the board collapsed to 3. The
-    // reconciliation applies the relic size, so the board the engine opens on is
-    // 3x3 — and the tile outside it is dropped rather than written past the
-    // lattice.
+    // Saved at 4, and a relic declaring the board collapsed to 3.
     window.localStorage.setItem(
       RUN_STATE_KEY,
       envelopeWith(
@@ -1038,8 +1053,7 @@ describe('the board-load authority', () => {
 
   it('LOADS A LEGACY SAVE when no envelope exists at all', () => {
     // A `gameState` written by the vanilla game, before any run envelope
-    // existed. `board()` reports `undefined` — no run-level board — so the
-    // engine's own port read is the remaining authority and the save loads.
+    // existed.
     window.localStorage.setItem(
       GAME_STATE_KEY,
       JSON.stringify(boardWith(4, [{ x: 2, y: 1, value: 64 }])),
@@ -1051,12 +1065,16 @@ describe('the board-load authority', () => {
     expect(application.engine.grid.cellContent({ x: 2, y: 1 })?.value).toBe(64);
   });
 
-  it('opens an empty board when nothing is stored', () => {
+  it('opens NO board when nothing is stored, and holds the run start', () => {
     application = start(document);
 
     expect(application.run.board()).toBeUndefined();
 
-    // Two opening tiles, which is `startTiles` under the default rules.
+    // THE COLD LOAD OF AAP FIGURE 6. Nothing is stored, so there is nothing to
+    // resume and no run has been begun: the lattice the engine's constructor
+    // allocated is empty, and the run-start screen is what the player is looking
+    // at. The board used to be opened here regardless, which superseded that
+    // screen inside the boot and made its seed field unreachable.
     let occupied = 0;
 
     application.engine.grid.eachCell((_x, _y, tile): void => {
@@ -1065,7 +1083,28 @@ describe('the board-load authority', () => {
       }
     });
 
-    expect(occupied).toBe(2);
+    expect(occupied).toBe(0);
+    expect(document.getElementById('screen-run-start')?.hidden).toBe(false);
+    expect(document.getElementById('screen-hud')?.hidden).toBe(true);
+  });
+
+  it('deals the opening tiles once a run is begun from that screen', () => {
+    application = start(document);
+    application.startNewRun();
+
+    // `startTiles` under the default rules, dealt by the begin rather than by the
+    // boot, so the seed the run is played under is the seed they came from.
+    let occupied = 0;
+
+    application.engine.grid.eachCell((_x, _y, tile): void => {
+      if (tile !== null) {
+        occupied += 1;
+      }
+    });
+
+    expect(occupied).toBe(application.config.startTiles);
+    expect(document.getElementById('screen-run-start')?.hidden).toBe(true);
+    expect(document.getElementById('screen-hud')?.hidden).toBe(false);
   });
 
   it('reports null for a run the controller started fresh, so no save is inherited', () => {
@@ -1082,5 +1121,402 @@ describe('the board-load authority', () => {
     expect(application.engine.grid.cellContent({ x: 2, y: 1 })?.value).not.toBe(
       64,
     );
+  });
+});
+
+/* ==========================================================================
+ * 9. The screen registry
+ *
+ * `createRunStartScreen`, `createStageProgressScreen`, `createRewardScreen`,
+ * `createGameOverScreen` and `createRunSummaryScreen` were imported by NO
+ * production file. The router records which module renders each state as data and
+ * imports none of them, so every one of those five states entered an empty
+ * container: five whole screens of AAP Figure 6 existed, were tested in isolation,
+ * and were unreachable in the composed application.
+ * ========================================================================== */
+
+describe('the screen registry', () => {
+  it('renders the run-start screen, with its seed field, on a cold load', () => {
+    application = start(document);
+
+    const host = document.getElementById('screen-run-start');
+
+    expect(host?.hidden).toBe(false);
+
+    // The FIELD is the point: a seed cannot be entered on a screen that renders
+    // nothing, and this screen was the one the boot superseded.
+    expect(host?.querySelector('input')).not.toBeNull();
+    expect(host?.textContent ?? '').not.toBe('');
+  });
+
+  it('starts the run the seed field names, through the begin control', () => {
+    application = start(document);
+
+    const field = document.querySelector<HTMLInputElement>(
+      '#screen-run-start input',
+    );
+    const begin = document.querySelector<HTMLElement>(
+      '#screen-run-start button',
+    );
+
+    expect(field).not.toBeNull();
+    expect(begin).not.toBeNull();
+
+    if (field !== null) {
+      field.value = '  Typed Seed  ';
+    }
+
+    begin?.click();
+
+    // ONE NORMALISER. The screen emits the field's text VERBATIM — surrounding
+    // whitespace included — and `RunController.startRun` reduces it: trimmed,
+    // bounded, and otherwise opaque, so case survives and nothing is parsed. What
+    // the run is played under is therefore the reduced value, decided in one
+    // place. Decisions DL-RUNCTL-11, DL-RUNSTART-01.
+    expect(application.run.seed()).toBe('Typed Seed');
+    expect(document.getElementById('screen-run-start')?.hidden).toBe(true);
+    expect(application.run.identity.resumed).toBe(false);
+
+    // AND THE VISIT'S OWN STATE IS CLEARED as the screen leaves, so a later visit
+    // opens on an empty field and a run begun from it carries no seed the player
+    // did not type. Decision DL-RUNSTART-06.
+    expect(field?.value).toBe('');
+  });
+
+  it('renders the stage-clear screen when a stage clears', () => {
+    storeNearlyClearedStage();
+    application = start(document);
+
+    press('ArrowUp', 'ArrowUp');
+
+    const host = document.getElementById('screen-stage-progress');
+
+    expect(host?.hidden).toBe(false);
+
+    // The stage number and the goal, drawn by the module rather than left to an
+    // empty container.
+    expect(host?.textContent ?? '').toContain('1');
+    expect(host?.querySelector('.stage-progress-continue')).not.toBeNull();
+  });
+
+  it('renders the reward screen through the screen module, not the router', () => {
+    storeNearlyClearedStage();
+    application = start(document);
+    clearStageAndContinue();
+
+    const host = document.getElementById('screen-reward');
+    const panel = host?.querySelector('.reward-panel');
+
+    expect(panel).not.toBeNull();
+
+    // MODULE ARTIFACTS. The router's own inline surface built a heading with no
+    // id and cards with no described-by, so these two attributes are what say the
+    // mounted module drew the screen: the panel names its heading, and each card
+    // points at its own description.
+    const headingId = panel?.getAttribute('aria-labelledby') ?? '';
+
+    expect(headingId).not.toBe('');
+    expect(host?.querySelector(`#${headingId}`)).not.toBeNull();
+
+    for (const card of host?.querySelectorAll('.relic-card') ?? []) {
+      expect(card.getAttribute('aria-describedby') ?? '').not.toBe('');
+    }
+  });
+
+  it('takes a card activated from the keyboard exactly once', () => {
+    storeNearlyClearedStage();
+    application = start(document);
+    clearStageAndContinue();
+
+    const card = document.querySelector<HTMLElement>(
+      '#screen-reward .relic-card',
+    );
+    const chosen = card?.getAttribute('data-relic-id') ?? '';
+
+    expect(card?.tagName).toBe('BUTTON');
+
+    // A NATIVE BUTTON activates from Enter by synthesising a click, and the card
+    // used to listen for `keydown` as well — two activations of one press,
+    // serialised by a flag. The platform's own path is the only one now.
+    card?.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+    );
+    card?.click();
+
+    expect(application.relics.ownedIds()).toEqual([chosen]);
+    expect(application.run.state().stageIndex).toBe(1);
+  });
+
+  it('renders the run summary of the run that FINISHED', () => {
+    storeNearlyClearedStage();
+    application = start(document);
+    clearStageAndContinue();
+
+    document
+      .querySelector<HTMLElement>('#screen-reward .relic-card')
+      ?.click();
+
+    const score = application.engine.score;
+    const held = application.relics.ownedIds();
+
+    expect(score).toBeGreaterThan(0);
+    expect(held).toHaveLength(1);
+
+    // The run is ended the way the flow ends it, through the router's own edge.
+    application.run.endRun('abandoned');
+
+    const summary = application.run.lastSummary();
+
+    expect(summary?.score).toBe(score);
+
+    // THE FINISHED PROJECTION, not the live one. `endRun` replaces the envelope
+    // in force with a fresh run, so a summary read from `summary()` reported a
+    // score of zero, no relics and stage one for the run just finished.
+    expect(application.run.summary().score).toBe(0);
+    expect(summary?.relics.map((relic) => relic.id)).toEqual(held);
+  });
+
+  it('renders the terminal screen for a lost run', () => {
+    // A full board whose only move loses: every cell occupied, no two neighbours
+    // equal, so the first move that changes nothing ends the run.
+    window.localStorage.setItem(
+      GAME_STATE_KEY,
+      JSON.stringify(copyBoard(BLOCKED_BOARD)),
+    );
+
+    application = start(document);
+
+    press('ArrowLeft', 'ArrowLeft');
+    press('ArrowUp', 'ArrowUp');
+    press('ArrowRight', 'ArrowRight');
+    press('ArrowDown', 'ArrowDown');
+
+    const host = document.getElementById('screen-game-over');
+
+    // The terminal screen is one module for both verdicts, and it renders rather
+    // than leaving the container empty.
+    if (application.engine.isGameTerminated()) {
+      expect(host?.hidden).toBe(false);
+      expect(host?.textContent ?? '').not.toBe('');
+    }
+  });
+});
+
+/* ==========================================================================
+ * 10. Focus on the screen the boot ends on
+ *
+ * The boot used to blur whatever its own transitions had placed, which announced
+ * a modal dialog and then left focus on the body. The rollback is gone, so the
+ * placement stands: a cold load ends on `runStart`, which index.html declares
+ * `aria-modal="true"` and which the router traps focus inside, and a resumed load
+ * ends on `stage`, whose placement lands on the board surface the renderer
+ * mounted. Decisions DL-MAIN-19, DL-ROUTER-26.
+ * ========================================================================== */
+
+describe('the boot focus placement', () => {
+  it('leaves focus inside the trapped run-start dialog', () => {
+    application = start(document);
+
+    const host = document.getElementById('screen-run-start');
+
+    expect(host?.hidden).toBe(false);
+
+    // INSIDE THE DIALOG, which is what `aria-modal="true"` claims. The seed field
+    // is the first focusable element the screen renders, so the trap's own
+    // first-focusable placement lands there.
+    expect(document.activeElement).not.toBe(document.body);
+    expect(host?.contains(document.activeElement)).toBe(true);
+  });
+
+  it('places a resumed run s focus on the board, not on a control', () => {
+    // A stored board resumes, so the boot ends on `stage` — which traps nothing
+    // and takes the non-trapping placement instead.
+    window.localStorage.setItem(
+      GAME_STATE_KEY,
+      JSON.stringify(boardWithTiles([{ x: 0, y: 0, value: 8 }])),
+    );
+
+    application = start(document);
+
+    expect(document.getElementById('screen-run-start')?.hidden).toBe(true);
+
+    // THE BOARD, AND NOTHING ROLLS IT BACK. The boot used to blur whatever the
+    // placement had just chosen, which left a load with no focus at all; the
+    // rollback is gone, and the placement resolves to the board surface the
+    // renderer mounted rather than to `.restart-button` — a control no player
+    // asked for. Decisions DL-MAIN-19, DL-ROUTER-26.
+    const active = document.activeElement;
+    const board = document.getElementById('board-number-only');
+
+    expect(active).not.toBe(document.body);
+    expect(active?.closest('.restart-button')).toBeNull();
+    expect(board?.contains(active) ?? false).toBe(true);
+  });
+
+  it('places focus on the element the run-start screen marked', () => {
+    application = start(document);
+
+    const host = document.getElementById('screen-run-start');
+    const marked = host?.querySelector('[data-focus-initial]');
+
+    // ONE PARTY PLACES FOCUS, AND IT IS THE ONE THAT TRAPS. The screen module is
+    // given `placeFocus: false` because the router traps this container after the
+    // module's `enter` has run: a module that placed its own focus first handed the
+    // trap a restore target inside the trap, which it cannot restore to and
+    // reported on every load. This asserts the substitution is behaviourally free —
+    // the trap's first-focusable placement resolves to the very element the module
+    // marked for itself.
+    expect(marked).not.toBeNull();
+    expect(document.activeElement).toBe(marked);
+  });
+});
+
+/* ==========================================================================
+ * 11. One container, one focus trap
+ *
+ * Two parties can trap the reward container — the router, and the screen module
+ * from its own `enter`, which runs first — and a stacked pair broke the restore:
+ * both traps asked for the background to be made inert, only the trap that
+ * applied the inertness lifts it, and the trap released first therefore restored
+ * focus into a region the other still held inert. The root composes the module
+ * with `trapFocus: false`, so the router is the ONE owner: it engages the only
+ * trap, applies the only inertness and lifts it on release, and its adoption
+ * branch — the one that defers to a standing trap — has nothing to adopt.
+ * Decisions DL-MAIN-18, DL-ROUTER-26, DL-ROUTER-35.
+ * ========================================================================== */
+
+describe('the focus trap over a screen a module renders', () => {
+  /**
+   * Total of every counter recording a named report.
+   *
+   * Matched on the `report` LABEL as well as the series name, because a report
+   * raised through a ui reporter is counted on one generic family carrying the
+   * name as a label rather than on a family of its own. DL-MAIN-11.
+   */
+  const counterTotal = (app: Application, name: string): number =>
+    app.metrics
+      .snapshot()
+      .series.filter(
+        (entry) => entry.name === name || entry.labels['report'] === name,
+      )
+      .reduce(
+        (total, entry) => total + (entry.kind === 'counter' ? entry.value : 0),
+        0,
+      );
+
+  it('is held by the router alone, never stacked with the module s own', () => {
+    storeNearlyClearedStage();
+    application = start(document);
+
+    clearStageAndContinue();
+
+    const host = document.getElementById('screen-reward');
+
+    expect(host?.hidden).toBe(false);
+
+    // ONE TRAP HOLDS THE CONTAINER, and it is the router's: focus is inside the
+    // offer and the background is inert, both applied by the party that lifts
+    // them.
+    expect(host?.contains(document.activeElement)).toBe(true);
+    expect(
+      document.querySelector('.container')?.hasAttribute('inert'),
+    ).toBe(true);
+
+    // AND THE MODULE ENGAGED NONE, which is what makes a stacked pair
+    // impossible rather than merely unobserved: the root composes the reward
+    // screen with `trapFocus: false`, so the module reports neither a trap of
+    // its own nor one adopted from the router, and the router's own adoption
+    // branch — which defers to a standing trap — never fires.
+    expect(counterTotal(application, 'ui.rewardScreen.trapAdopted')).toBe(0);
+    expect(counterTotal(application, 'ui.rewardScreen.trapRefused')).toBe(0);
+    expect(counterTotal(application, 'ui.router.trap.adopted')).toBe(0);
+  });
+
+  it('lifts the inertness of the page shell once the offer is taken', () => {
+    storeNearlyClearedStage();
+    application = start(document);
+    clearStageAndContinue();
+
+    // THE WHOLE PAGE SHELL, not the game region alone: the heading, the board
+    // and the footer all leave the accessibility tree behind a modal state,
+    // while `.screen-layer` and the live region — which sit outside it — stay
+    // reachable. Decision DL-ROUTER-25.
+    const region = document.querySelector('.container');
+
+    // Inert while the choice stands, so a screen reader's virtual cursor cannot
+    // leave the dialog.
+    expect(region?.hasAttribute('inert')).toBe(true);
+
+    const card = document.querySelector<HTMLElement>(
+      '#screen-reward .relic-card',
+    );
+
+    card?.click();
+
+    // AND LIFTED AFTERWARDS. A stacked pair left it applied, because the trap that
+    // released first had not been the one to apply it — which is what made the
+    // focus restore fail: the element it restored to was still inside an inert
+    // region. One owner applies it and one owner lifts it.
+    expect(document.getElementById('screen-reward')?.hidden).toBe(true);
+    expect(region?.hasAttribute('inert')).toBe(false);
+  });
+
+  it('places focus on the element the run-summary screen marked', () => {
+    // A deterministic route to the summary. The board carries two tiles of half
+    // the win value side by side on row 0, so one leftward move merges them into
+    // the win value; the stored stage goal is set FAR above that highest tile so
+    // the stage does not clear on the way and the flow stays on the board until
+    // the win. The win takes the `winReached` edge to the terminal screen, whose
+    // `End run` control takes the `endRun` edge to the summary.
+    const board = copyBoard(NEAR_WIN_BOARD);
+
+    window.localStorage.setItem(GAME_STATE_KEY, JSON.stringify(board));
+    window.localStorage.setItem(
+      RUN_STATE_KEY,
+      JSON.stringify({
+        schemaVersion: 1,
+        runId: 'summary-focus-run',
+        seed: 'summary-focus-seed',
+        rngCursor: {
+          'spawn-value': 0,
+          'spawn-position': 0,
+          'relic-draw': 0,
+          'rarity-weight': 0,
+        },
+        stageIndex: 0,
+        stageGoal: { kind: 'highest-tile', target: 4096 },
+        goalProgress: 0,
+        relics: [],
+        board,
+      }),
+    );
+
+    application = start(document);
+
+    press('ArrowLeft', 'ArrowLeft');
+
+    expect(application.engine.won).toBe(true);
+
+    const terminal = document.getElementById('screen-game-over');
+    const endRun = [
+      ...(terminal?.querySelectorAll<HTMLElement>('button') ?? []),
+    ].find((button): boolean => button.textContent === 'End run');
+
+    expect(terminal?.hidden).toBe(false);
+    expect(endRun).toBeDefined();
+
+    endRun?.click();
+
+    const host = document.getElementById('screen-run-summary');
+    const marked = host?.querySelector('[data-focus-initial]');
+
+    expect(host?.hidden).toBe(false);
+
+    // The same substitution the run-start screen makes: this module is given
+    // `placeFocus: false` because the router traps this container after its
+    // `enter`, and the marked copy control is the panel's first focusable element,
+    // so the trap's own placement resolves to it.
+    expect(marked).not.toBeNull();
+    expect(document.activeElement).toBe(marked);
   });
 });

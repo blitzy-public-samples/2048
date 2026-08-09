@@ -25,8 +25,8 @@
  *   run continues the sequence rather than replaying it.
  *
  * SEED ORIGINATION
- *   `originateRunSeed()` mints the value every substream is derived from, and is
- *   the one unseeded randomness source in the product; src/rng/seeded-rng.ts
+ *   `originateRunSeed()` mints the value every substream is derived from, and
+ *   is the one unseeded randomness source in the product; src/rng/seeded-rng.ts
  *   names this module as the home of that origination. `globalThis.crypto` is
  *   read behind a feature check, and nothing is ever installed onto
  *   `Math.random`.
@@ -37,21 +37,21 @@
  *   selection against the offer standing and the registry's catalogue, has the
  *   registry take the relic on LIVE through `pickUpRelic` so its handlers reach
  *   the hook bus, appends exactly the entry the registry returned, and reports
- *   success only where the live registry agrees. Previously the offer was
- *   remembered unexamined and never consulted, and a selection was appended to
- *   this controller's list alone — so an unoffered relic could be admitted, and
- *   an admitted one fired on no hook and was erased by the next commit's
- *   projection.
+ *   success only where the live registry agrees.
  *
  * ONE REGISTRATION STEP, AND ONE ROUND CLOSURE
- *   `selectReward()` — the method a reward screen presses — takes the relic on
+ *   `selectReward()`, the method a reward screen presses, takes the relic on
  *   through that SAME `takeRelicOn()` step, and both it and `resolveReward()`
- *   finish through `closeRewardRound()`, which clears the offer and performs the
- *   one stage advance a cleared stage is owed. Neither path can therefore keep a
- *   relic without advancing the run nor advance the run without keeping the
- *   relic: `selectReward()` used to reach for an activation member the registry's
- *   own port does not publish and advance on a synthetic record, and
- *   `resolveReward()` used to keep the relic on a stage that never advanced.
+ *   finish through `closeRewardRound()`, which clears the offer and performs
+ *   the one stage advance a cleared stage is owed. Neither path can keep a
+ *   relic without advancing the run, nor advance the run without keeping the
+ *   relic.
+ *
+ * THE TERMINAL WIN OUTRANKS THE STAGE PAYOUT
+ *   A commit carrying `won` with play blocked leaves the cleared stage
+ *   UNRESOLVED: no offer is drawn and no stage advances until the win is
+ *   resolved, and the commit that a continued win produces resolves the stage
+ *   that was waiting.
  *
  * NO CLOCK ON THE PLAY PATH, NO DOM
  *   The time source `originateRunSeed()` falls back to is read only while
@@ -99,13 +99,36 @@
  *   DL-RUNCTL-03  goal derivation and evaluation delegated to
  *                 src/config/stage-config.ts
  *   DL-RUNCTL-04  the correlation identifier received by injection
- *   DL-RUNCTL-05  both commit slices resolved at the PROVIDER CALL — the stage
- *                 slice measured from the board the commit carries, the relic
- *                 slice projected from the live registry — rather than from the
- *                 envelope the commit listener refreshes afterwards
+ *   DL-RUNCTL-05  both commit slices resolved at the PROVIDER CALL: the stage
+ *                 slice measured from the board the commit carries and the
+ *                 relic slice projected from the live registry, rather than
+ *                 from the envelope the commit listener refreshes afterwards
  *   DL-RUNCTL-06  every projection that leaves this controller cloned and
  *                 frozen, the stage goal and the board included, so no caller
  *                 holds a reference the envelope's writer also writes
+ *   DL-RUNCTL-07  one writer of `onRewardDrawn`, the private `reportReward`,
+ *                 taking the offer's own stage and requiring `accepted`
+ *   DL-RUNCTL-08  opening the next stage idempotent per stage, tracked from
+ *                 the engine's own `stage:start`
+ *   DL-RUNCTL-09  alias pairs on the relic-registry port for projection,
+ *                 hydration and activation
+ *   DL-RUNCTL-10  one transaction closing a reward round, with exactly one
+ *                 stage advance
+ *   DL-RUNCTL-11  `normalizeEnteredSeed()` bounding the raw value before the
+ *                 presence test and the trim
+ *   DL-RUNCTL-12  the stage payout deferred while a terminal win stands
+ *                 unresolved, rather than drawn over it
+ *   DL-RUNCTL-13  `summary()` describing the run in force, with the finished
+ *                 run read from `endRun()`'s return or `lastSummary()`
+ *   DL-RUNCTL-14  `begin()` restoring a standing reward round before setup, by
+ *                 projection from the catalogue rather than by drawing
+ *   DL-RUNCTL-15  the persistence write inside the reward transaction, with a
+ *                 refused write rolling the whole round back
+ *   DL-RUNCTL-16  `completeReward()` starting no stage for a refused selection
+ *   DL-RUNCTL-17  the controller subscribing to the engine through
+ *                 `observe(engine, cursors)` and never being called by it
+ *   DL-RUNCTL-18  no charge-spending member at all, a tray press being an
+ *                 inspection that spends nothing
  */
 
 import type { RulesConfig } from '../config/rules-config';
@@ -152,6 +175,7 @@ import {
   redactRunSummary,
   summarizeRunState,
   type LegacyBoardSnapshot,
+  type PendingRewardRound,
   type PersistedRelic,
   type RunOutcome,
   type RunReporter,
@@ -160,14 +184,11 @@ import {
 } from './run-state';
 import {
   migrateRunState,
+  readRunStateSnapshot,
   type RunStateLoadOutcome,
   type RunStatePersistencePort,
   type RunStateStore,
 } from './run-state-store';
-
-/* --------------------------------------------------------------------------
- * Seed origination
- * ----------------------------------------------------------------------- */
 
 /** Bytes drawn for an originated token, rendered as that many hex pairs. */
 const SEED_BYTES = 16;
@@ -181,36 +202,23 @@ const HEX_WIDTH = 2;
 /** Microsecond resolution for the fallback's monotonic component. */
 const MICROSECONDS_PER_MILLISECOND = 1000;
 
-/**
- * Distinguishes two tokens minted inside one clock tick.
- *
- * Module-scoped and monotonic. It is not randomness and is not a substitute for
- * any: it only guarantees that the fallback cannot return one value twice.
- */
+/** Distinguishes two tokens minted inside one clock tick. */
 let originationCounter = 0;
 
 /**
  * Mints a fresh run seed.
  *
- * THE ONLY UNSEEDED RANDOMNESS IN THE PRODUCT. Everything downstream of the
- * value returned here is seeded, so this call sits outside the determinism
- * guarantee and every draw taken from the substreams built on it sits
- * inside it.
- *
- * `globalThis.crypto` is a platform global under Node and in the browser, not a
- * DOM interface, and it is read behind a feature check rather than assumed.
- * NOTHING IS INSTALLED ONTO `Math.random`, and `Math.random` is not read.
- *
  * Total: returns a usable seed for every environment, including one carrying
  * neither `crypto` nor `performance`. The result always satisfies
- * `isAcceptableRunSeed()`.
+ * `isAcceptableRunSeed`.
  *
- * REPORTS NOTHING, AND NEVER THROWS. This and the four readers below run before
- * any sink exists — the correlation identifier every report carries is derived
- * from the seed this function returns — so each unusable randomness source is
- * stepped over to the next rather than reported. Decision DL-RUNCTL-01.
+ * REPORTS NOTHING, AND NEVER THROWS. This and the four readers below run
+ * before any sink exists — the correlation identifier every report carries is
+ * derived from the seed this function returns — so each unusable randomness
+ * source is stepped over to the next rather than reported. Decision
+ * DL-RUNCTL-01.
  *
- * @returns A seed no previous call returned.
+ * @returns A freshly originated seed.
  */
 export function originateRunSeed(): string {
   const source = readCryptoSource();
@@ -235,39 +243,63 @@ export function originateRunSeed(): string {
 /**
  * Mints an identifier for one run instance.
  *
- * SEPARATE FROM THE SEED, and never derived from it: two runs replaying one
- * seed carry that seed and two different identifiers, which is what the replay
- * guarantee requires of them.
- *
- * @returns An identifier no previous call returned.
+ * @returns A freshly originated identifier, unique under the same
+ *   probabilistic bound as `originateRunSeed`.
  */
 export function originateRunId(): string {
   return originateRunSeed();
 }
 
 /**
+ * Largest raw seed text this module will read before reducing it.
+ *
+ * `MAX_RUN_SEED_LENGTH` is the domain the substreams accept, and this is the
+ * ceiling on the text a reduction is allowed to WALK to get there. The two
+ * differ because the reduction trims surrounding whitespace, so the raw text may
+ * legitimately be longer than the seed it yields; four times the seed domain
+ * leaves three times `MAX_RUN_SEED_LENGTH` in slack for that, which no realistic
+ * entry approaches. Both are derived, never literals: `MAX_RUN_SEED_LENGTH` is
+ * itself the generator's ceiling less the longest substream suffix.
+ *
+ * WHY A CEILING BEFORE THE WALK. `trim()` and a presence regex are both
+ * whole-string operations, so a programmatic caller or a very large paste made
+ * the cost of reducing a seed proportional to whatever it handed in, before
+ * `MAX_RUN_SEED_LENGTH` was ever applied. Slicing first makes every step after
+ * it bounded. Decision DL-RUNCTL-11.
+ */
+export const MAX_ENTERED_SEED_LENGTH = MAX_RUN_SEED_LENGTH * 4;
+
+/**
  * Reduces a seed a player typed to one the substreams accept.
  *
- * Trimmed of surrounding whitespace, bounded to `MAX_RUN_SEED_LENGTH`, and
- * otherwise carried through OPAQUELY: a seed is a string, never a number, so
- * digits are not parsed and unicode is not transliterated. Bounding uses code
- * units, which is what `isAcceptableRunSeed()` measures, so a truncation can
- * split a surrogate pair; the result stays a valid seed because a seed is
- * never interpreted.
+ * Bounded to `MAX_ENTERED_SEED_LENGTH` FIRST, then trimmed of surrounding
+ * whitespace, then bounded to `MAX_RUN_SEED_LENGTH`, and otherwise carried
+ * through OPAQUELY: a seed is a string, never a number, so digits are not parsed
+ * and unicode is not transliterated. Bounding uses code units, which is what
+ * `isAcceptableRunSeed()` measures, so a truncation can split a surrogate pair;
+ * the result stays a valid seed because a seed is never interpreted.
  *
  * NEVER THROWS. Input that is empty, whitespace-only or not a string falls back
  * to `originateRunSeed()` rather than raising, so the run-start screen's
  * optional seed field needs no error path.
  *
  * @param input Whatever the seed field held.
- * @returns A seed satisfying `isAcceptableRunSeed()`.
+ * @returns A seed satisfying `isAcceptableRunSeed`.
  */
 export function normalizeEnteredSeed(input: string): string {
   if (typeof input !== 'string') {
     return originateRunSeed();
   }
 
-  const trimmed = input.trim();
+  // The raw ceiling, applied before any whole-string work. A slice is O(bound)
+  // rather than O(input), so nothing after this line reads more than
+  // `MAX_ENTERED_SEED_LENGTH` code units. DL-RUNCTL-11.
+  const raw =
+    input.length > MAX_ENTERED_SEED_LENGTH
+      ? input.slice(0, MAX_ENTERED_SEED_LENGTH)
+      : input;
+
+  const trimmed = raw.trim();
 
   if (trimmed.length === 0) {
     return originateRunSeed();
@@ -278,24 +310,20 @@ export function normalizeEnteredSeed(input: string): string {
       ? trimmed.slice(0, MAX_RUN_SEED_LENGTH)
       : trimmed;
 
-  // Defence in depth: the slice above already satisfies the predicate for every
-  // reachable bound. A predicate that ever disagreed would yield an originated
-  // seed rather than a seed `createRngStreams()` refuses.
+  // Defence in depth: the slice above already satisfies the predicate for
+  // every reachable bound.
   return isAcceptableRunSeed(bounded) ? bounded : originateRunSeed();
 }
 
-/** The minimum of Web Crypto this module reads, or `null` when it is absent. */
+/**
+ * The minimum of Web Crypto this module reads, or `null` when it is absent.
+ */
 interface CryptoSource {
   readonly getRandomValues?: (array: Uint8Array) => Uint8Array;
   readonly randomUUID?: () => string;
 }
 
-/**
- * Reads `globalThis.crypto` without assuming it exists.
- *
- * Guarded rather than accessed: a non-browser host, a hardened realm and an
- * insecure context can each leave it absent or partial.
- */
+/** Reads `globalThis.crypto` without assuming it exists. */
 function readCryptoSource(): CryptoSource | null {
   try {
     const candidate: unknown = (globalThis as { crypto?: unknown }).crypto;
@@ -351,12 +379,8 @@ function drawRandomUuid(source: CryptoSource): string | null {
 }
 
 /**
- * A seed from a high-resolution time source combined with a counter, for a host
- * carrying no usable `crypto`.
- *
- * NOT RANDOM, and documented as such: it is unique per call, not unguessable.
- * `performance` is read behind the same kind of guard as `crypto`, and a host
- * carrying neither still yields a distinct value through the counter.
+ * A seed from a high-resolution time source combined with a counter, for a
+ * host carrying no usable `crypto`.
  */
 function originateFallbackSeed(): string {
   originationCounter += 1;
@@ -398,39 +422,15 @@ function readMonotonicComponent(): string {
   }
 }
 
-/* --------------------------------------------------------------------------
- * Reward admission
- * ----------------------------------------------------------------------- */
-
-/**
- * Identifiers one reward offer may carry.
- *
- * A reward screen presents three, per AAP R8, and `drawRelicOffers` of
- * src/relics/relic-draw.ts returns at most one entry per relic in the pool it
- * samples. This ceiling is the bound the offer is admitted under, so a list
- * longer than any offer a draw can produce is refused whole rather than copied
- * and remembered.
- */
+/** Identifiers one reward offer may carry. */
 export const MAX_REWARD_OFFERS = 8;
 
 /**
  * Why a reward offer or a reward selection was refused.
  *
- * Carried on `RewardDrawnReport.refusal`, so the step that refused a pick is
- * visible to the observability layer rather than inferred from a `false`.
- *
- * `'offer'`        the offer presented was not a bounded set of distinct
- *                  catalogue identifiers, so nothing was recorded.
- * `'not-offered'`  the identifier chosen was not in the offer standing.
- * `'unknown'`      the registry's catalogue carries no such relic.
- * `'held'`         the run already holds the relic.
- * `'full'`         the run holds `MAX_PERSISTED_RELICS` already.
- * `'refused'`      the registry refused to take the relic on.
- * `'unconfirmed'`  the registry took it on but does not report holding it.
- *
- * ONE VOCABULARY. `'not-offered'` and `'refused'` are the spellings
- * `RewardSelectionOutcome` already used for these two reasons, so the outcome a
- * selection returns and the refusal a report carries name a refusal the same
+ * One vocabulary. `'not-offered'` and `'refused'` are the spellings
+ * `RewardSelectionOutcome` already used for these two reasons, so the outcome
+ * a selection returns and the refusal a report carries name a refusal the same
  * way.
  */
 export type RewardRefusal =
@@ -442,54 +442,8 @@ export type RewardRefusal =
   | 'refused'
   | 'unconfirmed';
 
-/* --------------------------------------------------------------------------
- * Identity resolution
- * ----------------------------------------------------------------------- */
-
 /** The stage index every run opens on. */
 const FIRST_STAGE_INDEX = 0;
-
-/**
- * What `activateRelic()` reports when no activation could be attempted: no
- * registry publishes the member, or the one that does raised.
- */
-const NO_ACTIVATION: RelicActivationOutcome = Object.freeze({
-  held: false,
-  limited: false,
-  consumed: 0,
-  remaining: undefined,
-  persisted: false,
-});
-
-/**
- * Reports whether an injected registry's activation return carries the members
- * `RelicActivationReport` declares.
- *
- * The registry is structural, so its return is measured rather than trusted: a
- * value of the wrong shape is read as no activation instead of reaching the
- * write path as `NaN` charges.
- *
- * @param value Value the registry returned.
- * @returns `true` for a usable report.
- */
-function isActivationReport(value: unknown): value is RelicActivationReport {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-
-  const report = value as {
-    held?: unknown;
-    limited?: unknown;
-    consumed?: unknown;
-  };
-
-  return (
-    typeof report.held === 'boolean' &&
-    typeof report.limited === 'boolean' &&
-    typeof report.consumed === 'number' &&
-    Number.isFinite(report.consumed)
-  );
-}
 
 /**
  * The identity one run plays under.
@@ -501,8 +455,8 @@ function isActivationReport(value: unknown): value is RelicActivationReport {
  */
 export interface RunIdentity {
   /**
-   * The run seed, verbatim, as `createRngStreams()` takes it. Guaranteed to
-   * satisfy `isAcceptableRunSeed()`, so building the substreams from it cannot
+   * The run seed, verbatim, as `createRngStreams` takes it. Guaranteed to
+   * satisfy `isAcceptableRunSeed`, so building the substreams from it cannot
    * throw.
    */
   readonly seed: string;
@@ -517,7 +471,7 @@ export interface RunIdentity {
   readonly seedProvided: boolean;
 }
 
-/** Everything `resolveRunIdentity()` reads. */
+/** Everything `resolveRunIdentity` reads. */
 export interface ResolveRunIdentityOptions {
   /**
    * Where the stored envelope is read from. Only `readJson` is used, and the
@@ -526,18 +480,18 @@ export interface ResolveRunIdentityOptions {
   readonly storage: Pick<RunStatePersistencePort, 'readJson'>;
 
   /**
-   * Originates a seed or a run identifier. Called at most twice — first for the
-   * seed, then for the run identifier — and not at all when a stored envelope
-   * supplies both.
+   * Originates a seed or a run identifier. Called at most twice — first for
+   * the seed, then for the run identifier — and not at all when a stored
+   * envelope supplies both.
    *
-   * Defaults to `originateRunSeed()`, so this function is callable with a port
+   * Defaults to `originateRunSeed`, so this function is callable with a port
    * alone. The composition root injects the same factory it uses elsewhere.
    */
   readonly createToken?: () => string;
 
   /**
    * A caller-supplied seed — the run-start screen's optional seed input.
-   * Adopted only when `isAcceptableRunSeed()` accepts it, and adopting one
+   * Adopted only when `isAcceptableRunSeed` accepts it, and adopting one
    * starts a FRESH run: a seed the player chose cannot continue a run that was
    * played under a different one.
    */
@@ -549,19 +503,18 @@ export interface ResolveRunIdentityOptions {
  *
  * REPORTS NOTHING, AND NEVER THROWS. This runs before the observability layer
  * exists — it is what supplies the correlation identifier that layer is keyed
- * on — so it has no sink to report to and cannot acquire one without inverting
- * the dependency. The authoritative load is `RunController.begin()`, which runs
- * once the sink exists and is the read that reports a corrupted payload, a
- * migration or a board-size reconciliation.
+ * on — so it has no sink to report to and cannot acquire one without
+ * inverting the dependency. The authoritative load is
+ * `RunController.begin()`, which runs once the sink exists and is the read
+ * that reports a corrupted payload, a migration or a board-size
+ * reconciliation.
  *
  * The two reads agree because both reduce the same stored value through the
  * same validation: an envelope this function adopts is an envelope
  * `RunStateStore.load()` also adopts.
  *
  * @param options Port, token factory and optional caller-supplied seed.
- * @returns The resolved identity. A stored envelope that is absent,
- *   unreadable, of an unknown version or invalid in any member yields an
- *   originated seed and run identifier rather than a refusal.
+ * @returns The resolved identity.
  */
 export function resolveRunIdentity(
   options: ResolveRunIdentityOptions,
@@ -569,11 +522,7 @@ export function resolveRunIdentity(
   const createToken = options.createToken ?? originateRunSeed;
   const requested = options.seed;
 
-  // The supplied seed is measured as given, NOT normalised. A seed the
-  // substreams would refuse falls through to the stored identity below, which
-  // is a different outcome from the truncation `normalizeEnteredSeed()`
-  // performs; that function is the run-start screen's own reduction, applied
-  // before a seed reaches this resolution.
+  // The supplied seed is measured as given, NOT normalised.
   if (
     typeof requested === 'string' &&
     requested.length > 0 &&
@@ -604,18 +553,25 @@ export function resolveRunIdentity(
 /**
  * Reads `seed` and `runId` out of the stored envelope, or reports that none is
  * usable.
- *
- * Every failure mode collapses to `null`: a port that throws, a value that is
- * not an envelope, a version outside the readable history, and a payload whose
- * validation refuses any member. The seed of a validated envelope has already
- * been measured against `isAcceptableRunSeed()` by that validation, so what
- * this returns is safe to build substreams from.
  */
 function readStoredIdentity(
   storage: Pick<RunStatePersistencePort, 'readJson'>,
 ): { readonly seed: string; readonly runId: string } | null {
   try {
-    const stored = storage.readJson(RUN_STATE_KEY);
+    // The SAME bounded read `RunStateStore.load()` and `peekRelics()` perform,
+    // rather than a third independent one: `readRunStateSnapshot()` applies the
+    // envelope's raw-size ceiling before anything parses, and the storage
+    // adapter memoises a parse per key on the exact stored text, so the three
+    // startup consumers share one parse of one bounded blob. An oversized value
+    // yields no identity and the run originates a fresh one, which is the same
+    // answer the authoritative load reaches. DL-RUNSTORE-06, DL-RUNCTL-01.
+    const snapshot = readRunStateSnapshot(storage);
+
+    if (!snapshot.present || snapshot.oversize) {
+      return null;
+    }
+
+    const stored = snapshot.parsed;
     const restored = migrateRunState(stored, classifyRunStateVersion(stored));
 
     if (restored === null) {
@@ -628,17 +584,13 @@ function readStoredIdentity(
   }
 }
 
-/* --------------------------------------------------------------------------
- * The engine port
- * ----------------------------------------------------------------------- */
-
 /**
  * The slice of the engine this controller uses.
  *
- * Narrowed to three members so the controller cannot reach anything else:
- * it observes, it reads the board snapshot it persists, and it resolves a
- * stage whose goal has been met. `Engine` in src/engine/engine.ts satisfies
- * this structurally; nothing imports the class.
+ * Narrowed to three members so the controller cannot reach anything else: it
+ * observes, it reads the board snapshot it persists, and it resolves a stage
+ * whose goal has been met. `Engine` in src/engine/engine.ts satisfies this
+ * structurally; nothing imports the class.
  */
 export interface RunEnginePort {
   /** Subscription surface. The controller never emits. */
@@ -655,21 +607,23 @@ export interface RunEnginePort {
    *
    * THE COUNTERPART OF `endStage()`, and the second half of a stage transition:
    * `endStage()` resolves the stage that finished, this controller advances its
-   * own index and goal, and this begins the stage that follows. The engine reads
-   * the index from the provider this controller supplies, so the advance must
-   * precede the call.
+   * own index and goal, and this begins the stage that follows. The engine
+   * reads the index from the provider this controller supplies, so the advance
+   * must precede the call.
    *
-   * The commit this ends with is also what PERSISTS the transition, including a
-   * relic just picked up.
+   * Called with NO argument, which carries the board already in play into the
+   * new stage. The optional parameter is the engine's own — a snapshot reopens
+   * the stage on that board instead — and is declared here so an engine
+   * satisfies the port either way.
    *
-   * Called with NO argument, which carries the board already in play into the new
-   * stage. The optional parameter is the engine's own — a snapshot reopens the
-   * stage on that board instead — and is declared here so an engine satisfies the
-   * port either way.
+   * Called with NO argument, which carries the board already in play into the
+   * new stage. The optional parameter is the engine's own — a snapshot
+   * reopens the stage on that board instead — and is declared here so an
+   * engine satisfies the port either way.
    *
-   * Optional so a test double that only observes still satisfies the port. Where
-   * it is absent the stage index advances and no stage is begun, which is the
-   * behaviour of an engine that does not implement stage transitions.
+   * Optional so a test double that only observes still satisfies the port.
+   * Where it is absent the stage index advances and no stage is begun, which is
+   * the behaviour of an engine that does not implement stage transitions.
    */
   startStage?(board?: SerializedGameState | null): void;
 }
@@ -677,7 +631,7 @@ export interface RunEnginePort {
 /**
  * The subscription surface of `EngineEvents`, and nothing else.
  *
- * `on()` APPENDS, so attaching here neither displaces a listener already
+ * `on` APPENDS, so attaching here neither displaces a listener already
  * attached nor reorders the ones after it. `off` and `emit` are deliberately
  * absent: this controller subscribes and never emits or detaches another
  * subscriber.
@@ -687,22 +641,22 @@ export type EngineEventSource = Pick<EngineEvents, 'on'>;
 /**
  * The four move directions, as `EnginePort.move` accepts them.
  *
- * DECLARED HERE, NOT IMPORTED, for the same reason every other member of these
- * ports is: this folder names src/engine's types structurally. Identical to
- * `Direction` of src/engine/types.ts — 0 up, 1 right, 2 down, 3 left — so an
- * engine satisfies the port and a caller cannot reach the engine with a fifth
- * value through this declaration.
+ * DECLARED HERE, NOT IMPORTED, for the same reason every other member of
+ * these ports is: this folder names src/engine's types structurally.
+ * Identical to `Direction` of src/engine/types.ts — 0 up, 1 right, 2 down, 3
+ * left — so an engine satisfies the port and a caller cannot reach the engine
+ * with a fifth value through this declaration.
  */
 export type MoveDirection = 0 | 1 | 2 | 3;
 
 /**
  * The slice of the engine a run START drives, beyond the observation surface.
  *
- * `Engine` in src/engine/engine.ts satisfies this structurally; nothing imports
- * the class, so src/engine never imports this folder. Named after the members
- * the engine actually exposes — `continuePlaying()` is the engine's method for
- * play continued past a win, and `setup()` takes the reconciled snapshot the
- * store returned.
+ * `Engine` in src/engine/engine.ts satisfies this structurally; nothing
+ * imports the class, so src/engine never imports this folder. Named after the
+ * members the engine actually exposes — `continuePlaying()` is the engine's
+ * method for play continued past a win, and `setup()` takes the reconciled
+ * snapshot the store returned.
  */
 export interface EnginePort extends RunEnginePort {
   /** Opens a board, from the reconciled snapshot when one is supplied. */
@@ -716,9 +670,9 @@ export interface EnginePort extends RunEnginePort {
    *
    * NARROWED TO THE FOUR DIRECTIONS, not `number`: a port widening the engine's
    * own parameter type made an out-of-contract direction reachable through this
-   * declaration without a type error, and the engine assumed the narrowed union.
-   * `MoveDirection` restates `Direction` of src/engine/types.ts rather than
-   * importing a value from it, keeping this folder's ports structural.
+   * declaration without a type error, and the engine assumed the narrowed
+   * union. `MoveDirection` restates `Direction` of src/engine/types.ts rather
+   * than importing a value from it, keeping this folder's ports structural.
    */
   move(direction: MoveDirection): boolean;
 
@@ -729,45 +683,37 @@ export interface EnginePort extends RunEnginePort {
   continuePlaying(): void;
 }
 
-/**
- * The slice of a relic registry this controller round-trips through.
- *
- * DECLARED HERE, NOT IMPORTED. src/relics/ is not named by this module, so the
- * persisted wire format stays independent of that folder's internal types and
- * this folder compiles and is exercised without it. Every member is optional,
- * so a controller constructed without a registry persists the relics it
- * already holds and resolves rewards by identifier alone.
- */
+/** The slice of a relic registry this controller round-trips through. */
 export interface RelicRegistryPort {
   /**
    * Projects the relics held, in pickup order, for the envelope to carry.
    * Consulted before each write when present, so charges a handler spent and
    * state a handler advanced reach the envelope.
    *
-   * Satisfied by `RelicRegistry.serialize()`.
+   * Satisfied by `RelicRegistry.serialize`.
    */
   readonly serialize?: () => readonly PersistedRelic[];
 
   /**
    * Takes one relic on for the rest of the run: appends it at the next pickup
-   * position, seeds its budget and its state slot, and binds its handlers so the
-   * hook bus dispatches to it from the next dispatch onwards.
+   * position, seeds its budget and its state slot, and binds its handlers so
+   * the hook bus dispatches to it from the next dispatch onwards.
    *
    * THE ACTIVATION STEP, under the second of the two names it may be published
    * as. `resolveRelic` only reads; this is what makes a chosen relic actually
-   * fire. `takeRelicOn()` reads `pickUpRelic` first and this next, so a registry
-   * publishing either has its relics registered — and a registry publishing
-   * neither can record a reward but cannot make it take effect.
+   * fire. `takeRelicOn()` reads `pickUpRelic` first and this next, so a
+   * registry publishing either has its relics registered — and a registry
+   * publishing neither can record a reward but cannot make it take effect.
    *
    * @param relicId Identifier of the relic to take on.
-   * @returns The entry to persist, or `null` where the identifier is unknown,
-   *   already held, or the bus refused the registration.
+   * @returns The entry to persist, or `null` where the identifier is
+   *   unknown, already held, or the bus refused the registration.
    */
   readonly activateRelic?: (relicId: string) => PersistedRelic | null;
 
   /**
-   * Identifiers of the relics held, in pickup order. Read when an offer is drawn
-   * so a relic the run already holds is never offered again.
+   * Identifiers of the relics held, in pickup order. Read when an offer is
+   * drawn so a relic the run already holds is never offered again.
    */
   readonly ownedRelicIds?: () => readonly string[];
 
@@ -775,44 +721,39 @@ export interface RelicRegistryPort {
    * Restores the relics a loaded envelope carried, in pickup order. `state` is
    * handed back exactly as it was persisted.
    *
-   * Satisfied by `RelicRegistry.restore()`.
+   * Satisfied by `RelicRegistry.restore`.
    */
   readonly restore?: (relics: readonly PersistedRelic[]) => void;
 
   /**
-   * The same projection as `serialize`, under the name this port first declared
-   * it. A registry supplying either is read through whichever it supplies.
+   * The same projection as `serialize`, under the name this port first
+   * declared it. A registry supplying either is read through whichever it
+   * supplies.
    *
-   * Satisfied by `RelicRegistry.snapshotRelics()`.
+   * Satisfied by `RelicRegistry.snapshotRelics`.
    */
   readonly snapshotRelics?: () => readonly PersistedRelic[];
 
   /**
-   * The same hydration as `restore`, under the name this port first declared it.
+   * The same hydration as `restore`, under the name this port first declared
+   * it.
    *
-   * Satisfied by `RelicRegistry.restoreRelics()`.
+   * Satisfied by `RelicRegistry.restoreRelics`.
    */
   readonly restoreRelics?: (relics: readonly PersistedRelic[]) => void;
 
   /**
    * Resolves a HELD identifier to the entry to persist, and yields `null` for
-   * one the registry does not hold. A registry without this member persists the
-   * bare identifier.
+   * one the registry does not hold. A registry without this member persists
+   * the bare identifier.
    *
-   * Satisfied by `RelicRegistry.persistedEntry()`.
+   * Satisfied by `RelicRegistry.persistedEntry`.
    */
   readonly resolveRelic?: (relicId: string) => PersistedRelic | null;
 
   /**
    * Reports the board edge length a set of PERSISTED entries implies, and
    * `undefined` where they imply none.
-   *
-   * Consulted before the envelope is loaded, on the entries the store peeked at
-   * in storage, and its answer becomes the `relicBoardSize` the board-size
-   * reconciliation weighs above the configured size. A board-shrinking relic's
-   * effect therefore survives a reload: without this the lattice would be
-   * rebuilt at the size the saved snapshot carried and the shrink would be
-   * silently undone.
    *
    * A registry without this member loads with no relic-implied size, which is
    * the behaviour of a run holding no board-mutating relic.
@@ -828,7 +769,7 @@ export interface RelicRegistryPort {
    * whether or not it is held. A reward selection is refused when this yields
    * `false`, so an identifier no catalogue carries can never be picked up.
    *
-   * Satisfied by `RelicRegistry.knows()`.
+   * Satisfied by `RelicRegistry.knows`.
    */
   readonly knows?: (relicId: string) => boolean;
 
@@ -838,44 +779,28 @@ export interface RelicRegistryPort {
    * an unknown identifier, a relic already held, or a registration the bus
    * declined.
    *
-   * THE PICKUP AUTHORITY. Without this member a chosen relic reaches the
-   * envelope but never reaches the bus, so it is recorded and never fires.
-   *
-   * Satisfied by `RelicRegistry.pickUp()`, whose `ActiveRelic | undefined`
+   * Satisfied by `RelicRegistry.pickUp`, whose `ActiveRelic | undefined`
    * return is read only for presence.
    */
   readonly pickUp?: (relicId: string) => unknown;
 
-  /**
-   * Spends charges from a held relic's budget and reports the outcome.
-   *
-   * Satisfied by `RelicRegistry.activate()`, whose `ChargeConsumption` return
-   * carries exactly these members.
-   */
-  readonly activate?: (
-    relicId: string,
-    amount?: number,
-  ) => RelicActivationReport;
+  // NO CHARGE-SPENDING MEMBER. `RelicRegistry.activate()` exists and is the
+  // registry's own charge ledger, but it is reached by the hook bus on the
+  // dispatch that ran a relic's handler — never from here. Naming it on this
+  // port would re-open the path where a press debits a budget while producing
+  // no board effect. DL-RUNCTL-18.
 
-  /**
-   * Reports whether the registry's catalogue carries an identifier.
-   *
-   * THE MEMBERSHIP AUTHORITY. An offer identifier and a selected identifier are
-   * both admitted against this, so a caller cannot present or choose a relic
-   * that is not in the pool the seeded draw sampled. A registry without this
-   * member cannot be asked, and the identifier is then admitted on its shape
-   * alone.
-   */
+  /** Reports whether the registry's catalogue carries an identifier. */
   readonly knowsRelic?: (relicId: string) => boolean;
 
   /**
-   * Takes one relic on LIVE — registering its handlers so they fire on the next
-   * hook — and yields the entry to persist for exactly the relic the registry
-   * accepted.
+   * Takes one relic on LIVE — registering its handlers so they fire on the
+   * next hook — and yields the entry to persist for exactly the relic the
+   * registry accepted.
    *
    * The step `resolveReward()` is built around: without it a chosen reward is
-   * appended to this controller's list alone, fires on no hook, and is erased by
-   * the next commit's projection.
+   * appended to this controller's list alone, fires on no hook, and is erased
+   * by the next commit's projection.
    *
    * @returns The accepted entry, and `null` for an identifier the registry
    *   refused.
@@ -885,24 +810,13 @@ export interface RelicRegistryPort {
   /**
    * Reports whether the registry holds the relic live.
    *
-   * Read after a pickup, so success is reported only where the live registry and
-   * the persisted envelope agree that the relic was taken on.
+   * Read after a pickup, so success is reported only where the live registry
+   * and the persisted envelope agree that the relic was taken on.
    */
   readonly holdsRelic?: (relicId: string) => boolean;
 }
 
-/* --------------------------------------------------------------------------
- * The reward transaction
- * ----------------------------------------------------------------------- */
-
-/**
- * One relic as a reward screen presents it: plain data, no handler.
- *
- * DECLARED HERE, NOT IMPORTED, for the same reason `RelicRegistryPort` is: a
- * reward screen shows a name, a rarity, a description and the hooks a relic
- * binds, and none of that needs the relic's behaviour. Nothing on this shape is
- * a function, so an offer round-trips through the reward report unchanged.
- */
+/** One relic as a reward screen presents it: plain data, no handler. */
 export interface RewardOffer {
   readonly id: string;
   readonly name: string;
@@ -921,10 +835,6 @@ export interface RewardDrawPort {
   /**
    * Draws distinct offers, excluding the relics the run already holds.
    *
-   * The draw consumes the run's `relic-draw` and `rarity-weight` substreams, so
-   * one seed and one move list yield one offer sequence — and returns fewer
-   * offers rather than raising when the pool cannot fill the request.
-   *
    * @param input How many offers to draw and which identifiers to exclude.
    * @returns The offers, in presentation order.
    */
@@ -932,6 +842,24 @@ export interface RewardDrawPort {
     readonly count: number;
     readonly ownedIds: readonly string[];
   }): readonly RewardOffer[];
+
+  /**
+   * Projects offers a stored round named, WITHOUT drawing.
+   *
+   * The counterpart of `draw` on the load path: a round that survived a reload
+   * is restored by resolving its identifiers against the relic catalogue, so the
+   * player is shown the same three cards rather than a fresh draw, and no
+   * substream cursor moves. An identifier the catalogue no longer declares is
+   * dropped rather than raised on, so a round that named one still restores the
+   * rest.
+   *
+   * Optional: a composition supplying no projector restores no round, and the
+   * run resolves the stage it resumed on as if the offer had not been drawn.
+   *
+   * @param relicIds Identifiers to resolve, in presentation order.
+   * @returns The offers, in the order the identifiers were given.
+   */
+  project?(relicIds: readonly string[]): readonly RewardOffer[];
 }
 
 /** Why a reward selection was refused, or that it was accepted. */
@@ -942,6 +870,18 @@ export type RewardSelectionOutcome =
   | 'already-resolved'
   | 'unknown-relic'
   | 'refused';
+
+/**
+ * What the `refusal` member of a `RewardDrawnReport` carries.
+ *
+ * The two vocabularies of this module, unioned and with `'accepted'` removed:
+ * `resolveReward()` and `recordRewardOffer()` name the STEP that refused, and
+ * `selectReward()` names the OUTCOME code it returned. A report carries
+ * whichever its writer speaks, and never a decorated identifier.
+ */
+export type RewardReportRefusal =
+  | RewardRefusal
+  | Exclude<RewardSelectionOutcome, 'accepted'>;
 
 /** What one reward selection did. */
 export interface RewardSelection {
@@ -967,7 +907,8 @@ const NO_OFFER_STAGE = -1;
 const NO_STARTED_STAGE = -1;
 
 /**
- * Copies one persisted relic entry, detaching its state slot by structural copy.
+ * Copies one persisted relic entry, detaching its state slot by structural
+ * copy.
  *
  * The registry's projection is the registry's own object. Copying it here keeps
  * a later write from carrying a reference the registry still mutates, which is
@@ -988,21 +929,15 @@ function cloneRelicEntry(relic: PersistedRelic): PersistedRelic {
     try {
       copy.state = JSON.parse(JSON.stringify(relic.state)) as unknown;
     } catch {
-      // A slot holding a cycle or a value JSON cannot express is dropped, which
-      // is what the store would do with it on the next write anyway.
+      // A slot holding a cycle or a value JSON cannot express is dropped,
+      // which is what the store would do with it on the next write anyway.
     }
   }
 
   return copy;
 }
 
-/**
- * Whether two persisted relic lists differ in identifier, order or budget.
- *
- * Compares the members a refusal or a renumbering would move. `state` is
- * deliberately NOT compared: a handler advances its own slot on nearly every
- * turn, so comparing it would report a normalisation on every load.
- */
+/** Whether two persisted relic lists differ in identifier, order or budget. */
 function relicsDiffer(
   before: readonly PersistedRelic[],
   after: readonly PersistedRelic[],
@@ -1029,36 +964,25 @@ function relicsDiffer(
 }
 
 /**
- * What a registry reports back from an activation.
+ * Everything one reward round consists of, recorded so a refused persistence
+ * write can put all of it back.
  *
- * Declared here rather than imported so this folder does not depend on
- * src/engine/hook-bus.ts; `ChargeConsumption` of that module carries these
- * members and therefore satisfies it structurally.
+ * Internal to the controller's reward transaction and not part of its published
+ * surface: it is exported only so the two private members that produce and
+ * consume it can name one type.
  */
-export interface RelicActivationReport {
-  /** Whether the identifier named a relic the registry holds. */
-  readonly held: boolean;
-
-  /** Whether that relic carries a charge budget at all. */
-  readonly limited: boolean;
-
-  /** Charges actually taken, which is `0` for every refused activation. */
-  readonly consumed: number;
-
-  /** Charges remaining, absent on an unheld or unlimited relic. */
-  readonly remaining?: number | undefined;
+export interface RewardRoundSnapshot {
+  readonly offer: readonly RewardOffer[];
+  readonly offeredRelicIds: readonly string[];
+  readonly offerStageIndex: number;
+  readonly resolvedRelicId: string | null;
+  readonly stageIndex: number;
+  readonly stageGoal: StageGoal;
+  readonly goalProgress: number;
+  readonly pendingReward: PendingRewardRound | undefined;
 }
 
-/** What `RunController.activateRelic()` reports. */
-export interface RelicActivationOutcome extends RelicActivationReport {
-  /**
-   * Whether the envelope carrying the new budget reached storage. `false`
-   * whenever nothing was consumed, because nothing then needed writing.
-   */
-  readonly persisted: boolean;
-}
-
-/** What `RunController.resolveReward()` reports. */
+/** What `RunController.resolveReward` reports. */
 export interface RewardResolution {
   /** Whether the relic joined the held list. */
   readonly accepted: boolean;
@@ -1066,23 +990,19 @@ export interface RewardResolution {
   /**
    * Why a selection was refused, and `null` where it was accepted.
    *
-   * Carries `RewardRefusal`, whose members `recordRewardOffer()` and this
-   * method share, so the offer's own refusal and a selection's are reported in
-   * one vocabulary.
+   * Carries `RewardRefusal`, whose members `recordRewardOffer` and this method
+   * share, so the offer's own refusal and a selection's are reported in one
+   * vocabulary.
    */
   readonly refusal: RewardRefusal | null;
 }
-
-/* --------------------------------------------------------------------------
- * The controller
- * ----------------------------------------------------------------------- */
 
 /** Every construction parameter. `store`, `identity`, `config` required. */
 export interface RunControllerOptions {
   /** Where the envelope is read and written. */
   readonly store: RunStateStore;
 
-  /** The identity `resolveRunIdentity()` produced. */
+  /** The identity `resolveRunIdentity` produced. */
   readonly identity: RunIdentity;
 
   /**
@@ -1108,11 +1028,6 @@ export interface RunControllerOptions {
   /**
    * Correlation identifier every report from this controller carries.
    * Injected, never derived here.
-   *
-   * A READER IS ACCEPTED: pass a function and every report resolves the
-   * identifier at the moment it is made, so a run started without a reload —
-   * one this controller outlived the construction of — reports under its own
-   * identifier rather than under the first run of the page load.
    */
   readonly correlationId?: CorrelationSource;
 
@@ -1125,8 +1040,8 @@ export interface RunControllerOptions {
 
   /**
    * The seeded draw a reward offer is taken from. Absent on a controller that
-   * offers no reward, in which case a cleared stage advances immediately — the
-   * behaviour of a run played without the relic system.
+   * offers no reward, in which case a cleared stage advances immediately —
+   * the behaviour of a run played without the relic system.
    */
   readonly rewards?: RewardDrawPort;
 
@@ -1137,13 +1052,11 @@ export interface RunControllerOptions {
    * Called whenever the run's identity changes, BEFORE the engine opens a board
    * on it, so the composition root can rebuild everything scoped to the run.
    *
-   * WHY A CALLBACK. This controller does not own the substreams — they are
-   * built from `seed()` and `cursors()` by the composition root — nor the
-   * correlation context, which src/observability/logger.ts derives. A new run
-   * mints a new seed and a new run identifier, and every one of those
-   * run-scoped constructs has to be replaced together with them: leaving the
-   * old substreams in place made a "new" run replay the previous seed's
-   * sequence, which is the determinism guarantee the run seed provides.
+   * THE RUN-SCOPED CONSTRUCTS LIVE OUTSIDE THIS CONTROLLER: the substreams are
+   * built from `seed()` and `cursors()` by the composition root, and the
+   * correlation context is derived by src/observability/logger.ts. A new run
+   * mints a new seed and a new run identifier, and every construct scoped to
+   * the run is replaced together with them. Decision DL-RUNCTL-04.
    *
    * Called before `engine.setup()`, so the opening spawns are drawn from the
    * NEW substreams rather than the ones the previous run left mid-sequence.
@@ -1175,13 +1088,9 @@ export interface RunScope {
   readonly seedProvided: boolean;
 }
 
-/** Everything `RunController.startRun()` reads. */
+/** Everything `RunController.startRun` reads. */
 export interface StartRunOptions {
-  /**
-   * The seed to play. Passed through `normalizeEnteredSeed()`, so a value a
-   * player typed is trimmed and bounded rather than refused. Absent means
-   * originate one.
-   */
+  /** The seed to play. Absent means originate one. */
   readonly seed?: string;
 
   /**
@@ -1191,21 +1100,7 @@ export interface StartRunOptions {
   readonly board?: SerializedGameState | null;
 }
 
-/**
- * Owns the run in progress.
- *
- * LIFECYCLE
- *   `begin()` adopts a stored envelope or assembles a fresh one. `observe()`
- *   attaches to the engine, after which the controller keeps the envelope
- *   current: the stage's goal progress is measured as each move resolves, the
- *   envelope is written on each commit, a stage whose goal is met is resolved
- *   and advanced, and a lost run is summarised and cleared.
- *
- * WRITES ARE BEST-EFFORT AND NEVER THROW
- *   `RunStateStore` reports and returns rather than throwing, for every input
- *   and against any port, so a full quota or a hostile storage implementation
- *   degrades to an unpersisted run rather than an exception on the commit path.
- */
+/** Owns the run in progress. */
 export class RunController {
   readonly identity: RunIdentity;
 
@@ -1220,12 +1115,8 @@ export class RunController {
   private readonly reporter: RunReporter;
 
   /**
-   * Reads the correlation identifier every report from this controller carries.
-   *
-   * Resolved from a pinned string or a shared scope, and read at report time
-   * rather than once at construction, so a run started without a reload reports
-   * under its own identifier rather than under the run this controller was
-   * constructed for.
+   * Reads the correlation identifier every report from this controller
+   * carries.
    */
   private readonly readRunCorrelationId: () => CorrelationId;
 
@@ -1241,27 +1132,19 @@ export class RunController {
    *
    * The RECONCILED board: `RunStateStore.load()` has already resolved a
    * snapshot saved at another edge length, so this is safe to open a grid on.
-   * `null` is meaningful rather than merely absent — it is what the engine must
-   * be passed for it to insert start tiles.
+   * `null` is meaningful rather than merely absent — it is what the engine
+   * must be passed for it to insert start tiles.
    */
   private openingSnapshot: LegacyBoardSnapshot | null;
 
-  /**
-   * Whether the last load READ an envelope, whatever became of it.
-   *
-   * Distinct from whether one was ADOPTED, and the distinction decides what a
-   * board with no adopted envelope opens on: no envelope at all is a save
-   * written before the upgrade, whose board lives under the legacy key and must
-   * still load, while an envelope that was read and refused belongs to another
-   * run and must not have its board opened.
-   */
+  /** Whether the last load READ an envelope, whatever became of it. */
   private storedEnvelopeRead: boolean;
 
   /**
    * The offer standing: the identifiers `recordRewardOffer()` admitted, and the
    * ONLY identifiers `resolveReward()` will take on. Empty while no offer
-   * stands, which is the state a refused offer and a resolved reward both leave.
-   * The offer itself is drawn elsewhere.
+   * stands, which is the state a refused offer and a resolved reward both
+   * leave. The offer itself is drawn elsewhere.
    */
   private offeredRelicIds: readonly string[];
 
@@ -1271,27 +1154,12 @@ export class RunController {
   /** How many relics one offer presents. */
   private readonly offerCount: number;
 
-  /**
-   * The offer a reward screen is presenting, frozen.
-   *
-   * THE IMMUTABLE ACTIVE OFFER, and the only set `selectReward` accepts an
-   * identifier from. Empty while no reward is pending, which is what makes a
-   * selection outside a reward — from a corrupted store, or from a caller
-   * reaching past the screen — refusable rather than merely unlikely.
-   */
+  /** The offer a reward screen is presenting, frozen. */
   private offer: readonly RewardOffer[];
 
   /**
    * Stage index in force when the standing offer was drawn, or `-1` while none
    * stands.
-   *
-   * WHAT DECIDES WHETHER A SELECTION ADVANCES. `stage:end` already advances the
-   * stage during its own emission — deliberately, so the commit that ends a
-   * stage reports the stage now in force — and a controller observed by an
-   * engine therefore reaches `selectReward` on an index that has already moved.
-   * A controller driven directly, with no engine observing, has not. Comparing
-   * the index against this value distinguishes the two, so exactly one advance
-   * happens per cleared stage either way.
    */
   private offerStageIndex: number;
 
@@ -1302,23 +1170,35 @@ export class RunController {
    * WHAT SEPARATES A RESOLVED ROUND FROM NO ROUND AT ALL. An accepted selection
    * clears the offer and the offered identifiers together, so neither of those
    * can answer "was this round already resolved?" afterwards: reading them
-   * reported `'no-offer'` for a double-clicked card and `'already-resolved'` for
-   * an offer that had been recorded and never drawn. Cleared whenever a new
+   * reported `'no-offer'` for a double-clicked card and `'already-resolved'`
+   * for an offer that had been recorded and never drawn. Cleared whenever a new
    * round opens — a fresh draw, a recorded offer, a begun or started run, a
    * finished one.
    */
   private resolvedRelicId: string | null;
 
   /**
+   * The stage index the resolved reward round was OFFERED at, and
+   * `NO_OFFER_STAGE` while no round has been resolved.
+   *
+   * Held because `closeRewardRound()` clears `offerStageIndex`, so a selection
+   * refused as `'already-resolved'` afterwards had nothing left to attribute
+   * itself to and reported the stage the run had moved on to. Written and
+   * cleared wherever `resolvedRelicId` is. DL-RUNCTL-07.
+   */
+  private resolvedStageIndex: number;
+
+  /**
    * The stage index the ENGINE last reported starting, and `-1` while it has
    * reported none.
    *
    * WHAT MAKES A STAGE OPEN IDEMPOTENT. Two collaborators can open the stage a
-   * cleared one advanced to — the commit handler, and `completeReward()` closing
-   * the reward that gated it — and both opening it dispatched `onStageStart`
-   * twice for one stage, so every per-stage relic effect applied twice. Recorded
-   * from the engine's own `stage:start`, so it names the stage the engine
-   * actually began rather than the one this controller intended to begin.
+   * cleared one advanced to — the commit handler, and `completeReward()`
+   * closing the reward that gated it — and both opening it dispatched
+   * `onStageStart` twice for one stage, so every per-stage relic effect applied
+   * twice. Recorded from the engine's own `stage:start`, so it names the stage
+   * the engine actually began rather than the one this controller intended to
+   * begin.
    */
   private startedStageIndex: number;
 
@@ -1327,38 +1207,36 @@ export class RunController {
 
   /**
    * Whether the stage's goal has been met and not yet resolved. Set by the
-   * progress measurement and cleared by `advanceStage()`.
+   * progress measurement and cleared by `advanceStage`.
    */
   private stageCleared: boolean;
 
   /**
-   * Guards the one re-entrant path: `endStage()` commits, so the commit
-   * handler that called it is re-entered before it returns. At most one stage
-   * is resolved per commit, and a board that clears several stages at once
-   * advances one stage per commit until it does not.
+   * Guards the one re-entrant path: `endStage` commits, so the commit handler
+   * that called it is re-entered before it returns.
    */
   private resolvingStage: boolean;
 
-  /** Whether the run in force has ended. Set by `finish()`. */
+  /** Whether the run in force has ended. Set by `finish`. */
   private ended: boolean;
 
   /** The last finished run, for a summary screen to read. */
   private finished: RunSummary | null;
 
   /**
-   * The board this run opens on, as `board()` reports it. Three states, and the
+   * The board this run opens on, as `board` reports it. Three states, and the
    * distinction between the last two is what keeps a legacy save loadable; see
-   * `board()`.
+   * `board`.
    */
   private adoptedBoard: SerializedGameState | null | undefined;
 
   /**
    * Reads the board of the engine being observed, or `null` before one is.
    *
-   * Attached by `observe()` and released with it. `stageContext()` measures
+   * Attached by `observe` and released with it. `stageContext` measures
    * through it, so a commit reached without a `move:after` — a withdrawn move
-   * that reseated the board, a stage end that adopted a handler's score — still
-   * carries a stage slice measured from the board it commits.
+   * that reseated the board, a stage end that adopted a handler's score —
+   * still carries a stage slice measured from the board it commits.
    */
   private boardReader: (() => SerializedGameState) | null;
 
@@ -1386,6 +1264,7 @@ export class RunController {
     this.offer = NO_OFFER;
     this.offerStageIndex = NO_OFFER_STAGE;
     this.resolvedRelicId = null;
+    this.resolvedStageIndex = NO_OFFER_STAGE;
     this.startedStageIndex = NO_STARTED_STAGE;
     this.current = this.freshState(this.identity.runId);
     this.stageCleared = false;
@@ -1399,14 +1278,13 @@ export class RunController {
   /**
    * The board the engine should OPEN ON, as the one board-load authority.
    *
-   * WHY AN AUTHORITY IS NEEDED. `Engine.setup()` called with no argument reads
-   * the legacy `gameState` key through its own storage port. Doing that ALONGSIDE
-   * a run load is two loads of two different values: the reconciled board the
-   * run produced — the one whose edge length was weighed against the configured
-   * size and against any board-shrinking relic — is discarded, and the lattice is
-   * rebuilt from whatever the legacy snapshot happened to carry, which is how a
-   * collapsed board silently returns at its original size. Exactly one of the
-   * two loads must decide, and this reports which.
+   * EXACTLY ONE LOAD DECIDES. `Engine.setup()` called with no argument reads
+   * the legacy `gameState` key through its own storage port, and that read
+   * alongside a run load is two loads of two different values — the
+   * reconciled board the run produced, whose edge length was weighed against
+   * the configured size and against any board-shrinking relic, against
+   * whatever the legacy snapshot carries. This reports which of the two
+   * decides.
    *
    * THREE STATES, EACH WITH A DIFFERENT MEANING, and each mapping onto a
    * distinct `Engine.setup()` argument:
@@ -1434,18 +1312,8 @@ export class RunController {
   /**
    * Performs the authoritative load and adopts its result.
    *
-   * THE READ THAT REPORTS. `resolveRunIdentity()` read the same value silently
-   * to produce the identity; this read goes through `RunStateStore.load()`, so
-   * a corrupted payload, a migrated version and a board-size reconciliation all
-   * reach the injected sink here.
-   *
-   * A stored envelope is adopted only when its seed is the seed the run is
-   * being played under. It always is when the identity was resolved from that
-   * same envelope; it is not when a caller supplied a seed, and adopting the
-   * stored stage and relics in that case would put another run's progress on a
-   * board playing a different sequence.
-   *
-   * @returns The load outcome, for a caller that wants to report or display it.
+   * @returns The load outcome, for a caller that wants to report or display
+   *   it.
    */
   begin(): RunStateLoadOutcome {
     const result = this.store.load({
@@ -1454,10 +1322,6 @@ export class RunController {
       stageGoal: this.goalForStage(FIRST_STAGE_INDEX),
       boardSize: this.config.boardSize,
 
-      // Derived from the STORED relic entries, read ahead of the load, so a
-      // board a cursed relic shrank is rebuilt at the size that relic left it
-      // at rather than at the size the snapshot happened to carry. The
-      // reconciliation weighs this above `boardSize`.
       relicBoardSize: this.readRelicBoardSize(),
     });
 
@@ -1468,16 +1332,17 @@ export class RunController {
       ? (restored as RunState)
       : this.freshState(this.identity.runId);
 
-    // THE AUTHORITATIVE BOARD TO OPEN ON, recorded here at the one place the
+    // The authoritative board to open on, recorded here at the one place the
     // adoption decision is made so no later caller has to re-derive it —
-    // re-deriving it from `store.exists()` reported success for a payload that
+    // re-deriving it from `store.exists` reported success for a payload that
     // was present and unreadable.
     //
-    // `board()` reports the reconciled board of an ADOPTED envelope and nothing
-    // else, and reports `undefined` rather than `null` where none was adopted:
-    // there is then no run-level board, and the engine's own port read of the
-    // legacy `gameState` key is the remaining authority — which is what keeps a
-    // save written by the vanilla game loadable across the upgrade.
+    // `board()` reports the reconciled board of an ADOPTED envelope and
+    // nothing else, and reports `undefined` rather than `null` where none was
+    // adopted: there is then no run-level board, and the engine's own port
+    // read of the legacy `gameState` key is the remaining authority — which
+    // is what keeps a save written by the vanilla game loadable across the
+    // upgrade.
     //
     // `openingBoard()` reports the same adopted board but resolves the
     // no-envelope case to `null`, which is what makes the engine insert start
@@ -1493,27 +1358,28 @@ export class RunController {
     this.offer = NO_OFFER;
     this.offerStageIndex = NO_OFFER_STAGE;
 
-    // No round of THIS run has been resolved and no stage of it has been opened
-    // yet, whichever run the instance was reporting on before.
+    // No round of THIS run has been resolved and no stage of it has been
+    // opened yet, whichever run the instance was reporting on before.
     this.resolvedRelicId = null;
+    this.resolvedStageIndex = NO_OFFER_STAGE;
     this.startedStageIndex = NO_STARTED_STAGE;
 
+    // THE UNRESOLVED ROUND, PUT BACK. Restored from the adopted envelope and
+    // projected from the catalogue rather than redrawn, so the resumed run shows
+    // the same three cards, moves no cursor, and — because a standing round is
+    // what `onCommit` reads to know the stage END is already resolved — does not
+    // dispatch `stage:end` for that stage a second time. Ordered before
+    // `restoreRelics()` so the offer stands before any relic can act.
+    // DL-RUN-06, DL-RUNCTL-14.
+    this.restorePendingReward();
+
     // The relics of an adopted envelope are handed back to the registry so the
-    // hook bus dispatches to them in the pickup order they were saved in. An
-    // envelope that was not adopted hands back the fresh, empty list — which
-    // DISCARDS anything a registry was holding before this call, because the
-    // envelope is the authority for what a run holds. See `restoreHeldRelics()`
-    // for where a relic may be taken on.
+    // hook bus dispatches to them in the pickup order they were saved in.
     this.restoreRelics();
 
     // The seed and the cursors the run will actually be played under are known
     // only now, after the adoption decision: an adopted envelope resumes its
     // own substreams mid-sequence, a fresh one starts them at zero.
-    //
-    // AHEAD OF THE FIRST REPORT. The scope a root rebuilds from this includes
-    // the run's correlation scope, so publishing it after the report below
-    // attributed this run's own opening report to whatever run the root was
-    // reporting under before it.
     this.publishRunScope(this.identity.seedProvided);
 
     this.reporter.onRunStarted?.({
@@ -1522,9 +1388,7 @@ export class RunController {
       stageIndex: this.current.stageIndex,
 
       // Whether a stored run was ADOPTED, which is the question the report
-      // asks. Not the identity's own `resumed`, which records only where the
-      // seed came from: a caller can supply the seed of the run already stored,
-      // and that run is resumed even though its seed was not read from it.
+      // asks.
       resumed: adopted,
       seedProvided: this.identity.seedProvided,
     });
@@ -1535,40 +1399,32 @@ export class RunController {
   /**
    * Hands the relics held to the registry again.
    *
-   * WHY A CALLER NEEDS THIS. `begin()` restores the adopted envelope's relics
-   * already, but the registry has to be constructed over the ENGINE'S hook bus,
-   * and the engine is constructed after this controller because it reads this
+   * A CONSTRUCTION-ORDER CONTRACT. `begin()` restores the adopted envelope's
+   * relics already, but the registry is constructed over the ENGINE'S hook bus
+   * and the engine is constructed after this controller, which reads this
    * controller's context providers. A composition root therefore binds the
-   * registry after `begin()` has already run, and this is what carries the
-   * relics of a resumed run into a registry that did not exist when they were
-   * loaded. Without it a resumed run displayed its relics and dispatched to
-   * none of them.
+   * registry after `begin()` has run, and this carries the relics of a resumed
+   * run into a registry that did not exist when they were loaded.
    *
    * Idempotent and total: the registry's own `restore` drops whatever it held
    * first, so calling this twice leaves the same set held, and a registry that
    * raises is reported rather than left to raise out of composition.
    *
-   * THE ENVELOPE IS THE AUTHORITY, so this — and the `begin()` that precedes it —
-   * makes the live registry agree with the envelope and DISCARDS anything the
-   * registry held that the envelope does not carry. A relic must therefore be
-   * taken on through the reward transaction (`selectReward()` /
-   * `resolveReward()`), which records it in the envelope as it registers it, or
-   * be restored from an envelope by this call after `begin()`; one picked up on
-   * the registry directly before `begin()` belongs to no run and does not
-   * survive it.
+   * THE ENVELOPE IS THE AUTHORITY, so this — and the `begin()` that precedes
+   * it — makes the live registry agree with the envelope and DISCARDS
+   * anything the registry held that the envelope does not carry. A relic must
+   * therefore be taken on through the reward transaction (`selectReward()` /
+   * `resolveReward()`), which records it in the envelope as it registers it,
+   * or be restored from an envelope by this call after `begin()`; one picked
+   * up on the registry directly before `begin()` belongs to no run and does
+   * not survive it.
    */
   restoreHeldRelics(): void {
     this.restoreRelics();
   }
 
   /**
-   * The board the engine must open on, as `begin()` resolved it.
-   *
-   * THE ONE AUTHORITY on what a run opens with. Read after `begin()` and passed
-   * straight to `engine.setup()`. `null` means open a fresh board and insert
-   * start tiles, which is what an absent, unreadable or non-adopted envelope
-   * yields; anything else is the store's reconciled snapshot and is safe to
-   * build a grid on.
+   * The board the engine must open on, as `begin` resolved it.
    *
    * @returns The reconciled board, or `null` to open fresh.
    */
@@ -1579,8 +1435,8 @@ export class RunController {
   /**
    * Whether the last load read a stored envelope at all.
    *
-   * Read alongside `openingBoard()` to tell the two no-board cases apart. See
-   * `openEngineBoard()`, which applies the distinction.
+   * Read alongside `openingBoard` to tell the two no-board cases apart. See
+   * `openEngineBoard`, which applies the distinction.
    *
    * @returns `true` when an envelope was read, adopted or not.
    */
@@ -1590,20 +1446,6 @@ export class RunController {
 
   /**
    * Opens the engine's board on whatever the load resolved.
-   *
-   * THE ONE PLACE THE THREE CASES ARE DECIDED, so a composition root and
-   * `resumeRun()` cannot decide them differently:
-   *
-   *   an ADOPTED envelope   opens on its reconciled board, which the store has
-   *                         already resolved against the configured edge
-   *                         length.
-   *   an envelope READ AND  opens fresh. Its board belongs to another run, and
-   *   NOT ADOPTED           `null` is what makes the engine insert start tiles.
-   *   NO envelope at all    opens through the engine's OWN port, which is the
-   *                         read js/game_manager.js L36 performed. This is what
-   *                         keeps a save written before the upgrade loading:
-   *                         its board lives under the legacy key, and a run
-   *                         wraps it at stage zero.
    *
    * @param engine The engine to open.
    */
@@ -1628,9 +1470,6 @@ export class RunController {
   /**
    * Hands the run's identity to the composition root so it can rebuild every
    * run-scoped construct.
-   *
-   * Contained: a root that raises is reported and the run still starts, because
-   * a half-rebuilt root is recoverable and a half-started run is not.
    *
    * @param seedProvided Whether the seed came from a caller.
    */
@@ -1665,14 +1504,7 @@ export class RunController {
     return this.current.runId;
   }
 
-  /**
-   * The correlation identifier every report from this controller carries.
-   *
-   * REPUBLISHED, NOT DERIVED. src/engine/types.ts L66-L81 names
-   * `deriveCorrelationId` in src/observability/logger.ts as the one deriver of
-   * this value; the empty string is what a controller constructed without one
-   * carries. Decision DL-RUNCTL-04.
-   */
+  /** The correlation identifier every report from this controller carries. */
   correlationId(): CorrelationId {
     return this.readRunCorrelationId();
   }
@@ -1685,7 +1517,7 @@ export class RunController {
   /**
    * The clear condition of the stage in progress.
    *
-   * A FRESH FROZEN COPY. The envelope's own goal is the value every commit's
+   * A fresh frozen copy. The envelope's own goal is the value every commit's
    * stage slice and every write read, so handing it out by reference let a
    * caller rewrite the target the run is measured against.
    */
@@ -1695,14 +1527,14 @@ export class RunController {
 
   /**
    * Fraction of the stage goal reached: the `progress` member
-   * `evaluateStageGoal()` returned, already clamped by it and stored verbatim.
+   * `evaluateStageGoal` returned, already clamped by it and stored verbatim.
    */
   goalProgress(): number {
     return this.current.goalProgress;
   }
 
   /**
-   * The relics held, IN PICKUP ORDER, with charges and opaque state.
+   * The relics held, in pickup order, with charges and opaque state.
    *
    * Array order is the pickup order the hook bus dispatches in, so it is
    * returned as held and never sorted, filtered or re-keyed.
@@ -1711,8 +1543,8 @@ export class RunController {
    * registry supplies, so reading it can raise — an accessor that throws, a
    * proxy that refuses. A relic whose state cannot be copied is reported and
    * carried with its identifier and its remaining charges alone, which is what
-   * every consumer of this projection reads; the alternative was a query that
-   * raised, and this projection is also the one `state()` falls back on.
+   * every consumer of this projection reads. This projection is also the one
+   * `state()` falls back on. Decision DL-RUNCTL-06.
    */
   relics(): readonly PersistedRelic[] {
     return Object.freeze(
@@ -1740,21 +1572,15 @@ export class RunController {
     }
   }
 
-  /**
-   * The draw counts to resume the substreams from.
-   *
-   * Read once at composition, after `begin()` and before
-   * `createRngStreams(seed, cursors)`. A fresh run yields zeros, so the opening
-   * spawns are taken rather than skipped.
-   */
+  /** The draw counts to resume the substreams from. */
   cursors(): RngCursorMap {
     return normalizeRngCursor(this.current.rngCursor);
   }
 
   /**
-   * The envelope in force, as a FRESH FROZEN COPY.
+   * The envelope in force, as a fresh frozen copy.
    *
-   * Deep on `cloneRunState()`'s terms: every relic, every relic state subtree,
+   * Deep on `cloneRunState`'s terms: every relic, every relic state subtree,
    * every cell and the cursor map are rebuilt, so a caller shares no object
    * with the envelope this controller writes and a later mutation of either is
    * invisible to the other.
@@ -1765,8 +1591,8 @@ export class RunController {
    * can reach the envelope through, because every member it copies is either a
    * primitive or replaced below. `board` is COPIED there too: freezing the
    * envelope's own snapshot would freeze the object this controller's next
-   * `refresh()` replaces, and handing it out unfrozen let a caller write into the
-   * board the writer reads.
+   * `refresh()` replaces, and handing it out unfrozen let a caller write into
+   * the board the writer reads.
    */
   state(): RunState {
     try {
@@ -1794,18 +1620,18 @@ export class RunController {
    * subscription measures every turn that resolves, but a commit can also be
    * reached by a turn that emits no `move:after` — a withdrawn move whose
    * `onBeforeMove` handler reseated the board is one, and a stage end that
-   * adopted a handler's score is another — and the slice those commits carried
-   * then described an earlier board. The measurement is taken here, while the
-   * payload is being assembled and before any consumer or the write sees it, so
-   * every commit's stage slice describes the board that commit carries.
-   * `measureCommittedBoard()` is inert until a `stage:start` has attached the
-   * board reader, so a projection read before a run has opened a board still
-   * reports the progress the envelope recorded.
+   * adopted a handler's score is another — and the slice those commits
+   * carried then described an earlier board. The measurement is taken here,
+   * while the payload is being assembled and before any consumer or the write
+   * sees it, so every commit's stage slice describes the board that commit
+   * carries. `measureCommittedBoard()` is inert until a `stage:start` has
+   * attached the board reader, so a projection read before a run has opened a
+   * board still reports the progress the envelope recorded.
    *
-   * The goal is COPIED AND FROZEN. It is the object this controller keeps in the
-   * envelope, and `readonly` in `StageCommitContext` binds the reference rather
-   * than the object, so a listener could otherwise retarget the goal the run is
-   * measured against and the goal that reaches storage.
+   * The goal is COPIED AND FROZEN. It is the object this controller keeps in
+   * the envelope, and `readonly` in `StageCommitContext` binds the reference
+   * rather than the object, so a listener could otherwise retarget the goal the
+   * run is measured against and the goal that reaches storage.
    */
   stageContext(): StageCommitContext {
     this.measureCommittedBoard();
@@ -1818,21 +1644,22 @@ export class RunController {
   }
 
   /**
-   * The relic slice of a commit, IN PICKUP ORDER.
+   * The relic slice of a commit, in pickup order.
    *
    * Projected in array order, which IS the pickup order, so the order the hook
    * bus dispatches in and the order a HUD renders are one order. `state` is not
    * carried: a commit's consumers show a relic and its remaining charges, and
    * its private state is nobody else's.
    *
-   * PROJECTED FROM THE REGISTRY, not from the envelope. The engine calls this
-   * provider while it assembles the commit payload, and the envelope's own
-   * relics are refreshed by the commit LISTENER — after that assembly — so a
-   * charge a relic handler spent during the turn reached the payload one commit
-   * late: the HUD showed the previous count and a reload restored the budget the
-   * envelope had. `projectRelics()` reads the registry when one is attached and
-   * falls back to the relics held otherwise, so a controller composed without a
-   * registry projects exactly what it did before.
+   * PROJECTED FROM THE REGISTRY, not from the envelope. The engine calls
+   * this provider while it assembles the commit payload, and the envelope's
+   * own relics are refreshed by the commit LISTENER — after that assembly —
+   * so a charge a relic handler spent during the turn reached the payload
+   * one commit late: the HUD showed the previous count and a reload restored
+   * the budget the envelope had. `projectRelics()` reads the registry when
+   * one is attached and falls back to the relics held otherwise, so a
+   * controller composed without a registry projects exactly what it did
+   * before.
    */
   relicContext(): RelicCommitContext {
     return this.projectRelics().map((relic): RelicCommitEntry =>
@@ -1842,19 +1669,12 @@ export class RunController {
     );
   }
 
-  /**
-   * `stageContext()` as the provider the engine takes.
-   *
-   * THE SANCTIONED ROUTE for stage context to reach a `state:commit` payload:
-   * the engine calls a function it was constructed with, so nothing in
-   * src/engine imports this folder. The returned closure reads the envelope
-   * fresh on every call rather than capturing it.
-   */
+  /** `stageContext` as the provider the engine takes. */
   stageCommitContextProvider(): StageCommitContextProvider {
     return (): StageCommitContext => this.stageContext();
   }
 
-  /** `relicContext()` as the provider the engine takes, in pickup order. */
+  /** `relicContext` as the provider the engine takes, in pickup order. */
   relicCommitContextProvider(): RelicCommitContextProvider {
     return (): RelicCommitContext => this.relicContext();
   }
@@ -1862,49 +1682,26 @@ export class RunController {
   /**
    * Attaches to the engine.
    *
-   * THREE SUBSCRIPTIONS, each doing what only it can:
-   *   - `stage:start` measures the opening progress. It is emitted before the
-   *     commit that ends `setup()`, so a restored board that already meets part
-   *     of its goal is reported correctly on the very first commit rather than
-   *     as zero.
-   *   - `move:after` measures progress from the board the move left. It, too,
-   *     precedes its commit, so the stage slice a commit carries describes the
-   *     board that commit carries.
-   *   - `state:commit` writes the envelope, resolves a met goal and finishes a
-   *     lost run.
-   *   - `stage:end` advances the stage. Advancing HERE rather than after
-   *     `endStage()` returns is what makes the commit `endStage()` ends with
-   *     report the stage now in force: the payload of that commit is assembled
-   *     after this emission completes, so a stage advanced during it is the
-   *     stage the commit carries, while `stage:end`'s own payload — assembled
-   *     before the emission — still reports the stage that cleared.
-   *
    * @param engine The engine to observe.
-   * @param cursors Reads the substreams' current draw counts. Called once per
-   *   commit; the substreams are constructed after this controller, so the
-   *   accessor is injected rather than the streams themselves.
+   * @param cursors Reads the substreams' current draw counts.
    * @returns Releases all three subscriptions.
    */
   observe(engine: RunEnginePort, cursors: () => RngCursorMap): () => void {
     const stopStageStart = engine.events.on('stage:start', (event): void => {
-      // WHICH STAGE THE ENGINE HAS OPEN, recorded from the engine's own emission
-      // so a second opener can tell that this stage is already begun. Two
-      // collaborators can open the stage a cleared one advanced to, and both
-      // opening it dispatched `onStageStart` twice for one stage.
+      // WHICH STAGE THE ENGINE HAS OPEN, recorded from the engine's own
+      // emission so a second opener can tell that this stage is already begun.
+      // Two collaborators can open the stage a cleared one advanced to, and
+      // both opening it dispatched `onStageStart` twice for one stage.
       this.startedStageIndex = event.stageIndex;
 
-      // THE BOARD READER IS ATTACHED HERE, not at subscription. A stage start is
-      // the first moment the engine holds a board of this run — it is emitted
-      // before the commit `setup()` ends with — and until then the engine's
-      // lattice is the empty one it was constructed with, which is not a board
-      // this run's progress may be measured against.
+      // THE BOARD READER IS ATTACHED HERE, not at subscription. A stage start
+      // is the first moment the engine holds a board of this run — it is
+      // emitted before the commit `setup()` ends with — and until then the
+      // engine's lattice is the empty one it was constructed with, which is not
+      // a board this run's progress may be measured against.
       this.boardReader = (): SerializedGameState => engine.serialize();
 
-      // THE EVENT'S GOAL IS ADOPTED BEFORE THE MEASUREMENT IS TAKEN. `goal` is
-      // the one transformable member of `onStageStart`, so a relic can replace
-      // it, and the engine measures against what it adopted. Measuring against
-      // this controller's own recorded goal instead left two authorities that
-      // disagreed the moment a handler replaced one of them.
+      // THE EVENT'S goal is adopted before the measurement is taken.
       this.adoptStageGoal(event.stageIndex, event.goal);
       this.measureSnapshot(engine.serialize());
     });
@@ -1922,13 +1719,13 @@ export class RunController {
       }
 
       // WHERE A REWARD GATES THE TRANSITION THE SELECTION ADVANCES, NOT THIS.
-      // Advancing here as well would move the run two stages for one clear, and
-      // it would also have the HUD report the next stage while the player is
-      // still being asked to choose a relic for the one that just cleared. Where
-      // no draw port was injected there is no choice to wait for, so the advance
-      // stays here and the commit `endStage()` ends with reports the stage now in
-      // force — which is the behaviour every run composed without the relic
-      // system keeps.
+      // Advancing here as well would move the run two stages for one clear,
+      // and it would also have the HUD report the next stage while the player
+      // is still being asked to choose a relic for the one that just cleared.
+      // Where no draw port was injected there is no choice to wait for, so
+      // the advance stays here and the commit `endStage()` ends with reports
+      // the stage now in force — which is the behaviour every run composed
+      // without the relic system keeps.
       if (this.rewards !== undefined) {
         return;
       }
@@ -1959,8 +1756,8 @@ export class RunController {
    * commit, so the progress a commit reports is measured from the board that
    * commit carries. Inert until a `stage:start` has attached the reader and
    * again once the subscriptions are released, which leaves the progress last
-   * measured — a resumed envelope's own recorded progress, before any stage has
-   * started — in place.
+   * measured — a resumed envelope's own recorded progress, before any stage
+   * has started — in place.
    *
    * TOTAL. `serialize()` is another module's call, so a raise is reported
    * through the contained fault path and the last good progress stands rather
@@ -1981,28 +1778,7 @@ export class RunController {
   }
 
   /**
-   * Advances to the next stage: the next index, that index's goal, and progress
-   * back to zero.
-   *
-   * The relics are carried forward untouched — they are held for the run, not
-   * for the stage — and so is the board snapshot, because a stage transition is
-   * not a restart.
-   *
-   * @returns The goal of the stage now in force.
-   */
-  /**
    * Adopts the stage index and goal a `stage:start` carried.
-   *
-   * THE ENGINE IS THE GOAL AUTHORITY once a stage has started, because
-   * `onStageStart` may replace the goal and the engine measures against what it
-   * adopted. This writes that goal into the envelope, so this controller's
-   * measurement, the stage slice it supplies to every commit, and the goal that
-   * reaches storage are all the engine's goal.
-   *
-   * The index is adopted alongside it because the two belong to the same stage;
-   * a mismatch would record one stage's goal against another's number. The goal
-   * is copied rather than aliased, so the engine's own object is not shared
-   * into the envelope.
    *
    * @param stageIndex Index the stage started at.
    * @param goal Goal the stage is being measured against.
@@ -2019,6 +1795,16 @@ export class RunController {
     };
   }
 
+  /**
+   * Advances to the next stage: the next index, that index's goal, and progress
+   * back to zero.
+   *
+   * The relics are carried forward untouched — they are held for the run, not
+   * for the stage — and so is the board snapshot, because a stage transition is
+   * not a restart.
+   *
+   * @returns The goal of the stage now in force.
+   */
   advanceStage(): StageGoal {
     const from = this.current.stageIndex;
     const to = from + 1;
@@ -2042,10 +1828,6 @@ export class RunController {
     return goal;
   }
 
-  /* ----------------------------------------------------------------------
-   * Reward resolution
-   * ------------------------------------------------------------------- */
-
   /**
    * Draws the offer a reward screen presents, and records it as the ACTIVE
    * OFFER.
@@ -2056,12 +1838,13 @@ export class RunController {
    * AAP V2. Relics the run already holds are excluded, so no relic is offered
    * twice across a run and no offer can contain a duplicate.
    *
-   * Idempotent while an offer stands: calling it again returns the offer already
-   * drawn rather than drawing a second one, so a screen that re-renders does not
-   * move the substreams and does not change what the player is being shown.
+   * Idempotent while an offer stands: calling it again returns the offer
+   * already drawn rather than drawing a second one, so a screen that re-renders
+   * does not move the substreams and does not change what the player is being
+   * shown.
    *
-   * @returns The offer, frozen. Empty where no draw port was injected, where the
-   *   pool is exhausted, or where the run has ended.
+   * @returns The offer, frozen. Empty where no draw port was injected, where
+   *   the pool is exhausted, or where the run has ended.
    */
   offerReward(): readonly RewardOffer[] {
     if (this.offer.length > 0) {
@@ -2096,7 +1879,9 @@ export class RunController {
       return NO_OFFER;
     }
 
-    this.offer = Object.freeze(drawn.map((relic) => Object.freeze({ ...relic })));
+    this.offer = Object.freeze(
+      drawn.map((relic) => Object.freeze({ ...relic })),
+    );
     this.offeredRelicIds = Object.freeze(
       this.offer.map((relic): string => relic.id),
     );
@@ -2105,9 +1890,22 @@ export class RunController {
     // this at `NO_OFFER_STAGE` and no selection can be attributed to it.
     this.offerStageIndex = this.current.stageIndex;
 
-    // A NEW ROUND, so the round previously resolved is no longer the one a
-    // selection would be reporting against.
     this.resolvedRelicId = null;
+    this.resolvedStageIndex = NO_OFFER_STAGE;
+
+    // WRITTEN INTO THE ENVELOPE, so the round survives a reload. It is also the
+    // marker that this stage's END has already been resolved: the goal is still
+    // met on every later commit, and without a standing round a resumed run
+    // dispatches `stage:end` again — paying every `onStageEnd` bounty a second
+    // time and drawing a second offer off advanced cursors. `write()` is the
+    // caller's; this only brings the envelope up to date. DL-RUN-06.
+    this.current = {
+      ...this.current,
+      pendingReward: {
+        stageIndex: this.offerStageIndex,
+        offeredRelicIds: [...this.offeredRelicIds],
+      },
+    };
 
     // THE OFFER ITSELF IS REPORTABLE, not only the selection made from it: an
     // offer drawn and never taken is exactly the case a bare selection counter
@@ -2156,11 +1954,8 @@ export class RunController {
    *
    * THE RELIC IS TAKEN ON THROUGH `takeRelicOn()`, the same registration step
    * `resolveReward()` uses, so the entry persisted is the one the registry
-   * produced by REGISTERING the relic with the hook bus. Previously this path
-   * called an activation member the registry's own port does not publish, so it
-   * recorded a synthetic entry, registered nothing, and the next commit's
-   * projection of the registry erased it: a run could clear stages, be offered
-   * relics, select them, advance, and hold nothing.
+   * produced by REGISTERING the relic with the hook bus, so the persisted entry
+   * and the live registration cannot disagree about what the run holds.
    *
    * SINGLE-USE. The offer is cleared by the accepted selection and the round is
    * recorded as resolved, so a second call reports `'already-resolved'` and
@@ -2168,18 +1963,14 @@ export class RunController {
    * two stages.
    *
    * @param relicId Identifier the player chose.
-   * @param engine Engine to open the next stage on. Omit it to advance the run's
-   *   stage without reopening a board, which is what a caller driving the engine
-   *   itself wants.
+   * @param engine Engine to open the next stage on. Omit it to advance the
+   *   run's stage without reopening a board, which is what a caller driving
+   *   the engine itself wants.
    * @returns What the selection did.
    */
   selectReward(relicId: string, engine?: RunEnginePort): RewardSelection {
     if (this.offer.length === 0) {
-      // WHAT WAS RESOLVED, NOT WHAT WAS OFFERED. An accepted selection clears
-      // the offer and the offered identifiers together, so reading the offered
-      // list here reported `'no-offer'` for the double-clicked card this code
-      // exists to describe and `'already-resolved'` for an offer that had been
-      // recorded and never drawn.
+      // What was resolved, not what was offered.
       return this.refuseSelection(
         relicId,
         this.resolvedRelicId === null ? 'no-offer' : 'already-resolved',
@@ -2193,10 +1984,10 @@ export class RunController {
       return this.refuseSelection(relicId, 'not-offered');
     }
 
-    // LIVE FIRST, exactly as `resolveReward()` does it: the entry appended below
-    // is the one the registry produced by taking the relic on, so the persisted
-    // record is a consequence of the registration rather than bookkeeping beside
-    // it.
+    // LIVE FIRST, exactly as `resolveReward()` does it: the entry appended
+    // below is the one the registry produced by taking the relic on, so the
+    // persisted record is a consequence of the registration rather than
+    // bookkeeping beside it.
     const activated = this.takeRelicOn(relicId);
 
     if (activated === null) {
@@ -2210,8 +2001,8 @@ export class RunController {
     }
 
     // The live registry is asked whether it agrees, and one that does not has
-    // its append WITHDRAWN, so the persisted list and the live registrations can
-    // never disagree about which relics a run holds.
+    // its append WITHDRAWN, so the persisted list and the live registrations
+    // can never disagree about which relics a run holds.
     if (!this.registryHolds(relicId)) {
       this.current = { ...this.current, relics: held };
 
@@ -2220,21 +2011,42 @@ export class RunController {
 
     const offered = this.offeredRelicIds;
 
+    // BOTH PRESERVED BEFORE THE ROUND CLOSES. `closeRewardRound()` clears the
+    // offered identifiers and advances the stage, so the offer's own context has
+    // to be read while it still stands.
+    const offerStage = this.rewardStageIndex();
+
+    // THE WRITE IS PART OF THE TRANSACTION, and it comes before the stage is
+    // opened and before the outcome is reported. The envelope is brought fully up
+    // to date — the relic appended, the round closed, the stage advanced — and
+    // then written; a refused write rolls every one of those back and the
+    // selection is refused, so a player is never told a relic was taken that no
+    // reload will find. Previously the write's answer was discarded, and a run
+    // whose storage was full advanced a stage and announced an acquisition that
+    // the next load knew nothing about. DL-RUNCTL-15.
+    const rollback = this.snapshotRewardRound();
+
     // Clears the offer and performs the one advance the cleared stage is owed.
     this.closeRewardRound(relicId);
 
+    if (!this.write()) {
+      this.restoreRewardRound(rollback);
+      this.withdrawRelic(held);
+
+      return this.refuseSelection(relicId, 'refused');
+    }
+
+    // OPENED ONLY ONCE THE WRITE COMMITTED. Opening the next stage emits
+    // `stage:start`, which every subscriber acts on, so it must not happen for a
+    // selection that is about to be refused.
     if (engine !== undefined) {
       this.openNextStage(engine);
     }
 
-    this.write();
-
-    this.reporter.onRewardDrawn?.({
-      correlationId: this.readRunCorrelationId(),
-      stageIndex: this.current.stageIndex,
-      offeredRelicIds: offered,
-      selectedRelicId: relicId,
-    });
+    // Through the one writer, so this outcome carries `accepted` and the offer's
+    // own stage exactly as `resolveReward()`'s does. The write itself happened
+    // inside the transaction above. DL-RUNCTL-07, DL-RUNCTL-15.
+    this.reportReward(offerStage, relicId, true, null, offered);
 
     return Object.freeze({
       outcome: 'accepted' as const,
@@ -2255,8 +2067,7 @@ export class RunController {
    * an array of at most `MAX_REWARD_OFFERS` distinct non-empty identifiers the
    * registry's catalogue carries — the shape the seeded draw produces. Any
    * other list leaves NO offer standing, so a screen that presented something
-   * else can have no selection admitted rather than a subset of one. Previously
-   * the list was copied unexamined, and `resolveReward()` never read it.
+   * else can have no selection admitted rather than a subset of one.
    *
    * Consumes no randomness and moves no cursor.
    *
@@ -2268,14 +2079,11 @@ export class RunController {
 
     this.offeredRelicIds = admitted ?? [];
 
-    // A RECORDED OFFER OPENS A ROUND, so whatever round was resolved before it
-    // is no longer the one a selection reports against: a selection made while
-    // this offer stands and no draw has been performed is `'no-offer'`, not
-    // `'already-resolved'`.
     this.resolvedRelicId = null;
+    this.resolvedStageIndex = NO_OFFER_STAGE;
 
     if (admitted === null) {
-      this.reportReward(undefined, false, 'offer');
+      this.reportReward(this.rewardStageIndex(), undefined, false, 'offer');
     }
 
     return admitted !== null;
@@ -2286,13 +2094,13 @@ export class RunController {
    * the relic on through the registry.
    *
    * FOUR GATES, in order. A selection must be one the player was actually
-   * OFFERED, must name a relic the registry's catalogue KNOWS, must not already
-   * be HELD, and must fit inside `MAX_PERSISTED_RELICS` — an envelope carrying
-   * more than that is refused by the store, so accepting one here would lose
-   * the whole run's progress on the next write. Validating against the recorded
-   * offer is what stops a caller picking any relic in the catalogue at will;
-   * validating against the catalogue is what stops an identifier no offer could
-   * have produced reaching the envelope.
+   * OFFERED, must name a relic the registry's catalogue KNOWS, must not
+   * already be HELD, and must fit inside `MAX_PERSISTED_RELICS` — an envelope
+   * carrying more than that is refused by the store, so accepting one here
+   * would lose the whole run's progress on the next write. Validating against
+   * the recorded offer is what stops a caller picking any relic in the
+   * catalogue at will; validating against the catalogue is what stops an
+   * identifier no offer could have produced reaching the envelope.
    *
    * THE RELIC IS PICKED UP BEFORE IT IS RECORDED. `RelicRegistryPort.pickUp`
    * registers it with the hook bus in pickup order, and only a pickup the
@@ -2318,23 +2126,27 @@ export class RunController {
    * @returns Whether the relic joined the held list, and why it did not.
    */
   resolveReward(relicId: string): RewardResolution {
+    // READ ONCE, AT THE TOP. Every report below names the stage the offer being
+    // resolved was made at, and the accepted branch closes the round — which
+    // advances the stage — before it reports. DL-RUNCTL-07.
+    const offerStage = this.rewardStageIndex();
     const refusal = this.refuseReward(relicId);
 
     if (refusal !== null) {
-      this.reportReward(relicId, false, refusal);
+      this.reportReward(offerStage, relicId, false, refusal);
 
       return Object.freeze({ accepted: false, refusal });
     }
 
-    // LIVE FIRST. The entry appended below is the one the registry produced by
-    // taking the relic on, so the persisted record is a CONSEQUENCE of the
-    // registration rather than a parallel piece of bookkeeping — which is what
-    // it was when a chosen relic reached the envelope, fired on no hook, and was
-    // erased by the next commit's projection of the registry.
+    // LIVE FIRST. The entry appended below is the one the registry produced
+    // by taking the relic on, so the persisted record is a CONSEQUENCE of the
+    // registration rather than a parallel piece of bookkeeping — which is
+    // what it was when a chosen relic reached the envelope, fired on no hook,
+    // and was erased by the next commit's projection of the registry.
     const entry = this.takeRelicOn(relicId);
 
     if (entry === null) {
-      this.reportReward(relicId, false, 'refused');
+      this.reportReward(offerStage, relicId, false, 'refused');
 
       return Object.freeze({ accepted: false, refusal: 'refused' as const });
     }
@@ -2342,17 +2154,15 @@ export class RunController {
     const held = this.current.relics;
 
     if (!this.appendRelic(relicId, entry)) {
-      this.reportReward(relicId, false, 'refused');
+      this.reportReward(offerStage, relicId, false, 'refused');
 
       return Object.freeze({ accepted: false, refusal: 'refused' as const });
     }
 
-    // The live registry is asked whether it agrees. One that does not is not
-    // taken at its word: the append is WITHDRAWN, so the persisted list and the
-    // live registrations can never disagree about which relics a run holds.
+    // The live registry is asked whether it agrees.
     if (!this.registryHolds(relicId)) {
       this.current = { ...this.current, relics: held };
-      this.reportReward(relicId, false, 'unconfirmed');
+      this.reportReward(offerStage, relicId, false, 'unconfirmed');
 
       return Object.freeze({
         accepted: false,
@@ -2360,46 +2170,44 @@ export class RunController {
       });
     }
 
+    // PRESERVED BEFORE THE ROUND CLOSES, for the same reason `offerStage` is
+    // read at the top: `closeRewardRound()` clears the offered identifiers.
+    const offered = this.offeredRelicIds;
+
     // CLEARED ONLY ON SUCCESS, so a refused pick leaves the same three cards
     // standing and the player can choose again. A DRAWN offer is closed with the
     // one advance its cleared stage is owed: without that advance this path kept
     // the relic and left the run on the stage it had already cleared, with a
     // reward still reported as pending, so it could never reach the next stage.
+    const rollback = this.snapshotRewardRound();
+
     this.closeRewardRound(relicId);
 
-    // THE PICKUP IS PERSISTED BY THE TRANSACTION THAT MADE IT. Previously the
-    // write that carried a chosen relic to storage was the commit of the stage
-    // start that followed, so a reward resolved without a stage start after it —
-    // which is every reward whose stage was already open — was held live and
-    // never persisted, and a reload dropped it.
-    this.write();
-    this.reportReward(relicId, true, null);
+    // THE PICKUP IS PERSISTED BY THE TRANSACTION THAT MADE IT, AND THE WRITE'S
+    // ANSWER DECIDES THE OUTCOME. Previously the write that carried a chosen
+    // relic to storage was the commit of the stage start that followed, so a
+    // reward resolved without a stage start after it — which is every reward
+    // whose stage was already open — was held live and never persisted, and a
+    // reload dropped it. Now a refused write rolls the round, the stage and the
+    // relic all back and the selection is refused, so the live state and the
+    // persisted state cannot diverge. DL-RUNCTL-15.
+    if (!this.write()) {
+      this.restoreRewardRound(rollback);
+      this.withdrawRelic(held);
+      this.reportReward(offerStage, relicId, false, 'refused', offered);
+
+      return Object.freeze({ accepted: false, refusal: 'refused' as const });
+    }
+
+    // Through the one writer, which carries the offer's own stage and the three
+    // identifiers it was drawn from. DL-RUNCTL-07.
+    this.reportReward(offerStage, relicId, true, null, offered);
 
     return Object.freeze({ accepted: true, refusal: null });
   }
 
   /**
    * Closes the reward round one accepted selection resolved.
-   *
-   * THE HALF OF THE TRANSACTION THAT MOVES THE RUN, shared by both public
-   * selection methods so neither can perform one half of it. Three things
-   * happen, in this order:
-   *
-   *   - the round is recorded as RESOLVED, which is what lets a second call on
-   *     the same round report `'already-resolved'` rather than reading the
-   *     cleared offer and reporting `'no-offer'`;
-   *   - the offer standing is cleared BEFORE the advance, so nothing reached
-   *     from the advance can select a second time;
-   *   - the stage advances, but only where it has not advanced already.
-   *
-   * EXACTLY ONE ADVANCE PER CLEARED STAGE. `stage:end` advances during its own
-   * emission where no reward gates the transition, so the index has already
-   * moved by the time a card is pressed; where a draw port IS injected that
-   * subscriber withholds the advance and the index still stands at the one the
-   * offer was drawn at. Comparing the two is what distinguishes them, and
-   * advancing only in the second case is what keeps a selection from skipping a
-   * stage — and what stops a recorded-but-undrawn offer, which belongs to a
-   * stage that already advanced, from advancing a second time.
    *
    * @param relicId Identifier the accepted selection took on.
    */
@@ -2410,13 +2218,131 @@ export class RunController {
 
     this.resolvedRelicId = relicId;
 
+    // Recorded BEFORE `offerStageIndex` is cleared: this is the round a later
+    // `'already-resolved'` refusal reports against.
+    this.resolvedStageIndex = this.rewardStageIndex();
+
     this.offer = NO_OFFER;
     this.offerStageIndex = NO_OFFER_STAGE;
     this.offeredRelicIds = [];
 
+    // The round leaves the envelope with the live offer, so a reload after an
+    // accepted selection resumes on the stage the selection advanced to rather
+    // than being offered the same three cards again. Removed rather than
+    // emptied, which is the absent state every reader already handles.
+    this.clearPersistedReward();
+
     if (pendingAdvance) {
       this.advanceStage();
     }
+  }
+
+  /**
+   * Records everything a reward round consists of, so a refused write can put it
+   * all back.
+   *
+   * The live offer, the admitted identifiers, the stage the round belongs to, the
+   * round last resolved, the stage index and goal slice of the envelope, and the
+   * persisted round itself. Every array is copied, so a later write cannot reach
+   * the record.
+   *
+   * @returns The record `restoreRewardRound()` takes.
+   */
+  private snapshotRewardRound(): RewardRoundSnapshot {
+    return {
+      offer: this.offer,
+      offeredRelicIds: this.offeredRelicIds,
+      offerStageIndex: this.offerStageIndex,
+      resolvedRelicId: this.resolvedRelicId,
+      stageIndex: this.current.stageIndex,
+      stageGoal: this.current.stageGoal,
+      goalProgress: this.current.goalProgress,
+      pendingReward: this.current.pendingReward,
+    };
+  }
+
+  /**
+   * Puts a recorded reward round back in force, envelope included.
+   *
+   * The inverse of everything `closeRewardRound()` does: the offer stands again,
+   * the round is unresolved again, and the stage the advance moved past is
+   * restored along with its goal and its measured progress. Nothing is written —
+   * the caller is rolling back BECAUSE a write was refused.
+   *
+   * @param snapshot Record `snapshotRewardRound()` produced.
+   */
+  private restoreRewardRound(snapshot: RewardRoundSnapshot): void {
+    this.offer = snapshot.offer;
+    this.offeredRelicIds = snapshot.offeredRelicIds;
+    this.offerStageIndex = snapshot.offerStageIndex;
+    this.resolvedRelicId = snapshot.resolvedRelicId;
+
+    const restored: RunState = {
+      ...this.current,
+      stageIndex: snapshot.stageIndex,
+      stageGoal: snapshot.stageGoal,
+      goalProgress: snapshot.goalProgress,
+    };
+
+    if (snapshot.pendingReward === undefined) {
+      const { pendingReward: _dropped, ...rest } = restored;
+
+      this.current = rest;
+
+      return;
+    }
+
+    this.current = { ...restored, pendingReward: snapshot.pendingReward };
+  }
+
+  /**
+   * Takes a relic back off, live and in the envelope, after a step following the
+   * pickup refused.
+   *
+   * THE LIVE SET IS RESTORED FROM THE LIST, not released by identifier: the
+   * registry publishes no single-relic release, and re-restoring the exact list
+   * held before the pickup is stronger than one — it puts back the pickup order,
+   * every charge budget and every state slot as they stood, and it is idempotent.
+   * A registry that raises is reported and the envelope is restored anyway, since
+   * the envelope is the authority for what a run holds and the next load hands the
+   * registry exactly what it carries.
+   *
+   * @param held The relic list to restore, as the envelope carried it before the
+   *   pickup.
+   */
+  private withdrawRelic(held: readonly PersistedRelic[]): void {
+    this.current = { ...this.current, relics: held };
+
+    const registry = this.registry;
+    const restore = registry?.restoreRelics ?? registry?.restore;
+
+    if (restore === undefined) {
+      return;
+    }
+
+    try {
+      // Called through its owner; see `projectRelics()`.
+      restore.call(registry, held);
+    } catch (error) {
+      this.reportRegistryFault(error);
+    }
+  }
+
+  /**
+   * Removes the standing reward round from the envelope, leaving the member
+   * absent rather than present and empty.
+   *
+   * Idempotent: an envelope carrying no round is left as the same object, so a
+   * caller cannot make a write necessary by asking twice.
+   */
+  private clearPersistedReward(): void {
+    if (this.current.pendingReward === undefined) {
+      return;
+    }
+
+    const { pendingReward: _dropped, ...rest } = this.current;
+
+    this.current = rest;
   }
 
   /**
@@ -2454,9 +2380,6 @@ export class RunController {
   /**
    * Reports a raise that came out of the injected registry.
    *
-   * The registry is injected and structural, so any of its members may raise.
-   * A raise is reported and contained rather than left to leave a turn.
-   *
    * @param error Whatever was thrown.
    */
   private reportRegistryFault(error: unknown): void {
@@ -2469,7 +2392,8 @@ export class RunController {
   }
 
   /**
-   * Resolves a reward and starts the stage that follows it, as ONE transaction.
+   * Resolves a reward and starts the stage that follows it, as ONE
+   * transaction.
    *
    * THE SECOND HALF OF A STAGE TRANSITION. `endStage()` resolved the stage that
    * cleared and this controller's `stage:end` subscriber advanced the index and
@@ -2480,8 +2404,8 @@ export class RunController {
    *
    * THE RELIC IS PERSISTED BY `resolveReward()` ITSELF, so the pickup and the
    * stage it was won in reach storage together whether or not a stage start
-   * follows. Where one does, the commit `startStage()` ends with writes the same
-   * envelope again from the board that stage opened on.
+   * follows. Where one does, the commit `startStage()` ends with writes the
+   * same envelope again from the board that stage opened on.
    *
    * A REFUSED SELECTION STILL STARTS THE STAGE. The stage was cleared and the
    * index already advanced, so withholding the start would strand the run
@@ -2495,15 +2419,27 @@ export class RunController {
   completeReward(engine: RunEnginePort, relicId: string): RewardResolution {
     const resolution = this.resolveReward(relicId);
 
+    // A REFUSED SELECTION STARTS NOTHING. `resolveReward()` leaves the offer
+    // standing for a refusal — an identifier that was never offered, one the
+    // catalogue does not know, one already held, one the registry would not seat —
+    // so the run is still owed a choice and the stage it is on is still the stage
+    // it was on. Starting a stage here regardless advanced past the very offer the
+    // player still has to answer: the screen came back up over a board that had
+    // already moved on. DL-RUNCTL-16.
+    if (!resolution.accepted) {
+      return resolution;
+    }
+
     // ONE START PER STAGE. Where nothing gated the transition the commit that
-    // resolved the stage has already opened the stage that follows, and starting
-    // it again dispatched `onStageStart` twice for one stage — which applied
-    // every per-stage relic effect twice. The engine's own `stage:start` records
-    // which stage is open, and a stage already open is not reopened.
+    // resolved the stage has already opened the stage that follows, and
+    // starting it again dispatched `onStageStart` twice for one stage — which
+    // applied every per-stage relic effect twice. The engine's own
+    // `stage:start` records which stage is open, and a stage already open is
+    // not reopened.
     //
     // The port declares `startStage` optional, so an engine that does not
-    // implement stage transitions leaves the index advanced and begins nothing —
-    // which is what a double that only observes does.
+    // implement stage transitions leaves the index advanced and begins nothing
+    // — which is what a double that only observes does.
     if (this.startedStageIndex !== this.current.stageIndex) {
       engine.startStage?.();
     }
@@ -2511,90 +2447,43 @@ export class RunController {
     return resolution;
   }
 
-  /**
-   * Spends charges from a held relic and persists the budget that remains.
-   *
-   * THE PRODUCTION ACTIVATION PATH. src/engine/hook-bus.ts deducts from a
-   * budget only through `consumeCharge`, which the registry reaches through
-   * `RelicRegistryPort.activate`; a dispatch that merely invokes a handler
-   * spends nothing. Without a call here a charge-limited relic fired for the
-   * whole run on a budget that never fell.
-   *
-   * THE WRITE IS PART OF THE TRANSACTION. An activation is not a move, so no
-   * commit follows it on its own; the envelope is refreshed and written here so
-   * a reload resumes on the budget that was actually spent. Nothing is written
-   * for an activation that consumed nothing, because nothing changed.
-   *
-   * NEVER THROWS. A registry that raises is reported and reported as unheld.
-   *
-   * @param engine Read for the board snapshot the write wraps.
-   * @param cursors Reads the substreams' current draw counts.
-   * @param relicId Identifier of the relic to spend from.
-   * @param amount Charges to spend; the registry's own default when omitted.
-   * @returns What the registry reported, and whether the envelope was written.
-   */
-  activateRelic(
-    engine: RunEnginePort,
-    cursors: () => RngCursorMap,
-    relicId: string,
-    amount?: number,
-  ): RelicActivationOutcome {
-    const registry = this.registry;
-
-    if (registry?.activate === undefined) {
-      return NO_ACTIVATION;
-    }
-
-    let report: RelicActivationReport;
-
-    try {
-      // Called through its owner; see `projectRelics()`.
-      report =
-        amount === undefined
-          ? registry.activate(relicId)
-          : registry.activate(relicId, amount);
-    } catch (error) {
-      this.reportRegistryFault(error);
-
-      return NO_ACTIVATION;
-    }
-
-    if (!isActivationReport(report) || report.consumed <= 0) {
-      return Object.freeze({
-        held: isActivationReport(report) ? report.held : false,
-        limited: isActivationReport(report) ? report.limited : false,
-        consumed: 0,
-        remaining: isActivationReport(report) ? report.remaining : undefined,
-        persisted: false,
-      });
-    }
-
-    return Object.freeze({
-      held: report.held,
-      limited: report.limited,
-      consumed: report.consumed,
-      remaining: report.remaining,
-      persisted: this.persist(engine, cursors),
-    });
-  }
+  // NO `activateRelic` MEMBER, AND DELIBERATELY SO. Every relic in this
+  // catalogue is automatic: it fires on the hooks it binds when its own trigger
+  // condition holds and asks src/engine/hook-bus.ts for its charge on that one
+  // path. There is therefore no effect a player can request out of turn, and a
+  // method that deducted a charge on request took a budget away and applied
+  // nothing — a charge spent with no effect, which is worse for a run than no
+  // control at all. The tray control in src/main.ts reads a slot out instead and
+  // spends nothing. `RelicRegistry.activate` remains the registry's own
+  // published member and is reached only by a caller that has an effect to pair
+  // with it. DL-RUNCTL-18.
 
   /**
    * Reports a refused selection and leaves the run untouched.
    *
+   * Reported through the one writer, so the refusal travels in `refusal` and
+   * `accepted: false` rather than being appended to the identifier: this path
+   * previously reported `selectedRelicId` as `` `${relicId} (${outcome})` ``,
+   * which is not an identifier any consumer could match. A non-string
+   * identifier — the `'not-offered'` case admits one — is reported as the empty
+   * string rather than coerced, so the field is always a string.
+   * DL-RUNCTL-07.
+   *
    * @param relicId Identifier that was refused.
-   * @param outcome Why it was refused.
+   * @param outcome Why it was refused. `'accepted'` is excluded, because an
+   *   accepted selection is not a refusal and does not travel this path.
    * @returns The refusal.
    */
   private refuseSelection(
     relicId: string,
-    outcome: RewardSelectionOutcome,
+    outcome: Exclude<RewardSelectionOutcome, 'accepted'>,
   ): RewardSelection {
-    this.reporter.onRewardDrawn?.({
-      correlationId: this.readRunCorrelationId(),
-      stageIndex: this.current.stageIndex,
-      offeredRelicIds: this.offeredRelicIds,
-      selectedRelicId: `${relicId} (${outcome})`,
-    });
+    this.reportReward(
+      this.rewardStageIndex(),
+      typeof relicId === 'string' ? relicId : '',
+      false,
+      outcome,
+    );
 
     return Object.freeze({
       outcome,
@@ -2604,8 +2493,8 @@ export class RunController {
   }
 
   /**
-   * Identifiers of the relics held, from the registry where it reports them and
-   * from the envelope otherwise.
+   * Identifiers of the relics held, from the registry where it reports them
+   * and from the envelope otherwise.
    *
    * @returns The identifiers, in pickup order.
    */
@@ -2632,24 +2521,15 @@ export class RunController {
     return this.current.relics.map((relic): string => relic.id);
   }
 
-  /* ----------------------------------------------------------------------
-   * Run lifecycle
-   * ------------------------------------------------------------------- */
-
   /**
    * Starts a FRESH run and opens the engine's board on it.
    *
-   * Ported from js/game_manager.js L17-L21 `restart()` and L35-L59 `setup()`:
-   * the stored envelope is discarded, a fresh one is assembled at stage 0, and
-   * the engine opens a board. The seed is `normalizeEnteredSeed()`'s
-   * reduction of `options.seed` when one is supplied, and
-   * `originateRunSeed()`'s otherwise.
+   * The substreams are NOT rebuilt here: they are constructed from `seed` and
+   * `cursors` by the composition root, which owns them. A caller starting a
+   * second run in one page load rebuilds them from the values this call
+   * leaves.
    *
-   * The substreams are NOT rebuilt here: they are constructed from `seed()` and
-   * `cursors()` by the composition root, which owns them. A caller starting a
-   * second run in one page load rebuilds them from the values this call leaves.
-   *
-   * @param engine The engine to open. Its `setup()` is what emits the first
+   * @param engine The engine to open. Its `setup` is what emits the first
    *   commit, and that commit is what persists the fresh envelope.
    * @param options Seed origin and the board to open on.
    * @returns The seed the run is played under.
@@ -2678,11 +2558,12 @@ export class RunController {
     this.ended = false;
 
     // A started run has resolved no reward round and has had no stage opened
-    // yet: the `setup()` this call drives is what opens its first one.
+    // yet: the `setup` this call drives is what opens its first one.
     this.resolvedRelicId = null;
+    this.resolvedStageIndex = NO_OFFER_STAGE;
     this.startedStageIndex = NO_STARTED_STAGE;
 
-    // The board this run opens on, which `board()` and `openingBoard()` both
+    // The board this run opens on, which `board` and `openingBoard` both
     // report so a caller that composed the engine separately opens the same
     // board this call does.
     this.adoptedBoard = options.board ?? null;
@@ -2692,16 +2573,14 @@ export class RunController {
     // to have been read and no legacy board to fall back to.
     this.storedEnvelopeRead = true;
 
-    // A fresh run holds no relics, so the registry is handed the empty list it
-    // must dispatch to rather than the previous run's.
     this.restoreRelics();
 
     // BEFORE THE FIRST REPORT OF THE NEW RUN, and before the board opens, NOT
     // AFTER. The substreams and the correlation scope are rebuilt against the
     // new seed here, so the opening spawns come from the new sequence rather
     // than from wherever the previous run's substreams had reached, AND every
-    // report below — this controller's own included — is attributed to the run
-    // that emitted it rather than to the ended run.
+    // report below — this controller's own included — is attributed to the
+    // run that emitted it rather than to the ended run.
     this.publishRunScope(options.seed !== undefined);
 
     this.reporter.onRunStarted?.({
@@ -2720,10 +2599,10 @@ export class RunController {
   /**
    * Resumes the stored run and opens the engine's board on it.
    *
-   * The board handed to `setup()` is the one `RunStateStore.load()` returned,
+   * The board handed to `setup` is the one `RunStateStore.load` returned,
    * which is ALREADY RECONCILED against the configured board size: a snapshot
-   * saved at another edge length has been resolved by the store, and no grid is
-   * ever built here from a raw persisted value.
+   * saved at another edge length has been resolved by the store, and no grid
+   * is ever built here from a raw persisted value.
    *
    * Falls back to a fresh run when nothing readable is stored, so the caller
    * needs no branch of its own.
@@ -2736,12 +2615,12 @@ export class RunController {
 
     // THE ADOPTION RESULT, NOT `store.exists()`. A key that is present but
     // unreadable makes `exists()` report success, and the run then opened on
-    // the envelope's own empty board — which suppressed the start tiles, because
-    // a supplied snapshot tells the engine the board was restored.
-    // `openEngineBoard()` is the one board-load authority: it reads the adoption
-    // result and tells an envelope that was read and refused apart from no
-    // envelope at all, the last of which falls back to the engine's own port read
-    // of the legacy snapshot.
+    // the envelope's own empty board — which suppressed the start tiles,
+    // because a supplied snapshot tells the engine the board was restored.
+    // `openEngineBoard()` is the one board-load authority: it reads the
+    // adoption result and tells an envelope that was read and refused apart
+    // from no envelope at all, the last of which falls back to the engine's own
+    // port read of the legacy snapshot.
     this.openEngineBoard(engine);
 
     return outcome;
@@ -2755,12 +2634,12 @@ export class RunController {
    * stored describe the same moment — a snapshot taken at any other point can
    * differ from the board being stored by a draw. Decision DL-RUNCTL-02.
    *
-   * NEVER THROWS OUT OF THE COMMIT PATH. `RunStateStore.save()` reports its own
-   * failure through `onWriteFailed` — it alone knows the key and the serialised
-   * size — and returns `false`; this method surfaces that `false` to its caller
-   * rather than discarding it or raising. js/local_storage_manager.js L37's
-   * `catch (error) { return false; }` swallowed the error object; nothing here
-   * does.
+   * NEVER THROWS OUT OF THE COMMIT PATH. `RunStateStore.save()` reports its
+   * own failure through `onWriteFailed` — it alone knows the key and the
+   * serialised size — and returns `false`; this method surfaces that `false`
+   * to its caller rather than discarding it or raising.
+   * js/local_storage_manager.js L37's `catch (error) { return false; }`
+   * swallowed the error object; nothing here does.
    *
    * @param engine Read for the board snapshot to wrap.
    * @param cursors Reads the substreams' current draw counts.
@@ -2772,16 +2651,22 @@ export class RunController {
     return this.write();
   }
 
-  /** The run in force, as data. Includes the seed, for a screen to display. */
+  /**
+   * The run IN FORCE, as data. Includes the seed, for a screen to display.
+   *
+   * NOT THE FINISHED RUN. `finish()` replaces the run in force with a fresh
+   * one, so after a run ends this describes the replacement — stage 0, no
+   * relics, a new seed. A caller showing the run that ENDED reads `endRun()`'s
+   * own return value, or `lastSummary()`. Decision DL-RUNCTL-13.
+   *
+   * @returns The run in force.
+   */
   summary(): RunSummary {
     return summarizeRunState(this.current);
   }
 
   /**
    * The last finished run, or `null` when none has finished in this page load.
-   *
-   * Held in memory precisely because the envelope is cleared when a run ends:
-   * a summary screen needs the finished run after the storage entry is gone.
    */
   lastSummary(): RunSummary | null {
     return this.finished;
@@ -2791,8 +2676,8 @@ export class RunController {
    * Ends the run in force explicitly, as a run-summary screen's end-run action
    * does, and clears the stored envelope.
    *
-   * Idempotent: ending a run that has already ended reports nothing further and
-   * returns the same summary.
+   * Idempotent: ending a run that has already ended reports nothing further
+   * and returns the same summary.
    *
    * @param outcome How the run ended.
    * @returns The finished run, including its seed.
@@ -2810,17 +2695,9 @@ export class RunController {
     return this.store.clear();
   }
 
-  /* ----------------------------------------------------------------------
-   * Internals
-   * ------------------------------------------------------------------- */
-
   /**
    * Handles one commit: records the state that was committed, then decides
    * whether the run or the stage resolved.
-   *
-   * ORDER MATTERS. The envelope is brought up to date first, so whatever
-   * follows — a write, a summary, a clear — describes the state that was
-   * actually committed rather than the state before it.
    */
   private onCommit(
     engine: RunEnginePort,
@@ -2830,11 +2707,8 @@ export class RunController {
     this.refresh(engine, cursors);
 
     if (event.over) {
-      // The engine clears `gameState` on a loss, exactly as
-      // js/game_manager.js L84-L86 did. The envelope is cleared with it, so
-      // the two keys cannot disagree about whether a run is in progress, and a
-      // reload after a loss opens a fresh run rather than a fresh board
-      // carrying the lost run's stage and relics.
+      // The engine clears `gameState` on a loss, exactly as js/game_manager.js
+      // L84-L86 did.
       this.finish('lost');
 
       return;
@@ -2846,17 +2720,25 @@ export class RunController {
       return;
     }
 
-    // A standing offer means this stage has already been resolved and is waiting
-    // on the player. The goal is still met on every later commit, so without this
-    // the resolution would be attempted again on every move of the wait.
+    // THE TERMINAL WIN OUTRANKS THE STAGE PAYOUT. `terminated` with `won` set
+    // is the unresolved 2048 win of js/game_manager.js L30-L32: play is
+    // blocked until the player takes Keep Going or ends the run. The payout is
+    // DEFERRED, not discarded — `stageCleared` stands, so the commit a
+    // continued win produces resolves it. Decision DL-RUNCTL-12.
+    if (event.won && event.terminated) {
+      return;
+    }
+
+    // A standing offer means this stage has already been resolved and is
+    // waiting on the player. The goal is still met on every later commit, so
+    // without this the resolution would be attempted again on every move of the
+    // wait.
     if (this.isRewardPending()) {
       return;
     }
 
-    // `endStage()` emits `stage:end` — where the advance happens — and then
-    // commits, so this handler is re-entered before the call returns. That
-    // re-entrant commit is what persists the advanced stage; the guard is what
-    // stops it from resolving a stage of its own.
+    // `endStage` emits `stage:end` — where the advance happens — and then
+    // commits, so this handler is re-entered before the call returns.
     this.resolvingStage = true;
 
     try {
@@ -2864,11 +2746,11 @@ export class RunController {
 
       // THE REWARD GATES THE NEXT STAGE. Where a draw port was injected the
       // cleared stage draws an offer and stops there: `selectReward()` is what
-      // advances the run and opens the next board, so the player chooses a relic
-      // between stages rather than being carried past the choice. Where none was
-      // injected — a run played without the relic system, and every unit case
-      // that composes the controller alone — the stage advances at once, which
-      // is the behaviour that keeps the game playable either way.
+      // advances the run and opens the next board, so the player chooses a
+      // relic between stages rather than being carried past the choice. Where
+      // none was injected — a run played without the relic system, and every
+      // unit case that composes the controller alone — the stage advances at
+      // once, which is the behaviour that keeps the game playable either way.
       if (this.rewards !== undefined) {
         this.offerReward();
 
@@ -2888,23 +2770,22 @@ export class RunController {
   /**
    * Opens the stage the run has just advanced to.
    *
-   * THE OTHER HALF OF A STAGE TRANSITION. `endStage()` resolves the stage that
-   * ended and the engine then refuses to end it again, so without this call the
-   * run would sit on a stage index it never opened a board for and no further
-   * stage could ever be reached. Called after `endStage()` has RETURNED rather
-   * than from inside the `stage:end` emission, because `endStage()` releases the
-   * adopted stage goal and commits after that emission — opening the stage from
-   * inside it would have the release discard the goal the new stage just adopted.
+   * THE OTHER HALF OF A STAGE TRANSITION. `endStage()` resolves the stage
+   * that ended and the engine then refuses to end it again, so without this
+   * call the run would sit on a stage index it never opened a board for and
+   * no further stage could ever be reached. Called after `endStage()` has
+   * RETURNED rather than from inside the `stage:end` emission: `endStage()`
+   * releases the adopted stage goal and commits after that emission.
    *
-   * The board is CARRIED, not reset: a stage transition is not a restart, so the
-   * snapshot the engine holds is handed straight back to it and the tiles in play
-   * survive into the new stage.
+   * The board is CARRIED, not reset: a stage transition is not a restart, so
+   * the snapshot the engine holds is handed straight back to it and the tiles
+   * in play survive into the new stage.
    *
    * IDEMPOTENT PER STAGE. A stage the engine has already reported starting is
    * not reopened, so a caller that reaches this after the commit path has
-   * already opened the stage — or after `completeReward()` has — cannot dispatch
-   * `onStageStart` a second time for one stage and double-apply every per-stage
-   * relic effect.
+   * already opened the stage — or after `completeReward()` has — cannot
+   * dispatch `onStageStart` a second time for one stage and double-apply every
+   * per-stage relic effect.
    *
    * @param engine The engine to open the stage on.
    * @returns Whether a stage was opened.
@@ -2938,11 +2819,11 @@ export class RunController {
 
   /**
    * Brings the envelope up to date with the moment being committed: the
-   * substreams' draw counts, the engine's board snapshot, and the relics as the
-   * registry holds them.
+   * substreams' draw counts, the engine's board snapshot, and the relics as
+   * the registry holds them.
    *
-   * All three are read TOGETHER, immediately before a write, so the counts, the
-   * board and the charges stored describe one moment.
+   * All three are read TOGETHER, immediately before a write, so the counts,
+   * the board and the charges stored describe one moment.
    */
   private refresh(engine: RunEnginePort, cursors: () => RngCursorMap): void {
     this.current = {
@@ -2956,10 +2837,10 @@ export class RunController {
   /**
    * Writes the envelope and surfaces a refused write.
    *
-   * `RunStateStore.save()` never throws: it reports through `onWriteFailed` and
-   * returns `false`. The report emitted here is the COMMIT PATH's own record of
-   * that refusal, at the decision point where the run failed to persist, and it
-   * carries no error object it did not receive.
+   * `RunStateStore.save` never throws: it reports through `onWriteFailed` and
+   * returns `false`. The report emitted here is the COMMIT PATH's own record
+   * of that refusal, at the decision point where the run failed to persist,
+   * and it carries no error object it did not receive.
    */
   private write(): boolean {
     if (this.store.save(this.current)) {
@@ -2976,14 +2857,7 @@ export class RunController {
     return false;
   }
 
-  /**
-   * The substreams' draw counts, with every named substream present.
-   *
-   * ALL FOUR are recorded. `normalizeRngCursor()` completes a partial map by
-   * walking `RNG_STREAM_NAMES`, so a reader that supplies fewer than four still
-   * yields a map carrying one entry per substream. A reader that throws yields
-   * the counts already recorded rather than propagating out of the commit path.
-   */
+  /** The substreams' draw counts, with every named substream present. */
   private readCursors(cursors: () => RngCursorMap): RngCursorMap {
     let read: RngCursorMap;
 
@@ -3004,11 +2878,6 @@ export class RunController {
     const carried = normalizeRngCursor(this.current.rngCursor);
     const complete: Record<string, number> = {};
 
-    // Walked by name, so the map written carries one entry per NAMED substream
-    // rather than per member the reader happened to return. A substream the
-    // reader omitted keeps the count already recorded, because a cursor only
-    // ever moves forward: writing a zero over a recorded count would replay
-    // draws the run has already taken.
     for (const name of RNG_STREAM_NAMES) {
       complete[name] = Math.max(normalized[name], carried[name]);
     }
@@ -3019,10 +2888,6 @@ export class RunController {
   /**
    * The relics to persist: the registry's projection when one is attached, and
    * the relics already held otherwise.
-   *
-   * PICKUP ORDER IS CARRIED THROUGH, and `state` is passed along opaquely —
-   * never inspected, never reshaped. A registry that throws or yields a
-   * non-array leaves the held relics in place.
    */
   private projectRelics(): readonly PersistedRelic[] {
     const registry = this.registry;
@@ -3034,10 +2899,8 @@ export class RunController {
     }
 
     try {
-      // CALLED THROUGH ITS OWNER, never through a member read off it into a
-      // local and then invoked bare: `RelicRegistry` supplies these members as
-      // class methods, which reach their own fields through `this`, and a bare
-      // call would enter them with none and raise on the first field read.
+      // Called through its owner, never through a member read off it into a
+      // local and then invoked bare.
       const projected = project.call(registry);
 
       return Array.isArray(projected) ? projected : this.current.relics;
@@ -3059,12 +2922,13 @@ export class RunController {
    * An offer is admitted only as the seeded draw produces one: an array of at
    * most `MAX_REWARD_OFFERS` entries, each a non-empty string, no identifier
    * repeated, and every identifier one the registry's catalogue carries. One
-   * unusable entry refuses the whole offer rather than a subset of it, because a
-   * subset would admit selections from a set the player was never shown.
+   * unusable entry refuses the whole offer rather than a subset of it, because
+   * a subset would admit selections from a set the player was never shown.
    *
    * TOTAL. The walk is contained, so a list that raises while it is read — a
-   * hostile iterator, a raising element — refuses the offer rather than raising
-   * out of `recordRewardOffer()`, and the refusal is reported like any other.
+   * hostile iterator, a raising element — refuses the offer rather than
+   * raising out of `recordRewardOffer()`, and the refusal is reported like any
+   * other.
    *
    * @param relicIds Identifiers offered.
    * @returns A fresh copy of the offer, or `null` where it was refused.
@@ -3078,7 +2942,7 @@ export class RunController {
   }
 
   /**
-   * Reads one offer under the admission rule `admitOffer()` contains.
+   * Reads one offer under the admission rule `admitOffer` contains.
    *
    * @param relicIds Identifiers offered.
    * @returns A fresh copy of the offer, or `null` where it was refused.
@@ -3109,10 +2973,10 @@ export class RunController {
   /**
    * Appends one validated entry to the held list, or refuses it.
    *
-   * APPENDED, NEVER INSERTED OR SORTED. Array order is pickup order and the hook
-   * bus dispatches in that order, so a relic joins at the END of the held list
-   * and every relic already held keeps its position. `charges` and `state` are
-   * carried exactly as the registry supplied them, and `state` is never
+   * APPENDED, NEVER INSERTED OR SORTED. Array order is pickup order and the
+   * hook bus dispatches in that order, so a relic joins at the END of the held
+   * list and every relic already held keeps its position. `charges` and `state`
+   * are carried exactly as the registry supplied them, and `state` is never
    * inspected or reshaped.
    *
    * The two ceilings are re-measured here rather than trusted from the caller,
@@ -3121,9 +2985,9 @@ export class RunController {
    * would lose the whole run's progress on the next write.
    *
    * @param relicId Identifier being taken on.
-   * @param entry The entry the registry produced, where there is one. Without
-   *   one the entry is resolved from the registry, which is what a caller
-   *   holding only an identifier reaches.
+   * @param entry The entry the registry produced, where there is one.
+   *   Without one the entry is resolved from the registry, which is what a
+   *   caller holding only an identifier reaches.
    * @returns Whether the relic joined the held list.
    */
   private appendRelic(relicId: string, entry?: PersistedRelic): boolean {
@@ -3152,18 +3016,28 @@ export class RunController {
   /**
    * Reports one reward outcome, accepted or refused.
    *
-   * Reported whether or not the relic was taken on, and naming the step that
-   * refused it, so a refused pick is visible to the observability layer rather
-   * than inferred from an absent report.
+   * THE ONE WRITER OF `onRewardDrawn`. Both public selection methods and the
+   * offer recorder reach the sink through here, so an accepted outcome and a
+   * refused one cannot carry differently-shaped payloads: `accepted` is always
+   * present, `refusal` is present exactly when something was refused, and
+   * `selectedRelicId` carries the identifier VERBATIM. `selectReward()` and
+   * `refuseSelection()` previously assembled payloads of their own, which
+   * omitted `accepted` and encoded the outcome into the identifier.
    *
-   * @param relicId Identifier chosen, absent where the OFFER itself was refused.
+   * @param relicId Identifier chosen, absent where the OFFER itself was
+   *   refused.
    * @param accepted Whether the relic joined the held list.
    * @param refusal Why it did not, and `null` where it did.
+   * @param offeredRelicIds The offer being reported against. Defaults to the
+   *   offer standing, which is what every caller reporting before the round
+   *   closes wants; a caller reporting afterwards passes the list it preserved.
    */
   private reportReward(
+    stageIndex: number,
     relicId: string | undefined,
     accepted: boolean,
-    refusal: RewardRefusal | null,
+    refusal: RewardReportRefusal | null,
+    offeredRelicIds?: readonly string[],
   ): void {
     const report: {
       correlationId: CorrelationId;
@@ -3171,11 +3045,11 @@ export class RunController {
       offeredRelicIds: readonly string[];
       selectedRelicId?: string;
       accepted: boolean;
-      refusal?: RewardRefusal;
+      refusal?: RewardReportRefusal;
     } = {
       correlationId: this.readRunCorrelationId(),
-      stageIndex: this.current.stageIndex,
-      offeredRelicIds: this.offeredRelicIds,
+      stageIndex,
+      offeredRelicIds: offeredRelicIds ?? this.offeredRelicIds,
       accepted,
     };
 
@@ -3191,12 +3065,35 @@ export class RunController {
   }
 
   /**
+   * The stage index a reward outcome is attributed to.
+   *
+   * The stage the standing offer was drawn at where one was drawn, and the
+   * stage in force otherwise — which is the case for an offer recorded through
+   * `recordRewardOffer()`, whose round is not attributed to a draw, and for a
+   * selection made with no offer standing at all.
+   *
+   * @returns The stage index to report.
+   */
+  private rewardStageIndex(): number {
+    if (this.offerStageIndex !== NO_OFFER_STAGE) {
+      return this.offerStageIndex;
+    }
+
+    if (this.resolvedStageIndex !== NO_OFFER_STAGE) {
+      return this.resolvedStageIndex;
+    }
+
+    return this.current.stageIndex;
+  }
+
+  /**
    * Whether the registry's catalogue carries one identifier.
    *
    * A registry that cannot be asked — one attached without `knowsRelic`, or
-   * none at all — admits the identifier on its shape alone, which is what keeps
-   * this controller usable without src/relics. A registry whose accessor throws
-   * refuses it, because an unanswerable membership question is not a yes.
+   * none at all — admits the identifier on its shape alone, which is what
+   * keeps this controller usable without src/relics. A registry whose accessor
+   * throws refuses it, because an unanswerable membership question is not a
+   * yes.
    *
    * @param relicId Identifier to test.
    * @returns Whether the identifier may be offered and chosen.
@@ -3204,9 +3101,10 @@ export class RunController {
   private catalogueCarries(relicId: string): boolean {
     const registry = this.registry;
 
-    // EITHER SPELLING, one reader. `knowsRelic` is the run port's name for this
-    // and `knows` is the registry's own; a controller composed with either is
-    // asked, and only one composed with neither admits on shape alone.
+    // Either spelling, one reader. `knowsRelic` is the run port's name for
+    // this and `knows` is the registry's own; a controller composed with
+    // either is asked, and only one composed with neither admits on shape
+    // alone.
     const knows = registry?.knowsRelic ?? registry?.knows;
 
     if (knows === undefined) {
@@ -3214,7 +3112,7 @@ export class RunController {
     }
 
     try {
-      // Called through its owner; see `projectRelics()`.
+      // Called through its owner; see `projectRelics`.
       return (
         (registry?.knowsRelic === undefined
           ? registry?.knows?.(relicId)
@@ -3230,17 +3128,6 @@ export class RunController {
   /**
    * Takes one relic on live and yields the entry to persist for it.
    *
-   * THE REGISTRATION STEP, whichever member carries it: it is what puts the
-   * relic's handlers on the hook bus, so the relic fires from the next hook
-   * onwards. Three spellings are accepted, tried in this order —
-   * `pickUpRelic`, which registers AND returns the entry to persist, so the
-   * record is exactly what the registry accepted; then `activateRelic`, the
-   * same step under the other name a port may publish it as; then `pickUp`,
-   * whose entry is read back through `resolveRelic`. A registry publishing NONE
-   * of them cannot register anything, and the entry falls back to
-   * `resolveRelic` and then to the bare identifier, which is the form a relic
-   * carrying neither charges nor state persists as.
-   *
    * The identifier the caller chose always wins over the one the registry
    * reported, so a registry cannot substitute a different relic.
    *
@@ -3250,22 +3137,20 @@ export class RunController {
   private takeRelicOn(relicId: string): PersistedRelic | null {
     const registry = this.registry;
 
-    // `activateRelic` accepted here as well as `pickUpRelic`, because
-    // `selectReward()` now reaches the registry through this one method and
-    // src/main.ts's port publishes the activation step under that name.
     const takeAndRead = registry?.pickUpRelic ?? registry?.activateRelic;
 
     if (takeAndRead !== undefined) {
       try {
-        // Called through its owner; see `projectRelics()`.
+        // Called through its owner; see `projectRelics`.
         const accepted = takeAndRead(relicId);
 
         if (accepted === null || typeof accepted !== 'object') {
           return null;
         }
 
-        // The identifier the caller chose always wins over the one the registry
-        // reported, so a registry cannot substitute a different relic.
+        // The identifier the caller chose always wins over the one the
+        // registry reported, so a registry cannot substitute a different
+        // relic.
         return { ...accepted, id: relicId };
       } catch (error) {
         this.reportRegistryFault(error);
@@ -3319,9 +3204,6 @@ export class RunController {
   /**
    * The entry to persist for one identifier a registry could not take on live.
    *
-   * `resolveRelic` resolves it when it can; a bare identifier is persisted
-   * otherwise. `state` is carried exactly as supplied.
-   *
    * @param relicId Identifier chosen.
    * @returns The entry to append.
    */
@@ -3329,8 +3211,8 @@ export class RunController {
     const registry = this.registry;
 
     // Either spelling: `persistedEntry` is the registry's own member name and
-    // `resolveRelic` the name this port first declared it under, and a registry
-    // supplying either is read through it.
+    // `resolveRelic` the name this port first declared it under, and a
+    // registry supplying either is read through it.
     const resolve = registry?.persistedEntry ?? registry?.resolveRelic;
 
     if (resolve === undefined) {
@@ -3338,7 +3220,7 @@ export class RunController {
     }
 
     try {
-      // Called through its owner; see `projectRelics()`.
+      // Called through its owner; see `projectRelics`.
       const resolved = resolve.call(registry, relicId);
 
       if (resolved === null || typeof resolved !== 'object') {
@@ -3359,12 +3241,6 @@ export class RunController {
    * The board edge length the STORED relic entries imply, read before the
    * envelope is loaded.
    *
-   * Two guards, because this runs on the startup path: a store without
-   * `peekRelics` and a registry without `relicBoardSize` each yield
-   * `undefined`, and a reader that raises is reported and yields `undefined`
-   * too — a run must open on a reconciled board rather than fail because a
-   * relic-implied size could not be read.
-   *
    * @returns The implied edge length, or `undefined`.
    */
   private readRelicBoardSize(): number | undefined {
@@ -3377,7 +3253,7 @@ export class RunController {
     try {
       const stored = this.store.peekRelics();
 
-      // Called through its owner; see `projectRelics()`.
+      // Called through its owner; see `projectRelics`.
       return Array.isArray(stored)
         ? registry.relicBoardSize(stored)
         : undefined;
@@ -3394,22 +3270,126 @@ export class RunController {
   }
 
   /**
+   * Puts the adopted envelope's unresolved reward round back in force.
+   *
+   * PROJECTED, NEVER REDRAWN. `RewardDrawPort.project` resolves the stored
+   * identifiers against the relic catalogue and takes no draw, so the resumed run
+   * presents the same offer it was interrupted on and every substream cursor
+   * stays exactly where the envelope left it. Redrawing would produce a different
+   * offer from advanced cursors and break the same-seed-same-offers guarantee of
+   * AAP V2.
+   *
+   * FIVE REASONS TO RESTORE NOTHING, each leaving the run to resolve its stage as
+   * if the offer had never been drawn: no round was stored; the run has ended; no
+   * projector was supplied; the round names a stage the envelope has since moved
+   * past — a stale marker, which is dropped rather than trusted; or the projection
+   * yielded nothing usable. The envelope is brought into line in each case, so a
+   * round that could not be restored does not sit in storage suppressing stage
+   * resolution for the rest of the run.
+   *
+   * NEVER THROWS. A projector that raises is reported and treated as one that
+   * yielded nothing.
+   */
+  private restorePendingReward(): void {
+    const stored = this.current.pendingReward;
+
+    if (stored === undefined) {
+      return;
+    }
+
+    if (this.ended || stored.stageIndex !== this.current.stageIndex) {
+      this.clearPersistedReward();
+
+      return;
+    }
+
+    const project = this.rewards?.project;
+
+    if (project === undefined) {
+      this.clearPersistedReward();
+
+      return;
+    }
+
+    let projected: readonly RewardOffer[];
+
+    try {
+      // Called through its owner; see `projectRelics()`.
+      projected = project.call(this.rewards, stored.offeredRelicIds);
+    } catch (error) {
+      this.reportRegistryFault(error);
+      this.clearPersistedReward();
+
+      return;
+    }
+
+    if (!Array.isArray(projected) || projected.length === 0) {
+      this.clearPersistedReward();
+
+      return;
+    }
+
+    // Through the SAME admission gate a live draw passes, so a stored round can
+    // no more name a relic outside the catalogue, a duplicate, or a relic the run
+    // already holds than a drawn one can.
+    const admitted = this.admitOffer(
+      projected.map((relic): string => relic.id),
+    );
+
+    if (admitted === null) {
+      this.clearPersistedReward();
+
+      return;
+    }
+
+    // `admitOffer` admits the list as a whole or not at all, so reaching here
+    // means every projected offer is one a live draw could have made.
+    this.offer = Object.freeze(
+      projected.map((relic) => Object.freeze({ ...relic })),
+    );
+    this.offeredRelicIds = Object.freeze([...admitted]);
+    this.offerStageIndex = stored.stageIndex;
+
+    // A RESTORED ROUND IS AN OPEN ROUND: nothing has been resolved against it,
+    // so a selection made now reports against this round rather than against
+    // whatever the instance last resolved.
+    this.resolvedRelicId = null;
+
+    // Re-recorded from what was actually admitted, so the envelope and the live
+    // offer cannot disagree about which three cards are standing.
+    this.current = {
+      ...this.current,
+      pendingReward: {
+        stageIndex: stored.stageIndex,
+        offeredRelicIds: [...this.offeredRelicIds],
+      },
+    };
+
+    this.reporter.onRewardOffered?.({
+      correlationId: this.readRunCorrelationId(),
+      stageIndex: this.offerStageIndex,
+      offeredRelicIds: this.offeredRelicIds,
+    });
+  }
+
+  /**
    * Hands the relics a loaded envelope carried back to the registry, in pickup
    * order, with `state` exactly as it was persisted, and ADOPTS what the
    * registry made of them.
    *
    * VALIDATED HYDRATION. The registry resolves every identifier against the
    * authoritative catalogue, so an identifier the catalogue does not know, a
-   * duplicate, and a malformed entry are all refused there — and a refused entry
-   * can never fire, because there is no handler to bind. Reading the result back
-   * is what keeps the envelope honest about that: without it the run would go on
-   * reporting a relic that is not held, the HUD would draw a tray entry for it,
-   * and the reward draw would keep excluding an identifier that is doing nothing.
+   * duplicate, and a malformed entry are all refused there — and a refused
+   * entry can never fire, because there is no handler to bind. Reading the
+   * result back is what keeps the envelope honest about that: without it the
+   * run would go on reporting a relic that is not held, the HUD would draw a
+   * tray entry for it, and the reward draw would keep excluding an identifier
+   * that is doing nothing.
    *
-   * The read-back is `snapshotRelics`, which is the registry's own projection, so
-   * pickup order, the charge budget in force and every nested state slot come
-   * from the registry rather than from the envelope that was loaded. The next
-   * write persists the normalised set.
+   * The read-back is `snapshotRelics`, which is the registry's own projection,
+   * so pickup order, the charge budget in force and every nested state slot
+   * come from the registry rather than from the envelope that was loaded. The
+   * next write persists the normalised set.
    */
   private restoreRelics(): void {
     const registry = this.registry;
@@ -3456,8 +3436,9 @@ export class RunController {
       return;
     }
 
-    // Adopted only when the registry actually made something different of them,
-    // so a clean load neither rewrites the envelope nor reports a refusal.
+    // Adopted only when the registry actually made something different of
+    // them, so a clean load neither rewrites the envelope nor reports a
+    // refusal.
     if (!relicsDiffer(requested, restored)) {
       return;
     }
@@ -3482,13 +3463,8 @@ export class RunController {
   }
 
   /**
-   * Summarises the run, reports it, clears the stored envelope and replaces the
-   * envelope in force with a fresh one.
-   *
-   * The replacement is what keeps a second run played without a reload honest:
-   * the next commit persists a run at stage 0 with no relics, rather than
-   * carrying the finished run's progress onto a fresh board. It is a new run
-   * instance, so it carries a new run identifier.
+   * Summarises the run, reports it, clears the stored envelope and replaces
+   * the envelope in force with a fresh one.
    */
   private finish(outcome: RunOutcome): RunSummary {
     const summary = this.summary();
@@ -3498,12 +3474,13 @@ export class RunController {
     this.stageCleared = false;
 
     // A finished run holds no pending reward: the offer it was showing belonged
-    // to the run that has just ended, as did any round it resolved and any stage
-    // it had open.
+    // to the run that has just ended, as did any round it resolved and any
+    // stage it had open.
     this.offer = NO_OFFER;
     this.offerStageIndex = NO_OFFER_STAGE;
     this.offeredRelicIds = [];
     this.resolvedRelicId = null;
+    this.resolvedStageIndex = NO_OFFER_STAGE;
     this.startedStageIndex = NO_STARTED_STAGE;
 
     this.reporter.onRunEnded?.({
@@ -3518,19 +3495,7 @@ export class RunController {
     return summary;
   }
 
-  /**
-   * Measures the stage's progress and records whether its goal is met.
-   *
-   * The measurement itself is `evaluateStageGoal()` in
-   * src/config/stage-config.ts; this module holds no second evaluator and
-   * stores the `progress` it returns verbatim. Decision DL-RUNCTL-03.
-   *
-   * The two inputs are checked for finiteness before they reach
-   * `evaluateStageGoal()`, which throws on a value that is not finite: an
-   * `onAfterMove` handler may set the score, so the number reaching here is not
-   * guaranteed to be one this module produced. An unusable measurement leaves
-   * the last good progress in place rather than replacing it with a guess.
-   */
+  /** Measures the stage's progress and records whether its goal is met. */
   private measure(highestTileValue: number, score: number): void {
     if (!Number.isFinite(score) || !Number.isFinite(highestTileValue)) {
       return;
@@ -3545,7 +3510,9 @@ export class RunController {
     this.stageCleared = progress.cleared;
   }
 
-  /** Measures from a board snapshot, for the paths that carry no live board. */
+  /**
+   * Measures from a board snapshot, for the paths that carry no live board.
+   */
   private measureSnapshot(state: SerializedGameState): void {
     this.measure(highestInSnapshot(state), state.score);
   }
@@ -3560,8 +3527,8 @@ export class RunController {
    * an empty board of the configured size.
    *
    * The empty board stands for exactly one moment — the first commit replaces
-   * it with the engine's own snapshot — and it is a truthful value rather than
-   * a stand-in: a run that has not started holds no tiles.
+   * it with the engine's own snapshot — and it is a truthful value rather
+   * than a stand-in: a run that has not started holds no tiles.
    */
   private freshState(runId: string): RunState {
     return createFreshRunState({
@@ -3575,14 +3542,9 @@ export class RunController {
   }
 }
 
-/* --------------------------------------------------------------------------
- * Write reporting
- * ----------------------------------------------------------------------- */
-
 /**
  * The `error` a commit-path write failure carries when the store refused the
- * envelope without raising. Not an exception: the store reports the storage
- * cause, and this names the consequence for the run.
+ * envelope without raising.
  */
 const WRITE_REFUSED_ON_COMMIT = Object.freeze(
   new Error('The run-state store refused the envelope on the commit path.'),
@@ -3591,9 +3553,6 @@ const WRITE_REFUSED_ON_COMMIT = Object.freeze(
 /**
  * Serialised size of an envelope, at two bytes per UTF-16 code unit, and `0`
  * when it cannot be measured.
- *
- * Measurement never throws, so a report about a failed write cannot itself
- * fail.
  */
 function measureBytes(state: RunState): number {
   try {
@@ -3610,20 +3569,10 @@ function measureBytes(state: RunState): number {
 /** Bytes per UTF-16 code unit, matching the store's own accounting. */
 const BYTES_PER_CODE_UNIT = 2;
 
-/* --------------------------------------------------------------------------
- * Board readers
- * ----------------------------------------------------------------------- */
-
 /** The value of a board with no tiles, as `StageProgressInput` defines it. */
 const NO_TILES = 0;
 
-/**
- * The minimum a board must expose to be measured: the x-major cell matrix.
- *
- * Declared structurally so this module names no engine class. The `Grid` an
- * event carries as `MoveAfterEvent.board` satisfies it. Every member below is
- * readonly, so a measurement reads the live board and writes nothing to it.
- */
+/** The minimum a board must expose to be measured: the x-major cell matrix. */
 interface WalkableBoard {
   readonly cells: readonly (readonly ({ readonly value: number } | null)[])[];
 }
@@ -3647,13 +3596,7 @@ function highestOnBoard(board: WalkableBoard): number {
   return highest;
 }
 
-/**
- * The highest tile value in a board snapshot, and 0 for one holding none.
- *
- * Tolerant of a matrix that came out of Web Storage: a row that is not an
- * array, a cell that is not a tile and a value that is not a finite number are
- * skipped rather than measured.
- */
+/** The highest tile value in a board snapshot, and 0 for one holding none. */
 function highestInSnapshot(state: SerializedGameState): number {
   let highest = NO_TILES;
 
@@ -3684,9 +3627,7 @@ function highestInSnapshot(state: SerializedGameState): number {
 }
 
 /**
- * An empty board snapshot of one edge length, in the frozen persisted shape:
- * `cells` indexed `[x][y]` with every empty cell retained as `null` rather than
- * compacted away.
+ * An empty board snapshot of one edge length, in the frozen persisted shape.
  */
 function emptyBoardSnapshot(size: number): LegacyBoardSnapshot {
   const cells: (null)[][] = [];

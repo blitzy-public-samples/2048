@@ -1,33 +1,13 @@
 // Ported-fidelity suite of src/engine/move-resolver.ts, the TypeScript port of
 // the move pipeline of js/game_manager.js, which is deleted. Every describe
-// below names one ported construct: `getVector()`, `buildTraversals()`,
-// `findFarthestPosition()`, `positionsEqual()`, `prepareTiles()`, `moveTile()`,
-// the merge branch, the reposition branch, the change check, the merge dispatch
-// and the traversal walk.
+// below names one ported construct.
 //
-// Three of those changed rather than moved, and each is pinned as changed: the
-// merge condition's two value tests are `config.merge.canMerge` while the
-// neighbour existence guard stays in the resolver; the produced face value is
-// `config.merge.produce`; and the win test is NOT performed here — the produced
-// value is reported and src/engine/terminal-state.ts compares it against
-// `RulesConfig.winValue`.
+// Three signatures changed with the move off the prototype: `getVector` is
+// `vectorForDirection`, `buildTraversals` takes the board size where the
+// method read `this.size`, and `findFarthestPosition` takes the grid where the
+// method read `this.grid`.
 //
-// Three signatures changed with the move off the prototype: `getVector()` is
-// `vectorForDirection`, `buildTraversals()` takes the board size where the
-// method read `this.size`, and `findFarthestPosition()` takes the grid where
-// the method read `this.grid`.
-//
-// This suite reads no DOM and no storage, consumes no randomness and names no
-// hook bus: src/engine/move-resolver.ts takes its merge transformation as an
-// injected callback. No mocking library is installed — the recorders below are
-// hand-written and the injected callbacks are vitest spies. It runs in the
-// `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
-//
-// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
-// DL-MOVE-01, DL-MOVE-02, DL-MOVE-03.
-// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-MOVE-01,
-// TR-MOVE-02, TR-MOVE-03, TR-MOVE-04, TR-MOVE-05, TR-MOVE-06, TR-MOVE-07,
-// TR-MOVE-08.
+// Decisions: DL-MOVE-01, DL-MOVE-02, DL-MOVE-03 (docs/DECISION_LOG.md).
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -1540,15 +1520,14 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
 
     const payload = dispatchMerge.mock.calls[0][0];
 
-    // The two live tiles of the merge branch, and the produced value twice:
-    // AAP Contract 1's collaborators, carried through the bus untouched.
+    // The two live tiles of the merge branch, and the produced value twice.
     expect(payload.source).toBe(source);
     expect(payload.target).toBe(target);
     expect(payload.resultValue).toBe(produced);
     expect(payload.scoreDelta).toBe(produced);
   });
 
-  it('reads back only the result value and the score delta (F2)', () => {
+  it('reads back only the result value and the score delta', () => {
     const grid = rehydrate(createMergePairBoard());
     const target = tileAt(grid, { x: 0, y: ROW_ZERO });
     const source = tileAt(grid, { x: 1, y: ROW_ZERO });
@@ -1576,7 +1555,7 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
   });
 
   it('leaves the merged tile on the values the resolver produced even when ' +
-    'a dispatch writes the two consumed tiles (F2)', () => {
+    'a dispatch writes the two consumed tiles', () => {
     const grid = rehydrate(createMergePairBoard());
     const target = tileAt(grid, { x: 0, y: ROW_ZERO });
     const source = tileAt(grid, { x: 1, y: ROW_ZERO });
@@ -1588,9 +1567,6 @@ describe('resolveMove merge dispatch (js/game_manager.js L156-L167)', () => {
       {
         dispatchMerge: (payload): MergePayload => {
           // The payload carries the live tiles, so these writes reach them.
-          // Both are out of `grid.cells` by the time the resolver returns, and
-          // the resolver reads `resultValue` and `scoreDelta` back off the
-          // payload and nothing else, so the board is unaffected.
           payload.source.value = HUGE_VALUE;
           payload.target.value = HUGE_VALUE;
 

@@ -1,24 +1,5 @@
 // Context-availability suite of src/input/on-screen-controls.ts.
 //
-// The contract under test is the one `OnScreenControlsHandle.setContext`
-// states: "A control whose action is inactive in the new context leaves both
-// the accessibility tree and the tab order." It holds for every control the
-// layer owns, the three index.html declares included — `.retry-button`
-// (index.html L52), `.restart-button` (L36) and `.keep-playing-button` (L51),
-// the ports of js/keyboard_input_manager.js L72-L74.
-//
-// Sections:
-//   1  the markup controls' availability across the three contexts
-//   2  the attribute state an unavailable control carries
-//   3  publication suppression
-//   4  accessible names under a remapped keymap
-//   5  unmount, which leaves index.html's own markup behind
-//
-// `.retry-button` declares `['game', 'overlay']` in `LEGACY_CONTROL_BINDINGS`
-// because the markup places it inside the terminal overlay while the
-// `restart` binding of src/input/keymap.ts lists `'game'` alone; both facts
-// are asserted below rather than assumed.
-//
 // The host is a hand-written double: no mocking library, no spy on a global,
 // and no storage. This suite is collected by the `unit:dom` project of
 // vitest.config.ts, whose environment is 'jsdom'.
@@ -29,6 +10,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_KEY_BINDINGS,
+  RELIC_SLOT_COUNT,
+  REWARD_SLOT_COUNT,
   type Direction,
   type InputContext,
   type Keymap,
@@ -43,15 +26,12 @@ import type {
 } from '../../../src/input/on-screen-controls';
 import type { InputSubscription } from '../../../src/input/input-manager';
 
-/* ===== Doubles and fixtures ===== */
-
 /** What the host recorded, so a publication is observable. */
 interface HostLog {
   readonly published: string[];
   readonly moves: Direction[];
 }
 
-/** A host that records rather than driving an engine. */
 function createHost(): OnScreenControlHost & { readonly log: HostLog } {
   const log: HostLog = { published: [], moves: [] };
 
@@ -157,8 +137,6 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-/* ===== 1. Availability across the three contexts ===== */
-
 describe('LEGACY_CONTROL_BINDINGS declares the overlay control', () => {
   it('gives .retry-button both contexts and the rest none of their own', () => {
     const [retry, restart, keepPlaying] = LEGACY_CONTROL_BINDINGS;
@@ -254,8 +232,6 @@ describe('a markup control follows the active context', () => {
 
     const handle = mount(createHost(), 'game');
 
-    // `.restart-button` declares no contexts of its own, so it follows the
-    // table in force rather than the one it was mounted with.
     expect(isSuppressed('.restart-button')).toBe(false);
 
     handle.setKeymap({
@@ -265,8 +241,8 @@ describe('a markup control follows the active context', () => {
 
     expect(isSuppressed('.restart-button')).toBe(true);
 
-    // `.retry-button` declares its own, so a remapped binding does not move
-    // it out of the overlay it lives in.
+    // `.retry-button` declares its own, so a remapped binding does not move it
+    // out of the overlay it lives in.
     expect(isSuppressed('.retry-button')).toBe(false);
   });
 
@@ -284,8 +260,6 @@ describe('a markup control follows the active context', () => {
     expect(handle.controls.length).toBeGreaterThan(markup.length);
   });
 });
-
-/* ===== 2. The attribute state an unavailable control carries ===== */
 
 describe('an unavailable markup control carries every suppressor', () => {
   it('writes hidden, aria-hidden, disabled and tabindex', () => {
@@ -350,8 +324,6 @@ describe('an unavailable markup control carries every suppressor', () => {
     expect(control('.restart-button').textContent).toBe('New Game');
   });
 });
-
-/* ===== 3. Publication suppression ===== */
 
 describe('an unavailable markup control publishes nothing', () => {
   it('drops a click on a control inactive in the context', () => {
@@ -420,8 +392,6 @@ describe('an unavailable markup control publishes nothing', () => {
   });
 });
 
-/* ===== 4. Accessible names under a remapped keymap ===== */
-
 describe('names track the keymap without overwriting the markup', () => {
   it('leaves a markup-declared accessible name alone', () => {
     seedMarkup();
@@ -478,8 +448,6 @@ describe('names track the keymap without overwriting the markup', () => {
   });
 });
 
-/* ===== 5. Unmount leaves index.html's markup behind ===== */
-
 describe('unmount restores the markup it was handed', () => {
   it('removes every attribute this layer wrote', () => {
     seedMarkup();
@@ -513,14 +481,11 @@ describe('unmount restores the markup it was handed', () => {
   });
 });
 
-/* ===== 7. A repeat mount replaces the set it finds ===== */
-
 // The module's entry point is a factory, so nothing stopped a second call over
-// the same host from appending a second pad and a second action group: the host
-// then carried two of every generated control — two tab stops per action, two
-// accessible names, and two click listeners publishing the same action twice
-// from one press. Replacing what a previous mount left makes a repeat mount
-// idempotent in effect (N10).
+// the same host from appending a second pad and a second action group: the
+// host then carried two of every generated control — two tab stops per action,
+// two accessible names, and two click listeners publishing the same action
+// twice from one press.
 
 describe('mounting twice over one host leaves one set of controls', () => {
   it('replaces the generated groups rather than appending to them', () => {
@@ -564,8 +529,7 @@ describe('mounting twice over one host leaves one set of controls', () => {
     expect(up).not.toBeNull();
     up?.click();
 
-    // The surviving set publishes to the host that created it, once. A stale
-    // duplicate would have published to the first host as well.
+    // The surviving set publishes to the host that created it, once.
     expect(second.log.moves).toHaveLength(1);
     expect(first.log.moves).toHaveLength(0);
   });
@@ -583,5 +547,159 @@ describe('mounting twice over one host leaves one set of controls', () => {
 
     expect(root.querySelectorAll('.on-screen-controls-group')).toHaveLength(0);
     expect(root.querySelectorAll('button')).toHaveLength(0);
+  });
+});
+
+/* ==========================================================================
+ * 6. Availability narrowed beyond the context, and one control per slot
+ * ========================================================================== */
+
+// The three contexts are coarse and several actions share one of them, so a
+// caller that knows which screen is showing and which slot is filled narrows
+// each control through the `available` predicate. `indexes` is what generates
+// one control per slot rather than one per action, and the two are read
+// together: a slot with no control cannot be reached by a pointer or by a
+// screen reader however many keys are bound to it.
+describe('availability narrows by the caller as well as the context', () => {
+  it('withdraws a control the predicate refuses, in an active context', () => {
+    seedMarkup();
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'game',
+      keymap: DEFAULT_KEY_BINDINGS,
+      available: (action): boolean => action !== 'restart',
+    });
+
+    mounted.push(handle);
+
+    // `restart` is active in `'game'` by its binding, so only the predicate can
+    // have withdrawn it.
+    expect(isSuppressed('.restart-button')).toBe(true);
+    expect(isSuppressed('.retry-button')).toBe(true);
+  });
+
+  it('reapplies the predicate on refresh, so a screen change lands', () => {
+    seedMarkup();
+
+    let allowed = false;
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'game',
+      keymap: DEFAULT_KEY_BINDINGS,
+      available: (): boolean => allowed,
+    });
+
+    mounted.push(handle);
+
+    expect(isSuppressed('.restart-button')).toBe(true);
+
+    allowed = true;
+    handle.refresh();
+
+    expect(isSuppressed('.restart-button')).toBe(false);
+  });
+
+  it('keeps every control where a predicate raises, and does not throw', () => {
+    seedMarkup();
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'game',
+      keymap: DEFAULT_KEY_BINDINGS,
+      available: (): boolean => {
+        throw new Error('the predicate is hostile');
+      },
+    });
+
+    mounted.push(handle);
+
+    expect(isSuppressed('.restart-button')).toBe(false);
+    expect(() => {
+      handle.refresh();
+    }).not.toThrow();
+  });
+
+  it('generates one control per relic slot the keymap binds a key for', () => {
+    seedMarkup();
+
+    const slots = Array.from(
+      { length: RELIC_SLOT_COUNT },
+      (_unused, slot): number => slot,
+    );
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'game',
+      keymap: DEFAULT_KEY_BINDINGS,
+      indexes: { activateRelic: slots },
+    });
+
+    mounted.push(handle);
+
+    // ONE PER SLOT, the last one included: a cap below `RELIC_SLOT_COUNT` left
+    // the ninth relic with a key binding and no control at all.
+    const generated = handle.controls.filter(
+      (entry) => entry.action === 'activateRelic',
+    );
+
+    expect(generated).toHaveLength(RELIC_SLOT_COUNT);
+    expect(generated.map((entry) => entry.index)).toEqual(slots);
+  });
+
+  it('generates one control per reward slot as well', () => {
+    seedMarkup();
+
+    const slots = Array.from(
+      { length: REWARD_SLOT_COUNT },
+      (_unused, slot): number => slot,
+    );
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'overlay',
+      keymap: DEFAULT_KEY_BINDINGS,
+      indexes: { selectReward: slots },
+    });
+
+    mounted.push(handle);
+
+    const generated = handle.controls.filter(
+      (entry) => entry.action === 'selectReward',
+    );
+
+    expect(generated).toHaveLength(REWARD_SLOT_COUNT);
+    expect(generated.map((entry) => entry.index)).toEqual(slots);
+  });
+
+  it('withdraws the slots the predicate refuses and keeps the rest', () => {
+    seedMarkup();
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'overlay',
+      keymap: DEFAULT_KEY_BINDINGS,
+      indexes: { selectReward: [0, 1, 2] },
+
+      // Two offers stand, so the third slot is refused.
+      available: (action, index): boolean =>
+        action !== 'selectReward' || index < 2,
+    });
+
+    mounted.push(handle);
+
+    const shown = handle.controls
+      .filter((entry) => entry.action === 'selectReward')
+      .map((entry) => ({
+        index: entry.index,
+        suppressed: entry.element.getAttribute('aria-hidden') === 'true',
+      }));
+
+    expect(shown).toEqual([
+      { index: 0, suppressed: false },
+      { index: 1, suppressed: false },
+      { index: 2, suppressed: true },
+    ]);
   });
 });

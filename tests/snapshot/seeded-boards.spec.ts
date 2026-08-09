@@ -1,35 +1,10 @@
 // Seeded board snapshots: seed + move list -> exact board state.
 //
-// THE GATE THIS IS HALF OF
-//   AAP V2 requires that one seed and one move list yield an identical board
-//   every time, and it requires that to be enforceable as a REGRESSION gate
-//   rather than as a property a unit test happens to assert. The unit suite
-//   already proves the engine is deterministic; what it cannot prove is that the
-//   sequence has not CHANGED, because a unit test computes both sides of its own
-//   comparison and therefore agrees with whatever the code now does. A stored
-//   snapshot is the only artifact that disagrees.
-//
-//   So the failure this file is built to catch is a silent one: a change to the
-//   PRNG, to the substream derivation, to the traversal order, to the spawn
-//   distribution or to the merge rule that leaves every unit test green while
-//   making every previously recorded run unreproducible. Any of those breaks a
-//   snapshot here on the next run.
-//
-// THE RECORDED VALUES ARE DERIVED FROM NOTHING
-//   Nothing in this file computes an expected board. Each snapshot is whatever
-//   the engine produced when it was recorded, checked in, and thereafter
-//   compared byte for byte. Decision DL-FIXTURE-03.
-//
-// RE-RECORDING IS DELIBERATE
-//   `npm run test:snapshot` passes no update flag, so an existing snapshot is
-//   never rewritten by it and a mismatch fails. Re-recording is the explicit
-//   opt-in `vitest run --config vitest.snapshot.config.ts -u`, and doing so
-//   after a rules change is a decision to declare every prior run
-//   unreproducible.
-//
 // This project runs in `node` with no DOM and no Web Storage. The engine is
 // DOM-free, so nothing here needs either: storage is a `MemoryStorage` behind
 // the real manager.
+//
+// Decisions: DL-FIXTURE-03 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -57,18 +32,7 @@ import {
 import { formatBoard, formatCursors } from '../fixtures/snapshot-format';
 import { PLATFORM_MATH_RANDOM } from '../fixtures/math-random-reference';
 
-/* ==========================================================================
- * Harness
- * ========================================================================== */
-
-/**
- * The move list every board case plays, unless it names its own.
- *
- * Sixteen moves cycling all four directions four times. All four appear because
- * a move that changes nothing resolves to no turn at all, and which single
- * direction changes a given seeded board is a property of that seed; cycling
- * guarantees real turns for every seed below.
- */
+/** The move list every board case plays, unless it names its own. */
 const MOVE_CYCLE: readonly Direction[] = [
   DIRECTION_UP,
   DIRECTION_RIGHT,
@@ -105,14 +69,7 @@ interface Played {
   readonly moved: readonly boolean[];
 }
 
-/**
- * Plays one seeded run and returns what it produced.
- *
- * Deliberately minimal: no hooks, no relics, no run controller, no renderer, no
- * observability. Every one of those is a subscriber, and a subscriber that
- * changed the recorded board would be a defect this file should surface rather
- * than absorb.
- */
+/** Plays one seeded run and returns what it produced. */
 function playSeeded(options: PlayOptions): Played {
   const backing = new MemoryStorage();
 
@@ -159,10 +116,6 @@ function render(played: Played): string {
   ].join('\n');
 }
 
-/* ==========================================================================
- * 1. A fresh board, several seeds
- * ========================================================================== */
-
 describe('a fresh board played from a fixed seed', () => {
   it.each([
     'snapshot-seed-alpha',
@@ -180,8 +133,6 @@ describe('a fresh board played from a fixed seed', () => {
     const first = playSeeded({ seed: 'snapshot-seed-alpha' });
     const second = playSeeded({ seed: 'snapshot-seed-alpha' });
 
-    // Determinism within one process, asserted directly rather than through the
-    // store: two independent compositions of one seed are the same run.
     expect(render(second)).toBe(render(first));
   });
 
@@ -194,10 +145,6 @@ describe('a fresh board played from a fixed seed', () => {
     expect(render(shifted)).not.toBe(render(alpha));
   });
 });
-
-/* ==========================================================================
- * 2. The five board fixtures
- * ========================================================================== */
 
 describe('a restored board played from a fixed seed', () => {
   it('reproduces its recorded board from the merge-pair fixture', () => {
@@ -213,8 +160,8 @@ describe('a restored board played from a fixed seed', () => {
   });
 
   it('reproduces its recorded board from the near-win fixture', () => {
-    // One move left merges the two 1024s into the configured win value, so this
-    // records the win transition as well as the board.
+    // One move left merges the two 1024s into the configured win value, so
+    // this records the win transition as well as the board.
     expect(
       render(
         playSeeded({
@@ -227,24 +174,19 @@ describe('a restored board played from a fixed seed', () => {
   });
 
   it('reproduces its recorded board from the near-loss fixture', () => {
-    // Records the loss transition: the board runs out of moves during the cycle.
+    // Records the loss transition: the board runs out of moves during the
+    // cycle.
     expect(
       render(playSeeded({ seed: 'fixture-near-loss', board: NEAR_LOSS_BOARD })),
     ).toMatchSnapshot();
   });
 });
 
-/* ==========================================================================
- * 3. Configured rules
- * ========================================================================== */
-
 describe('a fixed seed under configured rules', () => {
   it.each([2, 3, 5, 6, 8])(
     'reproduces its recorded board at board size %i',
     (boardSize) => {
-      // R4: the board dimension is configuration, not a literal. A snapshot per
-      // size records that the traversal, the spawn positions and the terminal
-      // checks all follow the configured lattice rather than a captured 4.
+      // R4: the board dimension is configuration, not a literal.
       expect(
         render(
           playSeeded({
@@ -277,9 +219,7 @@ describe('a fixed seed under configured rules', () => {
         playSeeded({
           seed: 'configured-spawn-weights',
           configure: (config): void => {
-            // The vanilla distribution inverted: mostly 4s. Recorded so a change
-            // to `pickWeighted`'s walk — which selects the first index whose
-            // running total exceeds the scaled draw — cannot pass unnoticed.
+            // The vanilla distribution inverted: mostly 4s.
             config.spawn = { values: [2, 4], weights: [0.1, 0.9] };
           },
         }),
@@ -301,16 +241,8 @@ describe('a fixed seed under configured rules', () => {
   });
 });
 
-/* ==========================================================================
- * 4. The invariant the whole gate rests on
- * ========================================================================== */
-
 describe('the randomness contract', () => {
   it('never replaces Math.random', () => {
-    // The seeded-PRNG pitfall this guards: a generator installed globally makes
-    // the whole runtime predictable, and a snapshot recorded under that
-    // condition would be reproducible for the wrong reason. Every module under
-    // src/ draws from an injected substream instead.
     playSeeded({ seed: 'math-random-guard' });
 
     expect(Math.random).toBe(PLATFORM_MATH_RANDOM);
@@ -322,8 +254,7 @@ describe('the randomness contract', () => {
     // Substream separation is what lets a relic be added without invalidating
     // every board snapshot in this file: a relic draws from `relic-draw` and
     // `rarity-weight`, and neither shares a sequence with the two spawn
-    // substreams. If play consumed them, the addition of the relic system would
-    // shift every recorded board here.
+    // substreams.
     expect(played.cursors).toContain('relic-draw      0');
     expect(played.cursors).toContain('rarity-weight   0');
   });

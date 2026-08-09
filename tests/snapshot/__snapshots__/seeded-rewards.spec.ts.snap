@@ -78,7 +78,7 @@ exports[`a run played through the production reward path > reproduces its record
           tumbler           uncommon    charges 3  hooks onBeforeMove
           chain-catalyst    legendary   charges -  hooks onStageStart, onMerge
   stage 2
-          prospectors-eye   rare        charges -  hooks onStageStart, onSpawn
+          prospectors-eye   rare        charges -  hooks onSpawn
     TAKEN loaded-dice       legendary   charges -  hooks onSpawn
           fertile-ground    uncommon    charges -  hooks onSpawn
   stage 3

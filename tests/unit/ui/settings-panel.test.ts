@@ -1,23 +1,8 @@
 // Contract suite for the settings dialog, AAP R9.
 //
-// The accessibility requirement names five preferences a player must be able to
-// change and one action they must be able to remap. This suite pins what the
-// dialog does with each:
-//
-//   real controls   toggle state is `aria-pressed`, unavailability is
-//                   `disabled` AND `aria-disabled`, and the reason for
-//                   unavailability is a referenced description rather than
-//                   colour alone.
-//   containment     the dialog delegates its trap to the focus manager,
-//                   engages exactly one, and releases exactly one.
-//   the capture     rebinding reads the next key pressed. The input manager is
-//                   suspended while a capture is armed and resumed once it
-//                   resolves, and Escape abandons the capture rather than the
-//                   dialog it was started from.
-//   the conflict    `resolveInput` returns the FIRST binding that matches, so a
-//                   rebind onto a key an earlier action holds is refused and
-//                   announced.
-//   no second store the panel owns no preference and no keymap of its own.
+// The accessibility requirement names five preferences a player must be able
+// to change and one action they must be able to remap. This suite pins what
+// the dialog does with each.
 //
 // Decisions behind this file are recorded in docs/DECISION_LOG.md.
 
@@ -55,10 +40,6 @@ import {
   SETTINGS_VOLUME_ID,
 } from '../../../src/ui/components/settings-panel';
 import { applyTheme } from '../../../src/theme/themes';
-
-/* ==========================================================================
- * Harness
- * ========================================================================== */
 
 interface TrapRecord {
   readonly container: Element;
@@ -119,19 +100,15 @@ interface HarnessOptions {
   readonly withEmitterSubscriber?: boolean;
 
   /**
-   * Whether the dialog engages its own trap. Defaults to `true`, the standalone
-   * case; `false` is the composition where the container's opener holds it.
+   * Whether the dialog engages its own trap. Defaults to `true`, the
+   * standalone case.
    */
   readonly trapFocus?: boolean;
 
   /**
-   * Collaborators that throw. Each is a transient failure of an owner the panel
-   * does not control, which is the condition the panel's guard flags decide
-   * whether a later attempt can retry.
-   *
-   * `throwOnKeymapChange` makes the TABLE'S OWNER refuse: its `remap` and
-   * `setKeymap` raise rather than write, which is the one way a keymap the panel
-   * offered fails to be adopted now that the owner holds the table.
+   * Collaborators that throw. Each is a transient failure of an owner the
+   * panel does not control, which is the condition the panel's guard flags
+   * decide whether a later attempt can retry.
    */
   readonly throwOnKeymapChange?: boolean;
   readonly throwOnResume?: boolean;
@@ -153,8 +130,7 @@ const harness = (options: HarnessOptions = {}): Harness => {
   const real = createPreferenceStore({});
   const calls: string[] = [];
 
-  // The store is frozen, so its members cannot be replaced in place. Every
-  // write is recorded by delegation instead, and every read stays real.
+  // The store is frozen, so its members cannot be replaced in place.
   const preferences: PreferenceStore = {
     ...real,
     setTheme: (id): void => {
@@ -195,11 +171,6 @@ const harness = (options: HarnessOptions = {}): Harness => {
     available: true,
   };
 
-  // THE REAL MANAGER as the table's owner, so the validation the dialog relies
-  // on is the production one rather than a paraphrase of it in a double. It is
-  // detached immediately: the dialog's own capture listener and this suite's
-  // synthetic keydowns are the only key traffic these tests want, and an
-  // attached manager would publish moves and restarts from them.
   let keymapWrites = 0;
   const keymapOwner: InputManager = createInputManager({
     keymap: DEFAULT_KEY_BINDINGS,
@@ -213,8 +184,8 @@ const harness = (options: HarnessOptions = {}): Harness => {
 
   // The owner the panel is given. The real manager unless the case wants a
   // refusing one, in which case its two writing members raise and everything
-  // else still reads through to the real table — so the panel's next capture is
-  // resolved against the bindings that are actually in force.
+  // else still reads through to the real table — so the panel's next capture
+  // is resolved against the bindings that are actually in force.
   const owner: InputManager =
     options.throwOnKeymapChange === true
       ? (Object.freeze({
@@ -427,10 +398,6 @@ const press = (key: string, code = key): void => {
 const captureText = (root: ParentNode): string =>
   root.querySelector(`#${SETTINGS_CAPTURE_STATUS_ID}`)?.textContent ?? '';
 
-/* ==========================================================================
- * 1. Opening, dialog semantics and containment
- * ========================================================================== */
-
 describe('opening the dialog', () => {
   it('renders a modal dialog named by its own heading', () => {
     const { panel, host } = harness();
@@ -515,10 +482,6 @@ describe('opening the dialog', () => {
   });
 });
 
-/* ==========================================================================
- * 2. Every control is a real control
- * ========================================================================== */
-
 describe('the controls', () => {
   it('uses native controls only: no bare anchor, no clickable div', () => {
     const { panel, host } = harness();
@@ -534,8 +497,8 @@ describe('the controls', () => {
     expect(host.querySelectorAll('span[tabindex]')).toHaveLength(0);
     expect(host.querySelectorAll('[role="button"]')).toHaveLength(0);
 
-    // Every button is a real submit-free button, so Enter and Space activate it
-    // and nothing navigates.
+    // Every button is a real submit-free button, so Enter and Space activate
+    // it and nothing navigates.
     for (const button of host.querySelectorAll('button')) {
       expect(button.type).toBe('button');
     }
@@ -605,10 +568,6 @@ describe('the controls', () => {
   });
 });
 
-/* ==========================================================================
- * 3. Palettes, motion and number-only mode
- * ========================================================================== */
-
 describe('the preference controls', () => {
   it('offers every palette, the original included, and never activates one', () => {
     const { panel, host, preferences, calls, announcements } = harness();
@@ -622,7 +581,7 @@ describe('the preference controls', () => {
     buttonNamed(host, 'Colourblind safe').click();
 
     // The choice went through the store, which is the one thing that activates
-    // a palette. The dialog writes no root attribute of its own.
+    // a palette.
     expect(calls).toEqual(['setTheme:colorblind-safe']);
     expect(preferences.getTheme()).toBe('colorblind-safe');
     expect(document.documentElement.getAttribute('data-theme')).toBe(
@@ -698,8 +657,8 @@ describe('the preference controls', () => {
     expect(hint?.textContent).toContain('no WebGL context is available');
 
     // Turning it off is refused, and the force was imposed only by this test:
-    // the dialog never calls `forceNumberOnlyMode`, and never even attempts the
-    // write while the mode is forced.
+    // the dialog never calls `forceNumberOnlyMode`, and never even attempts
+    // the write while the mode is forced.
     toggle.click();
 
     expect(preferences.isNumberOnlyMode()).toBe(true);
@@ -731,10 +690,6 @@ describe('the preference controls', () => {
   });
 });
 
-/* ==========================================================================
- * 4. Sound
- * ========================================================================== */
-
 describe('sound', () => {
   it('writes the store and pushes NOTHING into the engine', () => {
     const { panel, host, preferences, sound } = harness();
@@ -743,16 +698,7 @@ describe('sound', () => {
 
     buttonNamed(host, 'Mute sound').click();
 
-    // The store is the single owner. This dialog used to write the store AND
-    // push the same value into the audio layer, which is two synchronisation
-    // paths for one value: the store's own subscribers applied it as well, so a
-    // sync could push a value the engine had already taken. Now the write is the
-    // whole action, and src/audio/sound-engine.ts follows the store through its
-    // own subscription — asserted end to end by
-    // tests/unit/audio/sound-engine.test.ts, and wired by src/main.ts, which
-    // hands the store to `createSoundEngine`. Verified here by the DOUBLE
-    // staying untouched: this dialog reaches the engine for its availability and
-    // its unlock alone (N1).
+    // The store is the single owner.
     expect(preferences.isMuted()).toBe(true);
     expect(sound.muted).toBe(false);
 
@@ -835,10 +781,6 @@ describe('sound', () => {
   });
 });
 
-/* ==========================================================================
- * 5a. Containment against the real focus manager
- * ========================================================================== */
-
 describe('escape while a capture is armed', () => {
   it('abandons the capture and leaves the real trap holding the dialog', () => {
     // The real manager, not a stand-in: its trap listens for keydown on the
@@ -874,8 +816,7 @@ describe('escape while a capture is armed', () => {
     panel.open();
 
     // A second trap over the same container, engaged after the dialog's own —
-    // the composition src/ui/screen-router.ts produces. Its Escape callback is
-    // the one that would close the dialog.
+    // the composition src/ui/screen-router.ts produces.
     const outer = focusManager.trap(host, {
       label: 'settings',
       onEscape: (): void => {
@@ -908,10 +849,6 @@ describe('escape while a capture is armed', () => {
     document.body.innerHTML = '';
   });
 });
-
-/* ==========================================================================
- * 5. Rebinding a key
- * ========================================================================== */
 
 describe('rebinding a key', () => {
   it('renders a row per action with its keys spoken, never a key code', () => {
@@ -957,8 +894,7 @@ describe('rebinding a key', () => {
 
     // ONE announcement for one rebind. The dialog computes no table and writes
     // none: it asks the owner, and the owner validates, applies, persists and
-    // announces (N2). `keymap()` reads the OWNER's table here, so a dialog that
-    // only believed it had rebound something would fail this.
+    // announces.
     expect(keymapWrites()).toBe(1);
     expect(keymap().moveUp.keys).toEqual(['t']);
     expect(keymap().moveUp.codes).toEqual(['KeyT']);
@@ -1000,10 +936,7 @@ describe('rebinding a key', () => {
     rebindControl(host, 'moveUp').click();
 
     // The physical position `restart` holds, pressed on a layout that produces
-    // different key text there — a Dvorak keyboard reports `p` at `KeyR`. The
-    // key dimension is free, so the check that reads it alone accepted this and
-    // wrote a binding whose code shadowed `restart`: `resolveInput` returns its
-    // FIRST match, and `restart` is reached after `moveUp`.
+    // different key text there — a Dvorak keyboard reports `p` at `KeyR`.
     press('p', 'KeyR');
 
     expect(keymapWrites()).toBe(0);
@@ -1029,7 +962,7 @@ describe('rebinding a key', () => {
     rebindControl(host, 'moveUp').click();
 
     // The mirror case: `KeyQ` is bound to nothing, and the key text `r` is
-    // `restart`'s. Refused on the key dimension.
+    // `restart`'s.
     press('r', 'KeyQ');
 
     expect(keymapWrites()).toBe(0);
@@ -1049,8 +982,7 @@ describe('rebinding a key', () => {
 
     // `keepPlaying` is active in `'overlay'` and `restart` in `'game'`, so
     // neither dimension of `r`/`KeyR` is occupied in the context being rebound
-    // and the rebind stands. Checking every context rather than the action's own
-    // would have refused this.
+    // and the rebind stands.
     rebindControl(host, 'keepPlaying').click();
     press('r', 'KeyR');
 
@@ -1066,8 +998,9 @@ describe('rebinding a key', () => {
     panel.open();
     rebindControl(host, 'moveUp').click();
 
-    // An event with an empty `code` — a synthetic or on-screen keyboard event —
-    // carries nothing to check in that dimension, so only the key is measured.
+    // An event with an empty `code` — a synthetic or on-screen keyboard event
+    // — carries nothing to check in that dimension, so only the key is
+    // measured.
     press('t', '');
 
     expect(keymapWrites()).toBe(1);
@@ -1166,15 +1099,8 @@ describe('rebinding a key', () => {
   });
 });
 
-/* ==========================================================================
- * 5b. A collaborator that refuses
- * ========================================================================== */
-
 // Four guard flags decided whether a later attempt could retry, and every one
-// of them was raised BEFORE the collaborator it guarded had succeeded. A single
-// transient throw therefore became permanent: the guard short-circuited every
-// retry, and the panel went on reporting the state it had assumed rather than
-// the state in force.
+// of them was raised BEFORE the collaborator it guarded had succeeded.
 
 describe('a collaborator that refuses', () => {
   // The metric names src/ui/components/settings-panel.ts counts under.
@@ -1190,7 +1116,6 @@ describe('a collaborator that refuses', () => {
     rebindControl(host, 'moveUp').click();
     press('t', 'KeyT');
 
-    // Offered and refused, which is reported rather than swallowed.
     expect(keymapWrites()).toBe(1);
     expect(
       reports.some((report) => report.message === 'keymap remap threw'),
@@ -1216,10 +1141,6 @@ describe('a collaborator that refuses', () => {
     rebindControl(host, 'moveUp').click();
     press('t', 'KeyT');
 
-    // `ArrowUp` is the key `moveUp` still holds, because the rebind above was
-    // refused. Adopting locally first made the panel believe `moveUp` had moved
-    // to `t`, so this capture found `ArrowUp` free and seated a SECOND action
-    // on the key the InputManager was still dispatching `moveUp` from.
     rebindControl(host, 'moveDown').click();
     press('ArrowUp', 'ArrowUp');
 
@@ -1260,9 +1181,7 @@ describe('a collaborator that refuses', () => {
 
     // Armed again. The suspension is still in force — `resumeInput` threw, so
     // the InputManager never resumed — and arming disarms first, which RETRIES
-    // the resume before suspending again. Clearing the flag before the call
-    // made that retry short-circuit, leaving the board unplayable with the
-    // panel believing dispatch had been handed back.
+    // the resume before suspending again.
     rebindControl(host, 'moveDown').click();
 
     expect(suspensions).toEqual(['suspend', 'resume', 'resume', 'suspend']);
@@ -1290,9 +1209,7 @@ describe('a collaborator that refuses', () => {
     expect(keymap().moveUp.keys).toEqual(['z']);
     expect(keymap().moveUp.codes).toEqual(['KeyZ']);
 
-    // The same physical key on a layout that produces a different character:
-    // `event.key` is free, `event.code` is not. Only `key` was checked, so the
-    // rebind was accepted and both actions then fired from one physical key.
+    // The same physical key on a layout that produces a different character.
     rebindControl(host, 'moveDown').click();
     press('q', 'KeyZ');
 
@@ -1312,8 +1229,6 @@ describe('a collaborator that refuses', () => {
       reports.some((report) => report.message === 'sound unlock threw'),
     ).toBe(true);
 
-    // RETRIED, because the guard was never raised for an unlock that failed.
-    // Raising it first left the audio layer suspended for the life of the page.
     buttonNamed(host, 'Mute sound').click();
 
     expect(sound.unlocks).toBe(2);
@@ -1324,10 +1239,6 @@ describe('a collaborator that refuses', () => {
     expect(sound.unlocks).toBe(2);
   });
 });
-
-/* ==========================================================================
- * 6. Copy, dismissal, degradation and teardown
- * ========================================================================== */
 
 describe('the dialog s copy and boundaries', () => {
   it('names all four movement modalities and describes swipe as unbound', () => {
@@ -1381,7 +1292,6 @@ describe('the dialog s copy and boundaries', () => {
     unrouted.panel.open();
     buttonNamed(unrouted.host, 'Close settings').click();
 
-    // Nothing was subscribed, so the dialog closes rather than sticking.
     expect(unrouted.emissions).toEqual(['closeSettings']);
     expect(unrouted.panel.isOpen()).toBe(false);
   });
@@ -1429,17 +1339,6 @@ describe('the dialog s copy and boundaries', () => {
   });
 });
 
-/* ==========================================================================
- * Dialog semantics track the open state
- * ========================================================================== */
-
-// A hidden container that still answers to `[role="dialog"][aria-modal="true"]`
-// is a modal dialog to every selector that looks for one — including the
-// document context rule of src/input/input-manager.ts, whose
-// `.screen-layer [aria-modal="true"]:not([hidden])` is why the residue is
-// survivable rather than harmless — and it announces an inert background when
-// nothing is inert (N6).
-
 describe('the dialog semantics come and go with the open state', () => {
   it('takes the role and the modal flag off a closed dialog', () => {
     const { panel, host } = harness();
@@ -1456,14 +1355,14 @@ describe('the dialog semantics come and go with the open state', () => {
     expect(host.getAttribute('role')).toBeNull();
     expect(host.getAttribute('aria-modal')).toBeNull();
 
-    // `aria-hidden` moves with `hidden`, written in the same two places, so the
-    // pair cannot disagree.
+    // `aria-hidden` moves with `hidden`, written in the same two places, so
+    // the pair cannot disagree.
     expect(host.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('takes them off a host that has never been opened', () => {
-    // The state before the first open is the same hidden container as the state
-    // after a close, so it carries the same semantics: none.
+    // The state before the first open is the same hidden container as the
+    // state after a close, so it carries the same semantics: none.
     const { host } = harness();
 
     expect(host.hidden).toBe(true);
@@ -1533,16 +1432,10 @@ describe('the dialog semantics come and go with the open state', () => {
   });
 });
 
-/* ==========================================================================
- * One trap per container
- * ========================================================================== */
-
 // Two traps on one element is two owners of one thing: the first moves focus
 // inside, so the second records a restore target that is already inside the
 // container it is trapping, and the two then have to be released in the right
-// order for focus to return anywhere sensible. The composition of src/main.ts
-// hands ownership to src/ui/screen-router.ts, which has the trigger to restore
-// focus to and the background to make inert (N7).
+// order for focus to return anywhere sensible.
 
 describe('the focus trap has exactly one owner', () => {
   it('engages its own trap when it owns it', () => {

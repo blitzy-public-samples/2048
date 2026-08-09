@@ -1,66 +1,18 @@
 // Unit suite for the `collapsing-vault` relic of the `risk-reward-cursed`
 // family, declared in src/relics/families/risk-reward-cursed.ts. Three
 // properties are proved: the hooks it binds, the collapse it applies, and its
-// charge surface. AAP Group 5.
+// charge surface.
 //
 // The reload half of the board-size edge case — `reconcileBoardSize` and a
 // save/load round trip — is asserted by the sibling suite
-// tests/unit/relics/board-mutation.test.ts and is not repeated here. This suite
-// asserts the relic's immediate, in-memory effect.
-//
-// PROVENANCE OF THE ANCHORS THIS SUITE ASSERTS AGAINST
-//   js/grid.js L89-L91   `insertTile` wrote `cells[tile.x][tile.y] = tile`, so
-//                        a tile's own x/y and its slot in the matrix are one
-//                        fact; L93-L95 `removeTile` cleared that same slot.
-//   js/grid.js L97-L100  `withinBounds` compared a position against
-//                        `this.size`, the lattice's own field.
-//   js/grid.js L102-L117 `serialize` reported `size` and kept `null` for an
-//                        empty cell rather than omitting or compacting it.
-//   js/tile.js L10-L12   `savePosition` copied the current x/y into a fresh
-//                        `previousPosition` object; L14-L17 `updatePosition`
-//                        wrote x/y alone and left `previousPosition` standing.
-//   js/game_manager.js L238-L240  `movesAvailable` was
-//                        `cellsAvailable() || tileMatchesAvailable()`, and
-//                        L243-L268 bounded the neighbour probe by `this.size`
-//                        at L248-L249.
-//   js/application.js L3 carried the board dimension as the literal `4`. The
-//                        vanilla product declared that dimension in three
-//                        independent places — that literal, the Sass variable
-//                        `$grid-row-cells`, and sixteen static `.grid-cell`
-//                        elements — and reconciled none of them. One
-//                        configured value now drives all three.
-//   CONTRIBUTING.md L27  listed changes to the grid size among changes that
-//                        might not be accepted, superseded by the design-freeze
-//                        entry of docs/DECISION_LOG.md.
-//
-// Rationale for every choice named here lives in docs/DECISION_LOG.md, which
-// is the single source of truth for "why": DL-RISK-01 and DL-RISK-02 are the
-// entries src/relics/families/risk-reward-cursed.ts declares for this relic.
-//
-// Traceability rows of docs/TRACEABILITY_MATRIX.md this suite evidences:
-// TR-RISK-01, the relic's own row; the board-dimension consolidation
-// (js/application.js L3 to src/config/**); js/grid.js L89-L100; and
-// js/game_manager.js L238-L268. The command queue the handler records through
-// carries its own rows, TR-EFFECT-01 through TR-EFFECT-03.
-//
-// Figures this dispatch sits inside, per Rule 2: Figure 4, "Turn Data Flow:
-// From Keystroke to Composited Frame and Persisted Run State"
-// (docs/architecture/data-flow.md), whose `onStageEnd dispatch` node is where
-// the relic runs and whose `Moves available?` node the terminal-state block
-// below asserts against; and Figure 6, "Screen Flow State Machine", whose
-// `StageClear -> Reward` transition the same dispatch drives.
-//
-// TWO HARNESSES, each measuring a different thing.
-//   `stageBench` dispatches through the real src/engine/hook-bus.ts, which
-//   applies the commands the handler records. Every assertion about the
-//   lattice, the rules and the substream cursors runs through it.
-//   `directDispatch` invokes the handler with a `HookContext` assembled in this
-//   file over a recording queue that applies nothing. The zero-budget
-//   invocation runs through it.
+// tests/unit/relics/board-mutation.test.ts and is not repeated here. This
+// suite asserts the relic's immediate, in-memory effect.
 //
 // The context both harnesses build carries the run correlation identifier, so
 // the correlation plumbing is exercised end to end. Nothing here reads a DOM,
 // `Math.random`, a clock or a timer, and nothing here writes a snapshot file.
+//
+// Decisions: DL-RISK-01, DL-RISK-02 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -125,10 +77,6 @@ import {
   createNearWinBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * Constants
- * ========================================================================== */
-
 /** Catalogue identifier of the relic under test, and of its registration. */
 const RELIC_ID = 'collapsing-vault';
 
@@ -172,10 +120,6 @@ const UNTOUCHED_STREAMS: readonly StreamName[] = RNG_STREAM_NAMES.filter(
 /** Score every dispatch below carries, so a changed score is visible. */
 const STAGE_SCORE = 40;
 
-/* ==========================================================================
- * The unit under test
- * ========================================================================== */
-
 /**
  * Resolves the catalogue entry, failing loudly on a renamed or withdrawn id.
  *
@@ -213,14 +157,6 @@ function handlerSource(): string {
   return stageEndHandler().toString();
 }
 
-/* ==========================================================================
- * Harness 1: dispatch through the real hook bus
- *
- * The handler records commands on `HookContext.effects`; the bus applies them
- * once the handler has returned and its return has validated. A bench
- * therefore carries the live rules and the live lattice both commands write.
- * ========================================================================== */
-
 interface StageBench {
   /** Live rules, rebuilt per bench so no mutation crosses a test. */
   readonly config: RulesConfig;
@@ -239,9 +175,7 @@ interface StageBench {
  * Builds a bench with the relic registered as the only subscriber.
  *
  * @param size Edge length the rules and the lattice both open at.
- * @param cells Serialised cell matrix, read as `cells[x][y]`. `Grid.fromState`
- *   indexes the matrix itself, so a fixture is passed as `board.grid.cells`
- *   rather than as the whole board.
+ * @param cells Serialised cell matrix, read as `cells[x][y]`.
  * @param seed Run seed. A fixed literal in every caller.
  * @returns The bench.
  */
@@ -300,10 +234,6 @@ function slotOf(bench: StageBench): unknown {
   return bench.bus.subscriptions(BOUND_HOOK)[0]?.state;
 }
 
-/* ==========================================================================
- * Lattice helpers
- * ========================================================================== */
-
 /** One occupied cell, paired with the tile object standing in it. */
 interface Occupant {
   readonly x: number;
@@ -320,8 +250,8 @@ interface Placement {
 }
 
 /**
- * Lists the lattice's occupants, x-outer and y-inner — the order
- * js/grid.js L58-L64 walked cells in.
+ * Lists the lattice's occupants, x-outer and y-inner — the order js/grid.js
+ * L58-L64 walked cells in.
  *
  * @param grid Lattice to walk.
  * @returns One record per occupied cell.
@@ -368,9 +298,7 @@ function fill(grid: Grid, valueAt: (x: number, y: number) => number): void {
 
 /**
  * Serialises a lattice and rebuilds it from that snapshot, then serialises the
- * rebuild. The two are equal for a coherent lattice: `Grid.fromState` reads the
- * matrix `Grid.serialize` writes, `null` empties included
- * (js/grid.js L102-L117).
+ * rebuild.
  *
  * @param grid Lattice to round-trip.
  * @returns The rebuild's own snapshot.
@@ -430,17 +358,6 @@ function cursorDelta(
     'rarity-weight': after['rarity-weight'] - before['rarity-weight'],
   };
 }
-
-/* ==========================================================================
- * Harness 2: direct invocation over a recording queue
- *
- * The queue below satisfies `BoardEffectQueue` and RECORDS every command it
- * accepts without writing the lattice or the rules, so a direct invocation
- * leaves the board and the config exactly as they stood. Its five query members
- * read the LIVE lattice rather than a projection of the recorded commands, so
- * the boards passed to this harness carry at most one cell outside the next
- * bound and a projection cannot change what is recorded.
- * ========================================================================== */
 
 interface RecordingQueue {
   /** The queue as a handler receives it. */
@@ -574,16 +491,9 @@ interface DirectDispatch {
 }
 
 /**
- * Assembles a `HookContext` by hand over a bench, so the handler can be invoked
- * with a charge budget the bus would have guarded on.
- *
- * `RulesConfig` satisfies `ReadonlyRulesView` and `RngStreams` satisfies
- * `ReadonlyRngView` structurally; the lattice is reached through
- * `createReadonlyGridView`, the same facade the bus builds.
- *
  * @param bench Bench supplying the rules, the substreams and the lattice.
- * @param charges Charge budget the context declares. Absent by default, which
- *   is the budget the relic's own registration carries.
+ * @param charges Charge budget the context declares. Absent by default,
+ *   which is the budget the relic's own registration carries.
  * @returns The context, plus readers for what the handler did with it.
  */
 function directDispatch(
@@ -618,14 +528,10 @@ function directDispatch(
   };
 }
 
-/* ==========================================================================
- * Scenario boards
- * ========================================================================== */
-
 /**
  * Occupants at edge length 4 for the main re-homing scenario: two cells inside
- * the collapsed bound, and three outside it — one on the outermost column,
- * one on the outermost row, and one on their corner.
+ * the collapsed bound, and three outside it — one on the outermost column, one
+ * on the outermost row, and one on their corner.
  */
 const OUTER_SCENARIO: readonly Placement[] = [
   { x: 0, y: 0, value: 2 },
@@ -648,9 +554,9 @@ const EXILED_OCCUPANTS: readonly Placement[] = OUTER_SCENARIO.filter(
 );
 
 /**
- * Face value of the collapse-terminal scenario: a strict doubling ladder inside
- * the collapsed bound, where no two orthogonal neighbours are equal, and one
- * repeated value across the band the collapse drops.
+ * Face value of the collapse-terminal scenario: a strict doubling ladder
+ * inside the collapsed bound, where no two orthogonal neighbours are equal,
+ * and one repeated value across the band the collapse drops.
  *
  * @param x Column.
  * @param y Row.
@@ -677,25 +583,12 @@ function fillWithCornerWinner(grid: Grid, winValue: number): void {
   );
 }
 
-/* ==========================================================================
- * Shared per-test state
- * ========================================================================== */
-
-/**
- * A default config rebuilt before every test. The relic writes `boardSize`, so
- * each test reads its untouched members from this rather than from a shared
- * singleton, and the closing block asserts this one still opens at the
- * configured edge length.
- */
+/** A default config rebuilt before every test. */
 let baseline: RulesConfig;
 
 beforeEach((): void => {
   baseline = createDefaultRulesConfig();
 });
-
-/* ==========================================================================
- * 1. The relic declaration
- * ========================================================================== */
 
 describe('the collapsing-vault relic declaration', () => {
   it('is published by the risk-reward-cursed family and found by id', () => {
@@ -798,15 +691,6 @@ describe('the collapsing-vault relic declaration', () => {
     expect(directDispatch(bench).context.correlationId).toBe(CORRELATION_ID);
   });
 });
-
-/* ==========================================================================
- * 2. Both board-size declarations move together
- *
- * The crux of the suite. js/grid.js L97-L100 tested `withinBounds` against the
- * lattice's own `size`, while the configured dimension lived elsewhere
- * (js/application.js L3). A collapse that moved one and not the other would be
- * silent.
- * ========================================================================== */
 
 describe('collapsing-vault at onStageEnd moves both size declarations', () => {
   it('mutates Grid.size and config.boardSize to the same collapsed value',
@@ -931,10 +815,6 @@ describe('collapsing-vault at onStageEnd moves both size declarations', () => {
     expect(slotOf(bench)).toEqual({ boardSize: SIZE_FLOOR });
   });
 });
-
-/* ==========================================================================
- * 3. Out-of-range tiles are re-homed or dropped, never orphaned
- * ========================================================================== */
 
 /**
  * Reads the occupant standing in a cell.
@@ -1180,15 +1060,6 @@ describe('collapsing-vault re-homes or drops every out-of-range tile', () => {
     });
 });
 
-/* ==========================================================================
- * 4. The win and loss checks resolve at the collapsed size
- *
- * js/game_manager.js L238-L240 read
- * `cellsAvailable() || tileMatchesAvailable()` and L248-L249 bounded the probe
- * by `this.size`. The exported checks of src/engine/terminal-state.ts are
- * called here rather than re-implemented.
- * ========================================================================== */
-
 /** Win value the config-driven comparison is re-pointed at. */
 const CUSTOM_WIN_VALUE = 512;
 
@@ -1301,14 +1172,6 @@ describe('collapsing-vault leaves the win and loss checks on the new size',
       });
   });
 
-/* ==========================================================================
- * 5. Charges: none declared, none consulted, none required
- *
- * The guard and the decrement both belong to src/engine/hook-bus.ts, whose own
- * suites under tests/unit/engine own the mechanism. Asserted here: this relic
- * neither declares a budget nor reads one.
- * ========================================================================== */
-
 /** A board with exactly one occupant outside the collapsed bound. */
 const SINGLE_EXILE: readonly Placement[] = [
   { x: 0, y: 0, value: 2 },
@@ -1408,15 +1271,6 @@ describe('collapsing-vault carries no charge budget and consults none', () => {
       expect(relicUnderTest().state).toEqual({});
     });
 });
-
-/* ==========================================================================
- * 6. Determinism and substream hygiene
- *
- * The handler draws its re-homing destinations from the `relic-draw` substream,
- * so the same seed must land the same tiles in the same cells. The three other
- * substreams belong to the engine's spawns and to the rarity weighting and are
- * never touched here.
- * ========================================================================== */
 
 describe('collapsing-vault collapses deterministically from one substream',
   () => {
@@ -1535,10 +1389,6 @@ describe('collapsing-vault collapses deterministically from one substream',
       expect(result.effectsApplied).toBe(2);
     });
   });
-
-/* ==========================================================================
- * 7. Nothing shared is left behind
- * ========================================================================== */
 
 describe('the collapsing-vault suite leaves no shared state behind', () => {
   it('reads a freshly built config that still opens at the default size',

@@ -7,16 +7,16 @@
 // `scouring-wind` of this family — and `scouring-wind`'s budget of one is the
 // smallest of the five, so a single sweep exhausts it.
 //
-// THE AXIS. `scouring-wind` clears the line the family module defines as one
-// fixed `x` across every `y`, which that module names both a column and a row.
-// The COORDINATES are what settle it: one fixed `x` across every `y` is the
-// OUTER index of the x-major store js/grid.js L88-L95 wrote through, so the
-// cleared line is one contiguous sub-array of `cells`, where a visual row would
-// instead be one element taken from each sub-array. `eachCell` walks the
-// lattice x-outer and y-inner at js/grid.js L58-L64, and both walks report the
-// same number of cells, so a count alone cannot tell one from the other. Every
-// emptiness assertion below therefore names its coordinates, and every `it`
-// title states the axis as the coordinates give it.
+// THE AXIS. `scouring-wind` clears a ROW, which is the line AAP 0.1.2.5 names
+// among the charge-based relics, and a row is one fixed `y` across every `x`.
+// The COORDINATES are what settle it: the store js/grid.js L88-L95 wrote
+// through is x-major — `cells[x][y]`, where `x` selects a column — so a cleared
+// row is one element taken from each sub-array of `cells`, where a column would
+// instead be one contiguous sub-array. `eachCell` walks the lattice x-outer and
+// y-inner at js/grid.js L58-L64, and both walks report the same number of
+// cells, so a count alone cannot tell one from the other. Every emptiness
+// assertion below therefore names its coordinates, and every `it` title states
+// the axis as the coordinates give it.
 //
 // Mechanical provenance the assertions rest on:
 //   js/grid.js        L58-L64   `eachCell` walks x-outer, y-inner
@@ -106,10 +106,10 @@ import {
 } from '../../../src/relics/relic-registry';
 import { RARITIES } from '../../../src/relics/relic-types';
 import type { Relic } from '../../../src/relics/relic-types';
+import type { PersistedRelic } from '../../../src/run/run-state';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import type { RngStreams } from '../../../src/rng/rng-streams';
 import {
-  createBlockedBoard,
   createEmptyBoard,
   createMergePairBoard,
   createNearLossBoard,
@@ -490,7 +490,7 @@ function invokeDirectly(
 /** The state slot `scouring-wind` records, as this suite reads it back. */
 interface ScourRecord {
   readonly scours: number;
-  readonly column: { readonly x: number; readonly values: number[] } | null;
+  readonly row: { readonly y: number; readonly values: number[] } | null;
 }
 
 /**
@@ -513,15 +513,15 @@ function recordedState(rig: Rig, id: string = RELIC_ID): ScourRecord {
 }
 
 /**
- * The column a slot records, asserted to be present.
+ * The row a slot records, asserted to be present.
  *
  * @param record Slot to read.
- * @returns The recorded column.
+ * @returns The recorded row.
  */
-function sweptColumn(record: ScourRecord): NonNullable<ScourRecord['column']> {
-  expect(record.column).not.toBeNull();
+function sweptRow(record: ScourRecord): NonNullable<ScourRecord['row']> {
+  expect(record.row).not.toBeNull();
 
-  return record.column as NonNullable<ScourRecord['column']>;
+  return record.row as NonNullable<ScourRecord['row']>;
 }
 
 /** One occupied cell, as this suite compares them. */
@@ -550,16 +550,16 @@ function occupants(grid: Grid): Occupant[] {
 }
 
 /**
- * The cells of one column, in ascending `y`.
+ * The cells of one row, in ascending `x`.
  *
  * @param size Edge length of the board.
- * @param x Column index.
- * @returns Every cell of that column.
+ * @param y Row index.
+ * @returns Every cell of that row.
  */
-function columnCells(size: number, x: number): Position[] {
+function rowCells(size: number, y: number): Position[] {
   const cells: Position[] = [];
 
-  for (let y = 0; y < size; y += 1) {
+  for (let x = 0; x < size; x += 1) {
     cells.push({ x, y });
   }
 
@@ -567,26 +567,48 @@ function columnCells(size: number, x: number): Position[] {
 }
 
 /**
- * Every cell that is NOT in one column, x-outer and y-inner.
+ * Every cell that is NOT in one row, x-outer and y-inner.
  *
  * @param size Edge length of the board.
- * @param x Column index to exclude.
+ * @param y Row index to exclude.
  * @returns Every other cell.
  */
-function cellsOffColumn(size: number, x: number): Position[] {
+function cellsOffRow(size: number, y: number): Position[] {
   const cells: Position[] = [];
 
-  for (let column = 0; column < size; column += 1) {
-    if (column === x) {
-      continue;
-    }
+  for (let x = 0; x < size; x += 1) {
+    for (let row = 0; row < size; row += 1) {
+      if (row === y) {
+        continue;
+      }
 
-    for (let y = 0; y < size; y += 1) {
-      cells.push({ x: column, y });
+      cells.push({ x, y: row });
     }
   }
 
   return cells;
+}
+
+/**
+ * A board holding exactly one fully-occupied ROW, at y = 0, with every other
+ * cell empty.
+ *
+ * The transpose of the blocked fixture of tests/fixtures/boards.ts, which fills
+ * one COLUMN and is shared with suites that mean a column by it. Values
+ * ascend the doubling ladder across the row so a recorded sweep is
+ * distinguishable from a uniform one.
+ *
+ * @param size Edge length in cells.
+ * @returns The live board.
+ */
+function oneFullRowBoard(size: number = DEFAULT_BOARD_SIZE): Grid {
+  const grid = new Grid(size);
+
+  for (let x = 0; x < size; x += 1) {
+    place(grid, { x, y: 0 }, 2 ** (x + 1));
+  }
+
+  return grid;
 }
 
 /**
@@ -735,8 +757,8 @@ function terminalBoard(size: number): Grid {
 }
 
 /**
- * A board whose column 0 is one cell short of full and whose column 1 is full,
- * with every other cell empty.
+ * A board whose row 0 is one cell short of full and whose row 1 is full, with
+ * every other cell empty.
  *
  * @param size Edge length in cells.
  * @returns The live board.
@@ -744,12 +766,12 @@ function terminalBoard(size: number): Grid {
 function partialThenFullBoard(size: number): Grid {
   const grid = new Grid(size);
 
-  for (let y = 0; y < size - 1; y += 1) {
-    place(grid, { x: 0, y }, 2);
+  for (let x = 0; x < size - 1; x += 1) {
+    place(grid, { x, y: 0 }, 2);
   }
 
-  for (let y = 0; y < size; y += 1) {
-    place(grid, { x: 1, y }, 4);
+  for (let x = 0; x < size; x += 1) {
+    place(grid, { x, y: 1 }, 4);
   }
 
   return grid;
@@ -760,9 +782,9 @@ let baseline: Rig;
 
 beforeEach((): void => {
   // A fresh `createDefaultRulesConfig()`, a fresh substream table, a fresh bus
-  // and a fresh state slot per test. The blocked fixture holds exactly one
-  // fully-occupied column, at x = 0, with every other cell empty.
-  baseline = holding(gridOf(createBlockedBoard()), DECLARED_CHARGES);
+  // and a fresh state slot per test. `oneFullRowBoard()` holds exactly one
+  // fully-occupied row, at y = 0, with every other cell empty.
+  baseline = holding(oneFullRowBoard(), DECLARED_CHARGES);
 });
 
 /* ==========================================================================
@@ -785,7 +807,7 @@ describe('scouring-wind is declared as the fourth board-manipulation relic',
     });
 
     it('declares the Scouring Wind name, the legendary rarity and a '
-      + 'description that states the axis as one x across every y', () => {
+      + 'description that states the axis as one y across every x', () => {
       const relic = relicUnderTest();
 
       expect(relic.name).toBe('Scouring Wind');
@@ -795,8 +817,8 @@ describe('scouring-wind is declared as the fourth board-manipulation relic',
       expect(relic.description.length).toBeGreaterThan(0);
 
       // The player-facing copy names the same axis the handler acts on.
-      expect(relic.description).toContain('column');
-      expect(relic.description).toContain('single x across every y');
+      expect(relic.description).toContain('row');
+      expect(relic.description).toContain('single y across every x');
     });
 
     it('carries the seven members Relic declares and no others', () => {
@@ -835,7 +857,7 @@ describe('scouring-wind binds onAfterMove alone', () => {
   });
 
   it('is subscribed to onAfterMove and to no other hook on one bus', () => {
-    const rig = holding(gridOf(createBlockedBoard()), DECLARED_CHARGES);
+    const rig = holding(oneFullRowBoard(), DECLARED_CHARGES);
 
     expect(rig.bus.subscriptions('onAfterMove')).toHaveLength(1);
 
@@ -850,36 +872,36 @@ describe('scouring-wind binds onAfterMove alone', () => {
     // subscriber can sweep twice within one run.
     const twice = holding(new Grid(DEFAULT_BOARD_SIZE), UNLIMITED);
 
-    for (let y = 0; y < twice.grid.size; y += 1) {
-      place(twice.grid, { x: 0, y }, 2);
+    for (let x = 0; x < twice.grid.size; x += 1) {
+      place(twice.grid, { x, y: 0 }, 2);
     }
 
     sweep(twice);
 
-    for (let y = 0; y < twice.grid.size; y += 1) {
-      place(twice.grid, { x: 0, y }, 2);
+    for (let x = 0; x < twice.grid.size; x += 1) {
+      place(twice.grid, { x, y: 0 }, 2);
     }
 
     sweep(twice);
 
     expect(recordedState(twice)).toEqual({
       scours: 2,
-      column: { x: 0, values: [2, 2, 2, 2] },
+      row: { y: 0, values: [2, 2, 2, 2] },
     });
 
-    const once = holding(gridOf(createBlockedBoard()), UNLIMITED);
+    const once = holding(oneFullRowBoard(), UNLIMITED);
 
     sweep(once);
 
     expect(recordedState(once)).toEqual({
       scours: 1,
-      column: { x: 0, values: [2, 4, 8, 16] },
+      row: { y: 0, values: [2, 4, 8, 16] },
     });
   });
 
   it('records one sweep per slot when two runs sweep the same board', () => {
-    const first = holding(gridOf(createBlockedBoard()), DECLARED_CHARGES);
-    const second = holding(gridOf(createBlockedBoard()), DECLARED_CHARGES);
+    const first = holding(oneFullRowBoard(), DECLARED_CHARGES);
+    const second = holding(oneFullRowBoard(), DECLARED_CHARGES);
 
     sweep(first);
     sweep(second);
@@ -890,14 +912,14 @@ describe('scouring-wind binds onAfterMove alone', () => {
 });
 
 /* ==========================================================================
- * 3. Property two: the effect is one whole column emptied, and nothing else
+ * 3. Property two: the effect is one whole row emptied, and nothing else
  * ========================================================================== */
 
-describe('the sweep empties every tile at the selected x across all y', () => {
-  it('leaves every cell of the swept column empty, cell by named cell', () => {
+describe('the sweep empties every tile at the selected y across all x', () => {
+  it('leaves every cell of the swept row empty, cell by named cell', () => {
     sweep(baseline);
 
-    const swept = columnCells(baseline.grid.size, 0);
+    const swept = rowCells(baseline.grid.size, 0);
 
     for (const cell of swept) {
       expect(baseline.grid.cellAvailable(cell)).toBe(true);
@@ -910,18 +932,16 @@ describe('the sweep empties every tile at the selected x across all y', () => {
       expect.arrayContaining(swept),
     );
 
-    // js/grid.js L102-L117 keeps an empty cell as `null` in the snapshot.
-    expect(baseline.grid.serialize().cells[0]).toEqual([
-      null,
-      null,
-      null,
-      null,
-    ]);
+    // js/grid.js L102-L117 keeps an empty cell as `null` in the snapshot. The
+    // cleared row is index 0 of EVERY sub-array, because the store is x-major.
+    for (const column of baseline.grid.serialize().cells) {
+      expect(column[0]).toBeNull();
+    }
 
     expectCoherentLattice(baseline.grid);
   });
 
-  it('records one removal per occupied cell of the column, in ascending y',
+  it('records one removal per occupied cell of the row, in ascending x',
     () => {
       const result = sweep(baseline);
 
@@ -932,29 +952,29 @@ describe('the sweep empties every tile at the selected x across all y', () => {
       expect(result.effectsApplied).toBe(baseline.grid.size);
       expect(result.effects).toEqual([
         { kind: 'removeTile', cell: { x: 0, y: 0 } },
-        { kind: 'removeTile', cell: { x: 0, y: 1 } },
-        { kind: 'removeTile', cell: { x: 0, y: 2 } },
-        { kind: 'removeTile', cell: { x: 0, y: 3 } },
+        { kind: 'removeTile', cell: { x: 1, y: 0 } },
+        { kind: 'removeTile', cell: { x: 2, y: 0 } },
+        { kind: 'removeTile', cell: { x: 3, y: 0 } },
       ]);
     });
 
-  it('clears a column and not a row: on a full board every cell of x = 0 is '
-    + 'empty while every cell of every other x still stands', () => {
+  it('clears a row and not a column: on a full board every cell of y = 0 is '
+    + 'empty while every cell of every other y still stands', () => {
     const rig = holding(gridOf(createNearLossBoard()), DECLARED_CHARGES);
     const size = rig.grid.size;
 
     sweep(rig);
 
-    // THE AXIS ASSERTION. A cleared visual row would have emptied (x, 0) for
-    // every x and left (0, 1) standing; a cleared column empties (0, y) for
-    // every y and leaves (x, 0) standing for every other x. Both remove the
-    // same NUMBER of tiles, so only these coordinates separate them.
-    for (let y = 0; y < size; y += 1) {
-      expect(rig.grid.cellContent({ x: 0, y })).toBeNull();
+    // THE AXIS ASSERTION. A cleared column would have emptied (0, y) for every
+    // y and left (1, 0) standing; a cleared row empties (x, 0) for every x and
+    // leaves (0, y) standing for every other y. Both remove the same NUMBER of
+    // tiles, so only these coordinates separate them.
+    for (let x = 0; x < size; x += 1) {
+      expect(rig.grid.cellContent({ x, y: 0 })).toBeNull();
     }
 
-    for (let x = 1; x < size; x += 1) {
-      for (let y = 0; y < size; y += 1) {
+    for (let y = 1; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
         expect(rig.grid.cellContent({ x, y })).not.toBeNull();
       }
     }
@@ -962,24 +982,24 @@ describe('the sweep empties every tile at the selected x across all y', () => {
     expectCoherentLattice(rig.grid);
   });
 
-  it('leaves every tile off the swept column as the same object, at its own '
+  it('leaves every tile off the swept row as the same object, at its own '
     + 'cell, with its own value', () => {
     const rig = holding(gridOf(createNearLossBoard()), DECLARED_CHARGES);
-    const offColumn = cellsOffColumn(rig.grid.size, 0);
+    const offRow = cellsOffRow(rig.grid.size, 0);
     const standing = new Map<string, Tile>();
 
-    for (const cell of offColumn) {
+    for (const cell of offRow) {
       const tile = rig.grid.cellContent(cell);
 
       expect(tile).not.toBeNull();
       standing.set(`${String(cell.x)},${String(cell.y)}`, tile as Tile);
     }
 
-    const before = valuesAt(rig.grid, offColumn);
+    const before = valuesAt(rig.grid, offRow);
 
     sweep(rig);
 
-    for (const cell of offColumn) {
+    for (const cell of offRow) {
       const key = `${String(cell.x)},${String(cell.y)}`;
       const held = standing.get(key);
 
@@ -989,16 +1009,16 @@ describe('the sweep empties every tile at the selected x across all y', () => {
       expect({ x: held?.x, y: held?.y }).toEqual({ x: cell.x, y: cell.y });
     }
 
-    // The multiset an off-by-one would change: clearing the wrong column, or
-    // one cell too many, moves a value out of this comparison.
-    expect(valuesAt(rig.grid, offColumn)).toEqual(before);
+    // The multiset an off-by-one would change: clearing the wrong row, or one
+    // cell too many, moves a value out of this comparison.
+    expect(valuesAt(rig.grid, offRow)).toEqual(before);
   });
 
-  it('drops the occupied-cell count by exactly the length of the column it '
+  it('drops the occupied-cell count by exactly the length of the row it '
     + 'swept, computed from the board it swept', () => {
     const rig = holding(gridOf(createNearLossBoard()), DECLARED_CHARGES);
     const before = occupants(rig.grid).length;
-    const expectedDrop = valuesAt(rig.grid, columnCells(rig.grid.size, 0))
+    const expectedDrop = valuesAt(rig.grid, rowCells(rig.grid.size, 0))
       .length;
 
     sweep(rig);
@@ -1007,30 +1027,30 @@ describe('the sweep empties every tile at the selected x across all y', () => {
     expect(expectedDrop).toBe(rig.grid.size);
   });
 
-  it('selects the first fully-occupied column in ascending x, leaving a '
-    + 'partially occupied earlier column standing', () => {
+  it('selects the first fully-occupied row in ascending y, leaving a '
+    + 'partially occupied earlier row standing', () => {
     const rig = holding(partialThenFullBoard(DEFAULT_BOARD_SIZE),
       DECLARED_CHARGES);
     const size = rig.grid.size;
 
     sweep(rig);
 
-    // Column 1 was the first FULL column, so it is the one that went.
-    for (let y = 0; y < size; y += 1) {
-      expect(rig.grid.cellContent({ x: 1, y })).toBeNull();
+    // Row 1 was the first FULL row, so it is the one that went.
+    for (let x = 0; x < size; x += 1) {
+      expect(rig.grid.cellContent({ x, y: 1 })).toBeNull();
     }
 
-    // Column 0 was one cell short of full and is untouched.
-    for (let y = 0; y < size - 1; y += 1) {
-      expect(rig.grid.cellContent({ x: 0, y })?.value).toBe(2);
+    // Row 0 was one cell short of full and is untouched.
+    for (let x = 0; x < size - 1; x += 1) {
+      expect(rig.grid.cellContent({ x, y: 0 })?.value).toBe(2);
     }
 
-    expect(rig.grid.cellContent({ x: 0, y: size - 1 })).toBeNull();
+    expect(rig.grid.cellContent({ x: size - 1, y: 0 })).toBeNull();
     expect(occupants(rig.grid)).toHaveLength(size - 1);
 
     // Nothing was attempted against an empty cell: a removal aimed at one
     // would have been refused and counted rather than raising.
-    expect(sweptColumn(recordedState(rig)).x).toBe(1);
+    expect(sweptRow(recordedState(rig)).y).toBe(1);
     expectCoherentLattice(rig.grid);
   });
 
@@ -1043,10 +1063,10 @@ describe('the sweep empties every tile at the selected x across all y', () => {
     expect(sweep(full).effectsRefused).toBe(0);
   });
 
-  it('leaves a board whose every column is partially occupied entirely alone',
+  it('leaves a board whose every row is partially occupied entirely alone',
     () => {
-      // The merge-pair fixture holds (0, 0) and (1, 0) alone, so no column of a
-      // board wider than one row is full.
+      // The merge-pair fixture holds (0, 0) and (1, 0) alone, so no row of a
+      // board wider than two cells is full.
       const rig = holding(gridOf(createMergePairBoard()), DECLARED_CHARGES);
       const before = rig.grid.serialize();
       const result = sweep(rig);
@@ -1059,7 +1079,7 @@ describe('the sweep empties every tile at the selected x across all y', () => {
 
       // The slot is left exactly as the declaration shipped it, so a move that
       // swept nothing counts nothing.
-      expect(recordedState(rig)).toEqual({ scours: 0, column: null });
+      expect(recordedState(rig)).toEqual({ scours: 0, row: null });
       expectCoherentLattice(rig.grid);
     });
 
@@ -1112,7 +1132,7 @@ describe('the sweep empties every tile at the selected x across all y', () => {
 
   it('returns a payload rather than nothing', () => {
     const call = invokeDirectly(
-      harnessOn(gridOf(createBlockedBoard())),
+      harnessOn(oneFullRowBoard()),
       DECLARED_CHARGES,
       5,
     );
@@ -1143,19 +1163,19 @@ describe('the sweep empties every tile at the selected x across all y', () => {
       const rig = holding(new Grid(DEFAULT_BOARD_SIZE), DECLARED_CHARGES);
       const size = rig.grid.size;
 
-      // A merged tile INSIDE the column that goes, and one outside it: the
+      // A merged tile INSIDE the row that goes, and one outside it: the
       // renderer draws both source tiles beneath a merged one, so a pair left
       // standing over an emptied cell would paint a phantom tile there.
-      for (let y = 0; y < size; y += 1) {
-        placeMerged(rig.grid, { x: 0, y }, 8);
+      for (let x = 0; x < size; x += 1) {
+        placeMerged(rig.grid, { x, y: 0 }, 8);
       }
 
-      const survivor = placeMerged(rig.grid, { x: 1, y: 0 }, 16);
+      const survivor = placeMerged(rig.grid, { x: 0, y: 1 }, 16);
 
       sweep(rig);
 
-      expect(occupants(rig.grid)).toEqual([{ x: 1, y: 0, value: 16 }]);
-      expect(rig.grid.cellContent({ x: 1, y: 0 })).toBe(survivor);
+      expect(occupants(rig.grid)).toEqual([{ x: 0, y: 1, value: 16 }]);
+      expect(rig.grid.cellContent({ x: 0, y: 1 })).toBe(survivor);
       expect(survivor.mergedFrom).not.toBeNull();
 
       for (const source of survivor.mergedFrom ?? []) {
@@ -1165,18 +1185,18 @@ describe('the sweep empties every tile at the selected x across all y', () => {
       expectCoherentLattice(rig.grid);
     });
 
-  it('reports a column index inside 0 to size - 1, and every removal inside '
+  it('reports a row index inside 0 to size - 1, and every removal inside '
     + 'the lattice', () => {
     const rig = holding(gridOf(createNearLossBoard()), DECLARED_CHARGES);
     const result = sweep(rig);
-    const column = sweptColumn(recordedState(rig));
+    const row = sweptRow(recordedState(rig));
 
     // js/grid.js L80-L86 answers `null` outside the lattice rather than
     // raising, so an out-of-range index would clear nothing and report nothing.
-    expect(Number.isInteger(column.x)).toBe(true);
-    expect(column.x).toBeGreaterThanOrEqual(0);
-    expect(column.x).toBeLessThanOrEqual(rig.grid.size - 1);
-    expect(column.values).toHaveLength(rig.grid.size);
+    expect(Number.isInteger(row.y)).toBe(true);
+    expect(row.y).toBeGreaterThanOrEqual(0);
+    expect(row.y).toBeLessThanOrEqual(rig.grid.size - 1);
+    expect(row.values).toHaveLength(rig.grid.size);
 
     for (const effect of result.effects) {
       expect(effect.kind).toBe('removeTile');
@@ -1186,13 +1206,13 @@ describe('the sweep empties every tile at the selected x across all y', () => {
       }
 
       expect(rig.grid.withinBounds(effect.cell)).toBe(true);
-      expect(effect.cell.x).toBe(column.x);
-      expect(effect.cell.y).toBeGreaterThanOrEqual(0);
-      expect(effect.cell.y).toBeLessThanOrEqual(rig.grid.size - 1);
+      expect(effect.cell.y).toBe(row.y);
+      expect(effect.cell.x).toBeGreaterThanOrEqual(0);
+      expect(effect.cell.x).toBeLessThanOrEqual(rig.grid.size - 1);
     }
   });
 
-  it('leaves the near-loss fixture playable, with the emptied column now '
+  it('leaves the near-loss fixture playable, with the emptied row now '
     + 'carrying the verdict on its own', () => {
     const rig = holding(gridOf(createNearLossBoard()), DECLARED_CHARGES);
 
@@ -1204,7 +1224,7 @@ describe('the sweep empties every tile at the selected x across all y', () => {
 
     sweep(rig);
 
-    // The pair's (0, 0) went with the column, and the first half now answers.
+    // The pair's (0, 0) went with the row, and the first half now answers.
     expect(rig.grid.cellContent(ORIGIN)).toBeNull();
     expect(rig.grid.cellsAvailable()).toBe(true);
     expect(movesAvailable(rig.grid, rig.config)).toBe(true);
@@ -1231,40 +1251,39 @@ describe('the sweep empties every tile at the selected x across all y', () => {
 });
 
 /* ==========================================================================
- * 4. The column length and the column bound come from the live board
+ * 4. The row length and the row bound come from the live board
  * ========================================================================== */
 
 // A board-shrinking relic changes `boardSize` mid-run, so neither the length of
-// the column nor the range the index is chosen from may be a captured 4.
+// the row nor the range the index is chosen from may be a captured 4.
 
 for (const size of [3, 5]) {
   describe(`the sweep on a ${String(size)} by ${String(size)} board`, () => {
-    it(`empties all ${String(size)} cells at the selected x, and only those`,
+    it(`empties all ${String(size)} cells at the selected y, and only those`,
       () => {
         const rig = holding(gridOf(createNearLossBoard(size)),
           DECLARED_CHARGES);
-        const offColumn = cellsOffColumn(size, 0);
-        const before = valuesAt(rig.grid, offColumn);
+        const offRow = cellsOffRow(size, 0);
+        const before = valuesAt(rig.grid, offRow);
         const result = sweep(rig);
 
         expect(rig.config.boardSize).toBe(size);
         expect(rig.grid.size).toBe(size);
         expect(result.effectsApplied).toBe(size);
 
-        for (let y = 0; y < size; y += 1) {
-          expect(rig.grid.cellContent({ x: 0, y })).toBeNull();
+        for (let x = 0; x < size; x += 1) {
+          expect(rig.grid.cellContent({ x, y: 0 })).toBeNull();
         }
 
-        expect(valuesAt(rig.grid, offColumn)).toEqual(before);
+        expect(valuesAt(rig.grid, offRow)).toEqual(before);
         expect(occupants(rig.grid)).toHaveLength(size * size - size);
-        expect(sweptColumn(recordedState(rig)).values).toHaveLength(size);
+        expect(sweptRow(recordedState(rig)).values).toHaveLength(size);
         expectCoherentLattice(rig.grid);
       });
 
-    it(`clears the one full column of a ${String(size)}-wide blocked board`,
+    it(`clears the one full row of a ${String(size)}-wide single-row board`,
       () => {
-        const rig = holding(gridOf(createBlockedBoard(size)),
-          DECLARED_CHARGES);
+        const rig = holding(oneFullRowBoard(size), DECLARED_CHARGES);
 
         sweep(rig);
 
@@ -1286,15 +1305,15 @@ for (const size of [3, 5]) {
         expectCoherentLattice(rig.grid);
       });
 
-    it(`reports a column index inside 0 to ${String(size - 1)}`, () => {
+    it(`reports a row index inside 0 to ${String(size - 1)}`, () => {
       const rig = holding(gridOf(createNearLossBoard(size)), DECLARED_CHARGES);
 
       sweep(rig);
 
-      const column = sweptColumn(recordedState(rig));
+      const row = sweptRow(recordedState(rig));
 
-      expect(column.x).toBeGreaterThanOrEqual(0);
-      expect(column.x).toBeLessThanOrEqual(size - 1);
+      expect(row.y).toBeGreaterThanOrEqual(0);
+      expect(row.y).toBeLessThanOrEqual(size - 1);
     });
   });
 }
@@ -1330,7 +1349,7 @@ describe('the declared charge budget', () => {
     expect(baseline.bus.subscriptions('onAfterMove')[0]?.charges).toBe(0);
   });
 
-  it('spends nothing on a board with no fully-occupied column', () => {
+  it('spends nothing on a board with no fully-occupied row', () => {
     const rig = holding(gridOf(createEmptyBoard()), DECLARED_CHARGES);
     const result = sweep(rig);
 
@@ -1342,8 +1361,8 @@ describe('the declared charge budget', () => {
 });
 
 describe('an invocation made while the budget reads zero', () => {
-  it('clears the column at the selected x without throwing', () => {
-    const rig = harnessOn(gridOf(createBlockedBoard()));
+  it('clears the row at the selected y without throwing', () => {
+    const rig = harnessOn(oneFullRowBoard());
     const call = invokeDirectly(rig, 0);
 
     expect(call.observedCharges).toBe(0);
@@ -1351,15 +1370,15 @@ describe('an invocation made while the budget reads zero', () => {
     expect(call.returned).toBeTypeOf('object');
     expect(call.result.failed).toBe(0);
 
-    for (let y = 0; y < rig.grid.size; y += 1) {
-      expect(rig.grid.cellContent({ x: 0, y })).toBeNull();
+    for (let x = 0; x < rig.grid.size; x += 1) {
+      expect(rig.grid.cellContent({ x, y: 0 })).toBeNull();
     }
   });
 
   it('carries the run correlation identifier the bus was built with', () => {
     // Rule 3: the identifier is injected into the bus and reaches a handler on
     // its context, so the correlation plumbing is exercised end to end here.
-    const call = invokeDirectly(harnessOn(gridOf(createBlockedBoard())), 0);
+    const call = invokeDirectly(harnessOn(oneFullRowBoard()), 0);
 
     expect(call.observedCorrelationId).toBe(CORRELATION_ID);
   });
@@ -1368,28 +1387,34 @@ describe('an invocation made while the budget reads zero', () => {
     + 'were, and the slot keeps a valid shape', () => {
     const rig = harnessOn(gridOf(createNearLossBoard()));
     const canMerge = rig.config.merge.canMerge;
-    const offColumn = cellsOffColumn(rig.grid.size, 0);
-    const before = valuesAt(rig.grid, offColumn);
+    const offRow = cellsOffRow(rig.grid.size, 0);
+    const before = valuesAt(rig.grid, offRow);
+
+    // READ FROM THE FIXTURE, in the order the handler collects them, so no
+    // value table stands in for what the board actually held.
+    const sweptValues = rowCells(rig.grid.size, 0).map(
+      (cell): number => rig.grid.cellContent(cell)?.value ?? 0,
+    );
     const call = invokeDirectly(rig, 0);
 
     expect(call.threw).toBeUndefined();
     expectCoherentLattice(rig.grid);
-    expect(valuesAt(rig.grid, offColumn)).toEqual(before);
+    expect(valuesAt(rig.grid, offRow)).toEqual(before);
     expect(rig.config.boardSize).toBe(DEFAULT_BOARD_SIZE);
     expect(rig.config.winValue).toBe(2048);
     expect(rig.config.spawn.values).toEqual([2, 4]);
     expect(rig.config.merge.canMerge).toBe(canMerge);
     expect(call.state).toEqual({
       scours: 1,
-      column: { x: 0, values: [4, 8, 32, 4] },
+      row: { y: 0, values: sweptValues },
     });
   });
 
   it('poisons nothing: an ordinary dispatch afterwards still sweeps and still '
     + 'pays its charge', () => {
-    invokeDirectly(harnessOn(gridOf(createBlockedBoard())), 0);
+    invokeDirectly(harnessOn(oneFullRowBoard()), 0);
 
-    const later = holding(gridOf(createBlockedBoard()), DECLARED_CHARGES);
+    const later = holding(oneFullRowBoard(), DECLARED_CHARGES);
     const result = sweep(later);
 
     expect(result.chargesConsumed).toBe(DECLARED_CHARGES);
@@ -1397,7 +1422,7 @@ describe('an invocation made while the budget reads zero', () => {
     expect(occupants(later.grid)).toEqual([]);
     expect(recordedState(later)).toEqual({
       scours: 1,
-      column: { x: 0, values: [2, 4, 8, 16] },
+      row: { y: 0, values: [2, 4, 8, 16] },
     });
   });
 
@@ -1405,8 +1430,8 @@ describe('an invocation made while the budget reads zero', () => {
     + 'restored run can carry', () => {
     // RelicRegistry.restore does not clamp a persisted budget, so a negative
     // count is reachable and must be as harmless as zero.
-    const zeroRig = harnessOn(gridOf(createBlockedBoard()));
-    const negativeRig = harnessOn(gridOf(createBlockedBoard()));
+    const zeroRig = harnessOn(oneFullRowBoard());
+    const negativeRig = harnessOn(oneFullRowBoard());
     const zeroCall = invokeDirectly(zeroRig, 0);
     const negativeCall = invokeDirectly(negativeRig, -3);
 
@@ -1418,9 +1443,9 @@ describe('an invocation made while the budget reads zero', () => {
 });
 
 describe('a run that exhausts the budget through the registry', () => {
-  it('sweeps once, then leaves a rebuilt column standing without throwing',
+  it('sweeps once, then leaves a rebuilt row standing without throwing',
     () => {
-      const grid = gridOf(createBlockedBoard());
+      const grid = oneFullRowBoard();
       const rig = harnessOn(grid);
       const registry = new RelicRegistry({
         bus: rig.bus,
@@ -1437,10 +1462,10 @@ describe('a run that exhausts the budget through the registry', () => {
       expect(occupants(grid)).toEqual([]);
       expect(registry.find(RELIC_ID)?.charges).toBe(0);
 
-      // The column is rebuilt, so the only thing standing between it and a
+      // The row is rebuilt, so the only thing standing between it and a
       // second clear is the spent budget.
-      for (let y = 0; y < grid.size; y += 1) {
-        place(grid, { x: 0, y }, 2);
+      for (let x = 0; x < grid.size; x += 1) {
+        place(grid, { x, y: 0 }, 2);
       }
 
       const standing = occupants(grid).length;
@@ -1460,6 +1485,297 @@ describe('a run that exhausts the budget through the registry', () => {
 });
 
 /* ==========================================================================
+ * 5a. The sweep record across a persistence round trip
+ *
+ * `{ scours, row }` is `PersistedRelic.state` in the run envelope, so it
+ * leaves through `RelicRegistry.serialize()`, crosses Web Storage as JSON, and
+ * comes back through `restoreRelics()` onto a bus that has never dispatched. The
+ * three facts a reload has to preserve:
+ *
+ *   the counter CONTINUES rather than restarting, so the sweep after the reload
+ *     is recorded as the next one and not as the first;
+ *   the recorded row is REPLACED by the one the next sweep took, so the slot
+ *     always describes the most recent sweep;
+ *   the budget that was spent stays spent, so a reload does not refill it.
+ *
+ * Nothing here reads storage: src/run/run-state-store.ts is the writer and its
+ * own suite owns it, so the JSON boundary is crossed with `JSON.parse(JSON
+ * .stringify(...))`, which is what that store puts the entry through.
+ * ========================================================================== */
+
+/** Value the row rebuilt for the second sweep is laid with. */
+const RESTORED_ROW_VALUE = 8;
+
+/** One restored world: a rig, and the registry holding the relic on its bus. */
+interface RestoredRig {
+  readonly rig: Rig;
+  readonly registry: RelicRegistry;
+}
+
+/**
+ * Seats the relic through a registry pickup on a rig of its own.
+ *
+ * @param grid Board the dispatch resolves against.
+ * @param seed Seed the substreams are derived from.
+ * @returns The rig and its registry.
+ */
+function seatedOn(grid: Grid, seed: string = SEED): RestoredRig {
+  const rig = harnessOn(grid, seed);
+  const registry = new RelicRegistry({
+    bus: rig.bus,
+    reporter: NOOP_ENGINE_REPORTER,
+    correlationId: CORRELATION_ID,
+  });
+
+  expect(registry.pickUp(RELIC_ID)?.definition.id).toBe(RELIC_ID);
+  expect(registry.find(RELIC_ID)?.charges).toBe(DECLARED_CHARGES);
+
+  return { rig, registry };
+}
+
+/**
+ * Restores one persisted entry onto a rig and registry built after the write.
+ *
+ * @param persisted Entry as it came back out of JSON.
+ * @param grid Board the restored run resumes on.
+ * @param seed Seed the restored substreams are derived from.
+ * @returns The rig and its registry.
+ */
+function restoredOn(
+  persisted: PersistedRelic,
+  grid: Grid,
+  seed: string = SEED,
+): RestoredRig {
+  const rig = harnessOn(grid, seed);
+  const registry = new RelicRegistry({
+    bus: rig.bus,
+    reporter: NOOP_ENGINE_REPORTER,
+    correlationId: CORRELATION_ID,
+  });
+
+  registry.restoreRelics([persisted]);
+
+  expect(registry.has(RELIC_ID)).toBe(true);
+
+  return { rig, registry };
+}
+
+/**
+ * The entry the run envelope would carry for the relic, through JSON.
+ *
+ * @param registry Registry holding the relic.
+ * @returns The persisted entry.
+ */
+function persistedEntry(registry: RelicRegistry): PersistedRelic {
+  const serialized = JSON.parse(
+    JSON.stringify(registry.serialize()),
+  ) as PersistedRelic[];
+  const entry = serialized.find((held) => held.id === RELIC_ID);
+
+  expect(entry, `the envelope carries ${RELIC_ID}`).toBeDefined();
+
+  return entry as PersistedRelic;
+}
+
+/**
+ * A board holding exactly one fully-occupied row, at `y`, laid with
+ * `RESTORED_ROW_VALUE`.
+ *
+ * @param size Edge length in cells.
+ * @param y Row to fill.
+ * @returns The live board.
+ */
+function boardWithFullRow(size: number, y: number): Grid {
+  const grid = new Grid(size);
+
+  for (let x = 0; x < size; x += 1) {
+    place(grid, { x, y }, RESTORED_ROW_VALUE);
+  }
+
+  return grid;
+}
+
+/** Sweeps once through a seated rig and reads the entry it persists. */
+function sweepThenPersist(): {
+  readonly seated: RestoredRig;
+  readonly persisted: PersistedRelic;
+} {
+  const seated = seatedOn(oneFullRowBoard());
+  const first = sweep(seated.rig);
+
+  expect(first.invoked).toBe(1);
+  expect(first.chargesConsumed).toBe(DECLARED_CHARGES);
+  expect(recordedState(seated.rig)).toEqual({
+    scours: 1,
+    row: { y: 0, values: [2, 4, 8, 16] },
+  });
+
+  return { seated, persisted: persistedEntry(seated.registry) };
+}
+
+describe('the sweep record carried through a reload', () => {
+  it('persists as plain JSON, carrying the count and the swept row', () => {
+    const { persisted } = sweepThenPersist();
+
+    expect(persisted.id).toBe(RELIC_ID);
+    expect(persisted.charges).toBe(0);
+    expect(persisted.state).toEqual({
+      scours: 1,
+      row: { y: 0, values: [2, 4, 8, 16] },
+    });
+
+    // Nothing was lost or reshaped by the round trip through JSON, which is the
+    // form src/run/run-state-store.ts writes.
+    expect(JSON.parse(JSON.stringify(persisted))).toEqual(persisted);
+    expect(Object.keys(persisted).sort()).toEqual(['charges', 'id', 'state']);
+  });
+
+  it('is reinstalled on the restored bus, budget and all', () => {
+    const { persisted } = sweepThenPersist();
+    const restored = restoredOn(
+      persisted,
+      boardWithFullRow(DEFAULT_BOARD_SIZE, 1),
+    );
+
+    expect(restored.registry.find(RELIC_ID)?.state).toEqual(persisted.state);
+    expect(restored.registry.find(RELIC_ID)?.charges).toBe(0);
+
+    // Restored by copy: the entry the caller handed over is not the slot the
+    // bus now holds.
+    expect(restored.registry.find(RELIC_ID)?.state).not.toBe(persisted.state);
+    expect(recordedState(restored.rig)).toEqual(persisted.state);
+  });
+
+  it('continues the count and replaces the row on the next sweep', () => {
+    const { persisted } = sweepThenPersist();
+
+    // A spent budget would skip the handler outright, so the run the reload
+    // resumes carries a budget the second sweep can pay with. This is the
+    // entry a run with charges left would have written.
+    const resumable: PersistedRelic = { ...persisted, charges: 1 };
+    const grid = boardWithFullRow(DEFAULT_BOARD_SIZE, 1);
+    const restored = restoredOn(resumable, grid);
+    const second = sweep(restored.rig);
+
+    expect(second.invoked).toBe(1);
+    expect(second.failed).toBe(0);
+    expect(second.effectsApplied).toBe(grid.size);
+    expect(second.chargesConsumed).toBe(1);
+
+    // The counter CONTINUES: the sweep after the reload is the second, not a
+    // first sweep on a fresh ledger.
+    expect(recordedState(restored.rig)).toEqual({
+      scours: 2,
+      row: {
+        y: 1,
+        values: Array.from(
+          { length: grid.size },
+          (): number => RESTORED_ROW_VALUE,
+        ),
+      },
+    });
+
+    // The row recorded before the reload is gone from the slot, and the board
+    // it names was never touched by this run.
+    expect(sweptRow(recordedState(restored.rig)).y).not.toBe(0);
+    expect(occupants(grid)).toEqual([]);
+    expect(restored.registry.find(RELIC_ID)?.charges).toBe(0);
+    expectCoherentLattice(grid);
+  });
+
+  it('writes the continued record back into the envelope', () => {
+    const { persisted } = sweepThenPersist();
+    const restored = restoredOn(
+      { ...persisted, charges: 1 },
+      boardWithFullRow(DEFAULT_BOARD_SIZE, 2),
+    );
+
+    sweep(restored.rig);
+
+    const written = persistedEntry(restored.registry);
+
+    expect(written.charges).toBe(0);
+    expect(written.state).toEqual({
+      scours: 2,
+      row: {
+        y: 2,
+        values: Array.from(
+          { length: DEFAULT_BOARD_SIZE },
+          (): number => RESTORED_ROW_VALUE,
+        ),
+      },
+    });
+    expect(JSON.parse(JSON.stringify(written))).toEqual(written);
+  });
+
+  it('leaves a restored record untouched by a move that swept nothing', () => {
+    const { persisted } = sweepThenPersist();
+
+    // No row of the merge-pair fixture is full, so the sweep finds nothing: the
+    // count does not advance and the recorded row stands.
+    const restored = restoredOn(
+      { ...persisted, charges: 1 },
+      gridOf(createMergePairBoard()),
+    );
+    const board = restored.rig.grid.serialize();
+    const resolved = sweep(restored.rig);
+
+    expect(resolved.invoked).toBe(1);
+    expect(resolved.effectsApplied).toBe(0);
+    expect(resolved.chargesConsumed).toBe(0);
+    expect(recordedState(restored.rig)).toEqual(persisted.state);
+    expect(restored.rig.grid.serialize()).toEqual(board);
+    expect(restored.registry.find(RELIC_ID)?.charges).toBe(1);
+  });
+
+  it('sweeps nothing at all once a restored budget is already spent', () => {
+    const { persisted } = sweepThenPersist();
+    const grid = boardWithFullRow(DEFAULT_BOARD_SIZE, 0);
+    const restored = restoredOn(persisted, grid);
+    const board = grid.serialize();
+    let resolved: HookDispatchResult<'onAfterMove'> | undefined;
+
+    expect((): void => {
+      resolved = sweep(restored.rig);
+    }).not.toThrow();
+
+    // The bus owns the guard, so the handler is skipped rather than called with
+    // an empty budget, and the record the reload restored is left as it was.
+    expect(resolved?.invoked).toBe(0);
+    expect(resolved?.skipped).toBe(1);
+    expect(resolved?.chargesConsumed).toBe(0);
+    expect(grid.serialize()).toEqual(board);
+    expect(recordedState(restored.rig)).toEqual(persisted.state);
+    expect(persistedEntry(restored.registry).state).toEqual(persisted.state);
+  });
+
+  it('resumes from a record whose members are not usable', () => {
+    // What an older or hand-edited payload can carry: the reader falls back to
+    // a count of zero, so the sweep after the reload records the first one.
+    const grid = boardWithFullRow(DEFAULT_BOARD_SIZE, 3);
+    const restored = restoredOn(
+      {
+        id: RELIC_ID,
+        charges: 1,
+        state: { scours: 'not a number', row: 'not a row' },
+      } as PersistedRelic,
+      grid,
+    );
+    let resolved: HookDispatchResult<'onAfterMove'> | undefined;
+
+    expect((): void => {
+      resolved = sweep(restored.rig);
+    }).not.toThrow();
+
+    expect(resolved?.failed).toBe(0);
+    expect(recordedState(restored.rig).scours).toBe(1);
+    expect(sweptRow(recordedState(restored.rig)).y).toBe(3);
+    expect(occupants(grid)).toEqual([]);
+    expectCoherentLattice(grid);
+  });
+});
+
+/* ==========================================================================
  * 6. Determinism and substream hygiene
  * ========================================================================== */
 
@@ -1471,8 +1787,8 @@ const UNMOVED_CURSORS = Object.freeze({
   'rarity-weight': 0,
 });
 
-describe('the column the sweep selects is fixed by the board alone', () => {
-  it('produces the same board and records the same column under two '
+describe('the row the sweep selects is fixed by the board alone', () => {
+  it('produces the same board and records the same row under two '
     + 'different seeds', () => {
     const first = holding(gridOf(createNearLossBoard()), DECLARED_CHARGES,
       SEED);
@@ -1529,7 +1845,7 @@ describe('the column the sweep selects is fixed by the board alone', () => {
 
     // Error containment belongs to src/engine/hook-bus.ts, which reports a
     // throw through its injected reporter; the family module owns none.
-    expect(code).toContain('firstFullColumn(');
+    expect(code).toContain('firstFullRow(');
   });
 
   it('reaches no document, no storage and no timer', () => {
@@ -1554,7 +1870,7 @@ describe('the catalogue declaration after every dispatch above', () => {
     // shared by every run on the page and is never written by one.
     expect(declarationSnapshot()).toBe(SHIPPED_DECLARATION);
     expect(relic.charges).toBe(DECLARED_CHARGES);
-    expect(relic.state).toEqual({ scours: 0, column: null });
+    expect(relic.state).toEqual({ scours: 0, row: null });
     expect(Object.isFrozen(relic)).toBe(true);
     expect(Object.isFrozen(relic.hooks)).toBe(true);
     expect(Object.isFrozen(BOARD_MANIPULATION_FAMILY.relics)).toBe(true);

@@ -1,55 +1,15 @@
 // Merge particle burst: the spray of motes that accompanies a merging tile,
 // and the second of the two effects suppressed when motion is to be reduced.
 //
-// Schedule, easing and travel shape are read from src/theme/tokens.ts through
-// src/render/animations.ts, so a burst runs on the cadence the stylesheet gives
-// a merging tile: the `pop` keyframes (0% scale(0), 50% scale(1.2), 100%
-// scale(1)) applied as `pop 200ms ease $transition-speed` under
-// `animation-fill-mode: backwards`, so the 100ms delay holds the 0% keyframe
-// and the burst is clear across it.
-//
 // Travel is that same curve scaled by `spread` and `lift`: the spray reaches
-// the overshoot at the 50% keyframe and settles at 100%, and its alpha peaks at
-// the overshoot's own offset.
-//
-// The tint is the merged tile's ramp fill, read through `resolveTileFill` of
-// src/render/tile-materials.ts and blended toward `tileGoldGlowColor` of
-// src/theme/tokens.ts, the halo colour the merge glow is drawn in. The halo's
-// own divisor is carried below as `HALO_ATTENUATION`. No fill and no halo
-// colour is restated here as a literal or a table.
+// the overshoot at the 50% keyframe and settles at 100%, and its alpha peaks
+// at the overshoot's own offset.
 //
 // A merge arrives as an engine event, once per merge, so a move carrying two
 // merges requests two bursts on one frame and each runs its own tween.
 //
-// The buffer geometry, its two attribute arrays, the emission-direction table,
-// the alpha mask and one tween per burst record are all allocated at
-// construction and never again, so a burst writes into buffers and allocates
-// neither geometry nor an attribute array; this module holds no scene, mesh or
-// engine reference and takes its parent as a parameter of `attachTo`; it
-// touches no DOM, reads no clock — every step is driven by the caller's clamped
-// frame delta — consumes no randomness, and performs no I/O. Emission
-// directions are a pure function of a mote's slot, so one burst replays
-// identically. Reporting leaves through the injected reporter and nothing here
-// imports src/observability/.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated, all target-only because the deleted actuator
-// drew no particle:
-//   TR-PARTICLE-01  the fixed-capacity mote pool and its buffer geometry
-//   TR-PARTICLE-02  `createParticleSystem()` and one burst per merge
-//   TR-PARTICLE-03  `readBurstTint()`, the tint taken from the ramp fill
-//   TR-PARTICLE-04  the reduced-motion gate that suppresses a burst
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-PARTICLE-01  the fixed-capacity mote pool allocated once
-//   DL-PARTICLE-02  additive blending with depth writing off and frustum
-//                   culling off
-//   DL-PARTICLE-03  emission directions as a pure function of a mote's slot
-//   DL-PARTICLE-04  an option above a ceiling confined and reported, never
-//                   refused
-//   DL-PARTICLE-05  the four values with no token counterpart stated in
-//                   `particleDefaults` and overridable per construction
+// Decisions: DL-PARTICLE-01, DL-PARTICLE-02, DL-PARTICLE-03, DL-PARTICLE-04,
+// DL-PARTICLE-05 (docs/DECISION_LOG.md).
 
 import type { Object3D, Vector3Like } from 'three';
 import {
@@ -172,15 +132,7 @@ const GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 
 const BAND_CENTRE = 0.5;
 
-/**
- * Construction values with no counterpart in the token layer.
- *
- * style/main.scss declares flat fills, box-shadows and a scale curve and no
- * particle vocabulary of any kind, so the mote count, the concurrency limit and
- * the mask's two parameters are stated here; the four lengths beside them are
- * token-derived. Every entry is overridable through `ParticleSystemOptions`.
- * Decision DL-PARTICLE-05.
- */
+/** Construction values with no counterpart in the token layer. */
 export const particleDefaults = Object.freeze({
   particlesPerBurst: 12,
   maxConcurrentBursts: 6,
@@ -192,14 +144,7 @@ export const particleDefaults = Object.freeze({
   maskFalloffExponent: 2,
 } as const);
 
-/**
- * The ceilings the two count parameters and the mask edge are confined to.
- *
- * Every buffer this module allocates is sized from `particlesPerBurst` times
- * `maxConcurrentBursts`, and the alpha mask from `maskResolution` squared. A
- * request above a ceiling is confined to it and reported, never refused.
- * Decision DL-PARTICLE-04.
- */
+/** The ceilings the two count parameters and the mask edge are confined to. */
 export const particleLimits = Object.freeze({
   /** Motes one burst may emit. */
   maxParticlesPerBurst: 256,
@@ -245,10 +190,10 @@ export interface ParticleSystemOptions {
   /**
    * Forces the reduced-motion decision and holds it for the lifetime of the
    * instance. Omitted, the effective preference is read live through
-   * `queryReducedMotion()` of src/render/webgl-support.ts on every request and
-   * followed through `subscribeReducedMotion()`, so an explicit
-   * `setReducedMotionOverride()` and an operating-system setting toggled
-   * mid-run both take effect without a reload and without reconstruction.
+   * `queryReducedMotion` of src/render/webgl-support.ts on every request and
+   * followed through `subscribeReducedMotion`, so an explicit
+   * `setReducedMotionOverride` and an operating-system setting toggled mid-run
+   * both take effect without a reload and without reconstruction.
    */
   readonly reducedMotion?: boolean;
   readonly reporter?: RenderReporter;
@@ -263,7 +208,7 @@ export interface ParticleSystemStats {
   readonly activeParticles: number;
   readonly bursts: number;
 
-  /** Requests refused while motion is to be reduced, or after `dispose()`. */
+  /** Requests refused while motion is to be reduced, or after `dispose`. */
   readonly suppressed: number;
   readonly budgetExhaustions: number;
 
@@ -284,7 +229,7 @@ export interface ParticleSystemStats {
  * The merge burst over one pooled point cloud.
  *
  * Every member is safe to call at any time, before the first frame and after
- * `dispose()` alike.
+ * `dispose` alike.
  */
 export interface ParticleSystem {
   /**
@@ -294,7 +239,7 @@ export interface ParticleSystem {
    * attribute is written and no frame work is left outstanding.
    *
    * @returns `true` when a burst was claimed and its first keyframe written.
-   *   `false` after `dispose()`, while motion is to be reduced, and for an
+   *   `false` after `dispose`, while motion is to be reduced, and for an
    *   origin that is not a finite point; each refusal is reported and nothing
    *   is written.
    */
@@ -323,44 +268,51 @@ export interface ParticleSystem {
    * The pooled point cloud, the same instance on every call.
    *
    * Handed out so a caller can position or parent it. Its geometry, material
-   * and texture belong to `dispose()`: a caller that disposes them itself
-   * leaves this system holding released resources.
+   * and texture belong to `dispose`: a caller that disposes them itself leaves
+   * this system holding released resources.
    *
    * @returns The point cloud.
    */
   getObject(): Points<BufferGeometry, PointsMaterial>;
 
-  /** @returns Whether at least one burst is running. */
+  /**
+   * @returns Whether at least one burst is running.
+   */
   isActive(): boolean;
 
   /**
-   * @returns Motes the running bursts hold — the burst count multiplied by the
-   *   configured motes per burst, not a count of visible motes.
+   * @returns Motes the running bursts hold — the burst count multiplied by
+   *   the configured motes per burst, not a count of visible motes.
    */
   activeParticleCount(): number;
 
-  /** @returns Bursts currently running, from zero to the concurrency budget. */
+  /**
+   * @returns Bursts currently running, from zero to the concurrency budget.
+   */
   activeBurstCount(): number;
 
-  /** @returns The reduced-motion preference in force, read at the call. */
+  /**
+   * @returns The reduced-motion preference in force, read at the call.
+   */
   isReducedMotion(): boolean;
 
   /**
    * Retires every running burst and clears the mote buffers.
    *
    * Releases nothing: the pool, its buffers and the point cloud stay
-   * allocated, so the system remains usable and the next `burstAt()` runs
+   * allocated, so the system remains usable and the next `burstAt` runs
    * against the buffers it always had. Leaves the cumulative counters alone.
    */
   reset(): void;
 
   /**
-   * Releases every resource this system allocated and detaches the point cloud.
+   * Releases every resource this system allocated and detaches the point
+   * cloud.
    *
    * Retires running bursts, removes the point cloud from its parent, disposes
    * the geometry, the material and the alpha-mask texture — none of which
-   * three.js releases for a caller — and releases the preference
-   * subscription. Idempotent, and afterwards `burstAt()` refuses.
+   * three.js releases for a caller — and releases the preference subscription.
+   * Idempotent, and afterwards `burstAt` refuses.
    */
   dispose(): void;
 
@@ -378,20 +330,9 @@ export interface ParticleSystem {
 }
 
 
-/* ==========================================================================
- * 4. The tint, derived from the ramp and the halo token
- * ========================================================================== */
-
 /**
  * The halo colour of the DEFAULT palette, read from `tileGoldGlowColor` of
  * src/theme/tokens.ts once.
- *
- * The colour style/main.scss draws the outer halo of the merge glow in, the
- * `rgba($tile-gold-glow-color, ...)` term of its tile-value `box-shadow`.
- * It is the fallback `readHaloColor` returns where a palette states a glow
- * entry this module cannot read, and is not itself the colour a burst is
- * tinted with: every additive palette states its own glow, so a burst reads
- * the palette in force rather than this token.
  */
 const DEFAULT_HALO_COLOR: BurstColor = /* @__PURE__ */ readThemeColor(
   tileGoldGlowColor,
@@ -399,11 +340,6 @@ const DEFAULT_HALO_COLOR: BurstColor = /* @__PURE__ */ readThemeColor(
 
 /**
  * The halo colour of one theme, read at the moment it is needed.
- *
- * Read per burst rather than captured once, so a palette switched mid-run
- * reaches the next burst: the two additive palettes state their own
- * `tileGlow`, and a burst tinted from the token alone would keep the default
- * palette's gold under either of them.
  *
  * @param theme Theme to read, or omitted for the theme in force.
  * @returns The palette's glow colour, and `DEFAULT_HALO_COLOR` where the
@@ -429,8 +365,8 @@ function readHaloColor(theme?: Theme | ThemeId): BurstColor {
  * Confines a share to the span it is mixed over.
  *
  * @param share Requested share.
- * @returns The share where it lies in 0 to 1, `0` for a value below it or one
- *   that is not a finite number, and `1` above.
+ * @returns The share where it lies in 0 to 1, `0` for a value below it or
+ *   one that is not a finite number, and `1` above.
  */
 function confineShare(share: number): number {
   if (!Number.isFinite(share)) {
@@ -444,10 +380,12 @@ function confineShare(share: number): number {
  * The ramp fill of one tile value.
  *
  * @param tileValue Face value of the merged tile.
- * @returns The fill `resolveTileFill` of src/render/tile-materials.ts resolves
- *   under the theme in force, or `null` for a value the ramp does not cover —
- *   which a merge relic can produce off the powers of two the ramp is defined
- *   over.
+ * @param theme The theme, or its identifier, the fill is resolved under.
+ *   Omitted, `resolveTileFill` resolves it against the theme in force.
+ * @returns The fill `resolveTileFill` of src/render/tile-materials.ts
+ *   resolves under that theme, or `null` for a value the ramp does not
+ *   cover — which a merge relic can produce off the powers of two the ramp is
+ *   defined over.
  */
 function readRampFill(
   tileValue: number,
@@ -475,9 +413,6 @@ function blendTowardHalo(
 /**
  * The tint one burst carries: the merged tile's own ramp fill, blended toward
  * the halo colour of the merge glow.
- *
- * Total: a tile value the ramp does not resolve yields the halo colour rather
- * than throwing, so a merge relic producing a value off the ramp still bursts.
  */
 export function readBurstTint(
   tileValue: number,
@@ -590,9 +525,6 @@ function reportRejectedOption(
 /**
  * Reports one parameter confined to its ceiling.
  *
- * Counted under the same metric as a rejection, with the ceiling in place of a
- * fallback, so an oversized request is as visible as an unusable one.
- *
  * @param context Sink and counter.
  * @param option Parameter name.
  * @param received Value supplied.
@@ -632,8 +564,8 @@ function reportConfinedOption(
  *   unusable.
  * @param option Parameter name, for the report.
  * @param context Sink and counter.
- * @returns The supplied value where it is a finite number of at least zero, and
- *   `fallback` otherwise, in which case the rejection is reported.
+ * @returns The supplied value where it is a finite number of at least zero,
+ *   and `fallback` otherwise, in which case the rejection is reported.
  */
 function resolveMagnitude(
   supplied: number | undefined,
@@ -675,8 +607,7 @@ function resolveCount(
   }
 
   if (floored > ceiling) {
-    // Confined to the ceiling and reported, never refused. Decision
-    // DL-PARTICLE-04.
+    // Confined to the ceiling and reported, never refused.
     reportConfinedOption(context, option, supplied, ceiling);
 
     return ceiling;
@@ -830,11 +761,6 @@ export function createParticleSystem(
     optionContext,
   );
 
-  // Overflow-safe: the number of concurrent bursts is derived from the budget
-  // ceiling and the per-burst count rather than multiplied and checked
-  // afterwards, so no product is formed that the buffers below could not be
-  // sized for. Both operands are already confined to their own ceilings, so the
-  // division cannot be by zero and the result is at least one.
   const affordableBursts = Math.max(
     MIN_COUNT,
     Math.floor(particleLimits.maxBudget / particlesPerBurst),
@@ -874,11 +800,7 @@ export function createParticleSystem(
 
   // The colour attribute carries four components, the width three.js reads a
   // per-vertex alpha from; the mask supplies the mote's falloff and the
-  // attribute supplies its tint and its alpha. Additive blending is the
-  // compositing style/main.scss draws the halo of the merge glow with, and
-  // with depth writing off every mote composites whatever the draw order.
-  //
-  // Decision DL-PARTICLE-02.
+  // attribute supplies its tint and its alpha.
   const material = new PointsMaterial({
     size,
     sizeAttenuation: options.sizeAttenuation ?? true,
@@ -893,14 +815,12 @@ export function createParticleSystem(
 
   points.name = POINTS_OBJECT_NAME;
 
-  // The bounding volume is not recomputed as motes travel, and culling is
-  // off. Decision DL-PARTICLE-02.
+  // The bounding volume is not recomputed as motes travel, and culling is off.
   points.frustumCulled = false;
   points.visible = false;
 
-  // style/main.scss: three keyframes, the middle one carrying the
-  // overshoot at the offset it sits on. Travel is the scale curve itself, and
-  // alpha rises to the overshoot and returns to clear at the last keyframe.
+  // style/main.scss: three keyframes, the middle one carrying the overshoot at
+  // the offset it sits on.
   const burstStops: readonly TweenStop<BurstFrame>[] = Object.freeze([
     {
       offset: FIRST_KEYFRAME_OFFSET,
@@ -928,11 +848,9 @@ export function createParticleSystem(
   // The timing function style/main.scss names, resolved once.
   const burstEasing = easingFor(motion.pop.easing);
 
-  // One burst's whole cadence: the delay of style/main.scss plus its
-  // duration.
+  // One burst's whole cadence: the delay of style/main.scss plus its duration.
   const lifetimeMs = motion.pop.delay + motion.pop.duration;
 
-  // Reused by every tint transfer rather than allocated per burst.
   const scratchColor = new Color();
 
   const records: BurstRecord[] = [];
@@ -945,10 +863,7 @@ export function createParticleSystem(
       firstSlot,
       lastSlot: firstSlot + particlesPerBurst,
 
-      // style/main.scss: `pop 200ms ease $transition-speed`. Built once
-      // and reset on reuse. `reducedMotion` is stated rather than read here, so
-      // the tween is never built complete; `readReducedMotion()` below is what
-      // suppression is decided by.
+      // style/main.scss: `pop 200ms ease $transition-speed`.
       tween: createTween<BurstFrame>(
         {
           name: BURST_TWEEN_NAME,
@@ -985,9 +900,9 @@ export function createParticleSystem(
 
   /**
    * Reads the preference in force: the forced decision where one was supplied,
-   * and otherwise the live answer of `queryReducedMotion()`, which follows
-   * both the operating-system setting and the override the accessibility
-   * surface sets.
+   * and otherwise the live answer of `queryReducedMotion`, which follows both
+   * the operating-system setting and the override the accessibility surface
+   * sets.
    */
   const readReducedMotion = (): boolean =>
     forcedReducedMotion ?? queryReducedMotion();
@@ -1220,8 +1135,7 @@ export function createParticleSystem(
     writeTint(record);
 
     // The first keyframe: every mote sits at the emission point, clear, and
-    // stays there for the whole of the delay style/main.scss holds it
-    // across.
+    // stays there for the whole of the delay style/main.scss holds it across.
     writeBurst(record, record.tween.value());
 
     positionAttribute.needsUpdate = true;
@@ -1255,9 +1169,6 @@ export function createParticleSystem(
         continue;
       }
 
-      // A delta beyond the remaining lifetime is absorbed by the tween, which
-      // steps no further than its own end, so the record retires on this frame
-      // rather than carrying a mote past its last keyframe.
       writeBurst(record, record.tween.advance(deltaMs));
 
       if (record.tween.isComplete()) {

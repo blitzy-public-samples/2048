@@ -2,19 +2,7 @@
 //
 // `collapsing-vault` and `brittle-crown` are covered handler-by-handler by
 // tests/unit/relics/relic-effects.test.ts. Three things had no test, and the
-// third is the edge case the prompt states outright:
-//
-//   gilded-rot        doubles every merge's pay and raises every spawn to the
-//                     ceiling the rules declare, both read at use time.
-//   hollow-ascension  banks a charge per merge and sweetens the merges that
-//                     follow, and a stage that is NOT cleared empties the bank.
-//                     Its state is a bare number, which is the one relic state
-//                     that is not an object.
-//   shrink safety     a board-size-altering cursed relic must not corrupt tile
-//                     positions OR the win/lose check. The check is asserted
-//                     against the REAL src/engine/terminal-state.ts over the
-//                     reconciled board, because a size read from the wrong
-//                     place is how a shrunk board reports a loss it is not in.
+// third is the edge case the prompt states outright.
 
 import { describe, expect, it } from 'vitest';
 
@@ -45,10 +33,6 @@ import {
 } from '../../fixtures/relics';
 import type { RelicBench } from '../../fixtures/relics';
 
-/* ==========================================================================
- * Harness
- * ========================================================================== */
-
 /** Resolves one merge through a bench and hands back what it paid. */
 function pay(
   target: RelicBench,
@@ -66,10 +50,6 @@ function pay(
     scoreDelta: resolved.scoreDelta,
   };
 }
-
-/* ==========================================================================
- * 1. gilded-rot
- * ========================================================================== */
 
 describe('gilded-rot (risk-reward-cursed)', () => {
   it('binds onMerge and onSpawn', () => {
@@ -167,10 +147,6 @@ describe('gilded-rot (risk-reward-cursed)', () => {
   });
 });
 
-/* ==========================================================================
- * 2. hollow-ascension
- * ========================================================================== */
-
 describe('hollow-ascension (risk-reward-cursed)', () => {
   it('binds onMerge and onStageEnd', () => {
     expect(Object.keys(relicById('hollow-ascension').hooks).sort()).toEqual([
@@ -258,10 +234,6 @@ describe('hollow-ascension (risk-reward-cursed)', () => {
   });
 });
 
-/* ==========================================================================
- * 3. Shrink safety: positions and the win/lose check
- * ========================================================================== */
-
 describe('a board the vault shrank', () => {
   /** Shrinks a bench's board by clearing a stage. */
   function collapse(target: RelicBench): void {
@@ -280,8 +252,6 @@ describe('a board the vault shrank', () => {
     expect(target.grid.size).toBe(3);
     expect(target.config.boardSize).toBe(3);
 
-    // The corruption mode the discipline exists to prevent: a tile whose own
-    // x/y no longer matches the cell holding it.
     expectConsistentLattice(target.grid);
 
     for (const cell of occupants(target.grid)) {
@@ -304,8 +274,7 @@ describe('a board the vault shrank', () => {
     collapse(target);
 
     // Four tiles on a 3x3 board still leave five empty cells, so a move is
-    // available — and the check must read the RECONCILED size to say so. One
-    // reading the old edge length probes cells the lattice no longer holds.
+    // available — and the check must read the RECONCILED size to say so.
     expect(target.grid.size).toBe(3);
     expect(movesAvailable(target.grid, target.config)).toBe(true);
   });
@@ -345,8 +314,9 @@ describe('a board the vault shrank', () => {
 
     collapse(target);
 
-    // The tile survived the collapse, and the target it is measured against was
-    // never rewritten — so a run that had won has not un-won by losing an edge.
+    // The tile survived the collapse, and the target it is measured against
+    // was never rewritten — so a run that had won has not un-won by losing an
+    // edge.
     expect(target.config.winValue).toBe(2048);
     expect(highestTileValue(target.grid)).toBe(2048);
     expect(hasReachedWinValue(target.grid, target.config)).toBe(true);
@@ -408,10 +378,6 @@ describe('a board the vault shrank', () => {
     expect(cursorOf(target, 'relic-draw')).toBe(0);
   });
 });
-
-/* ==========================================================================
- * 4. The family together
- * ========================================================================== */
 
 describe('the cursed family held together', () => {
   it('carries four relics, none of them charge-limited', () => {
@@ -490,8 +456,6 @@ describe('the cursed family held together', () => {
     fill(target.grid, 2);
     dispatchOn(target, 'onStageEnd', stageEndPayload(true));
 
-    // Sixteen tiles into nine cells: seven are discarded rather than stacked,
-    // and every remaining slot holds exactly one tile at its own coordinates.
     expect(target.grid.size).toBe(3);
     expect(occupants(target.grid)).toHaveLength(9);
     expectConsistentLattice(target.grid);

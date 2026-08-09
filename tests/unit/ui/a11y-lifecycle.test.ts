@@ -1,25 +1,7 @@
 // Contract suite for the accessibility layer's lifecycle and announcement
 // bounds, AAP R9.
 //
-// Four properties are pinned here, none of them visible to the type checker:
-//
-//   remount      the parallel board layer installs a keydown listener on its
-//                host and a change listener on a media query. Remounting used
-//                to clear the cells only, so the previous host kept both
-//                listeners and its attribute-ownership flags were read against
-//                the NEXT host — which could strip a `role` it declared itself.
-//   receiver     `destroy()` reached `releaseAll` through `this`, so a
-//                destructured or re-bound call released the wrong stack, or
-//                threw.
-//   bounds       the queue bound refused to discard `terminal` and
-//                `relicAcquired`, so a queue of nothing but those grew past
-//                the bound; and the outbox composed utterances were pushed
-//                into had no ceiling at all.
-//   assertive    a polite `role="status"` region does not interrupt, so routing
-//                an assertive request into it is not an assertive announcement.
-//
-// The announcer schedules its own flush, so every test here flushes explicitly
-// rather than waiting on a timer.
+// Four properties are pinned here, none of them visible to the type checker.
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -90,10 +72,6 @@ const boardHost = (id: string): HTMLElement => {
   return host;
 };
 
-/**
- * Runs each scheduled step immediately, so a `flush()` reaches the regions
- * within the call rather than on a later timer.
- */
 const syncScheduler =
   (): AnnouncerScheduler =>
   (callback): { cancel(): void } => {
@@ -129,8 +107,6 @@ const politeRegion = (): HTMLElement => {
   return region;
 };
 
-/* ===== 1. Remount runs the complete unmount path (F-03) ===== */
-
 describe('the parallel board layer tears down before it remounts', () => {
   it('removes the previous host keydown listener', () => {
     const first = boardHost('board-one');
@@ -147,8 +123,6 @@ describe('the parallel board layer tears down before it remounts', () => {
     expect(layer.mount(first, 4)).toBe(true);
     expect(layer.mount(second, 4)).toBe(true);
 
-    // The old host would still have carried the listener, so a key pressed on
-    // it would have activated a cell of a board no longer mounted.
     first.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
     );
@@ -180,8 +154,8 @@ describe('the parallel board layer tears down before it remounts', () => {
     const first = boardHost('board-one');
     const second = boardHost('board-two');
 
-    // The second host declares its own role, so the layer must not claim it and
-    // must not strip it on unmount.
+    // The second host declares its own role, so the layer must not claim it
+    // and must not strip it on unmount.
     second.setAttribute('role', 'grid');
 
     const layer = createParallelBoardLayer({ document });
@@ -217,8 +191,8 @@ describe('the parallel board layer tears down before it remounts', () => {
     expect(layer.mount(host, 4)).toBe(true);
     expect(layer.mount(host, 0)).toBe(false);
 
-    // Every failure path resets the state, so a rejected mount does not leave a
-    // half-mounted layer behind.
+    // Every failure path resets the state, so a rejected mount does not leave
+    // a half-mounted layer behind.
     expect(layer.isMounted()).toBe(false);
     expect(layer.boardSize()).toBe(0);
     expect(host.hasAttribute('role')).toBe(false);
@@ -263,8 +237,6 @@ describe('the parallel board layer tears down before it remounts', () => {
     layer.unmount();
   });
 });
-
-/* ===== 2. destroy() does not depend on a receiver (F-04) ===== */
 
 describe('the focus manager destroys without a receiver', () => {
   it('survives a destructured call', () => {
@@ -312,10 +284,6 @@ describe('the focus manager destroys without a receiver', () => {
   });
 });
 
-/* ==========================================================================
- * The restore target a trap records
- * ========================================================================== */
-
 describe('the restore target a focus trap records', () => {
   /** Collects every warn record and counter a manager reports. */
   const createRecorder = (): {
@@ -356,8 +324,8 @@ describe('the restore target a focus trap records', () => {
     const recorder = createRecorder();
     const manager = createFocusManager({ reporter: recorder.reporter });
 
-    // Nothing holds focus, which is what a document reports as its body — and is
-    // the ordinary state in a game that binds its keys on the document.
+    // Nothing holds focus, which is what a document reports as its body — and
+    // is the ordinary state in a game that binds its keys on the document.
     expect(document.activeElement).toBe(document.body);
 
     const trap = manager.trap(dialog, {
@@ -370,8 +338,6 @@ describe('the restore target a focus trap records', () => {
 
     trap?.release();
 
-    // The FALLBACK served the release, which is what should have happened all
-    // along: focus lands on the supplied element rather than being left nowhere.
     expect(document.activeElement).toBe(board);
 
     // And no failure was reported: a body restore target is a state, not a
@@ -405,8 +371,8 @@ describe('the restore target a focus trap records', () => {
 
     trap?.release();
 
-    // Unchanged behaviour for the case the recording exists for: focus returns to
-    // the control that opened the dialog.
+    // Unchanged behaviour for the case the recording exists for: focus returns
+    // to the control that opened the dialog.
     expect(document.activeElement).toBe(trigger);
     expect(recorder.counters).not.toContain('ui.focus.trap.restore_body');
 
@@ -441,8 +407,6 @@ describe('the restore target a focus trap records', () => {
     manager.destroy();
   });
 });
-
-/* ===== 3. The bound covers queue and outbox (F-07) ===== */
 
 describe('the announcement bound covers every protected kind', () => {
   it('classifies each kind', () => {
@@ -496,8 +460,7 @@ describe('the announcement bound covers every protected kind', () => {
 
     announcer.flush();
 
-    // The terminal verdict survived the pressure; a move did not. It is read
-    // out of the assertive region, which is where a verdict now goes.
+    // The terminal verdict survived the pressure; a move did not.
     const assertive = document.querySelector('[aria-live="assertive"]');
 
     expect(assertive?.textContent ?? '').toMatch(/over|lost|lose|loss/i);
@@ -593,8 +556,6 @@ describe('the announcement bound covers every protected kind', () => {
     expect(OUTBOX_CAPACITY_MULTIPLE).toBeGreaterThanOrEqual(1);
   });
 });
-
-/* ===== 4. Assertive requests are assertive, or reported (F-08) ===== */
 
 describe('an assertive request is not silently made polite', () => {
   it('creates an assertive region beside the polite one', () => {
@@ -741,7 +702,8 @@ describe('an assertive request is not silently made polite', () => {
 
   it('reports the downgrade when no assertive region can be created', () => {
     const track = recorder();
-    // A detached region has no parent, so no sibling can be inserted beside it.
+    // A detached region has no parent, so no sibling can be inserted beside
+    // it.
     const detached = document.createElement('div');
 
     detached.setAttribute('role', 'status');
@@ -771,7 +733,6 @@ describe('an assertive request is not silently made polite', () => {
       ),
     ).toBe(true);
 
-    // And it still reached the polite region rather than being dropped.
     expect((detached.textContent ?? '').length).toBeGreaterThan(0);
 
     announcer.destroy();
@@ -838,9 +799,6 @@ describe('a board renderer hands the parallel layer over rather than emptying it
       parallelBoardLayer: layer,
     });
 
-    // Claimed: the element is out of the accessibility tree, and the layer knows
-    // it is no longer mounted rather than holding detached cells while
-    // `isMounted()` still reports `true`.
     expect(parallelHost.getAttribute('aria-hidden')).toBe('true');
     expect(parallelHost.hidden).toBe(true);
     expect(layer.isMounted()).toBe(false);

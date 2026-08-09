@@ -4,89 +4,8 @@
 // Origin: requirement R9, AAP section 0.6.2.6 Group 6, and working assumption
 // A5 for the mute and volume controls.
 //
-// PROVENANCE OF EACH SURFACE
-//   Key remapping presents the modern replacement for the `event.which` code
-//   map at js/keyboard_input_manager.js L37-L50 — arrows 38/39/40/37, Vim
-//   K/L/J/H 75/76/74/72, WASD 87/68/83/65 and `R` 82 for restart. Capture reads
-//   `KeyboardEvent.key` and `KeyboardEvent.code`; no numeric code is read or
-//   displayed. A capture persists BOTH, so a rebind is refused where EITHER
-//   collides with another action active in the same context — the key dimension
-//   alone was measured, which let a shared physical position shadow an action
-//   whose key text differed, and `resolveInput` returns its first match, so the
-//   shadowed action became unreachable.
-//   Every control is a real `<button>` or `<input>`. The three controls this
-//   supersedes are hrefless `<a>` elements at index.html (source branch) L31,
-//   L38 and L39.
-//   The primary action vocabulary is the button mixin at style/main.scss
-//   L159-L168, applied through the `.screen-button` class of
-//   style/_screens.scss. No colour, length or duration is declared here.
-//   Labels are real text nodes, not the `:after` pseudo-content of the score
-//   captions at style/main.scss L109-L115; a label that must not be seen uses
-//   the `.visually-hidden` utility of style/_a11y.scss.
-//   Host resolution goes through `resolveMount`, the guarded form of the
-//   unchecked lookups at js/html_actuator.js L3-L4 and
-//   js/keyboard_input_manager.js L141 (I12).
-//   A caught error is always reported with its error object, never discarded as
-//   at js/local_storage_manager.js L37.
-//
-// OWNERSHIP BOUNDARIES
-//   Preference values: src/ui/a11y/settings.ts. This module holds none.
-//   Keybinding computation: src/input/keymap.ts. The keymap is READ FROM and
-//   WRITTEN THROUGH the injected `keymapOwner`, which validates, applies,
-//   persists and announces; this module computes no table and persists nothing.
-//   Element-to-action binding for markup controls, and the open and close
-//   triggers: src/input/on-screen-controls.ts. None is created or bound here.
-//   Audio behaviour: src/audio/sound-engine.ts.
-//   The terminal-state overlay `.game-message` and the dialog's shown state in
-//   the screen flow: src/ui/screen-router.ts.
-//   Stacking: `.settings-panel:not([hidden])` of style/_screens.scss. No
-//   `z-index` is authored here.
-//   The collaborators above are drawn as a named Mermaid figure in
-//   docs/architecture/component-interaction.md.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-PANEL-01  js/keyboard_input_manager.js L37-L50  the `event.which` code
-//                                                      map, presented as the
-//                                                      remappable bindings read
-//                                                      from
-//                                                      `KeyboardEvent.key` and
-//                                                      `KeyboardEvent.code`
-//   TR-PANEL-02  index.html L31, L38, L39              the three hrefless `<a>`
-//                                                      controls, superseded by
-//                                                      real `<button>` and
-//                                                      `<input>` elements
-//   TR-PANEL-03  style/main.scss L159-L168             the button mixin,
-//                                                      applied through
-//                                                      `.screen-button`
-//   TR-PANEL-04  style/main.scss L109-L115             the `:after`
-//                                                      pseudo-content captions,
-//                                                      replaced by real text
-//                                                      nodes and the
-//                                                      `.visually-hidden`
-//                                                      utility
-//   TR-PANEL-05  js/html_actuator.js L3-L4,            the unchecked host
-//                js/keyboard_input_manager.js L141     lookups, replaced by
-//                                                      `resolveMount`
-//   TR-PANEL-06  js/local_storage_manager.js L37       the discarded caught
-//                                                      value, replaced by a
-//                                                      report that always
-//                                                      carries its error object
-//   TR-PANEL-07  target-only row                       `createSettingsPanel()`
-//                                                      and the focus-managed
-//                                                      dialog
-//   TR-PANEL-08  target-only row                       `settingsPanelCopy` and
-//                                                      the section vocabulary
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-PANEL-01  every preference reachable from one focus-managed modal dialog
-//   DL-PANEL-02  key capture reading `KeyboardEvent.key` and
-//                `KeyboardEvent.code`, with no numeric code read or displayed
-//   DL-PANEL-03  every control a real `<button>` or `<input>`, and every label a
-//                real text node
-//   DL-PANEL-04  the keymap owned by the injected `keymapOwner`, which is what
-//                validates, applies, persists and announces a rebind
+// Decisions: DL-PANEL-01, DL-PANEL-02, DL-PANEL-03, DL-PANEL-04
+// (docs/DECISION_LOG.md).
 
 import type { FocusManager, FocusTrapHandle } from '../a11y/focus-manager';
 import type { LiveRegionAnnouncer } from '../a11y/live-region';
@@ -125,8 +44,7 @@ import type { ThemeId } from '../../theme/themes';
 import { getTheme, themeIds } from '../../theme/themes';
 
 // The string values below are the same selectors style/_a11y.scss,
-// style/_reward.scss, style/_screens.scss and the suites match on; SCSS imports
-// nothing from here, so the two sides share a spelling rather than a symbol.
+// style/_reward.scss, style/_screens.scss and the suites match on.
 
 /** Context label carried into every report this module raises. */
 export const SETTINGS_PANEL_CONTEXT = 'settings-panel';
@@ -239,9 +157,6 @@ const MODIFIER_KEYS: readonly string[] = Object.freeze([
 
 const CANCEL_CAPTURE_KEY = 'Escape';
 
-// Palette names and descriptions come from the catalogue of
-// src/theme/themes.ts rather than being restated here.
-
 /** Every string this dialog writes. Each is caller-overridable. */
 export interface SettingsPanelCopy {
   readonly title: string;
@@ -274,8 +189,8 @@ export interface SettingsPanelCopy {
   /**
    * Shown when a captured key already belongs to another action.
    *
-   * `dimension` names which of the event's two identities collided: `'key'` for
-   * the logical `KeyboardEvent.key`, `'code'` for the physical
+   * `dimension` names which of the event's two identities collided: `'key'`
+   * for the logical `KeyboardEvent.key`, `'code'` for the physical
    * `KeyboardEvent.code`. An override that ignores the third argument still
    * satisfies this type.
    */
@@ -298,12 +213,7 @@ export interface SettingsPanelCopy {
   readonly restoreAnnouncement: string;
 }
 
-/**
- * Renders one motion setting as spoken text.
- *
- * The `never` branch is unreachable while `MotionSetting` holds exactly the
- * three members below, and fails the type check when a fourth is added.
- */
+/** Renders one motion setting as spoken text. */
 function motionSettingLabel(setting: MotionSetting): string {
   switch (setting) {
     case 'system':
@@ -322,12 +232,7 @@ function unreachableSetting(setting: never): string {
   return String(setting);
 }
 
-/**
- * Renders one palette as spoken text, from the catalogue's own name.
- *
- * The `never` branch is unreachable while `ThemeId` holds exactly the three
- * members below, and fails the type check when a fourth is added.
- */
+/** Renders one palette as spoken text, from the catalogue's own name. */
 function themeIdLabel(id: ThemeId): string {
   switch (id) {
     case 'default':
@@ -436,8 +341,8 @@ export const settingsPanelCopy: SettingsPanelCopy = Object.freeze({
 /**
  * The binding table's owner, declared by the three members this dialog calls.
  *
- * Structural, so the accessibility layer needs no import from the input manager
- * and the manager needs no knowledge of this dialog: `InputManager` of
+ * Structural, so the accessibility layer needs no import from the input
+ * manager and the manager needs no knowledge of this dialog: `InputManager` of
  * src/input/input-manager.ts satisfies it as written.
  */
 export interface KeymapOwner {
@@ -470,8 +375,7 @@ export interface SettingsPanelOptions {
   readonly host?: HTMLElement | null;
 
   /**
-   * Selector the host is resolved at. Defaults to
-   * `SETTINGS_PANEL_SELECTOR`.
+   * Selector the host is resolved at. Defaults to `SETTINGS_PANEL_SELECTOR`.
    */
   readonly hostSelector?: string;
 
@@ -483,25 +387,12 @@ export interface SettingsPanelOptions {
    */
   readonly focusManager?: FocusManager | null;
 
-  /**
-   * Whether this dialog engages the focus trap on its own host.
-   *
-   * `true` by default, which is the standalone case: the dialog contains focus,
-   * handles Escape and restores focus itself. `false` where the caller that
-   * shows the dialog holds the trap instead — the composition of src/main.ts
-   * does, through src/ui/screen-router.ts, which has the trigger to restore to
-   * and the background to make inert. Exactly one of the two owns it (N7).
-   */
+  /** Whether this dialog engages the focus trap on its own host. */
   readonly trapFocus?: boolean;
 
   /**
-   * The owner of the binding table: the source the rebinding rows read, and the
-   * one api a rebind is applied through.
-   *
-   * `InputManager` of src/input/input-manager.ts satisfies it as written. This
-   * dialog computes no table of its own and validates no conflict of its own —
-   * doing either made the dialog a second owner of state the manager holds, and
-   * a rebind then had to be applied twice to stay in step (N2).
+   * The owner of the binding table: the source the rebinding rows read, and
+   * the one api a rebind is applied through.
    *
    * Absent, the rebinding rows show the default table and every rebind is
    * refused as degraded.
@@ -544,8 +435,8 @@ export interface SettingsPanel {
    * available. A manager that is absent, or that refuses the trap, is reported
    * as degraded and the dialog still opens untrapped.
    *
-   * @returns Whether the dialog is open afterwards. An absent host, or a body
-   *   that could not be rendered, returns `false` and changes nothing.
+   * @returns Whether the dialog is open afterwards. An absent host, or a
+   *   body that could not be rendered, returns `false` and changes nothing.
    */
   open(): boolean;
 
@@ -567,10 +458,10 @@ export interface SettingsPanel {
    * the injected collaborators: the preference store, the focus manager, the
    * sound engine, the input emitter and the announcer.
    *
-   * `element` keeps the host it resolved, and the reporter and the copy stay in
-   * place so a later call can still be reported. Idempotent. Afterwards
-   * `open()`, `close()` and `refresh()` are no-ops that report, while
-   * `isOpen()` — which returns `false` — and a repeated `destroy()` are silent.
+   * `element` keeps the host it resolved, and the reporter and the copy stay
+   * in place so a later call can still be reported. Idempotent. Afterwards
+   * `open`, `close` and `refresh` are no-ops that report, while `isOpen` —
+   * which returns `false` — and a repeated `destroy` are silent.
    */
   destroy(): void;
 }
@@ -612,7 +503,9 @@ function writeToggleState(
   }
 }
 
-/** Adds an id to a control's `aria-describedby` without dropping the others. */
+/**
+ * Adds an id to a control's `aria-describedby` without dropping the others.
+ */
 function describeBy(control: Element, id: string): void {
   const present = control.getAttribute('aria-describedby');
   const ids = present === null || present === '' ? [] : present.split(/\s+/u);
@@ -684,10 +577,6 @@ function contextsOf(binding: InputBinding): readonly InputContext[] {
 /**
  * Which of a captured event's two dimensions a conflict was found in: the
  * logical `KeyboardEvent.key` or the physical `KeyboardEvent.code`.
- *
- * Carried into the refusal text and the conflict counter, so a refusal names the
- * dimension rather than leaving a player to guess why a key they have not bound
- * elsewhere was refused.
  */
 export type RebindDimension = 'key' | 'code';
 
@@ -697,23 +586,18 @@ interface RebindConflict {
   readonly dimension: RebindDimension;
 }
 
-/* ==========================================================================
- * 5. Construction
- * ========================================================================== */
-
 /**
  * Builds the settings dialog.
  *
- * Nothing is rendered, resolved or measured beyond the host lookup: `open()`
+ * Nothing is rendered, resolved or measured beyond the host lookup: `open`
  * renders the body, shows the dialog and requests a focus trap over it where a
  * focus manager is available. No media query is evaluated here and no
  * preference is read at construction.
  *
- * @param options Host, preference store, keymap and the optional focus manager,
- *   audio, emitter, announcer and sink collaborators.
- * @returns The dialog, closed, with no body rendered yet. An unresolvable host
- *   yields a usable object whose `open()` is a reported no-op.
- *
+ * @param options Host, preference store, keymap and the optional focus
+ *   manager, audio, emitter, announcer and sink collaborators.
+ * @returns The dialog, closed, with no body rendered yet. An unresolvable
+ *   host yields a usable object whose `open` is a reported no-op.
  * @example
  * ```ts
  * // `host` is the element src/ui/screen-router.ts resolved and injected. Where
@@ -743,7 +627,7 @@ export function createSettingsPanel(
   const suspendInput = options.suspendInput;
   const resumeInput = options.resumeInput;
 
-  // Dropped by `destroy()`.
+  // Dropped by `destroy`.
   let preferences: PreferenceStore | null = options.preferences ?? null;
   let focusManager: FocusManager | null = options.focusManager ?? null;
   let soundEngine: SoundEngine | null = options.soundEngine ?? null;
@@ -752,7 +636,7 @@ export function createSettingsPanel(
   let keymapOwner: KeymapOwner | null = options.keymapOwner ?? null;
 
   // A CACHE of the owner's table, refreshed by `adoptKeymap` and assigned
-  // nowhere else. Not a preference: src/ui/a11y/settings.ts holds no keymap.
+  // nowhere else.
   let keymap: Keymap = createKeymap();
 
   const owner: Document | null =
@@ -786,7 +670,7 @@ export function createSettingsPanel(
   let audioUnlocked = false;
   let soundDegradationReported = false;
 
-  /** Reports and refuses a call made after `destroy()`. */
+  /** Reports and refuses a call made after `destroy`. */
   const refuseAfterDestroy = (call: string): boolean => {
     if (!destroyed) {
       return false;
@@ -869,7 +753,7 @@ export function createSettingsPanel(
 
   // Read ONCE, before this module has written either: what index.html declared
   // is what an open dialog carries, so the markup stays the authority on both
-  // even though the attributes now come and go with the open state (N6).
+  // even though the attributes now come and go with the open state.
   const declaredRole = host?.getAttribute('role') ?? null;
   const declaredModal = host?.getAttribute('aria-modal') ?? null;
 
@@ -970,15 +854,6 @@ export function createSettingsPanel(
   /**
    * Applies the dialog's semantics for the time it is open, and names it from
    * its own heading.
-   *
-   * The role and the modal flag index.html declares are RESTORED here rather
-   * than merely completed, because `clearDialogSemantics` takes them off when
-   * the dialog closes: a hidden container that still answers to
-   * `[role="dialog"][aria-modal="true"]` is a modal dialog by every selector
-   * that looks for one, including the document context rule of
-   * src/input/input-manager.ts, and it says the background is inert when
-   * nothing is (N6). Whatever the markup declared is what comes back, so a
-   * declared `role` is still not overwritten with a different one.
    */
   const ensureDialogSemantics = (): void => {
     if (host === null) {
@@ -992,13 +867,7 @@ export function createSettingsPanel(
     describeBy(host, SETTINGS_HELP_ID);
   };
 
-  /**
-   * Takes the dialog's semantics off for the time it is closed.
-   *
-   * Called only after the host is hidden, so modal semantics are never removed
-   * from a container still on screen. `aria-hidden` moves with `hidden` here and
-   * in `ensureDialogSemantics`, so the two can never disagree (N6).
-   */
+  /** Takes the dialog's semantics off for the time it is closed. */
   const clearDialogSemantics = (): void => {
     if (host === null) {
       return;
@@ -1008,10 +877,6 @@ export function createSettingsPanel(
     host.removeAttribute('aria-modal');
     host.setAttribute('aria-hidden', 'true');
   };
-
-  /* ------------------------------------------------------------------------
-   * 5c. The four groups
-   * --------------------------------------------------------------------- */
 
   const buildAppearance = (): HTMLFieldSetElement | null => {
     const group = makeGroup('appearance', copy.appearanceLegend);
@@ -1317,8 +1182,7 @@ export function createSettingsPanel(
     return true;
   };
 
-  // Every control's state is derived from the store and the keymap. The dialog
-  // holds no second copy of any preference.
+  // Every control's state is derived from the store and the keymap.
 
   const syncThemes = (): void => {
     const store = preferences;
@@ -1452,10 +1316,10 @@ export function createSettingsPanel(
     try {
       engine.unlock();
 
-      // SET ONLY AFTER THE UNLOCK SUCCEEDED. Setting it first made a transient
-      // failure permanent: the guard above short-circuited every later gesture,
-      // so one throw left the audio layer suspended for the life of the page
-      // with no way to retry it.
+      // Set only after the unlock succeeded. Setting it first made a transient
+      // failure permanent: the guard above short-circuited every later
+      // gesture, so one throw left the audio layer suspended for the life of
+      // the page with no way to retry it.
       audioUnlocked = true;
     } catch (error: unknown) {
       reporter.error('sound unlock threw', error, {
@@ -1492,15 +1356,12 @@ export function createSettingsPanel(
       soundStatus.textContent = soundStatusText(availability);
     }
 
-    // NOTHING IS PUSHED INTO THE AUDIO LAYER FROM HERE. The store is the single
-    // owner of mute and volume, and src/audio/sound-engine.ts follows it through
-    // its own subscription, so this sync writes only the controls. A push here
-    // would be the second synchronisation path (N1).
+    // Nothing is pushed into the audio layer from here.
   };
 
   const syncBindings = (): void => {
     // Re-read first: the rows show what the owner holds, not what this dialog
-    // last saw (N2).
+    // last saw.
     const table = adoptKeymap();
 
     for (const [action, label] of bindingLabels) {
@@ -1548,8 +1409,7 @@ export function createSettingsPanel(
     syncCaptureControls();
   };
 
-  // Every write goes through src/ui/a11y/settings.ts. No activation attribute
-  // is written and no storage is touched here.
+  // Every write goes through src/ui/a11y/settings.ts.
 
   /** Reads the store, reporting its absence. */
   const requireStore = (call: string): PreferenceStore | null => {
@@ -1732,18 +1592,8 @@ export function createSettingsPanel(
     syncAll();
   };
 
-  /* ------------------------------------------------------------------------
-   * 5g. The keymap
-   * --------------------------------------------------------------------- */
-
   /**
    * Re-reads the table from its owner into the local cache.
-   *
-   * Every read of a binding goes through this, so a table changed anywhere —
-   * this dialog's own rebind, a restore, a change made elsewhere — reaches the
-   * rows from the one place that holds it. THE PANEL NEVER HOLDS A TABLE THE
-   * OWNER REFUSED: adopting first left the rows, the announcements and the
-   * conflict checks resolving against bindings that were not in force.
    *
    * @returns The table now cached.
    */
@@ -1767,10 +1617,6 @@ export function createSettingsPanel(
 
   /**
    * Applies one binding through the table's owner.
-   *
-   * The owner validates the conflict, writes the table its own listener reads,
-   * persists it and announces it once; this dialog reads the outcome and says
-   * what happened. No table is computed here (N2).
    *
    * @param action Action to rebind.
    * @param binding Keys and codes to bind it to.
@@ -1861,9 +1707,6 @@ export function createSettingsPanel(
     }
 
     if (resumeInput === undefined) {
-      // NO RESUME COLLABORATOR AT ALL, which is permanent rather than
-      // transient, so the flag is released as it always was: holding it would
-      // refuse every later attempt on a condition that cannot change.
       inputSuspended = false;
       reportDegraded('resumeInput', 'absent');
 
@@ -1873,10 +1716,8 @@ export function createSettingsPanel(
     try {
       resumeInput();
 
-      // CLEARED ONLY AFTER THE RESUME SUCCEEDED, which is the order
-      // `suspendDispatch` already used. Clearing it first made one throw
-      // permanent: input stayed suspended while the guard above short-circuited
-      // every retry, so the board could not be played again.
+      // Cleared only after the resume succeeded, which is the order
+      // `suspendDispatch` already used.
       inputSuspended = false;
     } catch (error: unknown) {
       reporter.error('input resume threw', error, {
@@ -1942,13 +1783,6 @@ export function createSettingsPanel(
    * The first conflict one captured event carries, or `null` where it carries
    * none.
    *
-   * Each dimension is measured independently, against every context the target
-   * action is active in — and only those, so a key bound to another action in
-   * another context is left reusable, which is what makes `keepPlaying`'s
-   * `'overlay'` binding and `restart`'s `'game'` binding able to share a key.
-   * The key is checked first, so a captured event conflicting in both dimensions
-   * is reported under the one a player pressed.
-   *
    * @param action Action being rebound.
    * @param key `KeyboardEvent.key` captured.
    * @param code `KeyboardEvent.code` captured, empty where the event carried
@@ -1993,17 +1827,7 @@ export function createSettingsPanel(
   const describeStandingBinding = (action: InputAction): string =>
     copy.bindingSummary(describeAction(action), describeBinding(keymap, action));
 
-  /**
-   * Applies a captured key, or refuses it and says which action holds it.
-   *
-   * BOTH DIMENSIONS ARE CHECKED. A rebind persists the logical key AND the
-   * physical code, and `resolveInput` of src/input/keymap.ts matches an event
-   * against either list, so a code already bound to another action shadows that
-   * action just as surely as a key does — and the shadowed action becomes
-   * unreachable, because resolution returns its first match. The key dimension
-   * alone was checked, which left every layout and modifier combination where
-   * the key text differs while the physical position is shared unguarded.
-   */
+  /** Applies a captured key, or refuses it and says which action holds it. */
   const applyCapture = (
     action: InputAction,
     key: string,
@@ -2032,20 +1856,14 @@ export function createSettingsPanel(
       return;
     }
 
-    // BOTH the captured character and the captured physical code reach the
-    // owner, which validates each dimension across every context the action is
-    // active in: a rebind could otherwise seat two actions on one physical key
-    // whenever the layout made their characters differ.
     const result = requestRemap(action, {
       keys: [key],
       codes: code === '' ? [] : [code],
     });
 
     // No owner to apply it, or an owner that raised: the capture is abandoned
-    // and the status names the binding STILL IN FORCE, so a refused rebind
-    // cannot be read as one that happened. Reporting `captureIdle` here said
-    // nothing about which keys the action answers to, which is the one fact a
-    // player who just tried to change them needs.
+    // and the status names the binding still in force, so a refused rebind
+    // cannot be read as one that happened.
     if (result === null) {
       disarmCapture(false);
       writeCaptureStatus(describeStandingBinding(action));
@@ -2058,13 +1876,6 @@ export function createSettingsPanel(
     const ownerConflict = result.conflict;
 
     if (!result.applied) {
-      // WHICH DIMENSION THE OWNER FOUND IT IN, read off the occupant it named:
-      // the owner reports the binding, not the dimension, and the panel's own
-      // pre-flight above already refused every conflict IT could see — so one
-      // reported here is measured against the occupant's two lists rather than
-      // assumed to be the key. A code the occupant holds and a key it does not
-      // is reported as a position collision, which is the message a player can
-      // act on.
       const ownerDimension: RebindDimension =
         ownerConflict !== null &&
         code.length > 0 &&
@@ -2075,8 +1886,8 @@ export function createSettingsPanel(
           ? 'code'
           : 'key';
 
-      // The owner refused it. Its name for the occupant is the one reported, so
-      // the dialog cannot disagree with the table about who holds the key.
+      // The owner refused it. Its name for the occupant is the one reported,
+      // so the dialog cannot disagree with the table about who holds the key.
       const text =
         ownerConflict === null
           ? describeStandingBinding(action)
@@ -2104,10 +1915,10 @@ export function createSettingsPanel(
     syncBindings();
     syncCaptureControls();
 
-    // DESCRIBED FROM THE KEYMAP IN FORCE — the one the owner returned — and not
-    // from the binding that was offered: a refusal returns above, so reaching
-    // here is itself the owner's acceptance, and the counter below therefore
-    // counts only a rebind that actually happened.
+    // Described from the keymap in force — the one the owner returned — and
+    // not from the binding that was offered: a refusal returns above, so
+    // reaching here is itself the owner's acceptance, and the counter below
+    // therefore counts only a rebind that actually happened.
     const text = copy.captureApplied(
       describeAction(action),
       describeBinding(result.keymap, action),
@@ -2118,11 +1929,7 @@ export function createSettingsPanel(
     announce(text);
   };
 
-  /**
-   * Arms a capture for one action.
-   *
-   * A second arming replaces the first rather than stacking a listener.
-   */
+  /** Arms a capture for one action. */
   const armCapture = (action: InputAction): void => {
     if (refuseAfterDestroy('armCapture')) {
       return;
@@ -2165,10 +1972,7 @@ export function createSettingsPanel(
       applyCapture(armed, event.key, event.code);
     };
 
-    // The window's capture phase, which precedes the document's. By the
-    // `FocusManager.trap` contract of src/ui/a11y/focus-manager.ts the trap's
-    // own keydown listener is bound on the document in the capture phase, so
-    // this listener stops the event before it reaches there.
+    // The window's capture phase, which precedes the document's.
     const doc = owner;
     const view = doc.defaultView;
 
@@ -2215,7 +2019,7 @@ export function createSettingsPanel(
     syncCaptureControls();
 
     if (!adopted) {
-      // NOTHING WAS RESTORED, so neither the count nor the announcement is
+      // Nothing was restored, so neither the count nor the announcement is
       // made: both claimed a restoration the owner had refused.
       writeCaptureStatus(copy.captureIdle);
 
@@ -2255,13 +2059,13 @@ export function createSettingsPanel(
       return;
     }
 
-    // ONE trap per container. Where the container's own opener holds the trap —
-    // src/ui/screen-router.ts does, with the trigger to restore focus to and the
-    // background to make inert, neither of which this dialog knows — engaging a
-    // second trap here would stack two owners on one element: the first moves
-    // focus inside, so the second records a restore target that is already
-    // inside the container it is trapping, and both then have to be released in
-    // the right order (N7).
+    // ONE trap per container. Where the container's own opener holds the trap
+    // — src/ui/screen-router.ts does, with the trigger to restore focus to and
+    // the background to make inert, neither of which this dialog knows —
+    // engaging a second trap here would stack two owners on one element: the
+    // first moves focus inside, so the second records a restore target that is
+    // already inside the container it is trapping, and both then have to be
+    // released in the right order.
     if (!ownsTrap) {
       reporter.count(TRAP_METRIC, { owner: 'container' });
 
@@ -2330,10 +2134,7 @@ export function createSettingsPanel(
 
     syncAll();
 
-    // Applied on EVERY open, not once on the first render: `render()` returns
-    // early when the body already stands, so semantics restored here are the
-    // semantics of an open dialog rather than of a dialog that has ever been
-    // opened (N6).
+    // Applied on EVERY open, not once on the first render.
     ensureDialogSemantics();
 
     // Shown before the trap engages: nothing inside a hidden subtree can take
@@ -2471,19 +2272,13 @@ export function createSettingsPanel(
     keymapOwner = null;
   };
 
-  // The host arrives hidden and carrying the role and the modal flag index.html
-  // declares, which is the same stale state a close used to leave behind: a
-  // hidden container answering to `[role="dialog"][aria-modal="true"]` before it
-  // has ever been opened. Both are captured above and restored on open, so
-  // taking them off here makes the state BEFORE the first open identical to the
-  // state after every close (N6).
   if (host !== null && host.hidden) {
     clearDialogSemantics();
   }
 
   // One subscription: an external change — a forced number-only mode, an
   // operating-system motion preference toggled mid-session — reaches the
-  // controls. This dialog holds no second copy of any value.
+  // controls.
   if (preferences !== null) {
     try {
       unsubscribe = preferences.subscribe(

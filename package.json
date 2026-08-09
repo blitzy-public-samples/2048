@@ -29,9 +29,9 @@
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
+    "@types/node": "24.13.3",
     "@types/seedrandom": "3.0.8",
     "@types/three": "0.185.4",
-    "happy-dom": "20.11.1",
     "jsdom": "30.0.1",
     "sass": "1.102.0",
     "seedrandom": "3.0.5",

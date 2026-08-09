@@ -1,20 +1,6 @@
 // The relic registry: the catalogue, pickup order, charge accounting, the
 // manual activation path and the persistence projection.
 //
-// SEVERAL SUITES IN ONE FILE. Each builds its own registry, so no suite
-// observes another's held relics.
-//
-// PROVENANCE
-//   js/keyboard_input_manager.js L18-L32  the vanilla three-name pub/sub bus
-//     whose append-only subscriber registry the pickup-ordered registry
-//     extends.
-//   js/local_storage_manager.js L47-L55   the unguarded `JSON.parse` whose
-//     absent guard `restore()` supplies; the tolerance suites pin that guard.
-//   js/game_manager.js L36-L45, L102-L110 the rehydration branch and the
-//     `serialize()` projection the persisted relic triple corresponds to.
-//   .jshintrc L1-L18                      two-space indentation, 80 columns and
-//     camelCase, carried forward per AAP 0.3.3.
-//
 // The figure these suites underpin is Figure 5, "Hook Dispatch Sequence:
 // Pickup-Order Fan-Out with Charge Guard and Error Isolation", in
 // docs/architecture/hook-dispatch-sequence.md.
@@ -50,13 +36,6 @@ import {
   type Relic,
 } from '../../../src/relics/relic-types';
 
-/**
- * The members `RelicRegistryPort` of src/run/run-controller.ts declares for the
- * relic registry, mirrored here rather than imported: this suite's dependency
- * set is src/relics and src/engine, and the consumer declares every member
- * optional, so requiring all seven here holds `runPort()` to a stricter shape
- * than the consumer's own declaration does.
- */
 interface RunControllerRelicPort {
   readonly snapshotRelics: () => readonly PersistedRelic[];
   readonly restoreRelics: (relics: readonly PersistedRelic[]) => void;
@@ -67,15 +46,15 @@ interface RunControllerRelicPort {
   readonly holdsRelic: (relicId: string) => boolean;
 }
 
-/* ===== Constants the catalogue is measured against ===== */
-
 const EXPECTED_FAMILY_COUNT = 4;
 
 const EXPECTED_RELICS_PER_FAMILY = 4;
 
 const EXPECTED_RELIC_COUNT = EXPECTED_FAMILY_COUNT * EXPECTED_RELICS_PER_FAMILY;
 
-/** The seven members `Relic` declares, and the only members a relic carries. */
+/**
+ * The seven members `Relic` declares, and the only members a relic carries.
+ */
 const DECLARED_MEMBERS: readonly string[] = [
   'id',
   'name',
@@ -85,8 +64,6 @@ const DECLARED_MEMBERS: readonly string[] = [
   'charges',
   'state',
 ];
-
-/* ===== The catalogue ===== */
 
 describe('relic catalogue', () => {
   it('publishes the four declared families, in catalogue order', () => {
@@ -197,8 +174,6 @@ describe('relic catalogue', () => {
   });
 });
 
-/* ===== Pickup ===== */
-
 describe('RelicRegistry pickup', () => {
   it('is constructible with no argument at all', () => {
     const registry = new RelicRegistry();
@@ -303,8 +278,6 @@ describe('RelicRegistry pickup', () => {
   });
 });
 
-/* ===== Bus registration ===== */
-
 describe('RelicRegistry bus registration', () => {
   it('registers a picked-up relic with the bus, in pickup order', () => {
     const bus = createHookBus();
@@ -393,8 +366,6 @@ describe('RelicRegistry bus registration', () => {
     expect(entry?.charges).toBe((charged.charges ?? 0) - 1);
   });
 });
-
-/* ===== Persistence ===== */
 
 describe('RelicRegistry persistence', () => {
   it('serialises the held relics in pickup order', () => {
@@ -531,8 +502,6 @@ describe('RelicRegistry persistence', () => {
   });
 });
 
-/* ===== RunController.RelicRegistryPort (finding CR-1) ===== */
-
 describe('RelicRegistry as the run controller port', () => {
   it('satisfies the four members the port declares', () => {
     const registry = new RelicRegistry({ bus: createHookBus() });
@@ -659,10 +628,6 @@ describe('RelicRegistry as the run controller port', () => {
   });
 });
 
-/* ==========================================================================
- * Harness
- * ========================================================================== */
-
 /** A registry over a real bus, and the bus itself. */
 interface Bench {
   readonly registry: RelicRegistry;
@@ -745,10 +710,6 @@ function unlimitedId(): string {
   return (found as Relic).id;
 }
 
-/* ==========================================================================
- * N1 — a copied state slot never re-parents itself
- * ========================================================================== */
-
 describe('state copying is prototype-safe', () => {
   it('keeps an own __proto__ member off the copy and off the prototype', () => {
     const hostile = JSON.parse('{"__proto__": {"polluted": true}, "keep": 1}');
@@ -764,16 +725,13 @@ describe('state copying is prototype-safe', () => {
     expect(slot).toBeDefined();
     expect(slot['keep']).toBe(1);
 
-    // The member is refused outright rather than carried, and nothing reached
-    // Object.prototype.
     expect(Object.prototype.hasOwnProperty.call(slot, '__proto__')).toBe(
       false,
     );
 
-    // PROTOTYPE-LESS, which is the second half of the same measure: the copy is
-    // built with `Object.create(null)`, so a member named `__proto__` cannot
-    // reach a setter even if the name filter were ever bypassed. The persisted
-    // loader accepts a null-prototype slot, so this still round-trips.
+    // PROTOTYPE-LESS, which is the second half of the same measure: the copy
+    // is built with `Object.create(null)`, so a member named `__proto__`
+    // cannot reach a setter even if the name filter were ever bypassed.
     expect(Object.getPrototypeOf(slot)).toBeNull();
     expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
   });
@@ -809,10 +767,6 @@ describe('state copying is prototype-safe', () => {
     expect(({} as Record<string, unknown>)['bad']).toBeUndefined();
   });
 });
-
-/* ==========================================================================
- * N2 — no accessor and no proxy trap runs on a public path
- * ========================================================================== */
 
 describe('untrusted input is read as data alone', () => {
   it('never invokes an accessor on a persisted entry', () => {
@@ -932,10 +886,6 @@ describe('untrusted input is read as data alone', () => {
   });
 });
 
-/* ==========================================================================
- * M10 — a declaration the registry did not author is adopted, not held
- * ========================================================================== */
-
 describe('injected and ad-hoc declarations are adopted', () => {
   it('does not modify the caller s array or its objects', () => {
     const declaration = adHoc();
@@ -1051,10 +1001,6 @@ describe('injected and ad-hoc declarations are adopted', () => {
   });
 });
 
-/* ==========================================================================
- * M9a — what a reader receives is detached from what the registry holds
- * ========================================================================== */
-
 describe('returned records are detached', () => {
   it('freezes every record active() hands back', () => {
     const { registry } = bench();
@@ -1135,10 +1081,6 @@ describe('returned records are detached', () => {
     expect(registry.find(id)?.charges).toBe(seeded - 2);
   });
 });
-
-/* ==========================================================================
- * M1 — activation is the one path a budget is spent on
- * ========================================================================== */
 
 describe('activate spends a charge budget', () => {
   it('spends one charge by default and reports what remains', () => {
@@ -1269,10 +1211,6 @@ describe('activate spends a charge budget', () => {
     expect(metrics).toContain('relics.activate');
   });
 });
-
-/* ==========================================================================
- * C1a — the surface a run controller binds
- * ========================================================================== */
 
 describe('the surface a run controller binds', () => {
   it('reports whether the catalogue knows an identifier', () => {
@@ -1414,21 +1352,6 @@ describe('the surface a run controller binds', () => {
   });
 });
 
-/* ==========================================================================
- * The state slot and the run port, contract-pinned
- * ==========================================================================
- *
- * A third suite, kept whole beside the two above. It builds its own registries
- * through its own `harness()`, so it observes none of their held relics, and it
- * covers the two boundaries reachable from outside this folder that neither of
- * the others pins: the state slot the registry COPIES, and the port a run
- * controller drives it through.
- */
-
-/* ==========================================================================
- * Harness
- * ========================================================================== */
-
 /** Correlation identifier every registry below is constructed with. */
 const CORRELATION_ID = 'registry-suite';
 
@@ -1474,10 +1397,6 @@ function relicWithState(id: string, state: unknown): Relic {
     state,
   };
 }
-
-/* ==========================================================================
- * 1. The state copy is total against a hostile slot (F-06)
- * ========================================================================== */
 
 describe('the state copy contains every reflection it performs', () => {
   it('accepts a proxy whose ownKeys trap throws, holding no state', () => {
@@ -1602,8 +1521,6 @@ describe('the state copy refuses the reserved member names', () => {
   });
 
   it('leaves Object.prototype unpolluted and the copy prototype-less', () => {
-    // No bus, so the record read back is the registry's own copy rather than
-    // the slot src/engine/hook-bus.ts owns and re-copies.
     const registry = new RelicRegistry({ correlationId: CORRELATION_ID });
     const port = registry.runPort();
     const hostile = JSON.parse('{"__proto__":{"polluted":"yes"}}') as Record<
@@ -1664,12 +1581,7 @@ describe('restore is total against a hostile entry list', () => {
       },
     });
 
-    // NEITHER RAISES NOR RUNS THE TRAP. Every element is read through
-    // `Object.getOwnPropertyDescriptor` rather than by indexing, so a `get`
-    // trap
-    // written to raise is never invoked: the entry loads from its own data
-    // descriptor, and a list that would have thrown out of `restore()` loads
-    // whole instead of losing an element to the trap.
+    // Neither raises nor runs the trap.
     expect(() => port.restoreRelics(hostile)).not.toThrow();
     expect(registry.ownedIds()).toEqual([CHARGED_RELIC_ID, PLAIN_RELIC_ID]);
   });
@@ -1699,10 +1611,6 @@ describe('restore is total against a hostile entry list', () => {
     expect(registry.ownedIds()).toEqual([]);
   });
 });
-
-/* ==========================================================================
- * 2. The run port is the live pickup route (F-02)
- * ========================================================================== */
 
 describe('runPort satisfies the run controller port', () => {
   it('is assignable to the run controller port, every member present', () => {
@@ -1825,15 +1733,6 @@ describe('runPort satisfies the run controller port', () => {
   });
 });
 
-/* ==========================================================================
- * Harness for the pickup-order, hook-binding and tolerance contracts
- * ==========================================================================
- *
- * A fourth suite set, kept whole beside the three above. Every test below
- * builds its own registry through the builders here, so none observes another's
- * held relics or another's pickup order.
- */
-
 /** A relic binding two hooks, carrying a budget and an initial state slot. */
 const TWO_HOOK_ID = 'temporal-anchor';
 
@@ -1868,9 +1767,6 @@ interface Recorded {
 /**
  * Builds a registry over a real bus wrapped so that every registration the
  * registry makes is recorded.
- *
- * The wrapper delegates to the real bus, so what is recorded is exactly what
- * the bus went on to hold; only `register` is intercepted.
  *
  * @returns The registry, the wrapped bus and the recorded registrations.
  */
@@ -1994,10 +1890,6 @@ function chargeBearing(): readonly Relic[] {
   );
 }
 
-/* ==========================================================================
- * A. Pickup order is monotonic and never renumbered
- * ========================================================================== */
-
 describe('pickup order is monotonic and never renumbered', () => {
   it('holds three relics in exactly the order they were picked up', () => {
     const { registry } = recorded();
@@ -2100,7 +1992,7 @@ describe('pickup order is monotonic and never renumbered', () => {
     expect(registry.pickUp('gilded-rot')?.pickupOrder).toBe(0);
 
     // Three refusals: an unknown identifier, a relic already held, and a value
-    // that is no declaration at all. None takes a position.
+    // that is no declaration at all.
     expect(registry.pickUp('no-such-relic')).toBeUndefined();
     expect(registry.pickUp('gilded-rot')).toBeUndefined();
     expect(registry.pickUp({} as unknown as Relic)).toBeUndefined();
@@ -2225,11 +2117,6 @@ describe('pickup order is monotonic and never renumbered', () => {
   });
 });
 
-
-/* ==========================================================================
- * B. One charge pool and one state slot per relic
- * ========================================================================== */
-
 describe('one relic keeps one charge pool and one state slot', () => {
   it('hands the bus ONE registration for every hook it binds', () => {
     const { registry, registrations } = recorded();
@@ -2241,8 +2128,7 @@ describe('one relic keeps one charge pool and one state slot', () => {
 
     // ONE registration, not one per bound hook: the budget and the slot it
     // carries are therefore the only budget and the only slot either binding
-    // can be dispatched with. A per-binding pool would need a second entry
-    // here, and a per-binding slot a second `state`.
+    // can be dispatched with.
     expect(registrations).toHaveLength(1);
 
     const registered = registrations[0] as HookSubscriber;
@@ -2295,8 +2181,7 @@ describe('one relic keeps one charge pool and one state slot', () => {
     expect(spent.consumed).toBe(1);
     expect(spent.remaining).toBe(budget - 1);
 
-    // ONE POOL. A per-binding budget would leave the hook that was not
-    // dispatched at the full count.
+    // ONE POOL.
     expect(subscriptionOf(bus, 'onBeforeMove', TWO_HOOK_ID)?.charges).toBe(
       budget - 1,
     );
@@ -2344,8 +2229,6 @@ describe('one relic keeps one charge pool and one state slot', () => {
     expect(second?.state).toEqual(first?.state);
     expect(heldRelic(registry, TWO_HOOK_ID).state).toEqual(first?.state);
 
-    // Each read is a COPY of the one slot rather than the slot itself, which is
-    // what stops a reader reaching what a dispatch reads.
     expect(second?.state).not.toBe(first?.state);
     expect(first?.state).not.toBe(declared.state);
   });
@@ -2460,15 +2343,6 @@ describe('one relic keeps one charge pool and one state slot', () => {
   });
 });
 
-/* ==========================================================================
- * C. The subscriptions the registry emits for the hook bus
- * ==========================================================================
- *
- * What the registry EMITS, and nothing about how the bus then walks it:
- * pickup-ordered dispatch, the charge guard, error isolation and the
- * compounding protocol are pinned by tests/unit/engine/hook-bus*.test.ts.
- */
-
 describe('the registry emits one subscription per hook a relic binds', () => {
   it('names a hook of HOOK_NAMES on every subscription it produces', () => {
     const { registry, bus } = recorded();
@@ -2540,8 +2414,8 @@ describe('the registry emits one subscription per hook a relic binds', () => {
       MERGE_ONLY_IDS.includes(relic.id),
     ).map((relic): string => relic.id);
 
-    // The pickup order below is the REVERSE of catalogue order, so an assertion
-    // satisfied by catalogue order cannot pass.
+    // The pickup order below is the REVERSE of catalogue order, so an
+    // assertion satisfied by catalogue order cannot pass.
     expect(catalogueOrder).toEqual([...MERGE_ONLY_IDS].reverse());
 
     for (const id of MERGE_ONLY_IDS) {
@@ -2641,16 +2515,6 @@ describe('the registry emits one subscription per hook a relic binds', () => {
     }
   });
 });
-
-/* ==========================================================================
- * D. The persisted triple, and a restore that tolerates everything
- * ==========================================================================
- *
- * `serialize()` corresponds to js/game_manager.js L102-L110 and `restore()` to
- * the `if (previousState)` rehydration at L36-L45. The tolerance the loader
- * carries is the guard js/local_storage_manager.js L52-L55 lacked, where a
- * corrupted value reached `JSON.parse` unguarded and threw during startup.
- */
 
 describe('serialize projects the persisted triple in pickup order', () => {
   it('writes exactly id, charges and state, and no fourth member', () => {
@@ -3041,8 +2905,7 @@ describe('every report leaves the registry through its injected sink', () => {
     const real = createHookBus();
 
     // The mark itself is made by a handler throwing during a dispatch, which
-    // tests/unit/engine/hook-bus.test.ts pins. What is read here is the
-    // registry's own projection of the mark: held relics only, in pickup order.
+    // tests/unit/engine/hook-bus.test.ts pins.
     const bus: HookBus = {
       ...real,
 
@@ -3103,10 +2966,6 @@ describe('every report leaves the registry through its injected sink', () => {
     ]);
   });
 });
-
-/* ==========================================================================
- * E. The shared catalogue is the same after every suite above
- * ========================================================================== */
 
 describe('the catalogue this file shares is unchanged', () => {
   it('still declares sixteen frozen relics over four frozen families', () => {

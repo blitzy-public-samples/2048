@@ -1,24 +1,7 @@
 // Store suite of src/run/run-state-store.ts: the guarded loader, the version
 // migration path, the corruption-tolerance policy and the namespaced-key
 // isolation. AAP Contract 5 (0.6.1.5), AAP 0.4.1.3, requirement R6, and the
-// guarded-loader half of implicit requirement I5. The write-failure path
-// discharges implicit requirement I13.
-//
-// Superseded constructs this suite is the named verification target for, in
-// docs/TRACEABILITY_MATRIX.md order:
-//   LocalStorageManager.prototype.getGameState
-//                                    js/local_storage_manager.js L52-L55, the
-//                                    unguarded JSON.parse at L54
-//   LocalStorageManager.prototype.setGameState        L57-L59
-//   LocalStorageManager.prototype.clearGameState      L61-L63
-//   bestScoreKey / gameStateKey                       L22-L23
-//   localStorageSupported, run once at construction   L25-L26
-//   the catch that discarded its error object         L37
-//   fakeStorage                                       L1-L19
-//   Grid.prototype.fromState, read as state[x][y]     js/grid.js L21-L34
-//   Tile.prototype.serialize                          js/tile.js L19-L27
-//   GameManager.prototype.setup, one snapshot read from the constructor
-//                                    js/game_manager.js L13, L36
+// guarded-loader half of implicit requirement I5.
 //
 // Collected by the unit:dom-free project of vitest.config.ts, environment
 // 'node'. Nothing here reads a document, a Web Storage global, a clock or
@@ -28,18 +11,6 @@
 // Figure this suite is the mechanical proof of: Figure 4 (Turn Data Flow) of
 // docs/architecture/data-flow.md, whose COMMIT to PERSIST edge is labelled
 // "Run state written under namespaced key".
-//
-// The migration path is exercised against an INJECTED version policy naming a
-// genuine prior version, because `RUN_STATE_SCHEMA_VERSION_HISTORY` holds one
-// entry in this build: decided against the module constants alone, the 'older'
-// verdict is unreachable and every assertion over it passes over an empty set.
-//
-// Coverage boundaries this suite stays inside: the reconciliation policy
-// arithmetic is tests/unit/run/board-size-reconciliation.test.ts, end-to-end
-// cursor resume is tests/unit/run/rng-cursor-persistence.test.ts, the schema
-// itself is tests/unit/run/run-state.test.ts, the deep copy is
-// tests/unit/run/run-state-cloning.test.ts, and the frozen best-score
-// accessor contract is tests/unit/storage/best-score.test.ts.
 //
 // Decisions behind this file: docs/DECISION_LOG.md.
 
@@ -99,15 +70,7 @@ import {
 } from '../../../src/storage/storage-keys';
 import { MERGE_PAIR_BOARD, copyBoard } from '../../fixtures/boards';
 
-/* ===== 1. The capturing report sink ===== */
-
-/**
- * One captured report, tagged with the channel it arrived on. The four run
- * channels are `RunReporter`'s in src/run/run-state.ts and the two storage
- * channels are `StorageReporter`'s in src/storage/local-storage-manager.ts. The
- * two interfaces share no member name, so one object satisfies both and one
- * list holds every report either declares.
- */
+/** One captured report, tagged with the channel it arrived on. */
 type CapturedReport =
   | {
       readonly channel: 'onLoadCorrupted';
@@ -130,25 +93,21 @@ type CapturedReport =
 
 type CapturedChannel = CapturedReport['channel'];
 
-/** The report one channel carries, read off the union rather than restated. */
 type ReportOn<C extends CapturedChannel> = Extract<
   CapturedReport,
   { channel: C }
 >['report'];
 
-/**
- * The three channels that carry a failure. `onWrite` is not one of them: it
- * reports every write, the successful ones included. The sink declares no
- * `onProbe` channel, so the writability probe that every
- * `LocalStorageManager` construction runs adds no record to the list.
- */
+/** The three channels that carry a failure. */
 const FAILURE_CHANNELS: readonly CapturedChannel[] = [
   'onLoadCorrupted',
   'onWriteFailed',
   'onFailure',
 ];
 
-/** A sink that satisfies both report contracts, plus the list it appends to. */
+/**
+ * A sink that satisfies both report contracts, plus the list it appends to.
+ */
 interface CapturingSink {
   readonly reporter: RunReporter;
   readonly storageReporter: StorageReporter;
@@ -212,11 +171,7 @@ function failures(records: readonly CapturedReport[]): CapturedReport[] {
   return records.filter((entry) => FAILURE_CHANNELS.includes(entry.channel));
 }
 
-/**
- * Reduces a caught value to text an assertion can measure: `name: message` for
- * an `Error`, the value itself for a string, and the empty string for anything
- * else. Mirrors nothing in the product.
- */
+/** Reduces a caught value to text an assertion can measure. */
 function errorText(value: unknown): string {
   if (value instanceof Error) {
     return `${value.name}: ${value.message}`;
@@ -224,8 +179,6 @@ function errorText(value: unknown): string {
 
   return typeof value === 'string' ? value : '';
 }
-
-/* ===== 2. The recording store, and the injected world ===== */
 
 type StorageOperationName = 'get' | 'set' | 'remove' | 'clear';
 
@@ -243,9 +196,7 @@ interface RecordingStorage {
 
 /**
  * Wraps a store so every `getItem`, `setItem`, `removeItem` and `clear` is
- * logged and then forwarded to `inner`. Every result is `inner`'s own,
- * including the `undefined` it yields for an absent key, ported from
- * js/local_storage_manager.js L8-L10.
+ * logged and then forwarded to `inner`.
  *
  * @param inner Store every call is forwarded to.
  * @returns The wrapper and its running log.
@@ -339,13 +290,8 @@ const CORRELATION_ID = 'run-correlation-0001';
 const trackedStorages: MemoryStorage[] = [];
 
 /**
- * Builds a world in the mandatory order: allocate the store, WRITE THE FIXTURE,
- * then construct `LocalStorageManager` and `RunStateStore`.
- *
- * js/local_storage_manager.js L25-L26 ran the writability probe once in the
- * constructor and fixed the store for the session, and js/game_manager.js L13
- * reached L36's single snapshot read from the constructor as well. Every test
- * in this file seeds before it constructs.
+ * Builds a world in the mandatory order: allocate the store, write the
+ * fixture, then construct `LocalStorageManager` and `RunStateStore`.
  *
  * @param options Fixture, configuration and correlation identifier.
  * @returns The world, with the subject already constructed.
@@ -406,8 +352,6 @@ function createStoreOnPort(port: RunStatePersistencePort): {
   return { store, records: sink.records };
 }
 
-/* ===== 3. Fixtures ===== */
-
 const FIXTURE_RUN_ID = 'run-0001';
 
 const FIXTURE_SEED = 'seed-42';
@@ -435,11 +379,7 @@ const VERSION_VERDICTS: readonly RunStateVersionVerdict[] = [
   'malformed',
 ];
 
-/**
- * The wrapped board snapshot, in js/game_manager.js L102-L110's key order.
- * `copyBoard()` returns a fresh unfrozen copy, sharing no cell with the frozen
- * fixture or with another call.
- */
+/** The wrapped board snapshot, in js/game_manager.js L102-L110's key order. */
 function buildBoard(): SerializedGameState {
   return copyBoard(MERGE_PAIR_BOARD);
 }
@@ -477,11 +417,9 @@ function readRunStateRaw(storage: MemoryStorage): string | null {
   return storage.getItem(RUN_STATE_KEY) ?? null;
 }
 
-/* ===== 4. Teardown hygiene ===== */
-
 /**
- * Best score observed at the start of the current test, read from the store the
- * hygiene section shares. `'unread'` until the first `beforeEach` runs.
+ * Best score observed at the start of the current test, read from the store
+ * the hygiene section shares.
  */
 let bestScoreAtEntry: string | null | undefined = 'unread';
 
@@ -494,12 +432,6 @@ const HYGIENE_STORAGE = new MemoryStorage();
 /**
  * Removes every key the product owns, then the best-score key by name, using
  * the exported constants and no string literal.
- *
- * js/local_storage_manager.js L61-L63 removed the board snapshot and never
- * L22's best score, which is why both are named here. Idempotent:
- * `MemoryStorage.removeItem` of an absent key is a no-op, and the setup file
- * vitest.config.ts names registers an `afterEach` of its own over the real Web
- * Storage global.
  *
  * @param storage Store to clear.
  */
@@ -524,8 +456,6 @@ afterEach(() => {
 
   trackedStorages.length = 0;
 });
-
-/* ===== 5. A namespaced run key beside two frozen unprefixed ones ===== */
 
 describe('the run key is namespaced and the legacy keys are not', () => {
   it('is exactly the namespaced runState key', () => {
@@ -554,8 +484,6 @@ describe('the run key is namespaced and the legacy keys are not', () => {
     expect(OWNED_STORAGE_KEYS).toContain(RUN_STATE_KEY);
   });
 });
-
-/* ===== 6. Run-state operations touch the run key and nothing else ===== */
 
 describe('run-state operations never touch the two legacy keys', () => {
   /**
@@ -654,8 +582,6 @@ describe('run-state operations never touch the two legacy keys', () => {
   });
 });
 
-/* ===== 7. The guarded loader never throws: the five verdicts ===== */
-
 describe("a current envelope loads and reports the 'loaded' outcome", () => {
   function loadCurrent(): { world: World; result: RunStateLoadResult } {
     const world = createWorld({
@@ -707,10 +633,93 @@ describe("a current envelope loads and reports the 'loaded' outcome", () => {
   });
 });
 
+/* ==========================================================================
+ * An unresolved reward round is carried through the load
+ *
+ * The candidate assembly names every member it carries LITERALLY, so a member it
+ * does not name is dropped however valid it is in storage. `pendingReward` was
+ * therefore written by the controller, read back as absent, and the round the
+ * player was choosing from was lost on every reload.
+ * ========================================================================== */
+
+describe('an unresolved reward round in a stored envelope', () => {
+  /** A valid envelope carrying a round of three offered identifiers. */
+  function envelopeWithPendingReward(
+    offeredRelicIds: readonly string[] = ['alpha', 'beta', 'gamma'],
+  ): string {
+    return JSON.stringify({
+      ...loosenEnvelope(),
+      pendingReward: { stageIndex: FIXTURE_STAGE_INDEX, offeredRelicIds },
+    });
+  }
+
+  it('is carried through the load, in presentation order', () => {
+    const world = createWorld({
+      seed: { [RUN_STATE_KEY]: envelopeWithPendingReward(['one', 'two']) },
+      config: createDefaultRulesConfig(),
+    });
+    const result = world.store.load();
+
+    expect(result.outcome).toBe('loaded');
+    expect(result.state?.pendingReward?.stageIndex).toBe(FIXTURE_STAGE_INDEX);
+    expect(result.state?.pendingReward?.offeredRelicIds).toEqual([
+      'one',
+      'two',
+    ]);
+    expect(failures(world.records)).toEqual([]);
+  });
+
+  it('survives a save and load through the store unchanged', () => {
+    const world = createWorld({ config: createDefaultRulesConfig() });
+    const saved: RunState = {
+      ...buildEnvelope(),
+      pendingReward: {
+        stageIndex: FIXTURE_STAGE_INDEX,
+        offeredRelicIds: ['alpha', 'beta', 'gamma'],
+      },
+    };
+
+    expect(world.store.save(saved)).toBe(true);
+    expect(world.store.load().state).toEqual(saved);
+  });
+
+  it('leaves an envelope without one at exactly nine members', () => {
+    const world = createWorld({
+      seed: { [RUN_STATE_KEY]: envelopeJson() },
+      config: createDefaultRulesConfig(),
+    });
+    const result = world.store.load();
+
+    // ADDITIVE: a save written before the member existed loads exactly as it did,
+    // with no `pendingReward` key invented for it.
+    expect(result.state?.pendingReward).toBeUndefined();
+    expect(Object.keys(result.state ?? {})).not.toContain('pendingReward');
+  });
+
+  it('refuses and reports a malformed round rather than half-loading it', () => {
+    const world = createWorld({
+      seed: {
+        [RUN_STATE_KEY]: JSON.stringify({
+          ...loosenEnvelope(),
+          pendingReward: { stageIndex: -1, offeredRelicIds: [] },
+        }),
+      },
+      config: createDefaultRulesConfig(),
+    });
+    const result = world.store.load();
+
+    // Validated like every other member: the payload is refused, the run falls
+    // back to fresh, and the diagnosis reaches the sink rather than being
+    // swallowed.
+    expect(result.state).toBeNull();
+    expect(failures(world.records).length).toBeGreaterThan(0);
+  });
+});
+
 describe('an unversioned envelope migrates to the current version', () => {
   /**
    * A payload written under the run key before the `schemaVersion` member
-   * existed. `classifyRunStateVersion()` reduces it to `'absent'`, which is the
+   * existed. `classifyRunStateVersion` reduces it to `'absent'`, which is the
    * migration path this build reaches from storage: the history holds exactly
    * one version, so no stored integer classifies as `'older'`.
    */
@@ -822,9 +831,9 @@ describe('an unversioned envelope migrates to the current version', () => {
 
 describe('the version history decides which payload migrates', () => {
   /**
-   * Stamps a valid envelope at `version` and reads it back. Every caller drives
-   * it from `RUN_STATE_SCHEMA_VERSION_HISTORY`, so a version added to that list
-   * is covered with no edit here.
+   * Stamps a valid envelope at `version` and reads it back. Every caller
+   * drives it from `RUN_STATE_SCHEMA_VERSION_HISTORY`, so a version added to
+   * that list is covered with no edit here.
    */
   function loadStampedAt(version: number): RunStateLoadResult {
     const payload = loosenEnvelope();
@@ -891,10 +900,6 @@ describe('the version history decides which payload migrates', () => {
         (version) => version !== RUN_STATE_SCHEMA_VERSION
       );
 
-      // Stated as an EQUALITY rather than driven as a loop with a `continue`.
-      // The shipped history holds one entry, so such a loop skips its only
-      // iteration and asserts nothing while reading as coverage of the
-      // migration path. Section 16 drives that path against an injected policy.
       expect(listedOlder).toEqual([]);
 
       for (const version of listedOlder) {
@@ -1057,8 +1062,6 @@ describe('an absent run key is not a failure', () => {
   });
 });
 
-/* ===== 8. Three corruption classes, none of them throwing ===== */
-
 /**
  * A raw string that cannot parse at all. The direct successor of the defect at
  * js/local_storage_manager.js L54, where the stored text reached `JSON.parse`
@@ -1066,20 +1069,10 @@ describe('an absent run key is not a failure', () => {
  */
 const UNPARSABLE_RAW = '{not json';
 
-/**
- * Raw strings that parse to something other than an object. `MemoryStorage`
- * preserves the `String(value)` coercion of js/local_storage_manager.js L4-L6,
- * so any of these can end up stored.
- */
+/** Raw strings that parse to something other than an object. */
 const PRIMITIVE_RAW: readonly string[] = ['42', '"text"', 'true', 'null'];
 
-/**
- * Envelopes that parse to an object and still fail `isRunStateShape`.
- *
- * `rngCursor` is deliberately absent from this set: a cursor member that is not
- * a map passes through `normalizeRngCursor()` and is completed rather than
- * refused, which the section below asserts as its own behaviour.
- */
+/** Envelopes that parse to an object and still fail `isRunStateShape`. */
 function structurallyWrongPayloads(): readonly Record<string, unknown>[] {
   const withoutBoard = loosenEnvelope();
 
@@ -1372,8 +1365,6 @@ describe('an unusable cursor member is completed, not refused', () => {
   });
 });
 
-/* ===== 9. migrateRunState as pure policy, driven with no storage ===== */
-
 /** The identity a wrap of an unversioned board snapshot adopts. */
 const MIGRATION_IDENTITY = {
   runId: FIXTURE_RUN_ID,
@@ -1393,10 +1384,9 @@ describe('migrateRunState resolves one verdict at a time', () => {
   it("returns an envelope for 'older' at a version the history lists", () => {
     const stored = loosenEnvelope();
 
-    // The version here is the CURRENT one, which the shipped history lists: the
-    // claim is that the 'older' verdict admits any listed version, not that the
-    // payload predates this build. Section 16 supplies a genuine prior version
-    // through an injected policy.
+    // The version here is the CURRENT one, which the shipped history lists:
+    // the claim is that the 'older' verdict admits any listed version, not
+    // that the payload predates this build.
     expect(RUN_STATE_SCHEMA_VERSION_HISTORY).toContain(stored.schemaVersion);
 
     const migrated = migrateRunState(stored, 'older');
@@ -1596,8 +1586,6 @@ describe('migrateRunState is pure', () => {
   });
 });
 
-/* ===== 10. save, clear and exists ===== */
-
 describe('save writes the envelope and exists sees it', () => {
   it('returns true and makes the value retrievable', () => {
     const world = createWorld();
@@ -1733,8 +1721,6 @@ describe('clear removes the run key and nothing else', () => {
     expect(world.store.exists()).toBe(false);
   });
 });
-
-/* ===== 11. The write and read failure paths ===== */
 
 /**
  * A store whose `setItem` throws the error an exhausted quota raises.
@@ -1906,14 +1892,12 @@ describe('a read that throws is reported rather than thrown', () => {
   });
 });
 
-/* ===== 12. Failures raised by the port itself ===== */
-
 /** The error every member of the throwing port below raises. */
 const PORT_FAILURE_TEXT = 'the persistence port failed';
 
 /**
- * A port whose every member throws. `RunStatePersistencePort` is structural, so
- * this four-method object needs no mocking library.
+ * A port whose every member throws. `RunStatePersistencePort` is structural,
+ * so this four-method object needs no mocking library.
  */
 const THROWING_PORT: RunStatePersistencePort = {
   readRaw: () => {
@@ -1930,7 +1914,9 @@ const THROWING_PORT: RunStatePersistencePort = {
   },
 };
 
-/** A port that reads a stored value and refuses every write by return value. */
+/**
+ * A port that reads a stored value and refuses every write by return value.
+ */
 const REFUSING_PORT: RunStatePersistencePort = {
   readRaw: () => envelopeJson(),
   readJson: () => JSON.parse(envelopeJson()) as unknown,
@@ -2040,8 +2026,6 @@ describe('a port that refuses by return value is reported', () => {
   });
 });
 
-/* ===== 13. Persistence reaches the injected port and nothing else ===== */
-
 describe('the store persists only through its injected port', () => {
   it('lands every effect in the injected double', () => {
     const world = createWorld();
@@ -2093,13 +2077,10 @@ describe('the store persists only through its injected port', () => {
   });
 });
 
-/* ===== 14. The reconciled discriminant, and no further ===== */
-
 /**
  * Coverage boundary: the reconciliation POLICY — the precedence order, the
- * shrink and grow directions and the `tilesDropped` accounting, is asserted
- * by tests/unit/run/board-size-reconciliation.test.ts. This section asserts
- * only that a load surfaces the discriminant and attaches the record.
+ * shrink and grow directions and the `tilesDropped` accounting, is asserted by
+ * tests/unit/run/board-size-reconciliation.test.ts.
  */
 const RECONCILIATION_MEMBERS: readonly string[] = [
   'savedSize',
@@ -2190,11 +2171,8 @@ describe('a load surfaces the reconciled outcome and its record', () => {
   });
 });
 
-/* ===== 15. The teardown this suite depends on, made observable ===== */
-
 describe('the teardown removes the best score the game never did', () => {
-  // js/local_storage_manager.js L61-L63 removed the snapshot key; L22's best
-  // score was never removed by the application.
+  // js/local_storage_manager.js L61-L63 removed the snapshot key.
   it('accepts a best score written into the shared store', () => {
     HYGIENE_STORAGE.setItem(BEST_SCORE_KEY, BEST_SCORE_SENTINEL);
 
@@ -2238,10 +2216,6 @@ describe('the teardown removes the best score the game never did', () => {
   });
 });
 
-/* ==========================================================================
- * A relic that declared a board size is applied on load (gate V6)
- * ========================================================================== */
-
 describe('a relic slot that declares a board size is applied on load', () => {
   /**
    * An envelope whose board was saved at the configured edge length and whose
@@ -2270,8 +2244,6 @@ describe('a relic slot that declares a board size is applied on load', () => {
     const result = world.store.load({ boardSize: saved.size });
     const grid = result.state?.board.grid;
 
-    // The load is reported as reconciled rather than plainly loaded, because a
-    // board size was applied and tiles outside it were dropped.
     expect(result.outcome).toBe('reconciled');
     expect(grid?.size).toBe(declared);
     expect(grid?.cells).toHaveLength(declared);
@@ -2339,10 +2311,6 @@ describe('a relic slot that declares a board size is applied on load', () => {
   });
 });
 
-/* ===== 16. A GENUINE prior version, end to end ===== */
-
-// This build's current version, read here as the version a stored payload
-// carries so the fixture is a real one rather than a hand-written integer.
 const PRIOR_STORED_VERSION = RUN_STATE_SCHEMA_VERSION;
 
 // The version the injected policy calls current, so `PRIOR_STORED_VERSION`
@@ -2358,8 +2326,8 @@ const TWO_VERSION_POLICY: RunStateVersionPolicy = Object.freeze({
  * Builds a world whose stored payload is at `PRIOR_STORED_VERSION` and whose
  * store reads under `TWO_VERSION_POLICY`.
  *
- * @param stored Payload to write, defaulting to the loosened fixture envelope
- *   stamped at the prior version.
+ * @param stored Payload to write, defaulting to the loosened fixture
+ *   envelope stamped at the prior version.
  * @returns The world, fixture already written.
  */
 function priorVersionWorld(stored?: Record<string, unknown>): World {
@@ -2642,19 +2610,11 @@ describe('migrateRunState reaches its older branch under a policy', () => {
   });
 });
 
-/* ===== 17. A report sink that throws, contained by every operation ===== */
-
 const SINK_FAILURE_TEXT = 'the report sink refused';
 
 /**
  * A `RunReporter` whose every member throws, plus a per-channel count of the
  * calls that reached it.
- *
- * The point of the fixture: `RunStateStore.emit()` is the only containment
- * between an injected sink and the no-throw guarantee of `load()`, `save()`,
- * `clear()` and `exists()`. A sink is third-party code from the store's point
- * of view — src/observability/ supplies the real one — so a throw from it must
- * neither escape nor suppress the operation's documented return value.
  */
 interface ThrowingSink {
   readonly reporter: RunReporter;

@@ -5,39 +5,20 @@
 // without a test opting in. The seeding helpers are exported from the same
 // module, so a suite imports what it needs from here.
 //
-// Provenance of the behaviour this module compensates for, from the deleted
-// vanilla sources:
-//   js/local_storage_manager.js L25-L26  the writability probe runs once, at
-//                                       construction, and fixes the store for
-//                                       the session
-//   js/game_manager.js L36               setup() reads the snapshot once
-//   js/local_storage_manager.js L61-L63  clearGameState() removes the
-//                                       snapshot; no member of the vanilla
-//                                       manager removes the best score
-//   js/local_storage_manager.js L43-L45  getBestScore() yields the stored
-//                                       string when a value is set and the
-//                                       number 0 when none is
-//   js/local_storage_manager.js L57-L59  setGameState() persists
-//                                       JSON.stringify(state)
-//
 // A seeded best score is written and read back as the exact stored string. No
 // member of this module converts it to a number.
 //
 // Only the keys src/storage/storage-keys.ts reports as owned are read, written
-// or removed here, which is the boundary
-// src/storage/local-storage-manager.ts enforces on the product itself. This
-// module holds no state between tests.
+// or removed here, which is the boundary src/storage/local-storage-manager.ts
+// enforces on the product itself. This module holds no state between tests.
 //
-// Decisions behind this file: DL-FIXTURE-03, the teardown removing the best
-// DL-FIXTURE-04, fixtures written to the store before the subject is
+// Decisions: DL-FIXTURE-03, DL-FIXTURE-04 (docs/DECISION_LOG.md).
 
 import { afterEach } from 'vitest';
 
 import { isOwnedStorageKey } from '../../src/storage/storage-keys';
 import type { OwnedStorageKey } from '../../src/storage/storage-keys';
 import type { SerializedGameState } from '../../src/engine/types';
-
-/* ===== 1. Web Storage access ===== */
 
 /**
  * The Web Storage surface this module uses: the four `StorageLike` operations
@@ -125,21 +106,17 @@ function requireWebStorage(): EnumerableStorage {
   return storage;
 }
 
-/* ===== 2. Seed shape ===== */
-
 /**
  * Keys to seed, each mapped to the exact string the product would have
  * persisted under it.
  *
- * Values are the exact strings a store holds. `serializeGameState()` produces
+ * Values are the exact strings a store holds. `serializeGameState` produces
  * the string form of a board snapshot.
  */
 export type StorageSeed = Readonly<Partial<Record<OwnedStorageKey, string>>>;
 
-/* ===== 3. Seeding ===== */
-
 /**
- * The string form `setGameState()` persisted a board snapshot as.
+ * The string form `setGameState` persisted a board snapshot as.
  *
  * @param state Snapshot to serialise, as `tests/fixtures/boards.ts` builds
  *   one.
@@ -201,8 +178,6 @@ export function seedThenConstruct<T>(
   return construct();
 }
 
-/* ===== 4. Reading ===== */
-
 /**
  * Reads a stored value back verbatim.
  *
@@ -217,16 +192,11 @@ export function readOwnedStorage(key: OwnedStorageKey): string | null {
   return getWebStorage()?.getItem(key) ?? null;
 }
 
-/* ===== 5. Teardown ===== */
-
 /**
  * Collects the keys currently held that the product owns.
  *
- * The keys are read before any removal so that removing one cannot shift the
- * index of another.
- *
  * @param storage Store to enumerate.
- * @returns Every held key `isOwnedStorageKey()` accepts, in index order.
+ * @returns Every held key `isOwnedStorageKey` accepts, in index order.
  */
 function collectOwnedKeys(storage: EnumerableStorage): OwnedStorageKey[] {
   const owned: OwnedStorageKey[] = [];
@@ -247,7 +217,7 @@ function collectOwnedKeys(storage: EnumerableStorage): OwnedStorageKey[] {
  *
  * That is the two frozen unprefixed literals `bestScore` and `gameState`, the
  * namespaced run-state key, the writability probe's key, and any further
- * namespaced key: membership is decided by `isOwnedStorageKey()`, and this
+ * namespaced key: membership is decided by `isOwnedStorageKey`, and this
  * module keeps no list of its own. No other key of the origin is touched.
  *
  * Total in every environment: it returns without doing anything when there is
@@ -284,7 +254,5 @@ export function clearOwnedStorage(): void {
   }
 }
 
-// Registered once, when this module is evaluated as a setup file. The vanilla
-// manager removed the snapshot but never the best score, so a best score
-// written by one test would otherwise be read by every test that follows it.
+// Registered once, when this module is evaluated as a setup file.
 afterEach(clearOwnedStorage);

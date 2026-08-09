@@ -1,47 +1,6 @@
 // The transactional board-effect channel: the commands a hook handler records
 // against the board and the rules, and the applier that writes them.
 //
-// WHAT THIS MODULE IS FOR
-//   src/engine/hooks.ts hands a handler `ReadonlyGridView` and
-//   `ReadonlyRulesView`, so nothing reachable from a handler can write the
-//   lattice or the rules. The relic effects AAP requirement R3 names — an extra
-//   spawned tile, an undo, a shuffle, an excision, a row clear, a board shrink,
-//   a substituted merge predicate and a substituted spawn distribution — are
-//   all writes. This module is the write channel: a handler RECORDS commands
-//   and the bus APPLIES them, so the capability arrives without a handler ever
-//   holding the live `Grid`, a live `Tile` or the live `RulesConfig`.
-//
-// THE TRANSACTION
-//   src/engine/hook-bus.ts opens one queue per handler, alongside the handler's
-//   randomness fork, and resolves the two together: `applyBoardEffects` runs
-//   only once the handler has returned and its return has validated, and the
-//   queue is dropped unapplied when the handler throws or its return is
-//   refused. A handler that records and then throws therefore leaves the board
-//   and the rules exactly as it found them.
-//
-// THE PROJECTION
-//   A command is validated as it is recorded, against this queue's own
-//   projected board rather than the live one: the live board has not changed
-//   yet, so a handler planning several steps — a shuffle placing every tile, a
-//   shrink re-homing several exiles — would otherwise be told a cell it has
-//   already claimed is still free. The projection is built from
-//   `ReadonlyGridView.serialize()` on first use and advanced by each accepted
-//   command, and its query members are what a multi-step handler reads.
-//
-// COMMAND ORDER IS THE RECORD ORDER
-//   `applyBoardEffects` replays commands in the order they were recorded and
-//   never reorders or coalesces them, so the board the applier produces is the
-//   board the projection described.
-//
-// THE RELOCATION ORDER
-//   Every lattice write goes through `Grid.insertTile` / `Grid.removeTile` plus
-//   `Tile.updatePosition`, which index by the flattened `tile.x` / `tile.y` of
-//   js/grid.js L88-L94, and follows the order js/game_manager.js L123-L127
-//   moved a tile in: remove at the pre-update coordinates, then update the
-//   position, then insert. `cells[x][y]` is written directly only by the
-//   lattice rebuild a resize performs, and every slot it leaves holds a `Tile`
-//   or `null`.
-//
 // This module reads no DOM, performs no I/O, consumes no randomness, reads no
 // clock, holds no mutable module state and reports nothing: a refused command
 // is reported to its caller as `false`, and the bus counts what was applied.
@@ -54,9 +13,25 @@
 //   js/grid.js         L7-L19     Grid.empty()        -> the resize rebuild
 //   js/grid.js         L89-L91    insertTile()        -> every insertion
 //   js/grid.js         L93-L95    removeTile()        -> every removal
-// Target rows TR-EFFECTS-01 through TR-EFFECTS-07 of
-// docs/TRACEABILITY_MATRIX.md, one per command. Decisions behind this file are
-// recorded in docs/DECISION_LOG.md.
+// Traceability rows in docs/TRACEABILITY_MATRIX.md, one per command:
+//   TR-EFFECTS-01  js/grid.js L89-L91            `insertTile()`, reached by
+//                                                the `insertTile` command
+//   TR-EFFECTS-02  js/grid.js L93-L95            `removeTile()`, reached by
+//                                                the `removeTile` command
+//   TR-EFFECTS-03  js/game_manager.js L123-L127  `moveTile()`, whose
+//                                                remove-update-insert order
+//                                                the `moveTile` command keeps
+//   TR-EFFECTS-04  js/game_manager.js L36-L45    the `setup()` rehydration,
+//                                                reached by `restoreBoard`
+//   TR-EFFECTS-05  js/grid.js L7-L19             `Grid.empty()`, the lattice
+//                                                rebuild a `resizeBoard`
+//                                                performs
+//   TR-EFFECTS-06  target-only row               `setMergePredicate`, the
+//                                                substituted merge rule
+//   TR-EFFECTS-07  target-only row               `setSpawnWeights`, the
+//                                                substituted spawn
+//                                                distribution
+// Decisions behind this file are recorded in docs/DECISION_LOG.md.
 
 import { Tile } from './tile';
 import type {
@@ -71,16 +46,7 @@ import type {
   RulesConfig,
 } from '../config/rules-config';
 
-/* --------------------------------------------------------------------------
- * Bounds
- * ----------------------------------------------------------------------- */
-
-/**
- * Commands one handler may record. A handler reaching this ceiling has its
- * further commands refused rather than growing the queue without bound; the
- * largest legitimate effect is a shuffle of a full board, which records one
- * command per cell.
- */
+/** Commands one handler may record. */
 const MAX_QUEUED_EFFECTS = 512;
 
 /** Smallest edge length a resize may leave. */
@@ -88,14 +54,9 @@ const MIN_EFFECT_BOARD_SIZE = 2;
 
 /**
  * Largest edge length a resize may leave, matching `MAX_BOARD_SIZE` of
- * src/config/default-config.ts. Declared here rather than imported so this
- * module names no configuration module beyond its type import.
+ * src/config/default-config.ts.
  */
 const MAX_EFFECT_BOARD_SIZE = 16;
-
-/* --------------------------------------------------------------------------
- * The recorded commands
- * ----------------------------------------------------------------------- */
 
 /** Every command name, in declaration order. */
 export const BOARD_EFFECT_NAMES = Object.freeze([
@@ -142,10 +103,8 @@ interface RestoreBoardEffect {
   readonly kind: 'restoreBoard';
   readonly snapshot: SerializedGrid;
 
-  // TR-EFFECT-01: the score a restore reinstates alongside the lattice, which
-  // an undo needs so the points a withdrawn move scored are withdrawn with it.
-  // Written by src/engine/engine.ts, not here: the score is the engine's, and
-  // this module writes only the board and the rules.
+  // the score a restore reinstates alongside the lattice, which an undo needs
+  // so the points a withdrawn move scored are withdrawn with it.
   readonly score?: number;
 }
 
@@ -177,16 +136,7 @@ export type BoardEffect =
   | SetMergePredicateEffect
   | SetSpawnWeightsEffect;
 
-/**
- * A command in DESCRIPTOR form, which `BoardEffectQueue.request()` accepts.
- *
- * TR-EFFECT-02. The named command members are the primary surface; this is the
- * data form of the same commands, for a caller holding a command it did not
- * build inline — a persisted effect, a relic table entry, or a test fixture.
- * Both spellings of a resize's edge length are read (`size` and `boardSize`)
- * and both spellings of a restore's lattice (`snapshot` and `board`), so a
- * descriptor written against either name resolves to the same command.
- */
+/** A command in DESCRIPTOR form, which `BoardEffectQueue.request` accepts. */
 export type BoardEffectRequest =
   | {
       readonly kind: 'insertTile';
@@ -214,19 +164,9 @@ export type BoardEffectRequest =
   | { readonly kind: 'setMergePredicate'; readonly predicate: MergePredicate }
   | { readonly kind: 'setSpawnWeights'; readonly weights: readonly number[] };
 
-/* --------------------------------------------------------------------------
- * The queue a handler records through
- * ----------------------------------------------------------------------- */
-
 /**
  * The board and rules a handler writes, as commands recorded now and applied
  * later.
- *
- * Every member returns `true` only when the command was accepted, and a
- * refused command changes nothing and is not recorded. Nothing here throws:
- * a coordinate outside the board, a cell already occupied, an empty cell to
- * move from, a size outside the supported range, a predicate that is not
- * callable and a weight list that cannot be drawn from are each refused.
  *
  * The five query members read this queue's PROJECTED board — the live board
  * with every accepted command already applied to it — which is the board the
@@ -240,20 +180,12 @@ export interface BoardEffectQueue {
   readonly length: number;
 
   /**
-   * Commands refused since the queue was opened, and never reset by `clear()`.
-   *
-   * TR-EFFECT-03. A refusal is not an error and nothing throws on one, so this
-   * is how a caller — and the dispatch that counts `engine.effect.refused` —
-   * learns that a command the handler believed it recorded changed nothing.
+   * Commands refused since the queue was opened, and never reset by `clear`.
    */
   readonly refused: number;
 
   /**
    * Records an insertion of a fresh tile.
-   *
-   * The tile records no previous position, so a view draws it appearing
-   * rather than moving, which is the appearance js/tile.js L6-L7 gave a
-   * spawned tile.
    *
    * @param cell Empty in-bounds cell to insert into.
    * @param value Face value the tile carries. Must be a positive integer.
@@ -274,8 +206,8 @@ export interface BoardEffectQueue {
    *
    * @param from Occupied in-bounds cell the tile stands in.
    * @param to Empty in-bounds cell it relocates to.
-   * @param tween Whether the tile records where it came from, so a view moves
-   *   it rather than popping it. Defaults to `true`.
+   * @param tween Whether the tile records where it came from, so a view
+   *   moves it rather than popping it. Defaults to `true`.
    * @returns Whether the command was recorded.
    */
   moveTile(from: Position, to: Position, tween?: boolean): boolean;
@@ -283,12 +215,7 @@ export interface BoardEffectQueue {
   /**
    * Records a whole-board restore from a snapshot.
    *
-   * Every tile the snapshot carries at a cell inside the PROJECTED board is
-   * restored; a tile beyond it is dropped rather than inserted off-lattice.
-   * The snapshot's own `size` does not resize the board — `resizeBoard` is the
-   * one command that does.
-   *
-   * @param snapshot The board to restore, in `Grid.serialize()`'s shape.
+   * @param snapshot The board to restore, in `Grid.serialize`'s shape.
    * @returns Whether the command was recorded.
    */
   restoreBoard(snapshot: SerializedGrid, score?: number): boolean;
@@ -329,11 +256,6 @@ export interface BoardEffectQueue {
   /**
    * Records one command given in DESCRIPTOR form.
    *
-   * TR-EFFECT-02. Resolves the descriptor to the matching named member, so a
-   * descriptor is validated, projected and recorded by exactly the same code
-   * the named member runs — the two forms cannot diverge. An unknown `kind` is
-   * refused.
-   *
    * @param effect Command to record.
    * @returns `true` when the command was accepted.
    */
@@ -342,7 +264,8 @@ export interface BoardEffectQueue {
   /**
    * Reads the commands recorded and not yet discarded, in record order.
    *
-   * @returns A frozen snapshot; recording after this call does not change it.
+   * @returns A frozen snapshot; recording after this call does not change
+   *   it.
    */
   requested(): readonly BoardEffect[];
 
@@ -406,9 +329,9 @@ export interface BoardEffectOptions {
    * Whether the two WHOLE-LATTICE commands may be recorded — restore and
    * resize. `false` refuses both.
    *
-   * Defaults to `true`. src/engine/hook-bus.ts passes `false` for `onMerge` and
-   * for `onSpawn`: each rebuilds every cell of the board, and both of those
-   * hooks dispatch while the engine is holding a position it has already
+   * Defaults to `true`. src/engine/hook-bus.ts passes `false` for `onMerge`
+   * and for `onSpawn`: each rebuilds every cell of the board, and both of
+   * those hooks dispatch while the engine is holding a position it has already
    * resolved against the board as it stands.
    */
   readonly rebuild?: boolean;
@@ -426,7 +349,9 @@ export interface BoardEffectSource {
   serialize(): SerializedGrid;
 }
 
-/** What `openBoardEffects` returns to the bus: the queue and its resolution. */
+/**
+ * What `openBoardEffects` returns to the bus: the queue and its resolution.
+ */
 export interface BoardEffectTransaction {
   /** The queue handed to the handler on its context. */
   readonly queue: BoardEffectQueue;
@@ -440,18 +365,12 @@ export interface BoardEffectTransaction {
   commit(): number;
 
   /**
-   * Drops every recorded command unapplied. Nothing reached the board or the
-   * rules, so the board a later handler reads is the board it would have read
-   * had this handler never run.
+   * Drops every recorded command unapplied.
    *
    * @returns How many commands were dropped.
    */
   rollback(): number;
 }
-
-/* --------------------------------------------------------------------------
- * Validation helpers
- * ----------------------------------------------------------------------- */
 
 /**
  * Reports whether `value` is a non-negative safe integer.
@@ -525,10 +444,6 @@ function keyOf(x: number, y: number): string {
   return `${String(x)},${String(y)}`;
 }
 
-/* --------------------------------------------------------------------------
- * The projection
- * ----------------------------------------------------------------------- */
-
 /**
  * The board a queue validates against: the live board as it stood when the
  * queue was opened, advanced by every command the queue has accepted.
@@ -587,15 +502,8 @@ function trimProjection(projection: Projection, size: number): void {
   }
 }
 
-/* --------------------------------------------------------------------------
- * The applier
- * ----------------------------------------------------------------------- */
-
 /**
  * Collects the live board's occupants, x-outer and y-inner.
- *
- * Collected into a plain array BEFORE any mutation, which is what keeps a
- * relocation from being made during the traversal that finds it.
  *
  * @param grid Live board.
  * @returns The occupants in traversal order.
@@ -671,10 +579,6 @@ function applyMove(grid: Grid, effect: MoveTileEffect): void {
 /**
  * Writes one whole-board restore.
  *
- * Every occupant is removed first, so the lattice is empty before a single
- * snapshot tile is inserted, and each restored tile records no previous
- * position, so a view draws the restored board appearing.
- *
  * @param grid Live board.
  * @param effect Command to apply.
  */
@@ -711,10 +615,6 @@ function applyRestore(grid: Grid, effect: RestoreBoardEffect): void {
  * fields are set, and every tile inside the new bound is re-inserted at the
  * cell it already occupied.
  *
- * A tile beyond the new bound is dropped. It is dropped rather than moved
- * because a caller re-homing survivors records its relocations before this
- * command, so anything still outside the bound here has already been resolved.
- *
  * @param grid Live board.
  * @param config Live rules, whose `boardSize` is written.
  * @param effect Command to apply.
@@ -731,8 +631,7 @@ function applyResize(
 
   // The one structural write in this module: the container itself is replaced
   // so every row and column beyond the new bound is gone and `eachCell`,
-  // `availableCells` and `serialize` all agree on the same lattice. Every slot
-  // it leaves holds `null` until a survivor is inserted over it.
+  // `availableCells` and `serialize` all agree on the same lattice.
   const cells: CellMatrix<Tile> = [];
 
   for (let x = 0; x < size; x += 1) {
@@ -796,21 +695,17 @@ export function applyBoardEffects(
   return effects.length;
 }
 
-/* --------------------------------------------------------------------------
- * Opening a transaction
- * ----------------------------------------------------------------------- */
-
 /**
  * Opens one handler's board-effect transaction over the live board and rules.
  *
- * The queue is lazy: the projection is built from `source.serialize()` on the
+ * The queue is lazy: the projection is built from `source.serialize` on the
  * first command or query and not at all for a handler that records neither, so
  * a dispatch over handlers that touch nothing costs no board projection.
  *
  * @param source The board commands are validated against, which is the query
  *   facade the handler also reads.
- * @param grid The live board `commit()` writes.
- * @param config The live rules `commit()` writes.
+ * @param grid The live board `commit` writes.
+ * @param config The live rules `commit` writes.
  * @returns The transaction.
  */
 export function openBoardEffects(
@@ -819,23 +714,7 @@ export function openBoardEffects(
   config: RulesConfig,
   options: BoardEffectOptions = {},
 ): BoardEffectTransaction {
-  // THE DISPATCH-POINT RESTRICTIONS, in two bands.
-  //
-  // CELL-LOCAL — insert, remove, move. Refused on `onMerge` alone, which is
-  // dispatched from inside the move walk of src/engine/move-resolver.ts while it
-  // holds tile references and traversal state; a cell written there would
-  // invalidate the walk and can corrupt a position. Accepted on `onSpawn`,
-  // because inserting one more tile beside the drawn one is exactly what a
-  // spawn-family relic is for.
-  //
-  // WHOLE-LATTICE — restore, resize. Refused on `onMerge` and on `onSpawn`:
-  // both rebuild every cell, and both of those hooks dispatch while the engine
-  // holds a position it resolved against the board as it stands, so a rebuild
-  // underneath it would strand that position.
-  //
-  // The two RULES commands are accepted on every hook — they change a
-  // comparison rather than a cell, which is what `frostbind` re-records its
-  // frozen-cell predicate through.
+  // The dispatch-point restrictions, in two bands.
   const latticeWritable = options.lattice !== false;
   const rebuildWritable = options.rebuild !== false;
   const recorded: BoardEffect[] = [];
@@ -866,9 +745,7 @@ export function openBoardEffects(
     return true;
   };
 
-  // The commands as written, WITHOUT the refusal tally. The exposed queue below
-  // wraps each of these so one place counts a refusal and `request()` reaches
-  // exactly the code the named member runs.
+  // The commands as written, WITHOUT the refusal tally.
   const commands = {
     get size(): number {
       return project().size;
@@ -943,9 +820,6 @@ export function openBoardEffects(
         return false;
       }
 
-      // Relocating a tile onto the cell it already stands in is accepted as a
-      // no-op rather than refused, so a caller walking a list of destinations
-      // need not special-case the cell it started from.
       if (fromKey === toKey) {
         return true;
       }

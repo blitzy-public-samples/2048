@@ -11,45 +11,18 @@
  * tables. Nothing here is ported: js/ plays no sound, so every row below is
  * target-only.
  *
- * One traceability row of docs/TRACEABILITY_MATRIX.md apiece:
- *   TR-AUDIO-05  the descriptor table and its per-event entries
- *   TR-AUDIO-06  the pure resolvers that select a descriptor
- *   TR-AUDIO-07  the audio bounds `MIN_VOLUME`, `MAX_VOLUME`,
- *                `DEFAULT_VOLUME` and `DEFAULT_MUTED`
- *
- * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
- * only so the construct can be found from the log:
- *   DL-AUDIO-01  the descriptor timings spanning the tile animations, with the
- *                merge pitch ramp following the exponent shape of the tile
- *                colour ramp
+ * Decisions: DL-AUDIO-01 (docs/DECISION_LOG.md).
  */
-
-/* ==========================================================================
- * 0. Audio bounds
- * ========================================================================== */
 
 // Re-exported, not redeclared: src/config/audio-bounds.ts holds the one
 // declaration of these four values, and both this layer and the accessibility
-// surface read it from there. This module keeps publishing them under the same
-// names, so every caller is unaffected.
-//
-// WHY NOT HERE. The accessibility surface needs the same four values to validate
-// a preference, and it is the leaf of the src/ui/ import graph: declaring them
-// in the audio domain made that leaf depend on src/audio/, which its own
-// contract forbids. Declaring them twice is what came before, and the two
-// declarations disagreed on the starting volume — so the volume a player heard
-// depended on which owner had last written the master gain. src/config/ is
-// neutral to both and imports neither.
+// surface read it from there.
 export {
   DEFAULT_MUTED,
   DEFAULT_VOLUME,
   MAX_VOLUME,
   MIN_VOLUME,
 } from '../config/audio-bounds';
-
-/* ==========================================================================
- * 1. Descriptor vocabulary
- * ========================================================================== */
 
 /** Wave shape a voice is built from. */
 export type SoundWaveform = 'sine' | 'triangle' | 'square' | 'sawtooth';
@@ -238,19 +211,7 @@ export function effectForMerge(resultValue: number): SoundEffect {
   });
 }
 
-/* ==========================================================================
- * 4. Event resolution
- * ========================================================================== */
-
-/**
- * The engine event names this module resolves.
- *
- * Exactly the seven names `EngineEventPayloadMap` of
- * src/engine/engine-events.ts
- * declares, and no others: a name absent from that contract is emitted by
- * nothing, so a mapping for it can never resolve. Declared locally rather
- * than imported, so this module names no engine module.
- */
+/** The engine event names this module resolves. */
 type AudioEventName =
   | 'stage:start'
   | 'move:before'

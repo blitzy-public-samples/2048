@@ -1,30 +1,5 @@
 // Contract suite for the render layer's value domain, theme lifecycle and
 // resource bounds, AAP R4 and R7.
-//
-// Four properties are pinned here because none of them is visible to the type
-// checker and each is a runtime failure rather than a compile error:
-//
-//   value domain     `RulesConfig.merge.produce` admits any positive integer,
-//                    so a configured or relic-created tile can carry a value
-//                    the colour ramp is not defined over. Every such tile has
-//                    to have a material and a numeral.
-//   theme lifecycle  a mesh holds the material instance it was handed. A theme
-//                    change therefore has to re-dress that instance rather than
-//                    dispose it, and every live mesh has to be rebound.
-//   destruction      `destroy()` is terminal and `dispose()` is reusable, so
-//                    nothing can be allocated after the release that released
-//                    it.
-//   bounds           every buffer is sized from the option parameters, so each
-//                    parameter carries an explicit ceiling.
-//
-// A fifth property, the continuity of the cell-to-world coordinate function, is
-// pinned because a move tween crosses integer cell boundaries on every move and
-// a discontinuity there is a visible jump.
-//
-// The numeral textures need a 2D canvas context, which jsdom does not
-// implement; the factory reports that and renders blocks without numerals, so
-// the assertions below read the material and mesh bindings rather than the
-// drawn glyphs.
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -55,8 +30,6 @@ const FIRST_SUPER_VALUE = rampValue(tileRampConstants.limit + 1);
 afterEach(() => {
   applyTheme('default');
 });
-
-/* ===== 1. Every legal tile value is dressed (AAP R4) ===== */
 
 describe('the material cache dresses a value the ramp does not carry', () => {
   it('resolves a material for a value that is not a power of two', () => {
@@ -114,7 +87,7 @@ describe('the material cache dresses a value the ramp does not carry', () => {
   });
 });
 
-/* ===== 2. A theme change re-dresses rather than disposes (AAP R7) ===== */
+/* ===== 2. */
 
 describe('adopting a theme keeps the live material instances', () => {
   it('re-dresses the cached material in place', () => {
@@ -187,8 +160,6 @@ describe('adopting a theme keeps the live material instances', () => {
   });
 });
 
-/* ===== 3. destroy() is terminal, dispose() is reusable ===== */
-
 describe('the material cache separates dispose from destroy', () => {
   it('refuses every allocating member after destroy', () => {
     const cache = createTileMaterialCache();
@@ -229,8 +200,6 @@ describe('the material cache separates dispose from destroy', () => {
   });
 });
 
-/* ===== 4. The particle burst reads the palette in force (AAP R7) ===== */
-
 describe('a burst tint follows the active palette', () => {
   it('takes the halo colour of the palette in force', () => {
     const light = readBurstTint(2048, 1);
@@ -255,8 +224,6 @@ describe('a burst tint follows the active palette', () => {
     );
   });
 });
-
-/* ===== 5. Every allocation parameter carries a ceiling ===== */
 
 describe('the particle system confines its allocation parameters', () => {
   it('confines an absurd per-burst count and burst count', () => {
@@ -307,8 +274,6 @@ describe('the particle system confines its allocation parameters', () => {
   });
 });
 
-/* ===== 6. One continuous cell-to-world coordinate function ===== */
-
 describe('cellToWorld is continuous across every cell boundary', () => {
   /**
    * The world x of one cell coordinate at the default board size.
@@ -347,7 +312,8 @@ describe('cellToWorld is continuous across every cell boundary', () => {
 
   it('lands each integer on the floored Sass step', () => {
     // The step style/main.scss compiles in its tile-position loop, as
-    // math.floor(($tile-size + $grid-spacing) * (n - 1)): floor((106.25 + 15) * n).
+    // math.floor(($tile-size + $grid-spacing) * (n - 1)): floor((106.25 + 15)
+    // * n).
     const step = (index: number): number => Math.floor(121.25 * index);
 
     for (const cell of [1, 2, 3]) {
@@ -359,9 +325,7 @@ describe('cellToWorld is continuous across every cell boundary', () => {
 describe('the mesh factory measures a board size against the product ceiling', () => {
   it('refuses a geometry beyond MAX_BOARD_SIZE', () => {
     // Persistence, the number-only renderer and the parallel accessibility
-    // board all refuse a size above the ceiling. This module accepted any
-    // positive integer, so a size the rest of the product refuses reached
-    // geometry construction and a `size` by `size` plate allocation here.
+    // board all refuse a size above the ceiling.
     expect(() => resolveBoardGeometry(MAX_BOARD_SIZE + 1)).toThrow(RangeError);
     expect(() => resolveBoardGeometry(2 ** 20)).toThrow(RangeError);
     expect(() => resolveBoardGeometry(MAX_BOARD_SIZE)).not.toThrow();

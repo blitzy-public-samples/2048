@@ -1,61 +1,10 @@
 // The input manager: the publish/subscribe surface the engine subscribes to,
 // and the keyboard and gesture paths that publish into it.
 //
-// Ported from js/keyboard_input_manager.js, which is deleted: the event
-// registry, the constructor-time `listen()` call, `on()` appending to the array
-// for its event name, `emit()` walking that array in registration order, the
-// single document `keydown` listener, the modifier guard, the recognised-key
-// test, `preventDefault()` immediately before the move is published, the
-// separate `R` test routed through `restart`, the swipe path, `restart()` and
-// `keepPlaying()`.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-INPUT-01  L1-L2      the event registry, held below as `listeners`
-//   TR-INPUT-02  L15        the constructor-time `listen()` call
-//   TR-INPUT-03  L18-L23    `on()`, appending to the array for its event name
-//   TR-INPUT-04  L25-L32    `emit()`, walking that array in registration order
-//   TR-INPUT-05  L34, L53   the single `keydown` listener, on the document
-//   TR-INPUT-06  L54-L55    the modifier guard
-//   TR-INPUT-07  L56        the recognised-key test
-//   TR-INPUT-08  L60-L61    `preventDefault()` before the move is published
-//   TR-INPUT-09  L66-L67    the separate `R` test, routed through `restart`
-//   TR-INPUT-10  L76-L127   the swipe path, by way of src/input/touch-input.ts
-//   TR-INPUT-11  L130-L133  `restart()`
-//   TR-INPUT-12  L135-L138  `keepPlaying()`
-//   TR-INPUT-13  target-only row  `resolveDocumentContext` and the per-context
-//                                 binding resolution
-//   TR-INPUT-14  target-only row  `classifyKeyModality` and the report that
-//                                 carries no key or code
-//
-// Moved out of this module: the numeric-code table and the numeric `82` test
-// are bindings in src/input/keymap.ts, matched against `event.key` and
-// `event.code`; the three gesture handlers are src/input/touch-input.ts; and
-// the control bindings are src/input/on-screen-controls.ts, which invokes the
-// `restart`, `keepPlaying` and `emitMove` members declared below.
-//
 // This module reads no clock, consumes no randomness and touches no storage.
 //
-// No report this module raises carries a character a keypress produced.
-// `event.key` and `event.code` are read for binding resolution and for the
-// binding lookup only; what reaches the injected reporter for a keydown that
-// resolved to no action is the context, the key modality
-// `classifyKeyModality` derives, whether a modifier was held and whether any
-// binding claims the key — never the key or the code itself.
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-INPUT-01  bindings resolved against `event.key` and `event.code`, where
-//                js/keyboard_input_manager.js L37-L50 read the deprecated
-//                `event.which`
-//   DL-INPUT-02  the keymap, the gesture path and the control bindings living
-//                in three sibling modules
-//   DL-INPUT-03  the appended listener list retained as the publish surface,
-//                walked in registration order
-//   DL-INPUT-04  no report carrying a character a keypress produced
-//   DL-INPUT-05  a rebind validated against the MERGED binding — every
-//                requested key and physical code, in the contexts that will
-//                be in force once the override is applied
+// Decisions: DL-INPUT-01, DL-INPUT-02, DL-INPUT-03, DL-INPUT-04, DL-INPUT-05
+// (docs/DECISION_LOG.md).
 
 import type {
   Direction,
@@ -121,7 +70,6 @@ const KEYMAP_METRIC = 'input.keymap.replaced';
 /** Counter raised once per binding this manager applied. */
 const KEYMAP_REMAP_METRIC = 'input.keymap.remap';
 
-/** Counter raised once per binding refused because a key was occupied. */
 const KEYMAP_CONFLICT_METRIC = 'input.keymap.remap.conflict';
 
 /** Counter raised once per keymap this manager persisted, or failed to. */
@@ -168,14 +116,6 @@ export interface InputEmitter {
 export type KeymapChangeReason = 'remap' | 'replace';
 
 /**
- * The outcome of one `remap` call.
- *
- * Total rather than a discriminated union, so a caller reads `applied` and then
- * either `keymap` or `conflict` without narrowing: `keymap` is always the table
- * in force AFTERWARDS, which on a refusal is the table that was already in
- * force.
- */
-/**
  * The two dimensions a binding occupies, and a remap is validated in.
  *
  * `'key'` is `KeyboardEvent.key`, the character the key produces, compared
@@ -190,6 +130,7 @@ interface RemapConflict {
   readonly dimension: RemapDimension;
 }
 
+/** The outcome of one `remap` call. */
 export interface RemapResult {
   /** Whether the binding was applied. */
   readonly applied: boolean;
@@ -198,20 +139,12 @@ export interface RemapResult {
   readonly keymap: Keymap;
 
   /**
-   * The binding already holding one of the requested keys or codes in a context
-   * the remapped action is active in, or `null` where none did.
+   * The binding already holding one of the requested keys or codes in a
+   * context the remapped action is active in, or `null` where none did.
    */
   readonly conflict: InputBinding | null;
 
-  /**
-   * WHICH dimension collided: the logical `key` or the physical `code`.
-   *
-   * Present exactly when `conflict` is, so a caller can name the collision the
-   * way a player experiences it. A code collision is invisible in the `key`
-   * dimension — on an alternate layout the character a key produces differs
-   * while `KeyboardEvent.code` is identical — so the two are not
-   * interchangeable in a message.
-   */
+  /** WHICH dimension collided: the logical `key` or the physical `code`. */
   readonly conflictDimension?: RemapDimension;
 }
 
@@ -224,13 +157,6 @@ export interface InputManagerOptions {
    * Called ONCE per accepted change to the binding table, with the table in
    * force afterwards and why it changed.
    *
-   * This is the single notification of a rebind. Before it existed, a caller
-   * computed a new table itself, wrote it in with `setKeymap` and then told the
-   * control layer separately, so the validation lived outside the owner of the
-   * table and two call sites had to stay in step (N2). A remap now goes through
-   * `remap()` alone, and every follower — the generated controls, the persisted
-   * copy — hangs off this one callback.
-   *
    * A throw is reported and contained: a follower that fails cannot leave the
    * manager holding a table its own listeners are not using.
    */
@@ -242,10 +168,10 @@ export interface InputManagerOptions {
   /**
    * Writes the binding table durably, returning whether the write succeeded.
    *
-   * Called by `remap()` and `setKeymap()` before `onKeymapChange`, so a rebind
+   * Called by `remap` and `setKeymap` before `onKeymapChange`, so a rebind
    * survives a reload without the caller remembering to save it. A throw is
-   * reported and contained, and a `false` return is counted: persistence is not
-   * allowed to fail a rebind that has already been applied in memory.
+   * reported and contained, and a `false` return is counted: persistence is
+   * not allowed to fail a rebind that has already been applied in memory.
    */
   readonly persistKeymap?: (keymap: Keymap) => boolean;
 
@@ -258,15 +184,8 @@ export interface InputManagerOptions {
 
   /**
    * The context keydown events are interpreted in. A context pins the manager
-   * to that context until `setContext()` replaces it; a function is consulted
-   * once per keydown. Omitted, the context is read from the document:
-   * `'textEntry'` while a text field holds focus, `'overlay'` while a dialog
-   * in `.screen-layer` is shown or the terminal overlay of `.game-container`
-   * carries `game-won` or `game-over`, and `'game'` otherwise.
-   *
-   * The same value reaches the gesture path and, where a caller passes this
-   * resolver to `mountOnScreenControls` as well, the generated controls — which
-   * is what makes ONE effective context govern every modality.
+   * to that context until `setContext` replaces it; a function is consulted
+   * once per keydown.
    */
   readonly context?: InputContext | (() => InputContext);
   readonly pointerFamily?: PointerEventFamily;
@@ -336,17 +255,7 @@ const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
 
 const SHOWN_DIALOG_SELECTOR = '.screen-layer [aria-modal="true"]:not([hidden])';
 
-/**
- * The terminal overlay of index.html, in its shown state.
- *
- * `.game-message` is NOT inside `.screen-layer` — js/html_actuator.js
- * L124-L127 showed it by adding `game-won` or `game-over`, and index.html keeps
- * it inside `.game-container` where it has always been. Matching the dialog
- * selector alone therefore left the context `'game'` while the win overlay held
- * the screen, and `.keep-playing-button`, whose only context is `'overlay'`,
- * was unreachable by key and by pointer alike. Both classes are matched because
- * the stylesheet shows the overlay for either.
- */
+/** The terminal overlay of index.html, in its shown state. */
 const SHOWN_TERMINAL_OVERLAY_SELECTOR =
   '.game-message.game-won, .game-message.game-over';
 
@@ -368,11 +277,6 @@ function isTextEntry(element: Element): boolean {
 
 /**
  * Resolves the input context from the document alone.
- *
- * THE ONE IMPLEMENTATION of the rule. Exported so a router composing further
- * state on top of it — a settings dialog it owns, say — extends this decision
- * rather than restating it, which is what keeps one effective context governing
- * the keyboard, the gesture path and the generated controls alike.
  *
  * @param owner Document to read.
  * @returns `'textEntry'` while a text field holds focus, `'overlay'` while a
@@ -399,20 +303,8 @@ function readAmbientDocument(): Document | null {
   return typeof document === 'undefined' ? null : document;
 }
 
-/* --------------------------------------------------------------------------
- * Payload helpers
- * ----------------------------------------------------------------------- */
-
 /** The payload index published when no slot names one. */
 const DEFAULT_PAYLOAD_INDEX = 0;
-
-// A local reduction of a caught value to its message text used to live here,
-// and `reportListenerError` used it to flatten a listener's throw onto a
-// report field. It is gone: every caught value now leaves this module through
-// `InputReporter.failure` unconverted, and the ONE reduction the input layer
-// performs — for a sink that implements no `failure` member — is
-// `describeThrownForFields` in src/input/keymap.ts, which is where
-// `createSafeInputReporter` applies it.
 
 function describePointerFamily(
   family: PointerEventFamily,
@@ -437,8 +329,8 @@ const NOOP_SPAN: InputSpan = Object.freeze({
  * keyboard path, and composition of the gesture path.
  *
  * Listeners are installed during construction, which is what
- * js/keyboard_input_manager.js L15 did. `listen()` re-installs them after
- * `destroy()`. Both are idempotent: neither can double-bind.
+ * js/keyboard_input_manager.js L15 did. `listen` re-installs them after
+ * `destroy`. Both are idempotent: neither can double-bind.
  *
  * This class binds no control elements. `restart`, `keepPlaying`, `emitMove`
  * and `publishAction` are the members src/input/on-screen-controls.ts invokes,
@@ -459,7 +351,7 @@ export class InputManager implements InputEmitter {
 
   private suspended = false;
 
-  /** Whether `listen()` has bound and `destroy()` has not yet unbound. */
+  /** Whether `listen` has bound and `destroy` has not yet unbound. */
   private listening = false;
 
   /** Handle `attachTouchInput` returned, or `null` while unbound. */
@@ -583,10 +475,7 @@ export class InputManager implements InputEmitter {
       return 0;
     }
 
-    // Snapshotted, not read live: `on()` pushes onto this exact array and
-    // `removeListener` splices it, so a registration made from inside a
-    // callback would otherwise be reached by the walk that is running, and a
-    // removal would shift the index of a callback not yet invoked.
+    // Snapshotted, not read live.
     const walking = callbacks.slice() as readonly InputListener<K>[];
     const span = this.openSpan(`${DISPATCH_SPAN}.${event}`);
 
@@ -618,21 +507,6 @@ export class InputManager implements InputEmitter {
   /**
    * Reports one callback that threw.
    *
-   * The count is raised first and separately, then the throw is delivered
-   * through `InputReporter.failure`, which takes the caught value UNCONVERTED:
-   * the name, the message, the stack and the cause chain of an `Error` all
-   * survive to the sink, as does the structure of a non-`Error` — a plain
-   * object, an array, `null` or `undefined` — that some code throws instead.
-   * This previously went through `log` with the value flattened to its message
-   * text, which discarded all of that before any sink could see it.
-   *
-   * `failure` is always present here, because `createSafeInputReporter` in
-   * src/input/keymap.ts fills it in: for a sink that implements it the value is
-   * passed through, and for a sink that does not the wrapper falls back to
-   * `log` with `describeThrownForFields`, which that module documents as the
-   * input layer's one and only such reduction. The choice therefore belongs to
-   * the wrapper, and this method never converts a caught value itself.
-   *
    * Contained itself, so a sink that throws while reporting cannot do what the
    * containment above exists to prevent.
    *
@@ -654,8 +528,6 @@ export class InputManager implements InputEmitter {
         { event, listener: index },
       );
     } catch {
-      // A throwing sink is contained here for the same reason the callback
-      // above is: neither may abort a publication.
     }
   }
 
@@ -665,8 +537,8 @@ export class InputManager implements InputEmitter {
    * @param direction Direction to publish. `0` up, `1` right, `2` down and
    *   `3` left, which is the encoding of the table at
    *   js/keyboard_input_manager.js L37-L50.
-   * @param modality How the move arrived. Defaults to `'onScreen'`, which
-   *   is how src/input/on-screen-controls.ts publishes one.
+   * @param modality How the move arrived. Defaults to `'onScreen'`, which is
+   *   how src/input/on-screen-controls.ts publishes one.
    * @returns How many callbacks were invoked.
    */
   readonly emitMove = (
@@ -684,7 +556,6 @@ export class InputManager implements InputEmitter {
    * The four movement actions all publish `'move'`, carrying their own
    * direction, which is what the shared numeric values of the table at
    * js/keyboard_input_manager.js L37-L50 expressed.
-
    */
   readonly publishAction = (
     action: InputAction,
@@ -785,8 +656,8 @@ export class InputManager implements InputEmitter {
         { target: 'document', event: 'keydown' },
       );
     } else {
-      // js/keyboard_input_manager.js L53: one listener, on the document,
-      // for `keydown` alone.
+      // js/keyboard_input_manager.js L53: one listener, on the document, for
+      // `keydown` alone.
       owner.addEventListener('keydown', this.handleKeyDown);
       this.teardown.push((): void => {
         owner.removeEventListener('keydown', this.handleKeyDown);
@@ -794,8 +665,7 @@ export class InputManager implements InputEmitter {
     }
 
     // js/keyboard_input_manager.js L76-L127, by way of
-    // src/input/touch-input.ts. A resolved swipe publishes `'move'`, which
-    // is what L125 did.
+    // src/input/touch-input.ts.
     this.detachTouch = attachTouchInput({
       onSwipe: (direction: Direction): void => {
         this.emitMove(direction, 'swipe');
@@ -805,11 +675,7 @@ export class InputManager implements InputEmitter {
       reporter: this.reporter,
       family: this.pointerFamily,
       // The SAME effective context every other modality reads, not merely the
-      // listening and suspension flags. A swipe publishes `'move'`, and
-      // movement is only meaningful where a movement action is bound in the
-      // context in force; without this a swipe moved the board while a modal
-      // dialog held the screen and while the terminal overlay was shown, which
-      // no keypress and no on-screen control could do.
+      // listening and suspension flags.
       isEnabled: (): boolean =>
         this.listening && !this.suspended && this.movementResolves(),
     });
@@ -825,7 +691,7 @@ export class InputManager implements InputEmitter {
    * Removes the keydown listener and invokes the gesture detach handle.
    *
    * Calling it while not listening removes nothing. The event registry is left
-   * intact: a detached manager can still be published to, and `listen()`
+   * intact: a detached manager can still be published to, and `listen`
    * re-installs everything this removed.
    */
   destroy(): void {
@@ -902,9 +768,6 @@ export class InputManager implements InputEmitter {
   /**
    * Replaces the whole binding table, persists it and announces it once.
    *
-   * The wholesale counterpart of `remap`: restoring the defaults is one call
-   * here rather than a table computed elsewhere and written in.
-   *
    * @param keymap Table to hold.
    */
   setKeymap(keymap: Keymap): void {
@@ -921,36 +784,13 @@ export class InputManager implements InputEmitter {
   /**
    * Binds one action to one key, validating, persisting and announcing it.
    *
-   * THE SINGLE ENTRY POINT FOR A REBIND. It performs, in order, the four steps
-   * that used to be spread across the settings dialog and the composition root:
-   *
-   *   1. VALIDATES. Every requested key AND every requested code is checked
-   *      against every context the action is active in, so a key already bound
-   *      to another action in a shared context is refused rather than shadowed —
-   *      including one that collides only by physical code, which the logical
-   *      key cannot see. The occupying binding and the dimension it collided in
-   *      are returned so the caller can name both.
-   *   2. APPLIES. The table this manager's own keydown listener reads is
-   *      replaced, so the new binding is live for the next keystroke with no
-   *      second write.
-   *   3. PERSISTS, through `persistKeymap`.
-   *   4. ANNOUNCES, exactly once, through `onKeymapChange`.
-   *
-   * A refusal does none of 2, 3 or 4 (N2).
-   *
    * @param action Action to rebind.
    * @param binding Keys and codes to bind it to.
    * @returns Whether it was applied, the table in force afterwards, and the
    *   occupying binding on a refusal.
    */
   remap(action: InputAction, binding: InputBindingOverride): RemapResult {
-    // THE WHOLE OVERRIDE IS VALIDATED IN BOTH DIMENSIONS. `mergeBinding` of
-    // ./keymap.ts resolves each member independently, so the binding that goes
-    // live is the merge of this override onto the one in force; and `codes` used
-    // to be applied without being validated at all, so a direct caller could
-    // persist a physical-code collision that shadowed another action's binding —
-    // and this manager is the documented single authority for a rebind, so
-    // nothing else would refuse it.
+    // The whole override is validated in both dimensions.
     const conflict = this.findRemapConflict(action, binding);
 
     if (conflict !== null) {
@@ -986,33 +826,10 @@ export class InputManager implements InputEmitter {
    * actions may share a key when no context activates both, which is what lets
    * a digit drive a reward choice in an overlay and nothing in the game.
    *
-   * THREE MEMBERS ARE READ FROM THE OVERRIDE, each resolved exactly as
-   * `mergeBinding` of ./keymap.ts resolves it — the override's value when it
-   * supplies one, and the binding in force when it does not:
-   *
-   *   `contexts`  an override naming contexts REPLACES the declared ones, so a
-   *               request that widens an overlay-only action into `'game'` has
-   *               to be free in `'game'` too. Searching the declared set alone
-   *               accepted a key already held in a context the override was
-   *               about to move the action into.
-   *   `codes`     `codes` is a second, independent channel the keydown listener
-   *               reads, and a physical code carries across layouts where the
-   *               character does not, so a requested code can land on a key
-   *               another action already holds even where every requested `key`
-   *               is free.
-   *   `keys`      omitted, the keys in force carry over, and they are searched
-   *               again because the contexts they are read in may have widened.
-   *
-   * Both lists are searched through `findBindingConflict`, which compares one
-   * value against a binding's keys case-insensitively AND against its codes
-   * exactly — so a code is looked up by passing it as the value, which is how
-   * the settings dialog's own preflight already reads it, and which also sees a
-   * requested code that lands on another action's logical key.
-   *
    * @param action Action being rebound, which never conflicts with itself.
    * @param binding The override requested for it.
-   * @returns The occupying binding and the dimension it collided in, or `null`
-   *   where every value of the merged binding is free.
+   * @returns The occupying binding and the dimension it collided in, or
+   *   `null` where every value of the merged binding is free.
    */
   private findRemapConflict(
     action: InputAction,
@@ -1023,8 +840,8 @@ export class InputManager implements InputEmitter {
     const codes = binding.codes ?? current.codes;
     const declared = binding.contexts ?? current.contexts;
 
-    // A binding that names no context is active in `'game'`, so that is where a
-    // key it requests has to be free.
+    // A binding that names no context is active in `'game'`, so that is where
+    // a key it requests has to be free.
     const contexts: readonly InputContext[] =
       declared.length > 0 ? declared : ['game'];
     const dimensions: readonly {
@@ -1076,8 +893,8 @@ export class InputManager implements InputEmitter {
   /**
    * Reports a throw from one of the two keymap collaborators.
    *
-   * Contained the way a throwing listener is: neither the durable writer nor the
-   * follower may abort a rebind the manager has already applied.
+   * Contained the way a throwing listener is: neither the durable writer nor
+   * the follower may abort a rebind the manager has already applied.
    *
    * @param member Name of the collaborator that threw.
    * @param error What it threw.
@@ -1119,8 +936,8 @@ export class InputManager implements InputEmitter {
 
     const context = this.readContext();
 
-    // L54-L55's modifier guard and L56's recognised-key test are both
-    // applied by `resolveInput`.
+    // L54-L55's modifier guard and L56's recognised-key test are both applied
+    // by `resolveInput`.
     const resolved = resolveInput(event, this.keymap, context);
 
     if (resolved === null) {
@@ -1137,8 +954,8 @@ export class InputManager implements InputEmitter {
     const direction = directionForAction(resolved.action);
 
     if (direction !== null) {
-      // L60 then L61: the default action is cancelled immediately before
-      // the move is published, and for a recognised move alone.
+      // L60 then L61: the default action is cancelled immediately before the
+      // move is published, and for a recognised move alone.
       if (resolved.preventDefault) {
         event.preventDefault();
       }
@@ -1171,19 +988,8 @@ export class InputManager implements InputEmitter {
 
   /**
    * Counts a keydown that resolved to no action, separating a key a binding
-   * does claim but a held modifier suppressed, which is L54-L55's guard,
-   * from a key no binding claims, which is L56's test.
-   *
-   * NO KEYSTROKE IS REPORTED. `event.key` and `event.code` are read to
-   * classify the keydown and are not carried into a field: in the
-   * `'textEntry'` context they are characters a player typed into an
-   * input, a search box or a password field, and this handler is bound to
-   * the document, so it sees every one of them. The report carries the
-   * context, the bounded key family, whether a modifier was held and
-   * whether a binding claims the key — four values drawn from closed sets.
-   * In the `'textEntry'` context even the family is withheld, because a
-   * family is a character class and a character class about a password is
-   * still something about a password.
+   * does claim but a held modifier suppressed, which is L54-L55's guard, from
+   * a key no binding claims, which is L56's test.
    *
    * @param event Event that resolved to nothing.
    * @param context Context it was resolved in.
@@ -1250,10 +1056,8 @@ export class InputManager implements InputEmitter {
   /**
    * Whether a movement action is bound in the context in force.
    *
-   * Read from the keymap rather than testing the context against `'game'`, so a
-   * remap that makes movement available elsewhere reaches the gesture path too.
-   *
-   * @returns `true` when at least one of the four movement actions is active.
+   * @returns `true` when at least one of the four movement actions is
+   *   active.
    */
   private movementResolves(): boolean {
     const context = this.readContext();
@@ -1310,8 +1114,7 @@ export class InputManager implements InputEmitter {
 /**
  * Creates an input manager with its listeners installed.
  *
- * @returns The bound manager. A binding whose target is absent is reported and
- *   skipped rather than raised.
+ * @returns The bound manager.
  */
 export function createInputManager(
   options: InputManagerOptions = {},

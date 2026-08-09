@@ -1,54 +1,15 @@
 // The risk-reward-cursed relic family: four relics whose upside is paid for,
 // and the family that holds the board-size-mutating relic.
 //
-// The family attaches at onStageStart, onStageEnd, onSpawn and onMerge, as each
-// relic requires. Its hook points come from three places in the deleted
-// controller: js/game_manager.js L156-L170, the merge branch, reached through
-// onMerge; js/game_manager.js L69-L76, addRandomTile() and the spawn value
-// literal at L71, reached through onSpawn; and js/game_manager.js L238-L268,
-// movesAvailable()/tileMatchesAvailable(), which reads the board size a shrink
-// changes. onStageEnd HAS NO VANILLA ANALOGUE.
-//
 // Brand new module: no source-branch file was ported into it. Relic
 // declarations, module-level constants and pure helpers only — no registry, no
 // draw, no dispatch.
-//
-// A handler here reaches the run through three channels and no others: the
-// payload it returns, its own `context.state` slot, and the command queue
-// src/engine/board-effects.ts declares on `HookContext.effects`.
-// `HookContext.grid` is the frozen `ReadonlyGridView` and
-// `HookContext.config` the frozen `ReadonlyRulesView`, so neither the lattice
-// nor the rules is written through them: `collapsing-vault` records `moveTile`
-// and `resizeBoard`, and `brittle-crown` records `setSpawnWeights`, and the bus
-// applies each once the handler has returned and its return has validated.
-// `resizeBoard` writes BOTH `grid.size` and `config.boardSize`.
-//
-// `collapsing-vault` ALSO declares the edge length it implies in its state slot,
-// because the slot is what survives a reload: `reconcileBoardSize()` of
-// src/run/run-state-store.ts reads it as `relicBoardSize` and applies it before
-// any grid is constructed, so a resumed run opens on the collapsed board rather
-// than springing back to the configured one. The command is the live-run write;
-// the declaration is the resume path, and the two carry the same number.
 //
 // This module reads no DOM, performs no I/O, consumes no randomness, reads no
 // clock, reports nothing, holds no mutable module-level state and reads no
 // `charges`.
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, in declaration
-// order, all target-only because no vanilla construct declared a relic:
-//   TR-RISK-01  collapsing-vault   onStageEnd
-//   TR-RISK-02  gilded-rot         onMerge, onSpawn
-//   TR-RISK-03  brittle-crown      onStageStart, onStageEnd
-//   TR-RISK-04  hollow-ascension   onMerge, onStageEnd
-//   TR-RISK-05  the frozen `RISK_REWARD_CURSED_FAMILY` export
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-RISK-01  `collapsing-vault` declaring its implied edge length in its
-//                state slot, which src/run/run-state-store.ts reconciles
-//                before any grid is constructed
-//   DL-RISK-02  each cursed effect paid for through a transformable payload
-//                member or a `context.effects` command the engine applies
+// Decisions: DL-RISK-01, DL-RISK-02 (docs/DECISION_LOG.md).
 
 import type {
   HookContext,
@@ -60,14 +21,6 @@ import type {
 import type { StreamName } from '../../rng/rng-streams';
 import type { Relic, RelicFamily } from '../relic-types';
 import { RARITIES } from '../relic-types';
-
-/* --------------------------------------------------------------------------
- * Relic magnitudes
- *
- * Each constant is one relic's own magnitude rather than a game rule: every
- * game rule this module acts on — the board edge length, the spawn values, the
- * stage goal and the score — is read from the live `HookContext` at use time.
- * ----------------------------------------------------------------------- */
 
 /** Smallest edge length `collapsing-vault` will collapse a board to. */
 const MINIMUM_PLAYABLE_BOARD_SIZE = 3;
@@ -96,18 +49,8 @@ const HOLLOW_ASCENSION_BANK_STEP = 1;
 /** Ceiling `hollow-ascension` clamps its bank to. */
 const HOLLOW_ASCENSION_MAX_BANK = 4096;
 
-/**
- * The one substream this module draws from: `collapsing-vault`'s re-homing.
- *
- * Typed as `StreamName`, the closed set `RNG_STREAM_NAMES` of
- * src/rng/rng-streams.ts declares. The two spawn substreams are the engine's
- * own and are never addressed here.
- */
+/** The one substream this module draws from. */
 const RELIC_DRAW_STREAM: StreamName = 'relic-draw';
-
-/* --------------------------------------------------------------------------
- * Pure helpers
- * ----------------------------------------------------------------------- */
 
 /**
  * Reports whether a value is a plain keyed object: an object that is neither
@@ -181,17 +124,9 @@ function readBank(state: unknown): number {
   return Math.min(Math.floor(state), HOLLOW_ASCENSION_MAX_BANK);
 }
 
-/* --------------------------------------------------------------------------
- * collapsing-vault
- * ----------------------------------------------------------------------- */
-
 /**
  * Orders two exiles for re-homing: highest face value first, and among equal
  * values the earlier of the x-outer, y-inner scan `occupiedCells` reports in.
- *
- * `Array.prototype.sort` is stable, so returning zero for an equal pair leaves
- * the scan order between them and the re-homing sequence is fixed by the board
- * alone.
  *
  * @param left First exile.
  * @param right Second exile.
@@ -206,31 +141,6 @@ function byDescendingValue(
 
 /**
  * Collapses the live board by one edge once a stage is cleared.
- *
- * The procedure, in the order the steps are recorded:
- *   1. the next edge length is computed from `config.boardSize` in force,
- *      floored at `MINIMUM_PLAYABLE_BOARD_SIZE`;
- *   2. the occupants are read once, before anything is recorded, and split into
- *      those inside the next bound and those outside it;
- *   3. each exile is re-homed, highest value first, into a cell standing empty
- *      inside the next bound and drawn from the `relic-draw` substream; an
- *      exile with nowhere to go is left where it is and is dropped by step 4;
- *   4. `resizeBoard` rebuilds the lattice at the next edge length and writes
- *      BOTH `grid.size` and `config.boardSize`, which is what keeps
- *      `withinBounds`, the engine, the renderer and the persisted snapshot
- *      reading one edge length.
- *
- * `config.winValue` is not touched: src/engine/terminal-state.ts compares
- * against the live value and scans the live grid, so the win and loss verdicts
- * resolve at the new size on their own.
- *
- * Nothing at all is recorded when the stage was not cleared, when the
- * configured edge length is not a usable integer, or when the board already
- * stands at the family's floor.
- *
- * This effect sits at `onStageEnd` and at no other hook: it is the one point
- * in the turn pipeline with no traversal in flight, because the resolver
- * builds its traversal arrays once per move from the size at move start.
  *
  * @param payload The stage result, read for `cleared`.
  * @param context The dispatch, read for `config.boardSize` and its effect
@@ -260,9 +170,6 @@ function collapsingVaultStageEnd(
     return;
   }
 
-  // The edge length ALREADY declared on the slot bounds the collapse, so a
-  // resumed run that reopened on a wider board than the slot records collapses
-  // to the narrower of the two rather than undoing a collapse already suffered.
   const declared = readDeclaredBoardSize(context.state);
   const applied = declared === null ? shrunk : Math.min(declared, shrunk);
   const effects = context.effects;
@@ -292,10 +199,10 @@ function collapsingVaultStageEnd(
     effects.moveTile({ x: exile.x, y: exile.y }, destination);
   }
 
-  // THE COLLAPSE. Every tile inside the new bound keeps the exact cell it
-  // occupied and the survivors re-homed above keep the cells they were moved to,
-  // so no position is reindexed or compacted; the command writes the size into
-  // the rules with the lattice, so the loss probe, the win check and the
+  // The collapse. Every tile inside the new bound keeps the exact cell it
+  // occupied and the survivors re-homed above keep the cells they were moved
+  // to, so no position is reindexed or compacted; the command writes the size
+  // into the rules with the lattice, so the loss probe, the win check and the
   // renderer's framing all follow the board that now exists.
   effects.resizeBoard(applied);
 
@@ -303,16 +210,8 @@ function collapsingVaultStageEnd(
   context.state = { boardSize: applied };
 }
 
-/* --------------------------------------------------------------------------
- * gilded-rot
- * ----------------------------------------------------------------------- */
-
 /**
  * Scales a merge's score contribution by the relic's multiplier.
- *
- * Transforms `scoreDelta` alone and floors the product. `resultValue` is
- * carried across untouched, and `source` and `target` travel as the same
- * objects they arrived as.
  *
  * @param payload The merge, read for `scoreDelta`.
  * @returns The payload carrying the scaled contribution, or nothing when the
@@ -337,14 +236,6 @@ function gildedRotMerge(payload: MergePayload): MergePayload | void {
 /**
  * Raises a spawning tile to the largest value the run can spawn.
  *
- * Reads the ceiling out of `config.spawn.values` at use time. The cell is
- * carried across exactly as it arrived.
- *
- * Changes nothing when the payload carries no cell — the case
- * `SpawnPayload.position` is optional for, matching the full-board fall-through
- * of js/grid.js L37-L43 — when the distribution offers no positive value, or
- * when the arriving value is already the ceiling.
- *
  * @param payload The spawn, read for its cell.
  * @param context The dispatch, read for `config.spawn.values`.
  * @returns The payload carrying the raised value, or nothing.
@@ -367,10 +258,6 @@ function gildedRotSpawn(
 
   return { position, value: highest };
 }
-
-/* --------------------------------------------------------------------------
- * brittle-crown
- * ----------------------------------------------------------------------- */
 
 /**
  * Reads the weights a state slot saved, as a fresh array.
@@ -458,26 +345,9 @@ function skewedWeights(
 /**
  * Saves the spawn distribution in force and installs the skewed one.
  *
- * The weights are saved into the state slot ONLY WHERE THE SLOT HOLDS NONE, as
- * a fresh array rather than a reference to the configured one, and the skewed
- * array is computed from the SAVED weights rather than from the arriving ones.
- * A second dispatch within one stage — a restart, or a resume after a reload,
- * where the configuration arrives fresh while the slot survives in storage —
- * therefore installs the same distribution the first dispatch installed rather
- * than skewing an already-skewed one. `brittleCrownStageEnd` clears the slot as
- * the stage resolves.
- *
- * The new array is recorded through
- * `HookContext.effects.setSpawnWeights`, which src/engine/board-effects.ts
- * refuses unless it is one weight per configured value, every entry finite and
- * at or above zero, and at least one above zero — so a distribution
- * `pickWeighted` could not draw from never reaches the rules.
- *
- * Returns nothing, so the stage's goal resolves exactly as it arrived.
- *
  * @param _payload The stage opening, read for nothing.
- * @param context The dispatch, read for the distribution in force and written
- *   for its state slot and its effect queue.
+ * @param context The dispatch, read for the distribution in force and
+ *   written for its state slot and its effect queue.
  */
 function brittleCrownStageStart(
   _payload: StageStartPayload,
@@ -499,16 +369,6 @@ function brittleCrownStageStart(
 /**
  * Restores the saved spawn distribution, pays the clearing bounty and releases
  * the slot.
- *
- * The saved weights are written back as a fresh copy and the slot is then
- * EMPTIED, which is the clear half of the save-only-if-absent pair
- * `brittleCrownStageStart` opens: without it a later stage would reinstall a
- * stale distribution.
- *
- * `score` is a transformable member of `onStageEnd` and src/engine/engine.ts
- * adopts the resolved value before it commits. Pays nothing when the stage was
- * not cleared, when the arriving score is not finite, when the bounty floors to
- * zero or below, or when the paid score would not be finite.
  *
  * @param payload The stage result, read for `cleared` and `score`.
  * @param context The dispatch, whose slot is emptied and whose effect queue
@@ -545,17 +405,8 @@ function brittleCrownStageEnd(
   return { ...payload, score };
 }
 
-/* --------------------------------------------------------------------------
- * hollow-ascension
- * ----------------------------------------------------------------------- */
-
 /**
  * Pays out of the ascension bank and then banks one more charge.
- *
- * The bonus is the bank as it stood when the merge began, scaled and floored,
- * and it is added to `scoreDelta`; `resultValue` is carried across untouched.
- * The bank is written on every dispatch, including one that pays nothing, and
- * is clamped to the bank ceiling.
  *
  * @param payload The merge, read for `scoreDelta`.
  * @param context The dispatch, read and written for its state slot.
@@ -594,10 +445,6 @@ function hollowAscensionMerge(
 /**
  * Empties the ascension bank when the stage was not cleared.
  *
- * A cleared stage leaves the bank exactly as it stands. This is the family's
- * use of `onStageEnd` as a carry-forward boundary; the hook has no vanilla
- * analogue.
- *
  * @param payload The stage result, read for `cleared`.
  * @param context The dispatch, whose state slot is emptied on a failure.
  */
@@ -611,14 +458,6 @@ function hollowAscensionStageEnd(
 
   context.state = 0;
 }
-
-/* --------------------------------------------------------------------------
- * Declarations
- *
- * Members of `Relic` only, one relic per ordinal position of `RARITIES`, and no
- * charge budget on any of the four. The charge guard and the charge decrement
- * both belong to src/engine/hook-bus.ts, and no handler above reads the field.
- * ----------------------------------------------------------------------- */
 
 const COLLAPSING_VAULT: Relic = Object.freeze<Relic>({
   id: 'collapsing-vault',
@@ -676,11 +515,6 @@ const HOLLOW_ASCENSION: Relic = Object.freeze<Relic>({
 
 /**
  * The `risk-reward-cursed` family.
- *
- * DECLARATION ORDER IS LOAD-BEARING. The array is flattened into the relic
- * catalogue in this order and the seeded reward draw resolves against that
- * catalogue: a reordering changes the offers a given seed produces and moves
- * the snapshot gate.
  *
  * Named and frozen as the other three family modules are, so
  * src/relics/relic-registry.ts flattens all four through one uniform export

@@ -1,35 +1,6 @@
 // Playwright configuration for the recorded-gameplay proof.
 //
-// The single project `gameplay-recording` runs in headless Chromium against the
-// built static bundle. `testMatch` names one path,
-// tests/e2e/gameplay-recording.spec.ts, so no other spec placed under
-// tests/e2e/ can be collected into the video gate. The unit suite and the
-// seeded snapshot gate run under their own Vitest configs and are ignored here.
-//
-// EXTERNAL CONSTRAINTS THE RECORDING SETTINGS SATISFY
-//   - `video.mode: 'on'` records every test, passing or failing, and
-//     `video.size` repeats the viewport; Playwright otherwise scales the frame
-//     into an 800x800 box. The 1280x960 viewport records the desktop layout
-//     unscaled: style/_tokens.scss declares $field-width as 500px and
-//     $mobile-threshold as 520px, and style/main.scss consumes both through
-//     @use.
-//   - the WebM is written when the browser context closes. Nothing here creates
-//     a context of its own; the built-in `page` fixture owns and closes it.
-//   - the ANGLE/SwiftShader launch arguments below make WebGL 2.0 available
-//     with no GPU present.
-//
-// This file carries no ported construct: the repository held no automation of
-// any kind. One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every
-// row of this file's area enumerated, all target-only:
-//   TR-PW-01  the `gameplay-recording` project and its single `testMatch`
-//   TR-PW-02  the recording settings and the software-GL launch arguments
-//   TR-PW-03  the preview web server and its loopback-origin assertion
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-PW-01  the recording settings that carry the proof
-//   DL-PW-02  the loopback-origin assertion evaluated at config load
-//
+// Decisions: DL-PW-01, DL-PW-02 (docs/DECISION_LOG.md).
 import { defineConfig, devices } from '@playwright/test';
 
 // Port `npm run preview` is started on and polled at. vite.config.ts declares
@@ -67,12 +38,8 @@ function assertPreviewPort(port: number): number {
 }
 
 /**
- * Asserts that `origin` is an HTTP or HTTPS URL on a loopback host, and returns
- * it in parsed form.
- *
- * Runs when this config is loaded, before any browser is launched and before any
- * server is started. A target that is not this machine's own preview server
- * throws here and no run begins. Decision DL-PW-02.
+ * Asserts that `origin` is an HTTP or HTTPS URL on a loopback host, and
+ * returns it in parsed form.
  *
  * @param origin Origin to check.
  * @returns The parsed form of `origin`.
@@ -116,9 +83,7 @@ assertPreviewPort(PORT);
 // server is polled on.
 const BASE_URL = assertLoopbackOrigin(`http://127.0.0.1:${PORT}`);
 
-// Viewport of the recording, reused verbatim as the video frame size. The
-// desktop layout is 500px wide with a 520px mobile threshold, so the board
-// records unscaled at its native size.
+// Viewport of the recording, reused verbatim as the video frame size.
 const VIEWPORT = { width: 1280, height: 960 };
 
 // Timing budget, in milliseconds. The longest wait a spec makes is the
@@ -134,16 +99,11 @@ const WEB_SERVER_SHUTDOWN_TIMEOUT = 10_000;
 
 export default defineConfig({
   // Playwright's half of the three-way split with the two Vitest projects.
-  // `testMatch` is the path of the one recorded-gameplay spec, so no other
-  // file under tests/e2e/ — and nothing following the unit convention
-  // (*.test.ts) — is collected into the video gate. `testIgnore` names the
-  // two Vitest subtrees outright.
   testDir: 'tests/e2e',
   testMatch: '**/tests/e2e/gameplay-recording.spec.ts',
   testIgnore: ['**/tests/unit/**', '**/tests/snapshot/**'],
 
   // Videos, screenshots and traces land here, one directory per test.
-  // `preserveOutput: 'always'` keeps a passing test's directory.
   outputDir: 'test-results',
   preserveOutput: 'always',
 
@@ -156,9 +116,6 @@ export default defineConfig({
   workers: 1,
   retries: 0,
 
-  // A stray `test.only` fails the run rather than silently reducing the gate to
-  // one test, on a workstation exactly as in CI. Unconditional: this file reads
-  // no CI variable.
   forbidOnly: true,
 
   // `open: 'never'` keeps the reporter from launching a browser of its own
@@ -175,8 +132,7 @@ export default defineConfig({
     actionTimeout: ACTION_TIMEOUT,
     navigationTimeout: NAVIGATION_TIMEOUT,
 
-    // The animation, camera and particle surfaces read this preference;
-    // `contextOptions` is where Playwright exposes it to a config.
+    // The animation, camera and particle surfaces read this preference.
     contextOptions: {
       reducedMotion: 'no-preference',
     },
@@ -192,11 +148,6 @@ export default defineConfig({
     },
 
     launchOptions: {
-      // The Chromium sandbox is disabled, expressed through Playwright's own
-      // option rather than a launch argument, because the CI container runs
-      // unprivileged and cannot grant the sandbox the namespaces it needs.
-      // Nothing here restricts the origins a spec or a page script may
-      // navigate to.
       chromiumSandbox: false,
 
       args: [
@@ -206,8 +157,8 @@ export default defineConfig({
         '--use-gl=angle',
         '--use-angle=swiftshader',
 
-        // /dev/shm is too small for Chromium's default shared-memory use in
-        // a container.
+        // /dev/shm is too small for Chromium's default shared-memory use in a
+        // container.
         '--disable-dev-shm-usage',
       ],
     },
@@ -226,9 +177,6 @@ export default defineConfig({
     },
   ],
 
-  // `--strictPort` fails the step when the port is taken rather than moving the
-  // server to another one, and `reuseExistingServer: false` means the recorded
-  // bundle is always the one this run built.
   webServer: {
     name: 'vite preview',
     command:

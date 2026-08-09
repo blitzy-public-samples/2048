@@ -4,77 +4,10 @@
 // effect, and it respects its charge budget including an invocation at zero
 // charges.
 //
-// UNIT UNDER TEST. The `temporal-anchor` entry of
-// `BOARD_MANIPULATION_FAMILY` in src/relics/families/board-manipulation.ts,
-// reached by identifier. Its specified effect: at `onAfterMove` it records the
-// board a move settled on and the score it settled at; at `onBeforeMove`,
-// while the board holds no empty cell and an anchor is held, it restores that
-// board and withdraws the move.
-//
-// THE THREE CHANNELS A HANDLER'S EFFECTS LEAVE THROUGH, which is what the
-// assertions below read. src/engine/hook-bus.ts substitutes `ReadonlyGridView`
-// for the live `Grid` before the first handler runs, so `insertTile`,
-// `removeTile`, the `cells` matrix and every live `Tile` are out of a handler's
-// reach:
-//   the transformable payload members its hook declares, `direction` and
-//     `cancelled`;
-//   its own persisted `state` slot, which both bindings share;
-//   `HookContext.effects`, the transactional command queue of
-//     src/engine/board-effects.ts. A handler RECORDS `restoreBoard`; the bus
-//     applies the recorded command once the handler has returned and its
-//     return has validated, and `applyRestore` writes the lattice through
-//     `Grid.removeTile` and `Grid.insertTile`.
-//
-// THE FIXTURE ROLES, from tests/fixtures/boards.ts. `createNearLossBoard()` is
-// the board with no empty cell, so it is the state the anchor arms on.
-// `createMergePairBoard()` and `createBlockedBoard()` both still hold empty
-// cells — the second cannot move LEFT and holds twelve — so both are states
-// the anchor must leave alone. `Grid.fromState` reads `state[x][y]`, so each
-// fixture's `grid.cells` matrix is passed to the constructor rather than the
-// `{ grid, score, over, won, keepPlaying }` wrapper around it.
-//
-// PROVENANCE OF THE VOCABULARY ASSERTED AGAINST:
-//   js/grid.js L102-L117         the `{ size, cells }` board projection, with
-//                                empty cells kept as `null`, which the anchor
-//                                holds
-//   js/tile.js L19-L27           the `{ position, value }` cell entry inside
-//                                that projection
-//   js/game_manager.js L102-L110 the `{ grid, score, over, won, keepPlaying }`
-//                                wrapper the fixtures of
-//                                tests/fixtures/boards.ts speak
-//   js/grid.js L89-L91           `insertTile` indexes `cells[tile.x][tile.y]`
-//   js/grid.js L93-L95           `removeTile` clears the same slot
-//   js/tile.js L10-L17           `savePosition()` records a fresh
-//                                `previousPosition`; `updatePosition()`
-//                                writes the two coordinates and leaves it
-//   js/game_manager.js L113-L120 `prepareTiles()`, which cleared `mergedFrom`
-//                                and saved every position each move
-//   js/game_manager.js L123-L127 `moveTile()`
-//   js/game_manager.js L134      the terminal guard `onBeforeMove` succeeds
-//   CONTRIBUTING.md L23          "Undo/redo features", superseded by the
-//                                design-freeze supersession entry of
-//                                docs/DECISION_LOG.md
-//
-// FIGURES. Figure 4, "Turn Data Flow: From Keystroke to Composited Frame and
-// Persisted Run State" (docs/architecture/data-flow.md), carries the
-// `onBeforeMove dispatch — cancellable` node and its
-// `vetoed -> Turn ends, no state change` branch. Figure 5, "Hook Dispatch
-// Sequence" (docs/architecture/hook-dispatch-sequence.md), carries the
-// charge-guard path. Boards are named through the fixtures of
-// tests/fixtures/boards.ts rather than drawn here.
-//
-// SCOPE. The `HookBus` mechanism itself — pickup-order dispatch, payload
-// validation, error isolation and the charge guard's own skip — is covered by
-// tests/unit/engine. This suite reads the bus only where this relic's
-// observable outcome depends on it: the lattice the recorded restore rebuilds,
-// and exhaustion across a run.
-//
 // This suite reads no DOM, no clock and no unseeded randomness, and it runs
 // under the `test` script with no server, browser or network.
 //
-// Decisions behind the unit under test are argued in docs/DECISION_LOG.md,
-// DL-BOARD-01 and DL-BOARD-02. The traceability row is TR-BOARD-01 of
-// docs/TRACEABILITY_MATRIX.md.
+// Decisions: DL-BOARD-01, DL-BOARD-02 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -129,10 +62,6 @@ import {
   createNearLossBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. Constants
- * ========================================================================== */
-
 /** Identifier of the relic under test. */
 const RELIC_ID = 'temporal-anchor';
 
@@ -141,9 +70,7 @@ const SUITE_SEED = 'temporal-anchor-suite';
 
 /**
  * Run correlation identifier every context, bus and registry in this suite
- * carries. Rule 3 requires the identifier to travel with the dispatch, and
- * src/engine/types.ts names src/observability/logger.ts as its one deriver, so
- * a literal is injected here rather than derived.
+ * carries.
  */
 const CORRELATION_ID: CorrelationId = 'run-temporal-anchor-suite';
 
@@ -173,15 +100,8 @@ const ANCHOR_SCORE = 44;
 /** Face value the board is filled to when a case needs a full board. */
 const FILLER_VALUE = 4;
 
-/* ==========================================================================
- * 2. Reaching the relic and its two handlers
- * ========================================================================== */
-
 /**
  * The relic under test, read out of the family export by identifier.
- *
- * Raises rather than returning `undefined`, so a renamed identifier fails the
- * lookup loudly instead of degrading every case below into a no-op.
  *
  * @returns The frozen declaration.
  * @throws {Error} If the family declares no relic under `RELIC_ID`.
@@ -258,10 +178,6 @@ function declarationFingerprint(): string {
 const DECLARED_FINGERPRINT: string = declarationFingerprint();
 
 /**
- * One handler's source with its comments removed, so every guard below reads
- * the executable text rather than the prose beside it;
- * `Function.prototype.toString()` carries both.
- *
  * @param handler Handler to read.
  * @returns The handler's source, comments replaced by single spaces.
  */
@@ -288,10 +204,6 @@ function boundHandlerSources(): readonly HandlerSource[] {
     { hook: 'onBeforeMove', source: executableSource(holdHandler()) },
   ];
 }
-
-/* ==========================================================================
- * 3. Board readers and writers
- * ========================================================================== */
 
 /** One occupied cell of a live board. */
 interface OccupantRecord {
@@ -369,13 +281,7 @@ function relocate(grid: Grid, from: Position, to: Position): void {
   grid.insertTile(tile);
 }
 
-/* ==========================================================================
- * 4. Shape readers over the persisted vocabulary
- * ========================================================================== */
-
 /**
- * Reports whether a value is a plain keyed object rather than an array.
- *
  * @param value Candidate value.
  * @returns `true` for a non-null, non-array object.
  */
@@ -384,8 +290,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Reports whether a value is one serialised cell entry, the shape
- * js/tile.js L19-L27 wrote.
+ * Reports whether a value is one serialised cell entry, the shape js/tile.js
+ * L19-L27 wrote.
  *
  * @param value Candidate entry.
  * @returns `true` for a `{ position: { x, y }, value }` pair.
@@ -409,8 +315,7 @@ function isCellEntry(value: unknown): boolean {
 
 /**
  * Reports whether a value is a board projection in the vocabulary of
- * js/grid.js L102-L117: `{ size, cells }`, `size` columns of `size` entries,
- * each entry an occupant or `null`.
+ * js/grid.js L102-L117.
  *
  * @param value Candidate projection.
  * @returns `true` for a well-formed projection.
@@ -483,10 +388,6 @@ function slotScore(value: unknown): unknown {
   return isRecord(value) ? value.score : null;
 }
 
-/* ==========================================================================
- * 5. The rules fingerprint
- * ========================================================================== */
-
 /** Every rule this relic must leave standing. */
 interface RulesFingerprint {
   readonly boardSize: number;
@@ -516,10 +417,6 @@ function rulesFingerprint(config: RulesConfig): RulesFingerprint {
     produce: config.merge.produce,
   };
 }
-
-/* ==========================================================================
- * 6. The recorded board commands
- * ========================================================================== */
 
 /** One recorded whole-board restore. */
 type RestoreRequest = Extract<BoardEffect, { kind: 'restoreBoard' }>;
@@ -635,10 +532,6 @@ function recordingQueue(
   };
 }
 
-/* ==========================================================================
- * 7. The hand-built dispatch bench
- * ========================================================================== */
-
 /**
  * The ONE state slot both bindings of one subscription share, held behind an
  * object so two context objects can read and write the same value.
@@ -649,7 +542,7 @@ interface SlotHolder {
 
 /** One case's collaborators, all fresh. */
 interface AnchorBench {
-  /** The rules in force, from `createDefaultRulesConfig()` and never frozen. */
+  /** The rules in force, from `createDefaultRulesConfig` and never frozen. */
   readonly config: RulesConfig;
 
   /** The run's named substreams, derived from the one suite seed. */
@@ -671,7 +564,8 @@ interface AnchorBench {
    * A context for one hook, reading and writing the bench's single slot.
    *
    * @param hook Hook the context names.
-   * @param charges Notional subscription budget; defaults to the declared one.
+   * @param charges Notional subscription budget; defaults to the declared
+   *   one.
    * @returns The context.
    */
   contextFor(hook: HookName, charges?: number): HookContext;
@@ -693,11 +587,6 @@ interface BenchOptions {
 }
 
 /**
- * Builds one case's collaborators: fresh rules, fresh substreams, a live board
- * restored from a fixture's cell matrix — `Grid.fromState` reads
- * `state[x][y]`, so the matrix is passed rather than the wrapper — a recording
- * queue, and one state slot both bindings reach.
- *
  * @param options What to build differently from the default.
  * @returns The bench.
  */
@@ -801,10 +690,6 @@ function beforeMovePayload(
   };
 }
 
-/* ==========================================================================
- * 8. The bus bench
- * ========================================================================== */
-
 /** A production bus with the relic held through a registry. */
 interface BusBench {
   readonly config: RulesConfig;
@@ -900,10 +785,6 @@ function liveCharges(bench: BusBench): number | undefined {
   return bench.registry.find(RELIC_ID)?.charges;
 }
 
-/* ==========================================================================
- * 9. A fresh bench for every case
- * ========================================================================== */
-
 /**
  * The default bench: fresh rules, fresh substreams, a fresh merge-pair board
  * and an unwritten state slot, rebuilt before every case so no case reads
@@ -914,10 +795,6 @@ let bench: AnchorBench;
 beforeEach(() => {
   bench = createBench();
 });
-
-/* ==========================================================================
- * 10. Property one: the relic fires only on its bound hooks
- * ========================================================================== */
 
 describe('the temporal-anchor declaration', () => {
   it('is carried by the board-manipulation family under its identifier', () => {
@@ -970,10 +847,6 @@ describe('the temporal-anchor declaration', () => {
   });
 });
 
-/* ==========================================================================
- * 11. Property two, first half: the anchor recorded at onAfterMove
- * ========================================================================== */
-
 describe('onAfterMove records the position the move settled on', () => {
   it('writes the settled board and score into the relic state slot', () => {
     const settled = bench.grid.serialize();
@@ -988,8 +861,7 @@ describe('onAfterMove records the position the move settled on', () => {
   it('holds a value copy: a later board write leaves the anchor standing',
     () => {
     // A slot holding the live `Grid` or its live `Tile` objects would track
-    // every later write. The comparison below is against the projection
-    // captured BEFORE the write, which is what separates the two cases.
+    // every later write.
     const settled = bench.grid.serialize();
 
     recordHandler()(afterMovePayload(bench), bench.contextFor('onAfterMove'));
@@ -1003,8 +875,6 @@ describe('onAfterMove records the position the move settled on', () => {
 
   it('holds the board in the { size, cells } vocabulary, empty cells null',
     () => {
-    // js/grid.js L102-L117 kept an empty cell as `null` rather than omitting
-    // it, and js/tile.js L19-L27 wrote each occupant as `{ position, value }`.
     recordHandler()(afterMovePayload(bench), bench.contextFor('onAfterMove'));
 
     const held = slotBoard(bench.slot.value);
@@ -1103,10 +973,6 @@ describe('onAfterMove records the position the move settled on', () => {
     expect(rulesFingerprint(bench.config)).toEqual(before);
   });
 });
-
-/* ==========================================================================
- * 12. Property two, second half: the rewind and the onBeforeMove veto
- * ========================================================================== */
 
 /**
  * Arms the anchor: records the settled board, then fills every empty cell
@@ -1332,10 +1198,6 @@ describe('onBeforeMove rewinds and withdraws the move', () => {
   });
 });
 
-/* ==========================================================================
- * 13. The two bindings share one state slot and one subscription
- * ========================================================================== */
-
 describe('the two bindings share the subscription state slot', () => {
   it('carries the run correlation identifier and the subscription identity',
     () => {
@@ -1401,10 +1263,6 @@ describe('the two bindings share the subscription state slot', () => {
   });
 });
 
-/* ==========================================================================
- * 14. The rewind applied: the lattice the recorded command rebuilds
- * ========================================================================== */
-
 /**
  * Runs one anchor cycle through the production bus: a fresh merge-pair board,
  * the settling dispatch, the fill that closes the board, and the move the
@@ -1446,9 +1304,6 @@ describe('the recorded rewind rebuilds the anchored lattice', () => {
 
   it('restores every occupant as a Tile whose coordinates agree with its slot',
     () => {
-    // js/grid.js L89-L91 indexed the store by the tile's OWN coordinates, so a
-    // tile whose coordinates disagree with the slot holding it is silent
-    // corruption rather than a visible fault.
     const cycle = runAnchorCycle(createBusBench());
     const grid = cycle.grid;
     let restored = 0;
@@ -1476,9 +1331,9 @@ describe('the recorded rewind rebuilds the anchored lattice', () => {
 
   it('leaves every restored tile with no previousPosition and no mergedFrom',
     () => {
-    // js/tile.js L10-L17 wrote `previousPosition` only through
-    // `savePosition()`, and js/game_manager.js L113-L120 cleared `mergedFrom`
-    // at the head of every move. A restored tile has done neither.
+    // js/tile.js L10-L17 wrote `previousPosition` only through `savePosition`,
+    // and js/game_manager.js L113-L120 cleared `mergedFrom` at the head of
+    // every move.
     const cycle = runAnchorCycle(createBusBench());
 
     for (const cell of occupants(cycle.grid)) {
@@ -1540,10 +1395,6 @@ describe('the recorded rewind rebuilds the anchored lattice', () => {
     }
   });
 });
-
-/* ==========================================================================
- * 15. Property three: the charge budget, including the zero-charge case
- * ========================================================================== */
 
 describe('the charge budget', () => {
   it('is declared, finite and above zero', () => {
@@ -1716,17 +1567,13 @@ describe('the charge budget', () => {
     expect(grid.availableCells()).toHaveLength(0);
     expect(reprojected(grid)).toEqual(filled);
 
-    // ONE POOL ACROSS BOTH BINDINGS: the spent budget covers the anchoring
+    // One pool across both bindings: the spent budget covers the anchoring
     // binding too, so no new anchor was recorded either.
     expect(JSON.stringify(busSlot(target))).toBe(spentSlot);
     expect(slotBoard(busSlot(target))).toBeNull();
     expect(liveCharges(target)).toBe(0);
   });
 });
-
-/* ==========================================================================
- * 16. Determinism: the rewind consumes no randomness
- * ========================================================================== */
 
 describe('the anchor is deterministic', () => {
   it('advances no substream cursor across either handler', () => {
@@ -1760,10 +1607,6 @@ describe('the anchor is deterministic', () => {
     }
   });
 });
-
-/* ==========================================================================
- * 17. The declaration is left exactly as it shipped
- * ========================================================================== */
 
 describe('the catalogue declaration survives the suite unchanged', () => {
   it('is frozen at the declaration and at its handler table', () => {

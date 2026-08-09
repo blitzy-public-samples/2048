@@ -1,6 +1,6 @@
-// Keyboard binding table and the shared contracts of the input layer: the event
-// names and their payloads, the bindable actions, the input contexts, the
-// binding table, its serialised form and the reporter interface.
+// Keyboard binding table and the shared contracts of the input layer: the
+// event names and their payloads, the bindable actions, the input contexts,
+// the binding table, its serialised form and the reporter interface.
 //
 // The direction encoding 0 up / 1 right / 2 down / 3 left is the encoding the
 // engine's direction-vector map reads, and the event names are the ones the
@@ -10,50 +10,8 @@
 // reads no DOM and touches no storage. Its functions are pure, except that the
 // deserialising helpers call into the injected `InputReporter`.
 //
-// The persisted-keymap limits are declared here as well: the byte limit the
-// persistence layer applies before parsing, and the property-count,
-// entries-per-list and string-length limits `deserializeKeymap` applies to a
-// parsed payload. `createSafeInputReporter` is the containment boundary every
-// report in src/input/ leaves through.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-KEYMAP-01  js/keyboard_input_manager.js  the `event.which` code map,
-//                 L37-L50                       ported as the default binding
-//                                               table keyed on
-//                                               `KeyboardEvent.key` and
-//                                               `KeyboardEvent.code`
-//   TR-KEYMAP-02  js/keyboard_input_manager.js  the three event names, ported
-//                 L9-L11, L54-L70               as `INPUT_EVENT_NAMES` and
-//                                               `InputEventPayload`
-//   TR-KEYMAP-03  js/game_manager.js L104-L116  the direction encoding
-//                                               0 up / 1 right / 2 down /
-//                                               3 left, declared here as
-//                                               `Direction`
-//   TR-KEYMAP-04  target-only row               `INPUT_ACTIONS`, `MoveAction`
-//                                               and `directionForAction`
-//   TR-KEYMAP-05  target-only row               `INPUT_CONTEXTS` and the
-//                                               per-context binding resolution
-//   TR-KEYMAP-06  target-only row               the remapping surface and the
-//                                               serialised keymap with its
-//                                               parse limits
-//   TR-KEYMAP-07  target-only row               `InputReporter` and
-//                                               `createSafeInputReporter`
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-KEYMAP-01  bindings keyed on `KeyboardEvent.key` and
-//                 `KeyboardEvent.code`, with no numeric code read
-//   DL-KEYMAP-02  the direction encoding kept as the bare number the engine
-//                 consumes
-//   DL-KEYMAP-03  the parse limits applied to a persisted keymap before and
-//                 after parsing
-//   DL-KEYMAP-04  the input layer's contracts declared in this leaf module, so
-//                 src/input/ imports nothing outside itself for them
-
-/* --------------------------------------------------------------------------
- * Directions
- * ----------------------------------------------------------------------- */
+// Decisions: DL-KEYMAP-01, DL-KEYMAP-02, DL-KEYMAP-03, DL-KEYMAP-04
+// (docs/DECISION_LOG.md).
 
 /** A board direction, carried as the bare number the engine consumes. */
 export type Direction = 0 | 1 | 2 | 3;
@@ -69,10 +27,6 @@ export const DIRECTION_DOWN = 2;
 
 /** Leftward move. */
 export const DIRECTION_LEFT = 3;
-
-/* --------------------------------------------------------------------------
- * Emitted event names and payloads
- * ----------------------------------------------------------------------- */
 
 /** Every event name the input layer emits, in declaration order. */
 export const INPUT_EVENT_NAMES = [
@@ -102,10 +56,6 @@ export type InputEventPayload = {
         ? string | undefined
         : undefined;
 };
-
-/* --------------------------------------------------------------------------
- * Bindable actions
- * ----------------------------------------------------------------------- */
 
 /**
  * Every bindable action, in the order the settings panel and the on-screen
@@ -146,7 +96,9 @@ export const MOVE_ACTION_DIRECTIONS: Readonly<Record<MoveAction, Direction>> =
     moveLeft: DIRECTION_LEFT,
   });
 
-/** The four movement actions, in the order the direction encoding numbers them. */
+/**
+ * The four movement actions, in the order the direction encoding numbers them.
+ */
 export const MOVE_ACTIONS: readonly MoveAction[] = Object.freeze([
   'moveUp',
   'moveRight',
@@ -178,10 +130,6 @@ export function directionForAction(action: InputAction): Direction | null {
   return isMoveAction(action) ? MOVE_ACTION_DIRECTIONS[action] : null;
 }
 
-/* --------------------------------------------------------------------------
- * Binding contexts
- * ----------------------------------------------------------------------- */
-
 /** Every context a binding can be active in. */
 export const INPUT_CONTEXTS = ['game', 'overlay', 'textEntry'] as const;
 
@@ -204,19 +152,9 @@ function toInputContext(value: string): InputContext | null {
   return null;
 }
 
-/* --------------------------------------------------------------------------
- * Binding and keymap shapes
- * ----------------------------------------------------------------------- */
-
 /** One action and the keys that trigger it. */
 export interface InputBindingSlot {
-  /**
-   * Zero-based payload index this slot publishes.
-   *
-   * Carried on the slot rather than derived from `keys` or `codes`, so an
-   * action whose payload addresses one of several targets keeps addressing the
-   * right one after a remap to keys that carry no ordinal at all.
-   */
+  /** Zero-based payload index this slot publishes. */
   readonly index: number;
 
   /**
@@ -258,20 +196,10 @@ export interface InputBinding {
    */
   readonly preventDefault: boolean;
 
-  /**
-   * Whether a held Alt, Control, Meta or Shift key suppresses the binding.
-   */
+  /** Whether a held Alt, Control, Meta or Shift key suppresses the binding. */
   readonly modifierSuppressed?: boolean;
 
-  /**
-   * Per-slot payload indices, for an action whose payload is an index.
-   *
-   * `selectReward` and `activateRelic` publish a zero-based index naming which
-   * offer or relic the press addresses. A slot states that index explicitly
-   * alongside the keys that select it, so the index survives a remap onto keys
-   * that carry no digit. Absent, or matching no slot, the action publishes
-   * index 0.
-   */
+  /** Per-slot payload indices, for an action whose payload is an index. */
   readonly slots?: readonly InputBindingSlot[];
 }
 
@@ -320,10 +248,6 @@ export type SerializedKeymap = {
   readonly [K in InputAction]: SerializedBinding;
 };
 
-/* --------------------------------------------------------------------------
- * Report sink
- * ----------------------------------------------------------------------- */
-
 /** Severity of a report. */
 export type InputReportLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -362,24 +286,16 @@ export interface InputReporter {
   /**
    * Records a caught value, carried UNCONVERTED.
    *
-   * The channel that exists so no module under src/input/ has to reduce a
-   * caught value to text of its own. `thrown` is `unknown` and is passed
-   * through verbatim, so whatever the sink is — the logger-backed adapter,
-   * a test double, a console — decides how much of the value to keep, and
-   * an `Error`'s `stack`, its `cause` chain and a non-`Error` throwable's
-   * own structure all survive the boundary instead of being flattened to a
-   * name and a message here.
-   *
-   * Optional, so a sink written before this channel existed still
-   * satisfies the contract; `createSafeInputReporter` fills it in and
-   * every caller reaches it through that wrapper.
+   * Optional, so a sink written before this channel existed still satisfies
+   * the contract; `createSafeInputReporter` fills it in and every caller
+   * reaches it through that wrapper.
    *
    * @param level Severity.
    * @param message Human-readable message.
    * @param thrown The caught value, exactly as it was caught. `null` and
    *   `undefined` are values a throw can carry and are passed on as such.
-   * @param fields Optional structured fields describing where it was
-   *   caught. Categorical values only; no keystroke and no free text.
+   * @param fields Optional structured fields describing where it was caught.
+   *   Categorical values only; no keystroke and no free text.
    */
   failure?(
     level: InputReportLevel,
@@ -435,11 +351,6 @@ const MAX_THROWN_TEXT_LENGTH = 200;
 /**
  * Reads one string property off a value without trusting the value.
  *
- * Total: the membership test and the read are both contained, because a
- * `Proxy` can throw from its `has` or `get` trap and an accessor — including
- * an `Error` subclass's own `name` or `message` — can throw from its getter.
- * Either throw is read as an absent property.
- *
  * @param source Value to read from.
  * @param field Property name to read.
  * @returns The property value, capped in length, or `undefined` where it is
@@ -469,12 +380,6 @@ function readThrownString(
 /**
  * Reduces a caught value to two report fields, for the one path that needs
  * text: a sink that implements no `failure` channel.
- *
- * THE INPUT LAYER'S ONLY SUCH REDUCTION. It is total — it accepts any value,
- * including a `Proxy` whose traps throw, an object whose `toString` throws
- * and a symbol, returns on every path and throws on none — and both fields
- * are capped. Every other path carries the caught value unconverted through
- * `InputReporter.failure`, so nothing else in src/input/ converts one.
  *
  * @param thrown The caught value, of any type.
  * @returns `errorName` and `errorMessage`, both populated.
@@ -510,20 +415,13 @@ function describeThrownForFields(thrown: unknown): InputReportFields {
  *
  * A `log`, `count`, `failure`, `startSpan` or span `end` that throws is
  * swallowed at this boundary: the throw does not reach the input path that
- * reported, and it is not reported back through the same sink. A
- * `startSpan` that throws yields the no-op span instead.
- *
- * `failure` is also COMPLETED here: the returned reporter always implements
- * the channel, and a wrapped sink that implements none of its own still
- * receives the report — through its `log` channel, with the caught value's
- * own name and message added as fields by the one total reduction in this
- * module. A module under src/input/ therefore reports a caught value
- * through `failure` and never flattens one itself.
+ * reported, and it is not reported back through the same sink. A `startSpan`
+ * that throws yields the no-op span instead.
  *
  * Every function in this module that accepts a reporter, and
- * `attachTouchInput` in src/input/touch-input.ts, wraps its reporter here
- * once before using it, so an input event, a keymap load and a gesture are
- * all unaffected by a faulty sink.
+ * `attachTouchInput` in src/input/touch-input.ts, wraps its reporter here once
+ * before using it, so an input event, a keymap load and a gesture are all
+ * unaffected by a faulty sink.
  *
  * @param reporter Reporter to contain.
  * @returns A reporter delegating to `reporter` and throwing for nothing.
@@ -608,10 +506,6 @@ export function createSafeInputReporter(
   });
 }
 
-/* --------------------------------------------------------------------------
- * Table construction
- * ----------------------------------------------------------------------- */
-
 /**
  * Builds one value per action.
  *
@@ -654,9 +548,6 @@ export const RELIC_SLOT_COUNT = 9;
 /**
  * Builds one indexed slot per digit, from `1` up.
  *
- * The digits are the DEFAULT keys, and each slot states its index alongside
- * them; a remap replaces the keys and keeps the index.
- *
  * @param count How many slots to build.
  * @returns The frozen slot list, index 0 first.
  */
@@ -685,8 +576,8 @@ const REWARD_SLOTS = digitSlots(REWARD_SLOT_COUNT);
 const RELIC_SLOTS = digitSlots(RELIC_SLOT_COUNT);
 
 /**
- * Returns a deeply frozen copy of `binding`, with `modifierSuppressed` resolved
- * to an explicit boolean and each array copied before freezing.
+ * Returns a deeply frozen copy of `binding`, with `modifierSuppressed`
+ * resolved to an explicit boolean and each array copied before freezing.
  *
  * @param binding Binding to copy.
  * @returns The frozen copy.
@@ -788,8 +679,6 @@ const DEFAULT_BINDING_TABLE: Keymap = {
   // `C` for continue. js/keyboard_input_manager.js bound no key to it at all —
   // `.keep-playing-button` at index.html L51 was the only way to reach it — so
   // this is the key the action gains, and it is remappable like every other.
-  // Nothing else is bound to C in any context, and `restart`'s `r` is bound in
-  // `'game'` alone, so the terminal overlay carries no conflict.
   keepPlaying: {
     action: 'keepPlaying',
     keys: ['c'],
@@ -842,8 +731,7 @@ const DEFAULT_BINDING_TABLE: Keymap = {
   },
 
   // Activated through the relic tray's own controls, and by a key bound to one
-  // of the indexed slots below. No key is bound by default, so the slots carry
-  // the indices a remap will address.
+  // of the indexed slots below.
   activateRelic: {
     action: 'activateRelic',
     keys: [],
@@ -891,10 +779,6 @@ const DEFAULT_BINDING_TABLE: Keymap = {
 export const DEFAULT_KEY_BINDINGS: Keymap = buildKeymap(
   (action) => DEFAULT_BINDING_TABLE[action]
 );
-
-/* --------------------------------------------------------------------------
- * Resolution
- * ----------------------------------------------------------------------- */
 
 /** A binding matched against an event. */
 export interface ResolvedInput {
@@ -999,7 +883,7 @@ function asKeyString(value: unknown): string {
  * @param keymap Table to resolve against.
  * @param context Context currently active.
  * @returns The match, or `null` when no binding applies. `null` is also the
- * result for a recognised key held with a suppressing modifier.
+ *   result for a recognised key held with a suppressing modifier.
  */
 export function resolveInput(
   event: KeyboardEvent,
@@ -1037,9 +921,6 @@ export function resolveInput(
 
 /**
  * Reads the payload index a press addresses off the binding's slots.
- *
- * The index comes off the slot, never off the text of the key: a slot remapped
- * from `1` to `F1` still addresses the offer it always addressed.
  *
  * @param binding Binding that matched.
  * @param lowerCasedKey Lower-cased `KeyboardEvent.key`.
@@ -1096,10 +977,6 @@ export function resolveAction(
   return resolved === null ? null : resolved.action;
 }
 
-/* --------------------------------------------------------------------------
- * Remapping
- * ----------------------------------------------------------------------- */
-
 /**
  * Merges an override onto a binding.
  *
@@ -1131,7 +1008,7 @@ function mergeBinding(
  * Builds a keymap from the defaults and optional per-action overrides.
  *
  * @param overrides Per-action overrides. Omitting the argument returns
- * `DEFAULT_KEY_BINDINGS` itself, already frozen.
+ *   `DEFAULT_KEY_BINDINGS` itself, already frozen.
  * @returns The frozen keymap.
  */
 export function createKeymap(overrides?: KeymapOverrides): Keymap {
@@ -1170,8 +1047,8 @@ export function remapAction(
  * @param keymap Table to search.
  * @param key Key or code to look for.
  * @param context Context to search within.
- * @param code `KeyboardEvent.code` of the same keystroke, where the caller has
- *   it. Omitted, only `key` is looked for, which is what every caller that
+ * @param code `KeyboardEvent.code` of the same keystroke, where the caller
+ *   has it. Omitted, only `key` is looked for, which is what every caller that
  *   passes a single string already means.
  * @returns The occupying binding, or `null` when the key is free.
  */
@@ -1183,10 +1060,7 @@ export function findBindingConflict(
 ): InputBinding | null {
   const lowerCasedKey = key.toLowerCase();
 
-  // A PHYSICAL COLLISION `key` ALONE CANNOT SEE. On an alternate layout the
-  // character a key produces differs from the character the bound key produced,
-  // while `KeyboardEvent.code` is identical — so a capture that reports a free
-  // `key` can still land on a key another action already holds by code.
+  // A PHYSICAL COLLISION `key` alone cannot see.
   const physicalCode = code === undefined ? '' : code;
 
   for (const action of INPUT_ACTIONS) {
@@ -1200,9 +1074,6 @@ export function findBindingConflict(
       return binding;
     }
 
-    // Only the code list, and only where the code says something `key` did not:
-    // the check above already compared `key` against both lists, so this adds
-    // conflicts rather than replacing any.
     if (
       physicalCode !== '' &&
       physicalCode !== key &&
@@ -1219,7 +1090,8 @@ export function findBindingConflict(
  * Enumerates the bindings of a keymap in `INPUT_ACTIONS` order.
  *
  * @param keymap Table to enumerate.
- * @param context When given, only bindings active in that context are returned.
+ * @param context When given, only bindings active in that context are
+ *   returned.
  * @returns A frozen list of bindings.
  */
 export function listBindings(
@@ -1238,10 +1110,6 @@ export function listBindings(
 
   return Object.freeze(bindings);
 }
-
-/* --------------------------------------------------------------------------
- * Human-readable labels
- * ----------------------------------------------------------------------- */
 
 /** Label returned for an action that no key triggers. */
 const UNBOUND_LABEL = 'Not bound';
@@ -1310,7 +1178,8 @@ function labelForKey(key: string): string {
  * Renders a `KeyboardEvent.code` value as spoken text.
  *
  * @param code Code value.
- * @returns The label, for example `'W'` for `'KeyW'` and `'1'` for `'Digit1'`.
+ * @returns The label, for example `'W'` for `'KeyW'` and `'1'` for
+ *   `'Digit1'`.
  */
 function labelForCode(code: string): string {
   if (code.startsWith(LETTER_CODE_PREFIX)) {
@@ -1328,8 +1197,8 @@ function labelForCode(code: string): string {
  * Joins labels into one spoken phrase.
  *
  * @param labels Labels to join, already de-duplicated.
- * @returns `UNBOUND_LABEL` for an empty list, the single label for one, `'A or
- * B'` for two, and `'A, B, or C'` for three or more.
+ * @returns `UNBOUND_LABEL` for an empty list, the single label for one, `'A
+ *   or B'` for two, and `'A, B, or C'` for three or more.
  */
 function joinLabels(labels: readonly string[]): string {
   if (labels.length === 0) {
@@ -1382,10 +1251,6 @@ export function describeBinding(keymap: Keymap, action: InputAction): string {
 
   return joinLabels(labels);
 }
-
-/* --------------------------------------------------------------------------
- * Serialisation
- * ----------------------------------------------------------------------- */
 
 /**
  * Projects a keymap onto plain data.
@@ -1453,21 +1318,22 @@ function describeRawType(value: unknown): string {
 /** Narrows a string to a known action name. */
 const INPUT_ACTION_SET: ReadonlySet<string> = new Set(INPUT_ACTIONS);
 
-/* --------------------------------------------------------------------------
- * Payload limits
- * ----------------------------------------------------------------------- */
-
 /**
  * Largest persisted keymap text, in bytes, that may be parsed.
  *
  * Web Storage charges two bytes per UTF-16 code unit, and
- * `measureKeymapPayloadBytes()` measures the same way. A serialised default
- * keymap is roughly 2 KB, so this leaves room for a fully remapped table
- * with several bindings per action.
+ * `measureKeymapPayloadBytes` measures the same way. A serialised default
+ * keymap is roughly 2 KB, so this leaves room for a fully remapped table with
+ * several bindings per action.
  *
  * The persistence layer applies this limit to the stored text BEFORE
  * parsing it; `deserializeKeymap()` receives already-parsed data and cannot
  * measure the text it came from.
+ *
+ * THE CALLER IS THE COMPOSITION ROOT. `readStoredKeymap()` in src/main.ts hands
+ * `isKeymapPayloadWithinLimit` to `readJson()` of
+ * src/storage/local-storage-manager.ts, which applies it to the raw string and
+ * refuses an oversized value with nothing parsed. DL-KEYMAP-03.
  */
 export const MAX_KEYMAP_PAYLOAD_BYTES = 16_384;
 
@@ -1475,56 +1341,48 @@ export const MAX_KEYMAP_PAYLOAD_BYTES = 16_384;
  * Largest number of own properties a persisted keymap may carry.
  *
  * `INPUT_ACTIONS` has fourteen members. The allowance above that absorbs a
- * payload written by a future version carrying actions this one does not
- * know, while bounding the unknown-action scan.
+ * payload written by a future version carrying actions this one does not know,
+ * while bounding the unknown-action scan.
  */
 export const MAX_KEYMAP_PROPERTIES = 32;
 
 /**
- * Largest number of entries one binding's `keys`, `codes` or `contexts`
- * list may carry.
+ * Largest number of entries one binding's `keys`, `codes` or `contexts` list
+ * may carry.
  *
- * Every entry of `keys` and `codes` is compared on every keypress that
- * reaches `resolveInput`, so this bounds the per-keypress scan for the
- * lifetime of the loaded table. The widest default binding carries three.
+ * Every entry of `keys` and `codes` is compared on every keypress that reaches
+ * `resolveInput`, so this bounds the per-keypress scan for the lifetime of the
+ * loaded table. The widest default binding carries three.
  */
 export const MAX_KEYMAP_ENTRIES_PER_LIST = 8;
 
 /**
- * Longest string a persisted `keys`, `codes` or `contexts` entry may
- * carry.
+ * Longest string a persisted `keys`, `codes` or `contexts` entry may carry.
  *
  * The longest value any default binding carries is `'ArrowRight'`, at ten
- * characters; the longest `KeyboardEvent.code` in general use is a little
- * over twenty.
+ * characters; the longest `KeyboardEvent.code` in general use is a little over
+ * twenty.
  */
 export const MAX_KEYMAP_STRING_LENGTH = 32;
 
 /**
  * Most slots one persisted binding may declare.
  *
- * Bounds the indexed-payload lists the same way
- * `MAX_KEYMAP_ENTRIES_PER_LIST` bounds the key and code lists, and admits the
- * widest binding the defaults declare, `activateRelic` at
- * `RELIC_SLOT_COUNT`.
+ * Bounds the indexed-payload lists the same way `MAX_KEYMAP_ENTRIES_PER_LIST`
+ * bounds the key and code lists, and admits the widest binding the defaults
+ * declare, `activateRelic` at `RELIC_SLOT_COUNT`.
  */
 export const MAX_KEYMAP_SLOTS = 16;
 
 /**
- * Largest number of individual unknown-action reports one payload
- * produces. Past this count the names are no longer reported one by one
- * and a single total is reported instead.
+ * Largest number of individual unknown-action reports one payload produces.
  */
 export const MAX_UNKNOWN_ACTION_REPORTS = 4;
 
 /** Bytes charged per UTF-16 code unit, matching Web Storage accounting. */
 const BYTES_PER_UTF16_UNIT = 2;
 
-/**
- * Longest text a report carries for a value read out of the payload. A
- * property name comes from outside and is truncated to this many
- * characters, with an ellipsis appended, before it reaches a sink.
- */
+/** Longest text a report carries for a value read out of the payload. */
 const MAX_REPORTED_TEXT_LENGTH = 48;
 
 /**
@@ -1547,15 +1405,7 @@ export type KeymapLimitName =
   | 'stringLength'
   | 'slotCount';
 
-/**
- * One broken limit, as a report carries it.
- *
- * Carries the limit's name, the measurement that broke it, the limit
- * itself, and — where the violation was inside one binding — the action and
- * field it was found in. No value read out of the payload is carried, so a
- * report of a hostile payload is bounded in size whatever that payload
- * contains.
- */
+/** One broken limit, as a report carries it. */
 export interface KeymapLimitViolation {
   /** Which limit was broken. */
   readonly limit: KeymapLimitName;
@@ -1595,9 +1445,10 @@ export function measureKeymapPayloadBytes(text: string): number {
 /**
  * Reports whether a persisted keymap text is small enough to parse.
  *
- * Pure, total, and cheap: it reads the text's length and nothing else. The
- * persistence layer calls this before `JSON.parse`, so an oversized payload
- * never becomes an object graph.
+ * Pure, total, and cheap: it reads the text's length and nothing else. It is
+ * handed to `readJson()` of src/storage/local-storage-manager.ts by
+ * `readStoredKeymap()` in src/main.ts, which applies it to the stored string
+ * before `JSON.parse`, so an oversized payload never becomes an object graph.
  *
  * @param text Stored text, before parsing.
  * @returns `true` when the text is within `MAX_KEYMAP_PAYLOAD_BYTES`.
@@ -1608,14 +1459,6 @@ export function isKeymapPayloadWithinLimit(text: string): boolean {
 
 /**
  * Finds the first declared limit a parsed payload breaks.
- *
- * Walks the payload's own properties in key order and, for each one that is
- * a record, the three string-list fields in `BOUNDED_LIST_FIELDS`. Returns
- * as soon as a limit is broken, so the walk is bounded by the limits
- * themselves.
- *
- * Reads lengths only: no key, string entry or other payload value is
- * carried in the result.
  *
  * @param raw Already-parsed persisted value.
  * @returns The first violation found, or `null` when the payload is within
@@ -1761,8 +1604,8 @@ function findSlotLimitViolation(
  * @param field Property name.
  * @param action Action the record describes, for reporting.
  * @param reporter Sink for rejected values.
- * @returns The accepted strings, or `null` when the property is absent or not
- * an array. An explicitly empty array is returned as such.
+ * @returns The accepted strings, or `null` when the property is absent or
+ *   not an array. An explicitly empty array is returned as such.
  */
 function readStringList(
   source: Record<string, unknown>,
@@ -1820,8 +1663,8 @@ function readStringList(
  * @param source Record to read from.
  * @param action Action the record describes, for reporting.
  * @param reporter Sink for rejected values.
- * @returns The accepted contexts, or `null` when the property is absent, not an
- * array, or names no known context.
+ * @returns The accepted contexts, or `null` when the property is absent, not
+ *   an array, or names no known context.
  */
 function readContextList(
   source: Record<string, unknown>,
@@ -1869,7 +1712,8 @@ function readContextList(
  * @param field Property name.
  * @param action Action the record describes, for reporting.
  * @param reporter Sink for rejected values.
- * @returns The boolean, or `null` when the property is absent or not a boolean.
+ * @returns The boolean, or `null` when the property is absent or not a
+ *   boolean.
  */
 function readBoolean(
   source: Record<string, unknown>,
@@ -1954,15 +1798,11 @@ function readBinding(
 /**
  * Reads a persisted binding's indexed slots.
  *
- * A slot is accepted only with a finite, non-negative integer `index` and at
- * least one usable key or code; anything else is reported and dropped, so a
- * malformed slot cannot publish a payload naming a target that does not exist.
- *
  * @param source Persisted binding to read from.
  * @param action Action the binding describes, for reporting.
  * @param reporter Sink for rejected values.
- * @returns The accepted slots, or `null` when the property is absent or not an
- *   array. An explicitly empty array is returned as such.
+ * @returns The accepted slots, or `null` when the property is absent or not
+ *   an array. An explicitly empty array is returned as such.
  */
 function readSlotList(
   source: Record<string, unknown>,
@@ -2099,7 +1939,8 @@ function readSlotStrings(value: unknown): string[] {
  *   read into the result, and the report carries the broken limit's name and
  *   measurements rather than any payload content. The byte limit,
  *   `MAX_KEYMAP_PAYLOAD_BYTES`, belongs to the persistence layer and is applied
- *   through `isKeymapPayloadWithinLimit()` before the text is parsed.
+ *   through `isKeymapPayloadWithinLimit()` before the text is parsed —
+ *   `readStoredKeymap()` in src/main.ts is the caller that applies it.
  *
  *   Report volume is bounded too: at most `MAX_UNKNOWN_ACTION_REPORTS` unknown
  *   action names are reported individually, and any remainder is reported as one
@@ -2107,8 +1948,8 @@ function readSlotStrings(value: unknown): string[] {
  *
  * @param raw Already-parsed persisted value, of any shape.
  * @param reporter Sink for fallback reports. Defaults to `NOOP_REPORTER`.
- * @returns A frozen keymap. `DEFAULT_KEY_BINDINGS` is returned whole when `raw`
- *   cannot be read at all or breaks a declared limit.
+ * @returns A frozen keymap. `DEFAULT_KEY_BINDINGS` is returned whole when
+ *   `raw` cannot be read at all or breaks a declared limit.
  */
 export function deserializeKeymap(
   raw: unknown,

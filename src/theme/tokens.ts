@@ -1,69 +1,19 @@
 /**
- * Design tokens for the TypeScript layer, mirroring style/_tokens.scss: the two
- * files carry the same token names and the same values, so the stylesheet and
- * the Three.js materials cannot drift. Colours the stylesheet computes with a
- * Sass function are carried here in their compiled form.
+ * Design tokens for the TypeScript layer, mirroring style/_tokens.scss: the
+ * two files carry the same token names and the same values, so the stylesheet
+ * and the Three.js materials cannot drift. Colours the stylesheet computes
+ * with a Sass function are carried here in their compiled form.
  *
- * Declarations and pure functions only: this module reads no DOM and carries
- * exactly one import, `DEFAULT_BOARD_SIZE` from src/config/default-config.ts,
- * the repository's single board-size declaration. That module imports only
- * types, reads no DOM and performs no I/O, so this one stays importable from a
- * test with no DOM, no WebGL and no browser. Numeric tokens are unitless, px
- * for lengths and ms for durations, with the unit named in each declaration's
- * comment.
+ * Section 9 emits `sassTokenProjection` as a Sass map; vite.config.ts passes
+ * it to Dart Sass as `$blitzy-token-projection`, and style/_tokens.scss
+ * resolves each of its tokens through it and raises a Sass `@error` where a
+ * projected value and that file's own fallback disagree.
  *
- * Section 9 emits `sassTokenProjection` as a Sass map; vite.config.ts passes it
- * to Dart Sass as `$blitzy-token-projection`, and style/_tokens.scss resolves
- * each of its tokens through it and raises a Sass `@error` where a projected
- * value and that file's own fallback disagree.
- *
- * One traceability row of docs/TRACEABILITY_MATRIX.md apiece. TOKEN is one area
- * across both halves of the mirror, so these ordinals continue the ones
- * style/_tokens.scss carries:
- *   TR-TOKEN-02  style/main.scss L4-L22   the fourteen-token block, mirrored
- *                                        here name for name and value for value
- *   TR-TOKEN-03  style/main.scss L6-L7    `$grid-row-cells` and `$tile-size`,
- *                                        mirrored as `gridRowCells` and the
- *                                        geometry scales, with the board size
- *                                        read from src/config/default-config.ts
- *   TR-TOKEN-04  style/main.scss L475-L548 the mobile scale, mirrored as the
- *                                        second `GeometryScale`
- *   TR-TOKEN-05  style/main.scss L404-L430 the tile numeral sizes, mirrored as
- *                                        `tileNumeralSize`
- *   TR-TOKEN-06  style/helpers.scss       the Sass colour derivations, carried
- *                                        here in their compiled form as
- *                                        `derivedColors`
- *   TR-TOKEN-07  target-only row          `depthScale`, the extrusion depths
- *                                        expressed as arithmetic on
- *                                        `gridSpacing`
- *   TR-TOKEN-08  target-only row          `sassTokenProjection`, the map
- *                                        vite.config.ts passes to Dart Sass
- *   TR-TOKEN-12  target-only row          `neutralLightColor`, the neutral
- *                                        white point of the 2.5D lighting rig,
- *                                        the one token the stylesheet has no
- *                                        counterpart for
- *
- * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
- * only so the construct can be found from the log:
- *   DL-TOKEN-02  the token layer mirrored in TypeScript, with the projection
- *                and the stylesheet's own fallbacks cross-checked by a Sass
- *                `@error`
- *   DL-TOKEN-03  colours the stylesheet computes with a Sass function carried
- *                here in compiled form
- *   DL-TOKEN-04  exactly one import, so the module stays importable with no
- *                DOM, no WebGL and no browser
- *   DL-TOKEN-07  the renderer's neutral white point declared as a token here
- *                and stated per palette as `ThemePalette.neutralLight`, and
- *                kept out of `sassTokenProjection` because the stylesheet
- *                declares no light
+ * Decisions: DL-TOKEN-02, DL-TOKEN-03, DL-TOKEN-04, DL-TOKEN-07
+ * (docs/DECISION_LOG.md).
  */
 
-// The specifier carries its `.ts` extension because vite.config.ts imports this
-// module for the Sass token projection and its native config loader resolves no
-// extensionless specifier. Modules outside that chain are imported without one.
 import { DEFAULT_BOARD_SIZE } from '../config/default-config.ts';
-
-/* ===== 1. Core tokens ===== */
 
 /** Board edge and container width, in px. */
 export const fieldWidth = 500;
@@ -81,11 +31,7 @@ export const gridSpacing = 15;
  */
 export const gridRowCells = DEFAULT_BOARD_SIZE;
 
-/**
- * Rejects an argument that is not a finite number.
- *
- * Module-private guard shared by the exported pure functions below.
- */
+/** Rejects an argument that is not a finite number. */
 function assertFinite(name: string, value: number): void {
   if (!Number.isFinite(value)) {
     throw new RangeError(
@@ -97,8 +43,8 @@ function assertFinite(name: string, value: number): void {
 /**
  * Tile footprint for one scale, in px.
  *
- * @throws RangeError when an argument is not finite, or when `rowCells` is not
- * a positive integer.
+ * @throws RangeError when an argument is not finite, or when `rowCells` is
+ *   not a positive integer.
  */
 export function computeTileSize(
   scaleFieldWidth: number,
@@ -156,14 +102,6 @@ export const tileGoldGlowColor = '#f3d774';
  * The neutral white point of the 2.5D lighting rig: the colour the key light
  * departs from before it warms toward a palette's halo, and the colour of the
  * fill light's sky half.
- *
- * DECLARED HERE rather than in src/render/, and absent from
- * `sassTokenProjection`, because the stylesheet declares no light: this is the
- * one token whose consumer is the renderer alone. It is the hex spelling of the
- * unit channel Three's own `new Color()` produces, so the lighting arithmetic is
- * unchanged by reading it from here. A palette states its own value through
- * `ThemePalette.neutralLight`, and src/render/scene.ts holds this token as the
- * fallback for an entry it cannot parse.
  */
 export const neutralLightColor = '#ffffff';
 
@@ -179,15 +117,11 @@ export const gameContainerBackground = '#bbada0';
  */
 export const transitionSpeed = 100;
 
-/* ===== 2. Literals the stylesheet declares outside the token block ===== */
-
 /** Page background behind the board. */
 export const pageBackground = '#faf8ef';
 
 /** Horizontal-rule colour. */
 export const ruleColor = '#d8d4d0';
-
-/* ===== 3. Colours the stylesheet derives, in compiled form ===== */
 
 /** Colours the stylesheet computes from a core token, in compiled form. */
 export const derivedColors = {
@@ -220,8 +154,6 @@ export const derivedColors = {
 /** Corner radius of the board itself, in px. Resolves to 6. */
 export const boardBorderRadius = tileBorderRadius * 2;
 
-/* ===== 4. Typography ===== */
-
 /**
  * Font stack for the whole user interface.
  *
@@ -233,8 +165,8 @@ export const fontFamily =
 /**
  * Monospace stack for the diagnostics overlay.
  *
- * Mirrors `$diagnostics-font-family`, style/_tokens.scss. System faces only; no
- * web font and no binary asset is added for it.
+ * Mirrors `$diagnostics-font-family`, style/_tokens.scss. System faces only;
+ * no web font and no binary asset is added for it.
  */
 export const monospaceStack =
   'ui-monospace, SFMono-Regular, Menlo, Consolas, ' +
@@ -287,9 +219,9 @@ export const paragraphLineHeight = 1.65;
 /**
  * Tile numeral sizes, in px, at both scales.
  *
- * The stylesheet steps the numeral down as the value gains digits. `default` is
- * the base declaration every tile receives; the three remaining steps override
- * it.
+ * The stylesheet steps the numeral down as the value gains digits. `default`
+ * is the base declaration every tile receives; the three remaining steps
+ * override it.
  */
 export const tileFontSizes = {
   /** Tile values below `tileFontSizeThresholds.threeDigit`. */
@@ -343,40 +275,35 @@ export function tileFontSize(
  * size falls as the board grows — a sixteen-cell desktop cell resolves to
  * roughly 15.31px — while the declared sizes do not, so a numeral three times
  * the height of its own cell was drawn at every board size above four.
- *
- * DERIVED, NOT INVENTED: the largest fraction of its cell any declared numeral
- * occupies at the compiled board size, which is the mobile base numeral at
- * 35 / 57.5 = 0.6087, ahead of the desktop base at 55 / 106.25 = 0.5176.
- * Rounding up to two places keeps the clamp non-binding at four cells for BOTH
- * scales, so the compiled design is reproduced exactly there and the clamp only
- * takes effect at an edge length the design was never authored for.
  */
 export const tileNumeralCellRatio = 0.61;
 
 /**
  * Smallest numeral this scale is willing to draw, in px.
  *
- * Below this a numeral is not legible at all, so a board size that would demand
- * it is served this instead: the cell is then smaller than its numeral, which is
- * visible and reportable, where an unbounded ratio silently produced a numeral
- * of a fraction of a pixel.
+ * Below this a numeral is not legible at all, so a board size that would
+ * demand it is served this instead: the cell is then smaller than its numeral,
+ * which is visible and reportable, where an unbounded ratio silently produced
+ * a numeral of a fraction of a pixel.
  */
 export const minTileNumeralSize = 6;
 
 /**
- * Numeral size for a tile value at one scale, CLAMPED to the resolved cell size.
+ * Numeral size for a tile value at one scale, CLAMPED to the resolved cell
+ * size.
  *
- * `tileFontSize` answers what the stylesheet declares for a value; this answers
- * what fits. The two agree exactly at the four-cell board, where the clamp is
- * never the binding constraint, and diverge as the board grows.
+ * `tileFontSize` answers what the stylesheet declares for a value; this
+ * answers what fits. The two agree exactly at the four-cell board, where the
+ * clamp is never the binding constraint, and diverge as the board grows.
  *
  * @param tileValue Face value the numeral is drawn for.
  * @param scale Which of the two scales to resolve at.
- * @param cellSize Resolved edge length of one cell, in px. A value that is not
- *   a finite number above zero leaves the declared size unclamped, which is the
- *   geometry-unavailable case.
- * @returns The size to draw at, in px, never above the declared size and never
- *   below `minTileNumeralSize` unless the declared size itself is below it.
+ * @param cellSize Resolved edge length of one cell, in px. A value that is
+ *   not a finite number above zero leaves the declared size unclamped, which
+ *   is the geometry-unavailable case.
+ * @returns The size to draw at, in px, never above the declared size and
+ *   never below `minTileNumeralSize` unless the declared size itself is below
+ *   it.
  * @throws RangeError when `tileValue` is not a finite positive number.
  */
 export function tileNumeralSize(
@@ -399,8 +326,6 @@ export function tileNumeralSize(
   return Math.max(Math.min(declared, minTileNumeralSize), fitted);
 }
 
-/* ===== 5. Motion ===== */
-
 /** The easing keywords style/main.scss uses. */
 export type MotionEasing = 'ease' | 'ease-in' | 'ease-in-out';
 
@@ -416,8 +341,8 @@ export type MotionFillMode = 'backwards' | 'both';
  */
 export const motion = {
   /**
-   * Tile movement, declared as a CSS transition and narrowed to `transform`. It
-   * carries no fill mode.
+   * Tile movement, declared as a CSS transition and narrowed to `transform`.
+   * It carries no fill mode.
    */
   movement: {
     duration: transitionSpeed,
@@ -453,8 +378,8 @@ export const motion = {
   },
 
   /**
-   * A newly spawned tile appearing. The `backwards` fill mode holds the tile at
-   * the 0% keyframe until the delay elapses.
+   * A newly spawned tile appearing. The `backwards` fill mode holds the tile
+   * at the 0% keyframe until the delay elapses.
    */
   appear: {
     duration: 200,
@@ -469,8 +394,7 @@ export const motion = {
 
   /**
    * A merged tile popping. The `backwards` fill mode holds the tile at the 0%
-   * keyframe until the delay elapses. `mid` carries the 50% overshoot, at
-   * `offset` through the duration.
+   * keyframe until the delay elapses.
    */
   pop: {
     duration: 200,
@@ -485,14 +409,10 @@ export const motion = {
   },
 } as const;
 
-/* ==========================================================================
- * 6. Z-index ladder — style/main.scss, extended above its ceiling
- * ========================================================================== */
-
 /**
  * The stacking ladder. The first six slots are the established ladder and are
  * not renumbered, even where the WebGL canvas takes over the layers they
- * occupy. The last four sit above that ceiling of 100.
+ * occupy.
  */
 export const zIndex = {
   gridContainer: 1,
@@ -520,8 +440,6 @@ export const zIndex = {
   diagnosticsOverlay: 500,
 } as const;
 
-/* ===== 7. Geometry, at both scales ===== */
-
 /** The lengths one scale resolves to, in px. */
 export interface GeometryScale {
   /** Board edge and container width. */
@@ -541,8 +459,8 @@ export interface GeometryScale {
 }
 
 /**
- * The lengths a scale is declared with, before `tileSize` and `tileBoxSize` are
- * derived from them.
+ * The lengths a scale is declared with, before `tileSize` and `tileBoxSize`
+ * are derived from them.
  */
 export interface GeometryScaleInput {
   readonly fieldWidth: number;
@@ -555,8 +473,8 @@ export interface GeometryScaleInput {
 /**
  * Resolves one scale from the lengths it is declared with.
  *
- * @throws RangeError when an input is not finite, or when `gridRowCells` is not
- * a positive integer.
+ * @throws RangeError when an input is not finite, or when `gridRowCells` is
+ *   not a positive integer.
  */
 export function createGeometryScale(
   input: GeometryScaleInput,
@@ -595,18 +513,11 @@ export const desktopGeometry = /* @__PURE__ */ createGeometryScale({
   gameContainerMarginTop,
 });
 
-/**
- * Board edge and container width at the mobile scale, in px.
- *
- * Projected into `$mobile-field-width` of style/_tokens.scss, which the
- * `smaller($mobile-threshold)` block of style/main.scss reads instead of
- * restating the length.
- */
+/** Board edge and container width at the mobile scale, in px. */
 export const mobileFieldWidth = 280;
 
 /**
- * Board padding and the gap between adjacent cells at the mobile
- * scale, in px.
+ * Board padding and the gap between adjacent cells at the mobile scale, in px.
  *
  * Projected into `$mobile-grid-spacing` of style/_tokens.scss, read by the
  * `smaller($mobile-threshold)` block of style/main.scss.
@@ -614,8 +525,8 @@ export const mobileFieldWidth = 280;
 export const mobileGridSpacing = 10;
 
 /**
- * Offset between the board and the content above it at the mobile
- * scale, in px.
+ * Offset between the board and the content above it at the mobile scale, in
+ * px.
  *
  * Projected into `$mobile-game-container-margin-top` of style/_tokens.scss,
  * read by the `smaller($mobile-threshold)` block of style/main.scss.
@@ -663,13 +574,10 @@ export function tilePositionStep(
   return Math.floor((scale.tileSize + scale.gridSpacing) * cellIndex);
 }
 
-/* ==========================================================================
- * 8. Depth scale — new, declared as multiples of `gridSpacing`
- * ========================================================================== */
-
 /**
- * Extrusion depths for the WebGL board, in px, each an arithmetic expression on
- * `gridSpacing`. Lengths only: camera and lighting values live in src/render.
+ * Extrusion depths for the WebGL board, in px, each an arithmetic expression
+ * on `gridSpacing`. Lengths only: camera and lighting values live in
+ * src/render.
  */
 export const depthScale = {
   /** `$depth-bevel`, style/_tokens.scss. Resolves to 3. */
@@ -682,35 +590,22 @@ export const depthScale = {
   tile: gridSpacing * 2,
 } as const;
 
-/* ===== 9. Sass projection — the build-time bridge into style/_tokens.scss ===== */
-
-/**
- * Name of the Sass variable the projection is delivered as.
- *
- * style/main.scss declares `$blitzy-token-projection: () !default`
- * ahead of its `@use` block and passes it to style/_tokens.scss as that
- * module's `$projection` configuration. The `!default` is what lets a
- * plain `sass style/main.scss` invocation, which prepends nothing,
- * compile against style/_tokens.scss's own fallbacks.
+/*
+ * ===== 9. Sass projection — the build-time bridge into style/_tokens.scss
+ * =====
  */
+
+/** Name of the Sass variable the projection is delivered as. */
 export const SASS_PROJECTION_VARIABLE = '$blitzy-token-projection';
 
 /**
- * Every token style/_tokens.scss resolves through the projection, keyed
- * by the kebab-case name it looks the value up under, valued as the
- * Sass literal that name resolves to.
+ * Every token style/_tokens.scss resolves through the projection, keyed by the
+ * kebab-case name it looks the value up under, valued as the Sass literal that
+ * name resolves to.
  *
- * The set is the primitive half of the token layer: the lengths,
- * counts, colours, durations and z-index slots that are stated rather
- * than computed. style/_tokens.scss derives `$tile-size`,
- * `$mobile-threshold`, `$tile-gold-glow-color` and the depth scale from
- * these, so those four are absent here by construction. The font
- * stacks are declared in style/_tokens.scss and mirrored by
- * `monospaceStack` above.
- *
- * Each value is written with the unit its SCSS counterpart carries: px
- * for lengths, ms for durations, bare for counts and z-index slots, and
- * the hex spelling of the corresponding colour token.
+ * Each value is written with the unit its SCSS counterpart carries: px for
+ * lengths, ms for durations, bare for counts and z-index slots, and the hex
+ * spelling of the corresponding colour token.
  */
 export const sassTokenProjection = {
   'field-width': `${fieldWidth}px`,
@@ -735,15 +630,9 @@ export const sassTokenProjection = {
 } as const satisfies Record<string, string>;
 
 /**
- * Renders `sassTokenProjection` as the SCSS source vite.config.ts
- * prepends to every stylesheet it compiles, through
+ * Renders `sassTokenProjection` as the SCSS source vite.config.ts prepends to
+ * every stylesheet it compiles, through
  * `css.preprocessorOptions.scss.additionalData`.
- *
- * The output is one variable declaration holding one Sass map, and
- * nothing else: no `@use`, no `@import` and no rule, so every partial
- * keeps declaring its own module dependencies. Key order follows
- * `sassTokenProjection`, which makes the emitted string deterministic
- * for a given set of token values.
  *
  * @returns SCSS source ending in a newline.
  */

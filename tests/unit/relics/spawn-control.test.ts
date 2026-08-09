@@ -197,10 +197,9 @@ describe('twin-seed (spawn-control)', () => {
  * ========================================================================== */
 
 describe('prospectors-eye (spawn-control)', () => {
-  it('binds onStageStart and onSpawn', () => {
+  it('binds onSpawn alone', () => {
     expect(Object.keys(relicById('prospectors-eye').hooks).sort()).toEqual([
       'onSpawn',
-      'onStageStart',
     ]);
   });
 
@@ -269,8 +268,6 @@ describe('prospectors-eye (spawn-control)', () => {
   it('reads the board size in force, not the one the stage opened at', () => {
     const target = relicBench(['prospectors-eye'], { seed: 'shrunk-ring' });
 
-    dispatchOn(target, 'onStageStart', stageStartPayload(4));
-
     // A board-mutating relic reduced the board after the stage began. The ring
     // must be the ring of the CURRENT edge length, so no cell beyond it is ever
     // offered.
@@ -288,15 +285,17 @@ describe('prospectors-eye (spawn-control)', () => {
     }
   });
 
-  it('records the opening board size as plain JSON', () => {
+  it('records no state slot, so nothing of it reaches the envelope', () => {
     const target = relicBench(['prospectors-eye']);
 
     dispatchOn(target, 'onStageStart', stageStartPayload(4));
+    spawn(target, 1, 1, 2);
 
-    const state = stateOf(target, 'prospectors-eye');
-
-    // Persisted inside the run envelope, so it must round-trip.
-    expect(JSON.parse(JSON.stringify(state))).toEqual({ stageBoardSize: 4 });
+    // THE RING IS READ LIVE from `config.boardSize`, so the relic has nothing to
+    // record and declares no `state`; a slot nothing reads would still be
+    // persisted inside the run envelope on every write.
+    expect(relicById('prospectors-eye').state).toBeUndefined();
+    expect(stateOf(target, 'prospectors-eye')).toBeUndefined();
   });
 
   it('is deterministic under a fixed seed', () => {

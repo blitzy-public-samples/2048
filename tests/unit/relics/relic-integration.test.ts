@@ -1,34 +1,12 @@
 // Integration suite over the relic subsystem driven through a REAL ENGINE.
 //
-// The per-relic suites beside this one dispatch hooks directly, which pins each
-// relic's effect precisely. This suite closes the remaining gap: that the
-// sixteen relics compose with the engine's own turn pipeline — the move
-// resolver, the terminal-state evaluation and the commit — rather than only
-// with a hand-built dispatch.
+// Four prompt-level edge cases are asserted end-to-end here.
 //
-// The composition asserted here is the one src/main.ts performs, so this suite
-// is also the pattern that wiring follows: ONE shared `HookBus`, a
-// `RelicRegistry` registered against it, and that same bus handed to the
-// `Engine`, with the registry's commit-context provider supplying the relic
-// slice of every `state:commit`.
+// Charge exhaustion. A relic registered at zero charges is skipped by the bus,
+// and the turn it was skipped on still resolves.
 //
-// Four prompt-level edge cases are asserted end-to-end here:
-//
-//   BOARD-SIZE MUTATION. "board-size-altering cursed relics (e.g. shrink board)
-//   must not corrupt existing tile positions or win/lose check". Asserted by
-//   ending a stage with `collapsing-vault` held and then continuing to PLAY:
-//   the engine's traversal and its neighbour probe must both read the smaller
-//   board.
-//
-//   MULTIPLE RELICS ON ONE HOOK. Every relic in the catalogue is held at once
-//   and a run of moves is played; the turn completes, no handler is reported
-//   degraded, and the board stays consistent.
-//
-//   CHARGE EXHAUSTION. A relic registered at zero charges is skipped by the
-//   bus, and the turn it was skipped on still resolves.
-//
-//   SEEDED REPRODUCIBILITY. Two engines on one seed holding one relic set play
-//   the same move list to the same board and the same score.
+// Seeded reproducibility. Two engines on one seed holding one relic set play
+// the same move list to the same board and the same score.
 //
 // This suite reads no DOM and no storage: the engine is built with no storage
 // port, so it plays a complete game and persists nothing.
@@ -53,8 +31,6 @@ import {
 } from '../../../src/relics/relic-registry';
 import type { Relic } from '../../../src/relics/relic-types';
 import { createRngStreams } from '../../../src/rng/rng-streams';
-
-/* ===== Fixtures ===== */
 
 const SEED = 'blitzy-relic-integration';
 
@@ -150,8 +126,6 @@ function faceValues(engine: Engine): number[] {
   return values;
 }
 
-/* ===== The composition itself ===== */
-
 describe('relic subsystem composed with the engine', () => {
   it('reports the held relics in every commit, in pickup order', () => {
     const taken = RELIC_CATALOGUE.slice(0, 3);
@@ -199,8 +173,6 @@ describe('relic subsystem composed with the engine', () => {
     expect(reported).toEqual([(RELIC_CATALOGUE[0] as Relic).id]);
   });
 });
-
-/* ===== Every relic at once ===== */
 
 describe('all sixteen relics held at once', () => {
   it('plays a full move list without a handler throwing', () => {
@@ -280,8 +252,6 @@ describe('all sixteen relics held at once', () => {
   });
 });
 
-/* ===== Seeded reproducibility with relics held ===== */
-
 describe('seeded reproducibility with relics held', () => {
   it('plays one seed and one move list to one board', () => {
     const relics = RELIC_CATALOGUE.slice(0, 8);
@@ -319,8 +289,6 @@ describe('seeded reproducibility with relics held', () => {
     expect(Math.random).toBe(before);
   });
 });
-
-/* ===== Board-size mutation (finding CR-4, end to end) ===== */
 
 describe('board shrink under a cursed relic, end to end', () => {
   const cursed = RELIC_CATALOGUE.find(
@@ -503,8 +471,6 @@ describe('board shrink under a cursed relic, end to end', () => {
     });
   });
 });
-
-/* ===== Charge exhaustion, end to end ===== */
 
 describe('charge exhaustion, end to end', () => {
   it('skips a relic whose budget is spent and still resolves the turn', () => {

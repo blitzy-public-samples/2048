@@ -9,7 +9,7 @@
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
 // this module's area enumerated:
-//   TR-CONTROL-01  L71-L74    the three control bindings — `.retry-button` and
+//   TR-CONTROL-01  L71-L74    the three control bindings: `.retry-button` and
 //                             `.restart-button` to `restart`,
 //                             `.keep-playing-button` to `keepPlaying`, in that
 //                             order
@@ -25,38 +25,8 @@
 // resolved touch-end event to one handler, so a tap can dispatch twice. Noted,
 // not fixed.
 //
-// Changed against that port:
-//   - the lookup is null-checked, reported and skipped
-//
-// Changed against that port:
-//   - a control the markup leaves unfocusable or unnamed is promoted, and the
-//     promotion is reported
-//   - `fn.bind(this)` becomes a lexically scoped handler; js/bind_polyfill.js
-//     is deleted
-//   - every action of `INPUT_ACTIONS` also gets a generated `<button>`, so the
-//     eleven actions the markup declares no control for are reachable too
-//   - the three L72-L74 controls carry `InputContext` availability like every
-//     generated one: unavailable, each leaves the accessibility tree and the
-//     tab order and publishes nothing. `MarkupControlBinding.contexts` is what
-//     a markup control declares when the markup places it somewhere its
-//     action's key is not bound, as `.retry-button` sits inside the terminal
-//     overlay
-//
-// Imports are limited to ./keymap, ./touch-input and ./input-manager. This
-// module reads no storage and declares no visual value: every colour, length,
-// radius and duration it relies on is declared in style/_tokens.scss,
-// style/_a11y.scss and style/_screens.scss and reached through the class names
-// emitted below.
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-CONTROL-01  the selector lookup null-checked, reported and skipped
-//   DL-CONTROL-02  a control the markup leaves unfocusable or unnamed promoted,
-//                  and the promotion reported
-//   DL-CONTROL-03  `fn.bind(this)` replaced by a lexically scoped handler,
-//                  js/bind_polyfill.js being deleted
-//   DL-CONTROL-04  a generated `<button>` for every action of `INPUT_ACTIONS`,
-//                  each carrying `InputContext` availability
+// Decisions: DL-CONTROL-01, DL-CONTROL-02, DL-CONTROL-03, DL-CONTROL-04
+// (docs/DECISION_LOG.md).
 
 import type {
   Direction,
@@ -72,6 +42,8 @@ import {
   DEFAULT_KEY_BINDINGS,
   MOVE_ACTION_DIRECTIONS,
   NOOP_REPORTER,
+  RELIC_SLOT_COUNT,
+  REWARD_SLOT_COUNT,
   createSafeInputReporter,
   describeAction,
   describeBinding,
@@ -119,15 +91,13 @@ const REDUCED_MOTION_METRIC = 'input.onScreen.reducedMotion';
 
 const INDEX_REJECTED_METRIC = 'input.onScreen.index.rejected';
 
+const AVAILABILITY_FAULT_METRIC = 'input.onScreen.availability.faulted';
+
 const BIND_FAILED_METRIC = 'input.onScreen.bind.failed';
 
 const ACTIVATE_SPAN = 'input.onScreen.activate';
 
 const MOUNT_SPAN = 'input.onScreen.mount';
-
-/* ==========================================================================
- * 2. Contract
- * ========================================================================== */
 
 /** Removes the listeners one `bindButtonPress` call added. */
 export type UnbindControl = () => void;
@@ -152,15 +122,7 @@ export interface BindButtonPressOptions {
   readonly bindTouchEnd?: boolean;
 }
 
-/**
- * The members of src/input/input-manager.ts this layer invokes.
- *
- * `InputManager` satisfies it. The three members js/keyboard_input_manager.js
- * L72-L74 handed to `bindButtonPress` are `restart` and `keepPlaying`; a
- * direction control publishes through `emitMove`, and every remaining action
- * through `emit`, so the cancel-then-publish ordering ported from L130-L138
- * stays in one place.
- */
+/** The members of src/input/input-manager.ts this layer invokes. */
 export interface OnScreenControlHost extends InputEmitter {
   restart(event?: Event): void;
   keepPlaying(event?: Event): void;
@@ -178,9 +140,7 @@ export interface MarkupControlBinding {
    * Contexts this control is available in. Defaults to the contexts the
    * action's binding lists, so a markup control carries the availability of
    * the action it publishes unless the markup places it somewhere the key is
-   * not bound: `.retry-button` sits inside the terminal overlay and is
-   * declared for `'overlay'` as well as `'game'` below, while the `r` key
-   * remains bound in `'game'` alone.
+   * not bound.
    */
   readonly contexts?: readonly InputContext[];
 }
@@ -192,6 +152,26 @@ export interface OnScreenControl {
   readonly element: Element;
   readonly generated: boolean;
 }
+
+/**
+ * Reports whether one control is available right now, beyond what its action's
+ * declared contexts say.
+ *
+ * The three input contexts are coarse — `'game'`, `'overlay'` and
+ * `'textEntry'` — and several actions share one of them, so a caller that
+ * knows which screen is showing and which slot is filled narrows each control
+ * here. Called for every control on every apply, with the action and the
+ * payload index the control carries.
+ *
+ * A predicate that raises is reported and the control is treated as available,
+ * so a fault in it never strips the whole control layer.
+ *
+ * Decision DL-CONTROL-06.
+ */
+export type OnScreenAvailability = (
+  action: InputAction,
+  index: number,
+) => boolean;
 
 /** Construction parameters. Only `host` is required. */
 export interface OnScreenControlsOptions {
@@ -218,7 +198,7 @@ export interface OnScreenControlsOptions {
    * Effective reduced-motion value to hold regardless of the reflected
    * attribute or the media query.
    *
-   * Supplied where the caller already owns the preference; `setReducedMotion()`
+   * Supplied where the caller already owns the preference; `setReducedMotion`
    * replaces it later. Absent, the resolution order is the reflected attribute
    * and then the media query.
    */
@@ -228,17 +208,21 @@ export interface OnScreenControlsOptions {
    * Payload indices to generate a control for, per action. Honoured for the
    * two actions whose payload carries an index, `'selectReward'` and
    * `'activateRelic'`; an entry for any other action is reported and ignored.
-   * Defaults to one control carrying index `0`.
    */
   readonly indexes?: Readonly<Partial<Record<InputAction, readonly number[]>>>;
+
+  /**
+   * Narrows availability beyond the action's declared contexts, consulted for
+   * every control on every apply. Absent, the contexts decide alone.
+   * Decision DL-CONTROL-06.
+   */
+  readonly available?: OnScreenAvailability;
 
   /**
    * Controls the markup declares, bound before the generated ones and each
    * promoted where the markup leaves it unfocusable or unnamed. Defaults to
    * `LEGACY_CONTROL_BINDINGS`, the three of js/keyboard_input_manager.js
-   * L72-L74. A caller that declares a further control in markup — the
-   * `.settings-button` of index.html, say — passes an extended list here
-   * rather than binding the element itself.
+   * L72-L74.
    */
   readonly markupControls?: readonly MarkupControlBinding[];
 }
@@ -289,12 +273,6 @@ export const DEFAULT_ON_SCREEN_HOST_SELECTOR = '#on-screen-controls';
  * Ported from js/keyboard_input_manager.js L72-L74, in the order those three
  * lines bound them: `.retry-button` and `.restart-button` both publish
  * `restart`, and `.keep-playing-button` publishes `keepPlaying`.
- *
- * `.retry-button` declares its own contexts because index.html L52 places it
- * inside `.game-message`, the terminal overlay, whereas the `restart` binding
- * of src/input/keymap.ts lists `'game'` alone. `.restart-button` at
- * index.html L36 sits above the board and takes the binding's contexts, and
- * `.keep-playing-button` at index.html L51 takes `keepPlaying`'s `'overlay'`.
  */
 export const LEGACY_CONTROL_BINDINGS: readonly MarkupControlBinding[] =
   Object.freeze([
@@ -315,7 +293,14 @@ const INDEXED_ACTIONS: ReadonlySet<InputAction> = new Set<InputAction>([
   'activateRelic',
 ]);
 
-const MAX_CONTROLS_PER_ACTION = 8;
+/**
+ * How many controls one action may generate.
+ *
+ * READ FROM THE KEYMAP, not restated: the larger of the two slot counts
+ * ./keymap binds digits for, so an action whose keys reach a slot reaches a
+ * control for that slot too. DL-CONTROL-07.
+ */
+const MAX_CONTROLS_PER_ACTION = Math.max(RELIC_SLOT_COUNT, REWARD_SLOT_COUNT);
 
 const DEFAULT_CONTROL_INDEX = 0;
 
@@ -363,10 +348,6 @@ const NOOP_UNBIND: UnbindControl = () => {
   return;
 };
 
-/* ==========================================================================
- * 4. Reporting helpers
- * ========================================================================== */
-
 /** The span returned when the injected sink opens none. */
 const NOOP_SPAN: InputSpan = Object.freeze({
   end(): void {
@@ -408,10 +389,6 @@ function resolveElement(
   try {
     return root.querySelector(target);
   } catch (caught: unknown) {
-    // An invalid selector makes `querySelector` throw rather than return null.
-    // The caught value is carried unconverted through the reporter's failure
-    // channel; the call is reduced to `null` and the caller reports the
-    // absence of the control it was resolving.
     const fields: InputReportFields = { selector: target };
 
     reporter.failure?.(
@@ -707,17 +684,13 @@ interface ControlRecord {
    */
   readonly contexts: readonly InputContext[] | null;
 
-  /**
-   * Whether this layer supplies the element's accessible name. True for
-   * every generated control, and for a markup control whose name this layer
-   * had to write because the markup carried none.
-   */
+  /** Whether this layer supplies the element's accessible name. */
   ownsName: boolean;
 
   /**
-   * The availability attributes as the markup declared them, held for a
-   * markup control so an available one is restored rather than stripped.
-   * `null` for a generated control, whose element this layer created.
+   * The availability attributes as the markup declared them, held for a markup
+   * control so an available one is restored rather than stripped. `null` for a
+   * generated control, whose element this layer created.
    */
   readonly declared: DeclaredAvailability | null;
 
@@ -729,11 +702,6 @@ interface ControlRecord {
  * The availability attributes of a markup control as they stood before this
  * layer first wrote them, so restoring one leaves the markup's own
  * declarations in place.
- *
- * `tabindex` is captured when the control first becomes unavailable rather
- * than at mount, because `promoteControl` may have written it in between; the
- * value restored is therefore the one the control actually carried while it
- * was available.
  */
 interface DeclaredAvailability {
   /** `hidden` as declared, or `null` when it was absent. */
@@ -766,10 +734,6 @@ function projectControl(record: ControlRecord): OnScreenControl {
 
 /**
  * Reports whether a context is one of those listed.
- *
- * Called with a binding's own `contexts` for a generated control and with the
- * resolved `contexts` of a `MarkupControlBinding` for one the markup
- * declares, so both kinds of control are measured by one rule.
  *
  * @param contexts Contexts the control is available in.
  * @param context Context to test against.
@@ -891,10 +855,6 @@ function applyAvailability(element: Element, available: boolean): void {
 /**
  * Reads the availability attributes of a control the markup declares.
  *
- * Read once, before this layer writes any of them, so an available control is
- * restored to what index.html declared instead of having the three
- * attributes stripped from it.
- *
  * @param element Element to read.
  * @returns The declared state.
  */
@@ -930,14 +890,6 @@ function writeAttribute(
 /**
  * Applies availability to one control the markup declares.
  *
- * The same four attributes `applyAvailability` writes, with two differences
- * that follow from index.html owning the element: the visible label is never
- * touched, and an available control is restored to the state the markup
- * declared rather than having the attributes removed. `.game-message` keeps
- * showing and hiding its own two controls through the stylesheet; this is the
- * accessibility-tree and tab-order half of the same state, which the
- * stylesheet cannot express.
- *
  * @param element Element to apply to.
  * @param declared The element's declared availability state.
  * @param available Whether the action is active in the current context.
@@ -960,9 +912,6 @@ function applyMarkupAvailability(
     return;
   }
 
-  // Captured on the transition rather than at mount: `promoteControl` may
-  // have supplied the tab stop, and that is the value an available control
-  // is restored to.
   if (declared.tabIndex === undefined) {
     declared.tabIndex = element.getAttribute('tabindex');
   }
@@ -1024,9 +973,6 @@ function resolveMotionQuery(
 /**
  * Observes the element carrying the reflected reduced-motion value.
  *
- * The settings surface writes the attribute directly, which fires no
- * media-query event, so the change is only seen by watching the element.
- *
  * @param target Element to observe, or `null`.
  * @param owner Document the observer constructor is taken from.
  * @param onChange Called on every attribute write.
@@ -1068,10 +1014,6 @@ function observeMotionRoot(
 
 /**
  * Reflects the reduced-motion preference onto the mount root.
- *
- * `MOTION_CLASS` is the only carrier of this layer's transitions, and it is
- * absent while the preference is `reduce`, so no transition this layer
- * triggers survives the preference.
  *
  * @param root Mount root, or `null` when none was resolved.
  * @param reduce Whether the user asked for reduced motion.
@@ -1221,7 +1163,6 @@ function promoteControl(
         return;
       }
 
-      // Space would otherwise scroll the page.
       event.preventDefault();
       handler(event);
     };
@@ -1298,11 +1239,6 @@ function readSource<T>(
 /**
  * Mounts one focusable, tappable control per bindable action, and binds the
  * controls index.html declares.
- *
- * Reports rather than throws: an absent mount root, an absent control and a
- * source that throws are each reported and skipped, and the returned handle is
- * callable in every one of those cases. The guarded successor of
- * js/keyboard_input_manager.js, where an absent element was a startup failure.
  */
 export function mountOnScreenControls(
   options: OnScreenControlsOptions,
@@ -1407,6 +1343,50 @@ export function mountOnScreenControls(
   let activeKeymap = resolveKeymap();
   let activeContext = resolveContext();
 
+  /**
+   * Whether one control is available: its action's declared contexts first, and
+   * then the caller's own predicate where one was supplied.
+   *
+   * Contained: a predicate that raises is reported and the control is treated
+   * as available. Decision DL-CONTROL-06.
+   *
+   * @param action Action the control publishes.
+   * @param index Payload index the control carries.
+   * @param contexts Contexts the control is available in.
+   * @param context Context in force.
+   * @returns Whether the control is available.
+   */
+  const isAvailable = (
+    action: InputAction,
+    index: number,
+    contexts: readonly InputContext[],
+    context: InputContext,
+  ): boolean => {
+    if (!isActiveIn(contexts, context)) {
+      return false;
+    }
+
+    const narrow = options.available;
+
+    if (narrow === undefined) {
+      return true;
+    }
+
+    try {
+      return narrow(action, index);
+    } catch (error) {
+      reporter.count(AVAILABILITY_FAULT_METRIC, { action, index });
+      reporter.log('warn', 'An availability predicate raised.', {
+        action,
+        index,
+        error: error instanceof Error ? error.message : String(error),
+      });
+
+      return true;
+    }
+  };
+
+
   const activate = (record: ControlRecord, event: Event): void => {
     if (!record.available) {
       const fields: InputReportFields = {
@@ -1459,8 +1439,7 @@ export function mountOnScreenControls(
   };
 
   // The three controls index.html declares, in the order
-  // js/keyboard_input_manager.js L72-L74 bound them. Each keeps the ported
-  // pair of listeners.
+  // js/keyboard_input_manager.js L72-L74 bound them.
   for (const binding of markupBindings) {
     const element = resolveElement(
       binding.selector,
@@ -1491,19 +1470,20 @@ export function mountOnScreenControls(
       element,
       generated: false,
       contexts,
-      // Replaced below where the promotion had to supply the name.
       ownsName: false,
       declared,
-      available: isActiveIn(
+      available: isAvailable(
+        binding.action,
+        DEFAULT_CONTROL_INDEX,
         contexts ?? activeKeymap[binding.action].contexts,
         activeContext,
       ),
     };
     const handler = bindRecord(record, binding.selector, true);
 
-    // Registered before the promotion's own revert, so an unmount restores
-    // the availability attributes first and the promotion's tab stop and
-    // role second, leaving the element as index.html declared it.
+    // Registered before the promotion's own revert, so an unmount restores the
+    // availability attributes first and the promotion's tab stop and role
+    // second, leaving the element as index.html declared it.
     reverts.push((): void => {
       applyMarkupAvailability(element, declared, true);
     });
@@ -1543,11 +1523,12 @@ export function mountOnScreenControls(
     reporter.count(HOST_MISSING_METRIC, fields);
   } else {
     // OWNED NODES ARE REPLACED, NOT ADDED TO. A second mount over the same host
-    // used to append a second pad and a second action group, so the host carried
-    // two of every generated control: two tab stops per action, two accessible
-    // names, two click listeners publishing the same action twice. Removing what
-    // a previous mount left makes a repeat mount idempotent in effect — the host
-    // ends up holding exactly one set whichever number of times this runs (N10).
+    // used to append a second pad and a second action group, so the host
+    // carried two of every generated control: two tab stops per action, two
+    // accessible names, two click listeners publishing the same action twice.
+    // Removing what a previous mount left makes a repeat mount idempotent in
+    // effect — the host ends up holding exactly one set whichever number of
+    // times this runs (N10).
     const stale = root.querySelectorAll(`:scope > .${GROUP_CLASS}`);
 
     if (stale.length > 0) {
@@ -1600,13 +1581,16 @@ export function mountOnScreenControls(
           contexts: null,
           ownsName: true,
           declared: null,
-          available: isActiveIn(binding.contexts, activeContext),
+          available: isAvailable(
+            binding.action,
+            index,
+            binding.contexts,
+            activeContext,
+          ),
         };
 
         // A generated control binds `'click'` alone; the pair of listeners at
         // js/keyboard_input_manager.js L142-L143 is not reproduced here.
-        //
-        // Decision DL-CONTROL-02.
         bindRecord(record, describeGenerated(binding.action, index), false);
         applyAvailability(element, record.available);
 
@@ -1628,14 +1612,6 @@ export function mountOnScreenControls(
    * Applies the resolved keymap and context to every control: names first, so
    * a remapped key is announced, then availability.
    *
-   * Every record is reapplied, the three index.html declares included. A
-   * control unavailable in `context` leaves the accessibility tree and the
-   * tab order whether this layer created its element or not, and `activate`
-   * publishes nothing for it. A markup control's contexts are its own where
-   * its binding declared them and the action's otherwise; its visible label
-   * is never written, and its accessible name is rewritten only where this
-   * layer supplied it.
-   *
    * @param keymap Table to derive names from.
    * @param context Context to derive availability from.
    */
@@ -1649,7 +1625,12 @@ export function mountOnScreenControls(
     for (const record of records) {
       const contexts = record.contexts ?? keymap[record.action].contexts;
 
-      record.available = isActiveIn(contexts, context);
+      record.available = isAvailable(
+        record.action,
+        record.index,
+        contexts,
+        context,
+      );
 
       if (record.generated) {
         applyGeneratedName(
@@ -1667,8 +1648,6 @@ export function mountOnScreenControls(
           );
         }
 
-        // `declared` is non-null for every record this branch reaches; the
-        // fallback keeps the read total rather than asserting.
         applyMarkupAvailability(
           record.element,
           record.declared ?? captureDeclaredAvailability(record.element),
@@ -1676,9 +1655,9 @@ export function mountOnScreenControls(
         );
       }
 
-      // Only a generated control belongs to one of the two groups, so only
-      // one of those keeps its group in the accessibility tree; a markup
-      // control sits where index.html places it.
+      // Only a generated control belongs to one of the two groups, so only one
+      // of those keeps its group in the accessibility tree; a markup control
+      // sits where index.html places it.
       if (!record.available || !record.generated) {
         continue;
       }
@@ -1695,9 +1674,7 @@ export function mountOnScreenControls(
   };
 
   // Reduced motion, resolved from three sources in a fixed order and then
-  // followed. The camera and particle effects inside the canvas read the render
-  // layer's own store; this covers the controls, and the reflected attribute is
-  // what the two agree through.
+  // followed.
   const motion = resolveMotionQuery(view, reporter);
   const motionRoot =
     options.motionRoot === undefined
@@ -1748,8 +1725,6 @@ export function mountOnScreenControls(
     });
   }
 
-  // The reflected attribute changes without a media-query event, because the
-  // settings surface writes it, so the element carrying it is observed too.
   const motionObserver = observeMotionRoot(
     motionRoot,
     ownerDocument,

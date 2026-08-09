@@ -1,24 +1,12 @@
 // In-memory Web Storage double: no persistence, no DOM reference and no
 // imports. Exported as a class; it installs no global.
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row this
-// module carries:
-//   TR-STORE-09  js/local_storage_manager.js L1-L19  the `window.fakeStorage`
-//                object literal that file already shipped, ported as this
-//                class
-//   TR-STORE-10  target-only row                     `StorageLike`, the
-//                structural surface both stores satisfy
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-STORE-05  the double exported as a class that installs no global, where
-//                L1 assigned onto `window`
-//   DL-STORE-06  the entries held in a `Map` keyed by string
+// Decisions: DL-STORE-05, DL-STORE-06 (docs/DECISION_LOG.md).
 
 /**
  * The persistence surface storage consumers type against. Both the browser's
- * `localStorage` and `MemoryStorage` satisfy it structurally, and membership is
- * limited to the four operations the product uses.
+ * `localStorage` and `MemoryStorage` satisfy it structurally, and membership
+ * is limited to the four operations the product uses.
  */
 export interface StorageLike {
   /**
@@ -43,13 +31,13 @@ export class MemoryStorage implements StorageLike {
   /**
    * Backing map. Every key is a plain string with no inherited member of any
    * name, so `'__proto__'` round-trips through `setItem` and `getItem` exactly
-   * as any other key does. Decision DL-STORE-06.
+   * as any other key does.
    */
   private data = new Map<string, string>();
 
   /**
    * Stores `value` under `key`, overwriting any previous value. The explicit
-   * `String()` coercion means an untyped caller passing a number stores that
+   * `String` coercion means an untyped caller passing a number stores that
    * number's string form.
    */
   setItem(key: string, value: string): void {
@@ -72,9 +60,7 @@ export class MemoryStorage implements StorageLike {
     this.data.delete(key);
   }
 
-  /**
-   * Discards every stored key by replacing the backing store.
-   */
+  /** Discards every stored key by replacing the backing store. */
   clear(): void {
     this.data = new Map();
   }

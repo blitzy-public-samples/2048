@@ -1,106 +1,20 @@
-// The 2.5D board renderer. AAP R1 and R7. Supersedes js/html_actuator.js.
+// The 2.5D board renderer. AAP R1 and R7.
 //
-// Called by nobody: this module registers listeners on the engine's event
-// emitter and is entered only from those listeners and from the frame callback
-// src/main.ts registers with src/render/render-loop.ts. Figures 1 and 2 of
-// docs/architecture/ARCHITECTURE.md are the two states. Every choice named
-// below is logged in docs/DECISION_LOG.md.
+// The canvas carries `aria-hidden="true"`; the parallel `role="grid"` layer
+// beside it carries the board's semantics and is mounted through that layer's
+// own api. src/render/number-only-renderer.ts takes the same layer down while
+// its own lattice draws, so exactly one of the two is exposed at a time.
 //
-// PROVENANCE MAP — every member of js/html_actuator.js to its target, no gaps
-// in either direction. One traceability row of docs/TRACEABILITY_MATRIX.md
-// apiece, every row of this module's area enumerated:
-//   TR-THREE-01  actuate            L10-L36   `render()` queues, `frame()`
-//                                             draws
-//   TR-THREE-02  the x-major walk   L16-L22   `planCommit()`
-//   TR-THREE-03  clearContainer     L43-L47   `clearLiveTiles()`
-//   TR-THREE-04  addTile            L49-L91   `planTile()` and `addTile()`
-//   TR-THREE-05  previousPosition   L54       `PlannedTile.from`
-//   TR-THREE-06  super threshold    L60       `resolveTileTheme().isSuper`
-//   TR-THREE-07  nested-frame move  L67-L72   `createMoveTween` of
-//                                             ./animations
-//   TR-THREE-08  the mergedFrom     L73-L80   `PlannedTile.merged`,
-//                                             `addTile(_, true)` recursion
-//   TR-THREE-09  the tile-new       L82       `createSpawnTween` of
-//                                             ./animations
-//   TR-THREE-10  applyClasses       L93-L95   material and mesh acquisition;
-//                                             no class attribute is written
-//                                             and the classList workaround is
-//                                             not carried forward
-//   TR-THREE-11  normalizePosition  L97-L99   `cellToWorldIn` of
-//                                             ./tile-mesh-factory
-//   TR-THREE-12  positionClass      L101-L104 `cellToWorldIn` of
-//                                             ./tile-mesh-factory
-//   TR-THREE-13  updateScore        L106-L121 src/ui/components/score-panel.ts.
-//                                             NOT here: this module carries the
-//                                             difference as
-//                                             `PaintPlan.scoreDelta` into
-//                                             `readRenderedBoard()` and writes
-//                                             no score outlet and no
-//                                             rising-delta node
-//   TR-THREE-14  updateBestScore    L123-L125 src/ui/screens/hud.ts. Not here
-//   TR-THREE-15  message            L127-L133 src/ui/screens/hud.ts. Not here
-//   TR-THREE-16  clearMessage       L135-L139 src/ui/screens/hud.ts. Not here
-//   TR-THREE-17  continueGame       L39-L41   src/ui/screens/hud.ts. Not here
-//   TR-THREE-18  target-only row              the hook-free subscription
-//                                             surface
-//   TR-THREE-19  target-only row              the WebGL surface and its
-//                                             context-loss handling
-//   TR-THREE-20  target-only row              the parallel accessibility board
-//   TR-THREE-21  target-only row              the stage lighting and the
-//                                             stage-clear punch
-//   TR-THREE-22  target-only row              `degraded` carried by the paint
-//                                             plan, the same member
-//                                             src/render/number-only-renderer.ts
-//                                             carries
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-THREE-01  the lighting rig re-tuned at most once per stage index, from
-//                either `stage:start` or the stage slice a commit carries
-//   DL-THREE-02  unmount leaving the canvas hidden and restoring the
-//                number-only host to its shipped state
-//   DL-THREE-03  `aria-hidden` restored on unmount to the state the canvas was
-//                found in
-//   DL-THREE-04  the spawn tween applying scale alone, with no per-block
-//                opacity
-//
-// SURFACES THIS MODULE HOLDS
-//   The canvas, the `WebGLRenderer` built on it, its pixel ratio, its clear
-//   colour, its drawing-buffer size and its context-loss listeners.
-//   src/render/scene.ts builds the scene graph, the camera and the lighting rig
-//   and constructs no renderer.
-//
-//   The canvas carries `aria-hidden="true"`; the parallel `role="grid"` layer
-//   beside it carries the board's semantics and is mounted through that layer's
-//   own api. src/render/number-only-renderer.ts takes the same layer down while
-//   its own lattice draws, so exactly one of the two is exposed at a time.
-//
-// EVENTS SUBSCRIBED — AAP Contract 1, six of the seven names
-//   state:commit  the reconciliation authority: what exists, at what value, in
-//                 which cell. Planned synchronously; drawn on the next frame
-//   tile:merge    once per merge, carrying the `resultValue` an `onMerge`
-//                 handler resolved: one pop, one burst, one punch each
-//   tile:spawn    the resolved cell, absent for a spawn that inserted nothing
-//   move:after    the cells a move repositioned, and their origins
-//   stage:start   `boardSize` to re-frame for, `stageIndex` to light for
-//   stage:end     the stage-clear punch
-//   move:before   NOT subscribed. It is the cancellable event, and a renderer
-//                 never withdraws a move; a withdrawn move changes no state
-//                 and reaches this module as no commit at all
-//
-//   Every payload carries the LIVE board and the LIVE tiles, per AAP
-//   Contract 1, so each listener plans its paint synchronously INSIDE the
-//   emission and holds no engine object past it.
-//
-// TIMING TAKEN FROM style/main.scss THROUGH ./animations
-//   move 100ms ease-in-out; spawn `appear` 200ms ease after a 100ms hold at
-//   scale zero; merge `pop` 200ms ease to 1.2 after the same 100ms hold. The
-//   two blocks a merge consumed hold for that same 100ms and leave on the frame
-//   the merged block starts to grow.
+// Every payload carries the LIVE board and the LIVE tiles, per AAP Contract 1,
+// so each listener plans its paint synchronously INSIDE the emission and holds
+// no engine object past it.
 //
 // Reduced motion is resolved by each animating member against
 // src/render/webgl-support.ts and is not re-decided here. This module reads no
 // storage and consumes no randomness.
+//
+// Decisions: DL-THREE-01, DL-THREE-02, DL-THREE-03, DL-THREE-04
+// (docs/DECISION_LOG.md).
 
 import { Color, SRGBColorSpace, WebGLRenderer } from 'three';
 import type { Vector3 } from 'three';
@@ -177,10 +91,6 @@ import {
   describeRenderError,
 } from './webgl-support';
 
-/* ==========================================================================
- * 1. Names carried into reports
- * ========================================================================== */
-
 const DIAGNOSTIC_SOURCE = 'render/three-renderer';
 
 /** Counter raised once per mount. */
@@ -246,23 +156,10 @@ const STAGE_LIGHTING_METRIC = 'render.three.stage.lighting';
 /** Counter raised once per stage resolution presented. */
 const STAGE_END_METRIC = 'render.three.stage.end';
 
-/* ==========================================================================
- * 2. The drawing buffer
- * ========================================================================== */
-
-/**
- * Alpha the drawing buffer is cleared to.
- *
- * Zero. The canvas stands in for the two board layers style/main.scss L254 and
- * L288 drew inside `.game-container`, and that container's own background at
- * style/main.scss L188 shows through every pixel the tilted board leaves.
- */
+/** Alpha the drawing buffer is cleared to. */
 const CLEAR_ALPHA = 0;
 
-/**
- * Highest device pixel ratio the drawing buffer is sized at. Above it the
- * buffer grows fourfold for a board of flat fills.
- */
+/** Highest device pixel ratio the drawing buffer is sized at. */
 const MAX_PIXEL_RATIO = 2;
 
 /** Pixel ratio used where the platform reports none. */
@@ -288,18 +185,7 @@ function resolvePixelRatio(): number {
   return Math.min(candidate, MAX_PIXEL_RATIO);
 }
 
-/* ==========================================================================
- * 3. Geometry scale
- * ========================================================================== */
-
-/**
- * The breakpoint of style/main.scss, as a media query.
- *
- * `smaller($mobile-threshold)` compiles to `(max-width: 520px)`, and
- * `mobileThreshold` of src/theme/tokens.ts is the port of that token, so the
- * scale this renderer resolves lengths at and the scale the stylesheet lays the
- * page out at cannot disagree.
- */
+/** The breakpoint of style/main.scss, as a media query. */
 const MOBILE_SCALE_QUERY = `(max-width: ${mobileThreshold}px)`;
 
 /** The part of `MediaQueryList` this module reads. */
@@ -314,13 +200,7 @@ interface ScaleQueryList {
   readonly removeListener?: (listener: () => void) => void;
 }
 
-/**
- * Narrows a value to a media-query list.
- *
- * A stand-in `matchMedia` that returns something else is refused here rather
- * than read, so a host whose implementation is partial resolves the default
- * scale instead of throwing during mount.
- */
+/** Narrows a value to a media-query list. */
 function isScaleQueryList(value: unknown): value is ScaleQueryList {
   if (value === null || typeof value !== 'object') {
     return false;
@@ -350,10 +230,6 @@ function openScaleQuery(view: Window | null): ScaleQueryList | null {
     return null;
   }
 }
-
-/* ==========================================================================
- * 4. The surfaces this renderer drives
- * ========================================================================== */
 
 /** One cell of the parallel accessibility board. */
 export interface ParallelBoardCell {
@@ -392,11 +268,11 @@ export interface ParallelBoardSurface {
 }
 
 /**
- * The cell naming carried into `readRenderedBoard()`.
+ * The cell naming carried into `readRenderedBoard`.
  *
- * The two functions are src/render/number-only-renderer.ts's own, so a consumer
- * reading a rendered board names a cell identically no matter which renderer
- * drew it.
+ * The two functions are src/render/number-only-renderer.ts's own, so a
+ * consumer reading a rendered board names a cell identically no matter which
+ * renderer drew it.
  */
 export type BoardCellCopy = {
   readonly cellLabel: (row: number, column: number, value: number) => string;
@@ -412,13 +288,6 @@ export const threeRendererCopy: BoardCellCopy = Object.freeze({
 /**
  * What one `webglcontextrestored` rebuild achieved, as
  * `ThreeRendererOptions.onContextRestored` receives it.
- *
- * A restored context is a NEW context, so the scene graph, the material cache,
- * the mesh factory, the particle system and the camera rig are all rebuilt
- * before the board can draw again. That rebuild can itself fail — the driver
- * can refuse the new context outright — and the two outcomes call for opposite
- * responses from the caller, so the verdict is reported rather than implied by
- * the callback having been made at all.
  */
 export interface ContextRestoreOutcome {
   /**
@@ -429,7 +298,7 @@ export interface ContextRestoreOutcome {
 
   /**
    * Whether the context still stands lost after the attempt, which is what
-   * `readStats().contextLost` reports.
+   * `readStats.contextLost` reports.
    */
   readonly contextLost: boolean;
 
@@ -440,10 +309,6 @@ export interface ContextRestoreOutcome {
    */
   readonly attempted: boolean;
 }
-
-/* ==========================================================================
- * 5. Construction parameters
- * ========================================================================== */
 
 /**
  * Every construction parameter. `canvas` is the only one a working renderer
@@ -476,10 +341,7 @@ export interface ThreeRendererOptions {
   /** Document elements are resolved against. Defaults to the ambient one. */
   readonly ownerDocument?: Document;
 
-  /**
-   * The rules in force. Read for `boardSize` alone, so the board is generated
-   * at mount rather than deferred to the first commit.
-   */
+  /** The rules in force. */
   readonly config?: RulesConfig;
 
   /**
@@ -494,7 +356,7 @@ export interface ThreeRendererOptions {
   /** Sink this renderer reports through. Wrapped so no channel can throw. */
   readonly reporter?: RenderReporter;
 
-  /** The cell naming carried into `readRenderedBoard()`. */
+  /** The cell naming carried into `readRenderedBoard`. */
   readonly copy?: Partial<BoardCellCopy>;
 
   /**
@@ -507,14 +369,6 @@ export interface ThreeRendererOptions {
    * Called once the browser has taken this renderer's WebGL context away,
    * after the loss has been reported and restoration requested.
    *
-   * WHY THE COMPOSITION ROOT HAS TO BE TOLD. This renderer's own response to a
-   * loss is to stop drawing until the context comes back, which is correct for
-   * a loss the browser then restores and leaves the board FROZEN for one it
-   * never does. Only the root can serve the number-only board instead, because
-   * only the root owns the preference store and the renderer selection. So the
-   * state is surfaced rather than kept, and the root decides how long to wait
-   * (implicit requirement I6).
-   *
    * Defaults to doing nothing, which leaves the wait-for-restoration behaviour
    * a renderer built without it has always had.
    */
@@ -525,10 +379,10 @@ export interface ThreeRendererOptions {
    * attempted the rebuild the new context requires, with the verdict of that
    * attempt. Defaults to doing nothing.
    *
-   * The verdict is what tells a caller whether the 2.5D board is drawing again:
-   * a restored context whose resources could NOT be rebuilt leaves the board
-   * parked, so a caller that ended its fallback on the restoration alone ended
-   * it on a board that never came back (implicit requirement I6).
+   * The verdict is what tells a caller whether the 2.5D board is drawing
+   * again: a restored context whose resources could NOT be rebuilt leaves the
+   * board parked, so a caller that ended its fallback on the restoration alone
+   * ended it on a board that never came back (implicit requirement I6).
    */
   readonly onContextRestored?: (outcome: ContextRestoreOutcome) => void;
 }
@@ -575,8 +429,8 @@ export interface ThreeRendererStats {
 
   /**
    * Animation triggers discarded for belonging to a turn other than the one
-   * being drawn. Non-zero means granular events and commits arrived interleaved,
-   * which the turn key is what protects the board from.
+   * being drawn. Non-zero means granular events and commits arrived
+   * interleaved, which the turn key is what protects the board from.
    */
   readonly orphanedTriggers: number;
 
@@ -586,7 +440,9 @@ export interface ThreeRendererStats {
   /** Restorations whose GPU resources were rebuilt. */
   readonly contextRestores: number;
 
-  /** The turn the armed triggers belong to, and `null` while none are armed. */
+  /**
+   * The turn the armed triggers belong to, and `null` while none are armed.
+   */
   readonly pendingTurn: number | null;
   readonly contextLost: boolean;
   readonly disposed: boolean;
@@ -608,9 +464,9 @@ export interface ThreeRenderer {
    *
    * @param canvas Canvas to draw into. Defaults to the one given at
    *   construction.
-   * @returns Whether the renderer mounted. A miss is reported and leaves every
-   *   other method a working no-op, which is the path a caller that skipped the
-   *   support probe lands on.
+   * @returns Whether the renderer mounted. A miss is reported and leaves
+   *   every other method a working no-op, which is the path a caller that
+   *   skipped the support probe lands on.
    */
   mount(canvas?: Element | null): boolean;
 
@@ -649,10 +505,6 @@ export interface ThreeRenderer {
   readStats(): ThreeRendererStats;
 }
 
-/* ==========================================================================
- * 6. Plan built from one commit
- * ========================================================================== */
-
 type CommitBoard = StateCommitEvent['board'];
 
 type CommitTile = NonNullable<CommitBoard['cells'][number][number]>;
@@ -688,8 +540,9 @@ interface PaintPlan {
   readonly terminated: boolean;
 
   /**
-   * `StateCommitEvent.degraded`, carried so `projectRendered` can put it on the
-   * shared `RenderedBoard` snapshot exactly as the number-only renderer does.
+   * `StateCommitEvent.degraded`, carried so `projectRendered` can put it on
+   * the shared `RenderedBoard` snapshot exactly as the number-only renderer
+   * does.
    */
   readonly degraded: boolean;
 
@@ -700,16 +553,7 @@ interface PaintPlan {
   readonly repaint?: boolean;
 }
 
-/**
- * The same plan, with every animation input removed.
- *
- * A tile whose `from` is its own cell takes no move tween, and one carrying
- * neither a `from` nor a merge pair would be taken for a spawn, so each tile
- * carries its own cell as its origin and no merge pair: every block is placed
- * where it already stands and no tween starts. Queued when the board is
- * generated again at the other scale, where the lattice is rebuilt outside a
- * turn and the blocks that stood on it have been recalled with it.
- */
+/** The same plan, with every animation input removed. */
 function restPlan(plan: PaintPlan): PaintPlan {
   return {
     ...plan,
@@ -737,10 +581,6 @@ function readCell(board: CommitBoard, x: number, y: number): CommitTile | null {
 /**
  * Projects one tile of a commit, and the pair it was merged from, into the
  * plain data one paint reads.
- *
- * `previousPosition` and `mergedFrom` are read inside the emission that carried
- * the tile, which is the only point the live tile still reports the move it
- * just made.
  */
 function planTile(tile: CommitTile): PlannedTile {
   const previous = tile.previousPosition;
@@ -752,9 +592,7 @@ function planTile(tile: CommitTile): PlannedTile {
     from: previous === null ? null : { x: previous.x, y: previous.y },
 
     // js/html_actuator.js L78-L80 passed each member of `mergedFrom` back
-    // through `addTile`, so the pair is planned by this same function. Each
-    // source carries its own `previousPosition` and the merge cell as its
-    // position, so each slides from where it started to where the merge landed.
+    // through `addTile`, so the pair is planned by this same function.
     merged:
       previous === null && tile.mergedFrom !== null
         ? tile.mergedFrom.map(planTile)
@@ -798,17 +636,7 @@ function planCommit(commit: StateCommitEvent, scoreDelta: number): PaintPlan {
   });
 }
 
-/* ==========================================================================
- * 7. One block on screen
- * ========================================================================== */
-
-/**
- * A block the scene holds, and the tweens driving it.
- *
- * `retireOnArrival` marks the two blocks a merge consumed: each finishes its
- * slide exactly as the merged block starts to grow, and is released then rather
- * than being left inside the block that replaced it.
- */
+/** A block the scene holds, and the tweens driving it. */
 interface LiveTile {
   readonly mesh: TileMesh;
   readonly value: number;
@@ -826,25 +654,12 @@ interface PendingMerge {
   readonly value: number;
 }
 
-/* ==========================================================================
- * 8. Element resolution
- * ========================================================================== */
+/** The `hidden` states an element can carry. */
+type HiddenState = HTMLElement['hidden'];
 
 /**
  * Narrows an element to an `HTMLElement`, by the members this module writes.
- *
- * `instanceof` is avoided so an element from another realm, and a stand-in in a
- * test, are both accepted.
  */
-/**
- * The `hidden` states an element can carry.
- *
- * Typed from the property, which carries the attribute's `until-found` value
- * alongside the two boolean states, so an element that shipped in that state is
- * restored to it rather than flattened to `false`.
- */
-type HiddenState = HTMLElement['hidden'];
-
 function asHtmlElement(value: Element | null | undefined): HTMLElement | null {
   if (value === null || value === undefined) {
     return null;
@@ -860,10 +675,6 @@ function asHtmlElement(value: Element | null | undefined): HTMLElement | null {
 
 /**
  * Narrows an element to a canvas, by the one method this module calls on it.
- *
- * `getContext` is what `WebGLRenderer` reaches for, so an element that carries
- * it is one this renderer can draw into and an element that does not is refused
- * before a context is requested.
  */
 function asCanvas(value: Element | null | undefined): HTMLCanvasElement | null {
   if (value === null || value === undefined) {
@@ -875,13 +686,7 @@ function asCanvas(value: Element | null | undefined): HTMLCanvasElement | null {
     : null;
 }
 
-/**
- * The attribute a canvas is marked with, and the value it carries.
- *
- * index.html ships `#board-canvas` already carrying it; `mount()` asserts it on
- * whatever canvas it was handed so the invariant holds for a canvas built by a
- * caller as well.
- */
+/** The attribute a canvas is marked with, and the value it carries. */
 const CANVAS_ARIA_ATTRIBUTE = 'aria-hidden';
 const CANVAS_ARIA_VALUE = 'true';
 
@@ -909,20 +714,15 @@ function measureElement(
   return { width, height };
 }
 
-/* ==========================================================================
- * 9. Construction
- * ========================================================================== */
-
 /**
  * Builds the 2.5D renderer.
  *
- * The WebGL context is acquired by `mount()`, not here, so a caller can
+ * The WebGL context is acquired by `mount`, not here, so a caller can
  * construct the renderer, read its stats and dispose it on a machine with no
  * context at all.
  *
  * @param options Canvas, surfaces, rules, scale, palette and report sink.
  * @returns A frozen renderer holding no context.
- *
  * @example
  * ```ts
  * const renderer = createThreeRenderer({ canvas, config, parallelBoardLayer });
@@ -974,12 +774,8 @@ export function createThreeRenderer(
   let numberOnlyWasHidden: HiddenState = false;
 
   /**
-   * Whether the host swap has run, so a teardown knows the recorded host states
-   * are real and may be restored.
-   *
-   * A mount that failed before the swap must NOT restore, because
-   * `numberOnlyWasHidden` would then hold a state from an earlier mount and the
-   * teardown would unhide a number-only host the caller is about to use.
+   * Whether the host swap has run, so a teardown knows the recorded host
+   * states are real and may be restored.
    */
   let hostsSwapped = false;
   let parallelBoardClaimed = false;
@@ -1010,17 +806,9 @@ export function createThreeRenderer(
   /**
    * The turn the armed triggers belong to, and `null` while none are armed.
    *
-   * WHY THE BUFFERS ARE KEYED AT ALL. `tile:merge`, `tile:spawn` and
-   * `move:after` arm animation triggers that are drained by the NEXT
-   * `state:commit`. Without a transaction identifier a trigger armed by one turn
-   * can be drained against a later board — a nested commit, a stage transition
-   * that commits between the arming and the paint, or an emission a subscriber
-   * deferred all produce that ordering — and the tween then plays a merge or a
-   * spawn in a cell that now holds something else.
-   *
    * Every granular event and every commit carries a monotonic `turn`
-   * (src/engine/engine-events.ts), so the buffers admit triggers for ONE turn and
-   * a commit drains only the triggers belonging to its own.
+   * (src/engine/engine-events.ts), so the buffers admit triggers for ONE turn
+   * and a commit drains only the triggers belonging to its own.
    */
   let pendingTurn: number | null = null;
 
@@ -1029,7 +817,7 @@ export function createThreeRenderer(
 
   /**
    * The `aria-hidden` state the canvas was found in, or `undefined` while no
-   * canvas is held. Restored by `unmount()`.
+   * canvas is held. Restored by `unmount`.
    */
   let canvasAriaHidden: string | null | undefined;
 
@@ -1062,7 +850,9 @@ export function createThreeRenderer(
   /** Animation triggers discarded for belonging to a superseded turn. */
   let orphanedTriggers = 0;
 
-  /** Contexts lost, and contexts whose resources were rebuilt after a restore. */
+  /**
+   * Contexts lost, and contexts whose resources were rebuilt after a restore.
+   */
   let contextLosses = 0;
   let contextRestores = 0;
   let movesAnnounced = 0;
@@ -1070,10 +860,6 @@ export function createThreeRenderer(
   let stagesEnded = 0;
   let mounted = false;
   let disposed = false;
-
-  /* ------------------------------------------------------------------
-   * Scale and geometry
-   * --------------------------------------------------------------- */
 
   const resolveScale = (): ScaleName => {
     if (requestedScale !== 'auto') {
@@ -1089,18 +875,14 @@ export function createThreeRenderer(
     return isSupportedBoardSize(configured) ? configured : DEFAULT_BOARD_SIZE;
   };
 
-  /* ------------------------------------------------------------------
-   * The output surface
-   * --------------------------------------------------------------- */
-
   /** Scratch a theme's page background is read into. */
   const clearColor = new Color();
 
   /**
    * The theme the surface and the scene are pinned to, where one was supplied.
    *
-   * `options.theme` accepts a catalogue entry or an id; the scene's rig and the
-   * clear colour both read a palette, so an id is resolved once here.
+   * `options.theme` accepts a catalogue entry or an id; the scene's rig and
+   * the clear colour both read a palette, so an id is resolved once here.
    *
    * @returns The pinned theme, or `undefined` where the renderer follows the
    *   theme in force.
@@ -1118,13 +900,8 @@ export function createThreeRenderer(
   /**
    * Builds the renderer over one canvas.
    *
-   * `alpha` is on and the clear alpha is zero, so the canvas is composited over
-   * the `$game-container-background` of `.game-container` at style/main.scss
-   * L188 rather than over a colour of its own. Shadow maps are left off; the
-   * casters and receivers the 2D design has are flat fills.
-   *
-   * @throws Error when the canvas yields no WebGL context, which is the signal
-   *   `mount()` converts into its number-only fallback.
+   * @throws Error when the canvas yields no WebGL context, which is the
+   *   signal `mount` converts into its number-only fallback.
    */
   const openSurface = (surface: HTMLCanvasElement): WebGLRenderer => {
     const renderer = new WebGLRenderer({
@@ -1163,10 +940,6 @@ export function createThreeRenderer(
     }
   };
 
-  /* ------------------------------------------------------------------
-   * Drawing-surface size
-   * --------------------------------------------------------------- */
-
   /**
    * Pushes the canvas's measured size into the scene.
    *
@@ -1183,9 +956,8 @@ export function createThreeRenderer(
     }
 
     // The content box of `.game-container`, which is the box the canvas
-    // occupies, is the fallback a canvas the layout has not measured yet
-    // takes —
-    // which is every canvas under a document with no layout engine.
+    // occupies, is the fallback a canvas the layout has not measured yet takes
+    // — which is every canvas under a document with no layout engine.
     const measured = measureElement(surface);
     const unmeasured = geometry.fieldWidth - geometry.gridSpacing * 2;
     const width = measured?.width ?? unmeasured;
@@ -1204,16 +976,8 @@ export function createThreeRenderer(
     }
   };
 
-  /* ------------------------------------------------------------------
-   * Board generation
-   * --------------------------------------------------------------- */
-
   /**
    * Generates the board at one size, releasing every block on screen first.
-   *
-   * `buildBoard` recalls every outstanding block into its pool, so the records
-   * held here are dropped BEFORE it runs rather than left pointing at meshes
-   * the factory considers idle.
    *
    * @returns Whether a board stands afterwards.
    */
@@ -1243,9 +1007,6 @@ export function createThreeRenderer(
       activeScene.mountBoard(built.group);
       activeScene.reframe(built.boardSize, built.geometry);
 
-      // Read off the scene's own rest transform rather than off the live
-      // camera: a camera effect displaces the camera itself, so the live
-      // transform stops being the framing's the moment one runs.
       camera?.setRestTransform(activeScene.readRestTransform());
       particles?.attachTo(built.group);
       applySize();
@@ -1269,10 +1030,7 @@ export function createThreeRenderer(
         message: 'The board could not be generated; nothing is drawn.',
         detail: Object.freeze({ boardSize: size, scale }),
 
-        // The bounded summary AND the value itself: `error` cannot hold a stack,
-        // a `cause` chain or a non-`Error` throwable's own structure, and
-        // `serializeError` of src/observability/logger.ts reads all three off
-        // `thrown`.
+        // The bounded summary AND the value itself.
         error: describeRenderError(error),
         thrown: error,
       });
@@ -1280,10 +1038,6 @@ export function createThreeRenderer(
       return false;
     }
   };
-
-  /* ------------------------------------------------------------------
-   * The canvas's accessibility marking
-   * --------------------------------------------------------------- */
 
   /**
    * Marks the canvas hidden from assistive technology, recording the state it
@@ -1341,17 +1095,7 @@ export function createThreeRenderer(
     surface.setAttribute?.(CANVAS_ARIA_ATTRIBUTE, found);
   };
 
-  /* ------------------------------------------------------------------
-   * The parallel accessibility board
-   * --------------------------------------------------------------- */
-
-  /**
-   * Shows the parallel board and mounts its cells.
-   *
-   * The mirror image of what src/render/number-only-renderer.ts does: the
-   * canvas is `aria-hidden` and cannot carry the board's semantics, so this
-   * renderer needs the layer beside it populated rather than taken down.
-   */
+  /** Shows the parallel board and mounts its cells. */
   const claimParallelBoard = (size: number): void => {
     const host = options.parallelBoard ?? null;
 
@@ -1369,8 +1113,7 @@ export function createThreeRenderer(
       };
 
       // Shown and exposed: this is the surface a screen reader reads the board
-      // from while the canvas draws it. `aria-busy` belongs to the layer, which
-      // clears it once the cells are populated.
+      // from while the canvas draws it.
       host.removeAttribute('aria-hidden');
 
       if (element !== null) {
@@ -1430,10 +1173,6 @@ export function createThreeRenderer(
     });
   };
 
-  /* ------------------------------------------------------------------
-   * Block placement
-   * --------------------------------------------------------------- */
-
   /**
    * The lengths in force.
    *
@@ -1453,8 +1192,7 @@ export function createThreeRenderer(
     }
 
     // `cellToWorldIn` allocates only when handed no target, which is the one
-    // call that grows this pool. It is bounded by the deepest nesting a frame
-    // reaches, which is one.
+    // call that grows this pool.
     const created = cellToWorldIn({ x: 0, y: 0 }, requireGeometry());
 
     worldScratch.push(created);
@@ -1483,10 +1221,7 @@ export function createThreeRenderer(
     tile.mesh.position.copy(target);
 
     // The spawn keyframes of style/main.scss animate `opacity` alongside
-    // `transform: scale()`. Only the scale is applied here: src/render/
-    // tile-materials.ts shares one material per value across every block of
-    // that value, so a per-block opacity would need a clone per tile. Scale
-    // zero draws nothing. DL-THREE-04.
+    // `transform: scale`.
     const spawn = tile.spawn;
     const merge = tile.merge;
 
@@ -1502,10 +1237,6 @@ export function createThreeRenderer(
 
     return moving || spawning || merging;
   };
-
-  /* ------------------------------------------------------------------
-   * Applying one plan
-   * --------------------------------------------------------------- */
 
   /** Releases every block on screen back to the factory's pool. */
   const clearLiveTiles = (): void => {
@@ -1524,8 +1255,8 @@ export function createThreeRenderer(
    * Adds one block for one planned tile.
    *
    * @param planned The tile to draw.
-   * @param retireOnArrival Whether the block is released once it arrives, which
-   *   is true of exactly the two blocks a merge consumed.
+   * @param retireOnArrival Whether the block is released once it arrives,
+   *   which is true of exactly the two blocks a merge consumed.
    */
   const addTile = (planned: PlannedTile, retireOnArrival: boolean): void => {
     const activeFactory = factory;
@@ -1562,21 +1293,18 @@ export function createThreeRenderer(
     const isMerged = planned.merged.length > 0;
 
     // js/html_actuator.js L82 took a tile carrying neither a previous position
-    // nor a merge pair for a new one. `tile:spawn` names the cell the engine
-    // resolved a spawn into, and a tile standing in one of those cells is new
-    // whatever origin the plan carries. A merge source is never new.
+    // nor a merge pair for a new one.
     const isNew =
       !isMerged &&
       !retireOnArrival &&
       (planned.from === null || pendingSpawns.has(key));
 
-    // Where a tile came from, in three cases and in this order:
-    //   a merge source keeps its planned origin, and takes its own cell where
-    //   the plan reports it did not move, so the move tween below always
-    //   exists to hold it on screen;
-    //   a new tile has no origin;
-    //   every other tile takes its planned origin, or the one `move:after`
-    //   reported for its destination cell where the plan carries none.
+    // Where a tile came from, in three cases and in this order: a merge source
+    // keeps its planned origin, and takes its own cell where the plan reports
+    // it did not move, so the move tween below always exists to hold it on
+    // screen; a new tile has no origin; every other tile takes its planned
+    // origin, or the one `move:after` reported for its destination cell where
+    // the plan carries none.
     const from: PlannedPosition | null = retireOnArrival
       ? planned.from ?? target
       : isNew
@@ -1585,12 +1313,10 @@ export function createThreeRenderer(
 
     // A merge source ALWAYS takes a move tween, even where it did not move.
     // js/html_actuator.js L73-L80 left the stationary source painted beneath
-    // the merged tile — `.tile-inner` at z-index 10 under
-    // `.tile-merged .tile-inner` at 20
-    // — for the 100ms the merged tile is held at scale zero, and the tween is
-    // what holds it on screen for exactly that interval here. Its duration and
-    // the merged block's delay are both `$transition-speed`, so the source
-    // leaves on the frame the merged block starts to grow.
+    // the merged tile — `.tile-inner` at z-index 10 under `.tile-merged
+    // .tile-inner` at 20 — for the 100ms the merged tile is held at scale
+    // zero, and the tween is what holds it on screen for exactly that interval
+    // here.
     const move =
       group !== null &&
       from !== null &&
@@ -1616,8 +1342,6 @@ export function createThreeRenderer(
       spawn,
       merge,
 
-      // A source block with no move tween never arrives, so it is retired at
-      // once by the first frame rather than being kept forever.
       retireOnArrival,
     };
 
@@ -1653,12 +1377,6 @@ export function createThreeRenderer(
 
   /**
    * Tunes the lighting rig for one stage index, at most once per index.
-   *
-   * Two callers reach it: `onStageStart`, and `render` off the `stage` slice
-   * every commit carries. src/engine/engine.ts emits `stage:start` from
-   * `setup()` alone, so a run whose board carries across a stage boundary
-   * announces the boundary in the commit's slice and nowhere else.
-   * DL-THREE-01.
    *
    * @param stageIndex Zero-based stage index. A non-finite index is ignored;
    *   src/render/scene.ts confines and reports the rest.
@@ -1704,23 +1422,14 @@ export function createThreeRenderer(
   };
 
   /**
-   * Admits a granular event's triggers to the buffers, discarding an older turn's
-   * if a newer turn has begun arming.
-   *
-   * The three granular events of one turn arrive in engine order — merge, then
-   * spawn, then move — so the first of them opens the turn and the rest join it.
-   * An event carrying a HIGHER turn means the previous turn's triggers were never
-   * drained, so they are dropped rather than mixed into the new turn's set. An
-   * event carrying a LOWER turn is a late arrival from a turn already superseded
-   * and is refused outright.
+   * Admits a granular event's triggers to the buffers, discarding an older
+   * turn's if a newer turn has begun arming.
    *
    * @param turn The turn the arriving event belongs to.
    * @returns Whether the event may arm a trigger.
    */
   const admitTurn = (turn: number): boolean => {
     if (!Number.isFinite(turn)) {
-      // An emitter that carries no usable turn falls back to the unkeyed
-      // behaviour rather than dropping the animation altogether.
       return true;
     }
 
@@ -1845,8 +1554,8 @@ export function createThreeRenderer(
         let numeralColor: string | null = null;
 
         // js/html_actuator.js L60 compared against the literal 2048; the ramp
-        // of src/theme/tile-ramp.ts carries that comparison as `isSuper`, and a
-        // configured win value replaces it where one was supplied.
+        // of src/theme/tile-ramp.ts carries that comparison as `isSuper`, and
+        // a configured win value replaces it where one was supplied.
         let rampIsSuper = false;
 
         try {
@@ -1919,21 +1628,14 @@ export function createThreeRenderer(
 
   /** Draws one plan. */
   const paint = (plan: PaintPlan): void => {
-    // BEFORE THE GPU GUARD, DELIBERATELY. The parallel accessibility board is
-    // DOM and `lastPlan` is plain data, so neither depends on a board standing:
-    // both follow the commit even on a frame that cannot draw one. While a
-    // context is lost `ensureBoard` reports no board, because
-    // `parkForContextLoss` released the factory and the scene while the lost
-    // context still owned them, so a commit that lands during the outage would
-    // otherwise leave the screen reader's grid showing a pre-loss board and
-    // leave the restoration reconciling to that same stale board.
+    // Before the GPU GUARD, DELIBERATELY. The parallel accessibility board is
+    // DOM and `lastPlan` is plain data, so neither depends on a board
+    // standing: both follow the commit even on a frame that cannot draw one.
     updateParallelBoard(plan);
     lastPlan = plan;
 
     if (!ensureBoard(plan.size)) {
       // No board stands, so no trigger armed for this plan can ever play.
-      // Dropped for the reason the refused-size path drops them: a trigger held
-      // past the plan it belongs to would fire at a cell of a later board.
       clearPendingTriggers();
 
       return;
@@ -1943,9 +1645,9 @@ export function createThreeRenderer(
 
     for (const planned of plan.tiles) {
       // js/html_actuator.js L73-L80 appended the two source tiles after the
-      // merged tile had been classed, leaving them beneath it in the container;
-      // the order is kept so a depth tie, if the tweens ever produced one,
-      // resolves the way the 2D board resolved it.
+      // merged tile had been classed, leaving them beneath it in the
+      // container; the order is kept so a depth tie, if the tweens ever
+      // produced one, resolves the way the 2D board resolved it.
       for (const source of planned.merged) {
         addTile(source, true);
       }
@@ -1955,15 +1657,13 @@ export function createThreeRenderer(
 
     startMergeEffects();
 
-    // Every trigger this plan consumed is dropped here, so the next plan starts
-    // from the events of its own turn alone.
+    // Every trigger this plan consumed is dropped here, so the next plan
+    // starts from the events of its own turn alone.
     clearPendingTriggers();
 
     // A terminal turn shakes the camera once: the 2D board's own terminal
     // treatment is the overlay src/ui/screens/hud.ts fades in, and this is the
-    // board's half of the same moment. Suppressed while motion is reduced by
-    // the effects module itself, and on a repaint, which redraws a commit whose
-    // own shake has already run.
+    // board's half of the same moment.
     if (plan.over && plan.repaint !== true) {
       camera?.shake();
     }
@@ -1977,10 +1677,6 @@ export function createThreeRenderer(
       detail: Object.freeze({ size: plan.size, tiles: plan.tiles.length }),
     });
   };
-
-  /* ------------------------------------------------------------------
-   * The frame
-   * --------------------------------------------------------------- */
 
   /** Retires the blocks whose tweens have finished and that asked to be. */
   const retireArrived = (): void => {
@@ -2009,9 +1705,9 @@ export function createThreeRenderer(
   /**
    * Measures the step since the last frame, in ms.
    *
-   * The loop's own context is used where one is handed in. A caller driving the
-   * renderer directly — a test, or a host with no loop — is measured against
-   * the ambient clock instead, and the first such frame steps nothing.
+   * The loop's own context is used where one is handed in. A caller driving
+   * the renderer directly — a test, or a host with no loop — is measured
+   * against the ambient clock instead, and the first such frame steps nothing.
    */
   const readDelta = (context: FrameContext | undefined): number => {
     if (context !== undefined) {
@@ -2058,9 +1754,6 @@ export function createThreeRenderer(
     const activeScene = scene;
     const surface = webgl;
 
-    // Nothing is drawn against a lost context: the handlers of
-    // src/render/webgl-support.ts report the loss and the restoration, and this
-    // frame and every frame between the two is skipped rather than issued.
     if (activeScene !== null && surface !== null && !contextLost) {
       surface.render(activeScene.scene, activeScene.camera);
     }
@@ -2072,10 +1765,6 @@ export function createThreeRenderer(
       (camera?.isActive() ?? false)
     );
   };
-
-  /* ------------------------------------------------------------------
-   * Mount and unmount
-   * --------------------------------------------------------------- */
 
   const openScale = (): void => {
     if (requestedScale !== 'auto') {
@@ -2093,16 +1782,12 @@ export function createThreeRenderer(
     const onChange = (): void => {
       const size = boardSize > 0 ? boardSize : readConfiguredSize();
 
-      // The scale changes every length, so the board is generated again rather
-      // than rescaled: `tileSize`, the field, the plates and the numeral
-      // textures are all functions of it.
       board = null;
       geometry = null;
       ensureBoard(size);
 
       // Generating the board recalls every block into the factory's pool, so
-      // the plan the board last showed is queued again. Without it the
-      // regenerated lattice stands empty until the next turn commits.
+      // the plan the board last showed is queued again.
       if (lastPlan !== null) {
         queued = restPlan(lastPlan);
       }
@@ -2161,42 +1846,17 @@ export function createThreeRenderer(
     releaseResize = null;
   };
 
-  /* ------------------------------------------------------------------
-   * Context loss and restoration
-   * --------------------------------------------------------------- */
-
-  /**
-   * Parks rendering for a lost context.
-   *
-   * `webglcontextlost` already has its `preventDefault()` called in
-   * src/render/webgl-support.ts, which is what makes restoration possible at all.
-   * This is the renderer's own half, and three of its four steps were missing:
-   *
-   *   1. The loss flag is raised, which stops `frame()` issuing a draw call. That
-   *      part existed.
-   *   2. THE LOOP IS PARKED. `frame()` went on advancing tweens, particles and the
-   *      camera rig against a context that cannot draw, and went on returning
-   *      `true` for outstanding work — so an idle-stopping loop kept spinning
-   *      frames for animations nobody could see, for as long as the context stayed
-   *      lost.
-   *   3. PENDING EFFECTS ARE CLEARED. Every GPU object belonging to the lost
-   *      context is invalid, so a queued plan and the triggers armed for it
-   *      describe resources that no longer exist.
-   *   4. THE FALLBACK IS ANNOUNCED, at `error` level, so the diagnostics surface
-   *      and the log both carry it rather than the board simply freezing.
-   */
+  /** Parks rendering for a lost context. */
   const parkForContextLoss = (): void => {
     contextLost = true;
     contextLosses += 1;
 
-    // Read before the release, which zeroes it: the diagnostic reports the board
-    // the loss interrupted, not the absence left behind.
+    // Read before the release, which zeroes it: the diagnostic reports the
+    // board the loss interrupted, not the absence left behind.
     const lostSize = boardSize;
 
-    // Every tween, burst and camera displacement in flight targets a mesh whose
-    // GPU resources have just been invalidated. Stopping them is what parks the
-    // loop: `frame()` reports outstanding work from these three, so with them
-    // cleared it reports none and an idle-stopping loop settles.
+    // Every tween, burst and camera displacement in flight targets a mesh
+    // whose GPU resources have just been invalidated.
     tweens?.clear();
     particles?.reset();
     camera?.reset();
@@ -2204,15 +1864,12 @@ export function createThreeRenderer(
     queued = null;
     clearPendingTriggers();
 
-    // RELEASED HERE, NOT AT RESTORATION. `webglcontextrestored` fires only after
-    // the browser has already put a NEW context on the canvas, so a delete issued
-    // from the restore handler targets that new context with a handle belonging to
-    // the destroyed one — twenty `INVALID_OPERATION: object does not belong to
-    // this context` warnings per restoration, one per geometry, texture and vertex
-    // array. Releasing while the context is still the lost one is a no-op at the
-    // driver: calls on a lost context are ignored without raising. `lastPlan` and
-    // the parallel board are deliberately left alone — `paint` keeps both current
-    // through the outage, and `lastPlan` is what the restoration reconciles from.
+    // Released here, not at restoration. `webglcontextrestored` fires only
+    // after the browser has already put a NEW context on the canvas, so a
+    // delete issued from the restore handler targets that new context with a
+    // handle belonging to the destroyed one — twenty `INVALID_OPERATION:
+    // object does not belong to this context` warnings per restoration, one
+    // per geometry, texture and vertex array.
     releaseGpuResources();
 
     reporter.onDiagnostic({
@@ -2232,8 +1889,8 @@ export function createThreeRenderer(
    * the hosts, the parallel board, the resize observer and the theme
    * subscription in place.
    *
-   * Shared by the context-loss park and the restoration rebuild, so the release
-   * order is stated once: the reverse of the order a mount takes them.
+   * Shared by the context-loss park and the restoration rebuild, so the
+   * release order is stated once: the reverse of the order a mount takes them.
    */
   const releaseGpuResources = (): void => {
     clearLiveTiles();
@@ -2261,21 +1918,12 @@ export function createThreeRenderer(
    * Rebuilds the renderer-owned GPU resources after a restored context and
    * reconciles the board that was last committed.
    *
-   * A restored context is a NEW context: every buffer, texture, program and
-   * material uploaded to the old one is gone. Clearing the flag alone — which is
-   * all this used to do — left the scene holding invalid handles, so the board
-   * either drew nothing or drew whatever the driver made of dead resources.
-   *
-   * The scene graph, the material cache, the mesh factory, the particle system
-   * and the camera rig are therefore all rebuilt, the board is regenerated at the
-   * size in force, and the plan the board last showed is queued again so the next
-   * frame reconciles the LATEST committed state rather than an empty board.
-   *
    * @param surface The canvas the restored context belongs to.
    * @param size Board size to rebuild at.
    * @param scale Scale the geometry is resolved for.
-   * @returns The verdict of the attempt, which a caller acts on: a rebuild that
-   *   did not complete leaves the board parked and the context reported lost.
+   * @returns The verdict of the attempt, which a caller acts on: a rebuild
+   *   that did not complete leaves the board parked and the context reported
+   *   lost.
    */
   const rebuildAfterContextRestore = (
     surface: HTMLCanvasElement,
@@ -2285,8 +1933,6 @@ export function createThreeRenderer(
     contextLost = false;
 
     if (disposed || !mounted) {
-      // Nothing to rebuild and no board to park: a renderer that owns no
-      // resources cannot be the reason a caller is serving another board.
       return Object.freeze({
         rebuilt: false,
         contextLost: false,
@@ -2297,10 +1943,8 @@ export function createThreeRenderer(
     const carried = lastPlan;
 
     try {
-      // Normally a no-op: `parkForContextLoss` already released everything while
-      // the lost context still owned it. Kept for the path where a restoration
-      // arrives without a recorded loss, so the rebuild never stacks a second set
-      // of resources on top of a live one.
+      // Normally a no-op: `parkForContextLoss` already released everything
+      // while the lost context still owned it.
       releaseGpuResources();
 
       webgl = openSurface(surface);
@@ -2328,17 +1972,11 @@ export function createThreeRenderer(
       applyClearColor(readPinnedTheme() ?? getActiveTheme());
       ensureBoard(carried?.size ?? size);
     } catch (error: unknown) {
-      // A restoration that cannot be completed leaves the renderer mounted but
-      // not drawing, rather than half-built: the flag goes back up so `frame()`
-      // stays parked, and the caller's number-only fallback keeps the game
-      // readable.
       contextLost = true;
 
-      // AND NOTHING IS LEFT ALLOCATED. The try above builds in order, so a
+      // And nothing is left allocated. The try above builds in order, so a
       // failure part-way through it leaves every resource created before the
-      // throwing line holding a context this renderer will not draw with. They
-      // are released here, so a later restoration rebuilds from nothing rather
-      // than stacking a second set on top of them.
+      // throwing line holding a context this renderer will not draw with.
       releaseGpuResources();
 
       reporter.onCount({ name: CONTEXT_FAILED_METRIC, value: 1 });
@@ -2364,15 +2002,7 @@ export function createThreeRenderer(
     contextRestores += 1;
 
     // The LATEST committed state, re-queued so the next frame reconciles in
-    // full. Drawn from the retained plan rather than from a remembered event, so
-    // no engine emission has to be replayed, and `paint` keeps that plan current
-    // through the outage, so a turn resolved while the context was dead is the
-    // turn the board comes back showing.
-    //
-    // Queued at REST, the way the scale change queues it: the lattice has just
-    // been generated again outside a turn, so every block is placed where it
-    // stands rather than sliding in from a position whose mesh no longer exists,
-    // and a terminal board does not shake a second time.
+    // full.
     if (carried !== null) {
       queued = restPlan(carried);
     }
@@ -2437,13 +2067,7 @@ export function createThreeRenderer(
     const size = readConfiguredSize();
 
     // EVERY initialisation step is inside this guard, not just the context and
-    // the scene. Nine of them used to sit outside it — the material cache, the
-    // mesh factory, the context-loss handlers, the tween group, the particle
-    // system, the camera rig, the board build, the parallel-board claim and the
-    // theme subscription — and a throw from any of them escaped this function,
-    // escaped the composition root's renderer selection, and took down
-    // application startup instead of falling back to number-only rendering.
-    // `teardown()` releases whatever was reached (M7).
+    // the scene.
     try {
       // The context is acquired here and nowhere else, so a caller that has
       // already probed for support decides whether to mount at all.
@@ -2470,21 +2094,16 @@ export function createThreeRenderer(
 
       applyClearColor(readPinnedTheme() ?? getActiveTheme());
 
-      // The context-loss handler the product has never had: WebGL is a hard
-      // runtime prerequisite of this renderer, and a lost context is silent
-      // without one.
+      // The context-loss handler the product has never had.
       releaseContextLoss = attachContextLossHandlers(
         surface,
         {
           onContextLost: (info: WebGLContextLossInfo): void => {
             parkForContextLoss();
 
-            // SURFACED TO WHOEVER BUILT THIS RENDERER, after this renderer's own
-            // response, so a handler that reads `readStats().contextLost` sees
-            // the loss the call is telling it about. Parking is all a renderer
-            // can do about a lost context; ending the wait and serving another
-            // board instead is a decision only the composition root can make,
-            // and without this forwarding it never learned there was a wait.
+            // Surfaced to whoever built this renderer, after this renderer's
+            // own response, so a handler that reads `readStats.contextLost`
+            // sees the loss the call is telling it about.
             options.onContextLost?.(info);
           },
           onContextRestored: (): void => {
@@ -2493,10 +2112,6 @@ export function createThreeRenderer(
             // would skip it entirely for a renderer built with no callback.
             const outcome = rebuildAfterContextRestore(surface, size, scale);
 
-            // THE VERDICT IS FORWARDED, not the fact of the restoration: a
-            // rebuild that failed leaves this renderer parked, and the caller's
-            // fallback must stay in force rather than be ended by a restoration
-            // that restored nothing drawable.
             options.onContextRestored?.(outcome);
           },
         },
@@ -2507,9 +2122,9 @@ export function createThreeRenderer(
       particles = createParticleSystem({ reporter });
       camera = createCameraEffects(scene.camera, { reporter });
 
-      // The number-only layer and the canvas are mutually exclusive: exactly one
-      // of the two draws the board, and index.html ships the number-only host
-      // hidden.
+      // The number-only layer and the canvas are mutually exclusive: exactly
+      // one of the two draws the board, and index.html ships the number-only
+      // host hidden.
       const numberOnly = asHtmlElement(options.numberOnlyHost);
 
       if (numberOnly !== null) {
@@ -2535,11 +2150,11 @@ export function createThreeRenderer(
       openResize();
 
       releaseTheme = subscribeToThemeChange((theme: Theme): void => {
-        // The material cache, the mesh factory and the scene's lighting rig each
-        // follow the theme through their own subscription; this repaints so the
-        // change reaches the screen without waiting for a turn, refreshes the
-        // projection's theme id, and carries the palette into the clear colour,
-        // which belongs to the renderer this module owns.
+        // The material cache, the mesh factory and the scene's lighting rig
+        // each follow the theme through their own subscription; this repaints
+        // so the change reaches the screen without waiting for a turn,
+        // refreshes the projection's theme id, and carries the palette into
+        // the clear colour, which belongs to the renderer this module owns.
         applyClearColor(theme);
 
         reporter.onCount({
@@ -2561,9 +2176,10 @@ export function createThreeRenderer(
         detail: Object.freeze({ boardSize, scale }),
       });
     } catch (error: unknown) {
-      // The mount is UNWOUND, not abandoned. `mounted` is cleared first so every
-      // guarded member refuses during the teardown, then `teardown()` releases
-      // whatever the try block reached and restores both hosts if the swap ran.
+      // The mount is UNWOUND, not abandoned. `mounted` is cleared first so
+      // every guarded member refuses during the teardown, then `teardown`
+      // releases whatever the try block reached and restores both hosts if the
+      // swap ran.
       mounted = false;
 
       teardown();
@@ -2592,17 +2208,8 @@ export function createThreeRenderer(
   };
 
   /**
-   * Releases every resource a mount may have taken, in the reverse of the order
-   * it takes them, and restores every host it may have written.
-   *
-   * SEPARATE FROM `unmount()` BECAUSE A FAILED MOUNT HAS TO RUN IT TOO. `unmount`
-   * refuses when `mounted` is false, and a mount that threw part-way through
-   * never set that flag — so before this existed a partial mount leaked its
-   * scene, its material cache, its mesh factory, its tween group, its particle
-   * system, its camera rig, its context-loss handlers, its resize observer and
-   * its theme subscription, and left the canvas shown over a number-only host it
-   * had already hidden. Every member is null-guarded, so running it against a
-   * mount that got nowhere is a no-op.
+   * Releases every resource a mount may have taken, in the reverse of the
+   * order it takes them, and restores every host it may have written.
    */
   const teardown = (): void => {
     releaseTheme?.();
@@ -2612,18 +2219,10 @@ export function createThreeRenderer(
 
     clearLiveTiles();
 
-    // EVERY TRIGGER, not just the merge list. `pendingSpawns` and
-    // `pendingMoveOrigins` are armed by the granular events and used to survive a
-    // teardown, so a remount drained the previous mount's triggers into its own
-    // first paint — a spawn tween on a cell that had merely been repositioned, and
-    // a slide from an origin on a board that no longer existed.
-    // `clearPendingTriggers` also releases the turn key, which is what makes the
-    // next commit reconcile in full (N5, M9).
+    // Every trigger, not just the merge list.
     clearPendingTriggers();
     queued = null;
 
-    // Any plan not yet drawn is abandoned: a remount reconciles from the next
-    // commit rather than repainting a board this mount never finished showing.
     lastScore = 0;
 
     particles?.dispose();
@@ -2641,9 +2240,6 @@ export function createThreeRenderer(
     releaseContextLoss?.();
     releaseContextLoss = null;
 
-    // The loss state belongs to the context this mount held, so a remount starts
-    // from "not lost" and its own loss/restore tallies rather than inheriting the
-    // previous mount's (N5).
     contextLost = false;
     contextLosses = 0;
     contextRestores = 0;
@@ -2656,14 +2252,9 @@ export function createThreeRenderer(
     lastFrameAt = null;
     lastPlan = null;
 
-    // Handed back the way it was taken: the layer stays mounted so the surface
-    // the next renderer takes over is populated rather than an empty
-    // `role="grid"`, and only the attributes this renderer wrote are restored.
     releaseParallelBoard();
 
-    // Restored only where the swap actually ran. A mount that failed before it
-    // leaves both hosts exactly as it found them, so the caller's fallback finds
-    // a number-only host in its shipped state.
+    // Restored only where the swap actually ran.
     if (hostsSwapped) {
       const numberOnly = asHtmlElement(options.numberOnlyHost);
 
@@ -2671,9 +2262,6 @@ export function createThreeRenderer(
         numberOnly.hidden = numberOnlyWasHidden;
       }
 
-      // The canvas is left HIDDEN rather than restored to the shown state
-      // index.html ships it in. The number-only host above is restored to its
-      // shipped state instead. DL-THREE-02.
       const canvasElement = asHtmlElement(canvas);
 
       if (canvasElement !== null) {
@@ -2688,7 +2276,7 @@ export function createThreeRenderer(
     litStageIndex = null;
 
     // The `aria-hidden="true"` mount asserted is restored to the state the
-    // canvas was found in. DL-THREE-03.
+    // canvas was found in.
     restoreCanvasAria(canvas);
 
     canvas = null;
@@ -2699,18 +2287,14 @@ export function createThreeRenderer(
       return;
     }
 
-    // Set FIRST, so `frame()` and every other guarded member refuses while the
-    // teardown runs and a remount starts from a known state (N5).
+    // Set FIRST, so `frame` and every other guarded member refuses while the
+    // teardown runs and a remount starts from a known state.
     mounted = false;
 
     teardown();
 
     reporter.onCount({ name: UNMOUNT_METRIC, value: 1 });
   };
-
-  /* ------------------------------------------------------------------
-   * Subscription
-   * --------------------------------------------------------------- */
 
   const render = (commit: StateCommitEvent): void => {
     if (disposed) {
@@ -2738,26 +2322,23 @@ export function createThreeRenderer(
         detail: Object.freeze({ size: commit.board.size, boardSize }),
       });
 
-      // Dropped rather than carried: a trigger queued against a board that is
-      // never drawn would otherwise fire at a cell of the next board.
       clearPendingTriggers();
 
       return;
     }
 
-    // Triggers armed by a turn other than this commit's are DISCARDED before the
-    // plan is built, so a merge pop or a spawn tween can never play against a
-    // board it was not armed for. `planCommit` reads the buffers, so the check
-    // has to precede it.
+    // Triggers armed by a turn other than this commit's are DISCARDED before
+    // the plan is built, so a merge pop or a spawn tween can never play
+    // against a board it was not armed for.
     triggersBelongTo(commit.turn);
 
     const delta = Math.max(0, commit.score - lastScore);
 
     lastScore = commit.score;
 
-    // The stage slice of AAP Contract 1, which is the authority on the stage in
-    // force: a board that carries across a stage boundary reports the new index
-    // here, and the rig is tuned for it.
+    // The stage slice of AAP Contract 1, which is the authority on the stage
+    // in force: a board that carries across a stage boundary reports the new
+    // index here, and the rig is tuned for it.
     lightForStage(commit.stage.stageIndex);
 
     // Planned here, inside the emission that carried the live board, and drawn
@@ -2980,8 +2561,7 @@ export function createThreeRenderer(
       };
     }
 
-    // The six names of AAP Contract 1 this renderer reads. `move:before` is
-    // not among them.
+    // The six names of AAP Contract 1 this renderer reads.
     const taken: EngineEventSubscription[] = [
       events.on('stage:start', onStageStart),
       events.on('tile:merge', onMerge),
@@ -3025,12 +2605,7 @@ export function createThreeRenderer(
       released = true;
       releaseTaken();
 
-      // REMOVED FROM THE SHARED COLLECTION, not merely called. `subscriptions`
-      // outlives a mount, so a release that only invoked its callbacks left them
-      // in the array: a mount/unmount/mount cycle grew it every time and
-      // `dispose()` then re-invoked every already-released callback. Splicing
-      // the exact entries keeps the array equal to what is actually subscribed
-      // (N4).
+      // Removed from the shared collection, not merely called.
       for (const release of taken) {
         const index = subscriptions.indexOf(release);
 
@@ -3057,10 +2632,6 @@ export function createThreeRenderer(
     rendered = null;
   };
 
-  // Mounted at construction where a canvas was handed in, which is the
-  // convention src/render/number-only-renderer.ts follows for its own host: the
-  // composition root then reads `mounted` to learn whether the mode it selected
-  // is available, rather than having to sequence a separate call.
   if (options.canvas !== undefined && options.canvas !== null) {
     mount(options.canvas);
   }

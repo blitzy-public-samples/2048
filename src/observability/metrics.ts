@@ -4,8 +4,8 @@
 // client-side snapshot download.
 //
 // This module is a pure addition. No counter, no histogram, no `performance.*`
-// call and no `console.*` call existed in the retired sources, so it carries no
-// ported construct.
+// call and no `console.*` call existed in the retired sources, so it carries
+// no ported construct.
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
 // this module's area enumerated, all target-only because the retired sources
@@ -42,13 +42,14 @@
 // attempts.
 //
 // `move:after`, symmetrically, is the completion signal of EVERY turn that
-// reached the walk and carries `moved: false` for one that moved nothing, so an
-// emission count measures turns ATTEMPTED. A turn that resolved is observable
-// at the engine's own `engine.move.resolved` counter, raised once per move that
-// changed the board. Feeding the turn family from the emission OVER-reports it
-// by exactly the idle inputs — pressing into a wall, repeating a direction on a
-// settled board — which skews every rate derived from it, and that is the
-// substitution this module refuses to make in either direction.
+// reached the walk and carries `moved: false` for one that moved nothing, so
+// an emission count measures turns ATTEMPTED. A turn that resolved is
+// observable at the engine's own `engine.move.resolved` counter, raised once
+// per move that changed the board. Feeding the turn family from the emission
+// OVER-reports it by exactly the idle inputs — pressing into a wall,
+// repeating a direction on a settled board — which skews every rate derived
+// from it, and that is the substitution this module refuses to make in either
+// direction.
 //
 // Emission counts do not vary with observers. The emitter counts an emission
 // before it looks a listener up, so an event with no subscriber is counted
@@ -160,8 +161,7 @@ export interface Histogram {
 
   /**
    * CUMULATIVE counts aligned to `buckets`: element `i` counts every
-   * observation at or below `buckets[i]`. Built fresh on each read. The
-   * overflow slot is not an element here; it equals `count`.
+   * observation at or below `buckets[i]`. Built fresh on each read.
    */
   readonly bucketCounts: readonly number[];
   observe(value: number): void;
@@ -173,12 +173,6 @@ export interface Histogram {
    * result is interpolated linearly within the bucket the rank falls in, and
    * its accuracy is bounded by the bucket widths. A rank that falls in the
    * overflow slot resolves to the highest bound.
-   *
-   * An EMPTY BUCKET IS NEVER SELECTED: it holds no observation, so no rank
-   * falls inside it. The lower edge of the first bucket, which the bounds
-   * leave unbounded below, is the smallest observation recorded, so an
-   * estimate never falls outside the observed range — including for a layout
-   * whose first bound is negative.
    *
    * @param q Quantile to estimate, from 0 to 1 inclusive.
    * @returns The estimate, or `NaN` when nothing has been observed or `q` is
@@ -194,8 +188,6 @@ export interface Histogram {
  * 16 is the frame budget, 32 and 64 are two and four budgets, and the rest are
  * the animation timings the product already holds, out past the 1200 ms
  * overlay delay.
- *
- * Decision DL-METRIC-01.
  */
 export const DEFAULT_DURATION_BUCKETS: readonly number[] = Object.freeze([
   1, 2, 4, 8, 16, 32, 64, 100, 200, 400, 600, 800, 1200, 2000,
@@ -254,11 +246,7 @@ export const METRIC_NAMES = Object.freeze({
   /**
    * Turns that resolved a move. Boundary: the actuation push of
    * js/game_manager.js L182-L190, which sat inside that method's `if (moved)`
-   * block, and which is the engine's `engine.move.resolved` counter. It is NOT
-   * the `move:after` event: that event is the completion signal of every turn
-   * that reached the walk and carries `moved: false` for a turn that moved
-   * nothing, so an emission count measures turns attempted. Fed by
-   * `recordTurnResolved` alone.
+   * block, and which is the engine's `engine.move.resolved` counter.
    *
    * Never above `engine_events_total{event="move:after"}`, and below it by
    * exactly the number of idle inputs.
@@ -267,21 +255,19 @@ export const METRIC_NAMES = Object.freeze({
   mergesTotal: `${METRIC_PREFIX}merges_total`,
 
   /**
-   * Tiles actually inserted into the lattice. Boundary:
-   * js/game_manager.js L69-L76, whose L72-L75 body ran only when
-   * js/grid.js L37-L43 returned a cell. Fed by `recordEngineEvent` from the
-   * `tile:spawn` emissions that carry a position, which the engine emits
-   * only for a spawn that reached the lattice.
+   * Tiles actually inserted into the lattice. Boundary: js/game_manager.js
+   * L69-L76, whose L72-L75 body ran only when js/grid.js L37-L43 returned a
+   * cell.
    */
   spawnsTotal: `${METRIC_PREFIX}spawns_total`,
 
   /**
    * Spawn attempts, whether or not a cell was available. Boundary:
    * js/game_manager.js L69-L76 on entry, which is the engine's
-   * `engine.spawn.attempt` counter and NOT the `tile:spawn` event: the
-   * engine returns before emitting when the board is full, so an emission
-   * count measures resolved spawns and would under-report attempts. Fed by
-   * `recordSpawnAttempt` alone.
+   * `engine.spawn.attempt` counter and NOT the `tile:spawn` event. The event is
+   * emitted for every attempt, so it does not distinguish one that inserted a
+   * tile from one that did not; what distinguishes them is the POSITION it
+   * carries, which `spawns_total` counts and which a suppressed attempt omits.
    *
    * Always at least `spawns_total`, and exactly `spawns_total` plus
    * `spawn_suppressed_total`.
@@ -289,9 +275,9 @@ export const METRIC_NAMES = Object.freeze({
   spawnAttemptsTotal: `${METRIC_PREFIX}spawn_attempts_total`,
 
   /**
-   * Spawn attempts that inserted no tile: the board was full, or an
-   * `onSpawn` handler returned no usable cell. The engine's
-   * `engine.spawn.suppressed` counter, fed by `recordSpawnSuppressed`.
+   * Spawn attempts that inserted no tile: the board was full, or an `onSpawn`
+   * handler returned no usable cell. The engine's `engine.spawn.suppressed`
+   * counter, fed by `recordSpawnSuppressed`.
    */
   spawnSuppressedTotal: `${METRIC_PREFIX}spawn_suppressed_total`,
 
@@ -321,8 +307,6 @@ export const METRIC_NAMES = Object.freeze({
  * Frozen. The per-hook, per-event, per-reason, per-stream, per-check and
  * per-span families are label dimensions on one family each, not concatenated
  * names.
- *
- * Decision DL-METRIC-04.
  */
 export const METRIC_LABELS = Object.freeze({
   hook: 'hook',
@@ -336,8 +320,9 @@ export const METRIC_LABELS = Object.freeze({
 const METRIC_HELP: Readonly<Record<keyof typeof METRIC_NAMES, string>> =
   Object.freeze({
     turnsTotal:
-      'Turns that resolved a move, one per engine turn that changed the ' +
-      'board. Idle turns are not counted.',
+      'Turns whose slide moved at least one tile, one per engine turn that ' +
+      'resolved a move. Neither an idle turn nor one changed by a hook ' +
+      'effect alone is counted.',
     mergesTotal: 'Tile merges resolved, one per tile:merge emission.',
     spawnsTotal:
       'Tiles inserted, one per tile:spawn emission carrying a position.',
@@ -396,8 +381,8 @@ const METRIC_KINDS: Readonly<Record<keyof typeof METRIC_NAMES, MetricKind>> =
   });
 
 /**
- * The slice of `HookBusMetrics` this module reads: the per-hook counts and
- * the correlation identifier of the bus that counted them.
+ * The slice of `HookBusMetrics` this module reads: the per-hook counts and the
+ * correlation identifier of the bus that counted them.
  *
  * Derived from that type by `Pick`, and optional. The member name is written
  * once, here. A `HookBusMetrics` value satisfies it as it stands; a fabricated
@@ -468,12 +453,12 @@ export type MetricSeriesSnapshot =
   | HistogramSeriesSnapshot;
 
 /**
- * The registry's whole state, as `snapshot()` reports it.
+ * The registry's whole state, as `snapshot` reports it.
  *
  * Plain JSON data throughout: the object round-trips through
  * `JSON.parse(JSON.stringify(snapshot))` unchanged, so a consumer need not
- * parse the text form. Every series in it also appears in
- * `toPrometheusText()`, and no series appears in one and not the other.
+ * parse the text form. Every series in it also appears in `toPrometheusText`,
+ * and no series appears in one and not the other.
  */
 export interface MetricsSnapshot {
   readonly schemaVersion: number;
@@ -489,21 +474,7 @@ export interface MetricsSnapshot {
   readonly series: readonly MetricSeriesSnapshot[];
 }
 
-/**
- * The one member of a `tile:spawn` payload `recordEngineEvent` reads.
- *
- * A structural view rather than an import of the event type, so the registry
- * still names no engine payload interface: a `SpawnPayload` from
- * src/engine/hooks.ts and a `TileSpawnEvent` from
- * src/engine/engine-events.ts both satisfy it.
- *
- * `position` present means a tile entered the lattice, and absent — or
- * `undefined` — means the spawn was suppressed and inserted nothing. It is
- * therefore the insertion signal and NOT the attempt signal: a full board
- * emits no `tile:spawn` at all, because the engine returns before the
- * emission, which is what keeps a full board free of draws. Attempts come
- * from `recordSpawnAttempt`.
- */
+/** The one member of a `tile:spawn` payload `recordEngineEvent` reads. */
 export interface SpawnDetail {
   /** Cell the tile was inserted in, absent when none was. */
   readonly position?: unknown;
@@ -511,10 +482,6 @@ export interface SpawnDetail {
 
 /**
  * The dimensions of an engine count report `recordEngineEventCount` reads.
- *
- * A structural view rather than an import, matching `SpawnDetail` above: an
- * `EngineCountReport` from src/engine/types.ts satisfies it as it stands, and
- * a fabricated value is validated at runtime.
  *
  * `hook` is declared here only so it can be REFUSED. The two dimensions are
  * disjoint and a report carries at most one; a report that names an engine
@@ -531,10 +498,6 @@ export interface EngineEventCountView {
   /** Emissions the report stands for. Absent is read as one. */
   readonly value?: unknown;
 }
-
-/* --------------------------------------------------------------------------
- * Construction parameters
- * ----------------------------------------------------------------------- */
 
 /** Families the registry will hold before it rejects a new one. */
 const MAX_FAMILIES = 128;
@@ -561,12 +524,6 @@ const MAX_HELP_LENGTH = 240;
 /**
  * Characters of metadata the registry will retain across every family and
  * every series: family names, help texts, label names and label values.
- *
- * The per-field limits above bound one call; this bounds their sum, so no
- * sequence of accepted calls can grow the registry without limit. The
- * family and series caps alone did not: 128 families times 256 series times
- * eight labels of bounded length still multiplies out, and the exposition
- * text and the JSON snapshot are both built from all of it.
  */
 const MAX_METADATA_CHARS = 262144;
 
@@ -679,12 +636,6 @@ function buildSeriesKey(labels: LabelSet): string {
 /**
  * Names the three series a histogram family generates in the exposition.
  *
- * A histogram family named `x` emits `x_bucket`, `x_sum` and `x_count`. Each
- * of those is a valid metric name in its own right, so a family registered
- * under one of them would collide with the generated series: one name would
- * carry two `# TYPE` declarations and two sets of samples, which a scraper
- * reads as a single malformed family.
- *
  * @param name Histogram family name.
  * @returns The three generated names.
  */
@@ -698,8 +649,6 @@ function generatedHistogramNames(name: string): readonly string[] {
 
 /**
  * Names the histogram family a candidate name would collide with, if any.
- *
- * The reciprocal of `generatedHistogramNames`: `x_bucket` resolves to `x`.
  *
  * @param name Candidate family name.
  * @returns The base name, or `null` when the candidate carries none of the
@@ -718,10 +667,6 @@ function histogramBaseName(name: string): string | null {
 /**
  * Derives the help text of a family that was never described.
  *
- * Deterministic and stable, so one registry state always renders one
- * exposition: the exposition format's `# HELP` line is emitted once per
- * family, and a family with no text of its own used to emit `# TYPE` alone.
- *
  * @param name Family name.
  * @param kind Kind the family was registered under.
  * @returns The derived text.
@@ -733,13 +678,10 @@ function deriveHelp(name: string, kind: MetricKind): string {
 /**
  * Builds the key one absolute reconciliation is remembered under.
  *
- * The source correlation identifier is part of the key, so a total read
- * from one source is never differenced against a total read from another.
- *
  * @param metric Family name the fold raises.
  * @param source Correlation identifier of the snapshot being folded.
- * @param dimension Label dimension within the family, such as a hook name
- *   or a substream name.
+ * @param dimension Label dimension within the family, such as a hook name or
+ *   a substream name.
  * @returns The key.
  */
 function foldKey(
@@ -750,14 +692,10 @@ function foldKey(
   return `${metric}|${source}|${dimension}`;
 }
 
-/* --------------------------------------------------------------------------
- * Exposition escaping
- * ----------------------------------------------------------------------- */
-
 /**
- * Escapes a label value for the exposition format: backslash, double quote
- * and newline take their defined escapes, and any remaining control character
- * becomes a space. No emitted line carries a raw control character.
+ * Escapes a label value for the exposition format: backslash, double quote and
+ * newline take their defined escapes, and any remaining control character
+ * becomes a space.
  *
  * @param value Value to escape.
  * @returns The escaped value.
@@ -846,13 +784,6 @@ function readCorrelationId(logger: Logger | undefined): string {
 /**
  * Reports whether a `tile:spawn` payload placed a tile.
  *
- * `SpawnPayload.position` in src/engine/hooks.ts is optional, and the engine
- * carries it on the event only for a spawn that reached the lattice: a spawn
- * suppressed on a full board is not emitted at all, and one suppressed by a
- * handler is emitted with the member omitted, which is the state
- * js/grid.js L37-L43 signalled by returning `undefined` from
- * `randomAvailableCell()`. A cell is a `{x, y}` pair of finite numbers.
- *
  * @param payload Payload the event carried.
  * @returns `true` when the payload carries a usable cell.
  */
@@ -894,12 +825,6 @@ function readCount(source: unknown, member: string): number | null {
  * Reduces a value of unknown type to a bounded string fit for a rejection
  * field.
  *
- * Only a string is carried, and only as many characters as a label value
- * holds: a rejection reports what it refused without letting the refused
- * value set the size of the record. Anything else reduces to the empty
- * string rather than being stringified, so a hostile `toString` is never
- * called.
- *
  * @param value Value being reported.
  * @returns The bounded string, or `''`.
  */
@@ -937,13 +862,6 @@ class MetricSeries implements Counter, Gauge, Histogram {
   /**
    * Smallest observation recorded, or `Number.POSITIVE_INFINITY` while none
    * has been.
-   *
-   * One number, so the histogram still retains no observation. It is the
-   * lower edge of the first bucket, which the bucket bounds do not carry:
-   * the first bucket holds everything at or below `buckets[0]`, so its lower
-   * edge is unbounded below and interpolating from a hard-coded `0` was
-   * wrong for any layout whose first bound is negative, and wrong by the
-   * whole of the first bucket for one whose observations sit well above `0`.
    */
   private minObservation = Number.POSITIVE_INFINITY;
 
@@ -1112,8 +1030,7 @@ class MetricSeries implements Counter, Gauge, Histogram {
     const rank = q * this.observations;
 
     // The lower edge of the first bucket, which is unbounded below in the
-    // bucket layout and is therefore taken from the observations
-    // themselves. Finite here, because `observations` is non-zero.
+    // bucket layout and is therefore taken from the observations themselves.
     let lowerBound = this.minObservation;
     let cumulativeBelow = 0;
 
@@ -1121,10 +1038,8 @@ class MetricSeries implements Counter, Gauge, Histogram {
       const inBucket = this.counts[index] ?? 0;
       const upperBound = this.buckets[index] ?? lowerBound;
 
-      // An EMPTY BUCKET HOLDS NO OBSERVATION, so no rank falls inside it and
-      // it is never the answer. `quantile(0)` used to select it, because a
-      // cumulative count of zero satisfies `>= 0`, and returned a bound
-      // nothing was ever observed at.
+      // An empty bucket holds no observation, so no rank falls inside it and
+      // it is never the answer.
       if (inBucket === 0) {
         lowerBound = upperBound;
 
@@ -1248,30 +1163,18 @@ interface MetricFamily {
   readonly series: Map<string, MetricSeries>;
 }
 
-/**
- * The in-page metrics registry.
- *
- * Holds every series and exports them three ways: `snapshot()` as JSON,
- * `toPrometheusText()` as text exposition, and `download()` as a file. Those
- * three members are what stands in for a network-served metrics endpoint here.
- //
- * The substitution is decision DL-METRIC-05.
- *
- * Every member is safe to call from inside an engine-event listener: a rejected
- * call is reported through the injected logger, counted, and otherwise ignored
- * rather than raised.
- */
+/** The in-page metrics registry. */
 export class MetricsRegistry {
   /**
-   * Correlation identifier every snapshot is keyed under and every fold baseline
-   * is checked against, as it stands now.
+   * Correlation identifier every snapshot is keyed under and every fold
+   * baseline is checked against, as it stands now.
    *
    * A GETTER over the injected logger, not a captured value: one page load can
-   * play more than one run, and `Logger.setCorrelationId` rotates the identifier
-   * for every logger sharing its state. A captured value would key a second
-   * run's snapshot to the first, and would make `resolveFoldSource` refuse the
-   * hook bus's own counts as foreign the moment the bus reported under the run
-   * that was actually playing. Decision DL-TYPES-04.
+   * play more than one run, and `Logger.setCorrelationId` rotates the
+   * identifier for every logger sharing its state. A captured value would key a
+   * second run's snapshot to the first, and would make `resolveFoldSource`
+   * refuse the hook bus's own counts as foreign the moment the bus reported
+   * under the run that was actually playing. Decision DL-TYPES-04.
    */
   get correlationId(): string {
     return readCorrelationId(this.logger);
@@ -1309,15 +1212,7 @@ export class MetricsRegistry {
   /** Metadata characters retained across every family and series. */
   private metadataChars = 0;
 
-  /**
-   * Per-span duration histograms, keyed by span name.
-   *
-   * Span, check and stream names are not known at construction the way event
-   * and hook names are, so these three caches fill on first use instead of
-   * being pre-resolved. Each is bounded by `MAX_SERIES_PER_FAMILY`, the same
-   * ceiling a family itself holds, so an unbounded stream of distinct
-   * identifiers cannot grow them without limit.
-   */
+  /** Per-span duration histograms, keyed by span name. */
   private readonly spanHistograms = new Map<string, MetricSeries>();
 
   /** Per-check status gauges, keyed by check name. */
@@ -1396,17 +1291,7 @@ export class MetricsRegistry {
     );
     this.framesCounter = this.declareSeries('framesRenderedTotal', {});
 
-    // THE THREE CANONICAL TUPLES DRIVE CONSTRUCTION, AND ARE STILL
-    // VALIDATED. `ENGINE_EVENT_NAMES`, `HOOK_NAMES` and `RNG_STREAM_NAMES`
-    // are each `Object.freeze`d at their declaration, so no consumer can
-    // reorder or extend one at runtime and change which series this registry
-    // holds. The bounded checks below are kept regardless of that freeze:
-    // every name and label goes through `declareSeries`, which validates the
-    // name and label pattern, charges the metadata budget, and refuses a
-    // family beyond `MAX_FAMILIES` or a series beyond
-    // `MAX_SERIES_PER_FAMILY`. The freeze is the source's guarantee; the
-    // validation is this module's, and it holds for a fabricated tuple a
-    // bundled or test consumer substitutes.
+    // The three canonical tuples drive construction, and are still validated.
     for (const event of ENGINE_EVENT_NAMES) {
       this.eventCounters.set(
         event,
@@ -1567,28 +1452,9 @@ export class MetricsRegistry {
    * Counts one engine-event emission, and the turn, merge or insertion that
    * emission also stands for.
    *
-   * ONE CALL PER EMISSION, NOT PER LISTENER. The emitter counts an emission
-   * before it looks a listener up, so an event with no subscriber is emitted
-   * and counted exactly like one with three, and nothing here varies with how
-   * many listeners a run happens to have registered.
-   *
    * `tile:merge` is emitted once per merge — js/game_manager.js L156-L170 was
    * entered once per merge inside the traversal — so a move that resolves two
    * merges calls this twice and the merge counter rises by two.
-   *
-   * `move:after` closes NO turn here and does not touch `turns_total`. It is
-   * the completion signal of every turn that reached the walk, emitted with
-   * `moved: false` for a turn that moved nothing, so counting emissions
-   * over-reports turns by exactly the idle inputs. Turns that resolved arrive
-   * through `recordTurnResolved`, from the engine's own
-   * `engine.move.resolved` counter.
-   *
-   * `tile:spawn` stands for one tile INSERTED, and only when its payload
-   * carries a position. It is not the spawn-attempt boundary and it does not
-   * touch `spawn_attempts_total`: the engine returns before emitting on a full
-   * board, so counting emissions would under-report attempts. Attempts arrive
-   * through `recordSpawnAttempt` and suppressions through
-   * `recordSpawnSuppressed`.
    */
   recordEngineEvent(event: EngineEventName, detail?: SpawnDetail): void {
     try {
@@ -1625,14 +1491,15 @@ export class MetricsRegistry {
    * report that carries no `event` but names an engine event in `hook` is
    * refused and reported rather than folded under that hook.
    *
-   * Equivalent to `recordEngineEvent` for the per-event and merge families, and
-   * the path a wiring layer uses when it is handed reports rather than events.
-   * It records no insertion and no turn, because a count report carries no
-   * payload and no resolution: insertions arrive with the event through
-   * `recordEngineEvent`, and turns that resolved arrive through
+   * Equivalent to `recordEngineEvent` for the per-event and merge families,
+   * and the path a wiring layer uses when it is handed reports rather than
+   * events. It records no insertion and no turn, because a count report
+   * carries no payload and no resolution: insertions arrive with the event
+   * through `recordEngineEvent`, and turns that resolved arrive through
    * `recordTurnResolved` from the engine's `engine.move.resolved` counter. A
-   * `move:after` report therefore raises the per-event family and nothing else —
-   * the report cannot tell a turn that resolved from one that moved nothing.
+   * `move:after` report therefore raises the per-event family and nothing
+   * else — the report cannot tell a turn that resolved from one that moved
+   * nothing.
    *
    * @param report One count report. `value` is the number of emissions it
    *   stands for, read as one when absent.
@@ -1711,10 +1578,10 @@ export class MetricsRegistry {
    * block. It is therefore the only feed `turns_total` has.
    *
    * The `move:after` event is NOT that boundary and does not reach this: the
-   * engine emits it for every turn that reached the walk, carrying
-   * `moved: false` for one that moved nothing, so a turn family fed from the
-   * emission counts idle inputs — a press into a wall, a direction repeated on
-   * a settled board — as turns and skews every rate derived from it.
+   * engine emits it for every turn that reached the walk, carrying `moved:
+   * false` for one that moved nothing, so a turn family fed from the emission
+   * counts idle inputs — a press into a wall, a direction repeated on a
+   * settled board — as turns and skews every rate derived from it.
    */
   recordTurnResolved(): void {
     try {
@@ -1725,13 +1592,10 @@ export class MetricsRegistry {
   }
 
   /**
-   * Counts one spawn attempt.
-   *
-   * THE AUTHORITATIVE ATTEMPT BOUNDARY, which is the engine's
-   * `engine.spawn.attempt` counter raised on entry to the spawn —
-   * js/game_manager.js L69 — and therefore the only feed
-   * `spawn_attempts_total` has. Every attempt reaches it, including the
-   * full-board one that emits no event.
+   * Counts one spawn attempt, fed from the engine's own `engine.spawn.attempt`
+   * counter. Every attempt reaches it, the full-board one included — that
+   * attempt emits `tile:spawn` with no position, so it is counted here and
+   * under `recordSpawnSuppressed`, and not under `spawns_total`.
    */
   recordSpawnAttempt(): void {
     try {
@@ -1741,15 +1605,7 @@ export class MetricsRegistry {
     }
   }
 
-  /**
-   * Counts one spawn attempt that inserted no tile.
-   *
-   * The engine's `engine.spawn.suppressed` counter: a full board, or an
-   * `onSpawn` handler that returned no usable cell. Attempts minus
-   * suppressions is the number of tiles inserted, so this family and
-   * `spawns_total` are two readings of one quantity and disagreeing is a
-   * wiring fault rather than a game state.
-   */
+  /** Counts one spawn attempt that inserted no tile. */
   recordSpawnSuppressed(): void {
     try {
       this.spawnSuppressedCounter.inc(1);
@@ -1848,12 +1704,6 @@ export class MetricsRegistry {
    * Writes one health verdict to `game2048_health_check_status`, labelled with
    * the check id.
    *
-   * TWO OF THE THREE ENCODINGS THE SERIES CARRIES. This member takes a boolean
-   * and so writes `1` or `0`; the third state, `-1` for a check the host offers
-   * nothing to evaluate, is set directly on the same series by
-   * `HealthSurface`, which owns the three-state verdict. The family's help text
-   * declares all three, because a reader of the series sees all three.
-   *
    * @param check Check id, carried as the series label. An empty value is
    *   reported and written nowhere.
    * @param healthy Whether the check passed.
@@ -1883,14 +1733,10 @@ export class MetricsRegistry {
    * Folds the draw cursors of the named RNG substreams into the per-stream
    * draw counter.
    *
-   * ABSOLUTE RECONCILIATION, as `foldHookDispatchCounts` uses: each cursor is
-   * a lifetime total, so the counter rises by the increase since the previous
-   * fold and folding one set of cursors twice adds nothing the second time.
-   *
    * @param cursors Draw cursor of each substream, keyed by substream name.
-   *   Only the four members of `RNG_STREAM_NAMES` are folded; any other key
-   *   is reported and folded nowhere, and an absent member is reported by
-   *   the fold itself.
+   *   Only the four members of `RNG_STREAM_NAMES` are folded; any other key is
+   *   reported and folded nowhere, and an absent member is reported by the
+   *   fold itself.
    */
   recordRngCursors(cursors: Readonly<Record<string, number>>): void {
     try {
@@ -1904,10 +1750,9 @@ export class MetricsRegistry {
       }
 
       // The CANONICAL TUPLE is iterated, not the caller's keys: the run has
-      // exactly the four named substreams, and folding whatever keys a
-      // caller happened to pass let an arbitrary name become a `stream`
-      // label and a series of its own. The series itself is resolved through
-      // the bounded per-stream cache rather than rebuilt on every fold.
+      // exactly the four named substreams, and folding whatever keys a caller
+      // happened to pass let an arbitrary name become a `stream` label and a
+      // series of its own.
       for (const stream of RNG_STREAM_NAMES) {
         const series = this.dynamicSeries(
           this.rngStreamCounters,
@@ -1942,22 +1787,8 @@ export class MetricsRegistry {
   /**
    * Folds the hook bus's dispatch counts into the per-hook counter families.
    *
-   * PULL, not push: the caller reads `HookBus.metrics()` and hands the result
+   * PULL, not push: the caller reads `HookBus.metrics` and hands the result
    * here. src/engine imports nothing from this module.
-   *
-   * DL-METRIC-03.
-   *
-   * ABSOLUTE RECONCILIATION: the bus reports lifetime totals, so each counter
-   * rises by the increase since the previous fold. Folding one snapshot twice
-   * therefore adds nothing the second time, and a total that has fallen below
-   * the previous reading — a fresh bus under the same registry — is read as
-   * the whole of a new lifetime.
-   *
-   * IDENTIFIER RULE: a snapshot must carry a correlation identifier, and where
-   * this registry holds one of its own the two must agree. A snapshot carrying
-   * none, and a snapshot carrying a foreign one, are each reported and neither
-   * is folded, so nothing this registry exports mixes runs. Decision
-   * DL-METRIC-06.
    */
   foldHookDispatchCounts(view: HookDispatchCountsView): void {
     try {
@@ -1998,8 +1829,8 @@ export class MetricsRegistry {
   /**
    * Projects the whole registry as plain JSON data.
    *
-   * Every series present here is also present in `toPrometheusText()` under
-   * the same name and labels, and no series appears in one and not the other.
+   * Every series present here is also present in `toPrometheusText` under the
+   * same name and labels, and no series appears in one and not the other.
    */
   snapshot(): MetricsSnapshot {
     const series: MetricSeriesSnapshot[] = [];
@@ -2065,10 +1896,6 @@ export class MetricsRegistry {
    * A filename ending in `.json` downloads the JSON snapshot; every other
    * filename downloads the Prometheus text. The object URL is revoked before
    * the call returns.
-   *
-   * The one member that reaches a document. `document`, `Blob` and
-   * `URL.createObjectURL` are each feature-detected, so the call reports and
-   * returns `false` where any of them is absent rather than throwing.
    *
    * @returns `true` when the download was triggered.
    */
@@ -2304,8 +2131,8 @@ export class MetricsRegistry {
   }
 
   /**
-   * Tests a new family's name against the sample names the histogram
-   * families generate, in both directions.
+   * Tests a new family's name against the sample names the histogram families
+   * generate, in both directions.
    *
    * @param name Name being registered.
    * @param kind Kind being registered.
@@ -2327,10 +2154,10 @@ export class MetricsRegistry {
     }
 
     if (kind !== 'histogram') {
-      // Reciprocal, for a non-histogram: a family named `x_bucket` is
-      // free unless a histogram named `x` is registered, which the check
-      // below covers for the histogram-first order and this one covers for
-      // the reverse.
+      // Reciprocal, for a non-histogram: a family named `x_bucket` is free
+      // unless a histogram named `x` is registered, which the check below
+      // covers for the histogram-first order and this one covers for the
+      // reverse.
       const base = histogramBaseName(name);
       const collides = base !== null && this.families.get(base)?.kind;
 
@@ -2368,8 +2195,8 @@ export class MetricsRegistry {
    * Charges characters against the registry's metadata budget.
    *
    * @param chars Characters the caller wants to retain.
-   * @returns `true` when the budget covered them, `false` when it did not.
-   *   A refusal charges nothing.
+   * @returns `true` when the budget covered them, `false` when it did not. A
+   *   refusal charges nothing.
    */
   private chargeMetadata(chars: number): boolean {
     if (this.metadataChars + chars > MAX_METADATA_CHARS) {
@@ -2385,8 +2212,8 @@ export class MetricsRegistry {
    * Reads the help text a family is exported with.
    *
    * @param family Family to read.
-   * @returns Its own text, or the deterministic derivation for a family
-   *   that was never described.
+   * @returns Its own text, or the deterministic derivation for a family that
+   *   was never described.
    */
   private helpOf(family: MetricFamily): string {
     return family.help.length > 0
@@ -2463,11 +2290,7 @@ export class MetricsRegistry {
       return null;
     }
 
-    // SORTED, not in the caller's insertion order. The stored object's key
-    // order is what `JSON.stringify` renders and what the snapshot carries,
-    // so two callers writing the same labels in different orders used to
-    // produce byte-different snapshots depending on which one created the
-    // series first.
+    // SORTED, not in the caller's insertion order.
     const names = Object.keys(labels).sort();
 
     if (names.length > MAX_LABELS_PER_SERIES) {
@@ -2582,7 +2405,7 @@ export class MetricsRegistry {
   /**
    * Resolves a gauge series as the internal implementation type.
    *
-   * `gauge()` answers with the narrow `Gauge` view, which carries neither the
+   * `gauge` answers with the narrow `Gauge` view, which carries neither the
    * `detached` flag a cache decision reads nor an identity a cache can hold.
    *
    * @param name Family name.
@@ -2628,13 +2451,6 @@ export class MetricsRegistry {
   /**
    * Reads a series for a dynamic identifier, resolving it once and holding it.
    *
-   * `resolveSeries` validates the labels, copies and freezes them, builds a
-   * family, then sorts and stringifies the label set into a lookup key — all
-   * of it repeated on every call for a series that already exists. Holding
-   * the resolved handle against the identifier itself skips that chain from
-   * the second call onward and leaves the caller updating the handle
-   * directly.
-   *
    * The cache is bounded: once it holds `MAX_SERIES_PER_FAMILY` identifiers a
    * further one still resolves and records, but is not retained. Nothing is
    * cached for a detached series, so a rejected label set does not pin a
@@ -2665,13 +2481,9 @@ export class MetricsRegistry {
     return series;
   }
 
-  /* ----------------------------------------------------------------------
-   * Fold internals
-   * ------------------------------------------------------------------- */
-
   /**
-   * Folds one lifetime total into a counter by its increase since the
-   * previous fold of the same key.
+   * Folds one lifetime total into a counter by its increase since the previous
+   * fold of the same key.
    *
    * @param series Counter to raise.
    * @param key Fold key the previous absolute is remembered under.
@@ -2707,19 +2519,12 @@ export class MetricsRegistry {
   }
 
   /**
-   * Reads the correlation identifier a fold's source carries, deciding
-   * whether the snapshot may be folded at all.
-   *
-   * THE CORRELATION POLICY, in one place. A snapshot passes only when it
-   * carries a non-empty identifier and, where this registry holds one of its
-   * own, that identifier is the same. Everything else is reported and
-   * refused. A registry constructed with no logger holds no identifier of its
-   * own and cannot judge foreignness, so it accepts whichever identifier the
-   * snapshot carries and namespaces the reconciliation by it.
+   * Reads the correlation identifier a fold's source carries, deciding whether
+   * the snapshot may be folded at all.
    *
    * @param view Snapshot being folded.
-   * @returns The source identifier, or `undefined` when the snapshot must not
-   *   be folded.
+   * @returns The source identifier, or `undefined` when the snapshot must
+   *   not be folded.
    */
   private resolveFoldSource(
     view: HookDispatchCountsView,
@@ -2753,8 +2558,8 @@ export class MetricsRegistry {
    *
    * @param table The bus's `hooks` member.
    * @param hook Hook to fold.
-   * @param source Correlation identifier of the bus that counted them,
-   *   which namespaces every reconciliation key below.
+   * @param source Correlation identifier of the bus that counted them, which
+   *   namespaces every reconciliation key below.
    */
   private foldOneHook(
     table: Record<string, unknown>,
@@ -2841,9 +2646,7 @@ export class MetricsRegistry {
   }
 
   private writeFamily(family: MetricFamily, lines: string[]): void {
-    // ONE HELP LINE PER FAMILY, ALWAYS. A family that was never described
-    // used to emit `# TYPE` alone, so the snapshot's `help` and the
-    // exposition disagreed for the same series; both now read `helpOf`.
+    // One help line per family, always.
     lines.push(`# HELP ${family.name} ${escapeHelp(this.helpOf(family))}`);
     lines.push(`# TYPE ${family.name} ${family.kind}`);
 

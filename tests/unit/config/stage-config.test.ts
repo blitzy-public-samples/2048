@@ -3,27 +3,17 @@
 // config-driven target of kind 'highest-tile' or 'score-threshold' evaluated
 // after a move and resolved at stage end.
 //
-// Provenance of the board vocabulary the derived metrics read, from the deleted
-// vanilla sources: grid serialised to `{ size, cells }`, an empty cell
+// Provenance of the board vocabulary the derived metrics read, from the
+// deleted vanilla sources: grid serialised to `{ size, cells }`, an empty cell
 // serialised as `null`, cell order x-outer and y-inner, and tile serialised to
 // `{ position: { x, y }, value }`.
 //
 // A stage goal has NO vanilla analogue, so the goal comparison pinned below is
 // the stage layer's own and not the win check's strict equality.
-//
 
 // This file imports four helpers from vitest, four values and five types from
 // the module under test, and one copy helper plus two board constants from
-// tests/fixtures/boards.ts. It reads no DOM and no storage, performs no I/O,
-// consumes no randomness, reads no clock and writes no log. It installs no spy
-// and replaces no global: the invariant that the product never patches
-// Math.random is asserted solely by tests/unit/rng/math-random-guard.test.ts,
-// and section 8 evidences this layer's purity by repeating a whole sweep.
-//
-// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
-// DL-STAGE-01, DL-STAGE-02, DL-STAGE-03.
-// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-STAGE-01,
-// TR-STAGE-02, TR-STAGE-03, TR-STAGE-04.
+// tests/fixtures/boards.ts.
 
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
@@ -116,8 +106,6 @@ function sweepGoals(stageConfig: StageConfig): StageGoal[] {
 }
 
 const FIRST_STAGE_GOAL: StageGoal = stageGoalForIndex(0, DEFAULT_STAGE_CONFIG);
-
-/* ===== 2. The persisted stageGoal field ===== */
 
 describe('StageGoal, the run-state envelope stageGoal field', () => {
   it('exposes exactly the members kind and target', () => {
@@ -738,15 +726,8 @@ describe('the fixture-derived highestTileValue', () => {
   });
 });
 
-/* ===== 11. stageGoalForIndex over a curve other than the default ===== */
-
 // Every case above reads DEFAULT_STAGE_CONFIG, whose ladder and extension are
-// `highest-tile` throughout. That leaves the kind discriminant, the
-// score-threshold branch, an extension of a different kind, an empty ladder and
-// the target bounds unmeasured on this function: a regression that hard-coded
-// `'highest-tile'`, read the ladder kind for an extended stage, or dropped the
-// bounding would pass. The curves below are built here for that reason, and
-// A3 requires the goal to be config-driven rather than default-driven.
+// `highest-tile` throughout.
 
 /** Ceiling src/config/stage-config.ts applies to every derived target. */
 const ABSOLUTE_TARGET_CEILING = Number.MAX_SAFE_INTEGER;
@@ -783,8 +764,9 @@ const EXPECTED_SCORE_GOALS: readonly StageGoal[] = [
   { kind: 'score-threshold', target: 20000 },
 ];
 
-/** A curve with no explicit ladder at all, so index 0 comes from the
- * extension. */
+/**
+ * A curve with no explicit ladder at all, so index 0 comes from the extension.
+ */
 const LADDERLESS_CURVE: StageConfig = {
   ladder: [],
   extension: {

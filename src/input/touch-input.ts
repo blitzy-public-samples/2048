@@ -5,40 +5,7 @@
  * `PointerEventFamily`, and the three handlers branch on that value. The probe
  * result is exported as `POINTER_EVENT_FAMILY`.
  *
- * The only import is ./keymap: this module reads no storage and emits no event
- * name. A resolved swipe leaves through the `onSwipe` callback, and every
- * counter, log and span leaves through the injected `InputReporter`, contained
- * by `createSafeInputReporter`, so a sink that throws breaks neither the attach
- * path nor any gesture handler. Module scope performs one guarded read of
- * `window.navigator` and touches no document, so the module imports cleanly
- * outside a browser.
- *
- * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
- * this module's area enumerated:
- *   TR-TOUCH-01  js/keyboard_input_manager.js  the pointer-event-family probe
- *                L4-L13                        and its `msPointerEnabled`
- *                                              branch, ported as
- *                                              `detectPointerEventFamily` and
- *                                              `POINTER_EVENT_FAMILY`
- *   TR-TOUCH-02  js/keyboard_input_manager.js  the touchstart handler, ported as
- *                L96-L112                      the gesture start
- *   TR-TOUCH-03  js/keyboard_input_manager.js  the touchmove handler, ported as
- *                L114-L117                     the default-prevention branch
- *   TR-TOUCH-04  js/keyboard_input_manager.js  the touchend handler and its
- *                L119-L137                     10px threshold, ported as the
- *                                              resolved swipe and
- *                                              `SWIPE_THRESHOLD_PX`
- *   TR-TOUCH-05  target-only row               `attachTouchInput`, its guarded
- *                                              host resolution and its detach
- *                                              handle
- *
- * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
- * only so the construct can be found from the log:
- *   DL-TOUCH-01  the pointer family selected once at module scope, with the
- *                three handlers branching on that value
- *   DL-TOUCH-02  a resolved swipe leaving through the `onSwipe` callback, with
- *                no event name emitted here
- *   DL-TOUCH-03  the 10px threshold carried over unchanged
+ * Decisions: DL-TOUCH-01, DL-TOUCH-02, DL-TOUCH-03 (docs/DECISION_LOG.md).
  */
 
 import {
@@ -247,12 +214,7 @@ function toGesturePoint(x: unknown, y: unknown): GesturePoint | null {
   return { x, y };
 }
 
-/**
- * Measures a gesture and resolves the direction it travelled. The dominant axis
- * wins, and an exact tie between the two absolute deltas resolves on the
- * vertical axis. `direction` is `null` when neither axis exceeded
- * `SWIPE_THRESHOLD_PX`.
- */
+/** Measures a gesture and resolves the direction it travelled. */
 function measureSwipe(
   start: GesturePoint,
   end: GesturePoint
@@ -264,7 +226,7 @@ function measureSwipe(
   const absDy = Math.abs(dy);
 
   if (Math.max(absDx, absDy) > SWIPE_THRESHOLD_PX) {
-    // (right : left) : (down : up)
+    // (right: left): (down: up)
     const direction: Direction =
       absDx > absDy
         ? dx > 0
@@ -297,7 +259,7 @@ export interface TouchInputOptions {
   /**
    * Consulted first by each of the three handlers. Returning `false` suspends
    * the gesture path: no coordinate is captured, no default action is
-   * cancelled and no swipe is emitted. Absent is read as always enabled.
+   * cancelled and no swipe is emitted.
    */
   isEnabled?(): boolean;
 }
@@ -382,14 +344,14 @@ function resolveHost(
  * @returns A detach handle that removes every listener this call did bind. A
  *   missing host or an unusable selector binds nothing, so the handle removes
  *   nothing; where some registrations are rejected and others succeed, the
- *   handle removes the ones that succeeded. Neither case throws.
+ *   handle removes the ones that succeeded.
  */
 export function attachTouchInput(
   options: TouchInputOptions
 ): DetachTouchInput {
   // Contained once here, so every log, counter and span below — including
-  // those emitted from inside a gesture handler — is safe against a sink
-  // that throws.
+  // those emitted from inside a gesture handler — is safe against a sink that
+  // throws.
   const reporter = createSafeInputReporter(
     options.reporter ?? NOOP_REPORTER
   );

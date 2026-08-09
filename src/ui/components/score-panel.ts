@@ -4,66 +4,12 @@
 // A component, not a screen. It declares no router lifecycle of its own, and a
 // screen calls `update` once per `state:commit`.
 //
-// Ported from js/html_actuator.js, which is deleted:
-//   L3-L4      the two mounts, `.score-container` and `.best-container`
-//   L7         the previous-score field, initialised to `0`
-//   L43-L47    `clearElement`, the child-removal loop
-//   L24-L25    the write order — the score, then the best score
-//   L106-L121  `updateScore`, its five steps in that order
-//   L123-L125  `updateBestScore`
-//
-// Ported from the rest of the retired sources:
-//   index.html       the two outlets, each seeded with `0`
-//   style/main.scss  `.score-addition`, the delta node's class
-//   style/main.scss  the `Score` and `Best` captions
-//   js/game_manager.js L80-L82   the best-score value shape
-//   js/game_manager.js L95       the best score re-read after the write
-//
-// Changed against that port:
-// - the two lookups run through `resolveMount`, and a miss is reported and
-// skipped instead of dereferenced
-// - the `:after` captions of style/main.scss gain a real accessible
-// counterpart where the markup declares no name
-// - the two text assignments are appends, and any accessible name is
-// inserted ahead of the value on the same write
-//
 // The best score arrives as the storage layer returns it — a string where one
-// is stored and the number `0` where none is — and reaches the DOM as text.
-// No member below converts it, retains it or compares it: js/game_manager.js
+// is stored and the number `0` where none is — and reaches the DOM as text. No
+// member below converts it, retains it or compares it: js/game_manager.js
 // L80-L82 promotes it and its L95 re-reads it after the write.
 //
-// This module declares no colour, length, radius, duration or z-index. Every
-// one it relies on is declared in style/main.scss and style/_a11y.scss and is
-// reached through the class names below. It names no observability module: the
-// report sink is injected. It reads no storage, holds no timer, registers no
-// listener and announces nothing.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-SCORE-01  js/html_actuator.js L106-L121  `updateScore` and the rising
-//                                               `.score-addition` delta
-//   TR-SCORE-02  js/html_actuator.js L123-L125  `updateBestScore`
-//   TR-SCORE-03  index.html                     the two outlets, each seeded
-//                                               with `0`
-//   TR-SCORE-04  style/main.scss                the `Score` and `Best` `:after`
-//                                               captions, given a real
-//                                               accessible counterpart
-//   TR-SCORE-05  js/game_manager.js L80-L82     the best-score value shape,
-//                                               carried to the DOM unconverted
-//   TR-SCORE-06  js/game_manager.js L95         the best score re-read after
-//                                               the write
-//   TR-SCORE-07  target-only row                `createScorePanel()`,
-//                                               `ScoreSnapshot` and the guarded
-//                                               lookups
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-SCORE-01  the two lookups run through `resolveMount`, with a miss
-//                reported and skipped
-//   DL-SCORE-02  a real accessible counterpart added where the markup declares
-//                no name
-//   DL-SCORE-03  the two text assignments made as appends, with any accessible
-//                name inserted ahead of the value on the same write
+// Decisions: DL-SCORE-01, DL-SCORE-02, DL-SCORE-03 (docs/DECISION_LOG.md).
 
 import type { BestScoreValue } from '../../engine/types';
 import type { UiReporter } from '../a11y/settings';
@@ -72,10 +18,6 @@ import {
   createSafeUiReporter,
   resolveMount,
 } from '../a11y/settings';
-
-/* ==========================================================================
- * 1. Selectors, class names and copy
- * ========================================================================== */
 
 /** Selector of the score outlet. Read at js/html_actuator.js L3. */
 const SCORE_SELECTOR = '.score-container';
@@ -119,10 +61,6 @@ const LABEL_ATTRIBUTE = 'aria-label';
 /** Attribute that names an element by reference. */
 const LABELLED_BY_ATTRIBUTE = 'aria-labelledby';
 
-/* ==========================================================================
- * 2. Report names
- * ========================================================================== */
-
 /** Counter raised once per completed mount, carrying each outlet's state. */
 const MOUNTED_METRIC = 'ui.scorePanel.mounted';
 
@@ -156,10 +94,6 @@ const DELTA_SKIPPED_METRIC = 'ui.scorePanel.delta_skipped';
 /** Counter raised once per `destroy`. */
 const DESTROYED_METRIC = 'ui.scorePanel.destroyed';
 
-/* ==========================================================================
- * 3. Public API
- * ========================================================================== */
-
 /**
  * The two quantities one commit carries to this component: the score half of
  * the actuation payload at js/game_manager.js L91-L97.
@@ -172,7 +106,7 @@ export interface ScoreSnapshot {
    * Best score as the storage layer returned it, typed as `BestScoreValue` —
    * the best-score port's OWN return type, aliased rather than restated. The
    * frozen contract is the raw stored string where one is stored and the
-   * number `0` where none is. Nothing here converts it.
+   * number `0` where none is.
    */
   readonly bestScore: BestScoreValue;
 }
@@ -184,7 +118,6 @@ export interface ScoreSnapshot {
 export interface ScorePanelOptions {
   /**
    * Score outlet, already resolved. Used as given, with no lookup of its own.
-   * `null` marks an outlet the caller looked for and did not find.
    */
   readonly scoreContainer?: HTMLElement | null;
 
@@ -204,8 +137,8 @@ export interface ScorePanelOptions {
 /** The score and best-score outlets, as one mounted component. */
 export interface ScorePanel {
   /**
-   * Writes both quantities: the score first, then the best score, which is
-   * the order of js/html_actuator.js L24-L25.
+   * Writes both quantities: the score first, then the best score, which is the
+   * order of js/html_actuator.js L24-L25.
    *
    * @param snapshot Score and best score of one commit.
    */
@@ -234,15 +167,11 @@ export interface ScorePanel {
   isReady(): boolean;
 
   /**
-   * Detaches the nodes this component created and releases both outlets.
-   * Every later call is a reported no-op.
+   * Detaches the nodes this component created and releases both outlets. Every
+   * later call is a reported no-op.
    */
   destroy(): void;
 }
-
-/* ==========================================================================
- * 4. Outlet state
- * ========================================================================== */
 
 /** One outlet, the accessible name it carries, and who owns that name. */
 interface Surface {
@@ -264,10 +193,6 @@ interface Surface {
   /** Logical name carried into every report. */
   readonly name: string;
 }
-
-/* ==========================================================================
- * 5. Document and attribute helpers
- * ========================================================================== */
 
 /**
  * Reads the ambient document.
@@ -317,9 +242,6 @@ function trimmedAttribute(element: Element, name: string): string {
 /**
  * Whether the markup already names an outlet.
  *
- * index.html is the authority for the markup. An outlet it names through
- * `aria-label` or `aria-labelledby` takes no name from this module.
- *
  * @param element Outlet to test.
  * @returns Whether either labelling attribute carries a value.
  */
@@ -351,14 +273,8 @@ function findDeclaredLabel(element: Element): Element | null {
   return null;
 }
 
-/* ==========================================================================
- * 6. Ported DOM operations
- * ========================================================================== */
-
 /**
  * Removes every child of an element.
- *
- * Ported from js/html_actuator.js L43-L47.
  *
  * @param element Element to empty.
  */
@@ -382,10 +298,6 @@ function clearSurface(surface: Surface): void {
 /**
  * Writes an outlet's value: the accessible name first, then the value as one
  * text node.
- *
- * The text half of js/html_actuator.js L112 and L124, expressed as an append:
- * the accessible name is appended first and the value follows it, on the same
- * write.
  *
  * @param surface Outlet to write.
  * @param text Value to show.
@@ -432,8 +344,8 @@ function detach(node: Node | null): void {
 }
 
 /**
- * Releases an outlet's accessible name, detaching it only where this
- * component created it.
+ * Releases an outlet's accessible name, detaching it only where this component
+ * created it.
  *
  * @param surface Outlet to release.
  */
@@ -446,16 +358,8 @@ function releaseLabel(surface: Surface): void {
   surface.ownsLabel = false;
 }
 
-/* ==========================================================================
- * 7. Mount resolution and accessible names
- * ========================================================================== */
-
 /**
  * Resolves one outlet without asserting and without throwing.
- *
- * The guarded form of the lookups at js/html_actuator.js L3-L4, neither of
- * which was null-checked (I12). An injected element is used as given; only an
- * absent option triggers a lookup.
  *
  * @param injected Element the caller injected, `null` for one the caller
  *   looked for and did not find, or `undefined` for none supplied.
@@ -486,12 +390,6 @@ function resolveSurfaceElement(
 
 /**
  * Resolves the accessible name an outlet carries.
- *
- * The `:after` captions at style/main.scss are pseudo-content, so
- * an outlet the markup leaves unnamed takes a visually-hidden name element
- * here (R9). Resolution stops at the first of three outcomes: a label element
- * the markup placed inside the outlet is adopted, a labelling attribute the
- * markup declares is left alone, and otherwise a name is created.
  *
  * @param surface Outlet to name.
  * @param labelText Word the name carries.
@@ -600,10 +498,6 @@ function mountSurface(
 }
 
 
-/* ==========================================================================
- * 8. Factory
- * ========================================================================== */
-
 /**
  * Mounts the score and best-score outlets.
  *
@@ -612,10 +506,9 @@ function mountSurface(
  * document does not supply is reported and its writes are skipped; the other
  * outlet is unaffected and keeps working.
  *
- * @param options Pre-resolved outlets, document and report sink. Every member
- *   is optional.
+ * @param options Pre-resolved outlets, document and report sink. Every
+ *   member is optional.
  * @returns The mounted panel, whether or not both outlets resolved.
-
  */
 export function createScorePanel(
   options: ScorePanelOptions = {},
@@ -640,14 +533,10 @@ export function createScorePanel(
     reporter,
   );
 
-  // js/html_actuator.js L7: the previous-score field starts at `0`. No member
-  // below resets it. A restart writes `0` against the score it follows: the
-  // difference is negative and no delta node appears.
+  // js/html_actuator.js L7: the previous-score field starts at `0`.
   let previousScore = 0;
 
-  // The delta node currently attached, held for `destroy`. The next clear
-  // removes it, which is the whole of its lifetime at
-  // js/html_actuator.js L107 and L115-L119.
+  // The delta node currently attached, held for `destroy`.
   let delta: Element | null = null;
 
   let destroyed = false;
@@ -672,9 +561,9 @@ export function createScorePanel(
    * Appends the delta node inside the score outlet.
    *
    * Ported from js/html_actuator.js L115-L119. `.score-addition` is a
-   * descendant rule of `.score-container` at style/main.scss. The
-   * node is appended inside the outlet and carries that class alone; every
-   * length, colour and duration of the `move-up` animation is declared there.
+   * descendant rule of `.score-container` at style/main.scss. The node is
+   * appended inside the outlet and carries that class alone; every length,
+   * colour and duration of the `move-up` animation is declared there.
    *
    * @param difference Amount the score rose by.
    */
@@ -707,12 +596,6 @@ export function createScorePanel(
 
   /**
    * Writes the score and, where it rose, the delta.
-   *
-   * Ported from js/html_actuator.js L106-L121, in the five steps that file
-   * performs them in: the outlet is emptied, the difference is taken against
-   * the previous score, the previous score is overwritten, the text is
-   * written from the overwritten field, and the delta node is appended only
-   * where the difference is above zero.
    *
    * @param score Score to show.
    */
@@ -748,8 +631,8 @@ export function createScorePanel(
    * Writes the best score.
    *
    * Ported from js/html_actuator.js L123-L125: the value is written as the
-   * outlet's text and nothing else happens. It is not converted, not
-   * retained, not compared and not formatted.
+   * outlet's text and nothing else happens. It is not converted, not retained,
+   * not compared and not formatted.
    *
    * @param bestScore Best score to show, exactly as it arrives.
    */
@@ -767,8 +650,8 @@ export function createScorePanel(
   /**
    * Writes both quantities of one commit.
    *
-   * The order is that of js/html_actuator.js L24-L25: the score, then the
-   * best score.
+   * The order is that of js/html_actuator.js L24-L25: the score, then the best
+   * score.
    *
    * @param snapshot Score and best score of one commit.
    */

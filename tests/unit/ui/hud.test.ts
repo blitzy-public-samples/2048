@@ -2,20 +2,6 @@
 //
 // Suite for src/ui/screens/hud.ts: the ONE actuator that writes the score, the
 // best score and the terminal overlay.
-//
-// WHAT THIS FILE PINS
-//   single ownership   two components used to own the same three outlets —
-//                      `ScorePanel` owned the two score outlets and the
-//                      number-only renderer owned the same two plus the overlay,
-//                      each with a previous-score cache of its own. Mounting
-//                      both cleared the other's accessible-name node and dropped
-//                      the rising delta. The renderer is now board-only and this
-//                      module is the sole writer.
-//   renderer independence  because the HUD subscribes to `state:commit` itself,
-//                      selecting a different board renderer changes what draws
-//                      the board and nothing else.
-//   ported behaviour   the write order, the two state classes and the two
-//                      verdict strings of js/html_actuator.js.
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -90,14 +76,7 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-/**
- * The value an outlet shows, without its accessible name.
- *
- * ScorePanel writes the visually-hidden label as an element child and the value
- * as a direct text node, so reading only the direct text nodes separates the
- * quantity from the name that precedes it. Asserting on raw `textContent` would
- * conflate the two and would silently pass if the label were ever dropped.
- */
+/** The value an outlet shows, without its accessible name. */
 const valueOf = (outlet: HTMLElement): string => {
   let text = '';
 
@@ -110,7 +89,9 @@ const valueOf = (outlet: HTMLElement): string => {
   return text;
 };
 
-/** The accessible name an outlet carries, read from its visually-hidden label. */
+/**
+ * The accessible name an outlet carries, read from its visually-hidden label.
+ */
 const labelOf = (outlet: HTMLElement): string =>
   outlet.querySelector('.visually-hidden')?.textContent ?? '';
 
@@ -129,8 +110,6 @@ describe('the HUD writes the score, the best score and the overlay', () => {
     expect(valueOf(surfaces.score)).toContain('120');
     expect(valueOf(surfaces.best)).toBe('900');
 
-    // The label survives the write and precedes the value, so a screen reader
-    // reads "Score 120" rather than a bare number.
     expect(labelOf(surfaces.score)).toBe('Score');
     expect(labelOf(surfaces.best)).toBe('Best score');
     expect(hud.readRendered()?.score).toBe(120);
@@ -219,7 +198,7 @@ describe('the terminal overlay carries the ported classes and verdicts', () => {
       hudCopy.wonMessage,
     );
 
-    // The vanilla `continueGame()`: keep-playing and restart both arrive as a
+    // The vanilla `continueGame`: keep-playing and restart both arrive as a
     // commit whose `terminated` is `false`.
     hud.render(commit(2048, { won: true, terminated: false }));
 
@@ -244,6 +223,37 @@ describe('the terminal overlay carries the ported classes and verdicts', () => {
     expect(surfaces.message.classList.contains('game-won')).toBe(false);
 
     hud.destroy();
+  });
+
+  it('clears the verdict without a commit, for a run that ended', () => {
+    const surfaces = fixture();
+    const hud = createHud({
+      scoreContainer: surfaces.score,
+      bestContainer: surfaces.best,
+      messageContainer: surfaces.message,
+      document,
+    });
+
+    hud.render(commit(2048, { won: true, terminated: true }));
+
+    expect(surfaces.message.classList.contains('game-won')).toBe(true);
+
+    // A run that ended takes no further commit, so the clear is asked for
+    // rather than carried by a payload.
+    expect(hud.clearTerminalOverlay()).toBe(true);
+    expect(surfaces.message.classList.contains('game-won')).toBe(false);
+    expect(hud.readRendered()?.terminal).toBeNull();
+    expect(hud.readRendered()?.verdict).toBeNull();
+
+    // The score the last commit wrote is untouched by it.
+    expect(hud.readRendered()?.score).toBe(2048);
+
+    // Nothing was on screen the second time, and it still does not throw.
+    expect(hud.clearTerminalOverlay()).toBe(false);
+
+    hud.destroy();
+
+    expect(hud.clearTerminalOverlay()).toBe(false);
   });
 
   it('reports an absent overlay and keeps writing the scores', () => {
@@ -271,9 +281,9 @@ describe('the HUD is driven by its host, not by an emitter of its own', () => {
   /**
    * The composition root's own subscription, restated here.
    *
-   * src/ui/screens/hud.ts subscribes to NO emitter: a commit reaches it through
-   * `render`, which is what src/main.ts and src/ui/screen-router.ts both drive.
-   * Attaching the listener in the suite is what the root does at
+   * src/ui/screens/hud.ts subscribes to NO emitter: a commit reaches it
+   * through `render`, which is what src/main.ts and src/ui/screen-router.ts
+   * both drive. Attaching the listener in the suite is what the root does at
    * src/main.ts's `stopHud`.
    */
   const drive = (events: EngineEvents, hud: Hud): (() => void) =>
@@ -319,7 +329,8 @@ describe('the HUD is driven by its host, not by an emitter of its own', () => {
     stop();
     events.emit('state:commit', commit(99));
 
-    // The subscription is released, so the outlet keeps the last value written.
+    // The subscription is released, so the outlet keeps the last value
+    // written.
     expect(surfaces.score.textContent).toContain('12');
 
     hud.destroy();
@@ -400,11 +411,9 @@ describe('a destroyed HUD writes nothing further', () => {
   });
 });
 
-/* ==========================================================================
- * The in-run status half: stage indicator and relic tray
- * ========================================================================== */
-
-/** The fixture above, plus the three run-status outlets index.html declares. */
+/**
+ * The fixture above, plus the three run-status outlets index.html declares.
+ */
 function runFixture(): {
   readonly hudGroup: HTMLElement;
   readonly stage: HTMLElement;
@@ -446,13 +455,7 @@ const stageSlice = (
 ): StageCommitContext =>
   Object.freeze({ stageIndex, goal: { kind, target }, goalProgress });
 
-/**
- * The visually-hidden runs one tray row carries, in document order.
- *
- * A row from src/ui/components/relic-card.ts states its pickup slot and its
- * tier as hidden text, so a suite reading one of them looks it up among them
- * rather than taking the first.
- */
+/** The visually-hidden runs one tray row carries, in document order. */
 const hiddenTexts = (row: Element | null | undefined): string[] =>
   row === null || row === undefined
     ? []
@@ -471,7 +474,8 @@ describe('the stage indicator', () => {
 
     expect(hud.hasStageIndicator()).toBe(true);
 
-    // ONE-BASED on screen, zero-based in the engine: index 2 is the third stage.
+    // ONE-BASED on screen, zero-based in the engine: index 2 is the third
+    // stage.
     expect(snapshot.stage).toBe(3);
     expect(
       outlets.stage.querySelector('.hud-stage-index .hud-value')?.textContent,
@@ -480,8 +484,8 @@ describe('the stage indicator', () => {
       outlets.stage.querySelector('.hud-stage-index .hud-label')?.textContent,
     ).toBe(hudCopy.stageLabel);
 
-    // The measured quantity is derived from the target and the fraction, so the
-    // readout cannot disagree with the progress the run reported.
+    // The measured quantity is derived from the target and the fraction, so
+    // the readout cannot disagree with the progress the run reported.
     expect(
       outlets.stage.querySelector('.hud-goal .hud-value')?.textContent,
     ).toBe('16 / 64 tile');
@@ -501,8 +505,6 @@ describe('the stage indicator', () => {
 
     expect(fill?.style.getPropertyValue('--hud-goal-fraction')).toBe('0.4');
 
-    // The track duplicates a quantity `.hud-value` already carries as text, so
-    // it is hidden from assistive technology rather than announced twice.
     expect(
       outlets.stage
         .querySelector('.hud-goal-meter')
@@ -556,8 +558,6 @@ describe('the stage indicator', () => {
 
     hud.render(runCommit(4, stageSlice(0, 'highest-tile', 16, 0.5), []));
 
-    // A commit arrives every turn and the indicator changes on a transition
-    // alone, so the same elements are still in place rather than replaced.
     expect(outlets.stage.querySelector('.hud-stage-index')).toBe(first);
 
     hud.render(runCommit(4, stageSlice(1, 'highest-tile', 32, 0), []));
@@ -610,8 +610,6 @@ describe('the relic tray', () => {
       outlets.tray.querySelectorAll('.relic-tray-item'),
     );
 
-    // PICKUP ORDER IS THE TRAY'S DOCUMENT ORDER, because it is the order the
-    // hook bus dispatches in and therefore what decides how effects compound.
     expect(items.map((item) => item.getAttribute('data-relic-id'))).toEqual([
       'twin-seed',
       'frostbind',
@@ -656,10 +654,7 @@ describe('the relic tray', () => {
       'legendary',
     ]);
 
-    // AND IN TEXT, for the reader the accent cannot reach. Visually hidden,
-    // because the accent states the tier twice over already. The row's hidden
-    // runs are the pickup slot and the tier, so the tier is looked for among
-    // them rather than assumed to be the first.
+    // And in text, for the reader the accent cannot reach.
     expect(hiddenTexts(items[1])).toContain(hudCopy.relicRarity('legendary'));
     expect(items[1]?.textContent).toContain('legendary');
 
@@ -709,9 +704,6 @@ describe('the relic tray', () => {
         ?.hasAttribute('data-rarity'),
     ).toBe(false);
 
-    // The tray skips a rebuild whose signature is unchanged, so the rarity is
-    // part of that signature: a tier resolved between two commits would
-    // otherwise never reach the DOM.
     tier = 'rare';
     hud.render(runCommit(0, stageSlice(0, 'highest-tile', 16, 0), held));
 
@@ -734,7 +726,6 @@ describe('the relic tray', () => {
       ]),
     );
 
-    // Written even at zero, because that is the value the stylesheet dims off.
     expect(
       outlets.tray
         .querySelector('.relic-tray-item')
@@ -755,10 +746,7 @@ describe('the relic tray', () => {
     expect(item?.textContent).toBe(hudCopy.relicTrayEmpty);
 
     // No role of its own, so the implicit `listitem` of an `<li>` inside a
-    // `<ul>` stands. `role="none"` was tried here and removed the only child
-    // role a `role="list"` permits, which left the list ARIA-invalid and
-    // announced as empty; a browser accessibility audit flagged it as
-    // `aria-required-children`.
+    // `<ul>` stands.
     expect(item?.hasAttribute('role')).toBe(false);
     expect(item?.getAttribute('data-relic-empty')).toBe('true');
     expect(outlets.tray.getAttribute('aria-label')).toBe(
@@ -779,9 +767,6 @@ describe('the relic tray', () => {
       ]),
     );
 
-    // src/input/on-screen-controls.ts owns EVERY element-to-action binding,
-    // including the relic-activation control, so the tray is a readout: a
-    // focusable button here would be a second control for the same action.
     expect(outlets.tray.querySelector('button')).toBeNull();
     expect(
       outlets.tray.querySelectorAll('.relic-tray-control'),
@@ -820,16 +805,14 @@ describe('the relic tray', () => {
     // tray showing the raw identifier would name the same relic two ways.
     expect(shown).toEqual(['Alloy Forge', 'Tumbler', 'unnamed-relic']);
 
-    // A blank answer falls back to the identifier rather than an empty pill, and
-    // `data-relic-id` stays the identifier either way.
     expect(
       Array.from(outlets.tray.querySelectorAll('.relic-tray-item')).map(
         (item) => item.getAttribute('data-relic-id'),
       ),
     ).toEqual(['alloy-forge', 'tumbler', 'unnamed-relic']);
 
-    // The full name is carried as a title, so a name the stylesheet truncates is
-    // still readable.
+    // The full name is carried as a title, so a name the stylesheet truncates
+    // is still readable.
     expect(
       outlets.tray
         .querySelector<HTMLElement>('.relic-tray-name')
@@ -854,8 +837,9 @@ describe('the relic tray', () => {
 
     hud.render(runCommit(8, stage, [{ id: 'frostbind', charges: 4 }]));
 
-    // THE SAME ROW, updated in place. A payload arrives on every turn, so a
-    // relic still held costs no element: only a relic that joined or left does.
+    // The same row, updated in place. A payload arrives on every turn, so a
+    // relic still held costs no element: only a relic that joined or left
+    // does.
     expect(outlets.tray.querySelector('.relic-tray-item')).toBe(first);
     expect(
       outlets.tray.querySelector('.relic-tray-charges')?.textContent,
@@ -878,9 +862,6 @@ describe('the relic tray', () => {
       outlets.tray.querySelectorAll('.relic-tray-item'),
     );
 
-    // A third relic is taken: the two rows standing are reused and one is
-    // created, and the newcomer takes the last slot because pickup order is the
-    // order it arrived in.
     hud.render(
       runCommit(0, stage, [
         { id: 'twin-seed' },
@@ -922,10 +903,6 @@ describe('the relic tray', () => {
   });
 });
 
-/* ==========================================================================
- * The unconfirmed terminal or stage status
- * ========================================================================== */
-
 describe('the unconfirmed-status notice', () => {
   it('shows the notice and marks the group while a commit is degraded', () => {
     const outlets = runFixture();
@@ -948,7 +925,7 @@ describe('the unconfirmed-status notice', () => {
     });
     const notice = outlets.hudGroup.querySelector<HTMLElement>('.hud-degraded');
 
-    // THE FLAG REACHES THE PRESENTATION. Before this the commit carried
+    // The flag reaches the presentation. Before this the commit carried
     // `degraded` and the HUD rendered only the ordinary terminal flags, so a
     // player was shown a settled board whose status the engine could not
     // establish.
@@ -956,8 +933,8 @@ describe('the unconfirmed-status notice', () => {
     expect(outlets.hudGroup.getAttribute('data-degraded')).toBe('true');
     expect(notice?.hidden).toBe(false);
 
-    // Real text, so a screen reader reaching the run-status group reads it; the
-    // once-per-transition announcement belongs to the announcer.
+    // Real text, so a screen reader reaching the run-status group reads it;
+    // the once-per-transition announcement belongs to the announcer.
     expect(notice?.textContent).toBe(hudCopy.degradedNotice);
 
     hud.destroy();
@@ -995,10 +972,6 @@ describe('the unconfirmed-status notice', () => {
   });
 });
 
-/* ==========================================================================
- * The live board dimension
- * ========================================================================== */
-
 describe('the board dimension is read live, never cached', () => {
   it('reads it off the board each payload carries', () => {
     const outlets = runFixture();
@@ -1012,9 +985,7 @@ describe('the board dimension is read live, never cached', () => {
     ).toBe(hudCopy.boardValue(4));
     expect(hud.readRendered()?.boardSize).toBe(4);
 
-    // A board-mutating cursed relic shrinks the board mid-run. The dimension is
-    // read from the payload on every write, so the readout follows it rather
-    // than showing the size the screen mounted at.
+    // A board-mutating cursed relic shrinks the board mid-run.
     hud.render({ ...runCommit(4, stage, []), board: new Grid(3) });
 
     expect(
@@ -1034,8 +1005,6 @@ describe('the board dimension is read live, never cached', () => {
     });
     const stage = stageSlice(0, 'highest-tile', 16, 0);
 
-    // A payload with no readable board: the reader answers instead, and is
-    // consulted again on the next write rather than remembered.
     const withoutBoard = {
       ...runCommit(0, stage, []),
       board: undefined,
@@ -1081,11 +1050,7 @@ describe('the board dimension is read live, never cached', () => {
   });
 });
 
-/* ==========================================================================
- * The relic tray reads the registry, live
- * ========================================================================== */
-
-/** One held relic, as `RelicRegistry.active()` returns it. */
+/** One held relic, as `RelicRegistry.active` returns it. */
 const held = (
   id: string,
   name: string,
@@ -1115,8 +1080,6 @@ describe('the tray renders the held relics in pickup order', () => {
       document,
       relics: (): readonly ActiveRelic[] => active,
 
-      // Deliberately wrong, so a row taking its name from the resolver instead
-      // of from the held declaration would be visible.
       relicName: (): string => 'RESOLVER',
     });
     const stage = stageSlice(0, 'score-threshold', 200, 0.5);
@@ -1130,8 +1093,6 @@ describe('the tray renders the held relics in pickup order', () => {
     ).toEqual(['Twin Seed', 'Frostbind']);
     expect(hud.readRendered()?.relics).toEqual(['twin-seed', 'frostbind']);
 
-    // The registry holds the live budget, so the count comes from the record
-    // read at the moment of the write rather than from anything snapshotted.
     active = [
       active[0]!,
       { ...held('frostbind', 'Frostbind', 'legendary', 0), pickupOrder: 1 },
@@ -1201,10 +1162,6 @@ describe('the tray renders the held relics in pickup order', () => {
   });
 });
 
-/* ==========================================================================
- * Announcements
- * ========================================================================== */
-
 /** A recording stand-in for the one announcer of ../a11y/live-region. */
 function recorder(): {
   readonly announcer: HudAnnouncerPort;
@@ -1240,8 +1197,6 @@ describe('the tray is readable through the live region', () => {
     });
     const stage = stageSlice(0, 'highest-tile', 16, 0);
 
-    // The loadout standing at the first write is the restored one, so it is
-    // recorded silently rather than narrated as a change.
     hud.render(runCommit(0, stage, [{ id: 'frostbind', charges: 5 }]));
 
     expect(sink.lines).toEqual([]);
@@ -1358,10 +1313,6 @@ describe('the tray is readable through the live region', () => {
   });
 });
 
-/* ==========================================================================
- * The router lifecycle
- * ========================================================================== */
-
 /** One stage context, as src/ui/screen-router.ts builds it. */
 const stageContext = (
   overrides: Partial<StageScreenContext> = {},
@@ -1427,8 +1378,6 @@ describe('the HUD is the stage screen of the router', () => {
   it('resolves its outlets inside the container the router injects', () => {
     const outlets = routedFixture();
 
-    // Nothing injected and no document: every outlet is a miss at construction,
-    // which is reported rather than raised, and `mount` supplies the container.
     const hud = createHud({
       hudContainer: null,
       stageContainer: null,
@@ -1526,9 +1475,6 @@ describe('the HUD is the stage screen of the router', () => {
       stageContext({
         goal: { kind: 'score-threshold', target: 500 },
 
-        // `evaluateStageGoal` already clamped this fraction and stated the
-        // quantity beside it, so neither is re-derived here: a rescale would
-        // show 150 rather than the 137 the run measured.
         goalProgress: { achieved: 137, progress: 0.274, cleared: false },
         score: 137,
       }),
@@ -1626,7 +1572,6 @@ describe('the HUD is the stage screen of the router', () => {
     expect(outlets.tray.querySelector('.relic-tray-item')).toBeNull();
     expect(outlets.hudGroup.querySelector('.hud-degraded')).toBeNull();
 
-    // Every later call is a reported no-op rather than a throw.
     expect(() => {
       hud.mount(outlets.hudGroup);
       hud.enter(stageContext());
@@ -1637,14 +1582,11 @@ describe('the HUD is the stage screen of the router', () => {
   });
 });
 
-/* ==========================================================================
- * Layering and the frozen best-score contract
- * ========================================================================== */
-
 describe('the HUD occupies the documented rung', () => {
   it('reads the HUD rung from the token layer', () => {
-    // The first step of the ladder extension above the retained ceiling of 100,
-    // and below the diagnostics overlay, which this surface must never shadow.
+    // The first step of the ladder extension above the retained ceiling of
+    // 100, and below the diagnostics overlay, which this surface must never
+    // shadow.
     expect(HUD_Z_INDEX).toBe(zIndex.hud);
     expect(HUD_Z_INDEX).toBe(200);
     expect(HUD_Z_INDEX).toBeLessThanOrEqual(zIndex.modal);
@@ -1687,9 +1629,7 @@ describe('the frozen best-score contract survives the HUD', () => {
 
     // The promotion comparison of js/game_manager.js L80-L82 still relies on
     // the relational coercion of that string, which rendering has not
-    // disturbed. The assertion widens the operand exactly as
-    // src/engine/engine.ts does, so the comparison performed here is the one
-    // the engine performs.
+    // disturbed.
     expect((storage.getBestScore() as number) < 20000).toBe(true);
     expect((storage.getBestScore() as number) < 900).toBe(false);
 

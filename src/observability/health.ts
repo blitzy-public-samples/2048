@@ -1,87 +1,16 @@
-// Health and readiness for the observability layer: the six capability
-// checks, the report roll-up, the two readiness verdicts, the per-check
-// logger record and the per-check status gauge.
+// Health and readiness for the observability layer: the six capability checks,
+// the report roll-up, the two readiness verdicts, the per-check logger record
+// and the per-check status gauge.
 //
-// Five checks are reused from the vanilla sources and one is added. Where
-// each came from, and where it is performed now:
+// Five checks are reused from the vanilla sources and one is added. Where each
+// came from, and where it is performed now.
 //
-//   functionBind           js/bind_polyfill.js L1, whose
-//                          `Function.prototype.bind || …` short-circuit is
-//                          the probe. Reused; performed in this module.
-//   classList              js/classlist_polyfill.js L2-L5, the
-//                          early-return guard. Reused; performed in this
-//                          module.
-//   requestAnimationFrame  js/animframe_polyfill.js L3-L10, the
-//                          ['webkit','moz'] prefix walk and the
-//                          `if (!window.requestAnimationFrame)` fallback
-//                          test, and L23, its `cancelAnimationFrame` half.
-//                          Reused; performed in this module, and reported
-//                          as a pair because the original shimmed both.
-//   pointerEvents          js/keyboard_input_manager.js L4-L13, the
-//                          `window.navigator.msPointerEnabled` selection
-//                          of MSPointerDown/Move/Up over
-//                          touchstart/move/end. Reused; performed by
-//                          `detectPointerEventFamily()` in
-//                          src/input/touch-input.ts, imported here rather
-//                          than repeated.
-//   storage                js/local_storage_manager.js L29-L40,
-//                          `localStorageSupported()`, which wrote a test
-//                          key, removed it and returned `true`, or `false`
-//                          on a throw. Reused; performed by
-//                          `probeWebStorage()` in
-//                          src/storage/local-storage-manager.ts, imported
-//                          here rather than repeated, and keyed on
-//                          `STORAGE_PROBE_KEY` rather than the original's
-//                          unprefixed "test".
-//   webgl                  ADDED. No vanilla origin. Performed by
-//                          `probeWebGLSupport()` in
-//                          src/render/webgl-support.ts, imported here.
+// js/bind_polyfill.js, js/classlist_polyfill.js and js/animframe_polyfill.js
+// are deleted with no code replacement, and their three probe constructs are
+// traced to this module.
 //
-// js/bind_polyfill.js, js/classlist_polyfill.js and
-// js/animframe_polyfill.js are deleted with no code replacement, and their
-// three probe constructs are traced to this module.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-HEALTH-01  js/bind_polyfill.js L1                the `functionBind`
-//                                                       probe
-//   TR-HEALTH-02  js/classlist_polyfill.js L2-L5        the `classList` probe
-//   TR-HEALTH-03  js/animframe_polyfill.js L3-L10, L23  the
-//                                                       `requestAnimationFrame`
-//                                                       pair
-//   TR-HEALTH-04  js/keyboard_input_manager.js L4-L13   the `pointerEvents`
-//                                                       probe
-//   TR-HEALTH-05  js/local_storage_manager.js L29-L40   the `storage` probe
-//   TR-HEALTH-06  target-only row                       the added `webgl` check
-//   TR-HEALTH-07  target-only row                       the report roll-up and
-//                                                       the two readiness
-//                                                       verdicts
-//   TR-HEALTH-08  target-only row                       the per-check logger
-//                                                       record and status gauge
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-HEALTH-01  the three-state check status
-//   DL-HEALTH-02  three probes imported from the modules that own them and
-//                 three performed here
-//   DL-HEALTH-03  the report roll-up rule and how `not-applicable`
-//                 participates in it
-//   DL-HEALTH-04  the gauge encoding of a status
-//   DL-HEALTH-05  programmatic client-side self-checks as the delivered form of
-//                 health and readiness
-//   DL-HEALTH-06  the three-state status carried unreduced through the
-//                 compatibility probe view, beside the boolean rather than
-//                 collapsed into it
-//
-// The imports are two sibling observability modules and the three probe
-// owners. No package is named, `three` included: the WebGL result arrives
-// through src/render/webgl-support.ts. Every global read here — `window`,
-// `document`, `Element`, `Function`, `performance` — is guarded, and no
-// exported member throws.
-
-/* ==========================================================================
- * 1. Imports
- * ========================================================================== */
+// Decisions: DL-HEALTH-01, DL-HEALTH-02, DL-HEALTH-03, DL-HEALTH-04,
+// DL-HEALTH-05, DL-HEALTH-06 (docs/DECISION_LOG.md).
 
 import { createLogger, serializeError } from './logger';
 import type {
@@ -96,18 +25,14 @@ import { detectPointerEventFamily } from '../input/touch-input';
 import { probeWebStorage } from '../storage/local-storage-manager';
 import { probeWebGLSupport } from '../render/webgl-support';
 
-/* ==========================================================================
- * 2. Check identity, status and the gauge encoding
- * ========================================================================== */
-
 /**
- * The six checks, in report order: the three reused probes performed here,
- * the two reused probes imported from the modules that own them, then the
- * added one.
+ * The six checks, in report order: the three reused probes performed here, the
+ * two reused probes imported from the modules that own them, then the added
+ * one.
  *
  * Frozen, and the single declaration of the names. The same strings are the
- * `check` label of the status gauge and the probe names the diagnostics
- * health panel renders.
+ * `check` label of the status gauge and the probe names the diagnostics health
+ * panel renders.
  */
 export const HEALTH_CHECK_IDS = Object.freeze([
   'functionBind',
@@ -124,25 +49,10 @@ export type HealthCheckId = (typeof HEALTH_CHECK_IDS)[number];
 /** How many checks a report carries. */
 export const HEALTH_CHECK_COUNT = HEALTH_CHECK_IDS.length;
 
-/**
- * Outcome of one check.
- *
- * `'not-applicable'` is a third state rather than a second failure: the
- * host offers nothing to evaluate — no `window`, no `document`, no global
- * store — so the capability is neither present nor absent. A no-DOM host
- * therefore reports `'not-applicable'` and never `'fail'`.
- */
+/** Outcome of one check. */
 export type HealthStatus = 'pass' | 'fail' | 'not-applicable';
 
-/**
- * Value the status gauge carries for each status.
- *
- * `1` and `0` are the encoding `MetricsRegistry.recordHealthCheck` writes
- * and the encoding `game2048_health_check_status` declares. `-1` is this
- * module's addition for the third state, so a check that could not be
- * evaluated is distinguishable from one that failed on a series charted
- * like a Prometheus `up` series.
- */
+/** Value the status gauge carries for each status. */
 export const HEALTH_GAUGE_VALUES: Readonly<Record<HealthStatus, number>> =
   Object.freeze({
     pass: 1,
@@ -163,23 +73,14 @@ export function isHealthCheckId(value: unknown): value is HealthCheckId {
   );
 }
 
-/* ==========================================================================
- * 3. Provenance
- * ========================================================================== */
-
 /** Whether a check was reused from the vanilla sources or added. */
 export type HealthCheckDisposition = 'reused' | 'added';
 
-/**
- * Where one check came from and where it is performed now.
- *
- * Plain JSON data, so an export carries the reused-versus-added split
- * rather than leaving it to prose.
- */
+/** Where one check came from and where it is performed now. */
 export interface HealthCheckSource {
   /**
-   * Path and line span of the vanilla probe this check reuses, and `null`
-   * for the added check, which has no vanilla origin.
+   * Path and line span of the vanilla probe this check reuses, and `null` for
+   * the added check, which has no vanilla origin.
    */
   readonly origin: string | null;
 
@@ -187,8 +88,8 @@ export interface HealthCheckSource {
   readonly owner: string;
 
   /**
-   * Symbol the owning module exports for the probe, and `null` where the
-   * probe is performed inline in the owner.
+   * Symbol the owning module exports for the probe, and `null` where the probe
+   * is performed inline in the owner.
    */
   readonly performedBy: string | null;
 
@@ -243,17 +144,13 @@ export const HEALTH_CHECK_SOURCES: Readonly<
   }),
 });
 
-/* ==========================================================================
- * 4. Result and report types
- * ========================================================================== */
-
 /**
- * The structured detail one check result carries: the resolved pointer
- * event names, the live storage strategy, the WebGL level, and the presence
- * flags each probe read.
+ * The structured detail one check result carries: the resolved pointer event
+ * names, the live storage strategy, the WebGL level, and the presence flags
+ * each probe read.
  *
- * Typed as log field values, so a result's own bag reaches the logger
- * without conversion, and every value survives `JSON.stringify` unchanged.
+ * Typed as log field values, so a result's own bag reaches the logger without
+ * conversion, and every value survives `JSON.stringify` unchanged.
  */
 export type HealthCheckData = Readonly<Record<string, LogFieldValue>>;
 
@@ -275,29 +172,18 @@ export interface HealthCheckResult {
   readonly durationMs: number;
 
   /**
-   * The value the probe threw, serialised. Present only on a `'fail'` a
-   * throw produced; a probe that answered `'fail'` without throwing
-   * carries none.
+   * The value the probe threw, serialised. Present only on a `'fail'` a throw
+   * produced; a probe that answered `'fail'` without throwing carries none.
    */
   readonly error?: SerializedError;
 }
 
 /**
- * A whole health report. Plain JSON data throughout: the object
- * round-trips through `JSON.parse(JSON.stringify(report))` unchanged.
+ * A whole health report. Plain JSON data throughout: the object round-trips
+ * through `JSON.parse(JSON.stringify(report))` unchanged.
  */
 export interface HealthReport {
-  /**
-   * The roll-up over `checks`:
-   *
-   * - `'fail'` when at least one check failed;
-   * - `'not-applicable'` when none failed and every check was
-   *   inapplicable, which is the whole-report shape of a host offering
-   *   nothing to evaluate;
-   * - `'pass'` otherwise, so a report mixing passes with inapplicable
-   *   checks passes and a `'not-applicable'` result never fails the
-   *   roll-up on its own.
-   */
+  /** The roll-up over `checks`. */
   readonly status: HealthStatus;
 
   /** Every check, one per `HEALTH_CHECK_IDS` member, in that order. */
@@ -316,10 +202,6 @@ export interface HealthReport {
   readonly durationMs: number;
 }
 
-/* ==========================================================================
- * 5. Readiness types
- * ========================================================================== */
-
 /**
  * Which board renderer the WebGL verdict permits: the Three.js renderer, or
  * the number-only renderer, which is also the non-WebGL fallback.
@@ -328,25 +210,23 @@ export type RendererReadiness = 'webgl' | 'number-only';
 
 /**
  * Whether the live store survives a reload. `'persistent'` is real Web
- * Storage; `'ephemeral'` is the in-memory double, whose contents are lost
- * with the page.
+ * Storage.
  */
 export type StorageReadiness = 'persistent' | 'ephemeral';
 
 /**
- * The consequential half of the surface: what a consumer acts on, derived
- * from the latest check results.
+ * The consequential half of the surface: what a consumer acts on, derived from
+ * the latest check results.
  *
- * Health is what an operator inspects; readiness is what
- * src/main.ts reads to decide which renderer to mount and what to expect
- * of persistence.
+ * Health is what an operator inspects; readiness is what src/main.ts reads to
+ * decide which renderer to mount and what to expect of persistence.
  */
 export interface ReadinessReport {
   /**
    * Whether every readiness-critical capability is present: the renderer
-   * verdict is `'webgl'` and the storage verdict is `'persistent'`. A
-   * build is playable when this is `false` — the fallbacks are the
-   * product's own — so it is a readiness statement and not a liveness one.
+   * verdict is `'webgl'` and the storage verdict is `'persistent'`. A build is
+   * playable when this is `false` — the fallbacks are the product's own — so
+   * it is a readiness statement and not a liveness one.
    */
   readonly ready: boolean;
 
@@ -362,9 +242,7 @@ export interface ReadinessReport {
   /** Context level obtained: `'webgl2'`, `'webgl'` or `'none'`. */
   readonly webglLevel: string;
 
-  /**
-   * What prevented a context from being obtained, absent when one was.
-   */
+  /** What prevented a context from being obtained, absent when one was. */
   readonly webglFailure?: string;
 
   /**
@@ -389,22 +267,11 @@ export interface ReadinessReport {
   readonly timestamp: string;
 }
 
-/* ==========================================================================
- * 6. Structural views of the three imported probes
- * ========================================================================== */
-
-/**
- * The members this module reads off a resolved pointer event family.
- *
- * A structural view rather than an import of the owning module's own
- * interface, so a signature change in src/input/touch-input.ts is a
- * one-line change here. A `PointerEventFamily` satisfies it as it stands.
- */
+/** The members this module reads off a resolved pointer event family. */
 export interface PointerFamilyView {
   /**
-   * Which branch the owner took, as it reports it on the resolved family.
-   * Read from that result; `navigator` is not reached from this module and
-   * the flag itself is tested nowhere in it.
+   * Which branch the owner took, as it reports it on the resolved family. Read
+   * from that result.
    */
   readonly msPointerEnabled: boolean;
 
@@ -443,8 +310,8 @@ export interface StorageProbeView {
 
 /**
  * The Web Storage probe. Defaults to `probeWebStorage` from
- * src/storage/local-storage-manager.ts, which owns the write-and-remove
- * round trip and the `STORAGE_PROBE_KEY` it writes.
+ * src/storage/local-storage-manager.ts, which owns the write-and-remove round
+ * trip and the `STORAGE_PROBE_KEY` it writes.
  */
 export type StorageProbe = () => StorageProbeView;
 
@@ -452,8 +319,8 @@ export type StorageProbe = () => StorageProbeView;
  * The two cached members this module reads off a live storage manager. A
  * `LocalStorageManager` satisfies it as it stands.
  *
- * Supplying one is what keeps the probe from being repeated: the manager
- * ran it once at construction and holds the result.
+ * Supplying one is what keeps the probe from being repeated: the manager ran
+ * it once at construction and holds the result.
  */
 export interface StorageStateView {
   /** The manager's construction-time probe result. */
@@ -485,15 +352,11 @@ export interface WebGLProbeView {
 
 /**
  * The WebGL probe. Defaults to `probeWebGLSupport` from
- * src/render/webgl-support.ts, which owns the context request, the release
- * and the held result.
+ * src/render/webgl-support.ts, which owns the context request, the release and
+ * the held result.
  */
 export type WebGLProbe = () => WebGLProbeView;
 
-/**
- * `WebGLProbeView.failure` value raised before any context is requested
- * because there is no document to create a canvas in.
- */
 const WEBGL_NO_DOCUMENT = 'no-document';
 
 /** `StorageProbeView.strategy` of a store supplied by the caller. */
@@ -501,10 +364,6 @@ const INJECTED_STRATEGY = 'injected';
 
 /** `StorageProbeView.strategy` of real Web Storage. */
 const WEB_STORAGE_STRATEGY = 'localStorage';
-
-/* ==========================================================================
- * 7. Guards, clock and outcome helpers
- * ========================================================================== */
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -551,12 +410,6 @@ function isWebGLProbeView(value: unknown): value is WebGLProbeView {
 /**
  * Reduces a settings bag to one this module can read from.
  *
- * TOTAL. A default parameter stands in for `undefined` ALONE, so an explicit
- * `null` — and any other value that is not an object — reached the reads that
- * follow it and raised out of a member this class documents as never throwing.
- * Anything that is not an object becomes the empty bag, which is the same
- * reading an omitted argument gives.
- *
  * @param options The supplied bag, whatever it is.
  * @returns The bag, or an empty one.
  */
@@ -566,10 +419,6 @@ function settingsOf<T extends object>(options: T): T {
 
 /**
  * Reads the one member `HealthCheckOptions` carries.
- *
- * TOTAL, in both directions: a bag that is not an object yields `false`, and a
- * bag whose `refresh` getter raises is contained rather than raising out of the
- * member that read it.
  *
  * @param options The supplied bag, whatever it is.
  * @returns Whether the held Web Storage result is to be discarded.
@@ -590,8 +439,8 @@ function refreshRequested(options: HealthCheckOptions): boolean {
  * Reads a monotonic clock, matching the guarded idiom
  * src/observability/metrics.ts uses.
  *
- * @returns `performance.now()` where it is readable, otherwise
- *   `Date.now()`, and `0` where neither can be read.
+ * @returns `performance.now` where it is readable, otherwise `Date.now`, and
+ *   `0` where neither can be read.
  */
 function monotonicNow(): number {
   try {
@@ -618,7 +467,7 @@ function monotonicNow(): number {
 }
 
 /**
- * @param startedAt Reading `monotonicNow()` returned before the work.
+ * @param startedAt Reading `monotonicNow` returned before the work.
  * @returns Milliseconds elapsed, clamped at zero so a clock that went
  *   backwards or could not be read never yields a negative duration.
  */
@@ -643,9 +492,6 @@ function readTimestamp(): string {
 /**
  * Ends a fragment with a single full stop.
  *
- * Applied to text a probe's owner authored, which may already carry one:
- * `WebGLProbeView.reason` does.
- *
  * @param text Fragment to close.
  * @returns `text` with one trailing full stop and no doubled one.
  */
@@ -668,20 +514,11 @@ function outcome(
   return { status, detail, data };
 }
 
-/* ==========================================================================
- * 8. The three reused probes performed here
- * ========================================================================== */
-
 /**
  * Check 1, `functionBind`.
  *
- * Reused from js/bind_polyfill.js L1, where
- * `Function.prototype.bind = Function.prototype.bind || …` used the
- * short-circuit itself as the probe. Read here as an explicit type test.
- *
  * @returns `'pass'` when the method is present, `'fail'` when it is not.
- *   Never `'not-applicable'`: `Function` is a language intrinsic and needs
- *   no host object.
+ *   Never `'not-applicable'`.
  */
 function probeFunctionBind(): ProbeOutcome {
   const bound: unknown = Function.prototype.bind;
@@ -698,12 +535,6 @@ function probeFunctionBind(): ProbeOutcome {
 
 /**
  * Check 2, `classList`.
- *
- * Reused from js/classlist_polyfill.js L2-L5, whose early return read
- * `typeof window.Element === "undefined" || "classList" in
- * document.documentElement`. The two conditions are reported separately
- * here: the first is the no-DOM bail-out and yields `'not-applicable'`, and
- * only the second is the support signal.
  *
  * @returns `'pass'` or `'fail'` from the support signal, and
  *   `'not-applicable'` where there is no host object to read it from.
@@ -760,18 +591,8 @@ function probeClassList(): ProbeOutcome {
 /**
  * Check 3, `requestAnimationFrame`.
  *
- * Reused from js/animframe_polyfill.js L3-L10, the `['webkit','moz']`
- * prefix walk and the `if (!window.requestAnimationFrame)` fallback test,
- * and L23, the matching `if (!window.cancelAnimationFrame)`. Both halves
- * are read, and the pair is reported as one check because the original
- * shimmed both.
- *
- * The vendor-prefixed names are not read: the walk existed to install a
- * shim, and this check reports the unprefixed pair the modern baseline
- * provides.
- *
- * @returns `'pass'` when both are callable, `'fail'` when either is
- *   missing, and `'not-applicable'` where there is no window to read.
+ * @returns `'pass'` when both are callable, `'fail'` when either is missing,
+ *   and `'not-applicable'` where there is no window to read.
  */
 function probeAnimationFrame(): ProbeOutcome {
   if (typeof window === 'undefined') {
@@ -798,25 +619,14 @@ function probeAnimationFrame(): ProbeOutcome {
   );
 }
 
-/* ==========================================================================
- * 9. The two reused probes and the added one, performed by their owners
- * ========================================================================== */
-
 /**
  * Check 4, `pointerEvents`.
  *
- * Reused from js/keyboard_input_manager.js L4-L13, whose
- * `if (window.navigator.msPointerEnabled)` selected `MSPointerDown`,
- * `MSPointerMove` and `MSPointerUp` over `touchstart`, `touchmove` and
- * `touchend`. The selection is performed by `detectPointerEventFamily()` in
- * src/input/touch-input.ts and read here; this module repeats neither the
- * flag test nor the name table.
- *
  * @param probe The owning module's family probe.
  * @returns `'pass'` with the three resolved names, and `'fail'` where the
- *   probe returned no usable family. The absence of a window is not a
- *   failure: the owner resolves the standard touch family there, which is
- *   the branch the original took when the flag was falsy.
+ *   probe returned no usable family. The absence of a window is not a failure:
+ *   the owner resolves the standard touch family there, which is the branch
+ *   the original took when the flag was falsy.
  */
 function probePointerEvents(probe: PointerFamilyProbe): ProbeOutcome {
   const family: unknown = probe();
@@ -833,8 +643,8 @@ function probePointerEvents(probe: PointerFamilyProbe): ProbeOutcome {
     `Pointer events resolve to ${family.touchstart}, ` +
     `${family.touchmove} and ${family.touchend}.`;
 
-  // Every member below is read off the family the owner returned, the
-  // branch flag included. No property of `navigator` is read here.
+  // Every member below is read off the family the owner returned, the branch
+  // flag included.
   return outcome('pass', detail, {
     resolved: true,
     msPointerEnabled: family.msPointerEnabled,
@@ -847,18 +657,10 @@ function probePointerEvents(probe: PointerFamilyProbe): ProbeOutcome {
 /**
  * Check 5, `storage`.
  *
- * Reused from js/local_storage_manager.js L29-L40, whose
- * `localStorageSupported()` wrote a test key, removed it and returned
- * `true`, returning `false` from its `catch`. The round trip is performed
- * by `probeWebStorage()` in src/storage/local-storage-manager.ts, which
- * writes `STORAGE_PROBE_KEY`; this module performs no storage access of its
- * own and writes no key, the original's unprefixed `"test"` included.
- *
  * @param view The probe result and the live strategy.
- * @returns `'pass'` where a store is in use, `'fail'` where the probe
- *   caught a throw, and `'not-applicable'` where no global store exists at
- *   all, which the probe reports as an unsupported result carrying no
- *   error.
+ * @returns `'pass'` where a store is in use, `'fail'` where the probe caught
+ *   a throw, and `'not-applicable'` where no global store exists at all, which
+ *   the probe reports as an unsupported result carrying no error.
  */
 function evaluateStorage(view: StorageStateView): ProbeOutcome {
   const probeResult = view.probe;
@@ -905,16 +707,12 @@ function evaluateStorage(view: StorageStateView): ProbeOutcome {
 }
 
 /**
- * Check 6, `webgl`. THE ADDED CHECK; it has no vanilla origin.
- *
- * The context request, the release and the held result belong to
- * `probeWebGLSupport()` in src/render/webgl-support.ts, whose result is
- * read here. This module requests no context and creates no canvas.
+ * Check 6, `webgl`. the added check; it has no vanilla origin.
  *
  * @param probe The owning module's support probe.
  * @returns `'pass'` where a context was obtained, `'not-applicable'` where
- *   there was no document to create a probe canvas in, and `'fail'` for
- *   every other outcome, the probe returning nothing usable included.
+ *   there was no document to create a probe canvas in, and `'fail'` for every
+ *   other outcome, the probe returning nothing usable included.
  */
 function evaluateWebGL(probe: WebGLProbe): ProbeOutcome {
   const support: unknown = probe();
@@ -968,10 +766,6 @@ function evaluateWebGL(probe: WebGLProbe): ProbeOutcome {
   );
 }
 
-/* ==========================================================================
- * 10. The surface
- * ========================================================================== */
-
 /** Subsystem tag every health record carries. */
 const HEALTH_SUBSYSTEM = 'health';
 
@@ -996,15 +790,8 @@ const STORAGE_PROBE_ERROR_NAME = 'StorageProbeError';
 /** Settings `check`, `checkOne` and `report` accept. */
 export interface HealthCheckOptions {
   /**
-   * Whether the held Web Storage result is discarded and the probe
-   * performed again. Defaults to `false`.
-   *
-   * It governs the storage check alone. The other five cost nothing to
-   * repeat: three are type tests, the pointer family is resolved from a
-   * frozen table, and src/render/webgl-support.ts holds its own result and
-   * returns it to every later caller, so reading it again requests no
-   * context. Discarding THAT held result is `resetWebGLSupportProbe()`'s
-   * job in the owning module and this module never calls it.
+   * Whether the held Web Storage result is discarded and the probe performed
+   * again. Defaults to `false`.
    *
    * A surface constructed with a `storage` view ignores this: the manager
    * probed once at construction and this module reads what it holds.
@@ -1016,15 +803,14 @@ export interface HealthCheckOptions {
 export interface HealthSurfaceOptions {
   /**
    * Logger the per-check records are emitted through. A child tagged
-   * `'health'` is taken from it, so the records share the supplied
-   * logger's correlation identifier, level, sinks and buffer. Defaults to
-   * a logger of this module's own.
+   * `'health'` is taken from it, so the records share the supplied logger's
+   * correlation identifier, level, sinks and buffer.
    */
   readonly logger?: Logger;
 
   /**
-   * Registry the per-check status gauge is written to. Defaults to a
-   * registry of this module's own, wired to the same logger.
+   * Registry the per-check status gauge is written to. Defaults to a registry
+   * of this module's own, wired to the same logger.
    */
   readonly metrics?: MetricsRegistry;
 
@@ -1036,47 +822,36 @@ export interface HealthSurfaceOptions {
   readonly storage?: StorageStateView;
 
   /**
-   * The Web Storage probe. Defaults to `probeWebStorage` from the module
-   * that owns it. Ignored when `storage` is supplied.
+   * The Web Storage probe. Defaults to `probeWebStorage` from the module that
+   * owns it.
    */
   readonly storageProbe?: StorageProbe;
 
   /**
-   * The pointer-family probe. Defaults to `detectPointerEventFamily` from
-   * the module that owns it.
+   * The pointer-family probe. Defaults to `detectPointerEventFamily` from the
+   * module that owns it.
    */
   readonly pointerProbe?: PointerFamilyProbe;
 
   /**
-   * The WebGL support probe. Defaults to `probeWebGLSupport` from the
-   * module that owns it.
+   * The WebGL support probe. Defaults to `probeWebGLSupport` from the module
+   * that owns it.
    */
   readonly webglProbe?: WebGLProbe;
 }
 
-/** A subscriber notified with every report `check()` completes. */
+/** A subscriber notified with every report `check` completes. */
 export type HealthListener = (report: HealthReport) => void;
 
 /**
- * One probe's result in the shape a diagnostics health panel reads: a name,
- * a verdict and a description.
- *
- * A structural view rather than an import, so this module stays free of any
- * dependency on the surface that renders it.
+ * One probe's result in the shape a diagnostics health panel reads: a name, a
+ * verdict and a description.
  */
 export interface HealthProbeView {
   /** The check id. */
   readonly name: string;
 
-  /**
-   * The result's own three-state status, carried through UNREDUCED.
-   *
-   * THE AUTHORITATIVE MEMBER. `healthy` beside it cannot express
-   * `'not-applicable'`, and a consumer reading the boolean alone presents an
-   * inapplicable check as an unqualified pass and writes the wrong gauge value
-   * for it. A consumer reads this and falls back to `healthy` only for a view
-   * that predates the member. Decision DL-HEALTH-06.
-   */
+  /** The result's own three-state status, carried through UNREDUCED. */
   readonly status: HealthStatus;
 
   /**
@@ -1115,8 +890,7 @@ interface EvaluatedCheck {
  *
  * @param counts How many results carry each status.
  * @returns `'fail'` when at least one check failed; `'pass'` when none
- *   failed and at least one passed; `'not-applicable'` when none failed and
- *   none passed, which is every check being inapplicable.
+ *   failed and at least one passed.
  */
 function rollUpStatus(
   counts: Readonly<Record<HealthStatus, number>>,
@@ -1132,24 +906,16 @@ function rollUpStatus(
  * Health and readiness over the six capability checks.
  *
  * Every check is performed inside a no-throw boundary, every result is
- * reported twice — once as a structured log record and once as a gauge
- * series labelled with the check id — and no member throws, including where
- * a probe, the logger, the registry or a subscriber does.
+ * reported twice — once as a structured log record and once as a gauge series
+ * labelled with the check id — and no member throws, including where a probe,
+ * the logger, the registry or a subscriber does.
  *
- * Construction performs no probe and emits nothing; `check()` is the first
- * call that does either.
+ * Construction performs no probe and emits nothing; `check` is the first call
+ * that does either.
  */
 export class HealthSurface {
   /**
    * Correlation identifier every record and report carries, as it stands now.
-   *
-   * A GETTER over this surface's own logger, not a captured value: one page load
-   * can play more than one run, and `Logger.setCorrelationId` rotates the
-   * identifier for every logger sharing its state, so a value captured at
-   * construction attributed every report of a second run played without a reload
-   * to the first run. Total, as every member of this class is: a logger that
-   * refuses the read yields the empty string rather than raising out of
-   * `check()`. Decision DL-TYPES-04.
    */
   get correlationId(): string {
     try {
@@ -1185,15 +951,9 @@ export class HealthSurface {
   private faultCount = 0;
 
   /**
-   * @param options Optional collaborators. Omitting every one builds a
-   *   surface that logs through its own logger, records to its own
-   *   registry and probes through the three owning modules, which is what
-   *   makes the module constructible in a unit test with no mocking
-   *   library.
+   * @param options Optional collaborators.
    */
   constructor(options: HealthSurfaceOptions = {}) {
-    // READ THROUGH `settingsOf`, because the default above stands in for an
-    // omitted argument alone: an explicit `null` reached the six reads below.
     const supplied = settingsOf(options);
     const base =
       supplied.logger ?? createLogger({ subsystem: HEALTH_SUBSYSTEM });
@@ -1219,8 +979,8 @@ export class HealthSurface {
   }
 
   /**
-   * Reporter calls this surface contained because the logger, the registry
-   * or a subscriber threw.
+   * Reporter calls this surface contained because the logger, the registry or
+   * a subscriber threw.
    *
    * `0` for collaborators that behave. A non-zero count means reporting is
    * failing while the checks themselves are not: every probe still ran and
@@ -1234,8 +994,8 @@ export class HealthSurface {
    * Runs all six checks, reports each one and returns the report.
    *
    * @param options Whether the held Web Storage result is discarded first.
-   * @returns The frozen report, always carrying exactly
-   *   `HEALTH_CHECK_COUNT` results in `HEALTH_CHECK_IDS` order.
+   * @returns The frozen report, always carrying exactly `HEALTH_CHECK_COUNT`
+   *   results in `HEALTH_CHECK_IDS` order.
    */
   check(options: HealthCheckOptions = {}): HealthReport {
     const refresh = refreshRequested(options);
@@ -1278,8 +1038,7 @@ export class HealthSurface {
    *
    * @param id Check to run.
    * @param options Whether the held Web Storage result is discarded first.
-   * @returns The frozen result. A value that is not one of the six ids
-   *   yields a `'fail'` result rather than throwing.
+   * @returns The frozen result.
    */
   checkOne(
     id: HealthCheckId,
@@ -1293,8 +1052,7 @@ export class HealthSurface {
   }
 
   /**
-   * The latest report, running the checks once when none has been taken
-   * yet.
+   * The latest report, running the checks once when none has been taken yet.
    *
    * @param options Whether the held Web Storage result is discarded, which
    *   also forces the checks to be run.
@@ -1313,17 +1071,17 @@ export class HealthSurface {
   /**
    * The held report, without probing.
    *
-   * @returns The report `check()` last produced, or `null` before the
-   *   first call.
+   * @returns The report `check` last produced, or `null` before the first
+   *   call.
    */
   lastReport(): HealthReport | null {
     return this.latest;
   }
 
   /**
-   * The two consequential verdicts, derived from the latest results:
-   * whether the Three.js renderer may be mounted or the number-only
-   * renderer is required, and whether the live store persists.
+   * The two consequential verdicts, derived from the latest results: whether
+   * the Three.js renderer may be mounted or the number-only renderer is
+   * required, and whether the live store persists.
    *
    * @param options Whether the held Web Storage result is discarded, which
    *   also forces the checks to be run.
@@ -1340,8 +1098,7 @@ export class HealthSurface {
     // `StorageStateView` is injected by the caller, so a view naming
     // `'localStorage'` beside a probe result that did not pass is type-valid,
     // and deriving persistence from the name alone reported that contradiction
-    // as `ready: true`. The check's own verdict decides, and the name says
-    // which store the verdict is about.
+    // as `ready: true`.
     const persistent =
       strategy === WEB_STORAGE_STRATEGY &&
       storage !== undefined &&
@@ -1369,14 +1126,14 @@ export class HealthSurface {
   }
 
   /**
-   * Subscribes a listener to every report `check()` completes.
+   * Subscribes a listener to every report `check` completes.
    *
-   * A listener that throws is contained, counted on `reporterFaults` and
-   * left subscribed; the remaining listeners still receive the report.
+   * A listener that throws is contained, counted on `reporterFaults` and left
+   * subscribed; the remaining listeners still receive the report.
    *
    * @param listener Listener to add.
-   * @returns A handle that removes it. Calling it more than once, or
-   *   after the listener has already been removed, does nothing.
+   * @returns A handle that removes it. Calling it more than once, or after
+   *   the listener has already been removed, does nothing.
    */
   subscribe(listener: HealthListener): () => void {
     if (typeof listener !== 'function') {
@@ -1403,8 +1160,8 @@ export class HealthSurface {
   }
 
   /**
-   * The held report as probe views, without probing when a report is
-   * already held.
+   * The held report as probe views, without probing when a report is already
+   * held.
    *
    * @returns One view per check, in `HEALTH_CHECK_IDS` order.
    */
@@ -1535,9 +1292,8 @@ export class HealthSurface {
   }
 
   /**
-   * Reports one result: a structured record through the logger and a value
-   * on the status gauge. Both are guarded, so a throwing collaborator is
-   * counted and contained rather than propagated.
+   * Reports one result: a structured record through the logger and a value on
+   * the status gauge.
    *
    * @param evaluated The result and the value its probe threw.
    */
@@ -1578,12 +1334,6 @@ export class HealthSurface {
   /**
    * Writes one result to `game2048_health_check_status`, labelled with the
    * check id.
-   *
-   * TWO WRITE PATHS, ONE SERIES. `'pass'` and `'fail'` go through
-   * `recordHealthCheck`, which encodes 1 and 0 and no third value.
-   * `'not-applicable'` is set directly from `HEALTH_GAUGE_VALUES`. Both
-   * paths resolve the same series for a given check id, so a check has one
-   * series however its status is written. Decision DL-HEALTH-04.
    *
    * @param result Result to record.
    */
@@ -1662,8 +1412,8 @@ function readStringField(
 
 /**
  * @param result Result to convert.
- * @returns The probe view of it, carrying the three-state `status` verbatim and
- *   naming the third state in `detail` as well, so a panel reading either
+ * @returns The probe view of it, carrying the three-state `status` verbatim
+ *   and naming the third state in `detail` as well, so a panel reading either
  *   member does not present an inapplicable check as an unqualified pass.
  */
 function toProbeView(result: HealthCheckResult): HealthProbeView {

@@ -7,10 +7,14 @@
 //   src/ui/screen-router.ts is the STATE authority: it selects `won` or
 //   `gameOver` from its `TRANSITIONS` table, resolves the container and injects
 //   it with the `ScreenContext`.
-//   This module is the DOM authority: it is the writer of the verdict panel
-//   inside `#screen-game-over`, of the two state classes on the retained
-//   `.game-message`, of that overlay's verdict paragraph, and of the visibility
-//   of the controls it creates itself.
+//   This module is the DOM authority for the verdict panel inside
+//   `#screen-game-over` and for the visibility of the controls it creates
+//   itself. That panel is the ONE OPERABLE terminal surface.
+//   The retained `.game-message` is written only where `overlay` resolves. The
+//   composed root of src/main.ts supplies `overlay: null` here; screens/hud is
+//   the one writer of that overlay in a composition carrying both, and the
+//   option keeps this module the writer for a composition carrying no HUD.
+//   Decision DL-GAMEOVER-02.
 //   Both surfaces are written idempotently and the same values are written on
 //   every path, so a class or a verdict another actor has already applied is
 //   observed as already applied rather than as a conflict.
@@ -83,8 +87,9 @@
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
 //   DL-GAMEOVER-01  one module serving both terminal states
-//   DL-GAMEOVER-02  the verdict panel rendered into `#screen-game-over` beside
-//                   the retained `.game-message`
+//   DL-GAMEOVER-02  the verdict panel as the one operable terminal surface,
+//                   with `.game-message` written only where no other actor
+//                   writes it
 //   DL-GAMEOVER-03  the contract constants re-exported from ../screen-router
 //                   rather than restated
 //   DL-GAMEOVER-04  an action rendered only where its callback was supplied
@@ -96,10 +101,17 @@
 //                   than by the `hidden` attribute
 //   DL-GAMEOVER-08  the opposite verdict's class retired on every overlay write
 //   DL-GAMEOVER-09  focus replaced only where a refresh changes the verdict
+//   DL-GAMEOVER-10  the composition registering this one module for both
+//                   terminal states, with `overlay`, `announce` and
+//                   `placeFocus` all left to their existing owners
 //
 // This module reads no storage, consumes no randomness, draws no board, holds
 // no engine reference and imports no observability module: every report it
 // raises leaves through the injected `UiReporter` of ../a11y/settings.
+//
+// Decisions: DL-GAMEOVER-01, DL-GAMEOVER-02, DL-GAMEOVER-03, DL-GAMEOVER-04,
+// DL-GAMEOVER-05, DL-GAMEOVER-06, DL-GAMEOVER-07, DL-GAMEOVER-08,
+// DL-GAMEOVER-09 (docs/DECISION_LOG.md).
 
 import { isGameTerminated } from '../../engine/terminal-state';
 import type { BestScoreValue } from '../../engine/types';
@@ -125,10 +137,6 @@ import {
   TERMINAL_VERDICTS_BY_SCREEN,
 } from '../screen-router';
 
-/* ==========================================================================
- * 1. Names carried into reports
- * ========================================================================== */
-
 /** Context label attached to every report this module raises. */
 export const GAME_OVER_CONTEXT = 'screen-game-over';
 
@@ -150,24 +158,24 @@ const FOCUS_METRIC = 'ui.gameOver.focus';
 /** Counter raised for each action press forwarded to a callback. */
 const ACTION_METRIC = 'ui.gameOver.action';
 
-/** Counter raised for each action the state declares and no callback serves. */
+/**
+ * Counter raised for each action the state declares and no callback serves.
+ */
 const ACTION_UNAVAILABLE_METRIC = 'ui.gameOver.action.unavailable';
 
 /** Counter raised for each lifecycle call carrying a context it cannot use. */
 const CONTEXT_REJECTED_METRIC = 'ui.gameOver.context.rejected';
 
-/** Counter raised where the injected cadence differs from the token cadence. */
+/**
+ * Counter raised where the injected cadence differs from the token cadence.
+ */
 const CADENCE_DRIFT_METRIC = 'ui.gameOver.cadence.drift';
 
-/** Counter raised for each call made after `destroy()`. */
+/** Counter raised for each call made after `destroy`. */
 const AFTER_DESTROY_METRIC = 'ui.gameOver.after_destroy';
 
 /** Counter raised where an injected port member raised. */
 const PORT_ERROR_METRIC = 'ui.gameOver.port.error';
-
-/* ==========================================================================
- * 2. The verbatim contract
- * ========================================================================== */
 
 /**
  * The two terminal states, in the order `TERMINAL_OVERLAY_CLASSES` keys them.
@@ -183,12 +191,6 @@ export const TERMINAL_STATES = Object.freeze([
 /**
  * The two classes js/html_actuator.js L128 computed, and the two strings L129
  * computed, pinned as types.
- *
- * The annotation is the enforcement: the VALUES come from ../screen-router, so
- * the router, the HUD and this module cannot drift from one another, and the
- * literals below are the compile-time assertion that what arrives from there is
- * still exactly what the retired actuator wrote. A change to either shared
- * constant fails this file rather than reaching a screen.
  */
 type PinnedOverlayClasses = {
   readonly won: 'game-won';
@@ -207,7 +209,9 @@ export const TERMINAL_STATE_CLASSES: PinnedOverlayClasses =
 /** The two strings js/html_actuator.js L129 computed, verbatim. */
 export const TERMINAL_STATE_MESSAGES: PinnedOverlayCopy = TERMINAL_OVERLAY_COPY;
 
-/** Selector the retained overlay is found at, as index.html L53 declares it. */
+/**
+ * Selector the retained overlay is found at, as index.html L53 declares it.
+ */
 export const GAME_OVER_OVERLAY_SELECTOR = TERMINAL_OVERLAY_SELECTOR;
 
 /**
@@ -223,11 +227,6 @@ export const GAME_OVER_VERDICT_SELECTOR = TERMINAL_OVERLAY_TEXT_SELECTOR;
  * The frozen overlay cadence of style/main.scss L234-L235: a `fade-in` whose
  * duration and delay both come from `motion.fadeIn` of ../../theme/tokens,
  * where the delay is `transitionSpeed * 12`.
- *
- * Read through `OVERLAY_CADENCE` of ../screen-router. NEITHER VALUE IS RESTATED
- * IN THIS FILE, as a numeral or otherwise, and neither is retimed. `total` is
- * the interval an assertion on the overlay has to clear, which is what the
- * recorded-gameplay gate's waits are calibrated to.
  */
 export const GAME_OVER_CADENCE = OVERLAY_CADENCE;
 
@@ -236,11 +235,6 @@ export const TERMINAL_VERDICTS = TERMINAL_VERDICTS_BY_SCREEN;
 
 /**
  * The two flags js/html_actuator.js L27-L33 branched on, per terminal state.
- *
- * Present so a lifecycle call carrying only the router's state name resolves
- * through the same `resolveTerminalState` a commit's own flags resolve through,
- * and the loss-before-win ordering is therefore applied on every path rather
- * than on one of them.
  */
 export const TERMINAL_FLAGS_BY_STATE = Object.freeze({
   won: Object.freeze({ over: false, won: true, terminated: true }),
@@ -266,10 +260,6 @@ export type GameOverAction =
 /** Attribute each rendered control carries its action in. */
 export const GAME_OVER_ACTION_ATTRIBUTE = 'data-action';
 
-/* ==========================================================================
- * 3. Class names this module writes
- * ========================================================================== */
-
 /**
  * The panel classes, every one declared by style/_screens.scss. None is
  * invented here and none carries a value of its own: geometry, colour, radius
@@ -283,19 +273,7 @@ export const GAME_OVER_CLASSES = Object.freeze({
   button: 'screen-button',
 } as const);
 
-/* ==========================================================================
- * 4. Copy
- * ========================================================================== */
-
-/**
- * Everything this screen writes as prose.
- *
- * `wonVerdict` and `lossVerdict` are the two strings js/html_actuator.js L129
- * wrote, taken from `TERMINAL_STATE_MESSAGES` so the panel heading and the
- * retained overlay's paragraph cannot say different things. The remainder has
- * no vanilla source: the vanilla overlay showed a verdict and two controls and
- * no score.
- */
+/** Everything this screen writes as prose. */
 export const gameOverCopy = Object.freeze({
   wonVerdict: TERMINAL_STATE_MESSAGES.won,
   lossVerdict: TERMINAL_STATE_MESSAGES.gameOver,
@@ -340,10 +318,6 @@ function mergeCopy(overrides: Partial<GameOverCopy> | undefined): GameOverCopy {
   });
 }
 
-/* ==========================================================================
- * 5. The terminal resolution
- * ========================================================================== */
-
 /**
  * The flags a verdict is resolved from, as js/game_manager.js L91-L97 placed
  * them in the actuation payload and ../../engine/engine-events carries them on
@@ -383,19 +357,12 @@ export function isTerminalScreenName(
 /**
  * Resolves which terminal verdict a set of flags produces.
  *
- * js/html_actuator.js L27-L33, ordering preserved exactly: the branch is
- * entered only where the turn is terminal, `over` is tested FIRST, and the win
- * verdict is reached only through `else if (metadata.won)`. A resolution that
- * tested `won` first would invert the verdict on every turn where both flags
- * are set, which a board-mutating relic can produce.
- *
  * @param flags The commit's own terminal flags.
  * @returns The terminal state, or `null` where the run is still in play.
- *
  * @example
  * ```ts
  * resolveTerminalState({ over: true, won: true, terminated: true });
- * // -> 'gameOver', because a loss takes precedence over a win.
+ * // -> 'gameOver': a loss takes precedence over a win.
  * ```
  */
 export function resolveTerminalState(
@@ -425,10 +392,6 @@ export function resolveTerminalState(
   return null;
 }
 
-/* ==========================================================================
- * 6. What a write produced
- * ========================================================================== */
-
 /** Everything one verdict write put on screen. */
 export interface GameOverSnapshot {
   /** The terminal state written. */
@@ -453,10 +416,6 @@ export interface GameOverSnapshot {
   readonly cadence: typeof GAME_OVER_CADENCE;
 }
 
-/* ==========================================================================
- * 7. Injected ports
- * ========================================================================== */
-
 /**
  * The announcer this screen speaks through. Both members are optional, and the
  * `LiveRegionAnnouncer` of ../a11y/live-region satisfies it as it stands.
@@ -477,9 +436,7 @@ export interface GameOverPreferencePort {
 export interface GameOverScreenOptions {
   /**
    * The retained terminal overlay, as an element or a selector. A selector is
-   * resolved against the document; `null` marks an outlet the caller looked for
-   * and did not find, and opts this screen out of writing it. Defaults to
-   * `GAME_OVER_OVERLAY_SELECTOR`.
+   * resolved against the document.
    */
   readonly overlay?: Element | string | null;
 
@@ -498,17 +455,10 @@ export interface GameOverScreenOptions {
   /** Copy overrides. Any member may be replaced. */
   readonly copy?: Partial<GameOverCopy>;
 
-  /**
-   * Whether this screen places focus on entry. Defaults to `true`. `false` is
-   * for a composition whose router places focus itself.
-   */
+  /** Whether this screen places focus on entry. Defaults to `true`. */
   readonly placeFocus?: boolean;
 
-  /**
-   * Whether this screen announces the verdict. Defaults to `true`. `false` is
-   * for a composition that attaches ../a11y/engine-announcer, which announces
-   * the same verdict from the commit.
-   */
+  /** Whether this screen announces the verdict. Defaults to `true`. */
   readonly announce?: boolean;
 
   /**
@@ -543,7 +493,7 @@ export interface GameOverScreen extends Screen {
   ): GameOverSnapshot | null;
 
   /**
-   * js/html_actuator.js L38-L41 `continueGame()`: clears the overlay for both
+   * js/html_actuator.js L38-L41 `continueGame`: clears the overlay for both
    * the restart and the keep-playing path.
    */
   clear(): void;
@@ -574,10 +524,6 @@ export interface GameOverDetail {
   readonly bestScore?: BestScoreValue | undefined;
 }
 
-/* ==========================================================================
- * 8. Small helpers
- * ========================================================================== */
-
 function readAmbientDocument(): Document | null {
   return typeof document === 'undefined' ? null : document;
 }
@@ -600,14 +546,6 @@ function asHtmlElement(element: Element | null): HTMLElement | null {
 /**
  * Renders a best score for display without coercing the stored value.
  *
- * `BestScoreValue` is the port's own return type: the raw stored STRING when a
- * value is present and the number `0` when it is absent, which is what
- * js/local_storage_manager.js L43-L45 returned. The value is stringified for
- * display only and is never compared, widened or written back from here.
- *
- * A value that is neither a string nor a finite number renders as the empty
- * string, so nothing puts `null` or `undefined` on screen as text.
- *
  * @param bestScore The value a commit carried.
  * @returns The text to display.
  */
@@ -624,8 +562,6 @@ function formatBestScore(bestScore: BestScoreValue | undefined): string {
 }
 
 /**
- * Renders a score for display, defaulting to nothing rather than to `NaN`.
- *
  * @param score The value a commit carried.
  * @returns The number to display, or `null` where none is usable.
  */
@@ -657,22 +593,11 @@ function detailOf(context: ScreenContext): GameOverDetail {
   return {};
 }
 
-/* ==========================================================================
- * 9. Construction
- * ========================================================================== */
-
 /**
  * Mounts the terminal-verdict screen for both `won` and `gameOver`.
  *
- * Nothing is read or written at import time: the overlay lookup, the panel
- * build and every report happen inside the lifecycle. An absent outlet is
- * reported and its writes are skipped; the outlet that did resolve keeps
- * working, so a missing panel host does not stop the retained overlay being
- * written and a missing overlay does not stop the panel being rendered.
- *
  * @param options Outlets, document, ports, copy and action callbacks.
  * @returns The screen, whether or not every outlet resolved.
- *
  * @example
  * ```ts
  * const gameOver = createGameOverScreen({
@@ -695,7 +620,9 @@ export function createGameOverScreen(
   const shouldPlaceFocus = options.placeFocus ?? true;
   const shouldAnnounce = options.announce ?? true;
 
-  /** Callbacks keyed by the action each serves, absent where none was given. */
+  /**
+   * Callbacks keyed by the action each serves, absent where none was given.
+   */
   const handlers: Readonly<
     Partial<Record<GameOverAction, () => void>>
   > = Object.freeze({
@@ -754,15 +681,11 @@ export function createGameOverScreen(
   /** The controls built, keyed by the action each invokes. */
   const controls = new Map<GameOverAction, HTMLButtonElement>();
 
-  /** Removers for every listener attached, drained by `destroy()`. */
+  /** Removers for every listener attached, drained by `destroy`. */
   const listeners: Array<() => void> = [];
 
   /**
    * Calls an injected port member without letting its throw reach the router.
-   *
-   * ../screen-router already contains a lifecycle throw, so this is the second
-   * boundary rather than the only one: a port that raises leaves the DOM writes
-   * this screen has already made intact.
    *
    * @param member Name carried into the report.
    * @param call The call to attempt.
@@ -780,7 +703,7 @@ export function createGameOverScreen(
   };
 
   /**
-   * Reports a call made after `destroy()` and answers whether to proceed.
+   * Reports a call made after `destroy` and answers whether to proceed.
    *
    * @param member Name carried into the report.
    * @returns Whether this screen has been destroyed.
@@ -792,10 +715,6 @@ export function createGameOverScreen(
 
     return destroyed;
   };
-
-  /* ------------------------------------------------------------------------
-   * The panel
-   * ---------------------------------------------------------------------- */
 
   /**
    * Builds one control for an action, and nothing where no callback serves it.
@@ -911,20 +830,16 @@ export function createGameOverScreen(
     });
   };
 
-  /* ------------------------------------------------------------------------
-   * The retained overlay
-   * ---------------------------------------------------------------------- */
-
   /**
    * js/html_actuator.js L127-L133 `message(won)`, with the paragraph lookup
    * guarded: the source read `getElementsByTagName("p")[0]` and wrote through
    * the result with no check.
    *
-   * The class is added whether or not the paragraph resolves, because the class
-   * is what style/main.scss L232-L248 fades in and what reveals
-   * `.keep-playing-button` inside `&.game-won`. Adding a class already present
-   * is the no-op `classList.add` defines it to be, which is what makes this
-   * safe to run after another actor has written the same value.
+   * The class is added whether or not the paragraph resolves: style/main.scss
+   * L232-L248 fades that class in and reveals `.keep-playing-button` inside
+   * `&.game-won`. Adding a class already present is the no-op `classList.add`
+   * defines it to be, so this runs safely after another actor has written the
+   * same value.
    *
    * The OPPOSITE verdict's class is retired first, so exactly one state class
    * is ever attached. Decision DL-GAMEOVER-08. js/html_actuator.js L131 only
@@ -973,7 +888,7 @@ export function createGameOverScreen(
   };
 
   /**
-   * js/html_actuator.js L135-L139 `clearMessage()`.
+   * js/html_actuator.js L135-L139 `clearMessage`.
    *
    * Both classes are removed, and as TWO separate calls: L136 records that IE
    * only takes one value to remove at a time.
@@ -988,17 +903,13 @@ export function createGameOverScreen(
     overlay.classList.remove(TERMINAL_STATE_CLASSES.gameOver);
   };
 
-  /* ------------------------------------------------------------------------
-   * Host semantics
-   * ---------------------------------------------------------------------- */
-
   /**
    * Tracks the host's accessible name to the verdict on screen.
    *
    * index.html L100 declares `#screen-game-over` with `role="dialog"`,
    * `aria-modal="true"` and a fixed `aria-label`; that one container serves
    * both verdicts, so the name is written per state and the declared value is
-   * restored by `destroy()`. No role and no other ARIA attribute is added.
+   * restored by `destroy`. No role and no other ARIA attribute is added.
    *
    * @param state The terminal state on screen.
    */
@@ -1031,24 +942,8 @@ export function createGameOverScreen(
     host.setAttribute('aria-label', hostLabel);
   };
 
-  /* ------------------------------------------------------------------------
-   * The panel's per-state content
-   * ---------------------------------------------------------------------- */
-
   /**
    * Reconciles a container's children against the list wanted, in order.
-   *
-   * ATTACHMENT IS THE MECHANISM, NOT THE `hidden` ATTRIBUTE. Decision
-   * DL-GAMEOVER-07. The cascade facts it rests on:
-   * style/main.scss L237-L245 is the hidden half of the attribute protocol and
-   * enumerates the elements it covers, and `.screen-button` is not among them;
-   * `@mixin screen-control` of style/_screens.scss declares
-   * `display: inline-block` on `.screen-button`, and `@mixin screen-content`
-   * declares it again for a `button` inside
-   * `.screen[data-screen="game-over"]`; both are author origin and outrank the
-   * user-agent `[hidden]` rule, which is the outcome that same block records in
-   * terms. A detached control is absent from the rendering, from the tab order
-   * and from the accessibility tree.
    *
    * A container already holding exactly `wanted`, in order, is left untouched,
    * so an in-state refresh moves no focus and mutates no node.
@@ -1085,9 +980,10 @@ export function createGameOverScreen(
    * Attaches the controls the state declares, in declaration order, and
    * detaches every other one.
    *
-   * `.keep-playing-button` inside the retained overlay is NOT touched here: its
-   * visibility belongs to `&.game-won` at style/main.scss L241, which the state
-   * class has already applied. This module writes nothing on that element.
+   * `.keep-playing-button` inside the retained overlay is NOT touched here:
+   * its visibility belongs to `&.game-won` at style/main.scss L241, which the
+   * state class has already applied. This module writes nothing on that
+   * element.
    *
    * @param state The terminal state on screen.
    * @returns The actions attached, in declaration order.
@@ -1115,9 +1011,9 @@ export function createGameOverScreen(
       control.removeAttribute(FOCUS_INITIAL_ATTRIBUTE);
     }
 
-    // The first control the state declares is the placement target, so a
-    // router-driven placement that passes no explicit target lands on the same
-    // element this screen would have chosen.
+    // The first control the state declares is the placement target: a
+    // router-driven placement that passes no explicit target lands on it.
+    // DL-GAMEOVER-09.
     wanted[0]?.setAttribute(FOCUS_INITIAL_ATTRIBUTE, '');
 
     if (shown.length === 0) {
@@ -1179,16 +1075,12 @@ export function createGameOverScreen(
     return readout;
   };
 
-  /* ------------------------------------------------------------------------
-   * Focus and the announcement
-   * ---------------------------------------------------------------------- */
-
   /**
    * Reads the reduced-motion value in force for a call.
    *
-   * A context's own value is used where one arrived, because the router reads
-   * it at the moment of the transition; otherwise the injected preference
-   * source is asked, and where neither supplies one, motion is allowed and
+   * A context's own value is used where one arrived — the router reads it at
+   * the moment of the transition — otherwise the injected preference source
+   * is asked. Where neither supplies one, motion is allowed, and
    * style/_a11y.scss's `prefers-reduced-motion` layer remains the visual
    * authority either way.
    *
@@ -1249,12 +1141,6 @@ export function createGameOverScreen(
   /**
    * Announces the verdict, once per entry into a state.
    *
-   * The `terminal` announcement of ../a11y/live-region carries primitive fields
-   * only and is written with that module's assertive polarity. The last state
-   * announced is held, so a refresh arriving while the same state stands
-   * announces nothing; `leave()` releases it, so a later entry into the same
-   * state announces again.
-   *
    * @param state The terminal state entered or refreshed.
    * @param detail The score the announcement carries.
    */
@@ -1288,6 +1174,33 @@ export function createGameOverScreen(
     reporter.count(ANNOUNCE_METRIC, { screen: state, verdict });
   };
 
+  /**
+   * The line the router reads on entry: the verdict, then the actions this
+   * state offers, named by the labels the rendered controls carry.
+   *
+   * The words come from `copy`, so the line and the panel cannot say different
+   * things. Decision DL-GAMEOVER-10.
+   *
+   * @param context The context this entry carries.
+   * @returns The line, or `null` for a context that is not terminal.
+   */
+  const announcement = (context: ScreenContext): string | null => {
+    const state = terminalStateOf(context);
+
+    if (state === null) {
+      return null;
+    }
+
+    const verdict = state === 'won' ? copy.wonVerdict : copy.lossVerdict;
+    const offered = TERMINAL_ACTIONS_BY_STATE[state]
+      .filter((action): boolean => controls.has(action))
+      .map((action): string => copy[action]);
+
+    return offered.length === 0
+      ? verdict
+      : `${verdict} ${offered.join(', or ')}.`;
+  };
+
   /* ------------------------------------------------------------------------
    * The one write path
    * ---------------------------------------------------------------------- */
@@ -1296,9 +1209,10 @@ export function createGameOverScreen(
    * Writes one verdict to both surfaces.
    *
    * Idempotent by construction: `classList.add` of a class already present, an
-   * identical `textContent` assignment and an identical `hidden` assignment are
-   * all no-ops, so re-applying the state on screen changes nothing and appends
-   * nothing. The announcement is gated separately, by the state last announced.
+   * identical `textContent` assignment and an identical `hidden` assignment
+   * are all no-ops, so re-applying the state on screen changes nothing and
+   * appends nothing. The announcement is gated separately, by the state last
+   * announced.
    *
    * @param state The terminal state to write.
    * @param detail The two values the readout shows.
@@ -1340,10 +1254,6 @@ export function createGameOverScreen(
   /**
    * Reports a cadence carried by a context that differs from the token one.
    *
-   * The recorded-gameplay gate's waits are calibrated to
-   * `GAME_OVER_CADENCE.total`, so a divergence between the router's cadence and
-   * ../../theme/tokens is surfaced rather than absorbed.
-   *
    * @param context Context a lifecycle member received.
    */
   const checkCadence = (context: ScreenContext): void => {
@@ -1376,7 +1286,8 @@ export function createGameOverScreen(
    *
    * @param member Name carried into the report.
    * @param context Context the member received.
-   * @returns The terminal state, or `null` where the context is not terminal.
+   * @returns The terminal state, or `null` where the context is not
+   *   terminal.
    */
   const acceptContext = (
     member: string,
@@ -1399,10 +1310,6 @@ export function createGameOverScreen(
 
     checkCadence(context);
 
-    // The router's state name is expressed as the two flags
-    // js/html_actuator.js L27-L33 branched on and resolved through the same
-    // function a commit's own flags take, so the loss-before-win ordering is
-    // applied on every path into this screen rather than on one of them.
     return resolveTerminalState(TERMINAL_FLAGS_BY_STATE[named]);
   };
 
@@ -1411,8 +1318,8 @@ export function createGameOverScreen(
    *
    * `.keep-playing-button` and `.retry-button` are NOT reached: those two are
    * bound by src/input/on-screen-controls.ts and revealed by `&.game-won` at
-   * style/main.scss L241, so clearing the state class is the whole of what puts
-   * them down.
+   * style/main.scss L241, so clearing the state class is the whole of what
+   * puts them down.
    */
   const retractControls = (): void => {
     for (const control of controls.values()) {
@@ -1425,8 +1332,8 @@ export function createGameOverScreen(
   };
 
   /**
-   * js/html_actuator.js L38-L41 `continueGame()`: the one clear path,
-   * reached by both js/game_manager.js L19 `restart` and L26 `keepPlaying`.
+   * js/html_actuator.js L38-L41 `continueGame`: the one clear path, reached by
+   * both js/game_manager.js L19 `restart` and L26 `keepPlaying`.
    *
    * @param member Name carried into the report.
    */
@@ -1448,12 +1355,7 @@ export function createGameOverScreen(
     reporter.count(CLEARED_METRIC, { member });
   };
 
-  /**
-   * Removes what this screen added and restores what it changed.
-   *
-   * Declared as a closure rather than reached through `this`, so a member that
-   * has been destructured off the returned object still tears down correctly.
-   */
+  /** Removes what this screen added and restores what it changed. */
   const teardown = (): void => {
     if (destroyed) {
       return;
@@ -1485,10 +1387,6 @@ export function createGameOverScreen(
     rendered = null;
     announced = null;
   };
-
-  /* ------------------------------------------------------------------------
-   * The lifecycle
-   * ---------------------------------------------------------------------- */
 
   return Object.freeze({
     mount(injected: Element): void {
@@ -1550,9 +1448,7 @@ export function createGameOverScreen(
       const snapshot = apply(state, detail);
 
       // The in-state refresh path: re-applying the verdict on screen is a
-      // no-op and moves no focus. A refresh carrying the OTHER verdict is a
-      // state change, and the control that held focus has been detached by the
-      // time this runs, so focus is placed again. Decision DL-GAMEOVER-09.
+      // no-op and moves no focus.
       if (previous !== null && previous !== state) {
         placeFocus(
           state,
@@ -1572,8 +1468,6 @@ export function createGameOverScreen(
       // The overlay is cleared on the way out of BOTH terminal states, so the
       // keep-playing exit and the restart exit leave the same clean surface —
       // which is the single behaviour js/html_actuator.js L38-L41 gave them.
-      // The last verdict announced is released here, so a later entry into the
-      // same state is news again.
       clearOverlay();
       restoreHostLabel();
       retractControls();
@@ -1585,6 +1479,8 @@ export function createGameOverScreen(
     unmount(): void {
       teardown();
     },
+
+    announcement,
 
     render(
       flags: TerminalFlags,
@@ -1598,8 +1494,8 @@ export function createGameOverScreen(
 
       if (state === null) {
         // Not terminal: js/html_actuator.js L27 entered its branch only where
-        // the payload said so, and the clear path is what a non-terminal commit
-        // reached through `continueGame()`.
+        // the payload said so, and the clear path is what a non-terminal
+        // commit reached through `continueGame`.
         clearAll('render');
 
         return null;

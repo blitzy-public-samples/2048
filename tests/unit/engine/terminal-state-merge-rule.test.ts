@@ -1,18 +1,5 @@
-// Contract suite for src/engine/terminal-state.ts: win and loss evaluation read
-// from the rules in force rather than from a literal, AAP R4.
-//
-// Constructs pinned, with the vanilla line range of each:
-//   js/game_manager.js L170      the win test the merge branch performed inline
-//   js/game_manager.js L238-L240 movesAvailable()
-//   js/game_manager.js L243-L268 tileMatchesAvailable()
-//   js/game_manager.js L30-L32   isGameTerminated()
-//
-// The loss probe is the assertion set this suite exists for: L259 compared
-// face values with `===`, which is one hardcoded merge rule, and the probe
-// resolves a merge through `RulesConfig.merge.canMerge` instead. Both halves
-// are pinned — that the default configuration reproduces L259's verdict for
-// every board, and that a configured predicate admitting an unequal pair keeps
-// the game alive on a full board L259 would have declared lost.
+// Contract suite for src/engine/terminal-state.ts: win and loss evaluation
+// read from the rules in force rather than from a literal, AAP R4.
 //
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock library and writes no snapshot.
@@ -88,8 +75,6 @@ function configWithPredicate(
 
   return config;
 }
-
-/* ===== 1. The loss probe reads the configured merge rule (AAP R4) ===== */
 
 describe('tileMatchesAvailable resolves a merge through ' +
   'config.merge.canMerge (js/game_manager.js L243-L268)', () => {
@@ -208,8 +193,6 @@ describe('tileMatchesAvailable resolves a merge through ' +
     });
 });
 
-/* ===== 2. movesAvailable keeps L238-L240's short circuit ===== */
-
 describe('movesAvailable (js/game_manager.js L238-L240)', () => {
   it('reports a move for a board with an empty cell without probing', () => {
     let probed = false;
@@ -250,8 +233,6 @@ describe('movesAvailable (js/game_manager.js L238-L240)', () => {
     expect(movesAvailable(fullBoardWithNoEqualNeighbours(), config)).toBe(true);
   });
 });
-
-/* ===== 3. The win value and the board reading are unchanged ===== */
 
 describe('win evaluation reads RulesConfig.winValue (L170)', () => {
   it('reports the win where a tile reaches the configured value', () => {

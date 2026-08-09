@@ -1,28 +1,5 @@
 // The hook boundary's SPANS: `HookBusTracing`, the structural port the bus
 // runs each dispatch and each handler inside.
-//
-// WHY THIS SUITE EXISTS
-//   Rule 3's tracing capability names the chain input -> engine -> hook bus ->
-//   relic handlers -> renderer. The two middle links live inside the bus, and
-//   the bus may not name a module under src/observability — src/engine imports
-//   nothing from there and that separation is load-bearing, because the engine
-//   is the DOM-free, dependency-free half of the split (AAP R1). So the
-//   wrappers are INJECTED, exactly as `RelicRegistryPort` is injected into the
-//   run controller, and this suite pins the port's contract from the bus side:
-//   what it is handed, when, in what order, and what happens when it is absent.
-//
-// The properties pinned here:
-//   PRESENT — one dispatch span per dispatch, carrying the hook name, opened
-//   whether or not a subscriber runs; one handler span per invoked handler,
-//   carrying the hook name and the subscriber's id, in pickup order.
-//   ABSENT — with no port the bus behaves exactly as it did before tracing
-//   existed: nothing is called, nothing is allocated, every count is the same.
-//   TRANSPARENT — the wrapper's return value is the dispatch's and the
-//   handler's, so a wrapper is a measurement and never a transformation.
-//   NON-INTERFERING — a handler that throws still has its throw contained by
-//   the bus rather than by the wrapper, the charge guard still skips a spent
-//   subscriber without opening a handler span, and a wrapper that itself
-//   throws does not corrupt the walk.
 
 import { describe, expect, it } from 'vitest';
 
@@ -41,8 +18,6 @@ import type {
 } from '../../../src/engine/hooks';
 import { DIRECTION_LEFT, DIRECTION_UP } from '../../../src/engine/types';
 import { createRngStreams } from '../../../src/rng/rng-streams';
-
-/* ===== Harness ===== */
 
 const RUN_SEED = 'blitzy-hook-tracing';
 
@@ -79,7 +54,9 @@ interface TraceCall {
   readonly hook: HookName;
   readonly relicId?: string;
 
-  /** Whether the wrapped function had already returned when this was logged. */
+  /**
+   * Whether the wrapped function had already returned when this was logged.
+   */
   readonly completed: boolean;
 }
 
@@ -89,14 +66,7 @@ interface TraceRecorder {
   readonly names: readonly string[];
 }
 
-/**
- * A recorder standing in for `createBoundaryTracing`.
- *
- * Each wrapper runs the function it was handed and returns its value verbatim,
- * which is what a span wrapper does, and records the call around it so the
- * nesting is observable: a dispatch entry is logged before its handlers and its
- * completion after them.
- */
+/** A recorder standing in for `createBoundaryTracing`. */
 function createRecorder(): TraceRecorder {
   const calls: TraceCall[] = [];
   const names: string[] = [];
@@ -130,10 +100,6 @@ function createRecorder(): TraceRecorder {
   return { tracing, calls, names };
 }
 
-/* ==========================================================================
- * The dispatch span
- * ========================================================================== */
-
 describe('the dispatch wrapper', () => {
   it('runs one span per dispatch, carrying the hook name', () => {
     const environment = createEnvironment();
@@ -160,9 +126,6 @@ describe('the dispatch wrapper', () => {
     });
     bus.dispatch('onBeforeMove', beforeMove(environment), environment);
 
-    // A dispatch that reached nobody still cost the engine a dispatch, and a
-    // trace that hid it would make an unsubscribed hook indistinguishable from
-    // an unemitted one.
     expect(recorder.names).toEqual(['dispatch:onBeforeMove']);
   });
 
@@ -204,8 +167,6 @@ describe('the dispatch wrapper', () => {
     });
     bus.dispatch('onBeforeMove', beforeMove(environment), environment);
 
-    // Entered dispatch-first and completed dispatch-last, which is what makes
-    // a handler span a CHILD of its dispatch rather than a sibling.
     expect(recorder.names).toEqual([
       'dispatch:onBeforeMove',
       'handler:onBeforeMove:inner',
@@ -216,10 +177,6 @@ describe('the dispatch wrapper', () => {
     ]);
   });
 });
-
-/* ==========================================================================
- * The handler span
- * ========================================================================== */
 
 describe('the handler wrapper', () => {
   it('runs one span per invoked handler, in pickup order', () => {
@@ -378,10 +335,6 @@ describe('the handler wrapper', () => {
   });
 });
 
-/* ==========================================================================
- * The port is optional
- * ========================================================================== */
-
 describe('a bus with no tracing port', () => {
   it('dispatches exactly as it did before tracing existed', () => {
     const environment = createEnvironment();
@@ -476,10 +429,6 @@ describe('a bus with no tracing port', () => {
   });
 });
 
-/* ==========================================================================
- * The wrapped work runs exactly once
- * ========================================================================== */
-
 describe('a wrapper cannot suppress, repeat or substitute the work', () => {
   /** A handler that draws, spends and records, then throws. */
   const failingSubscriber = (
@@ -512,9 +461,6 @@ describe('a wrapper cannot suppress, repeat or substitute the work', () => {
       environment,
     );
 
-    // ONE invocation, and its whole transaction rolled back: the retry the
-    // wrapper's rethrow used to trigger re-entered the handler inside the
-    // transaction that was already open.
     expect(counter.invocations).toBe(1);
     expect(result.invoked).toBe(1);
     expect(result.failed).toBe(1);
@@ -628,8 +574,6 @@ describe('a wrapper cannot suppress, repeat or substitute the work', () => {
 
     bus.dispatch('onBeforeMove', beforeMove(environment), environment);
 
-    // The second call replays the first outcome rather than re-entering the
-    // handler, so exactly one charge is spent.
     expect(invoked).toBe(1);
     expect(bus.metrics().chargesConsumed).toBe(1);
     expect(bus.subscribers()[0]?.charges).toBe(1);
@@ -648,8 +592,6 @@ describe('a wrapper cannot suppress, repeat or substitute the work', () => {
           try {
             run();
           } catch {
-            // Swallowed here, and asked for again, which is the shape that used
-            // to re-enter the handler.
           }
 
           return run();
@@ -691,7 +633,6 @@ describe('a wrapper cannot suppress, repeat or substitute the work', () => {
           try {
             return run();
           } catch {
-            // A wrapper that reports and returns rather than rethrowing.
             return undefined as T;
           }
         },

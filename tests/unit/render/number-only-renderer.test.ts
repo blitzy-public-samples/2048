@@ -1,31 +1,6 @@
 // Contract suite for the number-only renderer's geometry, node reconciliation,
 // semantic-surface ownership and subscription lifecycle, AAP R4, R7 and R9.
 //
-// Four properties are pinned here because each is invisible to the type checker
-// and each is a runtime defect rather than a compile error:
-//
-//   geometry    style/main.scss states a position rule per cell only for the
-//               COMPILED board size, so a configured size other than that one
-//               has no rule to take. Every tile therefore carries a written
-//               transform, derived from the configured size at the scale in
-//               force, and the four presentation properties the stylesheet
-//               reads through `var(--x, var(--x-compiled, …))` are written
-//               too.
-//   reconciling js/html_actuator.js emptied the tile layer on every actuation,
-//               which discards the node a CSS transition would have run on. A
-//               node is retained across a paint instead, so the 100ms transform
-//               transition runs; a merged or spawned tile still gets a fresh
-//               node, because `pop` and `appear` retrigger only on one.
-//   exclusivity the number-only lattice and src/ui/a11y/parallel-board.ts (the
-//               latter PLANNED, NOT PRESENT AT THIS COMMIT) both carry
-//               `role="grid"` over the same board, and two grids in the
-//               accessibility tree is one board announced twice. Exactly one is
-//               exposed, and the renderer that draws the board owns which.
-//   lifecycle   `subscribe()` registers a listener on an emitter that outlives
-//               this renderer, so a subscription taken after disposal, or one
-//               whose registration is overtaken by disposal, would leak a
-//               listener holding a disposed renderer.
-//
 // The numeral textures the WebGL path needs are not involved here: this
 // renderer draws DOM nodes, so jsdom carries the whole surface under test.
 
@@ -134,14 +109,12 @@ const drain = (renderer: { frame(): boolean }): void => {
 const tilesOf = (host: HTMLElement): HTMLElement[] =>
   Array.from(host.querySelectorAll<HTMLElement>('.tile'));
 
-/* ===== F-30: exactly one semantic board grid ===== */
-
 describe('F-30 semantic-surface exclusivity', () => {
   it('hides the parallel board once it has a lattice, without emptying it', () => {
     const { host, parallel } = hostFixture();
 
     // A cell the OTHER layer owns. Removing it left that layer holding a
-    // detached node while its own `isMounted()` still reported `true`, and
+    // detached node while its own `isMounted` still reported `true`, and
     // restoring attributes alone never gave it back.
     const foreignCell = document.createElement('div');
 
@@ -185,8 +158,7 @@ describe('F-30 semantic-surface exclusivity', () => {
     });
 
     // No configured size was handed in, so the lattice waits for the first
-    // commit. Hiding the other board across that window would leave the board
-    // with no semantic surface at all.
+    // commit.
     expect(parallel.hasAttribute('aria-hidden')).toBe(false);
     expect(parallel.hidden).toBe(false);
     expect(parallel.getAttribute('aria-busy')).toBe('true');
@@ -265,8 +237,6 @@ describe('F-30 semantic-surface exclusivity', () => {
   });
 });
 
-/* ===== F-09: geometry at any configured board size ===== */
-
 describe('F-09 board geometry is configured, not compiled', () => {
   for (const size of [3, 4, 5, 6]) {
     it(`writes a distinct transform for every cell of ${size}x${size}`, () => {
@@ -335,10 +305,10 @@ describe('F-09 board geometry is configured, not compiled', () => {
     renderer.render(commitOf(4, [{ x: 0, y: 0, value: 128 }]));
     drain(renderer);
 
-    // Written on the `.tile` wrapper, which is what `.tile-inner` inherits them
-    // from; style/main.scss reads each through a
-    // `var(--x, var(--x-compiled, …))` chain, so a property the renderer never
-    // writes silently falls back to the compiled four-wide ramp.
+    // Written on the `.tile` wrapper, which is what `.tile-inner` inherits
+    // them from; style/main.scss reads each through a `var(--x,
+    // var(--x-compiled, …))` chain, so a property the renderer never writes
+    // silently falls back to the compiled four-wide ramp.
     const tile = tilesOf(host)[0];
 
     expect(tile).toBeDefined();
@@ -392,8 +362,6 @@ describe('F-09 board geometry is configured, not compiled', () => {
     renderer.dispose();
   });
 });
-
-/* ===== F-17: keyed reconciliation ===== */
 
 describe('F-17 tile nodes are reconciled, not rebuilt', () => {
   it('retains the same node for a tile that did not change', () => {
@@ -556,8 +524,6 @@ describe('F-17 tile nodes are reconciled, not rebuilt', () => {
   });
 });
 
-/* ===== F-23: subscribe() after dispose() ===== */
-
 describe('F-23 subscribe() after dispose()', () => {
   const emitterStub = (): {
     events: Parameters<
@@ -635,10 +601,6 @@ describe('F-23 subscribe() after dispose()', () => {
   });
 });
 
-/* ==========================================================================
- * The unestablished terminal or stage status
- * ========================================================================== */
-
 describe('the rendered snapshot carries the unestablished-status flag', () => {
   it('reports what the commit reported, and clears with it', () => {
     const { host } = hostFixture();
@@ -650,9 +612,10 @@ describe('the rendered snapshot carries the unestablished-status flag', () => {
     });
     drain(renderer);
 
-    // `RenderedBoard` is the shape src/ui/a11y reads, so dropping the flag left
-    // the number-only presentation — which is also the WebGL fallback and the
-    // accessible rendering mode — unable to say the verdict was unconfirmed.
+    // `RenderedBoard` is the shape src/ui/a11y reads, so dropping the flag
+    // left the number-only presentation — which is also the WebGL fallback and
+    // the accessible rendering mode — unable to say the verdict was
+    // unconfirmed.
     expect(renderer.readRenderedBoard()?.degraded).toBe(true);
 
     renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));

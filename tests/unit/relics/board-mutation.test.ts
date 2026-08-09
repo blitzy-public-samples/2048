@@ -3,73 +3,13 @@
 // tile positions and the win and loss verdicts are still correct at the edge
 // length the load reconciled to.
 //
-// AAP validation gate V6 row 4, and the prompt edge case stated at AAP 0.1.2.5:
-// "board-size-altering cursed relics (e.g. shrink board) must not corrupt
-// existing tile positions or win/lose check" — across a reload.
+// AAP validation gate V6 row 4, and the prompt edge case stated at AAP
+// 0.1.2.5: "board-size-altering cursed relics (e.g. shrink board) must not
+// corrupt existing tile positions or win/lose check" — across a reload.
 //
-// SCOPE. tests/unit/relics/risk-reward-cursed.test.ts owns the relic's own
-// declaration and its immediate in-memory shrink mechanics.
-// tests/unit/run/run-state-store.test.ts owns the general version and
-// corruption policy, and tests/unit/run/run-relic-board-size.test.ts owns the
-// controller-driven load path over hand-written envelopes. This file owns the
-// intersection those three leave: collapse, persist, load, reconcile, verdict.
-//
-// THREE EDGE LENGTHS are in play after a reload — the one the snapshot
-// recorded, the one the rules configuration declares, and the one the
-// reconciliation applied. Section 4 constructs a board on which all three
-// yield DIFFERENT verdict pairs, and asserts the terminal-state evaluation
-// reads the third.
-//
-// Mechanical provenance, from the deleted vanilla sources:
-//   js/game_manager.js L36-L45           setup()'s rehydration branch, which
-//                                        rebuilt the grid from the SAVED size
-//                                        at L40-L41, `new Grid(
-//                                        previousState.grid.size,
-//                                        previousState.grid.cells)`, with
-//                                        nothing reconciling that size against
-//                                        the configuration
-//                                        -> src/run/run-state-store.ts
-//   js/game_manager.js L238-L268         movesAvailable() and
-//                                        tileMatchesAvailable(), the neighbour
-//                                        scan bounded by `this.size`
-//                                        -> src/engine/terminal-state.ts
-//   js/game_manager.js L102-L110         serialize(), the outermost stage of
-//                                        the persisted three-stage snapshot
-//   js/grid.js         L102-L117         the middle stage, an empty cell kept
-//                                        as `null`
-//   js/tile.js         L19-L27           the innermost stage
-//   js/grid.js         L80-L86           cellContent() yields `null` for a cell
-//                                        outside the lattice rather than
-//                                        raising
-//   js/grid.js         L89-L91           insertTile() indexes
-//                                        cells[tile.x][tile.y]
-//   js/tile.js         L10-L17           savePosition() copies the current
-//                                        cell; updatePosition() writes the
-//                                        current cell alone
-//   js/local_storage_manager.js L1-L19   the in-memory store double this suite
-//                                        injects
-//   js/local_storage_manager.js L22      the best-score key literal
-//   js/local_storage_manager.js L43-L45  getBestScore() yields the stored
-//                                        string when a value is present and
-//                                        the number 0 when none is
-//   js/local_storage_manager.js L52-L55  getGameState() called JSON.parse with
-//                                        no guard -> src/storage/**
-//   js/application.js  L3                the board dimension as a literal
-//                                        argument, one of its three vanilla
-//                                        declaration sites, the other two being
-//                                        style/main.scss L6 and the sixteen
-//                                        cells of index.html L43-L68
-//                                        -> src/config/**
-//
-// CONTRIBUTING.md lists a change to the grid size among the changes that might
-// not be accepted; the supersession entry is in docs/DECISION_LOG.md.
-//
-// Named figures: Figure 4, "Turn Data Flow: From Keystroke to Composited Frame
-// and Persisted Run State", in docs/architecture/data-flow.md, whose
-// `Moves available?` decision and `Run state written under namespaced key` node
-// are the two ends of the path asserted here; and Figure 7, "Seeded
-// Determinism: One Run Seed Fanned into Named RNG Substreams", whose persisted
-// cursor nodes the `rngCursor` cases exercise.
+// CONTRIBUTING.md used to list a change to the grid size among the changes that
+// might not be accepted; the supersession entry is DL-DOC-02 of
+// docs/DECISION_LOG.md.
 //
 // Every reporter reaches its subject by injection. Nothing here reads a
 // document, a clock, the global random source or a real Web Storage, and
@@ -156,10 +96,6 @@ import {
   createNearLossBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. Harness
- * ========================================================================== */
-
 /** Seed every substream in this suite is derived from. */
 const RUN_SEED = 'board-mutation-seed';
 
@@ -207,8 +143,8 @@ const LADDER: readonly number[] = [2, 4, 8, 16, 32];
 
 /**
  * Index step the ladder advances per row. Coprime with the ladder length, so
- * no two cells sharing an edge carry one value and no pair in a
- * ladder-filled region can merge.
+ * no two cells sharing an edge carry one value and no pair in a ladder-filled
+ * region can merge.
  */
 const LADDER_ROW_STEP = 3;
 
@@ -227,11 +163,7 @@ interface ReconciliationRecord {
   readonly appliedSize: number;
 }
 
-/**
- * One refused load as the injected `RunReporter` received it. The correlation
- * identifier is optional on the report, and absent on a store constructed
- * without one.
- */
+/** One refused load as the injected `RunReporter` received it. */
 interface CorruptionRecord {
   readonly correlationId: string | undefined;
   readonly key: string;
@@ -262,13 +194,7 @@ interface HeldProjection {
   readonly state: unknown;
 }
 
-/**
- * Everything one test is given, rebuilt in full before each test.
- *
- * `config` and `grid` are reassignable: a collapse writes both `grid.size` and
- * `config.boardSize`, and several cases replace the lattice with a fixture
- * board before dispatching.
- */
+/** Everything one test is given, rebuilt in full before each test. */
 interface Bench {
   config: RulesConfig;
   grid: Grid;
@@ -360,9 +286,7 @@ beforeEach(() => {
   };
 });
 
-// MANDATORY TEARDOWN. The application removes the best score on no path, so
-// every key the product owns is removed here, read off the exported list rather
-// than written out as literals.
+// Mandatory teardown.
 afterEach(() => {
   for (const key of OWNED_STORAGE_KEYS) {
     bench.backing.removeItem(key);
@@ -465,8 +389,7 @@ function throughText(snapshot: SerializedGrid): SerializedGrid {
 }
 
 /**
- * Builds the lattice a board fixture describes. `Grid.fromState` reads
- * `state[x][y]`, so the cell matrix is what a restore takes.
+ * Builds the lattice a board fixture describes.
  *
  * @param board Fixture board to rebuild.
  * @returns A lattice at the fixture's own size.
@@ -478,9 +401,6 @@ function gridFromBoard(board: SerializedGameState): Grid {
 /**
  * Builds a lattice of `size` whose top-left `filled` by `filled` region is a
  * ladder fill, with the win value in the region's far corner.
- *
- * No two cells sharing an edge inside the region carry one value, so the
- * region admits no merge; every cell outside it stands empty.
  *
  * @param size Edge length of the lattice.
  * @param filled Edge length of the filled region.
@@ -590,9 +510,6 @@ function projectHeld(held: readonly ActiveRelic[]): HeldProjection[] {
 /**
  * Wraps a board snapshot and the relic entries in a versioned envelope.
  *
- * The board member carries the serialised board VERBATIM: AAP Contract 5 wraps
- * the vanilla snapshot rather than reshaping it.
- *
  * @param grid Board snapshot to wrap.
  * @param relics Relic entries, in pickup order.
  * @param cursors Draw counts to record.
@@ -667,7 +584,7 @@ interface SequenceResult {
 /**
  * Runs the whole path once over collaborators built from scratch: collapse the
  * board, project the relics, persist the envelope, load it, and read what the
- * load resolved. Every owned key is removed before returning.
+ * load resolved.
  *
  * @param seed Run seed the substreams are derived from.
  * @returns What the sequence produced.
@@ -726,14 +643,6 @@ function runSequence(seed: string): SequenceResult {
   };
 }
 
-
-/* ==========================================================================
- * 2. The collapse in memory: positions, and the verdicts at the new size
- *
- * The relic's own declaration and its re-homing mechanics belong to
- * tests/unit/relics/risk-reward-cursed.test.ts. What is asserted here is only
- * what the reload half needs as its precondition.
- * ========================================================================== */
 
 describe('a stage cleared under the cursed relic', () => {
   it('moves the lattice and the configured edge length together', () => {
@@ -794,8 +703,9 @@ describe('a stage cleared under the cursed relic', () => {
         subscriberId: 'board-mutation-observer',
         pickupOrder: 1,
 
-        // The rules are projected per handler, so the observer dispatched after
-        // the relic reads the edge length the relic's own commands wrote.
+        // The rules are projected per handler, so the observer dispatched
+        // after the relic reads the edge length the relic's own commands
+        // wrote.
         boardSize: COLLAPSED_SIZE,
       },
     ]);
@@ -846,8 +756,8 @@ describe('a stage cleared under the cursed relic', () => {
     pickUp(CURSED_ID);
     endStage(true);
 
-    // The cell `savePosition()` recorded is unchanged, and the tile now stands
-    // somewhere else: `updatePosition()` writes the current cell alone.
+    // The cell `savePosition` recorded is unchanged, and the tile now stands
+    // somewhere else.
     expect(exile?.previousPosition).toEqual({ x: 3, y: 3 });
     expect([exile?.x, exile?.y]).not.toEqual([3, 3]);
     expect(bench.grid.withinBounds({ x: exile?.x ?? -1, y: exile?.y ?? -1 }))
@@ -892,8 +802,8 @@ describe('a stage cleared under the cursed relic', () => {
 
 describe('win and loss evaluation on the board a collapse left', () => {
   it('reports a loss once the collapse fills the tighter lattice', () => {
-    // Nine tiles inside the region the collapse keeps, so the collapse re-homes
-    // nothing and leaves every cell of the new lattice occupied.
+    // Nine tiles inside the region the collapse keeps, so the collapse
+    // re-homes nothing and leaves every cell of the new lattice occupied.
     bench.grid = ladderGrid(DEFAULT_BOARD_SIZE, COLLAPSED_SIZE);
     expect(movesAvailable(bench.grid, bench.config)).toBe(true);
     expect(bench.grid.cellsAvailable()).toBe(true);
@@ -937,8 +847,8 @@ describe('win and loss evaluation on the board a collapse left', () => {
   });
 
   it('drops the win value with the tile that carried it outside the bound', () => {
-    // The only winning tile stands in the corner the collapse discards, and the
-    // board is full, so nowhere inside the new bound stands empty for it.
+    // The only winning tile stands in the corner the collapse discards, and
+    // the board is full, so nowhere inside the new bound stands empty for it.
     bench.grid = ladderGrid(DEFAULT_BOARD_SIZE, DEFAULT_BOARD_SIZE);
     expect(hasReachedWinValue(bench.grid, bench.config)).toBe(true);
 
@@ -1019,13 +929,6 @@ describe('win and loss evaluation on the board a collapse left', () => {
     expect(occupants(bench.grid)).toEqual([{ x: 0, y: 0, value: 2 }]);
   });
 });
-
-/* ==========================================================================
- * 3. reconcileBoardSize: the pure resolution of the three candidate sizes
- *
- * Precedence is the relic-implied edge length, then the configured one, then
- * the recorded one.
- * ========================================================================== */
 
 describe('reconcileBoardSize over a recorded snapshot', () => {
   /** The wide snapshot every case in this section resolves against. */
@@ -1166,14 +1069,6 @@ describe('reconcileBoardSize over a recorded snapshot', () => {
 });
 
 
-/* ==========================================================================
- * 4. The reload half: persist through the real store, load, reconcile
- *
- * The vanilla loader rebuilt the grid from the size the snapshot recorded, at
- * js/game_manager.js L40-L41, and nothing weighed that size against the
- * configuration.
- * ========================================================================== */
-
 describe('a collapsed run persisted and loaded again', () => {
   /**
    * Collapses the bench's board and persists the result.
@@ -1242,7 +1137,6 @@ describe('a collapsed run persisted and loaded again', () => {
   it('reads win and loss at the reconciled size, not the recorded or configured one', () => {
     // A run whose relic collapsed the board to three while the envelope still
     // carried the wider board, loaded against a configuration declaring four.
-    // The three candidate sizes give three DIFFERENT verdict pairs.
     place(bench.grid, 0, 0, 2);
     place(bench.grid, 3, 3, 4);
     pickUp(CURSED_ID);
@@ -1296,12 +1190,10 @@ describe('a collapsed run persisted and loaded again', () => {
     expect(hasReachedWinValue(applied, verdicts)).toBe(false);
     expect(highestTileValue(applied)).toBe(32);
 
-    // The verdict a check stuck on the recorded size would have reported.
     expect(atRecorded.size).toBe(WIDE_SIZE);
     expect(movesAvailable(atRecorded, verdicts)).toBe(true);
     expect(hasReachedWinValue(atRecorded, verdicts)).toBe(true);
 
-    // The verdict a check stuck on the configured size would have reported.
     expect(atConfigured.size).toBe(DEFAULT_BOARD_SIZE);
     expect(movesAvailable(atConfigured, verdicts)).toBe(false);
     expect(hasReachedWinValue(atConfigured, verdicts)).toBe(true);
@@ -1360,8 +1252,6 @@ describe('a collapsed run persisted and loaded again', () => {
     expect(loaded.state).toBeNull();
     expect(loaded.outcome).toBe('fresh-fallback');
 
-    // The diagnosis reaches the caller rather than being discarded. Its exact
-    // wording per malformation belongs to tests/unit/run/run-state-store.test.ts.
     expect(Array.isArray(loaded.problems)).toBe(true);
     expect(loaded.problems ?? []).not.toHaveLength(0);
 
@@ -1392,8 +1282,9 @@ describe('a collapsed run persisted and loaded again', () => {
     bench.store.load();
     bench.store.clear();
 
-    // The accessor yields the raw stored text when a value is present, which is
-    // what the promotion comparison of js/game_manager.js L80-L82 relies on.
+    // The accessor yields the raw stored text when a value is present, which
+    // is what the promotion comparison of js/game_manager.js L80-L82 relies
+    // on.
     expect(bench.manager.getBestScore()).toBe(SEEDED_BEST_SCORE);
     expect(typeof bench.manager.getBestScore()).toBe('string');
     expect(rawValue(bench.backing, BEST_SCORE_KEY)).toBe(SEEDED_BEST_SCORE);
@@ -1434,10 +1325,6 @@ describe('a collapsed run persisted and loaded again', () => {
   });
 });
 
-
-/* ==========================================================================
- * 5. A collapse beside a relic that persists a slot of its own
- * ========================================================================== */
 
 describe('a collapsed run holding a second relic with its own slot', () => {
   /**
@@ -1575,25 +1462,19 @@ describe('a collapsed run holding a second relic with its own slot', () => {
     expect(persisted).toHaveLength(2);
 
     for (const entry of persisted) {
-      // A slot holding a Map, a function or an undefined member would not
-      // survive the envelope's own serialisation.
       expect(JSON.parse(JSON.stringify(entry))).toEqual(entry);
       expect(Object.keys(entry).sort()).toEqual(['id', 'state']);
       expect('charges' in entry).toBe(false);
     }
 
-    // One slot is a keyed record carrying no inherited member, the other a bare
-    // number: both are values JSON text represents directly.
+    // One slot is a keyed record carrying no inherited member, the other a
+    // bare number: both are values JSON text represents directly.
     expect(typeof persisted[0].state).toBe('object');
     expect(Object.getPrototypeOf(persisted[0].state)).toBeNull();
     expect(typeof persisted[1].state).toBe('number');
     expect(Number.isSafeInteger(persisted[1].state)).toBe(true);
   });
 });
-
-/* ==========================================================================
- * 6. Determinism and substream hygiene
- * ========================================================================== */
 
 describe('the collapse, persist and reload sequence under one seed', () => {
   it('produces the same board and the same draw counts on every run', () => {
@@ -1658,10 +1539,6 @@ describe('the collapse, persist and reload sequence under one seed', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Frame hygiene
- * ========================================================================== */
-
 describe('the rules configuration a collapse wrote', () => {
   it('is rebuilt per test, so no collapsed edge length leaks out of one', () => {
     place(bench.grid, 0, 0, 2);
@@ -1671,7 +1548,8 @@ describe('the rules configuration a collapse wrote', () => {
     expect(bench.config.boardSize).toBe(COLLAPSED_SIZE);
 
     // A configuration built after the write still declares the default, so the
-    // reconciliation one relic performed reaches no later run and no later test.
+    // reconciliation one relic performed reaches no later run and no later
+    // test.
     expect(createDefaultRulesConfig().boardSize).toBe(DEFAULT_BOARD_SIZE);
     expect(createDefaultRulesConfig().winValue).toBe(WIN_TILE_VALUE);
     expect(new Grid(createDefaultRulesConfig().boardSize).size).toBe(

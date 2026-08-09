@@ -1,6 +1,6 @@
-// The run summary: the end-of-run panel the `runSummary` state renders — final
-// score, stage reached with its goal, the relics collected in pickup order, and
-// the run seed, displayed verbatim and offered for copying.
+// The run summary: the end-of-run panel the `runSummary` state renders —
+// final score, stage reached with its goal, the relics collected in pickup
+// order, and the run seed, displayed verbatim and offered for copying.
 //
 // INPUT CONTRACT
 //   `RunSummary` of src/run/run-state.ts, which names this module as the
@@ -17,26 +17,32 @@
 //   the three readouts, the relic list and its no-relic notice;
 //   the seed readout, its copy control and the text confirmation of the copy
 //   result;
-//   the action row carrying the new-run and end-run controls.
+//   the action row carrying the new-run control, which is the only action this
+//   screen offers.
 //
 // WHAT IT DOES NOT OWN
 //   the run: every action is reported into an injected sink, and nothing here
 //   starts, ends, resumes or mutates a run;
 //   the engine and the board, neither of which is reached;
-//   the `hidden` attribute of `#screen-run-summary`, the focus trap and the
-//   per-state announcement, all three of which src/ui/screen-router.ts drives;
+//   ending the run, which has already happened by the time this state is
+//   reached: `endRun` from the win state and `acknowledge` from the loss state
+//   are the only edges into it;
+//   the `hidden` attribute of `#screen-run-summary`, the focus trap, the focus
+//   placement and the per-state announcement, all four of which
+//   src/ui/screen-router.ts drives; `announcement()` supplies the words it
+//   reads;
 //   element-to-action binding for a bindable action, which
 //   src/input/on-screen-controls.ts is the sole owner of.
 //
 // This module declares no colour, length, radius, duration or z-index and
-// writes no inline style: style/_summary.scss carries the panel's measure, its
-// leading, its stacking slot and its cadence, and style/_a11y.scss rings every
-// `<button>` inside `.screen-layer`. `runSummaryLayout` republishes the
+// writes no inline style: style/_summary.scss carries the panel's measure,
+// its leading, its stacking slot and its cadence, and style/_a11y.scss rings
+// every `<button>` inside `.screen-layer`. `runSummaryLayout` republishes the
 // measure, the leading and the rung this screen occupies, read from
-// ../../theme/tokens, so the values a consumer or a suite asserts against come
-// from the token layer rather than from a literal. It names no observability
-// module — the report sink is injected — reads no storage, holds no timer, and
-// performs no lookup and no DOM write at import time.
+// ../../theme/tokens, so the values a consumer or a suite asserts against
+// come from the token layer rather than from a literal. It names no
+// observability module — the report sink is injected — reads no storage,
+// holds no timer, and performs no lookup and no DOM write at import time.
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece. RUN SUMMARY is
 // one area across the TypeScript and stylesheet halves, so these ordinals
@@ -66,6 +72,12 @@
 //   DL-SUMMARY-07  initial focus marked on the copy control
 //   DL-SUMMARY-08  the verdict carried by the panel heading, and an action
 //                  control rendered only where a sink exists
+//   DL-SUMMARY-09  the end-run control withdrawn from this screen
+//   DL-SUMMARY-10  the `'copying'` state, `aria-busy`, one attempt at a time
+//                  and the generation an answer is discarded against
+//   DL-SUMMARY-11  focus placement and the entry announcement delegated to the
+//                  router through the two switches and `announcement()`
+//   DL-SUMMARY-12  `lastSummary()` outranking `summary()` on this screen
 //   DL-A11Y-06     the seed value's monospace treatment
 //   DL-A11Y-07     the copy confirmation delivered as text
 
@@ -96,10 +108,6 @@ import type { RelicCard } from '../components/relic-card';
 import { createRelicCard } from '../components/relic-card';
 import type { RouterEventName, Screen, ScreenContext } from '../screen-router';
 
-/* ==========================================================================
- * 1. Selectors, classes and attributes
- * ========================================================================== */
-
 /** Label naming this module in every report. */
 const REPORT_CONTEXT = 'run-summary';
 
@@ -115,7 +123,7 @@ const HOST_MOUNT = 'runSummary';
 
 /**
  * The state this module renders, as ../screen-router and ../a11y/focus-manager
- * both name it. Passed to `focusInitial`, so the two spellings cannot drift.
+ * both name it.
  */
 const SCREEN: Extract<ScreenContext['screen'], 'runSummary'> = 'runSummary';
 
@@ -123,9 +131,9 @@ const SCREEN: Extract<ScreenContext['screen'], 'runSummary'> = 'runSummary';
 const NEW_RUN_TRIGGER: RouterEventName = 'newRun';
 
 /**
- * Every class this module applies. style/_summary.scss is the authority for all
- * of them and declares a rule for each; `visuallyHidden` is the shared utility
- * style/_a11y.scss declares.
+ * Every class this module applies. style/_summary.scss is the authority for
+ * all of them and declares a rule for each; `visuallyHidden` is the shared
+ * utility style/_a11y.scss declares.
  */
 export const runSummaryClasses = Object.freeze({
   /** The panel itself, a `<section>`. */
@@ -207,10 +215,6 @@ const DESCRIBED_BY_ATTRIBUTE = 'aria-describedby';
  */
 export const DEFAULT_ID_PREFIX = 'run-summary';
 
-/* ==========================================================================
- * 2. Report names
- * ========================================================================== */
-
 /** Counter raised once per completed mount. */
 const MOUNTED_METRIC = 'ui.runSummary.mounted';
 
@@ -258,10 +262,6 @@ const AFTER_DESTROY_METRIC = 'ui.runSummary.after_destroy';
 
 /** Counter raised once per `destroy`. */
 const DESTROYED_METRIC = 'ui.runSummary.destroyed';
-
-/* ==========================================================================
- * 3. Layout contract and copy
- * ========================================================================== */
 
 /**
  * The layout this screen occupies, republished from ../../theme/tokens so the
@@ -315,7 +315,7 @@ export interface RunSummaryAnnouncementInput {
 export const runSummaryCopy = Object.freeze({
   /**
    * The panel's heading, which carries the verdict. The dialog's own name is
-   * declared at index.html. Decision DL-SUMMARY-08.
+   * declared at index.html.
    */
   title: (outcome: RunOutcome | null): string => {
     switch (outcome) {
@@ -344,8 +344,8 @@ export const runSummaryCopy = Object.freeze({
   stageValue: (stageIndex: number): string => String(stageIndex + 1),
 
   /**
-   * Renders a goal from its kind and target. Branches on the kind: a kind other
-   * than `'score-threshold'` renders through the tile form.
+   * Renders a goal from its kind and target. Branches on the kind: a kind
+   * other than `'score-threshold'` renders through the tile form.
    */
   goalValue: (kind: string, target: number): string =>
     kind === 'score-threshold'
@@ -390,17 +390,19 @@ export const runSummaryCopy = Object.freeze({
 
   /**
    * The confirmation after every path failed. The seed is left selected, which
-   * is what the line instructs. Decision DL-SUMMARY-05.
+   * is what the line instructs.
    */
   copyFailed:
-    'Could not copy automatically. The seed is selected — copy it with your ' +
-    'keyboard.',
+    'Could not copy automatically. The seed is selected — copy it with ' +
+    'your keyboard.',
 
   /** The confirmation where there is no seed to copy. */
   copyUnavailable: 'There is no seed to copy.',
 
+  /** The confirmation while an attempt is in flight. DL-SUMMARY-10. */
+  copying: 'Copying the seed…',
+
   newRunLabel: 'New run',
-  endRunLabel: 'End run',
 
   /** The line announced on entering the state. */
   announcement: (input: RunSummaryAnnouncementInput): string => {
@@ -425,14 +427,10 @@ export const runSummaryCopy = Object.freeze({
 /** The copy in force where a caller overrides none of it. */
 export type RunSummaryCopy = typeof runSummaryCopy;
 
-/* ==========================================================================
- * 4. Injected ports
- * ========================================================================== */
-
 /**
- * The run this panel reads. Every member is optional, and one that is absent or
- * raises yields a neutral value and is counted, so the panel renders with no
- * run controller attached at all.
+ * The run this panel reads. Every member is optional, and one that is absent
+ * or raises yields a neutral value and is counted, so the panel renders with
+ * no run controller attached at all.
  *
  * `RunController` of ../../run/run-controller satisfies it as it stands.
  */
@@ -440,7 +438,9 @@ export interface RunSummaryRunPort {
   /** The finished run. Preferred over every other source. */
   summary?(): RunSummary | null;
 
-  /** The last finished run, where the run in force has already been cleared. */
+  /**
+   * The last finished run, where the run in force has already been cleared.
+   */
   lastSummary?(): RunSummary | null;
 
   /** The run seed, verbatim. */
@@ -452,19 +452,17 @@ export interface RunSummaryRunPort {
   /** The goal of the stage in force. */
   stageGoal?(): StageGoal;
 
-  /** The relics held, IN PICKUP ORDER. */
+  /** The relics held, in pickup order. */
   relics?(): readonly PersistedRelic[];
 
-  /** Closes the run out. Reached only from the end-run control. */
-  endRun?(outcome: RunOutcome): unknown;
 }
 
 /**
  * The relic registry this panel reads, for the live charge counts and the
  * declarations behind the identifiers a summary carries.
  *
- * `RelicRegistry` of ../../relics/relic-registry satisfies it as it stands, and
- * `active()` returns the held relics already in pickup order.
+ * `RelicRegistry` of ../../relics/relic-registry satisfies it as it stands,
+ * and `active` returns the held relics already in pickup order.
  */
 export interface RunSummaryRelicPort {
   active?(): readonly ActiveRelic[];
@@ -473,27 +471,18 @@ export interface RunSummaryRelicPort {
 /**
  * The state machine the new-run action is reported into.
  *
- * `ScreenRouter` of ../screen-router satisfies it as it stands. The panel sends
- * the trigger and stops there: the router owns the edge and the run controller
- * owns the run.
+ * `ScreenRouter` of ../screen-router satisfies it as it stands. The panel
+ * sends the trigger and stops there: the router owns the edge and the run
+ * controller owns the run.
  */
 export interface RunSummaryRouterPort {
   send(trigger: RouterEventName): boolean;
 }
 
-/**
- * The clipboard this panel writes the seed to. Nothing is ever READ back.
- *
- * `navigator.clipboard` satisfies it, and is what is used where a caller
- * injects none. Decision DL-SUMMARY-05.
- */
+/** The clipboard this panel writes the seed to. Nothing is ever READ back. */
 export interface RunSummaryClipboardPort {
   writeText(text: string): Promise<void> | void;
 }
-
-/* ==========================================================================
- * 5. Construction parameters and the mounted screen
- * ========================================================================== */
 
 /** Every construction parameter. All are optional. */
 export interface RunSummaryScreenOptions {
@@ -501,8 +490,8 @@ export interface RunSummaryScreenOptions {
    * Container the panel is appended to, already resolved. `null` marks a host
    * the caller looked for and did not find, which is reported.
    *
-   * ../screen-router resolves and injects it through `mount(host)`, so a
-   * lookup here is only the fallback for a caller that mounts the panel itself.
+   * /screen-router resolves and injects it through `mount(host)`, so a lookup
+   * here is only the fallback for a caller that mounts the panel itself.
    */
   readonly host?: Element | null;
 
@@ -518,11 +507,26 @@ export interface RunSummaryScreenOptions {
   /** Sink every miss, refusal and degradation is reported through. */
   readonly reporter?: UiReporter;
 
-  /** Region the run's conclusion and each copy result are announced through. */
+  /**
+   * Region the run's conclusion and each copy result are announced through.
+   */
   readonly announcer?: LiveRegionAnnouncer | null;
 
   /** Store the effective reduced-motion value is read from. */
   readonly preferences?: PreferenceStore | null;
+
+  /**
+   * Whether focus is placed on entry. Defaults to `true`.
+   *
+   * SET FALSE WHERE A CALLER TRAPS THIS CONTAINER. A focus trap records the
+   * element holding focus at the moment it engages so it can hand focus back on
+   * release, and a caller that traps this container after this screen has placed
+   * focus inside it records a target inside its own trap — one it cannot restore
+   * to, and reports. The marked copy control is also the panel's first focusable
+   * element, so a trap that places focus itself resolves to the same element and
+   * the entrance is unchanged. Decisions DL-SUMMARY-07, DL-SUMMARY-11.
+   */
+  readonly placeFocus?: boolean;
 
   /**
    * Reduced-motion value that overrides the store and the context. `true`
@@ -540,8 +544,8 @@ export interface RunSummaryScreenOptions {
   readonly router?: RunSummaryRouterPort | null;
 
   /**
-   * The input emitter an action is published on, where no callback is supplied.
-   * `InputManager` of ../../input/input-manager satisfies it.
+   * The input emitter an action is published on, where no callback is
+   * supplied. `InputManager` of ../../input/input-manager satisfies it.
    */
   readonly input?: Pick<InputEmitter, 'emit'> | null;
 
@@ -556,28 +560,38 @@ export interface RunSummaryScreenOptions {
 
   /**
    * Called when the new-run control is activated. Takes precedence over the
-   * router and the input emitter; where all three are absent the control is not
-   * rendered. Decision DL-SUMMARY-08.
+   * router and the input emitter; where all three are absent the control is
+   * not rendered.
    */
   readonly onNewRun?: () => void;
 
-  /**
-   * Called when the end-run control is activated, with the outcome the context
-   * recorded — `'abandoned'` where it recorded none. The control is rendered
-   * only where this, or an input emitter, is supplied.
-   */
-  readonly onEndRun?: (outcome: RunOutcome) => void;
 
   /** Overrides for any subset of the copy. */
   readonly copy?: Partial<RunSummaryCopy>;
 
   /** Prefix of every element identifier. Defaults to `DEFAULT_ID_PREFIX`. */
   readonly idPrefix?: string;
+
+  /**
+   * Whether this screen announces the run's conclusion on entry. Defaults to
+   * `true`. `false` is for a composition whose router reads the entry line,
+   * which it takes from `announcement()` — the same words. The copy
+   * confirmations are left on either way: they report an action, not an entry.
+   * Decision DL-SUMMARY-11.
+   */
+  readonly announceEntry?: boolean;
 }
 
-/** Which path a copy attempt took, and how it ended. */
+/**
+ * Which path a copy attempt took, and how it ended.
+ *
+ * `'copying'` is the IN-FLIGHT value: the clipboard write is asynchronous, so
+ * an attempt occupies a state of its own between the press and the answer.
+ * Decision DL-SUMMARY-10.
+ */
 export type RunSummaryCopyState =
   | 'idle'
+  | 'copying'
   | 'copied'
   | 'failed'
   | 'unavailable';
@@ -614,7 +628,7 @@ export interface RunSummarySnapshot {
   /** The seed as rendered — verbatim — and `null` where none resolved. */
   readonly seed: string | null;
 
-  /** The relics rendered, IN PICKUP ORDER. Never sorted and never reversed. */
+  /** The relics rendered, in pickup order. Never sorted and never reversed. */
   readonly relics: readonly RunSummaryRelicRow[];
 
   /** The copy confirmation in force. */
@@ -622,9 +636,6 @@ export interface RunSummarySnapshot {
 
   /** Whether the new-run control was rendered. */
   readonly newRunOffered: boolean;
-
-  /** Whether the end-run control was rendered. */
-  readonly endRunOffered: boolean;
 }
 
 /** The mounted panel. Every member is safe to call at any time. */
@@ -638,10 +649,11 @@ export interface RunSummaryScreen extends Screen {
   /**
    * Receives the container and builds the tree, once.
    *
-   * Widened from `Screen.mount`, which the router always calls with a resolved
-   * element: omitting the argument resolves the host from the options instead —
-   * the injected element, and then `hostSelector` — and `null` marks a host the
-   * caller looked for and did not find, which is reported.
+   * Widened from `Screen.mount`, which the router always calls with a
+   * resolved element: omitting the argument resolves the host from the
+   * options instead — the injected element, and then `hostSelector` — and
+   * `null` marks a host the caller looked for and did not find, which is
+   * reported.
    *
    * @param host Container the panel is appended to.
    */
@@ -667,15 +679,11 @@ export interface RunSummaryScreen extends Screen {
 
   /**
    * Removes every node this module created, destroys every relic row and
-   * detaches every listener. `unmount()` is the lifecycle spelling of the same
-   * call. Idempotent, and every later call is a reported no-op.
+   * detaches every listener. `unmount` is the lifecycle spelling of the same
+   * call.
    */
   destroy(): void;
 }
-
-/* ==========================================================================
- * 6. Shared internals
- * ========================================================================== */
 
 /** The relic list rendered where a run collected none. */
 const EMPTY_ACTIVE_RELICS: readonly ActiveRelic[] = Object.freeze([]);
@@ -709,7 +717,7 @@ interface ResolvedRun {
   readonly goalText: string;
   readonly seed: string | null;
 
-  /** IN PICKUP ORDER, exactly as the source supplied it. */
+  /** In pickup order, exactly as the source supplied it. */
   readonly relics: readonly RelicEntry[];
 }
 
@@ -819,22 +827,11 @@ function toRelicDeclaration(value: unknown): Relic | null {
     : null;
 }
 
-/* ==========================================================================
- * 7. The mounted screen
- * ========================================================================== */
-
 /**
  * Builds the run-summary panel.
  *
- * Nothing is thrown: a document that is unavailable, a host that does not
- * resolve, a port member that raises and a clipboard that refuses are each
- * reported and leave a screen whose members are safe no-ops. `index.html`
- * declares `#screen-run-summary` empty, so the whole subtree below it is
- * created here and removed again by `destroy()`.
- *
  * @param options The collaborators and the copy.
  * @returns The mounted screen, implementing `Screen` of ../screen-router.
- *
  * @example
  * ```ts
  * // The router resolves the container and hands it to `mount`.
@@ -864,18 +861,18 @@ export function createRunSummaryScreen(
   const inputPort = options.input ?? null;
   const announcer = options.announcer ?? null;
   const preferences = options.preferences ?? null;
+  const placeFocusOnEntry = options.placeFocus !== false;
   const onNewRun = options.onNewRun;
-  const onEndRun = options.onEndRun;
+  const announceOnEntry = options.announceEntry !== false;
 
   /**
-   * Whether each action has an effective sink. A control with none is not
-   * rendered. Decision DL-SUMMARY-08.
+   * Whether the new-run action has an effective sink. A control with none is
+   * not rendered. Decision DL-SUMMARY-08.
+   *
+   * New run is the only action this screen renders. Decision DL-SUMMARY-09.
    */
   const newRunOffered =
     onNewRun !== undefined || routerPort !== null || inputPort !== null;
-  const endRunOffered =
-    onEndRun !== undefined ||
-    (runPort !== null && runPort.endRun !== undefined);
 
   /** Element identifiers, derived from the prefix once. */
   const ids = Object.freeze({
@@ -886,7 +883,7 @@ export function createRunSummaryScreen(
     seedStatus: `${idPrefix}-seed-status`,
   });
 
-  /** Listener removals, drained by `destroy()`. */
+  /** Listener removals, drained by `destroy`. */
   const teardown: (() => void)[] = [];
 
   /** The relic rows on screen, in the order they were created. */
@@ -909,13 +906,21 @@ export function createRunSummaryScreen(
   let snapshot: RunSummarySnapshot | null = null;
   let renderedSeed: string | null = null;
   let copyState: RunSummaryCopyState = 'idle';
+
+  /** Whether a copy attempt is in flight. DL-SUMMARY-10. */
+  let copyInFlight = false;
+
+  /**
+   * The lifecycle generation a copy attempt belongs to.
+   *
+   * Raised by `leave`, by `destroy` and by a render that replaces the seed, so
+   * an attempt cannot write state or announce over what came after it.
+   * DL-SUMMARY-10.
+   */
+  let copyGeneration = 0;
   let announced = false;
   let mountAttempted = false;
   let destroyed = false;
-
-  /* ----------------------------------------------------------------------
-   * Reporting helpers
-   * ------------------------------------------------------------------- */
 
   /**
    * Calls one optional port member, contained.
@@ -948,8 +953,9 @@ export function createRunSummaryScreen(
   };
 
   /**
-   * Announces one line through the injected region, contained. An absent region
-   * skips the announcement; nothing is written to a console in its place.
+   * Announces one line through the injected region, contained. An absent
+   * region skips the announcement; nothing is written to a console in its
+   * place.
    *
    * @param text Line to announce.
    */
@@ -969,7 +975,8 @@ export function createRunSummaryScreen(
 
   /**
    * The effective reduced-motion value: the explicit override, then the store,
-   * then the value the transition carried, and `false` where none is available.
+   * then the value the transition carried, and `false` where none is
+   * available.
    *
    * @returns Whether motion is to be reduced.
    */
@@ -989,13 +996,13 @@ export function createRunSummaryScreen(
     return context.reducedMotion ?? false;
   };
 
-  /* ----------------------------------------------------------------------
-   * Resolution: what the panel shows, and where it came from
-   * ------------------------------------------------------------------- */
-
   /**
-   * The finished run: the context's summary first, then the port's own, then
-   * the last run the port recorded.
+   * The FINISHED run: the context's summary first, then the last run the port
+   * recorded, and the run in force only as the fallback.
+   *
+   * The port's `lastSummary()` outranks its `summary()`: this screen is reached
+   * after a run ended, ending one opens its replacement, and `summary()` there
+   * describes the run that has not been played yet. Decision DL-SUMMARY-12.
    *
    * @returns The summary, or `null` where no source supplied one.
    */
@@ -1008,19 +1015,19 @@ export function createRunSummaryScreen(
       return null;
     }
 
-    const current = callPort<RunSummary | null>(
-      'summary',
-      runPort.summary?.bind(runPort),
+    const finished = callPort<RunSummary | null>(
+      'lastSummary',
+      runPort.lastSummary?.bind(runPort),
       null,
     );
 
-    if (current !== null) {
-      return current;
+    if (finished !== null) {
+      return finished;
     }
 
     return callPort<RunSummary | null>(
-      'lastSummary',
-      runPort.lastSummary?.bind(runPort),
+      'summary',
+      runPort.summary?.bind(runPort),
       null,
     );
   };
@@ -1055,11 +1062,6 @@ export function createRunSummaryScreen(
 
   /**
    * The goal of the stage reached.
-   *
-   * Resolution order: the port's own goal, taken only where the port agrees on
-   * which stage that is, and then the goal derived from the progression curve
-   * at the index being shown. `stageGoalForIndex` raises on an index outside
-   * its domain, and the raise is contained here. Decision DL-SUMMARY-06.
    *
    * @param stageIndex Index the readout is showing.
    * @returns The goal, or `null` where neither path resolved one.
@@ -1103,10 +1105,7 @@ export function createRunSummaryScreen(
 
   /**
    * The run seed, VERBATIM: the summary's first, then the context's, then the
-   * port's. No source is re-normalised, re-hashed, trimmed or truncated. The
-   * string on screen is the string that reproduces the run, and it is also the
-   * input `runCorrelationId` of ../../run/run-state derives the run's
-   * correlation identifier from.
+   * port's. No source is re-normalised, re-hashed, trimmed or truncated.
    *
    * @param summary The summary in force, or `null`.
    * @returns The seed, or `null` where no source supplied a non-empty one.
@@ -1154,8 +1153,9 @@ export function createRunSummaryScreen(
    * assigned and its count the budget the registry holds; neither is
    * recomputed here.
    *
-   * @param held Held relic, as `RelicRegistry.active()` returns it.
-   * @param index Position in the list supplied, used where no slot is carried.
+   * @param held Held relic, as `RelicRegistry.active` returns it.
+   * @param index Position in the list supplied, used where no slot is
+   *   carried.
    * @returns The row.
    */
   const readHeldEntry = (held: ActiveRelic, index: number): RelicEntry => {
@@ -1181,8 +1181,9 @@ export function createRunSummaryScreen(
   };
 
   /**
-   * Reads one persisted relic as a row. The array position IS the pickup order,
-   * which the run-state envelope guarantees, so the slot is that position.
+   * Reads one persisted relic as a row. The array position IS the pickup
+   * order, which the run-state envelope guarantees, so the slot is that
+   * position.
    *
    * @param relic Persisted relic, as the summary carries it.
    * @param index Position in the summary's own array.
@@ -1213,12 +1214,7 @@ export function createRunSummaryScreen(
   };
 
   /**
-   * The relics collected, IN PICKUP ORDER.
-   *
-   * Resolution order: the registry, where one is attached and still holds
-   * relics, and then the summary's own list, which the envelope holds in the
-   * same order. Both paths map the source list as it stands: no member sorts,
-   * groups, filters or reverses it. Decision DL-SUMMARY-04.
+   * The relics collected, in pickup order.
    *
    * @param summary The summary in force, or `null`.
    * @returns The rows, in pickup order.
@@ -1266,10 +1262,6 @@ export function createRunSummaryScreen(
       relics: resolveRelics(summary),
     };
   };
-
-  /* ----------------------------------------------------------------------
-   * The element tree
-   * ------------------------------------------------------------------- */
 
   /**
    * Creates one element, with its class and optionally its text.
@@ -1366,10 +1358,6 @@ export function createRunSummaryScreen(
     return button;
   };
 
-  /* ----------------------------------------------------------------------
-   * Actions: reported into an injected sink, never performed here
-   * ------------------------------------------------------------------- */
-
   /**
    * Publishes the new-run action.
    *
@@ -1424,50 +1412,6 @@ export function createRunSummaryScreen(
     }
   };
 
-  /**
-   * Publishes the end-run action, with the outcome the context recorded and
-   * `'abandoned'` where it recorded none.
-   */
-  const publishEndRun = (): void => {
-    const outcome: RunOutcome = context.outcome ?? 'abandoned';
-
-    try {
-      if (onEndRun !== undefined) {
-        onEndRun(outcome);
-        reporter.count(ACTION_METRIC, {
-          context: REPORT_CONTEXT,
-          action: 'endRun',
-          sink: 'callback',
-          outcome,
-        });
-
-        return;
-      }
-
-      if (runPort !== null && runPort.endRun !== undefined) {
-        runPort.endRun(outcome);
-        reporter.count(ACTION_METRIC, {
-          context: REPORT_CONTEXT,
-          action: 'endRun',
-          sink: 'run',
-          outcome,
-        });
-
-        return;
-      }
-
-      reporter.count(ACTION_WITHOUT_SINK_METRIC, {
-        context: REPORT_CONTEXT,
-        action: 'endRun',
-      });
-    } catch (error) {
-      reporter.error('the end-run action raised', error, {
-        context: REPORT_CONTEXT,
-        action: 'endRun',
-      });
-    }
-  };
-
   /* ----------------------------------------------------------------------
    * The copy ladder
    * ------------------------------------------------------------------- */
@@ -1489,7 +1433,20 @@ export function createRunSummaryScreen(
       return;
     }
 
+    // `aria-busy` while an attempt is in flight, so assistive technology is
+    // told the region is mid-change rather than reading a confirmation that has
+    // not arrived. DL-SUMMARY-10.
+    if (next === 'copying') {
+      seedStatus.setAttribute('aria-busy', 'true');
+    } else {
+      seedStatus.removeAttribute('aria-busy');
+    }
+
     switch (next) {
+      case 'copying':
+        seedStatus.textContent = copy.copying;
+
+        return;
       case 'copied':
         seedStatus.textContent = copy.copySucceeded;
 
@@ -1510,9 +1467,36 @@ export function createRunSummaryScreen(
   };
 
   /**
+   * Marks the copy control busy while an attempt is in flight, where a control
+   * was built.
+   *
+   * `aria-disabled`, NOT `disabled`: disabling the control the player just
+   * activated takes it out of the tab order, and the browser drops focus to the
+   * body when that happens — so a keyboard user loses their place for the
+   * length of a clipboard write. The re-entry guard is `copyInFlight`, which
+   * refuses the second press regardless of what the attribute says.
+   * DL-SUMMARY-10.
+   *
+   * @param busy Whether an attempt is in flight.
+   */
+  const setCopyControlBusy = (busy: boolean): void => {
+    if (copyButton === null) {
+      return;
+    }
+
+    if (busy) {
+      copyButton.setAttribute('aria-disabled', 'true');
+
+      return;
+    }
+
+    copyButton.removeAttribute('aria-disabled');
+  };
+
+  /**
    * The clipboard in force: the injected port where one was supplied — `null`
-   * opts out — and otherwise the platform's own, where it exists and carries a
-   * writer. Nothing is ever read back from it.
+   * opts out — and otherwise the platform's own, where it exists and carries
+   * a writer. Nothing is ever read back from it.
    *
    * @returns The port, or `null` where none is available.
    */
@@ -1598,8 +1582,8 @@ export function createRunSummaryScreen(
   };
 
   /**
-   * Copies the seed on screen. Never rejects, never throws, and never reads the
-   * clipboard, rewrites the address bar or issues a request.
+   * Copies the seed on screen. Never rejects, never throws, and never reads
+   * the clipboard, rewrites the address bar or issues a request.
    *
    * @returns Whether the seed reached the clipboard.
    */
@@ -1627,54 +1611,108 @@ export function createRunSummaryScreen(
       return false;
     }
 
-    const clipboard = readClipboard();
+    // SERIALISED. One attempt is in flight at a time: a second press while the
+    // clipboard has not answered is counted and refused rather than racing the
+    // first, so two answers cannot arrive for one visible state.
+    // DL-SUMMARY-10.
+    if (copyInFlight) {
+      reporter.count(COPY_METRIC, {
+        context: REPORT_CONTEXT,
+        outcome: 'refused',
+        path: 'in-flight',
+      });
 
-    if (clipboard !== null) {
-      try {
-        await clipboard.writeText(seed);
+      return false;
+    }
+
+    // THE LIFECYCLE TOKEN. `leave`, `unmount` and every re-render raise the
+    // generation, so an answer that arrives for a visit already left writes
+    // nothing and announces nothing. DL-SUMMARY-10.
+    const generation = copyGeneration;
+    const stale = (): boolean => destroyed || generation !== copyGeneration;
+
+    copyInFlight = true;
+    setCopyState('copying');
+    setCopyControlBusy(true);
+
+    try {
+      const clipboard = readClipboard();
+
+      if (clipboard !== null) {
+        try {
+          await clipboard.writeText(seed);
+
+          if (stale()) {
+            reporter.count(COPY_METRIC, {
+              context: REPORT_CONTEXT,
+              outcome: 'stale',
+              path: 'clipboard',
+            });
+
+            return false;
+          }
+
+          setCopyState('copied');
+          announce(copy.copySucceeded);
+          reporter.count(COPY_METRIC, {
+            context: REPORT_CONTEXT,
+            outcome: 'copied',
+            path: 'clipboard',
+          });
+
+          return true;
+        } catch (error) {
+          // The refusal is reported and the selection path below is taken.
+          // Decision DL-SUMMARY-05.
+          reporter.error('the clipboard refused the seed', error, {
+            context: REPORT_CONTEXT,
+          });
+
+          if (stale()) {
+            reporter.count(COPY_METRIC, {
+              context: REPORT_CONTEXT,
+              outcome: 'stale',
+              path: 'clipboard',
+            });
+
+            return false;
+          }
+        }
+      }
+
+      const selected = selectSeedText();
+
+      if (selected && copySelection()) {
         setCopyState('copied');
         announce(copy.copySucceeded);
         reporter.count(COPY_METRIC, {
           context: REPORT_CONTEXT,
           outcome: 'copied',
-          path: 'clipboard',
+          path: 'selection',
         });
 
         return true;
-      } catch (error) {
-        // The refusal is reported and the selection path below is taken.
-        // Decision DL-SUMMARY-05.
-        reporter.error('the clipboard refused the seed', error, {
-          context: REPORT_CONTEXT,
-        });
       }
-    }
 
-    const selected = selectSeedText();
-
-    if (selected && copySelection()) {
-      setCopyState('copied');
-      announce(copy.copySucceeded);
+      // The selection is left in place, which is what the confirmation below
+      // instructs. Decision DL-SUMMARY-05.
+      setCopyState('failed');
+      announce(copy.copyFailed);
       reporter.count(COPY_METRIC, {
         context: REPORT_CONTEXT,
-        outcome: 'copied',
-        path: 'selection',
+        outcome: 'failed',
+        path: selected ? 'selection' : 'none',
       });
 
-      return true;
+      return false;
+    } finally {
+      copyInFlight = false;
+
+      // The busy mark comes off only for the visit that made the attempt.
+      if (!stale()) {
+        setCopyControlBusy(false);
+      }
     }
-
-    // The selection is left in place, which is what the confirmation below
-    // instructs. Decision DL-SUMMARY-05.
-    setCopyState('failed');
-    announce(copy.copyFailed);
-    reporter.count(COPY_METRIC, {
-      context: REPORT_CONTEXT,
-      outcome: 'failed',
-      path: selected ? 'selection' : 'none',
-    });
-
-    return false;
   };
 
   /** Activates the copy control. Reports every failure, and throws never. */
@@ -1692,14 +1730,10 @@ export function createRunSummaryScreen(
     }
   };
 
-  /* ----------------------------------------------------------------------
-   * Construction of the tree, once
-   * ------------------------------------------------------------------- */
-
   /**
    * Builds the panel and caches every reference, so no member below performs a
-   * lookup of its own. index.html declares `#screen-run-summary` empty, and the
-   * order below is the source order style/_summary.scss reads.
+   * lookup of its own. index.html declares `#screen-run-summary` empty, and
+   * the order below is the source order style/_summary.scss reads.
    *
    * @param target Host the panel is appended to.
    * @param doc Document the tree is created in.
@@ -1761,8 +1795,8 @@ export function createRunSummaryScreen(
 
     seedCaption.id = ids.seedLabel;
 
-    // A `<code>`: selectable text that takes no tab stop of its own, which is
-    // why the copy control beside it is the keyboard path to the seed.
+    // A `<code>`: selectable text that takes no tab stop of its own. The copy
+    // control beside it is the keyboard path to the seed.
     const value = make(
       doc,
       'code',
@@ -1795,39 +1829,23 @@ export function createRunSummaryScreen(
     );
 
     // The designated initial target ../a11y/focus-manager resolves by marker.
-    // `SCREEN_INITIAL_FOCUS.runSummary` declares no selector, so this marker is
-    // the step of its chain that resolves. Decision DL-SUMMARY-07.
     control.setAttribute(runSummaryAttributes.focusInitial, '');
 
     seedGroup.append(seedCaption, value, control, status);
     created.append(heading, scores, relicsHeading, list, notice, seedGroup);
 
-    if (newRunOffered || endRunOffered) {
+    if (newRunOffered) {
       const actions = make(doc, 'div', runSummaryClasses.actions);
 
-      if (newRunOffered) {
-        actions.append(
-          makeButton(
-            doc,
-            runSummaryClasses.action,
-            copy.newRunLabel,
-            'newRun',
-            publishNewRun,
-          ),
-        );
-      }
-
-      if (endRunOffered) {
-        actions.append(
-          makeButton(
-            doc,
-            runSummaryClasses.action,
-            copy.endRunLabel,
-            'endRun',
-            publishEndRun,
-          ),
-        );
-      }
+      actions.append(
+        makeButton(
+          doc,
+          runSummaryClasses.action,
+          copy.newRunLabel,
+          'newRun',
+          publishNewRun,
+        ),
+      );
 
       created.append(actions);
     }
@@ -1931,7 +1949,6 @@ export function createRunSummaryScreen(
       layer: runSummaryLayout.layer,
       ceiling: runSummaryLayout.ceiling,
       newRun: newRunOffered,
-      endRun: endRunOffered,
     });
   };
 
@@ -1941,10 +1958,6 @@ export function createRunSummaryScreen(
       mount();
     }
   };
-
-  /* ----------------------------------------------------------------------
-   * Rendering
-   * ------------------------------------------------------------------- */
 
   /**
    * Writes one element's text, reporting an outlet the tree does not carry.
@@ -1971,8 +1984,10 @@ export function createRunSummaryScreen(
     element.textContent = text;
   };
 
-  /** Destroys every relic row and empties the list, so a re-render duplicates
-   * nothing. */
+  /**
+   * Destroys every relic row and empties the list, so a re-render duplicates
+   * nothing.
+   */
   const clearRelics = (): void => {
     for (const row of rows) {
       try {
@@ -1992,13 +2007,7 @@ export function createRunSummaryScreen(
   };
 
   /**
-   * Renders the relics collected, IN PICKUP ORDER.
-   *
-   * Each row is composed by `createRelicCard` in its `summary` variant, which
-   * is the read-only row style/_summary.scss dresses; no markup is built here.
-   * The list is iterated in the order it arrived, and `host.append` puts each
-   * row after the last, so source order is pickup order. Decision
-   * DL-SUMMARY-04.
+   * Renders the relics collected, in pickup order.
    *
    * @param entries Rows to render, in pickup order.
    */
@@ -2049,13 +2058,19 @@ export function createRunSummaryScreen(
    *
    * The string written is the string the source supplied, character for
    * character: nothing is trimmed, cased, hashed, truncated or ellipsised. A
-   * refresh carrying the same seed keeps the confirmation already on screen, so
-   * an in-state update neither repeats nor discards it.
+   * refresh carrying the same seed keeps the confirmation already on screen,
+   * so an in-state update neither repeats nor discards it.
    *
    * @param seed Seed to render, or `null` where none resolved.
    */
   const renderSeed = (seed: string | null): void => {
     const changed = seed !== renderedSeed;
+
+    if (changed) {
+      // A copy of the seed being replaced no longer describes what is on
+      // screen, so its answer writes nothing. DL-SUMMARY-10.
+      copyGeneration += 1;
+    }
 
     renderedSeed = seed;
     writeText(seedValue, 'seedValue', seed ?? copy.seedMissing);
@@ -2080,8 +2095,8 @@ export function createRunSummaryScreen(
   };
 
   /**
-   * Renders the whole panel from the context and the ports, and records what it
-   * put on screen.
+   * Renders the whole panel from the context and the ports, and records what
+   * it put on screen.
    *
    * @returns The snapshot of this render.
    */
@@ -2128,7 +2143,6 @@ export function createRunSummaryScreen(
       ),
       copyState,
       newRunOffered,
-      endRunOffered,
     });
 
     snapshot = rendered;
@@ -2142,10 +2156,6 @@ export function createRunSummaryScreen(
 
     return rendered;
   };
-
-  /* ----------------------------------------------------------------------
-   * The lifecycle
-   * ------------------------------------------------------------------- */
 
   /**
    * Reads the members of a context this panel renders from.
@@ -2183,9 +2193,13 @@ export function createRunSummaryScreen(
    * Places focus for this state, through the one deterministic chain
    * ../a11y/focus-manager owns. The marker on the copy control is what the
    * chain resolves, and the motion value decides whether the target is
-   * scrolled to smoothly. Decision DL-SUMMARY-07.
+   * scrolled to smoothly.
    */
   const placeFocus = (): void => {
+    if (options.placeFocus === false) {
+      return;
+    }
+
     const container = host ?? panel;
 
     if (container === null) {
@@ -2206,7 +2220,39 @@ export function createRunSummaryScreen(
   };
 
   /**
-   * Renders the summary, places focus and announces the run's conclusion.
+   * The run's conclusion as one line: the verdict, the score, the stage, the
+   * goal, the relic count and whether a seed is on screen.
+   *
+   * ONE COMPOSER, read by this screen where it announces its own entry and by
+   * the router where it reads the line. DL-SUMMARY-11.
+   *
+   * @param rendered What the last render put on screen.
+   * @returns The line.
+   */
+  const describeConclusion = (rendered: RunSummarySnapshot): string =>
+    copy.announcement({
+      outcome: rendered.outcome,
+      score: rendered.score,
+      stage: rendered.stageIndex + 1,
+      goal: rendered.goalText,
+      relics: rendered.relics.length,
+      seedPresent: rendered.seed !== null,
+    });
+
+  /**
+   * The line the router reads on entry.
+   *
+   * Reads what is on screen, so the words describe the summary the player is
+   * looking at. DL-SUMMARY-11.
+   *
+   * @returns The line, or `null` before anything has been rendered.
+   */
+  const announcement = (): string | null =>
+    snapshot === null ? null : describeConclusion(snapshot);
+
+  /**
+   * Renders the summary, then places focus and announces the conclusion where
+   * this screen owns those two steps.
    *
    * @param next Context for this entry.
    */
@@ -2225,20 +2271,13 @@ export function createRunSummaryScreen(
 
     const rendered = render();
 
-    placeFocus();
+    if (placeFocusOnEntry) {
+      placeFocus();
+    }
 
-    if (!announced) {
+    if (!announced && announceOnEntry) {
       announced = true;
-      announce(
-        copy.announcement({
-          outcome: rendered.outcome,
-          score: rendered.score,
-          stage: rendered.stageIndex + 1,
-          goal: rendered.goalText,
-          relics: rendered.relics.length,
-          seedPresent: rendered.seed !== null,
-        }),
-      );
+      announce(describeConclusion(rendered));
     }
 
     reporter.count(ENTERED_METRIC, {
@@ -2281,6 +2320,10 @@ export function createRunSummaryScreen(
     }
 
     announced = false;
+
+    // Every copy attempt still in flight belongs to the visit being left, so
+    // its answer writes nothing and announces nothing. DL-SUMMARY-10.
+    copyGeneration += 1;
     clearRelics();
 
     if (relicsEmpty !== null) {
@@ -2288,6 +2331,7 @@ export function createRunSummaryScreen(
     }
 
     setCopyState(renderedSeed === null ? 'unavailable' : 'idle');
+    setCopyControlBusy(false);
     reporter.count(LEFT_METRIC, { context: REPORT_CONTEXT });
   };
 
@@ -2303,6 +2347,10 @@ export function createRunSummaryScreen(
     }
 
     destroyed = true;
+
+    // Every copy attempt still in flight answers into a released panel, so its
+    // answer writes nothing and announces nothing. DL-SUMMARY-10.
+    copyGeneration += 1;
     clearRelics();
 
     for (const release of teardown.splice(0)) {
@@ -2341,8 +2389,7 @@ export function createRunSummaryScreen(
   };
 
   return Object.freeze({
-    // A getter: `destroy()` releases the panel, so a captured value would name
-    // a node no longer in the document.
+    // A getter.
     get element(): HTMLElement | null {
       return panel;
     },
@@ -2359,6 +2406,8 @@ export function createRunSummaryScreen(
     readSnapshot: (): RunSummarySnapshot | null => snapshot,
 
     layout: (): RunSummaryLayout => runSummaryLayout,
+
+    announcement,
 
     copySeed,
   });

@@ -1,50 +1,15 @@
 // Contract suite for the composition root's LAST renderer failure mode, AAP R7
-// and implicit requirement I6: the 2.5D factory itself raising, before any mount
-// is attempted.
+// and implicit requirement I6: the 2.5D factory itself raising, before any
+// mount is attempted.
 //
-// The three failure modes are separate, and only two of them were covered:
-//
-//   no context at all       the probe reports `supported: false` and the
-//                           number-only board is selected before a renderer is
-//                           built. Covered by renderer-selection.test.ts.
-//   a context refused       the probe reports a context, the renderer's own
-//                           request is refused, and the mount reports
-//                           `mounted: false`, which the fallback acts on. Also
-//                           covered there.
-//   the FACTORY raising     `createThreeRenderer()` throws before it returns.
-//                           `buildRenderer()` contains the throw and hands back
-//                           a mounted number-only renderer, so the board draws —
-//                           but the selection describing which renderer is
-//                           drawing, the preference the settings surface reads,
-//                           the live context-loss reader handed to the health
-//                           surface and the fallback helper's own guard were all
-//                           left describing a 2.5D renderer that does not exist.
-//                           That is what this file covers.
-//
-// WHY THE FACTORY IS MOCKED HERE. Nothing a document can be given makes the real
-// factory raise: it resolves its elements through guarded lookups and unwinds a
-// failed mount internally, which is exactly why the raising case had no test.
-// The mock is confined to this file, and the module is replaced whole, because
-// `src/main.ts` imports one value from it and no other module imports it at all.
-//
-// The hostile thrown value is deliberate. A catch that reduces a caught value
-// with `String(value)`, `value.name` or `value.message` can be made to raise
-// from inside the containment boundary itself, which would take `start()` down
-// along with the input manager, the screens and the focus manager — the very
-// outcome the boundary exists to prevent. `describeRenderError()` is the total
-// reduction, and this file pins that it is the one used.
+// The three failure modes are separate, and only two of them were covered.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { startWithRun } from '../../fixtures/application';
 
 const HOSTILE_MESSAGE = 'the 2.5D factory refused to construct';
 
-/**
- * A thrown value whose every conversion path raises.
- *
- * `String(value)` reaches `Symbol.toPrimitive`, then `toString`, then `valueOf`;
- * `value.name` and `value.message` reach their own accessors. All five raise, so
- * any reduction other than a contained one propagates.
- */
+/** A thrown value whose every conversion path raises. */
 const hostileThrow = (): never => {
   const hostile = {
     get name(): string {
@@ -77,10 +42,13 @@ const { resetWebGLSupportProbe } = await import(
 );
 const { applyTheme } = await import('../../../src/theme/themes');
 const { createMockWebGLContext } = await import('../../fixtures/webgl');
+const { RUN_STATE_KEY } = await import('../../../src/storage/storage-keys');
 
 type Application = Awaited<ReturnType<() => ReturnType<typeof start>>>;
 
-/** The board region of index.html, with the four elements the root looks up. */
+/**
+ * The board region of index.html, with the four elements the root looks up.
+ */
 const BOARD_MARKUP = `
   <main id="game-main">
     <div class="score-container"><span class="visually-hidden">Score</span>0</div>
@@ -115,12 +83,50 @@ const BOARD_MARKUP = `
 
 const nativeGetContext = HTMLCanvasElement.prototype.getContext;
 
+/**
+ * The run this suite resumes: a fixed seed, stage 0 and a two-tile board.
+ *
+ * A load that resumed nothing HOLDS THE RUN-START SCREEN and opens no board, so
+ * the fallback renderer would have nothing to draw and every tile assertion
+ * below would read zero for the wrong reason.
+ */
+const SEEDED_ENVELOPE = JSON.stringify({
+  schemaVersion: 1,
+  runId: 'fallback-run',
+  seed: 'fallback-seed',
+  rngCursor: {
+    'spawn-value': 2,
+    'spawn-position': 2,
+    'relic-draw': 0,
+    'rarity-weight': 0,
+  },
+  stageIndex: 0,
+  stageGoal: { kind: 'highest-tile', target: 16 },
+  goalProgress: 0.125,
+  relics: [],
+  board: {
+    grid: {
+      size: 4,
+      cells: [
+        [{ position: { x: 0, y: 0 }, value: 2 }, null, null, null],
+        [{ position: { x: 1, y: 0 }, value: 4 }, null, null, null],
+        [null, null, null, null],
+        [null, null, null, null],
+      ],
+    },
+    score: 0,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  },
+});
+
 let application: Application | null = null;
 
 /**
- * Makes every canvas answer with a mocked WebGL 2 context, so the probe reports
- * a context available and the root selects the 2.5D mode — which is the only
- * path that reaches the factory at all.
+ * Makes every canvas answer with a mocked WebGL 2 context, so the probe
+ * reports a context available and the root selects the 2.5D mode — which is
+ * the only path that reaches the factory at all.
  */
 const installWebGL = (): void => {
   const mock = createMockWebGLContext();
@@ -157,6 +163,7 @@ const settleFrames = async (count = 3): Promise<void> => {
 
 beforeEach(() => {
   document.body.innerHTML = BOARD_MARKUP;
+  window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
   installWebGL();
   resetWebGLSupportProbe();
 });
@@ -170,13 +177,12 @@ afterEach(() => {
   document.body.innerHTML = '';
   window.localStorage.removeItem('bestScore');
   window.localStorage.removeItem('gameState');
+  window.localStorage.removeItem(RUN_STATE_KEY);
 });
 
 describe('when the 2.5D factory itself raises', () => {
   it('composes the application rather than failing the boot', () => {
-    // The containment boundary's whole purpose. A reduction that raises inside
-    // the catch propagated out of `start()`, losing the input manager, the
-    // screens and the focus manager along with the board.
+    // The containment boundary's whole purpose.
     expect(() => {
       application = start(document);
     }).not.toThrow();
@@ -185,12 +191,11 @@ describe('when the 2.5D factory itself raises', () => {
   });
 
   it('reports the number-only board as the one drawing', async () => {
-    application = start(document);
+    application = startWithRun(document);
 
     await settleFrames();
 
-    // `selection` is what every later reader consults. Left at 'three' it named
-    // a renderer that was never constructed.
+    // `selection` is what every later reader consults.
     expect(application.renderer.support.supported).toBe(true);
     expect(application.renderer.mode).toBe('number-only');
     expect(application.renderer.fallback).toBe(true);
@@ -200,8 +205,6 @@ describe('when the 2.5D factory itself raises', () => {
   it('forces the number-only preference, as a failed mount does', () => {
     application = start(document);
 
-    // The settings surface reads the force to report that the 2.5D choice is no
-    // longer available on this machine.
     expect(application.preferences.isNumberOnlyForced()).toBe(true);
     expect(application.preferences.isNumberOnlyMode()).toBe(true);
     expect(application.preferences.getNumberOnlyForce().forced).toBe(true);
@@ -214,9 +217,8 @@ describe('when the 2.5D factory itself raises', () => {
       .recent(200)
       .filter((record) => record.message.startsWith('Board drawn by the'));
 
-    // `reportSelection()` reads the same `selection` every other consumer does,
-    // so a stale mode is stated on the record a reader would correlate from:
-    // 'Board drawn by the three renderer' for a renderer that never existed.
+    // `reportSelection` reads the same `selection` every other consumer does,
+    // so a stale mode is stated on the record a reader would correlate from.
     expect(selection).toHaveLength(1);
     expect(selection[0]?.message).toBe(
       'Board drawn by the number-only renderer.',
@@ -226,7 +228,7 @@ describe('when the 2.5D factory itself raises', () => {
   });
 
   it('does not park the board on a context-loss event it cannot receive', async () => {
-    application = start(document);
+    application = startWithRun(document);
 
     await settleFrames();
 
@@ -255,9 +257,6 @@ describe('when the 2.5D factory itself raises', () => {
     expect(reported).toHaveLength(1);
     expect(reported[0]?.level).toBe('error');
 
-    // The two-field summary the total reduction produces for a value that
-    // answers nothing: reported rather than raised, and carrying no text read
-    // off the hostile object itself.
     const error = reported[0]?.error;
 
     expect(error).toBeDefined();

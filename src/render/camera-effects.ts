@@ -1,15 +1,6 @@
 // Camera punch and shake: the merge impulse and the jolt, both suppressed when
 // motion is to be reduced.
 //
-// Timing, easing, delay and the impulse shape are read from
-// src/theme/tokens.ts through src/render/animations.ts, so a punch runs on the
-// cadence the stylesheet gives a merging tile: the `pop` keyframes (0%
-// scale(0), 50% scale(1.2), 100% scale(1)) applied as
-// `pop 200ms ease $transition-speed`
-// under `animation-fill-mode: backwards`, so the 100ms delay holds the 0%
-// keyframe. The terminal overlay's 1200ms delay is the ceiling a shake duration
-// is clamped to.
-//
 // The punch takes the `pop` overshoot as its impulse shape: it leaves rest at
 // the 0% keyframe, peaks at the offset the overshoot sits on, and is back at
 // rest at 100%.
@@ -21,31 +12,7 @@
 //
 // src/render/three-renderer.ts forwards here.
 //
-// This module holds no scene, mesh or engine reference and takes its camera as
-// a construction parameter; it touches no DOM, reads no clock — every step is
-// driven by the caller's clamped frame delta — consumes no randomness, and
-// performs no I/O. The transform is only ever written as
-// `rest + sum(active offsets)`; no effect reads the live camera and adds to it.
-// Every effect's last keyframe is a displacement of zero.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-CAMERA-01  style/main.scss `pop` keyframes  the overshoot shape, ported
-//                                                  as the punch impulse
-//   TR-CAMERA-02  target-only row                  `createCameraEffects()` and
-//                                                  the punch
-//   TR-CAMERA-03  target-only row                  the shake, clamped to the
-//                                                  terminal overlay's delay
-//   TR-CAMERA-04  target-only row                  the reduced-motion gate
-//   TR-CAMERA-05  target-only row                  `mergeIntensity()`, linear
-//                                                  in the tile-ramp exponent
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-CAMERA-01  the punch magnitude taken from the tile-ramp exponent, with
-//                 every value above the ramp's last resolving to one ceiling
-//   DL-CAMERA-02  the `pop` overshoot reused as the impulse shape
-//   DL-CAMERA-03  the transform written as `rest + sum(active offsets)`
+// Decisions: DL-CAMERA-01, DL-CAMERA-02, DL-CAMERA-03 (docs/DECISION_LOG.md).
 
 import type {
   Camera,
@@ -176,15 +143,7 @@ function resolveExponent(value: number): number {
   return Math.max(exponent, tileRampConstants.exponentStart);
 }
 
-/**
- * The punch intensity a merged tile value reads at.
- *
- * Linear in the exponent and not in the value, which is the normalisation
- * style/main.scss states as `($exponent - 1) / ($limit - 1) * 100` and
- * src/theme/tile-ramp.ts carries as `goldPercent`. The ramp's first exponent
- * resolves to `MIN_INTENSITY` and its last to `MAX_INTENSITY`; every
- * super-tile value resolves to `MAX_INTENSITY` rather than beyond it.
- */
+/** The punch intensity a merged tile value reads at. */
 export function mergeIntensity(value: number): number {
   if (!Number.isFinite(value)) {
     return MIN_INTENSITY;
@@ -240,10 +199,10 @@ export interface CameraEffectsOptions {
   /**
    * Forces the reduced-motion decision and holds it for the lifetime of the
    * instance. Omitted, the effective preference is read live through
-   * `queryReducedMotion()` of src/render/webgl-support.ts on every request and
-   * followed through `subscribeReducedMotion()`, so an explicit
-   * `setReducedMotionOverride()` and an operating-system setting toggled
-   * mid-run both take effect without a reload.
+   * `queryReducedMotion` of src/render/webgl-support.ts on every request and
+   * followed through `subscribeReducedMotion`, so an explicit
+   * `setReducedMotionOverride` and an operating-system setting toggled mid-run
+   * both take effect without a reload.
    */
   readonly reducedMotion?: boolean;
   readonly reporter?: RenderReporter;
@@ -270,7 +229,7 @@ export interface CameraEffectStats {
  * Camera punch and shake over one camera.
  *
  * Every member is safe to call at any time, before the first frame and after
- * `destroy()` alike.
+ * `destroy` alike.
  */
 export interface CameraEffects {
   punch(intensity?: number): boolean;
@@ -352,12 +311,12 @@ function resolveOption(
  * Creates the camera punch and shake for one camera.
  *
  * The camera's position and orientation are captured as the rest transform at
- * construction, and `setRestTransform()` replaces that capture when a caller
+ * construction, and `setRestTransform` replaces that capture when a caller
  * reframes the camera for a different board size. This module imports neither
  * the scene nor the accessibility settings surface.
  *
- * @returns A frozen controller. Constructed with motion reduced, every request
- *   is refused and the camera is never written.
+ * @returns A frozen controller. Constructed with motion reduced, every
+ *   request is refused and the camera is never written.
  */
 export function createCameraEffects(
   camera: Camera,
@@ -430,8 +389,6 @@ export function createCameraEffects(
   const restPosition = camera.position.clone();
   const restQuaternion = camera.quaternion.clone();
 
-  // The three axes every displacement is expressed along, derived from the
-  // REST orientation rather than the live one.
   const forwardAxis = new Vector3();
   const rightAxis = new Vector3();
   const upAxis = new Vector3();
@@ -439,8 +396,6 @@ export function createCameraEffects(
   // Displacement written into the camera by the last step.
   const appliedOffset = new Vector3();
 
-  // Accumulator every running effect adds into, reused by every step rather
-  // than allocated per frame.
   const composed = new Vector3();
 
   const effects: ActiveEffect[] = [];
@@ -473,13 +428,7 @@ export function createCameraEffects(
     appliedOffset.set(NO_DISPLACEMENT, NO_DISPLACEMENT, NO_DISPLACEMENT);
   };
 
-  /**
-   * Writes `rest + composed` onto the camera.
-   *
-   * A composed displacement of exactly zero writes the rest transform itself
-   * rather than adding to it, so the transform a completed effect leaves is
-   * the captured one and not a sum that happens to equal it.
-   */
+  /** Writes `rest + composed` onto the camera. */
   const writeTransform = (): void => {
     if (
       composed.x === NO_DISPLACEMENT &&
@@ -656,9 +605,8 @@ export function createCameraEffects(
 
     const peak = punchDistance * applied;
 
-    // style/main.scss: three keyframes, the middle one carrying the
-    // overshoot at the offset it sits on. The first and last carry no
-    // displacement, so the impulse leaves rest and returns to it.
+    // style/main.scss: three keyframes, the middle one carrying the overshoot
+    // at the offset it sits on.
     const stops: readonly TweenStop<CameraOffsetValue>[] = [
       {
         offset: FIRST_KEYFRAME_OFFSET,
@@ -770,8 +718,7 @@ export function createCameraEffects(
         }
 
         // Deterministic in the shake's own elapsed time: two sine terms at
-        // different frequencies, a quarter turn apart. No clock is read and
-        // no randomness is consumed, so one shake replays identically.
+        // different frequencies, a quarter turn apart.
         const phase = tween.elapsed() * shakeAngularSpeed;
 
         target.addScaledVector(rightAxis, amplitude * Math.sin(phase));

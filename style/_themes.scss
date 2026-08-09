@@ -4,39 +4,7 @@
 // Its `diagnostics-*` and `focus-*` entries are the only new values, both
 // derived from the text tokens; no inherited value is altered here.
 //
-// The ramp below is one generative port of the stylesheet's tile-ramp loop, run
-// once per palette: a base colour interpolated linearly in the EXPONENT between
-// the two anchors, an accent overlay for the mid band, a numeral colour that
-// flips from the dark to the bright text colour at value 8, and a progressive
-// glow shadow suppressed on every tile that received an accent. The twelve
-// compiled rows are not restated as a table anywhere.
-//
-// Activation contract — `data-theme` on the root element:
-//   absent, or "default"    the default palette, unscoped
-//   "high-contrast"         the high-contrast palette
-//   "colorblind-safe"       the colourblind-safe palette
-// With no attribute present the rendered colours are the stylesheet's own.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THEME is one area
-// across the stylesheet and TypeScript halves, so these ordinals continue the
-// ones src/theme/themes.ts carries:
-//   TR-THEME-07  style/main.scss L4-L22     the established palette, restated as
-//                                           the default theme's entries
-//   TR-THEME-08  style/main.scss L334-L402  the tile-ramp loop, ported here once
-//                                           per palette with no compiled row
-//                                           restated as a table
-//   TR-THEME-09  target-only row            the `data-theme` activation contract
-//                                           and its three values
-//   TR-THEME-10  target-only row            the `diagnostics-*` and `focus-*`
-//                                           entries derived from the text tokens
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-THEME-05  the two accessibility palettes added beside the default rather
-//                 than replacing it, so no inherited value is altered
-//   DL-THEME-06  the ramp run once per palette from the same generative loop
-//   DL-THEME-07  every themed value published as a custom property consumed
-//                 with a token fallback
+// Decisions: DL-THEME-05, DL-THEME-06, DL-THEME-07 (docs/DECISION_LOG.md).
 
 @use "sass:color";
 @use "sass:list";
@@ -48,12 +16,12 @@
 // Constants of the generative ramp, as distinct from the colours a palette
 // supplies to it.
 
-// Tile values are $ramp-base raised to 1 through $ramp-limit, giving 2 to 2048.
+// Tile values are $ramp-base raised to 1 through $ramp-limit, giving 2 to
+// 2048.
 $ramp-base: 2 !default;
 $ramp-limit: 11 !default;
 
-// The exponent from which a tile takes the bright numeral colour. Values 2 and
-// 4 fall below it and inherit the dark text colour.
+// The exponent from which a tile takes the bright numeral colour.
 $ramp-bright-from: 3 !default;
 
 // The exponent from which the glow shadow becomes visible, and the divisors
@@ -68,17 +36,14 @@ $ramp-glow-blur: $grid-spacing * 2 !default;
 $ramp-glow-spread: math.div($grid-spacing * 2, 3) !default;
 $ramp-glow-inset-width: math.div($grid-spacing, 15) !default;
 
-// Guard on the shared rarity ladder of style/_tokens.scss. Two tiers are the
-// minimum an interpolation between the anchors can be taken across, and it is
-// the same guard style/_hud.scss applies to its own copy of the list.
+// Guard on the shared rarity ladder of style/_tokens.scss.
 @if list.length($rarity-tiers) < 2 {
   @error "themes: $rarity-tiers needs at least two entries to interpolate "
     + "between a palette's anchors, received #{list.length($rarity-tiers)}.";
 }
 
-// The accent list of the default palette, one entry per exponent, `false` where
-// a tile takes no accent. The four colours, and the exponents they sit on, are
-// the `$special-colors` list of style/main.scss.
+// The accent list of the default palette, one entry per exponent, `false`
+// where a tile takes no accent.
 $ramp-default-accents: (
   false, false, #f78e48, #fc5e2e, #ff3333, #ff0000,
   false, false, false, false, false
@@ -92,9 +57,7 @@ $ramp-default-accent-weight: 55% !default;
 $ramp-default-super-tint: #333 !default;
 $ramp-default-super-weight: 95% !default;
 
-// Every colour a palette applies is declared once here. The emission mixins
-// below name these keys and never a colour of their own, and all three maps
-// carry the same key set.
+// Every colour a palette applies is declared once here.
 
 // The default palette. Each entry resolves to a token, to a documented
 // derivative of one, or to a literal the stylesheet already declares, except
@@ -135,10 +98,6 @@ $palette-default: (
   overlay-win: rgba($tile-gold-color, 0.5),
   overlay-win-text: $bright-text-color,
 
-  // The outer band takes the same derivation $diagnostics-surface below is
-  // written from rather than $text-color itself, so the stronger of the two
-  // bands measures at least 3.7:1 against every default surface the ring is
-  // drawn on. src/theme/themes.ts carries the compiled form of the same pair.
   focus-ring: color.adjust($text-color, $lightness: -22%),
   focus-ring-contrast: $bright-text-color,
 
@@ -147,9 +106,8 @@ $palette-default: (
   diagnostics-accent: $tile-gold-color
 );
 
-// The high-contrast palette. Its ramp is a single
-// monotonic luminance ladder from a mid-tone low anchor to a near-black high
-// anchor. It declares no accent band. Every step differs in luminance.
+// The high-contrast palette. Its ramp is a single monotonic luminance ladder
+// from a mid-tone low anchor to a near-black high anchor.
 $palette-high-contrast: (
   name: "high-contrast",
 
@@ -193,9 +151,9 @@ $palette-high-contrast: (
   diagnostics-accent: #7fd4ff
 );
 
-// The colourblind-safe palette. Both anchors and all
-// four accents are drawn from the Okabe-Ito colour set and sit on a monotonic
-// luminance ladder, so it carries protanopia, deuteranopia and tritanopia.
+// The colourblind-safe palette. Both anchors and all four accents are drawn
+// from the Okabe-Ito colour set and sit on a monotonic luminance ladder, so it
+// carries protanopia, deuteranopia and tritanopia.
 $palette-colorblind-safe: (
   name: "colorblind-safe",
 
@@ -239,21 +197,19 @@ $palette-colorblind-safe: (
   diagnostics-accent: #8ecae6
 );
 
-// The attribute that activates a palette and the three names it accepts. The
-// default needs no activation and emits no scoped rules.
+// The attribute that activates a palette and the three names it accepts.
 $theme-attribute: "data-theme" !default;
 $theme-names: ("default", "high-contrast", "colorblind-safe") !default;
 
-// The palettes activation switches between. The default is absent by
-// construction: it is the unscoped cascade.
+// The palettes activation switches between.
 $themes: (
   "high-contrast": $palette-high-contrast,
   "colorblind-safe": $palette-colorblind-safe
 ) !default;
 
 // Holds the name lists to one set in both directions: an unresolvable name in
-// $theme-names, or a palette keyed under a name it does not give itself, raises
-// a compile-time error.
+// $theme-names, or a palette keyed under a name it does not give itself,
+// raises a compile-time error.
 @each $name in $theme-names {
   @if $name != "default" and not map.has-key($themes, $name) {
     @error "themes: `#{$name}` is listed in $theme-names but absent from "
@@ -284,19 +240,14 @@ $themes: (
   @return map.get($palette, $key);
 }
 
-// The tile value an exponent stands for. Calls the same `pow()` helper
+// The tile value an exponent stands for. Calls the same `pow` helper
 // style/main.scss calls.
 @function ramp-power($exponent) {
   @return pow($ramp-base, $exponent);
 }
 
-// A rarity tier's accent: the palette's own two anchors interpolated across the
-// shared $rarity-tiers ladder, linear in the tier's ordinal.
-//
-// This is the same interpolation style/_hud.scss and style/_reward.scss ran,
-// and against the default palette it resolves to the same four colours they
-// compiled; under either additive palette it resolves to that palette's own
-// anchors instead, which is what gives the rarity surfaces theme coverage.
+// A rarity tier's accent: the palette's own two anchors interpolated across
+// the shared $rarity-tiers ladder, linear in the tier's ordinal.
 @function ramp-rarity($palette, $ordinal) {
   $count: list.length($rarity-tiers);
 
@@ -317,8 +268,7 @@ $themes: (
   @return list.nth($accents, $exponent);
 }
 
-// The share of the high anchor at one exponent. Linear in the exponent, not in
-// the tile value.
+// The share of the high anchor at one exponent.
 @function ramp-anchor-weight($exponent) {
   @return math.div($exponent - 1, $ramp-limit - 1) * 100%;
 }
@@ -329,8 +279,7 @@ $themes: (
   // Quantised at both steps, matching `overlayBackground` under
   // `quantiseIntermediate` in src/theme/tile-ramp.ts: the interpolated base is
   // floored BEFORE the accent is mixed over it, and the result is floored
-  // again. Flooring only the result would mix the accent over unfloored
-  // channels and land a channel off by one.
+  // again.
   $background: quantised(
     color.mix(
       palette-value($palette, tile-high),
@@ -367,8 +316,8 @@ $themes: (
   );
 }
 
-// A tile's glow shadow: an outer halo plus an inset ring, or `none` on any tile
-// that received an accent.
+// A tile's glow shadow: an outer halo plus an inset ring, or `none` on any
+// tile that received an accent.
 @function ramp-shadow($palette, $exponent) {
   @if ramp-accent($palette, $exponent) {
     @return none;
@@ -389,8 +338,7 @@ $themes: (
 }
 
 // Publishes a palette as `--theme-*` custom properties — the surface the
-// sibling partials and the TypeScript layer read. The per-value tile entries
-// come from the ramp port above, the same source `palette-ramp` emits from.
+// sibling partials and the TypeScript layer read.
 @mixin palette-properties($palette) {
   --theme-name: #{palette-value($palette, name)};
 
@@ -437,12 +385,7 @@ $themes: (
     $exponent: $exponent + 1;
   }
 
-  // One accent per rarity tier, from `ramp-rarity`. Published for the two
-  // surfaces that present a relic's rarity: style/_hud.scss's active-relic tray
-  // and style/_reward.scss's reward card and rarity chip. Both read these
-  // properties with their own compiled mix as the fallback, so the default
-  // palette renders exactly the colours they rendered before this block
-  // existed.
+  // One accent per rarity tier, from `ramp-rarity`.
   @each $tier in $rarity-tiers {
     --theme-rarity-#{"" + $tier}: #{ramp-rarity(
         $palette,
@@ -452,21 +395,12 @@ $themes: (
 }
 
 // Emits the tile ramp for a palette, nested one level inside `.tile`, so each
-// rule carries one selector more than the rule style/main.scss compiles for the
-// same tile.
+// rule carries one selector more than the rule style/main.scss compiles for
+// the same tile.
 @mixin palette-ramp($palette) {
   $exponent: 1;
   @while $exponent <= $ramp-limit {
     &.tile-#{ramp-power($exponent)} .tile-inner {
-      // The fill and the numeral are published as the same two
-      // `--tile-*-compiled` properties style/main.scss publishes its own
-      // compiled ramp under, rather than declared. `.tile-inner` there resolves
-      // `var(--tile-fill, var(--tile-fill-compiled, …))`, so the value
-      // src/render/number-only-renderer.ts writes stays authoritative under a
-      // palette as well as under the default one, and a tile the renderer wrote
-      // nothing for falls back to this palette's compiled entry rather than to
-      // the default palette's. `box-shadow` is declared: no custom property
-      // carries the glow and nothing else writes it.
       --tile-fill-compiled: #{ramp-background($palette, $exponent)};
       --tile-numeral-compiled: #{ramp-numeral($palette, $exponent)};
       box-shadow: ramp-shadow($palette, $exponent);
@@ -476,9 +410,7 @@ $themes: (
 }
 
 // Applies a palette to the surfaces style/main.scss colours at compile time,
-// which cannot read a custom property. Each selector carries exactly one
-// selector more than the rule it supersedes, so the nesting depth is
-// load-bearing; no declaration uses `!important`.
+// which cannot read a custom property.
 @mixin palette-surfaces($palette) {
   // The root element, and the body element that shares its declaration.
   background: palette-value($palette, page-background);
@@ -521,14 +453,7 @@ $themes: (
     background: palette-value($palette, board-field);
 
     // Scoped to `.board-number-only`, matching the scope style/main.scss
-    // applies to the same selector. The cell is produced by
-    // src/render/number-only-renderer.ts inside that layer and nowhere else,
-    // and the two rules carry the same scope so that this one keeps winning:
-    // both gained a class, so this selector stays one class more specific than
-    // the compile-time cell colour it supersedes, and the palette continues to
-    // recolour the lattice. The `cell` palette entry is also emitted as the
-    // `--theme-cell` custom property above, which is how the renderer and the
-    // parallel accessibility board read the empty-cell surface.
+    // applies to the same selector.
     .board-number-only .grid-cell {
       background: palette-value($palette, cell);
     }
@@ -572,11 +497,7 @@ $themes: (
 }
 
 // Diagnostics overlay colour, bound to the custom properties so it follows the
-// active palette. This rule declares colour only: the overlay's geometry, its
-// monospace stack and its place on the z-index ladder are declared by
-// `.diagnostics-overlay:not([hidden])` in style/main.scss, which is also where
-// `--theme-diagnostics-accent` is consumed as the overlay's outline. The two
-// rules do not overlap.
+// active palette.
 .diagnostics-overlay {
   background: var(--theme-diagnostics-surface);
   color: var(--theme-diagnostics-text);

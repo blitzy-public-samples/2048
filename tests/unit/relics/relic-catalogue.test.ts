@@ -1,54 +1,31 @@
 // Static shape and composition gate over the assembled relic catalogue.
 //
-// UNIT UNDER TEST
-//   src/relics/relic-types.ts     the `Relic` shape, the rarity ladder and the
-//                                 family vocabulary
-//   src/relics/relic-registry.ts  `RELIC_CATALOGUE`, `RELIC_FAMILIES` and
-//                                 `findRelicById`
-//   src/relics/families/*.ts      the four family records, read as data alone
-//
 // The four family modules are read here as declarations only: no handler is
 // invoked, no hook is dispatched and no registry is constructed. Handler
 // behaviour is covered by tests/unit/relics/relic-effects.test.ts and dispatch
 // by the hook-bus suites under tests/unit/engine/.
 //
-// WHAT THIS FILE HOLDS
-//   AAP Contract 3 fixes a relic declaration at seven members and places the
-//   family outside the shape. An interface is erased before the catalogue is
-//   assembled, so the seven-member set, the absent `family` member and the
-//   charge-bearing set are asserted over the assembled data.
+// AAP Contract 2 fixes the six hook names and places both the charge guard and
+// the error isolation in src/engine/hook-bus.ts. The source-text scans of
+// section 5 hold the handler side of that division.
 //
-//   AAP Contract 2 fixes the six hook names and places both the charge guard
-//   and the error isolation in src/engine/hook-bus.ts. The source-text scans of
-//   section 5 hold the handler side of that division.
-//
-//   AAP Contract 6 routes every draw through a named substream reached from
-//   `HookContext`, which is the `Math.random` scan of section 5.
+// AAP Contract 6 routes every draw through a named substream reached from
+// `HookContext`, which is the `Math.random` scan of section 5.
 //
 // The identifier sequence pinned in section 1 is the sequence
 // src/relics/relic-draw.ts resolves a drawn index against, and the recordings
 // under tests/snapshot/__snapshots__/ are recorded against it.
 //
-// VANILLA ANCHORS
-//   The rules these relics read from configuration rather than restate were
-//   literals in the superseded manager: the start-tile count at
-//   js/game_manager.js L7, the spawn distribution at L71, the merge predicate
-//   at L156, the merge producer at L157 and the win value at L170, with the
-//   spawn position at js/grid.js L37-L43. No expectation below restates one of
-//   those numbers.
-//
 // AAP Figure 5, Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard
 // and Error Isolation, carried by docs/architecture/hook-dispatch-sequence.md,
 // depicts the dispatch whose preconditions sections 4 and 5 state.
 //
-// Traceability rows in docs/TRACEABILITY_MATRIX.md: TR-RELIC-01 through
-// TR-RELIC-04 for the declaration vocabulary and TR-REGISTRY-04 for the
-// assembled catalogue. Decisions in docs/DECISION_LOG.md: DL-RELIC-01,
-// DL-RELIC-02, DL-REGISTRY-01 and DL-REGISTRY-02.
-//
 // This suite runs in the `unit:dom-free` project of vitest.config.ts under the
 // `node` environment. It reaches for no document, no storage, no clock, no
 // timer and no randomness, and it records no snapshot.
+//
+// Decisions: DL-RELIC-01, DL-RELIC-02, DL-REGISTRY-01, DL-REGISTRY-02
+// (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -78,10 +55,6 @@ import {
   type RelicFamilyName,
 } from '../../../src/relics/relic-types';
 
-/* ==========================================================================
- * Expectations
- * ========================================================================== */
-
 /** Families the catalogue publishes. */
 const EXPECTED_FAMILY_COUNT = 4;
 
@@ -99,9 +72,6 @@ const EXPECTED_MEMBER_COUNT = 7;
 
 /**
  * The seven members of AAP Contract 3, and the only members a relic declares.
- *
- * `family` is absent from the set: the family of a relic is the `name` of the
- * `RelicFamily` that declares it, held in `RELIC_FAMILIES`.
  */
 const CONTRACT_MEMBERS: readonly string[] = [
   'id',
@@ -126,9 +96,6 @@ const REQUIRED_MEMBERS: readonly string[] = [
  * Every relic identifier in catalogue order: the four families in
  * `RELIC_FAMILY_NAMES` order and, within a family, in that module's own
  * declaration order.
- *
- * Mirrors the `relics` arrays of `SPAWN_CONTROL_FAMILY`, `MERGE_MAGIC_FAMILY`,
- * `BOARD_MANIPULATION_FAMILY` and `RISK_REWARD_CURSED_FAMILY`.
  */
 const DECLARED_ORDER: readonly string[] = [
   'twin-seed',
@@ -159,8 +126,7 @@ const DECLARED_FAMILIES: readonly RelicFamily[] = [
 
 /**
  * The relics that declare a charge budget, in catalogue order, and the only
- * relics that declare one. These five are the charge-exhaustion edge-case set
- * of AAP 0.1.2.5.
+ * relics that declare one.
  */
 const CHARGE_BEARING_IDS: readonly string[] = [
   'frostbind',
@@ -196,10 +162,6 @@ const STAGE_END_FAMILIES: readonly RelicFamilyName[] = [
   'board-manipulation',
 ];
 
-/* ==========================================================================
- * Readers over the catalogue
- * ========================================================================== */
-
 /**
  * Lists the hooks `relic` binds, in `HOOK_NAMES` order.
  *
@@ -215,8 +177,8 @@ function boundHooks(relic: Relic): HookName[] {
  *
  * @param relic Declaration to read.
  * @param hook Hook whose handler is wanted.
- * @returns The handler's source text, or an empty string where the relic binds
- *   no handler to that hook.
+ * @returns The handler's source text, or an empty string where the relic
+ *   binds no handler to that hook.
  */
 function handlerSource(relic: Relic, hook: HookName): string {
   const handler = relic.hooks[hook];
@@ -229,8 +191,8 @@ function handlerSource(relic: Relic, hook: HookName): string {
  * carries `term`.
  *
  * @param term Text no handler carries.
- * @returns The offending bindings, named so a failure identifies the relic and
- *   the hook; empty where no handler carries the term.
+ * @returns The offending bindings, named so a failure identifies the relic
+ *   and the hook; empty where no handler carries the term.
  */
 function handlerOffences(term: string): string[] {
   const offences: string[] = [];
@@ -298,8 +260,8 @@ function relicsOfRarity(rarity: Rarity): readonly Relic[] {
  *
  * @param id Identifier to read.
  * @returns The declaration.
- * @throws Error where the catalogue carries no relic of that identifier, which
- *   fails the test that asked for it and names the identifier.
+ * @throws Error where the catalogue carries no relic of that identifier,
+ *   which fails the test that asked for it and names the identifier.
  */
 function relicById(id: string): Relic {
   const relic = findRelicById(id);
@@ -310,10 +272,6 @@ function relicById(id: string): Relic {
 
   return relic;
 }
-
-/* ==========================================================================
- * 1. Catalogue composition
- * ========================================================================== */
 
 describe('the relic catalogue composes the four declared families', () => {
   it('publishes exactly sixteen relic declarations', () => {
@@ -404,10 +362,6 @@ describe('the relic catalogue composes the four declared families', () => {
     },
   );
 });
-
-/* ==========================================================================
- * 2. AAP Contract 3: the seven-member declaration shape
- * ========================================================================== */
 
 describe('every relic declaration carries the Contract 3 member set', () => {
   it(
@@ -551,10 +505,6 @@ describe('every relic declaration carries the Contract 3 member set', () => {
   );
 });
 
-/* ==========================================================================
- * 3. The rarity ladder and the draw weights
- * ========================================================================== */
-
 describe('the rarity ladder weights and populates every tier', () => {
   it(
     'keys DEFAULT_RARITY_WEIGHTS by exactly the RARITIES tiers and by no ' +
@@ -607,10 +557,6 @@ describe('the rarity ladder weights and populates every tier', () => {
     },
   );
 });
-
-/* ==========================================================================
- * 4. AAP Contract 2: the six hook names a relic may bind
- * ========================================================================== */
 
 describe('every relic binds handlers to the six named hooks alone', () => {
   it('binds at least one of the six hooks on all sixteen relics', () => {
@@ -721,14 +667,6 @@ describe('every relic binds handlers to the six named hooks alone', () => {
     },
   );
 });
-
-/* ==========================================================================
- * 5. No handler duplicates a responsibility src/engine/hook-bus.ts owns
- *
- * Each scan reads `Function.prototype.toString` over every bound handler. The
- * positive control that closes the section asserts the corpus is real, so a
- * scan cannot report an empty offence list over unreadable source text.
- * ========================================================================== */
 
 describe('no relic handler duplicates a responsibility the bus owns', () => {
   it(

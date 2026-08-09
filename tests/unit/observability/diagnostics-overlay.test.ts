@@ -1,16 +1,8 @@
 // Contract suite for the diagnostics surface, Rule 3.
 //
-// Rule 3 requires a metrics endpoint, health checks and a dashboard, all
-// "verified working in the local development environment", because a capability
-// that cannot be exercised locally is not delivered. A static bundle has no
-// server, so AAP 0.7.2.4 substitutes an in-page surface plus an exportable
-// Prometheus snapshot. This suite is the verification of that substitute.
-//
-// The defect it closes: the registry was write-only. Counters moved and nothing
-// could read one, so no count, timing or health result was observable anywhere.
-//
-// The registry is real throughout, never a mock: a stub would prove the overlay
-// renders whatever it is handed rather than that it renders what was recorded.
+// The defect it closes: the registry was write-only. Counters moved and
+// nothing could read one, so no count, timing or health result was observable
+// anywhere.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -63,9 +55,6 @@ let overlay: DiagnosticsOverlay | null = null;
 
 /**
  * The rendered text of the fixture host, whitespace collapsed.
- *
- * The `setup()` harness reports the same value for the overlay it built; this
- * reads it for an overlay a case constructed itself.
  *
  * @returns The text, empty where the host is absent.
  */
@@ -136,10 +125,6 @@ const setup = (
   };
 };
 
-/* ==========================================================================
- * 1. Availability and lifecycle
- * ========================================================================== */
-
 describe('the surface lifecycle', () => {
   it('resolves its host and starts closed', () => {
     const harness = setup();
@@ -184,7 +169,6 @@ describe('the surface lifecycle', () => {
 
     expect(built.available).toBe(false);
 
-    // Every member stays a safe no-op rather than throwing on a missing host.
     expect(() => {
       built.open();
       built.refresh();
@@ -213,10 +197,6 @@ describe('the surface lifecycle', () => {
 
   it('leaves EVERY read and export member inert after destroy', () => {
     // The whole retained surface, not just the ones that touch the host.
-    // `destroy()` promises every member is inert, and the four readers and two
-    // exporters below went on working: a retained handle could keep probing
-    // health, folding the hook counts into the registry, reading the log buffer
-    // and the tracer, and creating download blobs after disposal.
     const reads = {
       health: 0,
       hooks: 0,
@@ -290,17 +270,16 @@ describe('the surface lifecycle', () => {
 
     expect(prometheus).toBe('');
 
-    // THE DOCUMENTED INERT VALUES, which are not a serialisation of the inert
-    // envelope: the exporter yields the empty string so a caller cannot mistake
-    // a disposed overlay's reading for a real one, while `snapshot()` yields the
-    // frozen empty envelope so a caller reading fields is not handed `null`.
+    // The documented inert values, which are not a serialisation of the inert
+    // envelope: the exporter yields the empty string so a caller cannot
+    // mistake a disposed overlay's reading for a real one, while `snapshot`
+    // yields the frozen empty envelope so a caller reading fields is not
+    // handed `null`.
     expect(json).toBe('');
     expect(built.exportPrometheusText()).toBe(false);
     expect(built.exportSnapshotJson()).toBe(false);
 
-    // Documented inert values: an empty envelope with every source absent. The
-    // zero `schemaVersion` is what tells it from a real reading, which carries
-    // `DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION`.
+    // Documented inert values: an empty envelope with every source absent.
     expect(DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION).toBeGreaterThan(0);
     expect(snapshot.schemaVersion).toBe(0);
     expect(snapshot.correlationId).toBe('');
@@ -324,10 +303,6 @@ describe('the surface lifecycle', () => {
     expect(built.lastSnapshot()).toBeNull();
   });
 });
-
-/* ==========================================================================
- * 2. It reports what was actually recorded
- * ========================================================================== */
 
 describe('the surface reports the registry', () => {
   it('shows a counter that was incremented', () => {
@@ -383,8 +358,8 @@ describe('the surface reports the registry', () => {
     loud.metrics.counter(`${METRIC_PREFIX}silent_total`);
     loud.overlay.open();
 
-    // A registry declares many families up front; showing every zero would bury
-    // the handful that moved.
+    // A registry declares many families up front; showing every zero would
+    // bury the handful that moved.
     expect(hidden).not.toContain('silent_total');
     expect(loud.text()).toContain('silent_total');
   });
@@ -435,10 +410,6 @@ describe('the surface reports the registry', () => {
     expect(series?.kind === 'counter' ? series.value : -1).toBe(1);
   });
 });
-
-/* ==========================================================================
- * 3. Health
- * ========================================================================== */
 
 describe('the health panel', () => {
   it('reports each probe and its verdict', () => {
@@ -516,10 +487,6 @@ describe('the health panel', () => {
   });
 });
 
-/* ==========================================================================
- * 4. The scrape substitute
- * ========================================================================== */
-
 describe('the exported snapshot', () => {
   it('exports Prometheus text carrying a recorded counter', () => {
     const harness = setup();
@@ -528,7 +495,6 @@ describe('the exported snapshot', () => {
 
     const text = harness.overlay.toPrometheusText();
 
-    // This is what stands in for a scrape response body.
     expect(text).toContain('exported_total');
     expect(text).toContain('# TYPE');
   });
@@ -543,10 +509,6 @@ describe('the exported snapshot', () => {
     expect(harness.overlay.toPrometheusText()).toContain('unopened_total');
   });
 });
-
-/* ==========================================================================
- * 5. Controls
- * ========================================================================== */
 
 describe('the surface controls', () => {
   it('offers refresh, export and close as real buttons', () => {
@@ -606,15 +568,6 @@ describe('the surface controls', () => {
   });
 });
 
-/* ==========================================================================
- * 6. The activation gate
- *
- * Rule 3 requires the surface to be exercisable locally, and requirement R11's
- * recorded run requires it to stay out of the way. `isDiagnosticsRequested` is
- * the runtime opt-in that satisfies both: default off, readable in production,
- * and not a build-time constant a bundler could remove.
- * ========================================================================== */
-
 describe('the activation gate', () => {
   it('defaults to off with no flag anywhere', () => {
     expect(isDiagnosticsRequested({})).toBe(false);
@@ -623,8 +576,8 @@ describe('the activation gate', () => {
       false,
     );
 
-    // The recorded-gameplay run sets nothing, so this is the case that keeps an
-    // overlay at z-index 500 out of the video.
+    // The recorded-gameplay run sets nothing, so this is the case that keeps
+    // an overlay at z-index 500 out of the video.
     expect(isDiagnosticsRequested(null)).toBe(false);
   });
 
@@ -670,14 +623,6 @@ describe('the activation gate', () => {
     expect(isDiagnosticsRequested(hostile)).toBe(false);
   });
 });
-
-/* ==========================================================================
- * 7. Self-mounting
- *
- * index.html's mount contract names no diagnostics container, so the surface
- * must be able to build its own host. It adopts a declared one where the markup
- * has it, which is what keeps this module free of any markup edit.
- * ========================================================================== */
 
 describe('mounting', () => {
   it('creates its own host where the markup declares none', () => {
@@ -804,13 +749,6 @@ describe('mounting', () => {
   });
 });
 
-/* ==========================================================================
- * 8. Token compliance and layering
- *
- * The operative design system is the repository's own token layer, so every
- * value the surface paints itself with resolves to src/theme/tokens.ts.
- * ========================================================================== */
-
 describe('the surface styling', () => {
   it('carries the diagnostics slot of the z-index ladder', () => {
     const harness = setup();
@@ -863,14 +801,6 @@ describe('the surface styling', () => {
     expect(harness.host.style.getPropertyValue('display')).toBe('none');
   });
 });
-
-/* ==========================================================================
- * 9. The health panel, all six checks and three states
- *
- * Validation gate V8 requires health to report all six checks. This is where a
- * developer sees that, and `not-applicable` is rendered as itself rather than
- * collapsed into a failure.
- * ========================================================================== */
 
 /**
  * Builds one fabricated check result.
@@ -1049,8 +979,7 @@ describe('the health panel', () => {
 
   it('reads the three-state status a probe reader carries rather than its boolean', () => {
     // The boolean cannot express the third state, so a reader collapsing to it
-    // presented an inapplicable check as an unqualified pass. The status member
-    // is what src/observability/health.ts now carries beside the boolean.
+    // presented an inapplicable check as an unqualified pass.
     const metrics = createMetricsRegistry();
     const built = createDiagnosticsOverlay({
       metrics,
@@ -1132,13 +1061,6 @@ describe('the health panel', () => {
     }
   });
 });
-
-/* ==========================================================================
- * 10. The hook-dispatch panel
- *
- * The counts are PULLED from the bus. Nothing is pushed into this module, which
- * is the property that keeps src/engine free of an observability import.
- * ========================================================================== */
 
 /** A fabricated dispatch-count view. */
 const fabricatedHookCounts = (): Pick<
@@ -1290,20 +1212,6 @@ describe('the hook panel', () => {
   });
 });
 
-/* ==========================================================================
- * 11. The trace panel
- *
- * Validation gate V8 requires the trace chain to be visible, frame-callback
- * seam included. The 16 ms reference is the budget js/animframe_polyfill.js L13
- * held and the tracer carries forward.
- *
- * DRIVEN BY A REAL `Tracer`. The records here carry the real identifier shape,
- * `${correlationId}#${counter}`, in which every span of one run shares its head
- * and only the counter differs. Fabricating identifiers with unique heads is
- * what let the panel render every span and every parent identically without any
- * case noticing.
- * ========================================================================== */
-
 /** Correlation identifier the traced runs below are keyed under. */
 const TRACED_CORRELATION_ID = deriveCorrelationId('trace-panel-seed', 'run-1');
 
@@ -1375,9 +1283,6 @@ const traceOneChain = (frames = 1, frameMs = 18): TracedChain => {
 
 /**
  * Reads the rendered table cells of the mounted overlay.
- *
- * `textContent` concatenates cells with no separator, so a rendered identifier
- * cannot be recovered from it; the cells are read individually instead.
  *
  * @returns Every cell's trimmed text, in document order.
  */
@@ -1514,8 +1419,8 @@ describe('the trace panel', () => {
 
     expect(parents.length).toBeGreaterThan(0);
 
-    // A chain is only readable as a chain if each parent resolves to a span the
-    // same panel shows.
+    // A chain is only readable as a chain if each parent resolves to a span
+    // the same panel shows.
     for (const parent of parents) {
       expect(ids.has(parent), `parent "${parent}" resolves to no span`).toBe(
         true,
@@ -1544,10 +1449,6 @@ describe('the trace panel', () => {
     expect(text).toContain('not attached');
   });
 });
-
-/* ==========================================================================
- * 12. The log panel
- * ========================================================================== */
 
 describe('the log panel', () => {
   it('carries the level, subsystem, message and correlation id', () => {
@@ -1593,9 +1494,7 @@ describe('the log panel', () => {
 
   it('carries no source location out of a full-stack logger', () => {
     // A logger built for a private development sink, which is the one
-    // configuration that keeps stack text as it was thrown. The panel and the
-    // export both read the logger's `snapshot()` surface, which redacts
-    // whatever the logger's own `stackDetail` is, so neither carries a location.
+    // configuration that keeps stack text as it was thrown.
     const logger = createLogger({
       correlationId: deriveCorrelationId('stack-seed', 'stack-run'),
       subsystem: 'test',
@@ -1624,8 +1523,6 @@ describe('the log panel', () => {
 
     logger.error('a move failed', undefined, thrown);
 
-    // The sink DID receive the locations, so the assertions below measure the
-    // export boundary rather than a logger that never carried them.
     const received = logger.recent(1)[0];
 
     expect(received.error?.stack).toContain(posix);
@@ -1642,8 +1539,6 @@ describe('the log panel', () => {
       expect(exported).not.toContain(location);
     }
 
-    // The record itself is redacted rather than merely unrendered: the stack
-    // shape and the frame names survive, the locations do not.
     expect(record?.error?.stack).toContain('at move');
     expect(record?.error?.stack).not.toContain('/home/agent');
     expect(record?.error?.cause?.stack).not.toContain('C:\\Users');
@@ -1654,10 +1549,6 @@ describe('the log panel', () => {
 
 
 
-/* ==========================================================================
- * 13. The combined snapshot, the dashboard template's input
- * ========================================================================== */
-
 describe('the combined snapshot', () => {
   it('carries the health, trace, metrics and log sections', () => {
     const logger = createLogger({
@@ -1666,8 +1557,8 @@ describe('the combined snapshot', () => {
       consoleOutput: false,
     });
 
-    // Wired as src/main.ts wires them, so one correlation identifier covers the
-    // registry, the records and the envelope built from both.
+    // Wired as src/main.ts wires them, so one correlation identifier covers
+    // the registry, the records and the envelope built from both.
     const metrics = createMetricsRegistry({ logger });
     const built = createDiagnosticsOverlay({
       metrics,
@@ -1799,13 +1690,6 @@ describe('the combined snapshot', () => {
     expect(revoke).toHaveBeenCalledWith('blob:control');
   });
 });
-
-/* ==========================================================================
- * 14. Cost while shown and while hidden
- *
- * The renderer this surface sits over is the product's first per-frame work, so
- * the schedule is throttled and a hidden overlay performs none of it.
- * ========================================================================== */
 
 describe('the refresh schedule', () => {
   it('refreshes on a throttled cadence and never once per frame', () => {
@@ -1942,13 +1826,6 @@ describe('the refresh schedule', () => {
   });
 });
 
-/* ==========================================================================
- * 15. It never throws
- *
- * A diagnostics surface that can take the game down with it is worse than none.
- * Every source is made to throw in turn.
- * ========================================================================== */
-
 describe('a failing source', () => {
   it('degrades the trace panel and leaves the others standing', () => {
     const built = createDiagnosticsOverlay({
@@ -2043,8 +1920,6 @@ describe('a failing source', () => {
 
     const brittle = Object.create(logger) as Logger;
 
-    // `snapshot` rather than `recent`: the log panel reads the export surface,
-    // because that is the surface that redacts.
     Object.defineProperty(brittle, 'snapshot', {
       value: (): never => {
         throw new Error('the buffer exploded');
@@ -2063,7 +1938,6 @@ describe('a failing source', () => {
       built.open();
     }).not.toThrow();
 
-    // The failure reaches the logger rather than the caller.
     expect(reported).toContain('A diagnostics panel failed to render.');
   });
 
@@ -2122,10 +1996,6 @@ describe('a failing source', () => {
     }
   });
 });
-
-/* ==========================================================================
- * 16. Accessibility and the frozen storage contract
- * ========================================================================== */
 
 describe('the surface is operable and leaves storage alone', () => {
   it('offers focusable buttons with accessible names', () => {
@@ -2194,15 +2064,6 @@ describe('the surface is operable and leaves storage alone', () => {
     expect(localStorage.length).toBe(before);
   });
 });
-
-/* ==========================================================================
- * 17. The keyboard focus survives a render
- *
- * A render replaces the control nodes. Runtime validation in Chrome showed that
- * without the two behaviours below the scheduled refresh ejected the focus to
- * `body` every cadence, which made unaided Tab traversal of the controls
- * impossible.
- * ========================================================================== */
 
 describe('the focus across a render', () => {
   it('restores the focused control after an explicit refresh', () => {
@@ -2301,7 +2162,8 @@ describe('the focus across a render', () => {
       );
 
       for (const control of controls) {
-        // The tab step, plus a cadence's worth of scheduled ticks between each.
+        // The tab step, plus a cadence's worth of scheduled ticks between
+        // each.
         control.focus();
         vi.advanceTimersByTime(1200);
         labels.push(document.activeElement?.textContent ?? 'lost');
@@ -2318,15 +2180,6 @@ describe('the focus across a render', () => {
     }
   });
 });
-
-/* ==========================================================================
- * A destroyed overlay is inert
- *
- * `destroy()` documents that it "leaves every member inert", and five members
- * did not honour it: the three reads still walked the registry, the health
- * surface and the tracer, and the two exports could still start a browser
- * download and create an object URL for an overlay that no longer existed.
- * ========================================================================== */
 
 describe('a destroyed overlay', () => {
   it('reports itself unavailable and closed', () => {
@@ -2390,8 +2243,6 @@ describe('a destroyed overlay', () => {
 
     harness.overlay.destroy();
 
-    // The registry is still perfectly readable; the overlay simply no longer
-    // reads it.
     expect(harness.overlay.toPrometheusText()).toBe('');
     expect(harness.metrics.toPrometheusText().length).toBeGreaterThan(0);
   });
@@ -2432,8 +2283,6 @@ describe('a destroyed overlay', () => {
 
     harness.overlay.destroy();
 
-    // Both could still reach the document and create an object URL for an
-    // overlay that no longer exists.
     expect(harness.overlay.exportPrometheusText()).toBe(false);
     expect(harness.overlay.exportSnapshotJson()).toBe(false);
   });
@@ -2485,10 +2334,6 @@ describe('a destroyed overlay', () => {
   });
 });
 
-/* ==========================================================================
- * A host outside the declared type
- * ========================================================================== */
-
 describe('a host that is not an element', () => {
   /** Values a caller could supply where `Element | null` is declared. */
   const NON_ELEMENT_HOSTS: readonly unknown[] = Object.freeze([
@@ -2521,7 +2366,7 @@ describe('a host that is not an element', () => {
           overlay.close();
         }).not.toThrow();
 
-        // AND THE DATA MODEL IS WHOLE, which is the point of the surface: the
+        // And the data model is whole, which is the point of the surface: the
         // export path is the substitute for a scraped metrics endpoint.
         expect(overlay.snapshot().metrics.series.length).toBeGreaterThan(0);
         expect(overlay.toPrometheusText().length).toBeGreaterThan(0);

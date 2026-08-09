@@ -88,6 +88,11 @@
  *   TR-RUN-11  target-only row               `cloneBoardSnapshot()`, the one
  *                                            board copier every projection of
  *                                            a stored board passes through
+ *   TR-RUN-12  target-only row               `pendingReward`,
+ *                                            `PendingRewardRound`,
+ *                                            `clonePendingReward()` and
+ *                                            `checkPendingReward()`, the
+ *                                            unresolved reward round
  *
  * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
  * only so the construct can be found from the log:
@@ -98,6 +103,9 @@
  *   DL-RUN-04  a payload breaking a bound refused, never clamped
  *   DL-RUN-05  the seed omitted from the reported summary by
  *              `redactRunSummary()`
+ *   DL-RUN-06  the unresolved reward round persisted as an OPTIONAL member
+ *              carrying identifiers alone, with `schemaVersion` left where it
+ *              stood
  */
 
 import {
@@ -123,40 +131,28 @@ import {
   isAcceptableRngCursor,
 } from '../rng/seeded-rng';
 
-
 /**
  * The board snapshot the envelope wraps, in the shape the pre-migration game
  * wrote under the `gameState` key.
  *
- * Declared as `SerializedGameState` in src/engine/types.ts and aliased here, so
- * this folder names the snapshot vocabulary once and the value the engine's
- * `serialize()` returns is assignable to `RunState.board` with no cast.
- *
- * The member name `keepPlaying` is FROZEN ON THE WIRE. The in-class flag it
- * projects is `continuedPlay`; renaming it inside `board` would make a save
- * written by the pre-migration game unreadable. The in-class flag was renamed
- * and the persisted name was not. Decision DL-ENGINE-04.
+ * Declared as `SerializedGameState` in src/engine/types.ts and aliased here,
+ * so this folder names the snapshot vocabulary once and the value the engine's
+ * `serialize` returns is assignable to `RunState.board` with no cast.
  */
 export type LegacyBoardSnapshot = SerializedGameState;
 
 /**
  * The grid and tile stages of the wrapped snapshot, re-exported so this folder
- * has one import surface for the snapshot vocabulary: a grid is
- * `{ size, cells }` with `cells` indexed `cells[x][y]` and holding `null` in
- * every empty cell, and a tile is `{ position: { x, y }, value }`.
+ * has one import surface for the snapshot vocabulary: a grid is `{ size, cells
+ * }` with `cells` indexed `cells[x][y]` and holding `null` in every empty
+ * cell, and a tile is `{ position: { x, y }, value }`.
  */
 export type { SerializedGrid, SerializedTile };
 
 /**
- * The data vocabulary a relic's own persisted state is drawn from: a
- * string, a finite number, a boolean, `null`, an array of these, or a plain
- * object whose every value is one of these.
- *
- * It is the module header's JSON round-trip contract stated as a type.
- * `isPersistedRelicState()` is the runtime decision, and `checkRelicState()`
- * names each member that falls outside it. `PersistedRelic.state` stays
- * declared as `unknown`, which is the type the value carries at the
- * untrusted boundary; this vocabulary is what the guards narrow it to.
+ * The data vocabulary a relic's own persisted state is drawn from: a string, a
+ * finite number, a boolean, `null`, an array of these, or a plain object whose
+ * every value is one of these.
  */
 export type PersistedRelicState =
   | string
@@ -169,54 +165,67 @@ export type PersistedRelicState =
 /**
  * One held relic as the envelope persists it: identity, charges remaining and
  * the relic's own opaque state. Narrower than the in-memory declaration — the
- * wire carries no name, description, rarity or hook table. Declared here and
- * not imported, so this folder compiles and is exercised without the relic
- * modules.
+ * wire carries no name, description, rarity or hook table.
  */
 export interface PersistedRelic {
   readonly id: string;
 
   /**
-   * Charges remaining. Absent on a relic that carries no charge budget,
-   * and `0` on one whose budget is exhausted.
+   * Charges remaining. Absent on a relic that carries no charge budget, and
+   * `0` on one whose budget is exhausted.
    */
   readonly charges?: number;
 
   /**
-   * The relic's own persisted state, opaque to this module and to the
-   * store. Declared as `unknown` because that is what the wire carries;
-   * every accepted value is one `PersistedRelicState` describes, which
-   * `checkRelicState()` decides and `describeRunStateProblems()` reports
-   * on.
+   * The relic's own persisted state, opaque to this module and to the store.
    */
   readonly state?: unknown;
 }
 
 /**
- * One run as it is persisted: nine members and no others.
+ * A reward round drawn and not yet resolved, as it is persisted.
+ *
+ * The offer alone is not enough. A cleared stage's goal is still met on every
+ * later commit, so a resumed run has to know that the stage END was already
+ * resolved — the `stage:end` dispatch made, its `onStageEnd` handlers fired and
+ * its bounties paid — or it resolves the same stage again. A standing round IS
+ * that marker: while one is recorded the stage that drew it is resolved and the
+ * run is waiting on a choice.
+ *
+ * Plain JSON data, carrying identifiers alone. The full offer a screen presents
+ * is projected from the relic catalogue by identifier on load, so no name,
+ * description or hook list is duplicated into storage where the catalogue could
+ * move out from under it.
+ */
+export interface PendingRewardRound {
+  /** Stage whose end drew this offer. */
+  readonly stageIndex: number;
+
+  /** Identifiers offered, in the order they were presented. */
+  readonly offeredRelicIds: readonly string[];
+}
+
+/**
+ * One run as it is persisted: nine required members, one optional, and no
+ * others.
  *
  * Run state is separate from board state. The board snapshot composes into
- * `board` and is never flattened up to this level, so `score`, `over` and `won`
- * are read through `board`.
+ * `board` and is never flattened up to this level, so `score`, `over` and
+ * `won` are read through `board`.
  */
 export interface RunState {
   /**
    * Schema version of this envelope. Every envelope this build writes carries
-   * `RUN_STATE_SCHEMA_VERSION`, and `classifyRunStateVersion()` reduces a
-   * stored value to the verdict a loader decides against.
+   * `RUN_STATE_SCHEMA_VERSION`, and `classifyRunStateVersion` reduces a stored
+   * value to the verdict a loader decides against.
    */
   readonly schemaVersion: number;
 
-  /**
-   * Opaque identifier of this run instance.
-   *
-   * NOT DERIVED FROM `seed`: two runs replaying one seed carry the same `seed`
-   * and different `runId`s.
-   */
+  /** Opaque identifier of this run instance. */
   readonly runId: string;
 
   /**
-   * The run seed, verbatim, as `SeededRng.seed` and `createRngStreams()` in
+   * The run seed, verbatim, as `SeededRng.seed` and `createRngStreams` in
    * src/rng/ take it.
    */
   readonly seed: string;
@@ -237,43 +246,41 @@ export interface RunState {
 
   /**
    * Fraction of `stageGoal.target` reached: the `progress` member
-   * `evaluateStageGoal()` returns, already clamped by it to the closed interval
+   * `evaluateStageGoal` returns, already clamped by it to the closed interval
    * [0, 1] and finite. Stored as produced; this module neither re-derives nor
    * re-clamps it.
    */
   readonly goalProgress: number;
 
   /**
-   * The relics held, IN PICKUP ORDER. Array order is the pickup order the hook
+   * The relics held, in pickup order. Array order is the pickup order the hook
    * bus dispatches in, so it is preserved on every read and every write and is
    * never sorted, filtered or re-keyed.
    */
   readonly relics: readonly PersistedRelic[];
   readonly board: LegacyBoardSnapshot;
+
+  /**
+   * The reward round drawn and not yet resolved, and ABSENT while none stands.
+   *
+   * Absence is the meaningful state — no choice is owed — and it is the state
+   * every envelope written before this member existed is in, which is why the
+   * member is optional and `schemaVersion` did not move for it. Decision
+   * `DL-RUN-06`.
+   */
+  readonly pendingReward?: PendingRewardRound;
 }
 
 export const RUN_STATE_SCHEMA_VERSION = 1;
 
 /**
  * Every schema version this build can read, ascending, including
- * `RUN_STATE_SCHEMA_VERSION` itself. A stored version this list does not
- * contain is `'unknown'`, which is what makes the distinction between a
- * current, an older and an unreadable payload decidable rather than inferred.
+ * `RUN_STATE_SCHEMA_VERSION` itself.
  */
 export const RUN_STATE_SCHEMA_VERSION_HISTORY: readonly number[] =
   Object.freeze([RUN_STATE_SCHEMA_VERSION]);
 
-/**
- * What a stored payload's `schemaVersion` member amounts to.
- *
- * `'current'` is equal to `RUN_STATE_SCHEMA_VERSION`. `'older'` is an integer
- * in `RUN_STATE_SCHEMA_VERSION_HISTORY` below it. `'unknown'` is an integer the
- * history does not contain, which covers every integer above the current
- * version. `'absent'` is no stored value at all, or a plain object carrying no
- * `schemaVersion` member — a payload written before the member existed.
- * `'malformed'` is a `schemaVersion` that is present but not an integer, and
- * any payload that is not a plain object, an array included.
- */
+/** What a stored payload's `schemaVersion` member amounts to. */
 export type RunStateVersionVerdict =
   | 'current'
   | 'older'
@@ -285,19 +292,10 @@ export type RunStateVersionVerdict =
  * The version set a classification is decided against: which version is
  * current, and which versions this build reads.
  *
- * Exists as an argument rather than only as the two module constants because
- * `RUN_STATE_SCHEMA_VERSION_HISTORY` holds exactly one entry in this build, so
- * a classification decided only against the constants can never reach its
- * `'older'` branch, and neither can any loader keyed on that verdict. A caller
- * — the store, and every suite covering the migration path — supplies a policy
- * naming a genuine prior version, which is what makes the branch reachable and
- * the three-way distinction between a current, an older and an unreadable
- * payload decidable in fact rather than only in principle.
- *
  * `RUN_STATE_VERSION_POLICY` is the shipped one. A supplied policy changes
- * nothing about what this build WRITES: `createFreshRunState()` and
- * `isCurrentRunState()` read `RUN_STATE_SCHEMA_VERSION` directly, so the
- * written version is the module constant whatever a reader was told.
+ * nothing about what this build WRITES: `createFreshRunState` and
+ * `isCurrentRunState` read `RUN_STATE_SCHEMA_VERSION` directly, so the written
+ * version is the module constant whatever a reader was told.
  */
 export interface RunStateVersionPolicy {
   /** Version treated as current, and the version a migration re-stamps to. */
@@ -321,12 +319,6 @@ export const RUN_STATE_VERSION_POLICY: RunStateVersionPolicy = Object.freeze({
 /**
  * Reduces a supplied policy to a usable one, falling back to
  * `RUN_STATE_VERSION_POLICY` member by member.
- *
- * TOTAL AND NON-THROWING for every input, including a policy whose members are
- * absent, hostile types or accessors that throw. The classifier's no-throw
- * guarantee — which the guarded loader is built on — must not become
- * conditional on the policy a caller passes, so a hostile policy degrades to
- * the shipped one rather than escaping.
  *
  * `current` is taken only when it is an integer. `history` is taken only when
  * it is an array, and is then reduced to its integer entries with `current`
@@ -380,13 +372,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/**
- * Reads one member of a plain object without throwing. A payload reaching the
- * functions below has normally come back out of `JSON.parse`, which produces
- * data properties only; every function here is nonetheless total over any value
- * a caller passes, so an accessor that throws is contained and reported as an
- * unreadable member instead of escaping.
- */
+/** Reads one member of a plain object without throwing. */
 function readMember(
   source: Record<string, unknown>,
   name: string
@@ -433,6 +419,17 @@ export const MAX_SUPPORTED_BOARD_SIZE = MAX_BOARD_SIZE;
  */
 export const MAX_PERSISTED_RELICS = 64;
 
+/**
+ * The most identifiers one persisted reward round may carry.
+ *
+ * A reward screen presents three (AAP R8), and this is the bound a stored round
+ * is refused above rather than the count one must hold: a build configured to
+ * offer more is not refused by a value this module fixed, and a payload claiming
+ * a thousand offers is. Set to `MAX_PERSISTED_RELICS`, since an offer can never
+ * usefully be longer than the catalogue a run could hold.
+ */
+export const MAX_REWARD_OFFER_IDS = MAX_PERSISTED_RELICS;
+
 function isBoardSize(value: unknown): value is number {
   return isSupportedBoardSize(value);
 }
@@ -449,9 +446,7 @@ function isSchemaVersion(value: unknown): value is number {
  *
  * @param value Stored value to classify.
  * @param policy Version set to decide against, resolved through
- *   `resolveRunStateVersionPolicy()`. Defaults to
- *   `RUN_STATE_VERSION_POLICY`. A hostile policy degrades to the shipped one
- *   rather than making this function throw.
+ *   `resolveRunStateVersionPolicy`. Defaults to `RUN_STATE_VERSION_POLICY`.
  */
 export function classifyRunStateVersion(
   value: unknown,
@@ -508,8 +503,8 @@ export function normalizeRngCursor(value: unknown): RngCursorMap {
     const recorded =
       member !== null && member.readable ? member.value : undefined;
 
-    // `typeof` narrows the read to a number; `isAcceptableRngCursor()`
-    // decides whether it is a resumable one, and `> 0` collapses `-0`.
+    // `typeof` narrows the read to a number; `isAcceptableRngCursor` decides
+    // whether it is a resumable one, and `> 0` collapses `-0`.
     cursor[name] =
       typeof recorded === 'number' &&
       recorded > 0 &&
@@ -525,10 +520,7 @@ export interface FreshRunStateInput {
   readonly runId: string;
   readonly seed: string;
 
-  /**
-   * Draw counts to record. Passed through `normalizeRngCursor()`, so a map
-   * missing a substream is completed with `0` rather than refused.
-   */
+  /** Draw counts to record. */
   readonly rngCursor: Partial<RngCursorMap>;
   readonly stageIndex: number;
   readonly stageGoal: StageGoal;
@@ -564,26 +556,10 @@ const MAX_REPORTED_PROBLEMS = 32;
 
 const PROBLEM_LIST_TRUNCATED = 'further problems were not reported';
 
-/**
- * Levels of nesting accepted below a relic's `state` member. The member
- * itself is level 0, its own members level 1, and a member deeper than this
- * is reported rather than descended into.
- *
- * Shared by `checkRelicState()` and `cloneRelicState()`, so the depth the
- * validation accepts and the depth the copy descends to are one number: an
- * accepted state is always copied entirely.
- */
+/** Levels of nesting accepted below a relic's `state` member. */
 const MAX_RELIC_STATE_DEPTH = 8;
 
-/**
- * Member names a persisted relic state may not carry.
- *
- * `JSON.parse` produces `__proto__` as an ordinary own data property, so a
- * stored envelope can carry all three of these as data. They are refused
- * rather than carried: `constructor` and `prototype` name the object's own
- * machinery, and an assignment of `__proto__` reaches the inherited setter
- * rather than defining a member.
- */
+/** Member names a persisted relic state may not carry. */
 const RESERVED_STATE_KEYS: ReadonlySet<string> = new Set<string>([
   '__proto__',
   'constructor',
@@ -591,8 +567,8 @@ const RESERVED_STATE_KEYS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Most members one object, or elements one array, inside a relic's `state`
- * may carry. Shared by the validation and the copy.
+ * Most members one object, or elements one array, inside a relic's `state` may
+ * carry.
  */
 const MAX_RELIC_STATE_BREADTH = 64;
 
@@ -600,14 +576,8 @@ const MAX_RELIC_STATE_BREADTH = 64;
 const MAX_RELIC_STATE_STRING_LENGTH = 256;
 
 /**
- * Reports whether `value` is an object carrying data alone: a plain object
- * or array whose prototype is `Object.prototype`, `Array.prototype` or
- * `null`.
- *
- * A `Date`, a `Map`, a `Set`, a class instance and a boxed primitive each
- * fail here, which is what separates the values `PersistedRelicState`
- * describes from the objects that merely survive `typeof value ===
- * 'object'`.
+ * Reports whether `value` is an object carrying data alone: a plain object or
+ * array whose prototype is `Object.prototype`, `Array.prototype` or `null`.
  *
  * @param value Object to test.
  * @returns `true` for a data-only object.
@@ -633,19 +603,6 @@ function isDataObject(value: object): boolean {
  * Records a problem for every part of a relic's `state` member that falls
  * outside `PersistedRelicState`.
  *
- * Total and non-throwing for every input, including a self-referential
- * value, a hostile accessor and a `Proxy`. `ancestors` carries the objects
- * currently being descended through, so a cycle is reported once and
- * descended no further; the recursion is bounded by that set and by
- * `MAX_RELIC_STATE_DEPTH`.
- *
- * Every value JSON cannot carry as data is refused rather than accepted and
- * silently altered: a non-finite number, `undefined`, a `bigint`, a symbol,
- * a function, an object that is not data-only, a symbol-keyed member, an
- * accessor member, and each name in `RESERVED_STATE_KEYS`. Refusing an
- * accessor is also what keeps the copy free of foreign code: nothing this
- * module reads during `cloneRelicState()` can run a getter.
- *
  * @param value Candidate state, or one of its members.
  * @param path Dotted path the member is reported under.
  * @param problems List to append to.
@@ -667,9 +624,6 @@ function checkRelicState(
     return;
   }
 
-  // Reported rather than treated as absence: only the `state` member itself
-  // may be absent, and `checkRelics()` answers that question before calling
-  // here.
   if (value === undefined) {
     addProblem(problems, `${path} is undefined`);
 
@@ -727,7 +681,6 @@ function checkRelicState(
       `${path} is nested deeper than ${MAX_RELIC_STATE_DEPTH} levels`
     );
 
-
     return;
   }
 
@@ -743,8 +696,8 @@ function checkRelicState(
     checkRelicStateMembers(object, path, problems, depth, ancestors);
   } catch {
     // A read this walk does not already guard — a `Proxy` trap, say — is
-    // contained and reported as an unreadable member, as `readMember()`
-    // contains one at the envelope's own level.
+    // contained and reported as an unreadable member, as `readMember` contains
+    // one at the envelope's own level.
     addProblem(problems, `${path} is not readable`);
   } finally {
     ancestors.delete(object);
@@ -781,9 +734,8 @@ function checkRelicStateEntries(
       return;
     }
 
-    // `JSON.stringify` writes a hole and an `undefined` entry as `null`;
-    // both are reported instead, so an accepted array copies entry for
-    // entry.
+    // `JSON.stringify` writes a hole and an `undefined` entry as `null`; both
+    // are reported instead, so an accepted array copies entry for entry.
     if (!Object.prototype.hasOwnProperty.call(entries, index)) {
       addProblem(problems, `${path}[${index}] is absent`);
 
@@ -870,8 +822,8 @@ function checkRelicStateMembers(
       continue;
     }
 
-    // An accessor is read by running its getter, which persistence never
-    // does; the value it would produce is not stored data.
+    // An accessor is read by running its getter, which persistence never does;
+    // the value it would produce is not stored data.
     if (
       typeof descriptor.get === 'function' ||
       typeof descriptor.set === 'function'
@@ -895,9 +847,8 @@ function checkRelicStateMembers(
  * Reports whether `value` is one relic's persisted state: a value the
  * `PersistedRelicState` vocabulary describes.
  *
- * Decided by `checkRelicState()`, so the predicate and the diagnosis can
- * never disagree about the same input. Total and non-throwing for every
- * input.
+ * Decided by `checkRelicState`, so the predicate and the diagnosis can never
+ * disagree about the same input. Total and non-throwing for every input.
  *
  * @param value Value as it came out of storage, parsed or otherwise.
  * @returns `true` when the value is persistable relic state.
@@ -913,8 +864,8 @@ export function isPersistedRelicState(
 }
 
 /**
- * The kinds a persisted `stageGoal.kind` may carry, keyed by kind so the
- * table is exhaustive over `StageGoalKind`: a kind added in
+ * The kinds a persisted `stageGoal.kind` may carry, keyed by kind so the table
+ * is exhaustive over `StageGoalKind`: a kind added in
  * src/config/stage-config.ts fails to compile here until it is listed.
  */
 const STAGE_GOAL_KINDS: Readonly<Record<StageGoalKind, true>> = Object.freeze({
@@ -922,11 +873,7 @@ const STAGE_GOAL_KINDS: Readonly<Record<StageGoalKind, true>> = Object.freeze({
   'score-threshold': true,
 });
 
-/**
- * Reports whether `value` is one of the declared stage goal kinds. Read through
- * `hasOwnProperty`, so an inherited member name such as `toString` is not
- * mistaken for a kind.
- */
+/** Reports whether `value` is one of the declared stage goal kinds. */
 function isStageGoalKind(value: unknown): value is StageGoalKind {
   return (
     typeof value === 'string' &&
@@ -948,9 +895,8 @@ function addProblem(problems: string[], problem: string): void {
 }
 
 /**
- * Reads one member for validation, recording a problem when an accessor refuses
- * it. The refusal is not discarded: it surfaces as a field-scoped entry in the
- * list a store hands to `RunReporter.onLoadCorrupted`.
+ * Reads one member for validation, recording a problem when an accessor
+ * refuses it.
  */
 function readForValidation(
   source: Record<string, unknown>,
@@ -981,14 +927,6 @@ function checkString(
 
 /**
  * Checks the run seed against the bound the RNG layer will apply to it.
- *
- * `createRngStreams()` REFUSES a seed longer than `MAX_RUN_SEED_LENGTH`,
- * because each substream is derived from the run seed plus a suffix and the
- * generator bounds the result. Validating the member as a string alone let an
- * envelope load successfully and then fail restoration a moment later, at a
- * point with no fallback: the load reported success and the run had no
- * substreams. `isAcceptableRunSeed()` is the RNG layer's own predicate, so the
- * two cannot disagree about which seeds are usable.
  *
  * @param source Envelope being validated.
  * @param problems List each failure is appended to.
@@ -1059,21 +997,17 @@ function checkStageGoal(value: unknown, problems: string[]): void {
   }
 }
 
-
 /**
- * Most values one relic state's walk visits, and most entries one array or
- * one plain object within it carries. Both bound the walk independently of
- * the lengths a payload declares.
+ * Most values one relic state's walk visits, and most entries one array or one
+ * plain object within it carries.
  */
 const MAX_RELIC_STATE_NODES = 512;
 
-/** @see MAX_RELIC_STATE_NODES */
+/**
+ * @see MAX_RELIC_STATE_NODES
+ */
 const MAX_RELIC_STATE_ENTRIES = 128;
 
-/**
- * The one property name that, assigned onto a plain object, reaches the
- * object's prototype instead of becoming an own property.
- */
 const PROTOTYPE_KEY = '__proto__';
 
 /** A remaining node allowance, decremented by each visited value. */
@@ -1082,9 +1016,9 @@ interface NodeBudget {
 }
 
 /**
- * Reports whether an object is plain data: its prototype is
- * `Object.prototype` or `null`, so it is neither a class instance nor a
- * built-in such as `Date`, `Map` or `Set`.
+ * Reports whether an object is plain data: its prototype is `Object.prototype`
+ * or `null`, so it is neither a class instance nor a built-in such as `Date`,
+ * `Map` or `Set`.
  *
  * @param value Object to test.
  * @returns `true` for a plain data object.
@@ -1098,16 +1032,6 @@ function isPlainDataObject(value: object): boolean {
 /**
  * Reports whether `value` is JSON data this module round-trips unchanged,
  * walking it within a fixed depth, node and entry allowance.
- *
- * Accepts `null`, strings, booleans, finite numbers, arrays and plain data
- * objects of those. Refuses `undefined`, `NaN`, both infinities,
- * functions, symbols, bigints, class instances, `Date`, `Map`, `Set`, an
- * own `__proto__` key, a cycle, and anything past the allowance — none of
- * which survives `JSON.parse(JSON.stringify(value))` as itself.
- *
- * A cycle is caught by the ancestor set rather than by the depth bound
- * alone, so a self-referential value is refused rather than walked to the
- * bound.
  *
  * @param value Value to walk.
  * @param depth Current depth.
@@ -1161,8 +1085,7 @@ function isJsonSafeValue(
 }
 
 /**
- * Walks the entries of one array or plain data object for
- * `isJsonSafeValue()`.
+ * Walks the entries of one array or plain data object for `isJsonSafeValue`.
  *
  * @param container Array or plain data object to walk.
  * @param depth Depth of `container` itself.
@@ -1209,9 +1132,6 @@ function isJsonSafeContainer(
  * Reports whether a relic's opaque state is data this module persists and
  * restores unchanged.
  *
- * Total and non-throwing for every input, an accessor that throws
- * included.
- *
  * @param value State to test.
  * @returns `true` for bounded JSON data.
  */
@@ -1229,11 +1149,9 @@ function isJsonSafeRelicState(value: unknown): boolean {
 }
 
 /**
- * Records a problem for every relic entry that is not
- * `{ id, charges?, state? }`, and for every part of an entry's `state` that
- * falls outside `PersistedRelicState`. Entry order is read but never
- * rearranged: the index in each reported path is the relic's pickup
- * position.
+ * Records a problem for every relic entry that is not `{ id, charges?, state?
+ * }`, and for every part of an entry's `state` that falls outside
+ * `PersistedRelicState`.
  *
  * @param value Candidate relic array.
  * @param problems List to append to.
@@ -1292,9 +1210,6 @@ function checkRelics(value: unknown, problems: string[]): void {
     );
 
     // Absent is the declared form of a relic carrying no state of its own.
-    // A present one is walked against `PersistedRelicState`, so a value
-    // that would not survive persistence is refused here rather than
-    // discovered on the way out of storage.
     if (state.readable && state.value !== undefined) {
       const reportedBefore = problems.length;
 
@@ -1306,11 +1221,9 @@ function checkRelics(value: unknown, problems: string[]): void {
         new Set<object>()
       );
 
-      // A total-value allowance the per-level depth and breadth bounds
-      // cannot express between them: a payload inside both can still
-      // declare a multiplicative number of values. Applied only when the
-      // walk above reported nothing, so a state that is already refused is
-      // reported once rather than twice.
+      // A total-value allowance the per-level depth and breadth bounds cannot
+      // express between them: a payload inside both can still declare a
+      // multiplicative number of values.
       if (
         problems.length === reportedBefore &&
         !isJsonSafeRelicState(state.value)
@@ -1322,6 +1235,94 @@ function checkRelics(value: unknown, problems: string[]): void {
         );
       }
     }
+  }
+}
+
+/**
+ * Records a problem for every member of a standing reward round that is not the
+ * shape `PendingRewardRound` declares: a non-negative integer `stageIndex` and
+ * an array of at most `MAX_REWARD_OFFER_IDS` distinct non-empty string
+ * identifiers.
+ *
+ * DISTINCTNESS IS CHECKED HERE because the no-duplicate-offers rule is
+ * structural (AAP V6): an envelope carrying the same identifier twice describes
+ * an offer the seeded draw could not have produced, so it is refused at the
+ * boundary rather than presented.
+ *
+ * The identifiers are NOT resolved against the catalogue here — this module
+ * knows nothing of relics — so a round naming a relic the catalogue no longer
+ * declares is structurally valid and is dropped by the projection that rebuilds
+ * the offer.
+ *
+ * @param value Candidate round.
+ * @param problems Accumulating problem list.
+ */
+function checkPendingReward(value: unknown, problems: string[]): void {
+  if (!isRecord(value)) {
+    addProblem(problems, 'pendingReward is not an object');
+    return;
+  }
+
+  const stageIndex = readForValidation(
+    value,
+    'stageIndex',
+    'pendingReward.stageIndex',
+    problems
+  );
+
+  if (stageIndex.readable && !isNonNegativeInteger(stageIndex.value)) {
+    addProblem(
+      problems,
+      'pendingReward.stageIndex is not a non-negative integer'
+    );
+  }
+
+  const offered = readForValidation(
+    value,
+    'offeredRelicIds',
+    'pendingReward.offeredRelicIds',
+    problems
+  );
+
+  if (!offered.readable) {
+    return;
+  }
+
+  if (!Array.isArray(offered.value)) {
+    addProblem(problems, 'pendingReward.offeredRelicIds is not an array');
+    return;
+  }
+
+  if (offered.value.length === 0) {
+    addProblem(problems, 'pendingReward.offeredRelicIds is empty');
+    return;
+  }
+
+  if (offered.value.length > MAX_REWARD_OFFER_IDS) {
+    addProblem(
+      problems,
+      `pendingReward.offeredRelicIds holds more than ${MAX_REWARD_OFFER_IDS}`
+    );
+    return;
+  }
+
+  const seen = new Set<string>();
+
+  for (let index = 0; index < offered.value.length; index += 1) {
+    const entry: unknown = offered.value[index];
+    const path = `pendingReward.offeredRelicIds[${index}]`;
+
+    if (typeof entry !== 'string' || entry.length === 0) {
+      addProblem(problems, `${path} is not a non-empty string`);
+      continue;
+    }
+
+    if (seen.has(entry)) {
+      addProblem(problems, `${path} repeats an identifier already offered`);
+      continue;
+    }
+
+    seen.add(entry);
   }
 }
 
@@ -1351,13 +1352,8 @@ function isSerializedTileShape(value: unknown): value is SerializedTile {
 }
 
 /**
- * Records a problem for every cell that is neither a persisted tile nor `null`.
- *
- * The matrix is NOT required to measure `board.grid.size` by
- * `board.grid.size`: the restore in src/engine/grid.ts truncates a larger
- * matrix and fills a smaller one with empty cells, and reconciling a saved size
- * against the configured one is the store's step, reported through
- * `RunReporter.onBoardSizeReconciled`.
+ * Records a problem for every cell that is neither a persisted tile nor
+ * `null`.
  */
 function checkCellMatrix(value: unknown, problems: string[]): void {
   if (!Array.isArray(value)) {
@@ -1453,8 +1449,8 @@ function checkGrid(value: unknown, problems: string[]): void {
 }
 
 /**
- * Records a problem for every part of the wrapped snapshot that is not
- * `{ grid, score, over, won, keepPlaying }`.
+ * Records a problem for every part of the wrapped snapshot that is not `{
+ * grid, score, over, won, keepPlaying }`.
  */
 function checkBoard(value: unknown, problems: string[]): void {
   if (!isRecord(value)) {
@@ -1481,9 +1477,8 @@ function checkBoard(value: unknown, problems: string[]): void {
 
 /**
  * Describes every member of `value` that is not the envelope this module
- * declares, one field-scoped entry per problem, and returns an empty list for a
- * valid envelope. A store hands the result to `RunReporter.onLoadCorrupted`, so
- * a refused payload is diagnosable rather than merely rejected.
+ * declares, one field-scoped entry per problem, and returns an empty list for
+ * a valid envelope.
  *
  * Total and non-throwing for every input — `null`, `undefined`, arrays,
  * primitives and objects whose accessors throw included. At most
@@ -1568,15 +1563,27 @@ export function describeRunStateProblems(value: unknown): string[] {
     checkBoard(board.value, problems);
   }
 
+  const pending = readForValidation(
+    value,
+    'pendingReward',
+    'pendingReward',
+    problems
+  );
+
+  // ABSENT IS VALID, and is the state of every envelope written before the
+  // member existed as well as of every run owing no choice.
+  if (pending.readable && pending.value !== undefined) {
+    checkPendingReward(pending.value, problems);
+  }
+
   return problems;
 }
 
 /**
  * Reports whether `value` is a structurally complete envelope, decided by
- * `describeRunStateProblems()` so the predicate and the diagnosis can never
+ * `describeRunStateProblems` so the predicate and the diagnosis can never
  * disagree about the same input. Which versions this build accepts is a
- * separate question, answered by `classifyRunStateVersion()`. Total and
- * non-throwing for every input.
+ * separate question, answered by `classifyRunStateVersion`.
  */
 export function isRunStateShape(value: unknown): value is RunState {
   return describeRunStateProblems(value).length === 0;
@@ -1584,13 +1591,6 @@ export function isRunStateShape(value: unknown): value is RunState {
 
 /**
  * Reports whether `value` is an envelope this build may write.
- *
- * Both questions at once: structurally complete by
- * `describeRunStateProblems()`, and carrying exactly
- * `RUN_STATE_SCHEMA_VERSION` by `classifyRunStateVersion()`. An envelope at
- * any other version — an older one this build reads, a future one, a
- * negative one — is not writable, because a version this build did not
- * produce is a version its next load discards.
  *
  * Total and non-throwing for every input.
  *
@@ -1603,31 +1603,13 @@ export function isCurrentRunState(value: unknown): value is RunState {
 }
 
 /**
- * What `cloneRelicState()` carries in place of a value the
- * `PersistedRelicState` vocabulary does not describe: nothing at all. A
- * member holding one is omitted from the copy and an array entry holding one
- * is carried as `null`, which is the projection `JSON.stringify` produces
- * for the same input.
+ * What `cloneRelicState` carries in place of a value the `PersistedRelicState`
+ * vocabulary does not describe: nothing at all.
  */
 const OMITTED_STATE_VALUE = Symbol('run-state.omitted');
 
 /**
  * Copies a relic's opaque state, carrying data alone.
- *
- * Structural and recursive: a string, a finite number, a boolean and `null`
- * are returned as they are, and an array or plain object is rebuilt entry by
- * entry so no part of the result is shared with the argument. Neither
- * `structuredClone` nor a JSON round-trip is used; the copy throws for no
- * input and catches nothing.
- *
- * Three boundaries are carried rather than followed, so a state that reached
- * this function without passing `checkRelicState()` still yields JSON data
- * and still terminates: a value the vocabulary does not describe is dropped,
- * a value already on the path from the root is dropped rather than descended
- * into, and a value below `MAX_RELIC_STATE_DEPTH` is dropped rather than
- * carried by reference. Each name in `RESERVED_STATE_KEYS` is dropped, and
- * every member the copy does define is defined as an own data property, so
- * a `__proto__` member never reaches the inherited setter.
  *
  * @param value State to copy.
  * @param depth Levels descended below the `state` member itself.
@@ -1683,9 +1665,6 @@ function cloneRelicState(
 /**
  * Copies one persisted state array, entry for entry.
  *
- * A dropped entry is carried as `null` rather than omitted, so the copy has
- * the length the original has and every later entry keeps its index.
- *
  * @param entries Array to copy.
  * @param depth Levels descended below the `state` member itself.
  * @param ancestors Objects on the path from `state` to `entries`.
@@ -1709,12 +1688,6 @@ function cloneRelicStateEntries(
 
 /**
  * Copies one persisted state object, member for member.
- *
- * Members are read through their own property descriptors, so no accessor is
- * invoked, and are written with `Object.defineProperty`, so a member named
- * `__proto__` becomes an own data property of the copy instead of reaching
- * the prototype setter. A symbol-keyed member, an accessor, a reserved name
- * and a value the vocabulary does not describe are each omitted.
  *
  * @param source Object to copy.
  * @param depth Levels descended below the `state` member itself.
@@ -1761,12 +1734,8 @@ function cloneRelicStateMembers(
 }
 
 /**
- * Copies one persisted relic, omitting each optional member the original
- * omits so the copy round-trips through JSON identically.
- *
- * A `state` the `PersistedRelicState` vocabulary does not describe is
- * omitted rather than carried, which is what `JSON.stringify` does with the
- * same value and what keeps the copy detached from the original.
+ * Copies one persisted relic, omitting each optional member the original omits
+ * so the copy round-trips through JSON identically.
  *
  * @param relic Relic to copy.
  * @returns A fresh relic.
@@ -1820,12 +1789,6 @@ function cloneCell(cell: SerializedTile | null): SerializedTile | null {
 /**
  * Copies a board snapshot, cell by cell.
  *
- * Exported so every projection of a stored board goes through ONE copier: a
- * caller handed the envelope's own snapshot could otherwise reach the board this
- * module's writer reads, and `readonly` types do not stop it from writing to it.
- * `cloneRunState()` uses this for the whole-envelope copy and
- * src/run/run-controller.ts uses it for the paths that project the board alone.
- *
  * @param board Snapshot to copy.
  * @returns A fresh snapshot sharing no object with `board`.
  */
@@ -1847,24 +1810,14 @@ export function cloneBoardSnapshot(
 /**
  * Copies an envelope for hand-off.
  *
- * Field-wise throughout: every member, every relic, every relic state
- * subtree, every cell and the cursor map are rebuilt, so no part of the copy
- * is shared with the original and a later mutation of either is invisible to
- * the other. Relic order is preserved. The cursor map is rebuilt through
- * `normalizeRngCursor()`, so the copy carries one draw count per substream
- * name whatever the original carried.
- *
- * The result is JSON data whatever the argument carried: a relic state
- * member outside the `PersistedRelicState` vocabulary is dropped rather than
- * aliased, and no member of the copy is defined by assignment, so a stored
- * `__proto__` member cannot reach a prototype.
- *
  * @param value Envelope to copy.
  * @returns A fresh envelope.
- * @throws RangeError when a relic's `state` nests deeper than 32 levels, which
- *   cannot be copied without sharing mutable data with the original.
+ * @throws RangeError when a relic's `state` nests deeper than 32 levels,
+ *   which cannot be copied without sharing mutable data with the original.
  */
 export function cloneRunState(value: RunState): RunState {
+  const pending = clonePendingReward(value.pendingReward);
+
   return {
     schemaVersion: value.schemaVersion,
     runId: value.runId,
@@ -1875,35 +1828,55 @@ export function cloneRunState(value: RunState): RunState {
     goalProgress: value.goalProgress,
     relics: value.relics.map(cloneRelic),
     board: cloneBoardSnapshot(value.board),
+
+    // OMITTED RATHER THAN CARRIED AS `undefined`, so a cloned envelope has the
+    // same own-property set as one with no round, and `JSON.stringify` of the
+    // two produces one string.
+    ...(pending === undefined ? {} : { pendingReward: pending }),
   };
 }
 
 /**
- * Projects an envelope onto the exact members this build writes, stamped
- * with `RUN_STATE_SCHEMA_VERSION`.
+ * Copies a standing reward round, or reports its absence.
  *
- * The write-side counterpart of `cloneRunState()`, which carries
- * `schemaVersion` through as it stands. Every member is named literally
- * below and no other is copied, so a member a caller added to its own
- * object does not reach the store, and the version written is always the one
- * the writing build's loader classifies as `'current'`.
+ * The identifier array is rebuilt, so the copy shares nothing with the original.
  *
- * Deep throughout, on `cloneRunState()`'s terms: the cursor map is rebuilt
- * through `normalizeRngCursor()`, and the goal, the relics and every cell
- * are fresh objects, so the projection shares nothing with `value`.
+ * @param value Round to copy, or `undefined`.
+ * @returns A fresh round, or `undefined`.
+ */
+export function clonePendingReward(
+  value: PendingRewardRound | undefined
+): PendingRewardRound | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return {
+    stageIndex: value.stageIndex,
+    offeredRelicIds: [...value.offeredRelicIds],
+  };
+}
+
+/**
+ * Projects an envelope onto the exact members this build writes, stamped with
+ * `RUN_STATE_SCHEMA_VERSION`.
+ *
+ * Deep throughout, on `cloneRunState`'s terms: the cursor map is rebuilt
+ * through `normalizeRngCursor`, and the goal, the relics and every cell are
+ * fresh objects, so the projection shares nothing with `value`.
  *
  * @param value Envelope to project.
  * @param targetVersion Version to stamp, defaulting to
- *   `RUN_STATE_SCHEMA_VERSION`. Supplied by a caller reading and writing under
- *   an injected `RunStateVersionPolicy`, so what it writes is what its own
- *   loader will classify as `'current'` rather than as `'older'`. A
- *   non-integer is ignored in favour of the default.
+ *   `RUN_STATE_SCHEMA_VERSION`. A non-integer is ignored in favour of the
+ *   default.
  * @returns A fresh envelope at the target schema version.
  */
 export function projectCurrentRunState(
   value: RunState,
   targetVersion?: number
 ): RunState {
+  const pending = clonePendingReward(value.pendingReward);
+
   return {
     schemaVersion: isSchemaVersion(targetVersion)
       ? targetVersion
@@ -1916,6 +1889,11 @@ export function projectCurrentRunState(
     goalProgress: value.goalProgress,
     relics: value.relics.map(cloneRelic),
     board: cloneBoardSnapshot(value.board),
+
+    // Omitted where no round stands, so an envelope owing no choice is written
+    // with the member absent — which is the shape every reader, including one
+    // built before the member existed, already handles.
+    ...(pending === undefined ? {} : { pendingReward: pending }),
   };
 }
 
@@ -1951,14 +1929,8 @@ export function summarizeRunState(state: RunState): RunSummary {
 }
 
 /**
- * The finished run as a REPORT carries it: every member of `RunSummary`
- * except the seed.
- *
- * A seed is player-supplied text — the run-start screen accepts one — so it
- * can hold anything the player typed, personal data included. It is not
- * needed to identify a run in a log or a metric, because the correlation
- * identifier already does that and is derived from the seed one way. So the
- * seed stays in run and UI state and no observability contract carries it.
+ * The finished run as a REPORT carries it: every member of `RunSummary` except
+ * the seed.
  */
 export type RedactedRunSummary = Omit<RunSummary, 'seed'>;
 
@@ -1992,20 +1964,15 @@ export function summarizeRunStateForReport(
   return redactRunSummary(summarizeRunState(state));
 }
 
-
-/* --------------------------------------------------------------------------
- * 11. The injected report sink
- * ----------------------------------------------------------------------- */
-
 /** How a run finished. */
 export type RunOutcome = 'won' | 'lost' | 'abandoned';
 
 export interface RunStateCorruptionReport {
   /**
-   * Correlation identifier of the run that read the payload, injected
-   * into the store, and absent when the store was constructed without
-   * one. The refused payload's own seed is never read for it: this
-   * folder derives no identifier of its own.
+   * Correlation identifier of the run that read the payload, injected into the
+   * store, and absent when the store was constructed without one. The refused
+   * payload's own seed is never read for it: this folder derives no identifier
+   * of its own.
    */
   readonly correlationId?: CorrelationId;
 
@@ -2068,15 +2035,7 @@ export interface RunStateWriteFailureReport {
   readonly error: unknown;
 }
 
-/**
- * A run that began, fresh or resumed.
- *
- * Carries NO SEED. The correlation identifier identifies the run, and it is
- * derived from the seed by src/observability/logger.ts, so a report needs no
- * second copy of a value the player may have typed. `seedProvided` records
- * the one fact about the seed that a report legitimately wants: whether the
- * run adopted a player-supplied seed or an originated one.
- */
+/** A run that began, fresh or resumed. */
 export interface RunStartedReport {
   readonly correlationId: CorrelationId;
 
@@ -2118,7 +2077,9 @@ export interface RelicsNormalizedReport {
   /** How many the registry holds after hydration. */
   readonly restored: number;
 
-  /** Identifiers the registry refused, in the order the envelope carried them. */
+  /**
+   * Identifiers the registry refused, in the order the envelope carried them.
+   */
   readonly refused: readonly string[];
 }
 
@@ -2132,9 +2093,7 @@ export interface RewardOfferedReport {
   readonly offeredRelicIds: readonly string[];
 }
 
-/**
- * A selection measured against the offer that was standing.
- */
+/** A selection measured against the offer that was standing. */
 export interface RewardDrawnReport {
   readonly correlationId: CorrelationId;
 
@@ -2143,23 +2102,33 @@ export interface RewardDrawnReport {
 
   /**
    * The offer standing when the report was made: the identifiers admitted by
-   * `recordRewardOffer()`, which is empty on a refused offer and once a
+   * `recordRewardOffer`, which is empty on a refused offer and once a
    * selection has been taken on.
    */
   readonly offeredRelicIds: readonly string[];
+
+  /**
+   * The identifier the outcome concerns, VERBATIM, and absent only where the
+   * OFFER itself was refused and no selection was made. It is never decorated
+   * with the outcome: a consumer matching identifiers has to be able to.
+   */
   readonly selectedRelicId?: string;
 
   /**
    * Whether the relic was taken on: registered live and appended to the run's
-   * relics. Absent on a report from a caller that does not distinguish the two
-   * outcomes.
+   * relics.
+   *
+   * REQUIRED. It was optional, and every writer that forgot it produced a
+   * report that type-checked while saying nothing about the outcome it exists
+   * to describe. A report is now unconstructible without it. DL-RUNCTL-07.
    */
-  readonly accepted?: boolean;
+  readonly accepted: boolean;
 
   /**
-   * The step that refused an offer or a selection, as
-   * `RewardRefusal` of src/run/run-controller.ts names it. Absent where nothing
-   * was refused.
+   * The step that refused an offer or a selection — `RewardRefusal` for an
+   * offer or a resolution and `RewardSelectionOutcome` for a selection, both of
+   * src/run/run-controller.ts. Absent EXACTLY where nothing was refused, so its
+   * presence and `accepted === false` always agree.
    */
   readonly refusal?: string;
 }
@@ -2184,15 +2153,9 @@ export interface RunEndedReport {
  * Sink for everything this folder reports: refused payloads, migrations,
  * board-size reconciliations, failed writes and the run lifecycle.
  *
- * Injected, never imported. This module names no observability module, so an
- * observability adapter is attached from the outside and a test substitutes a
- * fake sink that records the reports. Every member carries the correlation
- * identifier the reporting consumer was constructed with, which
- * src/observability/logger.ts derives once per run and injects.
- *
  * Every member is optional, so a consumer built without a sink, or with a
- * partial one, reports only what its sink accepts, and is constructible with no
- * arguments.
+ * partial one, reports only what its sink accepts, and is constructible with
+ * no arguments.
  */
 export interface RunReporter {
   readonly onLoadCorrupted?: (report: RunStateCorruptionReport) => void;
@@ -2244,8 +2207,6 @@ export const NOOP_RUN_REPORTER: RunReporter = Object.freeze({
   },
 });
 
-/* ===== 12. Correlation-identifier derivation ===== */
-
 /** Prefix every derived correlation identifier carries. */
 const CORRELATION_ID_PREFIX = 'run-';
 
@@ -2293,43 +2254,17 @@ function renderHash(hash: number): string {
  * Derives the run correlation identifier from the two members this envelope
  * persists.
  *
- * Byte-identical to `deriveCorrelationId(seed, runId)` in
- * src/observability/logger.ts, which is the single authority src/main.ts calls.
- * This is a separate implementation of the same algorithm rather than a
- * re-export: this module reaches no observability module, and the two are
- * pinned equal by tests/unit/run/run-state.test.ts, which compares their
- * output character by character over a shared input table.
+ * Neither form is unique by construction — each concatenates 32-bit hashes —
+ * so distinct inputs can collide, and a consumer needing exact identity
+ * compares `seed` and `runId` themselves.
  *
- * PURE. It reads no clock, consumes no randomness, touches no storage and
- * mutates nothing, so the same `(seed, runId)` yields the same string in this
- * process and in any later one — which is what lets a resumed run report under
- * the identifier it was already reporting under, from the persisted envelope
- * alone.
- *
- * TWO FORMS, ONE DERIVATION. Omitting `runId`, or passing an empty one, yields
- * the seed-grouping form: `run-` followed by two fixed-width base36 hashes of
- * the seed, FNV-1a then djb2. Supplying one appends a third hyphen-separated
- * hash taken over the run instance AND the seed, so two runs of one seed are
- * distinguishable while the seed-derived prefix still groups them.
- *
- * PSEUDONYMOUS, NOT ANONYMOUS. The derivation is unsalted and deterministic,
- * so a party holding candidate seeds can hash each one and match it against an
- * identifier. What it guarantees is that the seed TEXT is not carried in the
- * value and cannot be read back out by inversion; it does not guarantee the
- * seed cannot be identified by search. A run seed is therefore treated as data
- * that may be published, and no caller may put personal data in one.
- *
- * Neither form is unique by construction — each concatenates 32-bit hashes — so
- * distinct inputs can collide, and a consumer needing exact identity compares
- * `seed` and `runId` themselves.
- *
- * @param seed Seed of the run. Coerced with `String`, so any value is accepted
- *   and none throws.
+ * @param seed Seed of the run. Coerced with `String`, so any value is
+ *   accepted and none throws.
  * @param runId Run instance identifier. Omit it, or pass an empty value, for
  *   the seed-grouping form.
  * @returns An 18-character identifier for the seed-grouping form and a
- *   26-character one for the run-instance form, non-empty for every input,
- *   the empty string included.
+ *   26-character one for the run-instance form, non-empty for every input, the
+ *   empty string included.
  */
 export function runCorrelationId(seed: string, runId?: string): CorrelationId {
   const runSeed = String(seed);
@@ -2342,8 +2277,6 @@ export function runCorrelationId(seed: string, runId?: string): CorrelationId {
     return grouped;
   }
 
-  // Hashed over the run instance AND the seed rather than the run instance
-  // alone, so the segment cannot be read back as a bare hash of `runId`.
   const instance = `${String(runId)}\u0000${runSeed}`;
 
   return `${grouped}${CORRELATION_ID_INSTANCE_SEPARATOR}${renderHash(

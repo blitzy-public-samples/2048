@@ -1,14 +1,5 @@
 // Contract suite for the metrics registry's dynamic-series handling, Rule 3.
 //
-// Three recorders take an identifier the registry cannot know at construction
-// — a span name, a health-check name and an RNG substream name — unlike the
-// event and hook names, which are enumerable and pre-resolved. Each of them
-// rebuilt a label object and drove it through the full resolution chain on
-// every call: validate the labels, copy and freeze them, resolve the family,
-// then sort and stringify the label set into a lookup key. All of that is
-// wasted once the series exists, and `recordSpanDuration` sits on the frame
-// path.
-//
 // This suite pins both halves of the fix: that resolution happens once per
 // identifier, and that holding the handle changed none of the recorded values.
 
@@ -21,14 +12,7 @@ import {
   createMetricsRegistry,
 } from '../../../src/observability/metrics';
 
-/**
- * Counts calls to one private resolver.
- *
- * The saving is a skipped resolution, which no public member reports, so the
- * resolver itself is the only place the contract is observable. `private` in
- * TypeScript is erased at run time, so the member is reachable for counting
- * without changing the code under test.
- */
+/** Counts calls to one private resolver. */
 const countResolutions = (
   registry: MetricsRegistry,
   member: 'histogramSeries' | 'gaugeSeries' | 'counterSeries',
@@ -52,8 +36,6 @@ const familyLines = (text: string, family: string): readonly string[] =>
   text
     .split('\n')
     .filter((line) => line.startsWith(family) && !line.startsWith('#'));
-
-/* ===== 1. A span resolves once however often it is recorded ===== */
 
 describe('span durations resolve their series once', () => {
   it('resolves once across many records of one span', () => {
@@ -160,8 +142,6 @@ describe('span durations resolve their series once', () => {
   });
 });
 
-/* ===== 2. A health check resolves once ===== */
-
 describe('health checks resolve their series once', () => {
   it('resolves once across many records of one check', () => {
     const registry = createMetricsRegistry({});
@@ -228,8 +208,6 @@ describe('health checks resolve their series once', () => {
   });
 });
 
-/* ===== 3. RNG substreams resolve once ===== */
-
 describe('rng cursors resolve their series once per substream', () => {
   it('resolves once per substream across repeated folds', () => {
     const registry = createMetricsRegistry({});
@@ -244,7 +222,6 @@ describe('rng cursors resolve their series once per substream', () => {
       });
     }
 
-    // Four substreams, resolved once each rather than 24 times.
     expect(resolutions()).toBe(4);
   });
 
@@ -305,8 +282,6 @@ describe('rng cursors resolve their series once per substream', () => {
   });
 });
 
-/* ===== 4. The caches are bounded ===== */
-
 describe('the dynamic caches are bounded', () => {
   it('keeps recording past the retention ceiling', () => {
     const registry = createMetricsRegistry({});
@@ -336,7 +311,6 @@ describe('the dynamic caches are bounded', () => {
       METRIC_NAMES.healthCheckStatus,
     );
 
-    // Capped by the family ceiling rather than rising with the input.
     expect(lines.length).toBeLessThanOrEqual(256);
   });
 

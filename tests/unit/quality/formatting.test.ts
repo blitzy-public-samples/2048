@@ -1,44 +1,11 @@
 // @vitest-environment node
 
 // Read-only formatting gate over the tracked text sources.
-//
-// This file ASSERTS and never rewrites: it opens each file for reading, reports
-// every offending path and line, and changes nothing on disk.
-//
-// The five rules below are the mechanical whitespace invariants the retired
-// `.jshintrc` carried. AAP 0.3.3 carries its two-space indentation, 80-column
-// and camelCase conventions forward into the TypeScript sources, and AAP 0.8.5
-// replaces the repository's single human-review quality gate with executable
-// ones. Column width and naming are held by the TypeScript compiler and by
-// review; whitespace is held here.
-//
-// The `node` environment is declared per file, which vitest.config.ts documents
-// as the override for a suite in the jsdom project. This gate reads the
-// filesystem and needs no document.
-//
-// EXCLUSIONS:
-//   style/fonts/**  nine Clear Sans binaries and their `.svg` form. These DO
-//                   contain trailing whitespace and AAP 0.2.1.3 retains them
-//                   unchanged.
-//   node_modules,   dependency, build and artifact directories .gitignore
-//   dist, coverage,   already covers.
-//   test-results,
-//   playwright-report,
-//   blitzy*/
-//
-// Snapshot files ARE covered: they are committed, so trailing whitespace in one
-// is trailing whitespace in the tree.
-//
-// Decisions behind this file are recorded in docs/DECISION_LOG.md.
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, sep } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
-
-/* ==========================================================================
- * 1. Which files the gate reads
- * ========================================================================== */
 
 /** Directories walked in full. */
 const ROOTS: readonly string[] = ['src', 'tests', 'style'];
@@ -52,12 +19,7 @@ const EXTRA_FILES: readonly string[] = [
   'playwright.config.ts',
 ];
 
-/**
- * Directory names never descended into.
- *
- * `fonts` is the third-party binary set AAP 0.2.1.3 retains unchanged; the rest
- * are dependency, build and artifact directories .gitignore covers.
- */
+/** Directory names never descended into. */
 const SKIP_DIRECTORIES: ReadonlySet<string> = new Set([
   'fonts',
   'node_modules',
@@ -91,9 +53,6 @@ function isTextFile(name: string): boolean {
 
 /**
  * Collects every text file under `directory`, depth first.
- *
- * Paths are returned with `/` separators regardless of platform, so a failure
- * message reads the same everywhere.
  *
  * @param directory Directory to walk, relative to the repository root.
  * @returns Every text file found, in directory-entry order.
@@ -161,10 +120,6 @@ function offences(offends: (file: SourceFile) => readonly string[]): string[] {
   );
 }
 
-/* ==========================================================================
- * 2. The gate reads what it claims to
- * ========================================================================== */
-
 describe('the gate covers the tree it claims to', () => {
   it('reads the source, test and style trees', () => {
     // A gate that silently resolved no files would pass every rule below, so
@@ -182,18 +137,11 @@ describe('the gate covers the tree it claims to', () => {
   });
 
   it('reads no third-party font asset', () => {
-    // Named explicitly rather than left to the skip list: these files DO carry
-    // trailing whitespace, and AAP 0.2.1.3 retains them unchanged, so a gate
-    // that reached them would have to be weakened to pass.
     expect(
       SOURCES.filter((file) => file.path.startsWith('style/fonts/')),
     ).toEqual([]);
   });
 });
-
-/* ==========================================================================
- * 3. The rules
- * ========================================================================== */
 
 describe('no tracked file carries loose whitespace', () => {
   it('ends no line with a space or a tab', () => {
@@ -212,10 +160,7 @@ describe('no tracked file carries loose whitespace', () => {
   });
 
   it('ends every file with exactly one newline', () => {
-    // A missing final newline and a blank final line are both flagged. The
-    // second is what N9 of the review reported as trailing whitespace: seven
-    // files ended `\n\n`, among them the three the finding cited, and a blank
-    // last line is what a formatter and `git diff` both render as trailing.
+    // A missing final newline and a blank final line are both flagged.
     expect(
       offences((file) => {
         if (!file.text.endsWith('\n')) {
@@ -264,10 +209,6 @@ describe('no tracked file carries loose whitespace', () => {
   });
 });
 
-/* ==========================================================================
- * 4. One declaration per Sass function
- * ========================================================================== */
-
 describe('no stylesheet declares one function twice', () => {
   /** Every `@function` name declared in a file, in source order. */
   const declaredFunctions = (text: string): string[] => {
@@ -284,9 +225,7 @@ describe('no stylesheet declares one function twice', () => {
   };
 
   it('declares each @function exactly once per stylesheet', () => {
-    // A second declaration under one name silently supersedes the first: Sass
-    // resolves the last one and reports nothing, so the earlier block — and the
-    // documentation and provenance on it — is dead code that reads as live.
+    // A second declaration under one name silently supersedes the first.
     expect(
       offences((file) => {
         if (!file.path.endsWith('.scss')) {

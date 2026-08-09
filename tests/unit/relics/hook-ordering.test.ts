@@ -2,24 +2,9 @@
 // Contract 2 and validation gate V6 row 1, "two relics on one hook - both
 // fire, in pickup order, and compound".
 //
-// The executable counterpart of Figure 5, "Hook Dispatch Sequence: Pickup-Order
-// Fan-Out with Charge Guard and Error Isolation", in
+// The executable counterpart of Figure 5, "Hook Dispatch Sequence:
+// Pickup-Order Fan-Out with Charge Guard and Error Isolation", in
 // docs/architecture/hook-dispatch-sequence.md.
-//
-// PROVENANCE. js/keyboard_input_manager.js L18-L32 is the publish/subscribe
-// pair this dispatch descends from: `on` pushed a callback onto the array keyed
-// by event name and `emit` walked that array inline with one argument,
-// returning nothing — no queue, no charge notion, no return value and no error
-// isolation. Row TR-HOOKBUS-01 of docs/TRACEABILITY_MATRIX.md carries that
-// shape into src/engine/hook-bus.ts, and rows TR-HOOKBUS-02 and TR-HOOKBUS-03
-// add the two properties this file measures over REAL relics: pickup-order
-// dispatch and the compounding payload return.
-//
-// The two arithmetic sites being compounded are js/game_manager.js L157, the
-// merge producer `new Tile(positions.next, tile.value * 2)`, and L167, the
-// score accrual `self.score += merged.value`. The relics under test are rows
-// TR-MERGE-01 `echo-chamber`, TR-MERGE-02 `alloy-forge`, TR-MERGE-03
-// `frostbind` and TR-MERGE-04 `chain-catalyst`.
 //
 // SCOPE. tests/unit/engine/hook-bus.test.ts holds the mechanism against
 // SYNTHETIC subscriptions: pickup order with stub handlers, the charge guard,
@@ -27,16 +12,12 @@
 // holds the catalogue-level measurement alone and stubs nothing.
 //
 // Every expected figure below is DERIVED at run time — from
-// `defaultProduceMergeValue` and from a solo dispatch of the relic itself — and
-// no magnitude declared inside src/relics/families/merge-magic.ts is copied
-// here.
+// `defaultProduceMergeValue` and from a solo dispatch of the relic itself —
+// and no magnitude declared inside src/relics/families/merge-magic.ts is
+// copied here.
 //
-// Decisions behind this file are recorded in docs/DECISION_LOG.md and named
-// there: DL-HOOKBUS-02, the pickup-order index deciding dispatch order;
-// DL-HOOKBUS-03, the compounding return protocol in which a handler returning
-// nothing leaves the payload as it stands; DL-HOOKBUS-01, the charge guard
-// living in the bus; and DL-MERGE-02, `scoreDelta` transformed independently of
-// `resultValue`.
+// Decisions: DL-HOOKBUS-02, DL-HOOKBUS-03, DL-HOOKBUS-01, DL-MERGE-02
+// (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -75,10 +56,6 @@ import {
 } from '../../../src/rng/rng-streams';
 import type { RngCursorMap, RngStreams } from '../../../src/rng/rng-streams';
 import { createMergePairBoard } from '../../fixtures/boards';
-
-/* ==========================================================================
- * 1. Identifiers and the dispatch input
- * ========================================================================== */
 
 /** Relic raising `scoreDelta` by a fraction of `resultValue`. */
 const ECHO_CHAMBER = 'echo-chamber';
@@ -126,10 +103,6 @@ interface MergeOutcome {
   readonly effectsApplied: number;
   readonly chargesConsumed: number;
 }
-
-/* ==========================================================================
- * 2. Derivation, from the producer in force and from the relics themselves
- * ========================================================================== */
 
 /**
  * The operand shape `MergeProducer` reads.
@@ -193,10 +166,6 @@ const LADDER_UPPER_VALUE = producedFrom(LADDER_LOWER_VALUE);
 /** The unequal input `chain-catalyst` transforms. */
 const LADDER_MERGE = mergeInput(LADDER_LOWER_VALUE, LADDER_UPPER_VALUE);
 
-/* ==========================================================================
- * 3. The bench: a live config, live substreams, a live board and one bus
- * ========================================================================== */
-
 /** One run's collaborators, built fresh for every test. */
 interface OrderingBench {
   readonly config: RulesConfig;
@@ -209,10 +178,6 @@ interface OrderingBench {
 /**
  * Builds a bench and takes on `pickups` in the order given, which is the
  * pickup order `RelicRegistry` assigns.
- *
- * The config comes from `createDefaultRulesConfig`, which returns a live
- * object; `DEFAULT_RULES_CONFIG` is deep-frozen and is never used here, and a
- * relic installing a merge rule writes the config this bench owns.
  *
  * @param pickups Relic identifiers, in pickup order.
  * @param seed Run seed the substreams are derived from.
@@ -250,10 +215,6 @@ function benchFor(
 /**
  * Dispatches one `onMerge` over `bench` and flattens what the bus reports.
  *
- * The two tiles are live `Tile` objects, which is what the move resolver hands
- * the hook; the bus substitutes its frozen views before the first handler is
- * reached.
- *
  * @param bench Bench to dispatch over.
  * @param input Dispatch input.
  * @returns The accumulated payload's two arithmetic members and the counts.
@@ -285,10 +246,6 @@ function fireMerge(bench: OrderingBench, input: MergeInput): MergeOutcome {
 /**
  * The bonus `echo-chamber` adds at one `resultValue`, MEASURED by dispatching
  * the relic alone over a scratch bench at `scoreDelta` zero.
- *
- * The fraction itself is module-private in
- * src/relics/families/merge-magic.ts; this reads it out of the relic's own
- * behaviour.
  *
  * @param value `resultValue` the handler is to read.
  * @returns The bonus added to `scoreDelta`.
@@ -347,13 +304,6 @@ function chargesOf(bench: OrderingBench, id: string): number | undefined {
   return bench.registry.find(id)?.charges;
 }
 
-/* ==========================================================================
- * 4. The derived figures every expectation below is stated in
- *
- * Each figure below is an expression over `producedFrom` and `echoBonusFor`,
- * evaluated once at module scope.
- * ========================================================================== */
-
 /** `resultValue` as the dispatch input carries it. */
 const ARRIVING_VALUE = EQUAL_MERGE.resultValue;
 
@@ -403,8 +353,8 @@ function mergeHandlerOf(id: string): MergeHandler | undefined {
 }
 
 /**
- * The catalogue position of one relic within `MERGE_MAGIC_FAMILY`, which is the
- * order src/relics/relic-registry.ts flattens.
+ * The catalogue position of one relic within `MERGE_MAGIC_FAMILY`, which is
+ * the order src/relics/relic-registry.ts flattens.
  *
  * @param id Relic identifier.
  * @returns The zero-based position, or `-1` where the family omits it.
@@ -417,8 +367,6 @@ function cataloguePositionOf(id: string): number {
 
 /**
  * The data members of one catalogue declaration, as a comparable string.
- *
- * `hooks` holds functions and is compared by identity separately.
  *
  * @param id Relic identifier.
  * @returns The serialised declaration.
@@ -455,10 +403,6 @@ const DECLARATIONS_BEFORE: readonly string[] = Object.freeze(
 const HANDLERS_BEFORE: readonly (MergeHandler | undefined)[] = Object.freeze(
   RELICS_UNDER_TEST.map(mergeHandlerOf),
 );
-
-/* ==========================================================================
- * 5. The four expectation sets
- * ========================================================================== */
 
 describe('the input and the relics under test', () => {
   /** Rebuilt per test, so no pickup order leaks from one test to the next. */
@@ -519,10 +463,6 @@ describe('the input and the relics under test', () => {
     expect(resolved.scoreDelta).toBe(ALLOY_ALONE_SCORE);
   });
 });
-
-/* ==========================================================================
- * 6. Two relics on one hook: both fire, in pickup order, and compound
- * ========================================================================== */
 
 describe('two onMerge relics on one hook', () => {
   /** Pickup order `echo-chamber` then `alloy-forge`, rebuilt per test. */
@@ -605,10 +545,6 @@ describe('two onMerge relics on one hook', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Pickup order, not catalogue order and not identifier order
- * ========================================================================== */
-
 describe('dispatch order follows pickup, not the declaration', () => {
   it('declares echo-chamber ahead of alloy-forge in the catalogue', () => {
     expect(cataloguePositionOf(ECHO_CHAMBER)).toBeGreaterThanOrEqual(0);
@@ -652,10 +588,6 @@ describe('dispatch order follows pickup, not the declaration', () => {
   });
 });
 
-/* ==========================================================================
- * 8. Compounding, not overwriting
- * ========================================================================== */
-
 describe('the second handler compounds onto the first', () => {
   it('scores above either relic held alone, and the compound exactly', () => {
     const resolved = fireMerge(
@@ -678,8 +610,6 @@ describe('the second handler compounds onto the first', () => {
       EQUAL_MERGE,
     );
 
-    // Overwriting rather than accumulating would land the chain on one of
-    // these two figures.
     expect(inOrder.scoreDelta).not.toBe(ECHO_ALONE_SCORE);
     expect(inOrder.scoreDelta).not.toBe(ALLOY_ALONE_SCORE);
     expect(reversed.scoreDelta).not.toBe(ECHO_ALONE_SCORE);
@@ -698,10 +628,6 @@ describe('the second handler compounds onto the first', () => {
   });
 });
 
-/* ==========================================================================
- * 9. Each handler receives the payload the one before it returned
- * ========================================================================== */
-
 describe('each handler reads the accumulated payload', () => {
   it('takes its fraction from the raised value, picked up second', () => {
     const resolved = fireMerge(
@@ -714,7 +640,6 @@ describe('each handler reads the accumulated payload', () => {
       ARRIVING_SCORE + INCREMENT_ON_ARRIVING_VALUE + BONUS_ON_RAISED_VALUE,
     );
 
-    // The figure a handler reading the ORIGINAL payload would have produced.
     expect(resolved.scoreDelta).not.toBe(
       ARRIVING_SCORE + INCREMENT_ON_ARRIVING_VALUE + BONUS_ON_ARRIVING_VALUE,
     );
@@ -734,10 +659,6 @@ describe('each handler reads the accumulated payload', () => {
     );
   });
 });
-
-/* ==========================================================================
- * 10. A third relic on the one hook
- * ========================================================================== */
 
 /** `resultValue` the unequal input carries. */
 const LADDER_ARRIVING_VALUE = LADDER_MERGE.resultValue;
@@ -824,10 +745,6 @@ describe('three onMerge relics on one hook', () => {
   });
 });
 
-/* ==========================================================================
- * 11. A pickup on another hook leaves this hook's order alone
- * ========================================================================== */
-
 /**
  * The hooks carrying at least one subscriber, walked over all six names.
  *
@@ -881,10 +798,6 @@ describe('a pickup bound to another hook', () => {
     expect(hooksWithSubscribers(bench)).toEqual(['onMerge', 'onSpawn']);
   });
 });
-
-/* ==========================================================================
- * 12. A handler returning nothing, mid-chain
- * ========================================================================== */
 
 /** Charge budget `frostbind` declares, read from the declaration. */
 const FROSTBIND_DECLARED_CHARGES = findRelicById(FROSTBIND)?.charges ?? 0;
@@ -959,10 +872,6 @@ describe('a mid-chain handler that returns nothing', () => {
     ]);
   });
 });
-
-/* ==========================================================================
- * 13. A spent budget mid-chain
- * ========================================================================== */
 
 describe('a spent mid-chain relic', () => {
   /** Pickup order `echo-chamber`, `frostbind`, `alloy-forge`. */
@@ -1076,10 +985,6 @@ describe('a spent mid-chain relic', () => {
   });
 });
 
-/* ==========================================================================
- * 14. Determinism and substream hygiene
- * ========================================================================== */
-
 /** A cursor map reading zero on every named substream. */
 function zeroCursors(): RngCursorMap {
   const cursors: Partial<RngCursorMap> = {};
@@ -1160,10 +1065,6 @@ describe('one seed and one pickup order', () => {
     ]);
   });
 });
-
-/* ==========================================================================
- * 15. What the suite left behind
- * ========================================================================== */
 
 describe('the catalogue and the rules after every dispatch above', () => {
   it('leaves every declaration this suite picked up unmutated', () => {

@@ -1,41 +1,15 @@
 /**
  * Stage goal definitions and the stage progression curve.
  *
- * HAS NO VANILLA ANALOGUE: no construct in js/game_manager.js, js/grid.js or
- * js/tile.js resolved a stage, so every row below is target-only. One
- * traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
- * module's area enumerated:
- *   TR-STAGE-01  `StageGoalKind`, `StageGoal` and the two goal variants
- *   TR-STAGE-02  `evaluateStageGoal` and `StageGoalProgress`
- *   TR-STAGE-03  `StageConfig` and `stageGoalForIndex`
- *   TR-STAGE-04  `createDefaultStageConfig` and `DEFAULT_STAGE_CONFIG`
- *
- * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
- * only so the construct can be found from the log:
- *   DL-STAGE-01  the two goal kinds, `'highest-tile'` and
- *                `'score-threshold'`, as the whole goal vocabulary
- *   DL-STAGE-02  the goal evaluated at `onAfterMove` and resolved at
- *                `onStageEnd`
- *   DL-STAGE-03  the ladder expressed as a plain-JSON config, so a goal
- *                persists verbatim in the run-state envelope
- *
- * Serialisation contract: `StageGoal` and `StageConfig` are plain JSON data —
- * string and number members only, no functions, class instances or `undefined`
- * members — so a goal is persisted verbatim as the run-state envelope's
- * `stageGoal` field. A value whose numbers are all finite round-trips through
- * `JSON.parse(JSON.stringify(value))` deep-equal; the structural types also
- * admit `NaN` and `Infinity`, which JSON does not preserve, so a caller that
- * builds a config by hand keeps its numbers finite. Every value the factories
- * below produce satisfies that.
- *
  * Type declarations, frozen constants and pure functions only: this module
  * imports nothing, reads no DOM, consumes no randomness and performs no I/O.
+ *
+ * Decisions: DL-STAGE-01, DL-STAGE-02, DL-STAGE-03 (docs/DECISION_LOG.md).
  */
 
 /**
  * The measurable quantities a stage goal can target: `'highest-tile'` measures
- * the highest tile value on the board, `'score-threshold'` the run score. These
- * exact strings are what a persisted `StageGoal.kind` holds.
+ * the highest tile value on the board, `'score-threshold'` the run score.
  */
 export type StageGoalKind = 'highest-tile' | 'score-threshold';
 
@@ -50,11 +24,9 @@ interface ScoreThresholdStageGoal {
 }
 
 /**
- * One stage's clear condition. A discriminated union over `kind`, so
- * `switch (goal.kind)` narrows to one member and a kind added later raises a
- * compile error at every exhaustive consumer. Persisted verbatim as the
- * run-state envelope's `stageGoal` field and carried verbatim as the `goal`
- * member of the `stage:start` payload.
+ * One stage's clear condition. A discriminated union over `kind`, so `switch
+ * (goal.kind)` narrows to one member and a kind added later raises a compile
+ * error at every exhaustive consumer.
  */
 export type StageGoal = HighestTileStageGoal | ScoreThresholdStageGoal;
 
@@ -111,11 +83,6 @@ function assertStageIndex(stageIndex: number): void {
   }
 }
 
-/**
- * Maps a number into the closed interval [0, 1]: 0 for `NaN`, `-Infinity` and
- * anything at or below 0, 1 for `Infinity` and anything at or above 1, the
- * value itself otherwise. The result is always finite.
- */
 function clampUnitInterval(value: number): number {
   if (!(value > 0)) {
     return 0;
@@ -153,10 +120,6 @@ function createStageGoal(kind: StageGoalKind, target: number): StageGoal {
 /**
  * Evaluates one stage goal against one board state. Pure: identical arguments
  * always produce a deep-equal result.
- *
- * In the returned value, `achieved` is the measured quantity for the goal's
- * kind, `cleared` is `achieved >= goal.target`, and `progress` is finite within
- * [0, 1] — a target of 0 or below yields 1 when cleared and 0 otherwise.
  *
  * @throws RangeError when `goal.target`, `input.score` or
  *   `input.highestTileValue` is not a finite number, or when `goal` carries a
@@ -211,7 +174,7 @@ interface StageLadderExtension {
 /**
  * The stage progression curve. `ladder` holds the explicit goals for stage
  * indices 0 through `ladder.length - 1`, in stage order, and `extension`
- * supplies every index at or beyond that length, so `stageGoalForIndex()` is
+ * supplies every index at or beyond that length, so `stageGoalForIndex` is
  * total over every non-negative integer index, for any ladder length including
  * zero.
  */
@@ -225,23 +188,11 @@ export interface StageConfig {
  * run's first stage, matching the run-state envelope and the `stage:start`
  * payload.
  *
- * An index below `stageConfig.ladder.length` returns a copy of the
- * corresponding explicit ladder entry, whose `kind` is carried through
- * unchanged and whose `target` is rounded to an integer and bounded into
- * [0, `Number.MAX_SAFE_INTEGER`]. Every index at or beyond that length is
- * derived as `baseTarget * growthFactor ** (stageIndex - ladder.length)`,
- * rounded and bounded into
- * [0, min(`extension.maxTarget`, `Number.MAX_SAFE_INTEGER`)]. Both branches
- * bound their target the same way, so the returned `target` is always a finite
- * non-negative integer at every index and for every ladder — including one
- * that came back out of `JSON.parse`, and including a product that overflows
- * to `Infinity` or a non-finite extension parameter.
- *
  * Deterministic: consumes no randomness and reads no clock. Returns a freshly
  * allocated goal on every call, never a reference into `stageConfig`.
  *
- * @throws RangeError when `stageIndex` is not a non-negative integer, or when
- *   the resolved entry carries a `kind` outside `StageGoalKind`.
+ * @throws RangeError when `stageIndex` is not a non-negative integer, or
+ *   when the resolved entry carries a `kind` outside `StageGoalKind`.
  */
 export function stageGoalForIndex(
   stageIndex: number,
@@ -254,9 +205,6 @@ export function stageGoalForIndex(
   if (stageIndex < ladder.length) {
     const entry = ladder[stageIndex];
     if (entry !== undefined) {
-      // Explicit entries are bounded on the same terms as derived ones: a
-      // `StageConfig` can arrive from JSON, where `target` is only a number,
-      // so the produced goal is normalised rather than copied.
       return createStageGoal(
         entry.kind,
         boundedTarget(entry.target, ABSOLUTE_TARGET_CEILING),
@@ -317,8 +265,9 @@ function deepFreezeStageConfig(config: StageConfig): StageConfig {
 }
 
 /**
- * Builds the default progression curve, freshly allocated and unfrozen on every
- * call, sharing no object with `DEFAULT_STAGE_CONFIG` or an earlier return.
+ * Builds the default progression curve, freshly allocated and unfrozen on
+ * every call, sharing no object with `DEFAULT_STAGE_CONFIG` or an earlier
+ * return.
  */
 export function createDefaultStageConfig(): StageConfig {
   return {

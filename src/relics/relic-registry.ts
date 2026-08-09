@@ -6,70 +6,8 @@
 // relic exists. Adding a relic is an edit to a family module and to nothing
 // here.
 //
-// PROVENANCE
-//   Generalises the three subscriptions installed at js/game_manager.js
-//   L9-L11, where the manager bound one callback per input event once at
-//   construction, into hook subscriptions taken on in pickup order during a
-//   run. `serialize()` corresponds to js/game_manager.js L102-L110 and
-//   `restore()` to the `if (previousState)` rehydration branch at L36-L45.
-//   The `{ id, charges?, state? }` array the pair converts is the `relics`
-//   member of AAP Contract 5. Where js/local_storage_manager.js L54 parsed a
-//   stored value with no guard, `restore()` accepts every input — absent,
-//   older, malformed or unknown — without raising.
-//
-// CHARGE AND STATE OWNERSHIP
-//   This module SEEDS a run's charge budget and state slot, EXPOSES both,
-//   REHYDRATES both, and SPENDS one on a player's behalf through `activate()`.
-//   src/engine/hook-bus.ts skips a handler whose budget is spent and is the only
-//   writer of a budget, through two paths that share one internal deduction: its
-//   public `consumeCharge` and the dispatch walk's own spend, which a handler
-//   asks for by calling `HookContext.spendCharge()`. A relic handler therefore
-//   neither reads nor writes a count. The bus holds the live budget and the live
-//   slot from registration onwards, so every read below refreshes this module's
-//   records from `HookBus.subscribers()` before reporting them.
-//
-// THE RUN PORT
-//   `runPort()` is the surface src/run/run-controller.ts drives a registry
-//   through: the projection and restoration it already round-tripped, plus
-//   catalogue membership, the LIVE pickup and the held test that a reward
-//   selection is admitted by. It exists because `pickUp()` was reachable from
-//   nowhere the controller could call: a chosen reward was appended to the
-//   controller's own list, never registered with src/engine/hook-bus.ts, and
-//   erased by the next commit's projection.
-//
-// ONE POOL AND ONE SLOT PER RELIC
-//   A relic is registered ONCE, carrying its whole handler table:
-//   `HookSubscriber` of src/engine/hook-bus.ts is per relic rather than per
-//   hook. A relic binding two hooks therefore draws on one budget and reads
-//   and writes one state slot across both bindings.
-//
-// PURITY
-//   No DOM, no storage, no I/O, no clock and no randomness. Persistence
-//   belongs to src/run/run-state-store.ts and the reward draw to
-//   src/relics/relic-draw.ts, and this module reaches for neither: a caller
-//   passes `catalogue()` or `RELIC_CATALOGUE` and `ownedIds()` into the draw
-//   itself. Reporting goes to the injected `EngineReporter` alone.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-REGISTRY-01  js/game_manager.js L9-L11    the three fixed subscriptions
-//                                                generalised into pickup-
-//                                                ordered hook subscriptions
-//   TR-REGISTRY-02  js/game_manager.js L102-L110 `serialize()`
-//   TR-REGISTRY-03  js/game_manager.js L36-L45   `restore()`, the guarded
-//                                                rehydration branch
-//   TR-REGISTRY-04  target-only row              `RELIC_CATALOGUE`,
-//                                                `findRelicById` and the
-//                                                assembled family pool
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-REGISTRY-01  the registry as the only construct that names a relic; no
-//                   engine, renderer or UI module branches on a relic id
-//   DL-REGISTRY-02  one registration per relic carrying its whole handler
-//                   table, one charge budget and one state slot
-//   DL-REGISTRY-03  every read refreshing this module's records from
-//                   `HookBus.subscribers()` before reporting them
+// Decisions: DL-REGISTRY-01, DL-REGISTRY-02, DL-REGISTRY-03
+// (docs/DECISION_LOG.md).
 
 import {
   RARITIES,
@@ -104,10 +42,6 @@ import {
   type RelicCommitEntry,
 } from '../engine/types';
 
-/* --------------------------------------------------------------------------
- * Counter names
- * ----------------------------------------------------------------------- */
-
 // Reported through `EngineReporter.onCount`, in the
 // `<subsystem>.<area>.<event>` form src/engine/hook-bus.ts and src/input/ use.
 
@@ -140,11 +74,6 @@ const ACTIVATE_METRIC = 'relics.activate';
  */
 const ACTIVATE_UNKNOWN_METRIC = 'relics.activate.unknown';
 
-/**
- * Counter raised for an activation the registry itself would not carry to the
- * bus: an amount that is not a positive whole number, a position that is not a
- * whole number at or above zero, and a registry with no bus attached.
- */
 const ACTIVATE_REFUSED_METRIC = 'relics.activate.refused';
 
 /**
@@ -153,15 +82,9 @@ const ACTIVATE_REFUSED_METRIC = 'relics.activate.refused';
  */
 const ACTIVATE_EXHAUSTED_METRIC = 'relics.activate.exhausted';
 
-/* --------------------------------------------------------------------------
- * State copying
- * ----------------------------------------------------------------------- */
-
 /**
  * Nesting depth a state slot is copied to, matching `MAX_STATE_DEPTH` of
- * src/engine/hook-bus.ts and `MAX_RELIC_STATE_DEPTH` of
- * src/run/run-state.ts. A branch deeper than this is dropped rather than
- * aliased, which is also what makes the copy terminate on a cycle.
+ * src/engine/hook-bus.ts and `MAX_RELIC_STATE_DEPTH` of src/run/run-state.ts.
  */
 const MAX_STATE_DEPTH = 8;
 
@@ -170,15 +93,7 @@ const MAX_STATE_MEMBERS = 256;
 
 /**
  * Names a copied state slot never carries, matching `RESERVED_STATE_KEYS` of
- * src/run/run-state.ts. The value is mirrored rather than imported: src/run
- * imports `PersistedRelic` from src/relics, so an import in this direction
- * would close a cycle.
- *
- * `__proto__` is the load-bearing member. Written with `=`, an own property of
- * that name reaches `Object.prototype`'s setter and re-parents the copy instead
- * of becoming a member of it; `constructor` and `prototype` are refused
- * alongside it because a copy carrying either is no longer the plain data
- * object the run envelope describes.
+ * src/run/run-state.ts.
  */
 const RESERVED_STATE_KEYS: ReadonlySet<string> = new Set<string>([
   '__proto__',
@@ -187,9 +102,8 @@ const RESERVED_STATE_KEYS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Entries `restore()` reads from one persisted array, matching
- * `MAX_PERSISTED_RELICS` of src/run/run-state.ts. Mirrored, not imported, for
- * the reason given above `RESERVED_STATE_KEYS`.
+ * Entries `restore` reads from one persisted array, matching
+ * `MAX_PERSISTED_RELICS` of src/run/run-state.ts.
  */
 const MAX_RESTORED_ENTRIES = 64;
 
@@ -197,7 +111,7 @@ const MAX_RESTORED_ENTRIES = 64;
 const NO_IDS: readonly string[] = Object.freeze([]);
 
 /**
- * What `activate()` reports for a target no held relic answers to: nothing is
+ * What `activate` reports for a target no held relic answers to: nothing is
  * held, nothing is charge-limited, nothing was spent and no identifier was
  * addressed.
  */
@@ -261,12 +175,6 @@ function isRarity(value: unknown): value is Rarity {
 /**
  * Reads one data member of a state slot.
  *
- * An accessor property is skipped rather than invoked, as
- * `cloneRelicStateMembers` of src/run/run-state.ts skips one, so a slot
- * carrying a getter is copied without that getter running. The descriptor read
- * itself is contained: a `Proxy` whose `getOwnPropertyDescriptor` trap raises
- * yields an unreadable member rather than a throw.
- *
  * @param source Object to read.
  * @param name Own property to read.
  * @returns The stored value, or `undefined` for an absent property, for an
@@ -295,12 +203,9 @@ function readDataMember(source: object, name: string): unknown {
 /**
  * Lists the own member names of one state level.
  *
- * Contained for the same reason `readDataMember` is: a `Proxy` whose
- * `ownKeys` trap raises yields no member rather than a throw.
- *
  * @param source Object to enumerate.
- * @returns The own string-keyed names, and an empty list where they could not
- *   be read.
+ * @returns The own string-keyed names, and an empty list where they could
+ *   not be read.
  */
 function readMemberNames(source: object): readonly string[] {
   try {
@@ -369,18 +274,10 @@ function copyStateEntries(
 /**
  * Copies the members of one object level of a state slot.
  *
- * The destination carries NO PROTOTYPE and every member is written with
- * `Object.defineProperty`, and each name in `RESERVED_STATE_KEYS` is dropped
- * before either happens — the same three measures `cloneRelicStateMembers` of
- * src/run/run-state.ts takes, so a slot copied here and a slot copied by the
- * persisted loader carry the same members. Written by assignment onto `{}`, as
- * it was, a member named `__proto__` reached the prototype setter instead of
- * becoming data.
- *
  * @param source Level to copy.
  * @param depth Levels already descended.
- * @returns A fresh prototype-less object carrying the members that survive the
- *   copy.
+ * @returns A fresh prototype-less object carrying the members that survive
+ *   the copy.
  */
 function copyStateMembers(
   source: object,
@@ -417,18 +314,6 @@ function copyStateMembers(
 /**
  * Copies one state slot, all the way down.
  *
- * TOTAL BY CONSTRUCTION. Every input yields a value and none raises: the depth
- * bound terminates the walk on a cycle, an accessor is read through
- * `readDataMember` rather than invoked, every reflection the walk performs is
- * contained so a `Proxy` trap that raises drops a member rather than the call,
- * and a value JSON cannot carry — a function, a symbol, a `bigint`,
- * `undefined` inside an object — is dropped exactly as `JSON.stringify` drops
- * it. A slot that survives a copy is a slot that survives the run envelope's
- * serialisation.
- *
- * The counterpart of `copyState` in src/engine/hook-bus.ts, which is that
- * module's own state-ownership boundary and is not exported.
- *
  * @param value Slot to copy.
  * @param depth Levels already descended.
  * @returns A copy sharing no object with `value`.
@@ -456,13 +341,8 @@ function copyRelicState(value: unknown, depth = 0): unknown {
 }
 
 /**
- * Normalises one charge budget to a whole number within
- * `[0, Number.MAX_SAFE_INTEGER]`.
- *
- * Matches `normaliseCharges` of src/engine/hook-bus.ts, which is the rule the
- * bus reads a stored budget under, and clamps to a safe integer, which is the
- * form the non-negative-integer check in `checkRelics` of
- * src/run/run-state.ts accepts.
+ * Normalises one charge budget to a whole number within `[0,
+ * Number.MAX_SAFE_INTEGER]`.
  *
  * @param value Budget to normalise.
  * @returns The normalised budget; `0` for a value that is not finite and for
@@ -476,17 +356,7 @@ function normaliseCharges(value: number): number {
   return Math.min(Math.max(0, Math.trunc(value)), Number.MAX_SAFE_INTEGER);
 }
 
-/* --------------------------------------------------------------------------
- * The catalogue
- * ----------------------------------------------------------------------- */
-
-/**
- * The four family records as their modules export them, before ordering.
- *
- * `orderFamilies` below resolves the published order from
- * `RELIC_FAMILY_NAMES`, so this array's own order carries no meaning and no
- * order is ever read from object key enumeration.
- */
+/** The four family records as their modules export them, before ordering. */
 const DECLARED_FAMILIES: readonly RelicFamily[] = [
   SPAWN_CONTROL_FAMILY,
   MERGE_MAGIC_FAMILY,
@@ -516,12 +386,6 @@ function takeFamily(
 
 /**
  * Orders family records by `RELIC_FAMILY_NAMES`.
- *
- * `RELIC_FAMILY_NAMES` of src/relics/relic-types.ts is the one declaration of
- * the family ladder, and it is the order read here; this file's import order
- * and `DECLARED_FAMILIES`'s own order are not. A family whose name the ladder
- * does not carry keeps its position behind the ordered ones, so no family is
- * dropped.
  *
  * @param families Families to order.
  * @returns A fresh array in ladder order.
@@ -556,11 +420,6 @@ function freezeRelic(relic: Relic): Relic {
 /**
  * Copies the handler table of a declaration this registry did not author.
  *
- * Only the six names `HOOK_NAMES` declares are carried, and each only where it
- * is stored as a callable, so a table carrying an accessor, a seventh member or
- * a non-callable value yields a table without it. Read through
- * `readDataMember`, so a `Proxy` table runs no trap here.
- *
  * @param table Table to copy.
  * @returns A fresh frozen table.
  */
@@ -581,16 +440,6 @@ function adoptHooks(table: object): RelicHooks {
 /**
  * Adopts one relic declaration this registry did not author: an injected
  * catalogue entry, or a declaration handed straight to `pickUp`.
- *
- * The caller's object is neither held nor modified. A fresh declaration is
- * built from the seven members `Relic` declares — read as data, so no accessor
- * and no proxy trap runs — with a fresh frozen handler table and a COPY of the
- * initial state slot, and the result is frozen. A caller that goes on to mutate
- * what it passed therefore changes nothing the registry holds, and no run's
- * slot reaches the caller's object.
- *
- * `RELIC_CATALOGUE` does not travel this path: `freezeFamily` has already
- * frozen every declaration in it and its handler table at module scope.
  *
  * @param relic Declaration to adopt, already known to carry a usable shape.
  * @returns A fresh frozen declaration.
@@ -733,9 +582,8 @@ function repeatedIds(relics: readonly Relic[]): string[] {
 }
 
 /**
- * The four relic families, in the `RELIC_FAMILY_NAMES` order
- * `spawn-control`, `merge-magic`, `board-manipulation`,
- * `risk-reward-cursed`.
+ * The four relic families, in the `RELIC_FAMILY_NAMES` order `spawn-control`,
+ * `merge-magic`, `board-manipulation`, `risk-reward-cursed`.
  *
  * Frozen at every level: the array, each family record, each family's relic
  * array, each relic and each relic's handler table.
@@ -747,12 +595,6 @@ export const RELIC_FAMILIES: readonly RelicFamily[] = Object.freeze(
 /**
  * Every relic, flattened from `RELIC_FAMILIES`: families in ladder order and,
  * within a family, in that family's declaration order.
- *
- * THE SEQUENCE IS FIXED. src/relics/relic-draw.ts resolves a drawn index
- * against the pool it is handed in the order that pool carries, so this
- * sequence decides which relic a recorded seed offers and the snapshots under
- * tests/snapshot/__snapshots__/ are recorded against it. Frozen, and never
- * derived from object key enumeration.
  */
 export const RELIC_CATALOGUE: readonly Relic[] = Object.freeze(
   flattenFamilies(RELIC_FAMILIES),
@@ -766,25 +608,16 @@ const CATALOGUE_BY_ID: ReadonlyMap<string, Relic> =
  * Reads one relic declaration from `RELIC_CATALOGUE` by identifier.
  *
  * @param id Identifier to look up.
- * @returns The declaration, or `undefined` where the catalogue carries none of
- *   that identifier. Raises nothing, so a stored identifier from an older
- *   version resolves to `undefined` rather than to a throw.
+ * @returns The declaration, or `undefined` where the catalogue carries none
+ *   of that identifier.
  */
 export function findRelicById(id: string): Relic | undefined {
   return CATALOGUE_BY_ID.get(id);
 }
 
-/* --------------------------------------------------------------------------
- * Record conversion
- * ----------------------------------------------------------------------- */
-
 /**
  * Reports whether `value` carries the two declaration members a registration
  * reads: a non-empty string `id` and an object `hooks`.
- *
- * Both members are read through `readDataMember`, so a declaration carrying
- * either as an accessor — or a `Proxy` standing in for one — is judged on
- * stored data alone and no foreign code runs during the test.
  *
  * @param value Value to test.
  * @returns `true` for a value usable as a declaration.
@@ -806,10 +639,6 @@ function isRelicShape(value: unknown): value is Relic {
 /**
  * Reads one member of a persisted entry without trusting its declared type.
  *
- * Read through `readDataMember`, so an entry carrying the member as an
- * accessor, or a `Proxy` whose `get` trap would run, yields `undefined` rather
- * than invoking anything.
- *
  * @param entry Entry to read.
  * @param name Member to read.
  * @returns The stored value, or `undefined` where `entry` is not a plain
@@ -821,11 +650,6 @@ function readPersisted(entry: unknown, name: string): unknown {
 
 /**
  * Reads the entries of a persisted relic array as data.
- *
- * `length` and each index are read through `readDataMember` and the walk is
- * bounded by `MAX_RESTORED_ENTRIES`, so a `Proxy` array cannot run a trap on
- * this path and cannot lengthen the walk without bound. An index carrying an
- * accessor yields `undefined`, which `reseat` reports as malformed.
  *
  * @param source Array to read.
  * @returns A fresh array of at most `MAX_RESTORED_ENTRIES` entries.
@@ -846,10 +670,6 @@ function readEntries(source: readonly unknown[]): unknown[] {
 /**
  * Resolves the charge budget a freshly picked-up relic starts with.
  *
- * A declaration carrying no budget yields `undefined`, which is the unlimited
- * form the bus never charge-guards and the form `PersistedRelic.charges` is
- * absent for. The unlimited form is `undefined` and never `Infinity` or `-1`.
- *
  * @param definition Declaration being picked up.
  * @returns The budget, or `undefined` for an unlimited relic.
  */
@@ -861,18 +681,6 @@ function seededCharges(definition: Relic): number | undefined {
 
 /**
  * Resolves the charge budget a restored relic starts with.
- *
- * THE DECLARATION DECIDES WHETHER A RELIC IS CHARGE-LIMITED AT ALL; the entry
- * decides only how many charges remain. A declaration carrying no budget
- * yields `undefined` whatever the entry says, so no stored value charge-limits
- * an unlimited relic or lifts the limit from a limited one.
- *
- * A recorded `0` is kept as `0`, so a relic whose budget was spent before the
- * run was saved stays spent and the bus's guard goes on skipping it. A recorded
- * value that is not a finite number is read as `0`, matching the bus's rule
- * that an invalid budget is spent rather than replenished. An absent value —
- * what an entry written by a version that recorded no budget carries — falls
- * back to the declaration's own budget.
  *
  * @param definition Declaration being restored.
  * @param entry Persisted entry.
@@ -915,11 +723,6 @@ function restoredState(definition: Relic, entry: unknown): unknown {
 /**
  * Projects one held relic to the persisted triple of AAP Contract 5.
  *
- * `charges` is written only for a relic carrying a budget and `state` only
- * where a slot survives the copy, so no `undefined` member reaches the run
- * envelope. The object is plain and unfrozen, as `cloneRelic` of
- * src/run/run-state.ts produces.
- *
  * @param relic Held relic to project.
  * @returns A fresh `{ id, charges?, state? }`.
  */
@@ -961,15 +764,6 @@ function commitEntry(relic: ActiveRelic): RelicCommitEntry {
 /**
  * Detaches one held record for a reader.
  *
- * `ActiveRelic` declares `charges` and `state` as writable, so handing back the
- * record itself would let a reader write the registry's own budget and slot and
- * would alias the slot the bus holds. The copy is frozen and carries a COPY of
- * the slot, so a reader can neither write through it nor reach the bus's data;
- * `definition` is a frozen declaration and is shared rather than copied.
- *
- * Taken AFTER `refresh()`, so the values carried are the values the bus
- * holds as at the call that produced them.
- *
  * @param relic Held record to detach.
  * @returns A fresh frozen record.
  */
@@ -1002,24 +796,7 @@ function adoptLive(
   relic.state = live.state;
 }
 
-/* --------------------------------------------------------------------------
- * The run port
- * ----------------------------------------------------------------------- */
-
-/**
- * The seven operations a run controller drives a registry through.
- *
- * DECLARED HERE, NOT IMPORTED. `RelicRegistryPort` of
- * src/run/run-controller.ts declares the same members, so this record
- * satisfies that port structurally and neither folder imports the other. Every
- * member is total: none raises, whatever it is given.
- *
- * `pickUpRelic` is the LIVE registration step, and `activateRelic` is the same
- * step under the other name the consumer accepts for it. A reward that is not
- * taken on through one of them never reaches src/engine/hook-bus.ts, so its
- * handlers never fire and the projection this port reports does not carry it —
- * which is how a controller-only append was erased by the next commit.
- */
+/** The seven operations a run controller drives a registry through. */
 export interface RelicRunPort {
   /** Projects the relics held, in pickup order, refreshed from the bus. */
   readonly snapshotRelics: () => readonly PersistedRelic[];
@@ -1051,11 +828,6 @@ export interface RelicRunPort {
    * The SAME activation step as `pickUpRelic`, under the second name
    * `RelicRegistryPort` of src/run/run-controller.ts accepts for it.
    *
-   * Published because the consumer accepts either spelling and a port
-   * publishing neither cannot register anything: a reward taken on through a
-   * port that omitted this reached the controller's list alone, fired on no
-   * hook, and was erased by the next commit's projection.
-   *
    * @returns The entry to persist for the relic the registry accepted, and
    *   `null` for one it refused.
    */
@@ -1065,25 +837,7 @@ export interface RelicRunPort {
   readonly holdsRelic: (relicId: string) => boolean;
 }
 
-/* --------------------------------------------------------------------------
- * The registry
- * ----------------------------------------------------------------------- */
-
-/**
- * How one registry is constructed. Every member is optional, so a unit test
- * constructs a registry with no argument and no mocking library, as
- * src/engine/engine.ts is constructed.
- */
-/**
- * What `RelicRegistry.activate()` reports.
- *
- * The bus's `ChargeConsumption` FLATTENED onto the result — `held`, `limited`,
- * `consumed` and `remaining` are read directly — plus the identifier the target
- * resolved to and the same report under `consumption`. Both shapes are carried
- * because both are needed: a caller holding an identifier reads the consumption
- * it asked for, and a caller holding a pickup position must first learn which
- * relic that position named.
- */
+/** What `RelicRegistry.activate` reports. */
 export interface RelicActivation extends ChargeConsumption {
   /** Identifier addressed, or `null` where the target named nothing held. */
   readonly relicId: string | null;
@@ -1095,12 +849,15 @@ export interface RelicActivation extends ChargeConsumption {
   readonly consumption?: ChargeConsumption;
 }
 
+/**
+ * How one registry is constructed. Every member is optional, so a unit test
+ * constructs a registry with no argument and no mocking library, as
+ * src/engine/engine.ts is constructed.
+ */
 export interface RelicRegistryOptions {
   /**
    * Relics `pickUp` and `restore` resolve an identifier against. Defaults to
-   * `RELIC_CATALOGUE`, and a shorter pool may be injected in its place. A
-   * supplied array is copied and frozen, so the caller's array is neither held
-   * nor modified.
+   * `RELIC_CATALOGUE`, and a shorter pool may be injected in its place.
    */
   readonly catalogue?: readonly Relic[];
 
@@ -1117,28 +874,12 @@ export interface RelicRegistryOptions {
   /**
    * Correlation identifier of the run, carried on every report. Injected,
    * never derived here: the one authority is `deriveCorrelationId` in
-   * src/observability/logger.ts. Defaults to the empty string.
-   *
-   * A READER IS ACCEPTED: pass a function and every report resolves the
-   * identifier at the moment it is made, so a registry that outlives one run of
-   * a page load — or one cleared and refilled for a second run — reports under
-   * the run that is actually playing rather than under the first.
+   * src/observability/logger.ts.
    */
   readonly correlationId?: CorrelationSource;
 }
 
-/**
- * The relics one run holds, in pickup order.
- *
- * Generalises the three fixed subscriptions of js/game_manager.js L9-L11 into
- * a set that grows as a run collects relics. Pickup order is assigned here and
- * is the order src/engine/hook-bus.ts dispatches in, so it decides both how
- * effects compound and the order handlers consume randomness in; the HUD reads
- * the same order for its tray.
- *
- * NOTHING HERE BRANCHES ON AN INDIVIDUAL RELIC. Every method treats a relic
- * through `Relic`, `ActiveRelic` and `PersistedRelic` alone.
- */
+/** The relics one run holds, in pickup order. */
 export class RelicRegistry {
   /** Relics an identifier is resolved against, frozen. */
   private readonly pool: readonly Relic[];
@@ -1150,24 +891,12 @@ export class RelicRegistry {
 
   private readonly reporter: EngineReporter;
 
-  /**
-   * Reads the run correlation identifier every report carries.
-   *
-   * Resolved from a pinned string or a shared scope, and read per report rather
-   * than once at construction, because a page load can play more than one run.
-   */
+  /** Reads the run correlation identifier every report carries. */
   private readonly readCorrelationId: () => CorrelationId;
 
   /**
    * The correlation identifier every report from this registry carries, as it
    * stands now.
-   *
-   * REPUBLISHED, NOT DERIVED, exactly as `RunController.correlationId()`
-   * republishes it: src/engine/types.ts names `deriveCorrelationId` in
-   * src/observability/logger.ts as the one deriver, and the empty string is what
-   * a registry constructed without one carries. Readable so the identifier a
-   * relic report will carry is verifiable without a report having to be
-   * provoked.
    */
   get correlationId(): CorrelationId {
     return this.readCorrelationId();
@@ -1179,7 +908,6 @@ export class RelicRegistry {
   /**
    * Pickup position the next relic takes. Advances only on a pickup that was
    * accepted and is never reassigned, so removing a relic renumbers nothing.
-   * Reset by `clear()`, which starts a new run at position zero.
    */
   private nextPickupOrder = 0;
 
@@ -1190,9 +918,8 @@ export class RelicRegistry {
     const supplied = options.catalogue;
 
     // An injected catalogue is ADOPTED entry by entry: the caller's array and
-    // the caller's objects are neither held nor modified, and what the registry
-    // resolves against is frozen at every level. `RELIC_CATALOGUE` is used as
-    // it stands, `freezeFamily` having already frozen it at module scope.
+    // the caller's objects are neither held nor modified, and what the
+    // registry resolves against is frozen at every level.
     this.pool =
       supplied === undefined
         ? RELIC_CATALOGUE
@@ -1210,10 +937,6 @@ export class RelicRegistry {
       this.count(CATALOGUE_DUPLICATE_METRIC, repeated.length);
     }
   }
-
-  /* ------------------------------------------------------------------------
-   * Reporting
-   * --------------------------------------------------------------------- */
 
   /**
    * Delivers one counter, containing a throw from the reporter itself as
@@ -1248,16 +971,8 @@ export class RelicRegistry {
     return this.faults;
   }
 
-  /* ------------------------------------------------------------------------
-   * Bus attachment
-   * --------------------------------------------------------------------- */
-
   /**
    * Registers one relic with the bus, ONCE, carrying its whole handler table.
-   * The bus binds only the hooks the table binds to a callable handler, so a
-   * relic acting on one hook creates one binding rather than six, and the
-   * budget and the slot the registration carries are shared by every binding
-   * it creates.
    *
    * @param relic Record to register.
    * @returns `true` when there is no bus, and otherwise whatever
@@ -1379,11 +1094,6 @@ export class RelicRegistry {
   /**
    * Resolves a declaration from an identifier or from a declaration.
    *
-   * An identifier is looked up in this registry's catalogue. A declaration is
-   * taken on its own terms once it carries a usable shape and need not appear
-   * in that catalogue; it is ADOPTED rather than held, so the caller's object
-   * is neither retained nor modified and what this registry holds is frozen.
-   *
    * @param relic Declaration or identifier.
    * @returns The declaration, or `undefined` for an identifier the catalogue
    *   does not carry and for a value that is not a usable declaration.
@@ -1399,16 +1109,11 @@ export class RelicRegistry {
 
     // An entry already in this registry's pool is the pool's own frozen object
     // and is used as it stands; anything else is a declaration from outside.
-    // The identifier is read as data, so a `Proxy` declaration runs no trap.
     const id = readDataMember(relic, 'id');
     const known = typeof id === 'string' ? this.index.get(id) : undefined;
 
     return known === relic ? known : adoptDefinition(relic);
   }
-
-  /* ------------------------------------------------------------------------
-   * Pickup
-   * --------------------------------------------------------------------- */
 
   /**
    * Takes one relic on for the rest of the run.
@@ -1422,8 +1127,8 @@ export class RelicRegistry {
    *   registry's catalogue.
    * @returns A fresh frozen record detached from the registry's own, or
    *   `undefined` for an identifier the catalogue does not carry, a value that
-   *   is not a usable declaration, a relic already held, and a registration the
-   *   bus refused. Raises nothing.
+   *   is not a usable declaration, a relic already held, and a registration
+   *   the bus refused. Raises nothing.
    */
   pickUp(relicOrId: Relic | string): ActiveRelic | undefined {
     const held = this.take(relicOrId, undefined);
@@ -1431,46 +1136,26 @@ export class RelicRegistry {
     return held === undefined ? undefined : detachRelic(held);
   }
 
-  /* ------------------------------------------------------------------------
-   * Activation
-   * --------------------------------------------------------------------- */
-
   /**
    * Spends charges from a held relic's budget.
    *
-   * THE ONE PATH A BUDGET IS SPENT ON FROM OUTSIDE A DISPATCH. src/engine/hook-bus.ts
-   * writes a budget in exactly two places — the spend a handler asks for through
-   * `HookContext.spendCharge`, and `consumeCharge`, which this method calls — so a
-   * manual activation and a handler's own request draw on ONE shared pool. The
-   * bus's own report is handed straight back, so a caller sees whether the relic
-   * was held, whether it is charge-limited, how many charges were actually taken,
-   * and how many remain, which is what makes exhaustion observable rather than
-   * silent.
-   *
-   * ADDRESSED BY IDENTIFIER OR BY PICKUP POSITION. A string names the relic
-   * directly, which is what a run controller and the relic API hold. A number is
-   * a zero-based PICKUP POSITION, which is what a player's `activateRelic` press
-   * carries: the HUD's relic tray is rendered in pickup order — the same order
-   * the bus dispatches in — so the index resolves against `active()` directly and
-   * a player activating "the second relic" spends from the relic they can see in
-   * the second slot.
-   *
    * TOTAL. Raises nothing. An identifier that is not held, a position past the
-   * relics held, a position or amount that is not a whole number in range, and a
-   * registry with no bus each spend nothing and report it.
+   * relics held, a position or amount that is not a whole number in range, and
+   * a registry with no bus each spend nothing and report it.
    *
    * @param target Identifier of the relic to spend from, or its zero-based
    *   pickup position.
    * @param amount Charges to spend; defaults to `1`. A value that is not a
    *   positive whole number spends nothing.
-   * @returns The bus's consumption report, flattened onto the result, together
-   *   with the identifier addressed — `null` where nothing was held there — and
-   *   the same report under `consumption`, absent where nothing was asked of the
-   *   bus.
+   * @returns The bus's consumption report, flattened onto the result,
+   *   together with the identifier addressed — `null` where nothing was held
+   *   there — and the same report under `consumption`, absent where nothing
+   *   was asked of the bus.
    */
   activate(target: string | number, amount = 1): RelicActivation {
     // Read from the refreshed held list, so an identifier resolves against the
-    // budgets the bus holds and a position against the order the tray rendered.
+    // budgets the bus holds and a position against the order the tray
+    // rendered.
     this.refresh();
 
     const byPosition = typeof target !== 'string';
@@ -1523,9 +1208,6 @@ export class RelicRegistry {
       this.count(ACTIVATE_EXHAUSTED_METRIC);
     }
 
-    // The bus is the authority on the budget, so what it left is copied back onto
-    // this registry's own record at once rather than at the next refresh, and the
-    // refresh below carries it onto every projection `serialize()` persists.
     if (consumption.remaining !== undefined) {
       held.charges = consumption.remaining;
     }
@@ -1535,19 +1217,15 @@ export class RelicRegistry {
     return Object.freeze({ ...consumption, relicId, consumption });
   }
 
-  /* ------------------------------------------------------------------------
-   * Queries
-   * --------------------------------------------------------------------- */
-
   /**
-   * Reads the held relics IN PICKUP ORDER, refreshed from the bus.
+   * Reads the held relics in pickup order, refreshed from the bus.
    *
    * Never sorted, grouped or rearranged by rarity, family or name: the order
    * is acquisition order. A consumer wanting another grouping derives it.
    *
-   * @returns A fresh frozen array of fresh frozen records, each detached from
-   *   the registry's own. A budget read here is the budget the bus holds as at
-   *   this call, and writing to what is returned changes nothing held.
+   * @returns A fresh frozen array of fresh frozen records, each detached
+   *   from the registry's own. A budget read here is the budget the bus holds
+   *   as at this call, and writing to what is returned changes nothing held.
    */
   active(): readonly ActiveRelic[] {
     this.refresh();
@@ -1583,12 +1261,8 @@ export class RelicRegistry {
   }
 
   /**
-   * Reports whether this registry's catalogue carries an identifier, whether or
-   * not the relic is held.
-   *
-   * The check a reward selection is validated with: an identifier no catalogue
-   * carries is an identifier no offer could have drawn, and is refused before a
-   * pickup is attempted.
+   * Reports whether this registry's catalogue carries an identifier, whether
+   * or not the relic is held.
    *
    * @param id Identifier to look for.
    * @returns `true` when the catalogue carries the identifier.
@@ -1598,7 +1272,7 @@ export class RelicRegistry {
   }
 
   /**
-   * Reads the identifiers of the held relics IN PICKUP ORDER, which is the
+   * Reads the identifiers of the held relics in pickup order, which is the
    * `ownedIds` argument `drawRelicOffers` of src/relics/relic-draw.ts excludes
    * from an offer set.
    *
@@ -1621,8 +1295,8 @@ export class RelicRegistry {
 
   /**
    * Reads the relics an identifier is resolved against: the injected catalogue
-   * where one was injected, and `RELIC_CATALOGUE` otherwise. This is the `pool`
-   * argument `drawRelicOffers` of src/relics/relic-draw.ts draws from.
+   * where one was injected, and `RELIC_CATALOGUE` otherwise. This is the
+   * `pool` argument `drawRelicOffers` of src/relics/relic-draw.ts draws from.
    *
    * @returns The frozen catalogue; not a copy.
    */
@@ -1651,10 +1325,6 @@ export class RelicRegistry {
     );
   }
 
-  /* ------------------------------------------------------------------------
-   * Run lifecycle
-   * --------------------------------------------------------------------- */
-
   /**
    * Drops every held relic and unregisters each one from the bus, leaving the
    * registry as a fresh run finds it with pickup order back at position zero.
@@ -1681,21 +1351,18 @@ export class RelicRegistry {
     }
   }
 
-  /* ------------------------------------------------------------------------
-   * Persistence conversion
-   * --------------------------------------------------------------------- */
-
   /**
-   * Projects the held relics to the `relics` member of AAP Contract 5, IN
-   * PICKUP ORDER: `Array<{ id, charges?, state? }>`.
+   * Projects the held relics to the `relics` member of AAP Contract 5, in
+   * pickup order: `Array<{ id, charges?, state? }>`.
    *
-   * Corresponds to `serialize()` at js/game_manager.js L102-L110. `charges` is
+   * Corresponds to `serialize` at js/game_manager.js L102-L110. `charges` is
    * written only for a relic carrying a budget and `state` only where a slot
    * survives the copy, so the persisted payload carries no `undefined` member.
-   * No storage is reached: src/run/run-state-store.ts writes what this returns.
+   * No storage is reached: src/run/run-state-store.ts writes what this
+   * returns.
    *
-   * @returns A fresh array of fresh plain objects, refreshed from the bus, so
-   *   a budget spent during the turn just played is the budget persisted.
+   * @returns A fresh array of fresh plain objects, refreshed from the bus,
+   *   so a budget spent during the turn just played is the budget persisted.
    */
   serialize(): PersistedRelic[] {
     this.refresh();
@@ -1712,14 +1379,9 @@ export class RelicRegistry {
   /**
    * Projects ONE held relic to the persisted triple of AAP Contract 5.
    *
-   * The single-relic counterpart of `serialize()`, and what a caller persisting
-   * a freshly picked-up relic reads: the budget and slot are refreshed from the
-   * bus first, so the entry carries the values the bus holds rather than the
-   * values the declaration seeded.
-   *
    * @param id Identifier of the relic to project.
-   * @returns A fresh `{ id, charges?, state? }`, or `null` where the relic is
-   *   not held. Raises nothing.
+   * @returns A fresh `{ id, charges?, state? }`, or `null` where the relic
+   *   is not held. Raises nothing.
    */
   persistedEntry(id: string): PersistedRelic | null {
     this.refresh();
@@ -1738,13 +1400,6 @@ export class RelicRegistry {
    * Corresponds to the `if (previousState)` rehydration branch at
    * js/game_manager.js L36-L45. The array's own order becomes pickup order, so
    * a resumed run dispatches in the order the saved run dispatched in.
-   *
-   * TOTAL. Every input is accepted and none raises, which is the guard
-   * js/local_storage_manager.js L54 lacked: `null`, `undefined`, a value that
-   * is not an array and an empty array each leave no relic held; an entry with
-   * no identifier, with an identifier that is not a non-empty string, with an
-   * identifier the catalogue does not carry, or repeating an identifier already
-   * restored is skipped and reported, and the entries around it still load.
    *
    * @param persisted Entries to restore.
    */
@@ -1770,20 +1425,6 @@ export class RelicRegistry {
 
   /**
    * Builds the port a run controller drives this registry through.
-   *
-   * THE ONE ROUTE BETWEEN THE TWO FOLDERS. `RelicRegistryPort` of
-   * src/run/run-controller.ts names the same members, so the object
-   * returned here satisfies that port without either folder importing the
-   * other. Each member is bound to this instance and reads through to it on
-   * every call, so a relic taken on after the port was built is a relic the
-   * port reports.
-   *
-   * `pickUpRelic` is what makes a chosen reward LIVE: it registers the relic's
-   * handlers with the bus and returns the entry to persist for exactly the
-   * relic the registry accepted, so the controller can append that entry rather
-   * than one of its own. `activateRelic` is published alongside it as the same
-   * step under the consumer's other name for it, so a reward transaction
-   * reaching for either spelling finds one.
    *
    * @returns A frozen port bound to this registry.
    */
@@ -1812,9 +1453,6 @@ export class RelicRegistry {
 
       pickUpRelic: takeOn,
 
-      // Added because `RunController.selectReward()` reaches for an activation
-      // member and this port published none: the relic was recorded and never
-      // registered.
       activateRelic: takeOn,
 
       holdsRelic: (relicId: string): boolean => this.has(relicId),
@@ -1839,20 +1477,16 @@ export class RelicRegistry {
     this.take(id, entry);
   }
 
-  /* ------------------------------------------------------------------------
-   * Commit context
-   * --------------------------------------------------------------------- */
-
   /**
-   * Projects the held relics to the relic slice of a state commit, IN PICKUP
-   * ORDER, refreshed from the bus.
+   * Projects the held relics to the relic slice of a state commit, in pickup
+   * order, refreshed from the bus.
    *
    * Satisfies `RelicCommitContext` of src/engine/types.ts, the port the engine
    * declares locally so that it never imports src/relics. `state` is not
    * carried: a commit's consumers show an identifier and a charge count.
    *
-   * @returns A fresh frozen array, and `EMPTY_RELIC_CONTEXT` while no relic is
-   *   held.
+   * @returns A fresh frozen array, and `EMPTY_RELIC_CONTEXT` while no relic
+   *   is held.
    */
   relicContext(): RelicCommitContext {
     this.refresh();
@@ -1876,17 +1510,6 @@ export class RelicRegistry {
   commitContextProvider(): RelicCommitContextProvider {
     return (): RelicCommitContext => this.relicContext();
   }
-
-  /* ------------------------------------------------------------------------
-   * The run controller's port
-   * --------------------------------------------------------------------- */
-
-  // src/run/run-controller.ts declares `RelicRegistryPort` structurally rather
-  // than importing this class, so that src/run compiles and is exercised
-  // without src/relics. The three members below are that port, and a
-  // `RelicRegistry` therefore satisfies it as it stands: the controller
-  // round-trips the held relics through them on every load, every write and
-  // every reward it resolves.
 
   /**
    * `RelicRegistryPort.snapshotRelics`: the held relics in pickup order, with
@@ -1912,15 +1535,9 @@ export class RelicRegistry {
    * `RelicRegistryPort.resolveRelic`: takes one drawn relic on and reports the
    * entry to persist for it.
    *
-   * The pickup happens HERE, which is what registers the relic's handlers with
-   * the bus: the controller resolves a reward by identifier and the registry
-   * turns that identifier into a live, dispatching subscriber. A relic already
-   * held is reported at the charges and state it already carries rather than
-   * being reseated, so resolving the same identifier twice cannot reset it.
-   *
    * @param relicId Identifier the reward screen drew.
-   * @returns The entry to persist, or `null` for an identifier this registry's
-   *   catalogue does not carry and for a pickup the bus refused.
+   * @returns The entry to persist, or `null` for an identifier this
+   *   registry's catalogue does not carry and for a pickup the bus refused.
    */
   resolveRelic(relicId: string): PersistedRelic | null {
     const held = this.find(relicId);
@@ -1942,15 +1559,8 @@ export class RelicRegistry {
    * `RelicRegistryPort.relicBoardSize`: the smallest edge length the persisted
    * relic entries imply, or `undefined` where they imply none.
    *
-   * GENERIC, AND NAMES NO RELIC. Any relic whose persisted `state` carries a
-   * numeric `boardSize` is declaring the edge length its effect leaves the
-   * board at; the smallest such declaration wins, because a board that two
-   * relics have shrunk stands at the smaller of the two. AAP Contract 3 forbids
-   * special-casing an individual relic, so this reads the declaration rather
-   * than the identifier — a second board-mutating relic needs no change here.
-   *
    * Called BEFORE the board is reconciled, on the entries
-   * `RunStateStore.peekRelics()` read straight out of storage, so the size a
+   * `RunStateStore.peekRelics` read straight out of storage, so the size a
    * cursed relic left the board at is applied to the lattice a resumed run is
    * built on.
    *
@@ -1982,8 +1592,8 @@ export class RelicRegistry {
  * The edge length one persisted entry declares through its own state slot.
  *
  * @param relic Entry to read.
- * @returns A positive safe integer, or `undefined` where the entry declares no
- *   usable edge length.
+ * @returns A positive safe integer, or `undefined` where the entry declares
+ *   no usable edge length.
  */
 function readDeclaredBoardSize(relic: PersistedRelic): number | undefined {
   const state: unknown = readPersisted(relic, 'state');

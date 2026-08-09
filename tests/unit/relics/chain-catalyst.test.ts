@@ -1,69 +1,7 @@
 // Isolation suite of `chain-catalyst`, the rarity-index-3 relic of the
 // `merge-magic` family declared in src/relics/families/merge-magic.ts.
 //
-// The three properties every suite under tests/unit/relics/ holds a relic to,
-// asserted here against this one relic and nothing else:
-//   1. it fires only on the hooks it binds;
-//   2. it produces its specified effect — the widened merge predicate it
-//      records on `onStageStart`, and the corrected produced value it returns
-//      on `onMerge`;
-//   3. it respects `charges`, including an invocation made while the notional
-//      subscription budget stands at zero.
-//
-// THE HANDLERS ARE INVOKED DIRECTLY, through a `HookContext` this file builds.
-// The dispatch mechanism — pickup order, the charge guard, the compounding of
-// one handler's return into the next, error isolation — belongs to
-// src/engine/hook-bus.ts and is asserted in tests/unit/engine/hook-bus.test.ts
-// and tests/unit/engine/hook-bus-charges.test.ts. Nothing below re-proves it.
-//
-// Vanilla provenance, the merge branch of js/game_manager.js, deleted:
-//   L156  `next && next.value === tile.value && !next.mergedFrom`
-//         -> `config.merge.canMerge`, the member this relic records a wrapper
-//            over, with the `next &&` existence guard left outside it.
-//   L157  `new Tile(positions.next, tile.value * 2)`
-//         -> `config.merge.produce`, whose return src/engine/move-resolver.ts
-//            carries into the payload as `resultValue`.
-//   L167  `self.score += merged.value`
-//         -> the payload's `scoreDelta`, dispatched EQUAL to `resultValue`.
-//   L170  `merged.value === 2048`
-//         -> `config.winValue`, compared in src/engine/terminal-state.ts.
-// Every expectation below is DERIVED from `config.merge.produce`,
-// `defaultCanMerge` and `defaultProduceMergeValue`. No doubling table and no
-// `* 2` literal stands in for any of the three.
-//
-// Traceability rows of docs/TRACEABILITY_MATRIX.md this suite is evidence for:
-//   TR-MERGE-04    the `chain-catalyst` declaration and its two handlers
-//   TR-HOOK-01     onStageStart, js/game_manager.js L35-L59
-//   TR-HOOK-03     onMerge, js/game_manager.js L156-L170
-//   TR-CONFIG-05   the merge predicate and producer pair
-//   TR-DEFAULT-05  `defaultCanMerge`, js/game_manager.js L156
-//   TR-DEFAULT-06  `defaultProduceMergeValue`, js/game_manager.js L157
-//
-// Named figures these assertions are the mechanical proof of: Figure 4, "Turn
-// Data Flow: From Keystroke to Composited Frame and Persisted Run State", in
-// docs/architecture/data-flow.md, whose `Merge condition from
-// config.merge.canMerge` decision node and `onMerge dispatch, score delta
-// applied` node are the two steps this relic rewrites; and Figure 5, "Hook
-// Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard and Error
-// Isolation", in docs/architecture/hook-dispatch-sequence.md, whose
-// transformed-payload return is what section 4 reads back.
-//
-// Coverage owned by sibling suites and not repeated here: the installed
-// predicate reached through a real bus and the two-relic wrapper chain
-// (tests/unit/relics/relic-effects.test.ts and
-// tests/unit/relics/merge-magic.test.ts), the win comparison against
-// `config.winValue` (tests/unit/engine/terminal-state.test.ts), the merge
-// schema (tests/unit/config/rules-config.test.ts), and the board-effect queue
-// itself (tests/unit/engine/board-effects.test.ts).
-//
-// Decisions of docs/DECISION_LOG.md this suite is the evidence for:
-// DL-MERGE-01, DL-MERGE-02 and DL-CONFIG-01.
-//
-// This suite reads no DOM and no storage, installs no mock, replaces no
-// global, reads no clock and starts no timer; every double below is
-// hand-written, and any draw would resolve against a substream derived from
-// one literal seed. It runs in the `unit:dom-free` project of
-// vitest.config.ts, whose environment is 'node'.
+// Decisions: DL-MERGE-01, DL-MERGE-02, DL-CONFIG-01 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -111,10 +49,6 @@ import type {
 } from '../../../src/rng/rng-streams';
 import { MERGE_PAIR_BOARD } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. The harness
- * ========================================================================== */
-
 /** Identifier of the relic under test. */
 const RELIC_ID = 'chain-catalyst';
 
@@ -160,7 +94,9 @@ const UNBOUND_HOOKS: readonly HookName[] = HOOK_NAMES.filter(
   (name) => name !== 'onStageStart' && name !== 'onMerge',
 );
 
-/** The members `MergePayload` declares, in the order this suite builds them. */
+/**
+ * The members `MergePayload` declares, in the order this suite builds them.
+ */
 const MERGE_PAYLOAD_MEMBERS: readonly string[] = [
   'resultValue',
   'scoreDelta',
@@ -170,9 +106,7 @@ const MERGE_PAYLOAD_MEMBERS: readonly string[] = [
 
 /**
  * Every named substream at rest: the cursor map a dispatch taking no draw
- * reads both before and after it runs. `RngCursorMap` is keyed by every
- * `StreamName`, so an added substream fails to compile here, and section 6
- * asserts these keys against the exported `RNG_STREAM_NAMES` tuple.
+ * reads both before and after it runs.
  */
 const CURSORS_AT_REST: RngCursorMap = Object.freeze({
   'spawn-value': 0,
@@ -245,14 +179,9 @@ const DECLARED_AT_IMPORT = Object.freeze({
   onMerge: mergeHandler(),
 });
 
-/* --------------------------------------------------------------------------
- * 1.1 Operands and payloads
- * ----------------------------------------------------------------------- */
-
 /**
  * A live tile, which is the operand src/engine/move-resolver.ts L300 hands
- * `config.merge.canMerge` and L303 projects into the merge payload. `Tile`
- * satisfies both `MergeTileView` and `ReadonlyTileView` structurally.
+ * `config.merge.canMerge` and L303 projects into the merge payload.
  *
  * @param x Column the tile occupies.
  * @param y Row the tile occupies.
@@ -265,9 +194,7 @@ function tileAt(x: number, y: number, value: number): Tile {
 
 /**
  * A live tile carrying a recorded merge pair, which is the state
- * js/game_manager.js L158 left on a tile it had just produced. `mergedFrom` is
- * read for presence, and the pair is recorded as two tiles of `parent` so the
- * shape stays faithful to L158.
+ * js/game_manager.js L158 left on a tile it had just produced.
  *
  * @param x Column the tile occupies.
  * @param y Row the tile occupies.
@@ -326,7 +253,7 @@ function raise(produce: MergeProducer, value: number): number {
 /**
  * Reports whether `value` is a rung the producer reaches from `start`, so a
  * corrected result can be shown to be a value the base game could itself have
- * produced. Bounded by `LADDER_WALK_LIMIT` applications.
+ * produced.
  *
  * @param produce Producer the rungs are walked with.
  * @param start Face value the walk begins at.
@@ -351,16 +278,9 @@ function reachableFrom(
   return false;
 }
 
-/* --------------------------------------------------------------------------
- * 1.2 The capability views a dispatch carries
- * ----------------------------------------------------------------------- */
-
 /**
  * The frozen rules projection src/engine/hook-bus.ts builds from the live
- * `RulesConfig` once per dispatch. Built per dispatch here as well, so a rule
- * substituted between dispatches is the rule the next one reads, and the
- * spawn arrays are copied so freezing the projection leaves the live config
- * writable.
+ * `RulesConfig` once per dispatch.
  *
  * @param config Live rules to project.
  * @returns The readonly view.
@@ -385,8 +305,7 @@ function rulesView(config: RulesConfig): ReadonlyRulesView {
 
 /**
  * The query half of the live board, with `cellValue` standing in for
- * `cellContent` so no live `Tile` is reachable through it. Reads resolve
- * against the board in force at the moment they are called.
+ * `cellContent` so no live `Tile` is reachable through it.
  *
  * @param grid Live board to face.
  * @returns The readonly view.
@@ -409,10 +328,6 @@ function gridView(grid: Grid): ReadonlyGridView {
   return Object.freeze(view);
 }
 
-/* --------------------------------------------------------------------------
- * 1.3 The board-effect queue a dispatch records through
- * ----------------------------------------------------------------------- */
-
 /**
  * A fresh coordinate, so a recorded command holds no object its caller can
  * write through.
@@ -428,10 +343,6 @@ function cellOf(cell: Position): Position {
  * Reduces a descriptor to the command it names, reading both spellings of a
  * restore's lattice and both of a resize's edge length, as
  * src/engine/board-effects.ts does.
- *
- * Validation beyond a callable predicate and a present operand is that
- * module's own and is asserted in tests/unit/engine/board-effects.test.ts;
- * this reduction records what it is handed.
  *
  * @param effect Descriptor to reduce.
  * @returns The command, or `null` for a descriptor naming none.
@@ -488,10 +399,7 @@ function commandOf(effect: BoardEffectRequest): BoardEffect | null {
 
 /**
  * A queue that RECORDS every command in the vocabulary and answers its five
- * queries from the live lattice. Each named member reduces its arguments
- * through `commandOf`, the same reduction `request` uses, so the named and the
- * descriptor forms cannot diverge. Nothing throws, and a command the reduction
- * refuses raises `refused` and is not recorded.
+ * queries from the live lattice.
  *
  * @param grid Live board the queries read.
  * @returns The queue.
@@ -563,14 +471,10 @@ function createEffectQueue(grid: Grid): BoardEffectQueue {
   return queue;
 }
 
-/* --------------------------------------------------------------------------
- * 1.4 The bench and the dispatch
- * ----------------------------------------------------------------------- */
-
 /** The collaborators one test drives the two handlers through. */
 interface Bench {
   /**
-   * The live rules. Always from `createDefaultRulesConfig()`, never the
+   * The live rules. Always from `createDefaultRulesConfig`, never the
    * deep-frozen `DEFAULT_RULES_CONFIG`, and rebuilt for every test.
    */
   readonly config: RulesConfig;
@@ -611,10 +515,6 @@ function createBench(grid?: Grid): Bench {
  * The context one dispatch carries: the three capability views, the effect
  * queue, the run correlation identifier, the dispatch identity and the
  * subscriber's own state slot.
- *
- * The views are rebuilt on every call, as src/engine/hook-bus.ts rebuilds them
- * per dispatch, and `state` is an accessor pair onto the bench so a handler's
- * write is observable.
  *
  * @param bench Bench to build over.
  * @param hook Hook being dispatched.
@@ -851,11 +751,7 @@ beforeEach(() => {
   bench = createBench();
 });
 
-/* ==========================================================================
- * 2. Property 1: it fires only on the hooks it binds
- * ========================================================================== */
-
-describe('the chain-catalyst declaration, TR-MERGE-04', () => {
+describe('the chain-catalyst declaration', () => {
   it('is reached by id from its family and from the catalogue', () => {
     const declared = relicUnderTest();
 
@@ -908,10 +804,6 @@ describe('the chain-catalyst declaration, TR-MERGE-04', () => {
     ]);
   });
 });
-
-/* ==========================================================================
- * 3. Property 2a: the merge predicate the stage-start hook records
- * ========================================================================== */
 
 describe('the merge predicate chain-catalyst records on stage start', () => {
   it('records exactly one board command, the rule substitution', () => {
@@ -1018,22 +910,49 @@ describe('the merge predicate chain-catalyst records on stage start', () => {
   });
 
   it(
-    'admits a ladder pair on the two values alone, so a target that ' +
-      'already merged this turn is admitted by the widening and not by the ' +
-      'base rule',
+    'refuses a ladder pair whose target already merged this turn, in both ' +
+      'operand orders',
     () => {
       const installed = openStage(bench);
-      const high = raise(bench.config.merge.produce, PROBE_VALUE);
-      const moving = tileAt(1, 0, PROBE_VALUE);
-      const merged = mergedTileAt(0, 0, high, PROBE_VALUE);
+      const produce = bench.config.merge.produce;
+      const high = raise(produce, PROBE_VALUE);
 
-      // The wrapper preserves the delegate's verdict as an OR: the delegate
-      // refuses for the recorded merge, and the ladder branch then decides on
-      // the two face values.
-      expect(defaultCanMerge(moving, merged)).toBe(false);
-      expect(installed(moving, merged)).toBe(true);
+      // The ladder branch is symmetric in the two face values, so the guard is
+      // asserted with the recorded merge on the LARGER operand and then on the
+      // smaller one. js/game_manager.js L156 held `!next.mergedFrom` beside its
+      // equality test, and src/engine/move-resolver.ts L313 writes `mergedFrom`
+      // onto the tile a merge produced, so a target carrying it has already
+      // merged during the traversal in progress.
+      const lowMoving = tileAt(1, 0, PROBE_VALUE);
+      const mergedHigh = mergedTileAt(0, 0, high, PROBE_VALUE);
+      const highMoving = tileAt(1, 0, high);
+      const mergedLow = mergedTileAt(0, 0, PROBE_VALUE, PROBE_VALUE / 2);
+
+      expect(defaultCanMerge(lowMoving, mergedHigh)).toBe(false);
+      expect(installed(lowMoving, mergedHigh)).toBe(false);
+      expect(defaultCanMerge(highMoving, mergedLow)).toBe(false);
+      expect(installed(highMoving, mergedLow)).toBe(false);
+
+      // The SAME two face values are admitted the moment the target carries no
+      // recorded merge, so the refusals above are the guard and not the ladder
+      // measurement refusing the pair.
+      expect(installed(lowMoving, tileAt(0, 0, high))).toBe(true);
+      expect(installed(highMoving, tileAt(0, 0, PROBE_VALUE))).toBe(true);
     },
   );
+
+  it('refuses a ladder pair whose target merged, on the operand projection ' +
+    'a neighbour probe supplies', () => {
+    const installed = openStage(bench);
+    const high = raise(bench.config.merge.produce, PROBE_VALUE);
+
+    // src/engine/terminal-state.ts probes with a value-only projection, so the
+    // guard is read off `mergedFrom` and never off a live-tile member.
+    expect(
+      installed(operand(PROBE_VALUE), { value: high, mergedFrom: [high] }),
+    ).toBe(false);
+    expect(installed(operand(PROBE_VALUE), operand(high))).toBe(true);
+  });
 
   it('leaves the base rule and the shared default rules untouched', () => {
     const installed = openStage(bench);
@@ -1059,8 +978,7 @@ describe('the merge predicate chain-catalyst records on stage start', () => {
     const moving = tileAt(1, 0, PROBE_VALUE);
 
     // src/engine/move-resolver.ts supplies live tiles; the neighbour probe of
-    // src/engine/terminal-state.ts supplies value-only projections. The
-    // `next &&` existence guard stays outside the predicate in both.
+    // src/engine/terminal-state.ts supplies value-only projections.
     expect(() => installed(moving, tileAt(0, 0, high))).not.toThrow();
     expect(() => installed(operand(PROBE_VALUE), operand(high))).not.toThrow();
     expect(() =>
@@ -1096,19 +1014,15 @@ describe('the merge predicate chain-catalyst records on stage start', () => {
     const doubled = raise(defaultProduceMergeValue, PROBE_VALUE);
     const moving = tileAt(1, 0, PROBE_VALUE);
 
-    // A wrapper nested over the first would still admit the doubling
-    // neighbour through its delegate; the replacement admits only the rung
-    // the producer now in force names.
+    // A wrapper nested over the first would still admit the doubling neighbour
+    // through its delegate; the replacement admits only the rung the producer
+    // now in force names.
     expect(second).not.toBe(first);
     expect(second(moving, tileAt(0, 0, tripled))).toBe(true);
     expect(second(moving, tileAt(0, 0, doubled))).toBe(false);
     expect(second(moving, tileAt(0, 0, PROBE_VALUE))).toBe(true);
   });
 });
-
-/* ==========================================================================
- * 4. Property 2b: the produced value the merge hook corrects
- * ========================================================================== */
 
 describe('the produced value chain-catalyst corrects on a merge', () => {
   it('returns nothing for an equal pair, leaving the merge alone', () => {
@@ -1372,10 +1286,6 @@ describe('the produced value chain-catalyst corrects on a merge', () => {
   });
 });
 
-/* ==========================================================================
- * 5. Property 3: charges, including an invocation at a spent budget
- * ========================================================================== */
-
 describe('chain-catalyst and the charge budget', () => {
   it('declares no charge budget, with the member absent not null', () => {
     const declared = relicUnderTest();
@@ -1388,8 +1298,6 @@ describe('chain-catalyst and the charge budget', () => {
   });
 
   it('names no charge budget in either handler', () => {
-    // src/engine/hook-bus.ts owns the guard and the decrement; a handler that
-    // read a budget would be a second guard.
     for (const source of [
       stageStartHandler().toString(),
       mergeHandler().toString(),
@@ -1470,10 +1378,6 @@ describe('chain-catalyst and the charge budget', () => {
     expect(bench.chargeRequests).toBe(0);
   });
 });
-
-/* ==========================================================================
- * 6. Determinism and substream hygiene
- * ========================================================================== */
 
 describe('chain-catalyst determinism and substream hygiene', () => {
   it('advances no named substream on either hook', () => {
@@ -1563,10 +1467,6 @@ describe('chain-catalyst determinism and substream hygiene', () => {
   });
 });
 
-/* ==========================================================================
- * 7. The declaration and the shared defaults after this suite
- * ========================================================================== */
-
 describe('the declaration and the shared defaults after this suite', () => {
   it('is unmutated, and is still frozen at both levels', () => {
     const declared = relicUnderTest();
@@ -1600,8 +1500,6 @@ describe('the declaration and the shared defaults after this suite', () => {
 
   it('hands every test a fresh, writable rules object', () => {
     // Sections 3 through 6 each left a wrapper in force over their own bench.
-    // This test runs after all of them and reads the default predicate, which
-    // is what the beforeEach rebuild leaves in place.
     expect(bench.config.merge.canMerge).toBe(defaultCanMerge);
     expect(bench.config.merge.produce).toBe(defaultProduceMergeValue);
     expect(Object.isFrozen(bench.config)).toBe(false);

@@ -5,18 +5,6 @@
 // Storage can write it, and every later page load reads it. Two properties of
 // that read are pinned here.
 //
-// SIZE. `grid.size` drives a `size` by `size` allocation in `Grid` and both
-// loops of every traversal. Accepting any positive safe integer meant a stored
-// `2 ** 40` froze startup on every load until the entry was cleared by hand.
-// `isSupportedBoardSize` of src/config/default-config.ts is the product-wide
-// ceiling and is now applied BEFORE any grid is built.
-//
-// TILE COORDINATES. `Grid.fromState` places a tile at the matrix coordinate it
-// was found at while building it from the RECORDED position, so a snapshot whose
-// two disagree produced a tile that believed it was elsewhere; the first move
-// then indexed `grid.cells[tile.x]` outside the lattice and threw. Every
-// restored tile now carries the coordinate of the cell holding it.
-//
 // This suite reads no DOM and no storage; the storage port is a hand-written
 // double. It runs in the `unit:dom-free` project of vitest.config.ts.
 
@@ -71,7 +59,6 @@ function createHarness(stored: unknown): Harness {
   };
 }
 
-/** An otherwise valid snapshot carrying one column of one tile. */
 function createStored(size: unknown, cell: unknown): Record<string, unknown> {
   return {
     grid: { size, cells: [[cell]] },
@@ -120,8 +107,6 @@ describe('a persisted board size above the product ceiling is refused', () => {
 
     engine.setup();
 
-    // Constructing 2**40 columns would not return at all; the assertion is
-    // that the load is refused, and the elapsed bound states why it matters.
     expect(engine.grid.size).toBe(DEFAULT_BOARD_SIZE);
     expect(Date.now() - startedAt).toBeLessThan(2000);
   });
@@ -156,8 +141,8 @@ describe('a persisted board size above the product ceiling is refused', () => {
 
 describe('a persisted tile is restored into the cell that holds it', () => {
   it('normalises a position that disagrees with its cell', () => {
-    // The tile sits at cells[0][0] but claims to be at (9, 9), which is outside
-    // a four-cell lattice entirely.
+    // The tile sits at cells[0][0] but claims to be at (9, 9), which is
+    // outside a four-cell lattice entirely.
     const { engine } = createHarness(
       createStored(DEFAULT_BOARD_SIZE, {
         position: { x: 9, y: 9 },
@@ -174,8 +159,6 @@ describe('a persisted tile is restored into the cell that holds it', () => {
     expect(tile?.y).toBe(0);
     expect(tile?.value).toBe(2);
 
-    // The move used to throw here: `grid.cells[9]` is undefined, so writing
-    // `grid.cells[tile.x][tile.y] = null` dereferenced it.
     expect(() => {
       engine.move(DIRECTION_UP);
     }).not.toThrow();
@@ -216,8 +199,6 @@ describe('a persisted tile is restored into the cell that holds it', () => {
 
     engine.setup();
 
-    // `Tile` coerces a falsy value to 2, which would have turned a corrupted
-    // entry into a playable tile of a value the snapshot never held.
     expect(engine.grid.cellContent({ x: 0, y: 0 })).toBeNull();
     expect(engine.grid.availableCells()).toHaveLength(
       DEFAULT_BOARD_SIZE * DEFAULT_BOARD_SIZE,
@@ -254,8 +235,6 @@ describe('a persisted tile is restored into the cell that holds it', () => {
   });
 
   it('tolerates a matrix shorter than the size it declares', () => {
-    // One column of one cell, against a declared edge length of four: the
-    // missing columns and rows read as empty rather than failing the load.
     const { engine } = createHarness({
       grid: { size: 4, cells: [[{ position: { x: 0, y: 0 }, value: 4 }], []] },
       score: 0,

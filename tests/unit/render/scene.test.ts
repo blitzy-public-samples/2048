@@ -1,26 +1,7 @@
 // Contract suite for the scene rig's two public argument boundaries, AAP R7.
 //
-// WHY THIS SUITE EXISTS
-//   `BoardScene` exposes the scene, the camera and the board group alongside the
-//   calls that mutate them, and two of those calls trusted arithmetic they had
-//   not measured. Neither failure is a rendering artefact: each takes the canvas
-//   out for the rest of the session.
-//
-//   the graph   `Object3D.add` REPARENTS. `mountBoard` refused only a
-//               non-object and the board group itself, so mounting `scene` —
-//               which is exposed on the same record and IS an ancestor of the
-//               board group — moved the scene beneath its own child and made the
-//               graph cyclic. The next matrix update or render traversal then
-//               recurses until the stack is exhausted.
-//   the frustum  `resize` measured width and height individually and then
-//               derived the aspect and the four planes from them without
-//               measuring either. Two finite positive lengths can still overflow
-//               the ratio — `Number.MAX_VALUE / Number.MIN_VALUE` is `Infinity` —
-//               and that value was assigned straight onto the orthographic
-//               camera, poisoning its projection matrix.
-//
-// The rig is real throughout. `createScene` builds Three.js objects and needs no
-// WebGL context, so every case below runs without a canvas.
+// The rig is real throughout. `createScene` builds Three.js objects and needs
+// no WebGL context, so every case below runs without a canvas.
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { Group, Mesh, Object3D } from 'three';
@@ -33,10 +14,6 @@ import type {
   RenderReporter,
 } from '../../../src/render/webgl-support';
 import { applyTheme } from '../../../src/theme/themes';
-
-/* ==========================================================================
- * Harness
- * ========================================================================== */
 
 interface Harness {
   readonly board: BoardScene;
@@ -98,10 +75,6 @@ function planesAreFinite(board: BoardScene): boolean {
   );
 }
 
-/* ==========================================================================
- * 1. mountBoard refuses a mount that would make the graph cyclic (F-07)
- * ========================================================================== */
-
 describe('mountBoard', () => {
   it('mounts a factory-owned group', () => {
     const { board, names } = harness();
@@ -125,8 +98,7 @@ describe('mountBoard', () => {
     const { board, diagnostics } = harness();
     const sceneParentBefore = board.boardGroup.parent;
 
-    // The mount that made the graph cyclic: `scene` is exposed on the same
-    // record as `boardGroup`, and `add` would have reparented it beneath it.
+    // The mount that made the graph cyclic.
     expect(board.mountBoard(board.scene)).toBe(false);
 
     // Neither edge moved: the board group is still the scene's child, and the
@@ -165,8 +137,6 @@ describe('mountBoard', () => {
 
     board.mountBoard(board.scene);
 
-    // The traversal a cyclic graph would not survive. It terminates, because the
-    // refusal left the graph a tree.
     expect(() => {
       board.scene.updateMatrixWorld(true);
     }).not.toThrow();
@@ -217,8 +187,7 @@ describe('mountBoard', () => {
     const { board, diagnostics } = harness();
     const hostile = new Group();
 
-    // An object whose own parent-change hook raises. `add` invokes it, and the
-    // throw must not escape into the renderer.
+    // An object whose own parent-change hook raises.
     Object.defineProperty(hostile, 'removeFromParent', {
       value: (): never => {
         throw new Error('refused to leave its parent');
@@ -241,10 +210,6 @@ describe('mountBoard', () => {
     expect(board.mountBoard(new Group())).toBe(false);
   });
 });
-
-/* ==========================================================================
- * 2. resize refuses a viewport that resolves to no usable frustum (F-08)
- * ========================================================================== */
 
 describe('resize', () => {
   it('adopts an ordinary viewport and reprojects', () => {
@@ -296,8 +261,7 @@ describe('resize', () => {
     const { board, diagnostics } = harness();
     const before = planesOf(board);
 
-    // Both lengths are finite and positive; the ratio between them is not. This
-    // is the assignment that reached the camera as `Infinity`.
+    // Both lengths are finite and positive; the ratio between them is not.
     expect(board.resize(Number.MAX_VALUE, Number.MIN_VALUE)).toBe(false);
     expect(planesOf(board)).toEqual(before);
     expect(planesAreFinite(board)).toBe(true);
@@ -314,8 +278,8 @@ describe('resize', () => {
     const { board } = harness();
     const before = planesOf(board);
 
-    // The mirror case: the ratio underflows to zero, whose reciprocal — which is
-    // what the shorter axis is scaled by — is `Infinity` again.
+    // The mirror case: the ratio underflows to zero, whose reciprocal — which
+    // is what the shorter axis is scaled by — is `Infinity` again.
     expect(board.resize(Number.MIN_VALUE, Number.MAX_VALUE)).toBe(false);
     expect(planesOf(board)).toEqual(before);
     expect(planesAreFinite(board)).toBe(true);
@@ -329,8 +293,6 @@ describe('resize', () => {
     expect(board.resize(1, 1e6)).toBe(false);
     expect(planesOf(board)).toEqual(before);
 
-    // A wide but plausible viewport is still adopted, so the band refuses the
-    // absurd rather than the merely unusual.
     expect(board.resize(3840, 600)).toBe(true);
     expect(planesAreFinite(board)).toBe(true);
   });
@@ -346,8 +308,7 @@ describe('resize', () => {
     expect(planesOf(board)).toEqual(adopted);
 
     // The rig recovers: the next usable size is adopted as though the refusal
-    // had never been offered. A square viewport, so the planes it resolves to
-    // differ from the 4:3 ones above rather than coinciding with them.
+    // had never been offered.
     expect(board.resize(1024, 1024)).toBe(true);
     expect(planesOf(board)).not.toEqual(adopted);
     expect(planesAreFinite(board)).toBe(true);
@@ -382,10 +343,6 @@ describe('resize', () => {
     expect(planesOf(board)).toEqual(adopted);
   });
 });
-
-/* ==========================================================================
- * 3. reframe keeps the projection finite across a board-size change
- * ========================================================================== */
 
 describe('reframe', () => {
   it('reprojects a new board size and stays finite', () => {

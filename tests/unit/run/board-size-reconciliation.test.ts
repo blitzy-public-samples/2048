@@ -1,74 +1,6 @@
 // Board-size reconciliation: the policy arithmetic, the shrink and the grow
 // rehydration, and the terminal-state reads over the reconciled lattice.
 //
-// AAP 0.4.1.3 names board-size rehydration as the corruption risk of the
-// persistence boundary. Gate V6 requires tile positions and the win/lose check
-// to survive a board-mutating cursed relic INCLUDING ACROSS A RELOAD, and
-// Contract 5 places the reconciliation on the load path, ahead of any lattice
-// construction. The prompt's edge case this discharges: a board-size-altering
-// cursed relic must not corrupt existing tile positions or the win/lose check.
-//
-// THE DEFECT THIS SUITE MEASURES
-//   js/game_manager.js L40-L41 rebuilt the lattice from the size the SNAPSHOT
-//   recorded, `new Grid(previousState.grid.size, previousState.grid.cells)`,
-//   and left L2's `this.size` — the constructor argument, which
-//   js/application.js L3 supplied as the literal 4 — untouched. L248-L249 then
-//   bounded the neighbour probe by that captured size rather than by
-//   `this.grid.size`, while every method of js/grid.js read the live one:
-//   L10/L13, L59-L60, L98-L99 and L105/L108. A board grown past the captured
-//   size therefore had its outer row and column skipped by the probe, which is
-//   a game over declared while a legal merge remained; a board shrunk below it
-//   had cells outside the lattice probed, which js/grid.js L80-L86 answers with
-//   `null` and no throw. src/engine/terminal-state.ts reads the edge length off
-//   its argument at every call, and that is what the sections below measure.
-//
-// Superseded constructs this suite is the named verification target for, in
-// docs/TRACEABILITY_MATRIX.md order:
-//   GameManager.prototype.setup            js/game_manager.js L36-L45, the
-//                                          saved-size rebuild at L40-L41
-//   GameManager.prototype.movesAvailable   js/game_manager.js L238-L240
-//   GameManager.prototype.tileMatchesAvailable
-//                                          js/game_manager.js L243-L268, the
-//                                          captured-size loop at L248-L249
-//   GameManager.prototype.getVector        js/game_manager.js L194-L204
-//   GameManager.prototype.positionsEqual   js/game_manager.js L270-L272
-//   Grid.prototype.fromState               js/grid.js L21-L34, read as
-//                                          state[x][y]
-//   Grid.prototype.cellContent             js/grid.js L80-L86, the
-//                                          out-of-bounds `null` valve
-//   Grid.prototype.withinBounds            js/grid.js L97-L100
-//   Grid.prototype.serialize               js/grid.js L102-L117, `null` in an
-//                                          empty cell at L109
-//   Tile.prototype.serialize               js/tile.js L19-L27
-//   LocalStorageManager, the probe run once at construction and the single
-//   snapshot read                          js/local_storage_manager.js
-//                                          L25-L26, L52-L55
-//
-// Figure this suite is the mechanical proof of: Figure 4 (Turn Data Flow) of
-// docs/architecture/data-flow.md, whose win check reads `config.winValue` and
-// whose loss check is the `Moves available?` decision. Both reads are asserted
-// here over the reconciled edge length, which is the size Figure 4's COMMIT
-// stage persists.
-//
-// Collected by the unit:dom-free project of vitest.config.ts, environment
-// 'node'. Nothing here reads a document, a Web Storage global or a clock;
-// `Math.random` is read for reference identity and never called, wrapped,
-// stubbed or written. No mocking api, no replaced global, no snapshot
-// artifact, and every store and sink is injected.
-//
-// Coverage boundaries this suite stays inside. The loader's five verdicts are
-// tests/unit/run/run-state-store.test.ts, which is also where the surfacing of
-// the reconciled discriminant is asserted; section 15 reads that discriminant
-// only as the entry to the board-integrity assertions it owns. Further out:
-// the registry and controller wiring that supplies a relic-implied size is
-// tests/unit/run/run-relic-board-size.test.ts; cursor resume is
-// tests/unit/run/rng-cursor-persistence.test.ts; relic behaviour, charges and
-// hook dispatch are tests/unit/relics/; the frozen best-score accessor is
-// tests/unit/storage/best-score.test.ts. This file owns the reconciliation
-// policy arithmetic, the rehydrated lattice, and the terminal-state reads over
-// it. Classic dimensionality is frozen: a reconciled edge length is a per-run
-// value, and nothing here assumes a third axis.
-//
 // Decisions behind this file: docs/DECISION_LOG.md.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -137,10 +69,6 @@ import {
   createNearWinBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. Sizes, actions and the reference captured at load
- * ========================================================================== */
-
 /** The edge length every saved fixture below is written at. */
 const SAVED_SIZE = DEFAULT_BOARD_SIZE;
 
@@ -150,7 +78,7 @@ const GROWN_SIZE = SAVED_SIZE + 1;
 /** The edge length the shrink cases reconcile down to. */
 const SHRUNK_SIZE = SAVED_SIZE - 1;
 
-/** The smallest edge length `isSupportedBoardSize()` accepts. */
+/** The smallest edge length `isSupportedBoardSize` accepts. */
 const SMALLEST_SIZE = 1;
 
 const NO_CHANGE: BoardSizeReconciliationAction = 'none';
@@ -177,10 +105,6 @@ const MID_VALUE = 64;
 /** Face value the dropped-tile cases of the highest section carry. */
 const HIGH_VALUE = 1024;
 
-/* ==========================================================================
- * 2. Local board vocabulary
- * ========================================================================== */
-
 /**
  * The five distinct values the bespoke lattices cycle through, as the crowded
  * fixture of tests/fixtures/boards.ts cycles through.
@@ -205,7 +129,6 @@ type CellValue = (x: number, y: number) => number | null;
 /**
  * Builds a serialised matrix, `cells[x][y]`, x-outer and y-inner, with `null`
  * in every empty cell and every tile's `position` set to the cell it occupies.
- * This is the form js/grid.js L102-L117 wrote and js/grid.js L21-L34 read back.
  */
 function buildMatrix(
   size: number,
@@ -273,12 +196,9 @@ function tilesOutside(grid: SerializedGrid, size: number): PlacedTile[] {
 }
 
 /**
- * Asserts the lattice guarantees `reconcileBoardSize()` states for every
- * input: the recorded edge length, a dense square matrix, a cell that is
- * `null` or a tile, and a tile whose `position` is the cell it occupies.
- *
- * js/grid.js L109 wrote `null` into an empty cell and left no hole, so a hole
- * is asserted against rather than tolerated.
+ * Asserts the lattice guarantees `reconcileBoardSize` states for every input:
+ * the recorded edge length, a dense square matrix, a cell that is `null` or a
+ * tile, and a tile whose `position` is the cell it occupies.
  */
 function expectWellFormedGrid(grid: SerializedGrid, size: number): void {
   expect(grid.size).toBe(size);
@@ -331,15 +251,9 @@ function rehydrate(result: BoardSizeReconciliationResult): Grid {
   return new Grid(result.grid.size, result.grid.cells);
 }
 
-/* ==========================================================================
- * 3. The captured-size neighbour probe, as js/game_manager.js ran it
- * ========================================================================== */
-
 /**
- * The four direction vectors of js/game_manager.js L194-L204: 0 up, 1 right,
- * 2 down and 3 left, with y increasing downward. Declared here rather than
- * imported, src/engine/move-resolver.ts being outside this suite's
- * dependencies.
+ * The four direction vectors of js/game_manager.js L194-L204: 0 up, 1 right, 2
+ * down and 3 left, with y increasing downward.
  */
 const PROBE_VECTORS: readonly Vector[] = Object.freeze([
   { x: 0, y: -1 },
@@ -350,9 +264,7 @@ const PROBE_VECTORS: readonly Vector[] = Object.freeze([
 
 /**
  * Whether any of the four neighbours of `cell` merges with `value` under the
- * configured predicate. Both operands reach the predicate with no merge
- * history, which is how src/engine/terminal-state.ts presents them and the
- * state js/game_manager.js L113-L120 had already produced.
+ * configured predicate.
  */
 function probesMatch(
   grid: Grid,
@@ -382,10 +294,7 @@ function probesMatch(
 
 /**
  * js/game_manager.js L243-L268's neighbour probe with its loop bound supplied
- * as an argument. That is the one difference from the source: L248-L249 read
- * the captured `this.size`, where src/engine/terminal-state.ts reads
- * `grid.size`. A bound above the lattice addresses cells outside it, which
- * js/grid.js L80-L86 answers with `null`.
+ * as an argument.
  */
 function matchesWithinBound(
   grid: Grid,
@@ -407,8 +316,7 @@ function matchesWithinBound(
 
 /**
  * Every adjacent equal pair on the board, each counted once, as
- * `"(x,y)-(x,y)"`. Walks the two forward vectors of `PROBE_VECTORS`, so a pair
- * is not reported twice.
+ * `"(x,y)-(x,y)"`.
  */
 function adjacentEqualPairs(grid: Grid): string[] {
   const forward = PROBE_VECTORS.filter(
@@ -429,15 +337,7 @@ function adjacentEqualPairs(grid: Grid): string[] {
   return pairs;
 }
 
-/* ==========================================================================
- * 4. The capturing report sink
- * ========================================================================== */
-
-/**
- * A sink that appends every reconciliation report to a list. A plain object
- * collecting values: nothing here spies on a console, replaces a member or
- * discards a report.
- */
+/** A sink that appends every reconciliation report to a list. */
 interface CapturingReporter {
   readonly reporter: RunReporter;
   readonly reconciliations: BoardSizeReconciliationReport[];
@@ -479,10 +379,6 @@ function detailOf(
   return report as BoardSizeReconciliationDetail;
 }
 
-/* ==========================================================================
- * 5. The injected world, seeded before the subject is constructed
- * ========================================================================== */
-
 const FIXTURE_RUN_ID = 'run-board-size-0001';
 
 const FIXTURE_SEED = 'seed-board-size';
@@ -521,7 +417,7 @@ interface WorldOptions {
   /**
    * Entries the envelope carries. A board-mutating relic reaches the
    * reconciliation as an input alone: one entry declaring `boardSize` on its
-   * own state slot. No behaviour, charge budget or hook table is involved.
+   * own state slot.
    */
   readonly relics?: readonly PersistedRelic[];
 }
@@ -534,13 +430,8 @@ interface World {
 }
 
 /**
- * Builds a world in the mandatory order: allocate the store, WRITE THE
- * ENVELOPE, then construct `LocalStorageManager` and `RunStateStore`.
- *
- * js/local_storage_manager.js L25-L26 ran the writability probe once in the
- * constructor, and js/game_manager.js L13 reached L36's single snapshot read
- * from the constructor as well, so an envelope written after construction
- * would not be seen.
+ * Builds a world in the mandatory order: allocate the store, write the
+ * envelope, then construct `LocalStorageManager` and `RunStateStore`.
  */
 function createWorld(options: WorldOptions): World {
   const storage = new MemoryStorage();
@@ -569,11 +460,6 @@ function createWorld(options: WorldOptions): World {
 /**
  * Removes every key the product owns, then the best-score key by name, using
  * the exported constants and no string literal.
- *
- * js/local_storage_manager.js L61-L63 removed the board snapshot and never
- * L22's best score. Idempotent: `MemoryStorage.removeItem` of an absent key is
- * a no-op, and the setup file vitest.config.ts names registers an `afterEach`
- * of its own over the Web Storage global.
  */
 function clearOwnedKeysOf(storage: MemoryStorage): void {
   for (const key of OWNED_STORAGE_KEYS) {
@@ -583,11 +469,7 @@ function clearOwnedKeysOf(storage: MemoryStorage): void {
   storage.removeItem(BEST_SCORE_KEY);
 }
 
-/**
- * The rules every case reads, rebuilt from the factory before each one. The
- * factory returns a fresh unfrozen config per call, and
- * `DEFAULT_RULES_CONFIG` is neither read nor written here.
- */
+/** The rules every case reads, rebuilt from the factory before each one. */
 let config: RulesConfig;
 
 beforeEach(() => {
@@ -601,10 +483,6 @@ afterEach(() => {
 
   trackedStorages.length = 0;
 });
-
-/* ==========================================================================
- * 6. The three inputs and the precedence between them
- * ========================================================================== */
 
 describe('reconcileBoardSize weighs the saved and configured sizes', () => {
   it('changes nothing when the saved size already matches', () => {
@@ -737,10 +615,6 @@ describe('a board-mutating relic outweighs the configured size', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Purity over the arguments, and totality over degenerate ones
- * ========================================================================== */
-
 describe('reconcileBoardSize is pure over the values it is handed', () => {
   it('mutates neither the saved grid nor the sizes', () => {
     const savedGrid = buildGrid(SAVED_SIZE, cycleValueAt);
@@ -802,12 +676,7 @@ interface DegenerateCase {
   readonly action: BoardSizeReconciliationAction;
 }
 
-/**
- * Every degenerate input the reconciliation absorbs. A saved grid is typed
- * `unknown` by `BoardSizeReconciliationInput`, so a hostile value needs no
- * cast; the two numeric members are cast through `unknown` where the value
- * under test is not a number at all.
- */
+/** Every degenerate input the reconciliation absorbs. */
 const DEGENERATE_CASES: readonly DegenerateCase[] = [
   {
     name: 'an absent saved grid',
@@ -1039,14 +908,6 @@ describe('reconcileBoardSize is total over a degenerate saved payload', () => {
   });
 });
 
-/* ==========================================================================
- * 8. A shrink keeps every surviving tile where it was, and accounts for the
- *    tiles it dropped
- *
- *    `reconcileBoardSize()` reports nothing, so the reporter half of this
- *    accounting is asserted over `RunStateStore.load()` in section 15.
- * ========================================================================== */
-
 describe('a shrink retains in-bounds tiles and counts the rest', () => {
   it('drops exactly the tiles lying outside the smaller lattice', () => {
     const saved = createNearLossBoard(SAVED_SIZE).grid;
@@ -1201,13 +1062,6 @@ describe('a shrink retains in-bounds tiles and counts the rest', () => {
   });
 });
 
-/* ==========================================================================
- * 9. A grow adds empty cells and moves nothing
- *
- *    The reporter half, for a grow that dropped nothing, is asserted over
- *    `RunStateStore.load()` in section 15.
- * ========================================================================== */
-
 describe('a grow adds empty cells and re-centres nothing', () => {
   it('grows to the configured size and drops no tile', () => {
     const { reconciliation } = reconcileTo(
@@ -1291,18 +1145,10 @@ describe('a grow adds empty cells and re-centres nothing', () => {
   });
 });
 
-/* ==========================================================================
- * 10. The loss check reads the reconciled edge length
- * ========================================================================== */
-
 /** The corner cell of a grown lattice. */
 const OUTER = GROWN_SIZE - 1;
 
-/**
- * The value a cell of the outer band takes. With `pair` set, the corner takes
- * the value of the cell above it, which is the one adjacent equal pair the
- * grown lattice carries.
- */
+/** The value a cell of the outer band takes. */
 function outerBandValue(x: number, y: number, pair: boolean): number {
   return pair && x === OUTER && y === OUTER
     ? cycleValueAt(OUTER, OUTER - 1)
@@ -1312,10 +1158,6 @@ function outerBandValue(x: number, y: number, pair: boolean): number {
 /**
  * A saved 4x4 lattice grown to `GROWN_SIZE` and then filled to the edge, as a
  * spawn fills a cell the grow added.
- *
- * The saved lattice carries no adjacent equal pair at all, so with `pair` set
- * the only merge on the finished board is the one in the outer column, and
- * with it clear there is none anywhere.
  */
 function grownAndFilledBoard(pair: boolean): Grid {
   const grid = rehydrate(
@@ -1355,7 +1197,8 @@ describe('a grown board is scanned to its own edge, not the saved one', () => {
   });
 
   // js/game_manager.js L243-L268. The pair sits in the row and column the
-  // captured bound never reaches, so this is the assertion the file exists for.
+  // captured bound never reaches, so this is the assertion the file exists
+  // for.
   it('finds the outer merge, where a captured bound of 4 finds none', () => {
     const grid = grownAndFilledBoard(true);
 
@@ -1393,10 +1236,6 @@ describe('a grown board is scanned to its own edge, not the saved one', () => {
     expect(visited).toContain(`${OUTER},${OUTER}`);
   });
 });
-
-/* ==========================================================================
- * 11. The loss check over a shrunk board stays inside the new lattice
- * ========================================================================== */
 
 /**
  * A saved 4x4 lattice whose one adjacent equal pair lies wholly in the band a
@@ -1462,11 +1301,7 @@ describe('a shrunk board is scanned to its own edge, not the saved one', () => {
   });
 });
 
-/* ==========================================================================
- * 12. movesAvailable keeps the short circuit of the vanilla check
- * ========================================================================== */
-
-// js/game_manager.js L238-L240: `cellsAvailable() || tileMatchesAvailable()`.
+// js/game_manager.js L238-L240: `cellsAvailable || tileMatchesAvailable`.
 describe('movesAvailable keeps its operand order and its short circuit', () => {
   it('is carried by the free cells a grow added, with no pair present', () => {
     const grid = rehydrate(
@@ -1509,10 +1344,6 @@ describe('movesAvailable keeps its operand order and its short circuit', () => {
     expect(movesAvailable(grid, config)).toBe(true);
   });
 });
-
-/* ==========================================================================
- * 13. The win check reads config.winValue over the reconciled lattice
- * ========================================================================== */
 
 /**
  * A saved 4x4 board carrying the win value at one cell and `MID_VALUE` at the
@@ -1598,10 +1429,6 @@ describe('the win check reads the reconciled lattice', () => {
   });
 });
 
-/* ==========================================================================
- * 14. The highest tile value is read from the reconciled lattice
- * ========================================================================== */
-
 /** A saved 4x4 board carrying `MID_VALUE` first and `HIGH_VALUE` last. */
 function boardWithHighTileLast(): SerializedGrid {
   const board = createEmptyBoard(SAVED_SIZE);
@@ -1651,10 +1478,6 @@ describe('the highest tile value is read from the reconciled lattice', () => {
     expect(highestTileValue(grid)).toBe(config.winValue / 2);
   });
 });
-
-/* ==========================================================================
- * 15. Post-reload board integrity, through the store (gate V6)
- * ========================================================================== */
 
 /**
  * A relic entry declaring an edge length on its own state slot, which is the
@@ -1782,8 +1605,6 @@ describe('a reconciled load leaves the envelope internally consistent', () => {
   });
 });
 
-// Rule 3: a reconciliation that discarded tiles without saying so would be the
-// same class of defect as js/local_storage_manager.js L37's discarded error.
 describe('a reconciliation reaches the reporter with its counts', () => {
   it('reports the shrink with the sizes and the dropped count', () => {
     const loaded = loadAgainst(savedBoard(), SHRUNK_SIZE);
@@ -1894,10 +1715,6 @@ describe('a relic-shrunk board is not lost when it is reloaded', () => {
     expect(highestTileValue(grid)).toBe(0);
   });
 });
-
-/* ==========================================================================
- * 16. The teardown removes the keys the game never did
- * ========================================================================== */
 
 describe('the teardown clears every owned key, idempotently', () => {
   it('empties a store carrying a run envelope and a best score', () => {

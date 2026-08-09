@@ -1,48 +1,6 @@
 // Orchestration suite of src/engine/engine.ts: the DOM-free rules engine and
 // turn orchestrator, and the primary successor to js/game_manager.js.
 //
-// It is the unit-level evidence for gate V1 — Phase 1 plays identically to
-// vanilla 2048 from the player's perspective — so every `describe` below
-// names the vanilla construct it pins together with that construct's line
-// range, which is how the orchestration rows of docs/TRACEABILITY_MATRIX.md
-// are each covered by a named test:
-//   js/game_manager.js L1-L14    constructor        -> constructor
-//   js/game_manager.js L17-L21   restart()          -> restart()
-//   js/game_manager.js L24-L27   keepPlaying()      -> continuePlaying()
-//   js/game_manager.js L30-L32   isGameTerminated() -> isGameTerminated()
-//   js/game_manager.js L35-L59   setup()            -> setup()
-//   js/game_manager.js L62-L66   addStartTiles()    -> addStartTiles()
-//   js/game_manager.js L69-L76   addRandomTile()    -> addRandomTile()
-//   js/game_manager.js L79-L99   actuate()          -> commit()
-//   js/game_manager.js L102-L110 serialize()        -> serialize()
-//   js/game_manager.js L130-L191 move()             -> move()
-//
-// The sequence sections 5 through 9 walk is AAP Figure 4, Turn Data Flow, of
-// docs/architecture/data-flow.md: the direction, the cancellable
-// `onBeforeMove`, tile preparation, the traversal, the merge, the win check,
-// the moved? decision, the spawn, `onAfterMove`, the loss check and
-// `state:commit`. The absent view collaborator asserted in section 1 is the
-// one decisive difference between AAP Figure 1 and AAP Figure 2 of
-// docs/architecture/ARCHITECTURE.md.
-//
-// TWO LOGGED DEVIATIONS ARE VERIFIED HERE by their observable consequences:
-// the forced `keepPlaying` prototype-shadowing repair of L24-L27, in section
-// 10, and the board-by-reference-versus-immutable-projection choice of the
-// commit payload, in section 9.
-//
-// SCOPE. Sibling suites own what this one does not repeat: the lattice ->
-// grid.test.ts; the traversals and the merge math -> move-resolver.test.ts;
-// the win and loss predicates -> terminal-state.test.ts; bus mechanics ->
-// hook-bus.test.ts; emitter mechanics -> engine-events.test.ts; the spawn's
-// substream wiring and cursor accounting -> engine-spawn.test.ts; per-hook
-// payload adoption -> engine-hook-payloads.test.ts; listener
-// non-interference -> engine-observer-non-interference.test.ts; persisted
-// board bounds -> engine-snapshot-bounds.test.ts; the `bestScore` key format
-// and the storage failure paths -> tests/unit/storage; run-state versioning
-// -> tests/unit/run; PRNG sequence properties -> tests/unit/rng. No snapshot
-// matcher appears below: the seeded regression gate is tests/snapshot, which
-// carries its own configuration and runs separately.
-//
 // Every collaborator arrives through the single options object, so this suite
 // needs no mocking library and no module mocking; the doubles in the next
 // section are hand written. It reads no DOM and no storage, and runs in the
@@ -127,19 +85,13 @@ import {
   createNearWinBoard,
 } from '../../fixtures/boards';
 
-/* ===== 0. Constants, doubles and helpers ===== */
-
 /** Run seed every deterministic case below is built from. */
 const RUN_SEED = 'engine-suite-seed-1';
 
 /** A second run seed, for the cases that compare two runs. */
 const OTHER_SEED = 'engine-suite-seed-2';
 
-/**
- * Correlation identifier the tracer-integration cases key their spans on.
- * Supplied rather than derived: src/observability/logger.ts owns the one
- * derivation and no engine module reads this value.
- */
+/** Correlation identifier the tracer-integration cases key their spans on. */
 const TRACED_CORRELATION_ID = 'run-engine-suite-traced';
 
 /** The win value js/game_manager.js L170 compared against. */
@@ -194,9 +146,9 @@ interface RecordingPort {
   readonly written: SerializedGameState[];
 
   /**
-   * The stored best score, in the frozen shape
-   * js/local_storage_manager.js L43-L45 returned: the raw string when a value
-   * is present, and the number `0` when it is absent.
+   * The stored best score, in the frozen shape js/local_storage_manager.js
+   * L43-L45 returned: the raw string when a value is present, and the number
+   * `0` when it is absent.
    */
   best: string | 0;
 
@@ -300,25 +252,10 @@ function createRecordingReporter(): RecordingReporter {
   };
 }
 
-/**
- * Correlation identifier the counter assertions pin every report to. Distinct
- * from the default empty one, so a report that carried no identifier at all
- * cannot pass.
- */
+/** Correlation identifier the counter assertions pin every report to. */
 const CORRELATION_ID_UNDER_TEST = 'run-correlation-metrics';
 
-/**
- * Every counter src/engine/engine.ts raises itself, as literals.
- *
- * Written out rather than imported because only two of the eleven are exported;
- * a literal is also the stronger contract, since a rename inside the engine
- * fails here rather than following the constant silently. A dashboard and an
- * alert both key on these exact strings.
- *
- * src/engine/engine-events.ts and src/engine/hook-bus.ts raise their own
- * counters through the SAME injected sink, and each has its own suite, so the
- * assertions below read the engine's share rather than the whole stream.
- */
+/** Every counter src/engine/engine.ts raises itself, as literals. */
 const ENGINE_OWNED_METRICS: readonly string[] = Object.freeze([
   'engine.move.blocked',
   'engine.move.refused',
@@ -362,9 +299,6 @@ function engineMetricNamesOf(
 /**
  * Sums the values captured under one counter name.
  *
- * A sum rather than an occurrence count, so a report carrying a value other
- * than 1 is measured rather than hidden.
- *
  * @param counts Reports the sink captured.
  * @param metric Counter name to total.
  * @returns The total recorded under `metric`.
@@ -381,9 +315,6 @@ function countOf(
 /**
  * Reads the report sink the engine holds.
  *
- * js/game_manager.js L1-L5 held its collaborators as ordinary members; the
- * sink is TypeScript private here, and this narrows that one member.
- *
  * @param engine Engine to read.
  * @returns The sink in force.
  */
@@ -392,8 +323,8 @@ function reporterOf(engine: Engine): EngineReporter {
 }
 
 /**
- * Projects the board to face values, in the x-major order
- * js/grid.js L102-L117 serialised.
+ * Projects the board to face values, in the x-major order js/grid.js L102-L117
+ * serialised.
  *
  * @param engine Engine to read.
  * @returns `values[x][y]`, with `null` in every empty cell.
@@ -405,8 +336,8 @@ function boardValues(engine: Engine): (number | null)[][] {
 }
 
 /**
- * Projects an emitted board to face values, in the same order
- * `boardValues` reads the live lattice in.
+ * Projects an emitted board to face values, in the same order `boardValues`
+ * reads the live lattice in.
  *
  * @param board The projection an event carried.
  * @returns `values[x][y]`, with `null` in every empty cell.
@@ -471,10 +402,6 @@ function faceValues(engine: Engine): number[] {
 /**
  * Builds a persisted snapshot from a y-major visual matrix.
  *
- * `rows[y][x]` is the value at cell (x, y), so a literal reads as the board
- * looks while the matrix written is the x-major one js/grid.js L102-L117
- * serialised. The matrix must be square.
- *
  * @param rows Row-major values, `null` for an empty cell.
  * @param overrides Snapshot members to replace; the four defaults are the
  *   fresh-game values js/game_manager.js L48-L51 assigned.
@@ -525,13 +452,9 @@ function withFixedSpawn(value: number): RulesConfig {
 }
 
 /**
- * The board that is one left move from having no move available, given a
- * spawn of 8: the pair in row 0 merges, the freed cell takes the spawn, and
- * no two neighbours then match.
- *
- * Cell values, row y = 0 first:
- *    2  2
- *   16 32
+ * The board that is one left move from having no move available, given a spawn
+ * of 8: the pair in row 0 merges, the freed cell takes the spawn, and no two
+ * neighbours then match.
  *
  * @returns A fresh, unfrozen snapshot.
  */
@@ -617,8 +540,6 @@ function captureCommits(engine: Engine): StateCommitEvent[] {
 function play(engine: Engine, directions: readonly Direction[]): boolean[] {
   return directions.map((direction) => engine.move(direction));
 }
-
-/* ===== 1. constructor (js/game_manager.js L1-L14) ===== */
 
 describe('constructor (js/game_manager.js L1-L14)', () => {
   it('constructs with every option but the substreams defaulted', () => {
@@ -713,8 +634,7 @@ describe('constructor (js/game_manager.js L1-L14)', () => {
 
     expect(engine.correlationId).toBe('run-first');
 
-    // One page load can play more than one run. A captured identifier kept
-    // every later report of this engine attributed to the run that ended.
+    // One page load can play more than one run.
     current = 'run-second';
 
     expect(engine.correlationId).toBe('run-second');
@@ -791,9 +711,7 @@ describe('constructor (js/game_manager.js L1-L14)', () => {
     engine.setup(null);
     engine.move(DIRECTION_LEFT);
 
-    // Named exactly and in order, not merely typed. `typeof metric ===
-    // 'string'` held for any name at all, so a renamed or misspelled counter
-    // passed and a branch that stopped counting passed too.
+    // Named exactly and in order, not merely typed.
     expect(engineMetricNamesOf(recording.counts)).toEqual([
       // `setup(null)` restores nothing, which the engine counts as a refused
       // snapshot whether one was unreadable or none was offered.
@@ -817,9 +735,6 @@ describe('constructor (js/game_manager.js L1-L14)', () => {
   });
 
   it('names the counter of every branch one move can take', () => {
-    // One case per counted branch, each pinned to its canonical name and to a
-    // count of exactly one, so a branch that stops counting or starts counting
-    // twice is caught rather than absorbed into a total.
     const blocked = createRecordingReporter();
     const blockedEngine = new Engine({
       streams: streamsFor(),
@@ -845,8 +760,8 @@ describe('constructor (js/game_manager.js L1-L14)', () => {
 
     expect(blockedEngine.move(DIRECTION_LEFT)).toBe(false);
 
-    // The refusal is the FIRST thing the move does, so nothing else counts:
-    // no hook is dispatched and no event is emitted.
+    // The refusal is the FIRST thing the move does, so nothing else counts: no
+    // hook is dispatched and no event is emitted.
     expect(metricNamesOf(blocked.counts)).toEqual(['engine.move.blocked']);
 
     const cancelled = createRecordingReporter();
@@ -969,9 +884,9 @@ describe('constructor (js/game_manager.js L1-L14)', () => {
       ...Object.getOwnPropertyNames(Object.getPrototypeOf(engine) as object),
     ];
 
-    // js/game_manager.js L5 held `this.actuator` and L58, L91 and L189
-    // called into it; js/html_actuator.js exposed `actuate` at L10 and
-    // `continueGame` at L39.
+    // js/game_manager.js L5 held `this.actuator` and L58, L91 and L189 called
+    // into it; js/html_actuator.js exposed `actuate` at L10 and `continueGame`
+    // at L39.
     expect(members).not.toContain('actuator');
     expect(members).not.toContain('actuate');
     expect(members).not.toContain('continueGame');
@@ -991,8 +906,6 @@ describe('constructor (js/game_manager.js L1-L14)', () => {
     }
   });
 });
-
-/* ===== 2. setup() (js/game_manager.js L35-L59) ===== */
 
 describe('setup() (js/game_manager.js L35-L59)', () => {
   it('resets the score and the three flags on a fresh board (L46-L55)', () => {
@@ -1052,9 +965,7 @@ describe('setup() (js/game_manager.js L35-L59)', () => {
   });
 
   it('reconciles a saved size against the configured one', () => {
-    // AAP section 0.4.1.3 names this the corruption risk. The saved size is
-    // written back to the configuration, so every later read — the win and
-    // loss checks included — sees the size the lattice has.
+    // AAP section 0.4.1.3 names this the corruption risk.
     const config = createDefaultRulesConfig();
     const engine = new Engine({ streams: streamsFor(), config });
 
@@ -1174,8 +1085,6 @@ describe('setup() (js/game_manager.js L35-L59)', () => {
   });
 });
 
-/* ===== 3. addStartTiles() (js/game_manager.js L62-L66) ===== */
-
 describe('addStartTiles() (js/game_manager.js L62-L66)', () => {
   it('places config.startTiles tiles, defaulting to the 2 of L7', () => {
     const config = createDefaultRulesConfig();
@@ -1221,8 +1130,6 @@ describe('addStartTiles() (js/game_manager.js L62-L66)', () => {
     expect(tileCount(engine)).toBe(0);
   });
 });
-
-/* ===== 4. addRandomTile() (js/game_manager.js L69-L76) ===== */
 
 describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
   it('draws values from config.spawn.values alone (L71)', () => {
@@ -1283,8 +1190,7 @@ describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
 
   it('never calls Math.random across a turn (L71, js/grid.js L41)', () => {
     // The two audited call sites are the only randomness the vanilla game
-    // held, and both are substream draws now. The spy also guards against a
-    // seeded generator being installed over the platform function.
+    // held, and both are substream draws now.
     const spy = vi.spyOn(Math, 'random');
 
     try {
@@ -1306,8 +1212,7 @@ describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
   it('inserts no tile on a full board, does not throw, and emits the attempt ' +
     'with no position (L70)', () => {
     // js/grid.js L37-L43 returned no cell on a full board, which is the
-    // boundary the guard at L70 kept the spawn away from. Six start tiles on
-    // a four-cell board reach the guard twice.
+    // boundary the guard at L70 kept the spawn away from.
     const config = createDefaultRulesConfig();
 
     config.boardSize = 2;
@@ -1327,7 +1232,7 @@ describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
     expect(tileCount(engine)).toBe(4);
 
     // AAP Contract 1: every attempt is emitted, and the two that found no cell
-    // carry no position. Four insertions then two full-board attempts.
+    // carry no position.
     expect(spawned).toHaveLength(6);
     expect(spawned.filter((cell) => cell !== undefined)).toHaveLength(4);
     expect(spawned.slice(4)).toEqual([undefined, undefined]);
@@ -1372,8 +1277,6 @@ describe('addRandomTile() (js/game_manager.js L69-L76)', () => {
     expect(tileCount(engine)).toBe(4);
   });
 });
-
-/* ===== 5. move(): the terminal guard (js/game_manager.js L134) ===== */
 
 describe('move(): the terminal guard (js/game_manager.js L134)', () => {
   /**
@@ -1422,8 +1325,8 @@ describe('move(): the terminal guard (js/game_manager.js L134)', () => {
       new Tile({ x: 1, y: 0 }, 2),
     ];
 
-    // js/game_manager.js L113-L120 cleared `mergedFrom` and saved the
-    // position on every tile; both markers survive a refused move.
+    // js/game_manager.js L113-L120 cleared `mergedFrom` and saved the position
+    // on every tile; both markers survive a refused move.
     (tile as Tile).mergedFrom = marker;
     (tile as Tile).previousPosition = null;
 
@@ -1490,14 +1393,11 @@ describe('move(): the terminal guard (js/game_manager.js L134)', () => {
   });
 });
 
-/* ===== 6. move(): the moved? decision (js/game_manager.js L182-L190) ===== */
-
 describe('move(): the moved? decision (js/game_manager.js L182-L190)', () => {
   it('spawns nothing and commits nothing when no position changed', () => {
     // BLOCKED_BOARD's tiles already sit in column 0, so L175's
-    // `positionsEqual` check never reports a change and the whole `if
-    // (moved)` block of L182-L190 is skipped. AAP Figure 4 marks this as one
-    // of the two deliberately preserved turn properties.
+    // `positionsEqual` check never reports a change and the whole `if (moved)`
+    // block of L182-L190 is skipped.
     const recording = createRecordingPort();
     const engine = new Engine({
       streams: streamsFor(),
@@ -1522,11 +1422,7 @@ describe('move(): the moved? decision (js/game_manager.js L182-L190)', () => {
   });
 
   it('completes the turn through move:after carrying moved as false', () => {
-    // The completion signal of the no-op branch. Without it a subscriber that
-    // opened work on `move:before` has nothing to close it on and holds that
-    // work open until the next turn supersedes it — which is the leak the
-    // Performance-API tracer of src/observability/tracer.ts exhibited, since
-    // `move:after { moved: false }` is its only unmoved-turn closure.
+    // The completion signal of the no-op branch.
     const engine = new Engine({ streams: streamsFor() });
 
     engine.setup(copyBoard(BLOCKED_BOARD));
@@ -1555,9 +1451,7 @@ describe('move(): the moved? decision (js/game_manager.js L182-L190)', () => {
   });
 
   it('dispatches no hook for the turn that changed nothing', () => {
-    // `onAfterMove` belongs to the branch that changed the board. The no-op
-    // emission is an event alone: no handler runs, so no relic can rescore,
-    // end or win a turn that resolved nothing.
+    // `onAfterMove` belongs to the branch that changed the board.
     const engine = new Engine({ streams: streamsFor() });
 
     engine.setup(copyBoard(BLOCKED_BOARD));
@@ -1572,9 +1466,7 @@ describe('move(): the moved? decision (js/game_manager.js L182-L190)', () => {
 
   it('closes an unmoved turn span on the real Performance-API tracer', () => {
     // The cross-module contract of finding M12, driven end to end: a real
-    // `Engine`, a real `Tracer`, and no fabricated event anywhere. The turn
-    // span must be CLOSED after the no-op and must carry `unmoved`, with no
-    // turn latency observed because nothing committed.
+    // `Engine`, a real `Tracer`, and no fabricated event anywhere.
     const logger = createLogger({ correlationId: TRACED_CORRELATION_ID });
     const registry = createMetricsRegistry({ logger });
     const tracer = createTracer({ logger, metrics: registry, marks: false });
@@ -1611,8 +1503,8 @@ describe('move(): the moved? decision (js/game_manager.js L182-L190)', () => {
   });
 
   it('spawns exactly one tile and commits once when a position changed', () => {
-    // A right move on BLOCKED_BOARD slides every tile and merges none, so
-    // the tile count rises by exactly the one tile L183 spawned.
+    // A right move on BLOCKED_BOARD slides every tile and merges none, so the
+    // tile count rises by exactly the one tile L183 spawned.
     const engine = new Engine({ streams: streamsFor() });
 
     engine.setup(copyBoard(BLOCKED_BOARD));
@@ -1695,8 +1587,6 @@ describe('move(): the moved? decision (js/game_manager.js L182-L190)', () => {
   });
 });
 
-/* ===== 7. move(): the win check (js/game_manager.js L170) ===== */
-
 describe('move(): the win check (js/game_manager.js L170)', () => {
   it('sets won when a merge reaches the configured 2048', () => {
     const engine = new Engine({ streams: streamsFor() });
@@ -1748,8 +1638,6 @@ describe('move(): the win check (js/game_manager.js L170)', () => {
     expect(engine.won).toBe(false);
   });
 });
-
-/* ===== 8. The six hooks at their mapped points ===== */
 
 describe('the six hooks dispatch at their mapped points', () => {
   it('dispatches all six across a stage, a turn and a stage end', () => {
@@ -2024,6 +1912,73 @@ describe('the six hooks dispatch at their mapped points', () => {
     expect(dispatched).not.toContain('onStageEnd');
   });
 
+  it('refuses to carry a board over while a win stands unresolved', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    // The canonical win: `won` is set and play is blocked until the player
+    // takes Keep Going or ends the run.
+    engine.setup(createNearWinBoard(DEFAULT_BOARD_SIZE, 2048));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.won).toBe(true);
+    expect(engine.isGameTerminated()).toBe(true);
+
+    const played = boardValues(engine);
+    const events: string[] = [];
+
+    recordEvents(engine, events);
+
+    engine.startStage();
+
+    // No stage started, no board rebuilt, and the win still stands: the
+    // terminal decision outranks the stage transition. DL-ENGINE-11.
+    expect(events).not.toContain('stage:start');
+    expect(boardValues(engine)).toEqual(played);
+    expect(engine.isGameTerminated()).toBe(true);
+  });
+
+  it('carries the board over once Keep Going has cleared the win', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(createNearWinBoard(DEFAULT_BOARD_SIZE, 2048));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+
+    engine.continuePlaying();
+
+    const played = boardValues(engine);
+    const events: string[] = [];
+
+    recordEvents(engine, events);
+
+    engine.startStage();
+
+    expect(events).toContain('stage:start');
+    expect(engine.isGameTerminated()).toBe(false);
+    expect(engine.won).toBe(true);
+    expect(boardValues(engine)).toEqual(played);
+  });
+
+  it('rebuilds on a supplied board even while a win stands', () => {
+    const engine = new Engine({ streams: streamsFor() });
+
+    engine.setup(createNearWinBoard(DEFAULT_BOARD_SIZE, 2048));
+
+    expect(engine.move(DIRECTION_LEFT)).toBe(true);
+    expect(engine.isGameTerminated()).toBe(true);
+
+    const events: string[] = [];
+
+    recordEvents(engine, events);
+
+    // The REBUILDING path installs a board of its own, so it is not guarded:
+    // a restored snapshot carries its own terminal status.
+    engine.startStage(copyBoard(MERGE_PAIR_BOARD));
+
+    expect(events).toContain('stage:start');
+    expect(engine.won).toBe(false);
+  });
+
   it('honours an onBeforeMove veto, which is Figure 4\'s vetoed edge', () => {
     const recording = createRecordingPort();
     const engine = new Engine({
@@ -2125,8 +2080,6 @@ describe('the six hooks dispatch at their mapped points', () => {
     expect(engine.serialize()).toEqual(before);
   });
 });
-
-/* ===== 9. The seven engine events (js/game_manager.js L91-L97) ===== */
 
 describe('the seven engine events (js/game_manager.js L91-L97)', () => {
   it('emits every event name across a stage, a turn and a stage end', () => {
@@ -2411,15 +2364,13 @@ describe('the seven engine events (js/game_manager.js L91-L97)', () => {
     expect(engine.move(DIRECTION_LEFT)).toBe(true);
     expect(boardValues(engine)).not.toEqual(before);
 
-    // The commit carried the board by reference, so the reference a
-    // subscriber kept is the board the move mutated in place.
+    // The commit carried the board by reference, so the reference a subscriber
+    // kept is the board the move mutated in place.
     expect(held).toBe(engine.grid);
     expect(held.cells[0][0]?.value).toBe(4);
     expect(held.cells[1][0]).toBeNull();
   });
 });
-
-/* ===== 10. keepPlaying() (js/game_manager.js L24-L27) ===== */
 
 describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
   /**
@@ -2492,10 +2443,6 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
   });
 
   it('declares the three frozen names L9-L11 subscribed, in that order', () => {
-    // Read off the product's own `INPUT_EVENT_NAMES` rather than restated, so a
-    // rename in src/input/keymap.ts fails here. js/keyboard_input_manager.js
-    // L9-L11 registered exactly these three, in exactly this order, and the
-    // eight names after them are this feature's additions.
     expect(INPUT_EVENT_NAMES.slice(0, 3)).toEqual([
       'move',
       'restart',
@@ -2504,10 +2451,6 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
   });
 
   it('reaches the method through the REAL input manager bus', () => {
-    // The whole point of the case: the subscription, the dispatch and the
-    // engine are all real. `InputManager` is constructible with no document —
-    // it resolves an absent one and binds no listener — so the real bus is
-    // driven here without leaving the dom-free project.
     const engine = new Engine({ streams: streamsFor() });
     const input = new InputManager();
 
@@ -2543,8 +2486,8 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
   });
 
   it('is reached by no OTHER name the input layer emits', () => {
-    // `continuePlaying()` must be reachable from `keepPlaying` and from
-    // nothing else, so a later input event cannot silently resume a won run.
+    // `continuePlaying` must be reachable from `keepPlaying` and from nothing
+    // else, so a later input event cannot silently resume a won run.
     const engine = new Engine({ streams: streamsFor() });
     const input = new InputManager();
 
@@ -2578,8 +2521,6 @@ describe('keepPlaying() (js/game_manager.js L24-L27)', () => {
     input.destroy();
   });
 });
-
-/* ===== 11. isGameTerminated() (js/game_manager.js L30-L32) ===== */
 
 describe('isGameTerminated() (js/game_manager.js L30-L32)', () => {
   it('reports false on a fresh board', () => {
@@ -2649,8 +2590,6 @@ describe('isGameTerminated() (js/game_manager.js L30-L32)', () => {
   });
 });
 
-/* ===== 12. serialize() (js/game_manager.js L102-L110) ===== */
-
 describe('serialize() (js/game_manager.js L102-L110)', () => {
   it('returns exactly the five members L103-L109 wrote', () => {
     const engine = new Engine({ streams: streamsFor() });
@@ -2670,8 +2609,8 @@ describe('serialize() (js/game_manager.js L102-L110)', () => {
 
   it('keeps the persisted member name of L108 spelled keepPlaying', () => {
     // The in-class flag is `continuedPlay`; the persisted name is frozen, so
-    // src/run/run-state.ts can wrap this shape verbatim and a snapshot
-    // written by the pre-migration game still loads.
+    // src/run/run-state.ts can wrap this shape verbatim and a snapshot written
+    // by the pre-migration game still loads.
     const engine = new Engine({ streams: streamsFor() });
 
     engine.setup(copyBoard(NEAR_WIN_BOARD));
@@ -2765,8 +2704,6 @@ describe('serialize() (js/game_manager.js L102-L110)', () => {
   });
 });
 
-/* ===== 13. restart() (js/game_manager.js L17-L21) ===== */
-
 describe('restart() (js/game_manager.js L17-L21)', () => {
   it('clears the persisted snapshot before setting up (L18, L20)', () => {
     const recording = createRecordingPort(
@@ -2791,9 +2728,7 @@ describe('restart() (js/game_manager.js L17-L21)', () => {
 
     expect(recording.calls[0]).toBe('clearGameState');
 
-    // `restart()` passes `null` to `setup()`, so the port is never read back.
-    // Reading it back would restore the snapshot the clear just discarded
-    // whenever the clear failed, which is the board a restart exists to leave.
+    // `restart` passes `null` to `setup`, so the port is never read back.
     expect(recording.calls).not.toContain('getGameState');
     expect(engine.score).toBe(0);
   });
@@ -2811,8 +2746,8 @@ describe('restart() (js/game_manager.js L17-L21)', () => {
         getBestScore: (): 0 => 0,
         setBestScore: (): void => undefined,
 
-        // The snapshot survives the clear, which is what a port that raises
-        // on `clearGameState` leaves behind.
+        // The snapshot survives the clear, which is what a port that raises on
+        // `clearGameState` leaves behind.
         getGameState: (): SerializedGameState => snapshot,
         clearGameState: (): void => {
           throw new Error('quota');
@@ -2853,9 +2788,9 @@ describe('restart() (js/game_manager.js L17-L21)', () => {
   });
 
   it('clears the terminal condition rather than calling a view (L19)', () => {
-    // js/game_manager.js L19 called `actuator.continueGame()` to clear the
-    // win and loss message; the commit setup() ends with carries
-    // `terminated` as false instead, which is what a view clears on.
+    // js/game_manager.js L19 called `actuator.continueGame` to clear the win
+    // and loss message; the commit setup ends with carries `terminated` as
+    // false instead, which is what a view clears on.
     const engine = new Engine({ streams: streamsFor() });
 
     engine.setup(copyBoard(NEAR_WIN_BOARD));
@@ -2906,8 +2841,6 @@ describe('restart() (js/game_manager.js L17-L21)', () => {
   });
 });
 
-/* ===== 14. actuate() -> commit() (js/game_manager.js L79-L99) ===== */
-
 describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
   it('promotes the score only when it beats the stored one (L80-L82)', () => {
     const recording = createRecordingPort(null, '3');
@@ -2942,9 +2875,7 @@ describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
 
   it('compares the stored string relationally, without coercing it', () => {
     // js/local_storage_manager.js L43-L45 returned the raw stored string, and
-    // L80 compared against it relationally. `'1024' < 4` is false, so a
-    // pre-migration best score of 1024 outlives a score of 4, and a port
-    // reporting the same value as a number reaches the same verdict.
+    // L80 compared against it relationally.
     const stored = createRecordingPort(null, '1024');
     const numeric = createRecordingPort(null, 0);
 
@@ -3087,12 +3018,7 @@ describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
     expect(recording.written[0].grid.size).toBe(DEFAULT_BOARD_SIZE);
   });
 
-  // THE STORAGE PORT, not the terminal-state probe. Every member raises, and the
-  // turn still completes, because AAP Contract 5 requires the commit path never
-  // to throw out of a move whose board has already changed. A terminal-state
-  // measurement that cannot be taken is a different case with a different
-  // answer — a surfaced degraded state — and is asserted in
-  // tests/unit/engine/engine-capabilities.test.ts.
+  // The storage port, not the terminal-state probe.
   it('completes the turn when every port call raises', () => {
     const failing: EngineStoragePort = {
       getBestScore: (): string | 0 => {
@@ -3141,11 +3067,6 @@ describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
 
     recording.counts.length = 0;
 
-    // Measured ONE TURN AT A TIME, so the number is attributable rather than a
-    // total whose composition is unknown. A resolved turn makes three port
-    // calls that raise — the best-score read of the promotion, the best-score
-    // read of the commit payload, and the snapshot write — plus a fourth, the
-    // promotion write, only on a turn that scored.
     expect(engine.move(DIRECTION_LEFT)).toBe(true);
 
     const firstTurn = recording.counts.filter(
@@ -3193,14 +3114,10 @@ describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
       expect(commit.bestScore).toBe(0);
     }
 
-    // The turn still resolved, so the failure was contained rather than
-    // swallowing the move.
     expect(countOf(recording.counts, 'engine.move.resolved')).toBe(1);
   });
 
   it('raises the port counter for each of the five calls in turn', () => {
-    // One hostile call at a time, so the counter is attributed to the call
-    // that actually raised rather than to a total over all five.
     const calls = [
       'getBestScore',
       'setBestScore',
@@ -3229,10 +3146,9 @@ describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
       });
 
       expect(() => {
-        // The board is supplied, so this setup consults no port; the second one
-        // OMITS it, which is the call that reads `getGameState` — the read
-        // js/game_manager.js L36 performed. Both are driven, so every one of the
-        // five hostile members is actually reached.
+        // The board is supplied, so this setup consults no port; the second
+        // one OMITS it, which is the call that reads `getGameState` — the read
+        // js/game_manager.js L36 performed.
         engine.setup(copyBoard(NEAR_WIN_BOARD));
         engine.move(DIRECTION_LEFT);
         engine.restart();
@@ -3249,8 +3165,6 @@ describe('actuate() -> commit() (js/game_manager.js L79-L99)', () => {
     }
   });
 });
-
-/* ===== 15. Vanilla parity from the five fixtures (gate V1) ===== */
 
 describe('vanilla parity from the five fixtures (gate V1)', () => {
   /**
@@ -3501,10 +3415,6 @@ describe('vanilla parity from the five fixtures (gate V1)', () => {
   });
 });
 
-/* ==========================================================================
- * attemptMove(): the structured outcome of one attempt
- * ========================================================================== */
-
 describe('attemptMove(): which of the four paths a move took', () => {
   it('reports a resolved move as moved and committed', () => {
     const engine = new Engine({ streams: streamsFor() });
@@ -3629,8 +3539,8 @@ describe('attemptMove(): which of the four paths a move took', () => {
     engine.setup(copyBoard(MERGE_PAIR_BOARD));
     control.setup(copyBoard(MERGE_PAIR_BOARD));
 
-    // `move()` is `attemptMove().moved` and nothing else: the same board, the
-    // same score and the same return value.
+    // `move` is `attemptMove.moved` and nothing else: the same board, the same
+    // score and the same return value.
     expect(control.move(DIRECTION_LEFT)).toBe(
       engine.attemptMove(DIRECTION_LEFT).moved,
     );
@@ -3645,19 +3555,6 @@ describe('attemptMove(): which of the four paths a move took', () => {
     expect(Object.isFrozen(engine.attemptMove(DIRECTION_LEFT))).toBe(true);
   });
 });
-
-/* ==========================================================================
- * The stage-ladder fallback survives a subscriber that changes nothing
- *
- * The neutral goal `EMPTY_STAGE_CONTEXT` carries is a SENTINEL meaning "no
- * stage source supplied a goal", and it crosses the hook bus on the
- * `onStageStart` payload. The bus rebuilds that payload whenever it invokes a
- * subscriber, so the goal the engine adopts is a structurally-equal COPY as soon
- * as anything is registered — and a sentinel recognised by object identity was
- * therefore defeated by the mere PRESENCE of an observer, leaving a zero-target
- * goal in force that a fresh board already meets. Four of the sixteen relics
- * bind `onStageStart`.
- * ========================================================================== */
 
 describe('the configured stage curve stands behind an onStageStart observer', () => {
   it('keeps the ladder goal in force when a void observer is registered', () => {
@@ -3691,8 +3588,8 @@ describe('the configured stage curve stands behind an onStageStart observer', ()
 
     const progress = engine.stageProgress();
 
-    // The zero-target goal the identity comparison left in force measured every
-    // board as complete: progress 1 and cleared on the opening position.
+    // The zero-target goal the identity comparison left in force measured
+    // every board as complete: progress 1 and cleared on the opening position.
     expect(progress.cleared).toBe(false);
     expect(progress.progress).toBeLessThan(1);
   });
@@ -3737,7 +3634,8 @@ describe('the configured stage curve stands behind an onStageStart observer', ()
     });
     engine.setup(null);
 
-    // Recognising the sentinel by value must not cost the handler its authority.
+    // Recognising the sentinel by value must not cost the handler its
+    // authority.
     expect(engine.stageGoalInForce()).toEqual(replaced);
   });
 
@@ -3777,27 +3675,17 @@ describe('the configured stage curve stands behind an onStageStart observer', ()
 
     engine.setup(null);
 
-    // A zero-target score threshold is met by every board, so it is read as the
-    // sentinel it is identical to and the curve decides.
+    // A zero-target score threshold is met by every board, so it is read as
+    // the sentinel it is identical to and the curve decides.
     expect(engine.stageGoalInForce()).toEqual(
       stageGoalForIndex(2, DEFAULT_STAGE_CONFIG),
     );
   });
 });
 
-/* ==========================================================================
- * A direction outside the four is refused, not thrown
- *
- * `Direction` is a compile-time claim. The value arrives from an input adapter,
- * from a structural port that used to widen it to `number`, and from callers
- * holding strings — so an unusable one reached the vector lookup and raised a
- * bare `TypeError` from inside the pipeline, AFTER `move:before` had been
- * emitted and `onBeforeMove` dispatched: the turn had no `move:after` to close
- * it and a subscriber's turn span was left open. A numeric string was coerced
- * into a real, committed move.
- * ========================================================================== */
-
-/** Every value outside the four directions a caller can reach the engine with. */
+/**
+ * Every value outside the four directions a caller can reach the engine with.
+ */
 const OUT_OF_CONTRACT_DIRECTIONS: readonly { label: string; value: unknown }[] =
   Object.freeze([
     { label: 'one past the last direction', value: 4 },
@@ -3852,12 +3740,12 @@ describe('attemptMove(): an out-of-contract direction', () => {
 
       const attempt = engine.attemptMove(value as Direction);
 
-      // REFUSED, CLOSED AND UNCOMMITTED: the outcome is the whole of the turn.
+      // Refused, closed and uncommitted: the outcome is the whole of the turn.
       expect(attempt.moved).toBe(false);
       expect(attempt.resolution).toBe('blocked');
       expect(attempt.committed).toBe(false);
 
-      // NOTHING WAS ANNOUNCED AND NOTHING WAS DISPATCHED, so a subscriber that
+      // Nothing was announced and nothing was dispatched, so a subscriber that
       // opens work on `move:before` has nothing left open.
       expect(events).toEqual([]);
       expect(dispatched).toEqual([]);
@@ -3906,7 +3794,6 @@ describe('attemptMove(): an out-of-contract direction', () => {
     engine.setup(copyBoard(MERGE_PAIR_BOARD));
     control.setup(copyBoard(MERGE_PAIR_BOARD));
 
-    // `'3'` used to resolve as DIRECTION_LEFT, merge, spawn and commit.
     expect(engine.move('3' as unknown as Direction)).toBe(false);
     expect(engine.serialize()).toEqual(control.serialize());
     expect(engine.score).toBe(0);
@@ -3929,8 +3816,6 @@ describe('attemptMove(): an out-of-contract direction', () => {
 
     recording.counts.length = 0;
 
-    // The direction is measured FIRST, so the refusal is attributed to the
-    // contract rather than to the terminal state.
     expect(engine.attemptMove(4 as Direction).resolution).toBe('blocked');
     expect(engineMetricNamesOf(recording.counts)).toEqual([
       'engine.move.refused',
@@ -3967,10 +3852,6 @@ describe('attemptMove(): an out-of-contract direction', () => {
     expect(viaHook.resolvedDirection).toBe(DIRECTION_UP);
   });
 });
-
-/* ==========================================================================
- * A throwing report sink, contained
- * ========================================================================== */
 
 describe('a report sink that throws (Engine.reporterFaults)', () => {
   /**
@@ -4019,7 +3900,7 @@ describe('a report sink that throws (Engine.reporterFaults)', () => {
 
     engine.setup(null);
 
-    // `setup()` raises the snapshot counter, so at least one report was
+    // `setup` raises the snapshot counter, so at least one report was
     // delivered and at least one throw was contained.
     expect(engine.reporterFaults).toBeGreaterThan(0);
     expect(engine.lastReporterFault).toBe('onCount exploded');
@@ -4080,7 +3961,7 @@ describe('a report sink that throws (Engine.reporterFaults)', () => {
   });
 
   it('plays the same game a sink that behaves plays', () => {
-    // THE GAME-DOMAIN RESULT IS THE MEASURE. One engine reports to a sink that
+    // The game-domain result is the measure. One engine reports to a sink that
     // throws from every count, the other to a sink that records them; the two
     // play the same scripted moves on the same seed and must agree on the
     // board, the score and what they persist.
@@ -4114,11 +3995,8 @@ describe('a report sink that throws (Engine.reporterFaults)', () => {
     expect(hostile.score).toBe(control.score);
     expect(hostile.currentTurn()).toBe(control.currentTurn());
 
-    // The ENGINE-OWNED counts the control sink took are the reports the hostile
-    // sink threw out of. The emitter and the bus report through the same sink
-    // and contain their own throws — the bus counts them on
-    // `HookBusMetrics.reporterFaults` — so this counter measures the engine's
-    // share and nothing else.
+    // The ENGINE-OWNED counts the control sink took are the reports the
+    // hostile sink threw out of.
     expect(hostile.reporterFaults).toBe(
       engineMetricNamesOf(recording.counts).length,
     );
@@ -4147,9 +4025,8 @@ describe('a report sink that throws (Engine.reporterFaults)', () => {
 
   it('keeps the frozen best-score contract under a throwing sink', () => {
     // AAP 0.8.3 V3: the port reports the raw string when a value is present,
-    // the promotion comparison relies on the relational coercion of it, and the
-    // committed value is the one re-read after the possible write. None of that
-    // may be disturbed by a sink that throws.
+    // the promotion comparison relies on the relational coercion of it, and
+    // the committed value is the one re-read after the possible write.
     const recordingPort = createRecordingPort(null, '1000');
     const commits: (string | 0)[] = [];
     const engine = new Engine({
@@ -4171,7 +4048,7 @@ describe('a report sink that throws (Engine.reporterFaults)', () => {
   });
 
   it('contains a throw from a port failure report', () => {
-    // `throughPort()` reports the failure from inside its own catch, so a sink
+    // `throughPort` reports the failure from inside its own catch, so a sink
     // that throws there replaced a contained port failure with an escaping
     // report failure.
     const engine = new Engine({

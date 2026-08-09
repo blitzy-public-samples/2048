@@ -1,59 +1,19 @@
-// Ported-fidelity suite of src/engine/terminal-state.ts, which carries the
-// win and loss evaluation of js/game_manager.js, deleted. That port is part
-// of the `js/game_manager.js -> src/engine/*` edge of Figure 8, "File
-// Transformation Map: Superseded Modules to TypeScript Targets", the visual
-// index of docs/TRACEABILITY_MATRIX.md, and this suite is the evidence
-// those rows cite.
+// Ported-fidelity suite of src/engine/terminal-state.ts, which carries the win
+// and loss evaluation of js/game_manager.js, deleted. That port is part of the
+// `js/game_manager.js -> src/engine/*` edge of AAP Figure 8, the file
+// transformation map.
 //
-// Every describe below names one construct and the traceability row it
-// belongs to:
-//   TR-TERM-01  js/game_manager.js L170      the inline win comparison
-//                                            -> isWinningMergeValue()
-//   TR-TERM-02  js/game_manager.js L238-L240 movesAvailable()
-//                                            -> movesAvailable()
-//   TR-TERM-03  js/game_manager.js L243-L268 tileMatchesAvailable()
-//                                            -> tileMatchesAvailable()
-//   TR-TERM-04  js/game_manager.js L30-L32   isGameTerminated()
-//                                            -> isGameTerminated()
-//   TR-TERM-05  no vanilla source            -> hasReachedWinValue()
-//   TR-TERM-06  no vanilla source            -> highestTileValue()
-//
-// Section 7 covers the flag js/game_manager.js L24-L27 assigned over its own
-// prototype method of the same name, which L31 then read back and L45 and
-// L51 wrote. It reaches this module as `TerminalStateInput.continuedPlay`,
-// the name src/engine/engine.ts carries it under. The Engine method is
-// `continuePlaying()`, and the persisted member name and the input event
-// name keep the vanilla spelling; those three are asserted in
-// tests/unit/engine/engine-snapshot-bounds.test.ts and
-// tests/unit/input/input-dispatch.test.ts and are not repeated here.
-//
-// Section 9 is the AAP R4 evidence: the win value and the merge predicate
-// are read from the argument at every call, so a replaced predicate moves
-// the loss verdict with it and the terminal evaluation and
-// src/engine/move-resolver.ts cannot disagree.
-//
-// The verdicts asserted below appear in two further named figures. Figure 4,
-// "Turn Data Flow: From Keystroke to Composited Frame and Persisted Run
-// State", in docs/architecture/data-flow.md, carries the win check against
-// `config.winValue` and the `Moves available?` decision that gates game
-// over; Figure 6, "Screen Flow State Machine: Run Start to Run Summary",
-// carries the `Won -> keep playing` and `Won -> RunSummary` transitions the
-// flag of section 7 governs. The test names below are stable so both
-// documents can cite them.
-//
-// Coverage owned by sibling suites and not repeated here: the lattice, the
-// bounds valve and the projection (tests/unit/engine/grid.test.ts), the
-// traversals and the merge branch
-// (tests/unit/engine/move-resolver.test.ts), and the merge schema itself
-// (tests/unit/config/rules-config.test.ts).
+// Section 9 is the AAP R4 evidence: the win value and the merge predicate are
+// read from the argument at every call, so a replaced predicate moves the loss
+// verdict with it and the terminal evaluation and src/engine/move-resolver.ts
+// cannot disagree.
 //
 // This suite reads no DOM and no storage, installs no mock and replaces no
 // global; every test double below is hand-written. It runs in the
 // `unit:dom-free` project of vitest.config.ts, whose environment is 'node'.
 //
-// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
-// DL-TERM-01, DL-TERM-02, DL-TERM-03, DL-TERM-04, and DL-ENGINE-04 for the flag
-// of section 7.
+// Decisions: DL-TERM-01, DL-TERM-02, DL-TERM-03, DL-TERM-04, DL-ENGINE-04
+// (docs/DECISION_LOG.md).
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -92,8 +52,6 @@ import {
   createNearWinBoard,
 } from '../../fixtures/boards';
 
-/* ===== 1. Sizes, values and helpers ===== */
-
 /** A board smaller than the configured size. */
 const SHRUNK_SIZE = 3;
 
@@ -104,9 +62,8 @@ const GROWN_SIZE = 5;
 const ALTERNATIVE_WIN_VALUE = 1024;
 
 /**
- * The win value `createDefaultRulesConfig()` carries, ported from
- * js/game_manager.js L170. Section 2 asserts it against that configuration
- * before moving the target off it.
+ * The win value `createDefaultRulesConfig` carries, ported from
+ * js/game_manager.js L170.
  */
 const DEFAULT_CONFIG_WIN_VALUE = 2048;
 
@@ -122,9 +79,7 @@ const WIN_VALUE_HALVING = 2;
 /** Face value carried by the one tile of a single-tile board. */
 const SINGLE_TILE_VALUE = 8;
 
-/**
- * Directions js/game_manager.js L253 walked from each occupied cell.
- */
+/** Directions js/game_manager.js L253 walked from each occupied cell. */
 const PROBE_DIRECTION_COUNT = 4;
 
 /** Length of the cycle a perimeter board draws its face values from. */
@@ -144,22 +99,15 @@ const EXPORTED_QUERY_NAMES: readonly string[] = [
 ];
 
 /**
- * Face value written over cell (0, 0) of the near-loss fixture to remove
- * its one adjacent equal pair. It differs from that cell's two neighbours
- * — the fixture documents them as 4 at (1, 0) and 8 at (0, 1) — and from
- * every value the fixture's cycle emits.
+ * Face value written over cell (0, 0) of the near-loss fixture to remove its
+ * one adjacent equal pair.
  */
 const UNMATCHED_VALUE = 1024;
 
-/** Sum the alternative merge predicate of section 8 accepts. */
 const ALTERNATIVE_MERGE_SUM = 6;
 
 /**
  * Builds a grid from a serialised board.
- *
- * The two-argument constructor is the one js/game_manager.js L40-L41 used
- * to restore a snapshot, and the size comes from the board rather than
- * from the configuration.
  *
  * @param board Serialised board to restore.
  * @returns A grid holding that board's tiles.
@@ -215,10 +163,6 @@ function putTile(
 /**
  * Builds a full board carrying no pair the default predicate accepts.
  *
- * The near-loss fixture is a full board with exactly one adjacent equal
- * pair, at (0, 0) and (1, 0). Overwriting (0, 0) with `UNMATCHED_VALUE`
- * removes that pair and leaves every other cell as the fixture built it.
- *
  * @param size Edge length in cells. Defaults to the configured size.
  * @returns A fresh, unfrozen board with no empty cell.
  */
@@ -235,11 +179,6 @@ function createLostBoard(
 /**
  * Builds a full board whose one adjacent equal pair runs down a column.
  *
- * `createLostBoard` carries no adjacent equal pair. Writing the face value
- * of (0, 2) into (0, 1) pairs those two cells; at the configured size the
- * other two neighbours of (0, 1) are the overwritten corner and the cell at
- * (1, 1), and the fixture gives neither of them that value.
- *
  * @returns A fresh, unfrozen board with no empty cell.
  */
 function createColumnPairBoard(): SerializedGameState {
@@ -251,14 +190,8 @@ function createColumnPairBoard(): SerializedGameState {
 }
 
 /**
- * Builds a full board whose one adjacent equal pair sits in the last cells
- * the walk of js/game_manager.js L248-L249 reaches: (size - 1, size - 2)
- * and (size - 1, size - 1).
- *
- * `createLostBoard` carries no adjacent equal pair. Writing the face value
- * of the final cell into the one above it pairs those two; at the configured
- * size the other two neighbours of that cell are (size - 2, size - 2) and
- * (size - 1, size - 3), and the fixture gives neither that value.
+ * Builds a full board whose one adjacent equal pair sits in the last cells the
+ * walk of js/game_manager.js L248-L249 reaches.
  *
  * @returns A fresh, unfrozen board with no empty cell.
  */
@@ -272,8 +205,7 @@ function createLateColumnPairBoard(): SerializedGameState {
 }
 
 /**
- * The face value a perimeter board carries at one cell. Two adjacent cells
- * differ by exactly one in `x + y`, so no two of them share a value.
+ * The face value a perimeter board carries at one cell.
  *
  * @param x Column index.
  * @param y Row index.
@@ -284,9 +216,8 @@ function perimeterValue(x: number, y: number): number {
 }
 
 /**
- * Builds a board whose tiles sit only in the corners and along the edges,
- * with every interior cell empty. Every one of those tiles addresses at
- * least one cell outside the lattice when it is probed.
+ * Builds a board whose tiles sit only in the corners and along the edges, with
+ * every interior cell empty.
  *
  * @returns A fresh, unfrozen board at the configured size.
  */
@@ -307,8 +238,8 @@ function createPerimeterBoard(): SerializedGameState {
 
 /**
  * The neighbour probes a full board of this edge length reads inside the
- * lattice: four per cell, less the one each edge cell and the two each
- * corner cell address outside it.
+ * lattice: four per cell, less the one each edge cell and the two each corner
+ * cell address outside it.
  *
  * @param size Edge length in cells.
  * @returns The count of in-bounds probes.
@@ -318,8 +249,8 @@ function inBoundsProbeCount(size: number): number {
 }
 
 /**
- * The neighbour probes a board of this edge length addresses at most: one
- * per cell per direction, in bounds or out of it.
+ * The neighbour probes a board of this edge length addresses at most: one per
+ * cell per direction, in bounds or out of it.
  *
  * @param size Edge length in cells.
  * @returns The count of addressed probes.
@@ -330,7 +261,7 @@ function attemptedProbeCount(size: number): number {
 
 /**
  * Reads the highest face value of a serialised board, and 0 for a board
- * holding no tiles. Independent of the walk `highestTileValue` performs.
+ * holding no tiles.
  *
  * @param board Board to scan.
  * @returns The highest face value on it.
@@ -350,8 +281,8 @@ function highestSerializedValue(board: SerializedGameState): number {
 }
 
 /**
- * Builds a configuration whose merge predicate records every pair it is
- * asked about and answers with `verdict`.
+ * Builds a configuration whose merge predicate records every pair it is asked
+ * about and answers with `verdict`.
  *
  * @param verdict Verdict the predicate returns for every pair.
  * @returns The configuration and the recorded operand pairs.
@@ -376,9 +307,8 @@ function configWithRecordingPredicate(verdict: boolean): {
 }
 
 /**
- * Builds a configuration whose merge predicate records every pair it is
- * asked about and answers with the default rule of
- * src/config/default-config.ts.
+ * Builds a configuration whose merge predicate records every pair it is asked
+ * about and answers with the default rule of src/config/default-config.ts.
  *
  * @returns The configuration and the recorded operand pairs, in the order
  *   the probe asked about them.
@@ -402,8 +332,6 @@ function configWithObservedPredicate(): {
 
   return { config, calls };
 }
-
-/* ===== 2. TR-TERM-01 isWinningMergeValue, js/game_manager.js L170 ===== */
 
 describe('isWinningMergeValue, ported from js/game_manager.js L170', () => {
   it('accepts the configured win value', () => {
@@ -454,8 +382,6 @@ describe('isWinningMergeValue, ported from js/game_manager.js L170', () => {
 
   it('reports false for a merge value that overshoots the target', () => {
     const config = createDefaultRulesConfig();
-    // A producer trebling rather than doubling takes the face value one
-    // merge below the target past it rather than onto it.
     const belowTarget = config.winValue / WIN_VALUE_HALVING;
     const overshoot = belowTarget * OVERSHOOT_FACTOR;
 
@@ -466,8 +392,6 @@ describe('isWinningMergeValue, ported from js/game_manager.js L170', () => {
     expect(isWinningMergeValue(overshoot, config)).toBe(false);
   });
 });
-
-/* ===== 3. TR-TERM-05 hasReachedWinValue, no vanilla source ===== */
 
 describe('hasReachedWinValue, an addition with no vanilla source', () => {
   it('reports false for a board holding no tiles', () => {
@@ -544,8 +468,6 @@ describe('hasReachedWinValue, an addition with no vanilla source', () => {
   });
 });
 
-/* == 4. TR-TERM-03 tileMatchesAvailable, js/game_manager.js L243-L268 == */
-
 describe('tileMatchesAvailable, from js/game_manager.js L243-L268', () => {
   it('reports false for a board holding no tiles', () => {
     const config = createDefaultRulesConfig();
@@ -602,9 +524,8 @@ describe('tileMatchesAvailable, from js/game_manager.js L243-L268', () => {
     const config = createDefaultRulesConfig();
 
     // js/grid.js L80-L86 returned `null` for a cell outside the lattice, so
-    // the probe of js/game_manager.js L253-L255 stepped off every edge
-    // without a bounds test. Every tile of the blocked fixture sits in
-    // column 0, so each of them probes out of bounds at least once.
+    // the probe of js/game_manager.js L253-L255 stepped off every edge without
+    // a bounds test.
     expect(() =>
       tileMatchesAvailable(gridOf(BLOCKED_BOARD), config),
     ).not.toThrow();
@@ -618,8 +539,7 @@ describe('tileMatchesAvailable, from js/game_manager.js L243-L268', () => {
     const board = createPerimeterBoard();
 
     // js/grid.js L84 answers the off-lattice cells js/game_manager.js L255
-    // addresses. Every tile of this board sits on an edge, so each one
-    // addresses at least one such cell and each corner addresses two.
+    // addresses.
     expect(() =>
       tileMatchesAvailable(gridOf(board), config),
     ).not.toThrow();
@@ -640,10 +560,10 @@ describe('tileMatchesAvailable, from js/game_manager.js L243-L268', () => {
   it('asks the predicate once per in-bounds probe and no more', () => {
     const { config, calls } = configWithRecordingPredicate(false);
 
-    // js/game_manager.js L248-L253 addressed four cells from each of the
-    // size by size cells, so a full board addresses `attemptedProbeCount`
-    // in all; js/grid.js L84 answers the ones outside the lattice with
-    // `null`, leaving `inBoundsProbeCount` pairs for the predicate.
+    // js/game_manager.js L248-L253 addressed four cells from each of the size
+    // by size cells, so a full board addresses `attemptedProbeCount` in all;
+    // js/grid.js L84 answers the ones outside the lattice with `null`, leaving
+    // `inBoundsProbeCount` pairs for the predicate.
     expect(tileMatchesAvailable(gridOf(createLostBoard()), config)).toBe(
       false,
     );
@@ -682,8 +602,8 @@ describe('tileMatchesAvailable, from js/game_manager.js L243-L268', () => {
     const inBounds = inBoundsProbeCount(DEFAULT_BOARD_SIZE);
     const lastCellReached = inBounds - PROBE_DIRECTION_COUNT;
 
-    // The near-loss fixture's pair is (0, 0) and (1, 0), the first cell of
-    // the walk of L248-L249 and its first in-bounds probe.
+    // The near-loss fixture's pair is (0, 0) and (1, 0), the first cell of the
+    // walk of L248-L249 and its first in-bounds probe.
     expect(tileMatchesAvailable(gridOf(NEAR_LOSS_BOARD), early.config)).toBe(
       true,
     );
@@ -726,8 +646,6 @@ describe('tileMatchesAvailable, from js/game_manager.js L243-L268', () => {
     expect(JSON.stringify(board)).toBe(before);
   });
 });
-
-/* ===== 5. TR-TERM-02 movesAvailable, js/game_manager.js L238-L240 ===== */
 
 describe('movesAvailable, ported from js/game_manager.js L238-L240', () => {
   it('reports true while any cell is empty', () => {
@@ -781,8 +699,6 @@ describe('movesAvailable, ported from js/game_manager.js L238-L240', () => {
   });
 });
 
-/* ===== 6. TR-TERM-04 isGameTerminated, js/game_manager.js L30-L32 ===== */
-
 describe('isGameTerminated, ported from js/game_manager.js L30-L32', () => {
   it('covers every combination of the three flags', () => {
     const cases: readonly {
@@ -814,7 +730,9 @@ describe('isGameTerminated, ported from js/game_manager.js L30-L32', () => {
   });
 });
 
-/* == 7. The continue-after-win flag, js/game_manager.js L24-L27, L45, L51 == */
+/*
+ * == 7. The continue-after-win flag, js/game_manager.js L24-L27, L45, L51 ==
+ */
 
 describe('the continue-after-win flag, js/game_manager.js L24-L27', () => {
   it('is a boolean member of the state, not a callable', () => {
@@ -865,8 +783,6 @@ describe('the continue-after-win flag, js/game_manager.js L24-L27', () => {
     expect(names).not.toContain('keepPlaying');
   });
 });
-
-/* ===== 8. TR-TERM-06 highestTileValue, no vanilla source ===== */
 
 describe('highestTileValue, an addition with no vanilla source', () => {
   it('reports 0 for a board holding no tiles', () => {
@@ -926,8 +842,6 @@ describe('highestTileValue, an addition with no vanilla source', () => {
   });
 });
 
-/* ===== 9. AAP R4: the merge rule in force decides the loss verdict ===== */
-
 describe('the loss verdict follows the configured merge predicate', () => {
   it('finds a move a widened predicate accepts and equality does not', () => {
     const equality = createDefaultRulesConfig();
@@ -970,9 +884,7 @@ describe('the loss verdict follows the configured merge predicate', () => {
   it('reduces to the vanilla comparison under the default predicate', () => {
     const config = createDefaultRulesConfig();
 
-    // js/game_manager.js L259 compared face values alone. The default
-    // predicate adds `!target.mergedFrom`, which every probe view satisfies,
-    // so the two verdicts agree cell for cell.
+    // js/game_manager.js L259 compared face values alone.
     for (const board of [
       EMPTY_BOARD,
       MERGE_PAIR_BOARD,

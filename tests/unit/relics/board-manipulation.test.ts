@@ -3,23 +3,11 @@
 //
 // What each of the four handlers DOES is covered by
 // tests/unit/relics/relic-effects.test.ts. Two family-level properties had no
-// test, and both are conditions under which a relic must do nothing at all:
-//
-//   zero charges      every relic of this family carries a budget, and the
-//                     prompt names the case outright: invoked with ZERO charges
-//                     remaining, a charge relic must neither throw nor corrupt
-//                     run state. The guard lives in src/engine/hook-bus.ts, so
-//                     the case is asserted per relic AND asserted to be the
-//                     bus's own rather than each handler's.
-//   trigger bands     three of the four bind `onBeforeMove`. Held together they
-//                     are dispatched in one turn, so their arming conditions
-//                     must partition the board rather than overlap: a turn that
-//                     rewinds must not also tumble, and a turn that culls must
-//                     not also rewind. The bands are decided by the number of
-//                     empty cells left.
+// test, and both are conditions under which a relic must do nothing at all.
 //
 // Every case dispatches through a real `HookBus` against a real `Grid`, so the
-// guard, the ordering and the board-effect transaction are the production ones.
+// guard, the ordering and the board-effect transaction are the production
+// ones.
 
 import { describe, expect, it } from 'vitest';
 
@@ -38,10 +26,6 @@ import {
   stateOf,
 } from '../../fixtures/relics';
 import type { RelicBench } from '../../fixtures/relics';
-
-/* ==========================================================================
- * Harness
- * ========================================================================== */
 
 /** The four relics of the family, in declaration order. */
 const FAMILY = [
@@ -70,10 +54,6 @@ function placeCount(target: RelicBench, count: number, value = 2): void {
     }
   }
 }
-
-/* ==========================================================================
- * 1. Zero charges
- * ========================================================================== */
 
 describe('a charge budget spent to zero', () => {
   it('is declared by every relic of the family', () => {
@@ -164,9 +144,7 @@ describe('a charge budget spent to zero', () => {
 
     expect(beforeSweep?.charges).toBe(relicById('scouring-wind').charges);
 
-    // A full board gives it a column to clear, and THAT invocation asks. The
-    // handler never writes the budget itself — it requests, and the bus is the
-    // one writer, which is why the two paths share one pool.
+    // A full board gives it a column to clear, and THAT invocation asks.
     fill(target.grid, 2);
     dispatchOn(target, 'onAfterMove', afterMovePayload(target.grid, 40));
 
@@ -176,8 +154,6 @@ describe('a charge budget spent to zero', () => {
 
     expect(afterSweep?.charges).toBe(0);
 
-    // ONE POOL, TWO PATHS: the manual deduction finds the budget already gone
-    // and takes nothing rather than driving it negative.
     const spent = target.bus.consumeCharge('scouring-wind', 1);
 
     expect(spent.consumed).toBe(0);
@@ -200,8 +176,6 @@ describe('a charge budget spent to zero', () => {
       'culling-blade',
     ]);
 
-    // Eight tiles of the lowest spawn value: eight empty cells arms the blade,
-    // and no empty cell would have been needed to arm the anchor.
     placeCount(target, 8, 2);
 
     const outcome = resultOn(
@@ -216,10 +190,6 @@ describe('a charge budget spent to zero', () => {
     expectConsistentLattice(target.grid);
   });
 });
-
-/* ==========================================================================
- * 2. Trigger bands
- * ========================================================================== */
 
 describe('the three onBeforeMove relics held together', () => {
   /** All three, in declaration order, on one bench. */
@@ -244,8 +214,7 @@ describe('the three onBeforeMove relics held together', () => {
     );
 
     // Only the anchor acted: the board is the anchored one and the turn is
-    // withdrawn. A tumble would have left sixteen tiles standing, and a cull
-    // would have left fifteen.
+    // withdrawn.
     expect(resolved.cancelled).toBe(true);
     expect(occupants(target.grid)).toHaveLength(4);
     expect(occupants(target.grid).every((cell) => cell.value === 2)).toBe(true);
@@ -265,8 +234,6 @@ describe('the three onBeforeMove relics held together', () => {
       beforeMovePayload(target.grid),
     );
 
-    // The turn still resolves, and the tile count is unchanged: a rewind would
-    // have withdrawn it, and a cull would have removed one.
     expect(resolved.cancelled).toBe(false);
     expect(occupants(target.grid)).toHaveLength(13);
     expectConsistentLattice(target.grid);
@@ -374,10 +341,6 @@ describe('the three onBeforeMove relics held together', () => {
     expect(cursorOf(first, 'relic-draw')).toBe(cursorOf(second, 'relic-draw'));
   });
 });
-
-/* ==========================================================================
- * 3. The fourth relic, on the other hook
- * ========================================================================== */
 
 describe('scouring-wind beside the other three', () => {
   it('acts on onAfterMove alone, and the trio on onBeforeMove alone', () => {

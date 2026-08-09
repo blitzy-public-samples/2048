@@ -4,6 +4,28 @@
   <meta charset="utf-8">
   <title>2048</title>
 
+  <!-- Content Security Policy, declared in the document because the deployment
+       mandate is that `dist/` is copied to an arbitrary static host with no
+       server and no header configuration behind it, so a meta policy is the only
+       layer that travels with the artifact. It applies identically to the dev
+       server, the preview server and the copied bundle.
+         `script-src 'self'`  every script is same-origin: one hashed module in
+                              the bundle, `/@vite/client` in development, and no
+                              inline script anywhere.
+         `style-src` needs `'unsafe-inline'`  the number-only renderer, the
+                              parallel board, the HUD and the diagnostics
+                              surface all write inline style ATTRIBUTES, and the
+                              dev server injects CSS as `<style>` elements.
+         `img-src 'self' data:`  the icons are same-origin; `data:` covers the
+                              assets the build inlines below its 4 KiB
+                              threshold.
+         `connect-src 'self'`  covers the development HMR websocket, which is
+                              same-origin.
+       `frame-ancestors` and `report-to` are NOT expressible in a meta policy and
+       are documented in README.md as headers a host should add on top of this.
+       Decision DL-BUILD-15. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'none'; worker-src 'self'; form-action 'none'">
+
   <!-- No stylesheet link: src/main.ts imports style/main.scss, so CSS enters
        through the module graph and the build emits the compiled asset. -->
   <link rel="shortcut icon" href="favicon.ico">

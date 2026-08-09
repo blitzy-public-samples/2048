@@ -1,17 +1,5 @@
-// The two harnesses every suite under tests/unit/relics/ drives a relic through.
-//
-// A relic is plain data (AAP Contract 3) whose behaviour lives in the handlers
-// of its `hooks` table, and those handlers are only ever invoked by
-// src/engine/hook-bus.ts. This module therefore exercises a relic THROUGH A REAL
-// BUS rather than by calling its handler directly, so every assertion in the
-// relic suites is made against the contract the engine actually runs.
-//
-// TWO SURFACES, ONE MECHANISM. `createRelicHarness` is the environment-shaped
-// harness — a caller assembles the collaborators and reads what a dispatch
-// committed — and `relicBench` is the seat-shaped one, which registers a named
-// catalogue relic and hands back its seat. Both build a real bus over a live
-// `Grid` and a live `RulesConfig`, both fork randomness from a named substream
-// per handler, and neither asserts: the expectations live in the suites.
+// The two harnesses every suite under tests/unit/relics/ drives a relic
+// through.
 //
 // This module reads no DOM and no storage, performs no I/O, reads no clock,
 // writes no log and takes no unseeded randomness: every draw comes from a
@@ -52,7 +40,9 @@ export const HARNESS_SEED = 'blitzy-relic-harness';
  */
 export type BoardLayout = readonly (readonly (number | null)[])[];
 
-/** What a harness hands a suite: the collaborators plus the bus driving them. */
+/**
+ * What a harness hands a suite: the collaborators plus the bus driving them.
+ */
 export interface RelicHarness extends HookEnvironment {
   /** The live rules the dispatch reads, and that a relic may write. */
   readonly config: RulesConfig;
@@ -112,12 +102,8 @@ export interface RelicHarnessOptions {
 /**
  * Builds a mutable rules object carrying the vanilla-equivalent defaults.
  *
- * `createDefaultRulesConfig()` is the factory the engine itself uses, so a
- * suite runs under the rules the product ships rather than a bespoke copy.
- * Fresh on every call and never frozen: the `merge-magic` and
- * `risk-reward-cursed` families WRITE this object.
- *
- * @param boardSize Edge length to declare, where it differs from the default.
+ * @param boardSize Edge length to declare, where it differs from the
+ *   default.
  * @returns A fresh, writable rules object.
  */
 export function createHarnessConfig(boardSize?: number): RulesConfig {
@@ -290,10 +276,6 @@ export function tileAt(x: number, y: number, value: number): Tile {
   return new Tile({ x, y }, value);
 }
 
-/* ==========================================================================
- * The seat-shaped harness
- * ========================================================================== */
-
 
 
 /** The one seed every bench built here is drawn from. */
@@ -315,8 +297,8 @@ export interface RelicSeat {
   readonly id: string;
 
   /**
-   * Charge budget to register with, overriding the definition's own. `0` is the
-   * exhausted budget the zero-charge cases drive.
+   * Charge budget to register with, overriding the definition's own. `0` is
+   * the exhausted budget the zero-charge cases drive.
    */
   readonly charges?: number;
 }
@@ -343,9 +325,6 @@ export function relicById(id: string): Relic {
 
 /**
  * Builds a bench seating the named relics, in the order given.
- *
- * REGISTRATION ORDER IS PICKUP ORDER, which is the order the bus dispatches in,
- * so a compounding case states the order it means by the order it seats.
  *
  * @param seats Relics to seat, by identifier or with a charge override.
  * @param options Board size and seed, each defaulted.

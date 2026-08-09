@@ -1,35 +1,6 @@
 // Contract suite over tests/fixtures/boards.ts, the five board fixtures every
 // other suite under tests/ builds engine state from.
 //
-// Why the fixture module carries a suite of its own: every consumer suite
-// agrees with every other about the shape of a fixture, so a fault in the
-// builder is invisible to all of them at once. The assertions below are
-// therefore written against the vocabulary the deleted vanilla sources
-// declared rather than against another fixture.
-//
-// Provenance of that vocabulary:
-//   js/tile.js L19-L27       tile -> { position: { x, y }, value }
-//   js/grid.js L102-L117     grid -> { size, cells }
-//   js/grid.js L109          an empty cell serialises as `null`
-//   js/grid.js L58-L64       cell order is x-outer, y-inner
-//   js/grid.js L21-L34       fromState reads `state[x][y]` at L28
-//   js/game_manager.js L102-L110  manager -> { grid, score, over, won,
-//                                 keepPlaying }
-//   js/game_manager.js L170  the win comparison is strict equality
-//   js/game_manager.js L238-L240  `cellsAvailable() || tileMatchesAvailable()`
-//
-// Four contracts are pinned: every builder returns a freshly allocated,
-// unfrozen graph sharing no object with an earlier return or with the frozen
-// constants; every occupied slot agrees with the position its tile carries;
-// every board is `size` by `size` with coherent manager flags; and every
-// argument guard throws exactly `RangeError`.
-//
-// The subject imports two values from src/config/default-config.ts and no
-// other module. This suite reads no storage and no document, declares no spy,
-// consumes no randomness and holds no state between tests. It is collected by
-// the unit:dom project in vitest.config.ts; nothing below needs the document
-// that project supplies.
-//
 // Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
 import { describe, expect, it } from 'vitest';
@@ -55,8 +26,6 @@ import type {
   SerializedGameState,
   SerializedTile,
 } from '../../../src/engine/types';
-
-/* ===== 1. Builders under test ===== */
 
 /** Builds one board at a requested size. */
 type BoardBuilder = (size?: number) => SerializedGameState;
@@ -116,7 +85,9 @@ const BUILDERS: readonly BuilderCase[] = [
   },
 ];
 
-/** Sizes every builder is exercised at, all at or above `MIN_OCCUPIED_SIZE`. */
+/**
+ * Sizes every builder is exercised at, all at or above `MIN_OCCUPIED_SIZE`.
+ */
 const EXERCISED_SIZES: readonly number[] = [2, 3, 4, 5];
 
 /** Sizes rejected as not being a safe integer of at least the minimum. */
@@ -154,8 +125,6 @@ const PAIR_TILE_COUNT = 2;
 
 /** Distinct values the near-loss fixture cycles through. */
 const CROWDED_CYCLE_LENGTH = 5;
-
-/* ===== 2. Traversal helpers ===== */
 
 /** One cell address. */
 interface CellAddress {
@@ -221,8 +190,8 @@ function valueAt(
 
 /**
  * Counts the adjacent pairs of equal value on a board, horizontally and
- * vertically — the neighbour probe of js/game_manager.js L238-L240 expressed as
- * a count.
+ * vertically — the neighbour probe of js/game_manager.js L238-L240 expressed
+ * as a count.
  *
  * @param board Board to probe.
  * @returns How many adjacent equal pairs the board carries.
@@ -257,8 +226,8 @@ function adjacentEqualPairs(board: SerializedGameState): number {
  * shared reference at every level.
  *
  * @param board Board to flatten.
- * @returns The board, its grid, the matrix, every column, every tile and every
- *   tile's position.
+ * @returns The board, its grid, the matrix, every column, every tile and
+ *   every tile's position.
  */
 function everyObject(board: SerializedGameState): object[] {
   const objects: object[] = [board, board.grid, board.grid.cells];
@@ -275,8 +244,6 @@ function everyObject(board: SerializedGameState): object[] {
 
   return objects;
 }
-
-/* ===== 3. Shape shared by every builder ===== */
 
 describe('every board fixture builder', () => {
   it.each(BUILDERS)(
@@ -376,8 +343,6 @@ describe('every board fixture builder', () => {
   );
 });
 
-/* ===== 4. Freshness: no object is shared with an earlier return ===== */
-
 describe('board fixture freshness', () => {
   it.each(BUILDERS)(
     '$name shares no object between two returns',
@@ -450,8 +415,6 @@ describe('board fixture freshness', () => {
   );
 });
 
-/* ===== 5. copyBoard ===== */
-
 describe('copyBoard', () => {
   it.each(BUILDERS)(
     'copies a $name board deep-equal and object-disjoint',
@@ -506,8 +469,6 @@ describe('copyBoard', () => {
     }
   });
 });
-
-/* ===== 6. Per-fixture layout ===== */
 
 describe('createEmptyBoard', () => {
   it('leaves every cell null at every exercised size', () => {
@@ -668,8 +629,6 @@ describe('createNearLossBoard', () => {
   });
 });
 
-/* ===== 7. Argument guards ===== */
-
 describe('board fixture argument guards', () => {
   it.each(BUILDERS)(
     '$name throws RangeError below its own minimum size',
@@ -716,8 +675,6 @@ describe('board fixture argument guards', () => {
     expect(() => createNearWinBoard(4, 2048)).not.toThrow();
   });
 });
-
-/* ===== 8. The five frozen constants ===== */
 
 describe('the five frozen board constants', () => {
   it.each(BUILDERS)(

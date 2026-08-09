@@ -1,22 +1,7 @@
-// Stable text renderings of engine and run state, for the seeded snapshot gate.
+// Stable text renderings of engine and run state, for the seeded snapshot
+// gate.
 //
-// TEXT, NOT A STRUCTURAL SNAPSHOT
-//   Every rendering below is a legible string and is lossless over the members
-//   that decide determinism, so a diff that reads as identical IS identical in
-//   those members. Decision DL-FIXTURE-04.
-//
-// STABILITY
-//   Nothing here reads a clock, consumes randomness, touches storage or the DOM,
-//   or depends on locale: numbers are rendered by `String`, whose output for a
-//   double is exactly specified and therefore identical on every platform, and
-//   no member is sorted by anything but its own declared order. A rendering is
-//   the same string on every run of one input, which is what makes it storable.
-//
-// REDACTION
-//   `runId` is originated per run instance and would make any snapshot carrying
-//   it unstorable. It is rendered as a placeholder unless a spec supplies its
-//   own deterministic token factory, in which case the real value is stable and
-//   is shown.
+// Decisions: DL-FIXTURE-04 (docs/DECISION_LOG.md).
 
 import type { SerializedGameState, SerializedTile } from '../../src/engine/types';
 import { RNG_STREAM_NAMES } from '../../src/rng/rng-streams';
@@ -32,12 +17,7 @@ const EMPTY_CELL = '.';
 /** What a cell holding something other than a tile renders as. */
 const MALFORMED_CELL = '?';
 
-/**
- * One cell of a serialised grid, or `null`.
- *
- * The matrix type admits `null`, and a matrix that came out of storage can hold
- * anything at all, so the renderer narrows rather than trusting the type.
- */
+/** One cell of a serialised grid, or `null`. */
 function readCell(value: unknown): SerializedTile | null {
   if (typeof value !== 'object' || value === null) {
     return null;
@@ -48,15 +28,6 @@ function readCell(value: unknown): SerializedTile | null {
 
 /**
  * Renders one board as a fixed-width grid under a metadata line.
- *
- * ROW-MAJOR OUTPUT FROM A COLUMN-MAJOR MATRIX. The persisted matrix is indexed
- * `cells[x][y]`, so row `y` is read across the columns. The output therefore
- * reads the way the board looks on screen — top row first, left column first —
- * rather than the way it is stored.
- *
- * A tile whose recorded position disagrees with the cell holding it is shown as
- * `value@x,y`, because that disagreement is a real corruption the engine
- * normalises away on load and a snapshot should not hide it.
  *
  * @param state Board snapshot to render.
  * @returns The rendering, with no trailing newline.
@@ -111,14 +82,7 @@ export function formatBoard(state: SerializedGameState): string {
   return lines.join('\n');
 }
 
-/**
- * Renders a cursor map in the substream declaration order.
- *
- * Order comes from `RNG_STREAM_NAMES` rather than from the object's own key
- * order, so a map rebuilt in a different order renders identically and a
- * substream ADDED to that list shows up as a new line rather than as a silent
- * reordering of the existing ones.
- */
+/** Renders a cursor map in the substream declaration order. */
 export function formatCursors(cursors: RngCursorMap): string {
   return RNG_STREAM_NAMES.map(
     (name) => `  ${name.padEnd(16)}${String(cursors[name])}`,
@@ -132,11 +96,7 @@ export function formatStreamCursors(streams: RngStreams): string {
 
 /** Options that control what a run rendering shows rather than redacts. */
 export interface FormatRunOptions {
-  /**
-   * Show `runId` verbatim. Only for a spec that supplies its own deterministic
-   * token factory; a run whose identifier was originated renders a placeholder,
-   * because the real value differs on every run and no snapshot could store it.
-   */
+  /** Show `runId` verbatim. */
   readonly showRunId?: boolean;
 }
 
@@ -146,10 +106,6 @@ const REDACTED_RUN_ID = '<originated>';
 /**
  * Renders one run-state envelope, member by member, in the order the interface
  * declares them.
- *
- * All nine members appear. A member added to the envelope without this
- * rendering being extended shows up as an unexplained absence from a snapshot
- * that otherwise claims to describe the whole run, which is the point.
  *
  * @param state Envelope to render.
  * @param options Whether to show the run identifier.
@@ -189,15 +145,7 @@ export function formatRunState(
   ].join('\n');
 }
 
-/**
- * Renders a sequence of drawn numbers, one per line, numbered from 1.
- *
- * `String` on a double yields the shortest representation that round-trips to
- * the same double, and that representation is exactly specified, so a recorded
- * draw is byte-identical on every platform. Truncating to a fixed number of
- * decimals would hide a change in the low bits, which is exactly the kind of
- * change a determinism gate exists to catch.
- */
+/** Renders a sequence of drawn numbers, one per line, numbered from 1. */
 export function formatDraws(draws: readonly number[]): string {
   return draws
     .map((draw, index) => `  ${String(index + 1).padStart(2)}. ${String(draw)}`)

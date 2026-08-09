@@ -1,47 +1,10 @@
 // Design tokens. This file declares variables only and emits no CSS.
 //
-// The first block is the game's established token set, unchanged in name,
-// value and order, and is mirrored by src/theme/tokens.ts so the stylesheet
-// and the Three.js materials read one set of values. The blocks after it are
-// new families. Every partial that needs a token loads this file for itself:
-// Sass `@use` is not transitive.
-//
-// src/theme/tokens.ts is the authoritative side of that pair. vite.config.ts
-// renders its `sassTokenProjection` as a Sass map and prepends it to every
-// stylesheet it compiles; style/main.scss passes that map here as `$projection`
-// and `_resolve-token()` returns the projected value for every token it
-// carries. A projected value that disagrees with the fallback beside it raises
-// `@error`, so the two sides cannot diverge. `$projection` is empty when no
-// build supplied one, and every token then resolves to its fallback.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece. TOKEN is one area
-// across both halves of the mirror, so these ordinals do not collide with the
-// ones src/theme/tokens.ts carries:
-//   TR-TOKEN-09  style/main.scss L4-L22  the fourteen-variable token block,
-//                                        moved here unchanged in name, value
-//                                        and order
-//   TR-TOKEN-10  target-only row         `_resolve-token()`, `$projection` and
-//                                        the `@error` that holds the two sides
-//                                        together
-//   TR-TOKEN-11  target-only row         the new token families: the z-index
-//                                        ladder extension, the depth scale and
-//                                        the mobile restatements
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-TOKEN-05  the established token block moved here unchanged, with every
-//                partial loading this file for itself
-//   DL-TOKEN-06  src/theme/tokens.ts as the authoritative side, resolved
-//                through the projected map with a fallback beside every token
+// Decisions: DL-TOKEN-05, DL-TOKEN-06 (docs/DECISION_LOG.md).
 
 @use "sass:color";
 @use "sass:map";
 @use "sass:math";
-
-// -----------------------------------------------------------------------------
-// Projection intake: configured by style/main.scss from the map vite.config.ts
-// prepends.
-// -----------------------------------------------------------------------------
 
 $projection: () !default;
 
@@ -70,14 +33,6 @@ $_token-fallbacks: (
   z-index-diagnostics: 500,
 );
 
-// Returns the value of one projected token: the projected value when the build
-// supplied one, the fallback otherwise. Private to this module, so `@use
-// "tokens" as *` does not expose it.
-//
-// @param {String} $name - key into $_token-fallbacks and into $projection.
-// @return {*} the resolved token value.
-// @throw when $name names no fallback, or when the projected value and the
-//   fallback disagree.
 @function _resolve-token($name) {
   $fallback: map.get($_token-fallbacks, $name);
 
@@ -100,36 +55,9 @@ $_token-fallbacks: (
   @return $projected;
 }
 
-// -----------------------------------------------------------------------------
-// Colour serialisation.
-// -----------------------------------------------------------------------------
-
 // Serialises a colour the way a `background` or `color` declaration serialises
-// it, so a colour published into a custom property carries the same channels as
-// one declared directly.
-//
-// Dart Sass writes a declared colour as hex, flooring each channel; a colour
-// interpolated into a custom property keeps its fractional channels and is
-// written as percentages instead. src/theme/tile-ramp.ts floors, which is the
-// parity the compiled ramp is verified against, so each channel is floored here
-// before `rgb()` rebuilds the colour.
-//
-// Declared in this file because it exists for token parity with
-// src/theme/tile-ramp.ts, and because both callers — style/main.scss for the
-// default ramp and style/_themes.scss for each palette's ramp — already load
-// this file and interpolate their result into the same custom properties.
-// Provenance: moved here from style/helpers.scss, whose change boundary is the
-// Dart Sass migration of the vanilla helpers alone. Decision DL-TOKEN-01.
-// Traceability row TR-TOKEN-01, a target-only row.
-//
-// THE ONE DECLARATION. A second, identical one stood at the end of this file and
-// silently superseded this one: Sass takes the last, so the two could drift with
-// nothing reporting it, one documented block was dead, the DL-TOKEN-01 /
-// TR-TOKEN-01 provenance was split across both, and a reader had no way to tell
-// which was authoritative. This is the declaration.
-//
-// @param {Color} $color - the colour to serialise.
-// @return {Color} the same colour with each RGB channel floored to an integer.
+// it, so a colour published into a custom property carries the same channels
+// as one declared directly.
 @function quantised($color) {
   @return rgb(
     math.floor(color.channel($color, "red", $space: rgb)),
@@ -137,11 +65,6 @@ $_token-fallbacks: (
     math.floor(color.channel($color, "blue", $space: rgb))
   );
 }
-
-// -----------------------------------------------------------------------------
-// The established token set. The eleven stated values resolve through the
-// projection; the three derived values below are computed from them.
-// -----------------------------------------------------------------------------
 
 $field-width: _resolve-token(field-width) !default;
 $grid-spacing: _resolve-token(grid-spacing) !default;
@@ -162,17 +85,6 @@ $game-container-margin-top: _resolve-token(game-container-margin-top) !default;
 $game-container-background: _resolve-token(game-container-background) !default;
 
 $transition-speed: _resolve-token(transition-speed) !default;
-
-// -----------------------------------------------------------------------------
-// Mobile scale.
-//
-// The three lengths style/main.scss's `smaller($mobile-threshold)` block needs,
-// named here so that block reads them instead of declaring its own. The board
-// dimension and the corner radius are not rescaled there, so the block reads
-// $grid-row-cells and $tile-border-radius above. Mirrored by
-// `mobileFieldWidth`, `mobileGridSpacing` and `mobileGameContainerMarginTop` of
-// src/theme/tokens.ts.
-// -----------------------------------------------------------------------------
 
 $mobile-field-width: _resolve-token(mobile-field-width) !default;
 $mobile-grid-spacing: _resolve-token(mobile-grid-spacing) !default;
@@ -196,60 +108,12 @@ $depth-bevel: math.div($grid-spacing, 5) !default;
 $depth-board: $grid-spacing * 1 !default;
 $depth-tile: $grid-spacing * 2 !default;
 
-// -----------------------------------------------------------------------------
-// Sibling-control gap: the gap between two adjacent controls, as three times
-// $tile-border-radius. Resolves to 9px, the `margin-left` style/main.scss
-// applies between the two controls of `.game-message .lower`.
-//
-// It is the single declaration of that gap. style/_screens.scss and
-// style/_summary.scss each derived it independently before this token existed,
-// and both now default to it; style/main.scss reads it for the gap between
-// `.restart-button` and `.settings-button`.
-// -----------------------------------------------------------------------------
-
 $control-gap: $tile-border-radius * 3 !default;
-
-// -----------------------------------------------------------------------------
-// Relic rarity ladder: the one ordered rarity list the style layer generates
-// rarity rules from, lowest first. style/_hud.scss generates the active-relic
-// tray's accent from it, style/_reward.scss generates the reward card's accent
-// and chip from it, and style/_themes.scss derives each palette's rarity
-// accents from it, so the surfaces cannot style different sets of tiers.
-//
-// These are the members of the `Rarity` enumeration of
-// src/relics/relic-types.ts, and `rarity` is a field of one relic.
-// `risk-reward-cursed` is a relic FAMILY - one of the four alongside
-// `spawn-control`, `merge-magic` and `board-manipulation` - and is not a member
-// of this list.
-// -----------------------------------------------------------------------------
 
 $rarity-tiers: common, uncommon, rare, legendary !default;
 
-// -----------------------------------------------------------------------------
-// Diagnostics overlay monospace stack.
-//
-// Independent of the Clear Sans stack that style/main.scss applies to the rest
-// of the interface.
-// -----------------------------------------------------------------------------
-
 $diagnostics-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
   "Liberation Mono", monospace !default;
-
-// -----------------------------------------------------------------------------
-// Tile numeral clamp.
-//
-// Fraction of a cell's edge a tile numeral may occupy, and the smallest numeral
-// either scale will draw. Mirrored by `tileNumeralCellRatio` and
-// `minTileNumeralSize` of src/theme/tokens.ts, which is what
-// src/render/number-only-renderer.ts writes `--tile-numeral-size` from.
-//
-// The four declared numeral sizes of style/main.scss were authored against the
-// four-cell board and cell size falls as the board grows while they do not. The
-// ratio is DERIVED: the largest fraction of its cell any declared numeral
-// occupies at $grid-row-cells, which is the mobile base numeral at 35 / 57.5 =
-// 0.6087 ahead of the desktop base at 55 / 106.25 = 0.5176. Rounding up to two
-// places keeps the clamp non-binding at four cells for both scales.
-// -----------------------------------------------------------------------------
 
 $tile-numeral-cell-ratio: 0.61 !default;
 $tile-numeral-min-size: 6px !default;

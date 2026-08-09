@@ -1,20 +1,7 @@
 // Contract suite for the audio layer's subscription ownership, preference
 // ownership and event integration, AAP A5 and R9.
 //
-// Three properties are pinned here, none of them visible to the type checker:
-//
-//   detachment   `EngineEventSource.on` was typed `void`, so every release
-//                handle the emitter returned was discarded. A disposed engine
-//                therefore stayed registered on the emitter for the emitter's
-//                whole life and went on receiving every event.
-//   ownership    the accessibility surface's default volume was 1 and the
-//                engine's was 0.6, and each held its own mute and volume, so
-//                what a listener heard depended on which had last written the
-//                master gain.
-//   integration  the engine subscribed to `relic:acquired`, which no emitter
-//                produces: `EngineEventPayloadMap` of
-//                src/engine/engine-events.ts declares seven names and that
-//                is not one of them.
+// Three properties are pinned here, none of them visible to the type checker.
 //
 // jsdom implements no Web Audio API, so the engine reports itself unavailable
 // and synthesises nothing. That is the documented degradation and it leaves
@@ -23,11 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-// Vite's `?raw` query hands a module's own text to the suite. Read this way
-// rather than through a Node builtin: this suite runs in the jsdom project,
-// where `import.meta.url` is a served URL and not a file path, and the
-// browser-context tsconfig types `*?raw` through vite/client while declaring
-// no Node types at all.
+// Vite's `?raw` query hands a module's own text to the suite.
 import a11ySettingsSource from '../../../src/ui/a11y/settings.ts?raw';
 
 import { createEngineEvents } from '../../../src/engine/engine-events';
@@ -64,11 +47,6 @@ import {
 
 /**
  * A listener stored by a fake emitter, whatever event it was registered for.
- *
- * `EngineEventListener<K>` for every `K` is assignable to this, so one set
- * holds listeners of every event without widening the fake's own `on` away
- * from the engine's generic signature — which is the mismatch the previous
- * broad fakes hid.
  */
 type StoredListener = (payload: never) => void;
 
@@ -110,9 +88,6 @@ const offOnlySource = (): {
 
   return {
     source: {
-      // Returns nothing, which is why this fake carries `off`. Cast at the
-      // return alone: the release handle is what this source deliberately
-      // withholds, and every parameter still matches the engine's signature.
       on: (<K extends EngineEventName>(
         eventName: K,
         handler: EngineEventListener<K>,
@@ -183,8 +158,6 @@ const preferenceSource = (
   };
 };
 
-/* ===== 1. Disposal detaches every handler (F-05) ===== */
-
 describe('a disposed sound engine is detached from its sources', () => {
   it('releases every handle the source returned', () => {
     const emitter = recordingSource();
@@ -221,8 +194,6 @@ describe('a disposed sound engine is detached from its sources', () => {
     engine.subscribe(emitter.source);
     engine.dispose();
 
-    // Nothing is registered, so nothing is reached; the handler would otherwise
-    // have run against a disposed engine.
     expect(() => {
       emitter.emit('state:commit');
       emitter.emit('tile:merge');
@@ -352,15 +323,11 @@ describe('a disposed sound engine is detached from its sources', () => {
   });
 });
 
-/* ===== 2. One owner for mute and volume (F-27) ===== */
-
 describe('the mute and volume defaults have exactly one owner', () => {
   it('publishes the same four values from all three modules', () => {
     // One declaration, in src/config/audio-bounds.ts, re-exported by the audio
     // module and by the accessibility surface: these are the same bindings and
-    // cannot drift. Two independent declarations came before, and they DISAGREED
-    // on the starting volume, so the volume a player heard depended on which
-    // owner had last written the master gain.
+    // cannot drift.
     expect(SETTINGS_MIN_VOLUME).toBe(MIN_VOLUME);
     expect(SETTINGS_MAX_VOLUME).toBe(MAX_VOLUME);
     expect(SETTINGS_DEFAULT_VOLUME).toBe(DEFAULT_VOLUME);
@@ -375,11 +342,10 @@ describe('the mute and volume defaults have exactly one owner', () => {
   it('leaves the accessibility leaf with no edge into the audio layer', () => {
     const source = a11ySettingsSource;
 
-    // A DIRECTION, not a preference. src/ui/a11y/settings.ts is the leaf of the
-    // src/ui/ import graph, and a volume bound is something a PREFERENCE has to
-    // validate whether or not this build ever plays a sound — so the leaf must
-    // not reach into the audio subsystem for it. The panel is where preferences
-    // are adapted into audio, and the panel is not the leaf.
+    // A DIRECTION, not a preference. src/ui/a11y/settings.ts is the leaf of
+    // the src/ui/ import graph, and a volume bound is something a PREFERENCE
+    // has to validate whether or not this build ever plays a sound — so the
+    // leaf must not reach into the audio subsystem for it.
     expect(source).not.toMatch(/from\s+'\.\.\/\.\.\/audio\//);
     expect(source).toMatch(/from\s+'\.\.\/\.\.\/config\/audio-bounds'/);
   });
@@ -517,8 +483,6 @@ describe('the mute and volume defaults have exactly one owner', () => {
   });
 });
 
-/* ===== 3. Only emitted events are mapped (F-28) ===== */
-
 describe('the event table names only events an emitter produces', () => {
   it('maps each of the seven contract names', () => {
     // Exactly the names EngineEventPayloadMap declares.
@@ -532,9 +496,8 @@ describe('the event table names only events an emitter produces', () => {
   });
 
   it('does not map an event no emitter produces', () => {
-    // `relic:acquired` is absent from EngineEventPayloadMap, so a mapping
-    // for it could never resolve. It was removed rather than added to the
-    // frozen contract.
+    // `relic:acquired` is absent from EngineEventPayloadMap, so a mapping for
+    // it could never resolve.
     expect(effectNameForEvent('relic:acquired')).toBe(null);
   });
 
@@ -599,8 +562,6 @@ describe('the event table names only events an emitter produces', () => {
   });
 });
 
-/* ===== 4. The preference store satisfies the audio contract ===== */
-
 describe('the store satisfies the audio preference contract', () => {
   it('is assignable without an adapter', () => {
     const store = createPreferenceStore({});
@@ -640,17 +601,14 @@ describe('the store satisfies the audio preference contract', () => {
 
 describe('the audio port is the engine event contract, not a paraphrase', () => {
   it('accepts the real emitter of src/engine/engine-events.ts', () => {
-    // A COMPILE-TIME assertion first: the assignment below is the check, and it
-    // is what the previous broad fakes stopped the suite from making. It is
-    // exercised at runtime too, so the engine's `on` really is called.
+    // A COMPILE-TIME assertion first: the assignment below is the check, and
+    // it is what the previous broad fakes stopped the suite from making.
     const events = createEngineEvents();
     const source: EngineEventSource = events;
     const engine = createSoundEngine({});
 
     engine.subscribe(source);
 
-    // Every one of the five names it registers for is emitted by the same
-    // emitter, so an event renamed on one side no longer compiles on the other.
     expect(() => {
       events.emit('tile:spawn', {
         turn: 1,
@@ -678,9 +636,9 @@ describe('the audio port is the engine event contract, not a paraphrase', () => 
 
     engine.subscribe(events);
 
-    // A spawn with no position means NO TILE WAS INSERTED: the engine emits the
-    // event either way, and announcing the second case announced a tile the
-    // player never saw appear.
+    // A spawn with no position means no tile was inserted: the engine emits
+    // the event either way, and announcing the second case announced a tile
+    // the player never saw appear.
     events.emit('tile:spawn', { turn: 1, value: 2 });
 
     const afterSuppressed = counted.filter(

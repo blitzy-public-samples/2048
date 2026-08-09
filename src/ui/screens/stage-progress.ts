@@ -2,80 +2,8 @@
 // entered when a stage is resolved and left when the player continues into the
 // reward screen.
 //
-// NO VANILLA ANALOGUE. The retired sources carried exactly one screen, no
-// router, no hash handling and no History API use, and no construct in
-// js/game_manager.js, js/grid.js or js/tile.js resolved a stage. Every row this
-// module owns in docs/TRACEABILITY_MATRIX.md is therefore a target-only row,
-// declared as having no source construct so the reverse direction of that
-// matrix carries no gap.
-//
-// WHAT IT RENDERS, AND WHERE EACH VALUE COMES FROM
-//   the stage that ended, whether it cleared, and the score at stage end —
-//     the three members of the `stage:end` payload, typed here as
-//     `StageEndEvent` of ../../engine/engine-events and delivered by the router
-//     on the `StageClearScreenContext` of ../screen-router;
-//   the goal in force — the `StageGoal` of ../../config/stage-config, carried
-//     on the same context, rendered by branching on its `kind` discriminant;
-//   the measured quantity and the goal fraction — the `achieved` and the
-//     `progress` members of that module's `StageGoalProgress`. The `stageClear`
-//     context carries neither, so both arrive through the injected ports of
-//     `StageProgressOptions`, whose shapes are the accessor triple of
-//     `RunController` in ../../run/run-controller.
-//
-// WHAT IT DOES NOT DO
-//   it never subscribes to an engine event: every payload arrives from the
-//     router, which is the sole subscriber that drives screens;
-//   it never evaluates or re-evaluates a stage goal for the verdict. The
-//     `cleared` flag rendered is the payload's own. `evaluateStageGoal` is
-//     called for one purpose only — formatting a measured quantity the
-//     payload does not carry — and its `progress` is used verbatim: never
-//     re-clamped, never re-scaled against the target;
-//   it never advances the run: `RunController.advanceStage()` owns the
-//     lifecycle and the router owns the transition. The continue control
-//     publishes the `continueStage` action and nothing more;
-//   it never writes the container's `hidden` attribute, its `role`, its
-//     `aria-modal` or its `aria-label`: index.html declares all four and the
-//     router owns the attribute.
-//
-// LAYERING AND MOTION, BOTH READ FROM ../../theme/tokens
-//   `STAGE_PROGRESS_LAYER` is `zIndex.screenOverlay`, the 300 rung of the
-//     ladder extension, and is at or below `zIndex.modal` so the z-index-500
-//     diagnostics overlay is never shadowed. No rule is emitted from here: the
-//     container's stacking slot is declared by style/_screens.scss.
-//   `STAGE_PROGRESS_CADENCE` is `motion.fadeIn`, the frozen overlay cadence of
-//     an 800 ms fade after a 1200 ms delay. This module starts no animation and
-//     schedules no timer, so there is nothing here to retime; the cadence is
-//     published so a gate can read the interval it has to clear.
-//   The one entrance behaviour that is sequenced is the scroll that follows
-//     focus placement, and it is gated on the effective reduced-motion value:
-//     the injected preference port first, then the value the router read at
-//     the moment of the transition. style/_a11y.scss collapses the container's
-//     fade for the same preference.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece:
-//   TR-STAGECLEAR-01  target-only row  `createStageProgressScreen()` and the
-//                                      five-member `Screen` lifecycle over the
-//                                      `#screen-stage-progress` container
-//   TR-STAGECLEAR-02  target-only row  the three `stage:end` facts rendered:
-//                                      the stage index, the cleared flag and
-//                                      the score
-//   TR-STAGECLEAR-03  target-only row  the `StageGoal` kind branch and the
-//                                      `StageGoalProgress` readout
-//   TR-STAGECLEAR-04  target-only row  the hosted continue control, its
-//                                      delegated activation and its
-//                                      `data-focus-initial` marker
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-STAGECLEAR-01  the measured quantity and the goal fraction arriving
-//                     through injected ports, with no goal re-evaluated for the
-//                     verdict
-//   DL-STAGECLEAR-02  the structured stage-clear announcement being opt-in
-//                     through an injected announcer
-//   DL-STAGECLEAR-03  the continue control rendered here and its
-//                     element-to-action binding delegated
-//   DL-STAGECLEAR-04  the interstitial rendering no opaque panel, with its
-//                     content appended directly to the container
+// Decisions: DL-STAGECLEAR-01, DL-STAGECLEAR-02, DL-STAGECLEAR-03,
+// DL-STAGECLEAR-04 (docs/DECISION_LOG.md).
 
 import { evaluateStageGoal } from '../../config/stage-config';
 import type { StageGoal, StageGoalProgress } from '../../config/stage-config';
@@ -97,19 +25,9 @@ import type {
   StageClearScreenContext,
 } from '../screen-router';
 
-/* ==========================================================================
- * 1. The state, its container and the vocabulary it renders with
- * ========================================================================== */
-
 /** The state this module renders, as ../screen-router names it. */
 const SCREEN_NAME = 'stageClear' as const;
 
-/**
- * Selector of the container, read from `SCREEN_MOUNTS` of ../screen-router
- * rather than restated. index.html is the authority for it and declares it
- * empty, carrying `role="dialog"`, `aria-modal="true"`, `aria-label` and
- * `hidden`; every node below is appended inside it.
- */
 const HOST_SELECTOR: string = SCREEN_MOUNTS[SCREEN_NAME];
 
 /** Logical name of the container, carried into every report. */
@@ -130,11 +48,7 @@ export const CONTINUE_CONTROL_CLASS = 'stage-progress-continue';
 /** `CONTINUE_CONTROL_CLASS` as a class selector. */
 export const CONTINUE_CONTROL_SELECTOR = `.${CONTINUE_CONTROL_CLASS}`;
 
-/**
- * The classes of style/_screens.scss this module renders with. Every one is
- * declared there and available to all six router states; no class is invented
- * here and none needs a new rule.
- */
+/** The classes of style/_screens.scss this module renders with. */
 const SCREEN_CLASSES = Object.freeze({
   /** The verdict type treatment, at both scales. */
   verdict: 'screen-verdict',
@@ -170,10 +84,6 @@ export const STAGE_PROGRESS_CADENCE = Object.freeze({
   total: motion.fadeIn.delay + motion.fadeIn.duration,
 } as const);
 
-/* ==========================================================================
- * 2. Copy
- * ========================================================================== */
-
 /** Lower bound of a valid goal fraction. */
 const FRACTION_FLOOR = 0;
 
@@ -198,8 +108,8 @@ const LABEL_SEPARATOR = ' ';
 /**
  * Every string this screen renders, as pure functions of primitives.
  *
- * The stage number is one-based: it is player-facing copy, and the engine's own
- * index stays zero-based everywhere else. No string here names a movement
+ * The stage number is one-based: it is player-facing copy, and the engine's
+ * own index stays zero-based everywhere else. No string here names a movement
  * control, so none can fall out of step with the instructional copy of
  * index.html.
  */
@@ -265,10 +175,6 @@ export const stageProgressCopy = Object.freeze({
 /** The copy set, as a type a caller can partially override. */
 export type StageProgressCopy = typeof stageProgressCopy;
 
-/* ==========================================================================
- * 3. Report names
- * ========================================================================== */
-
 /** Counter raised once per completed mount. */
 const MOUNTED_METRIC = 'ui.stageProgress.mounted';
 
@@ -293,7 +199,9 @@ const ANNOUNCED_METRIC = 'ui.stageProgress.announced';
 /** Counter raised once per continue press this module forwarded. */
 const CONTINUE_METRIC = 'ui.stageProgress.continue';
 
-/** Counter raised once per goal measurement that was refused or unavailable. */
+/**
+ * Counter raised once per goal measurement that was refused or unavailable.
+ */
 const MEASURE_SKIPPED_METRIC = 'ui.stageProgress.measure_skipped';
 
 /** Counter raised once per injected port that raised. */
@@ -311,20 +219,16 @@ const CONTINUE_FAULT_METRIC = 'ui.stageProgress.continue_faulted';
 /** Counter raised once per `unmount`. */
 const UNMOUNTED_METRIC = 'ui.stageProgress.unmounted';
 
-/* ==========================================================================
- * 4. Injected ports
- * ========================================================================== */
-
 /**
  * The run accessors this screen reads.
  *
  * Declared as the accessor triple of `RunController` in
- * ../../run/run-controller made optional, so that controller satisfies it as it
- * stands and a test substitutes a plain object. Structurally a subset of the
- * `RouterRunPort` of ../screen-router, so one adapter serves both.
+ * ../../run/run-controller made optional, so that controller satisfies it as
+ * it stands and a test substitutes a plain object. Structurally a subset of
+ * the `RouterRunPort` of ../screen-router, so one adapter serves both.
  *
- * `goalProgress()` returns the `progress` member `evaluateStageGoal()`
- * produced, already bounded to [0, 1] by it and stored verbatim there.
+ * `goalProgress` returns the `progress` member `evaluateStageGoal` produced,
+ * already bounded to [0, 1] by it and stored verbatim there.
  */
 export type StageProgressRunPort = Partial<
   Pick<RunController, 'stageIndex' | 'stageGoal' | 'goalProgress'>
@@ -353,12 +257,6 @@ export interface StageProgressMeasurementPort {
  *
  * Structurally the `RouterAnnouncerPort` of ../screen-router, and the
  * `LiveRegionAnnouncer` of ../a11y/live-region satisfies it as it stands.
- *
- * ABSENT BY DEFAULT, AND SILENT WHEN ABSENT. ../a11y/engine-announcer.ts
- * announces the structured `stageClear` line on `stage:end`, and the router
- * announces its own transition line on entering this state, so a composition
- * that has either of those attached leaves this port unset. Decision
- * DL-STAGECLEAR-02.
  */
 export interface StageProgressAnnouncerPort {
   announce?(input: Announcement): void;
@@ -372,17 +270,13 @@ export type StageProgressPreferencePort = Partial<
   Pick<PreferenceStore, 'isReducedMotion'>
 >;
 
-/* ==========================================================================
- * 5. Construction parameters and the rendered state
- * ========================================================================== */
-
 /** Everything the factory accepts. Every member is optional. */
 export interface StageProgressOptions {
   /**
    * The container, as an element or as a selector resolved against `document`.
    *
    * A screen driven by the router receives the resolved container through
-   * `mount()` and needs none of this; the fallback exists so the screen is
+   * `mount` and needs none of this; the fallback exists so the screen is
    * usable stand-alone, and it runs through the guarded `resolveMount` of
    * ../a11y/settings. Defaults to `SCREEN_MOUNTS.stageClear`.
    */
@@ -403,15 +297,7 @@ export interface StageProgressOptions {
   /** The preference source read before focus is placed. */
   readonly preferences?: StageProgressPreferencePort;
 
-  /**
-   * Called when the continue control is activated.
-   *
-   * ABSENT BY DEFAULT, AND NO LISTENER IS BOUND WHEN ABSENT: the control is
-   * left for src/input/on-screen-controls.ts to promote and bind through its
-   * `markupControls` list, keyed on `CONTINUE_CONTROL_SELECTOR`, which is the
-   * one owner of element-to-action binding. A composition wires exactly one of
-   * the two paths. Decision DL-STAGECLEAR-03.
-   */
+  /** Called when the continue control is activated. */
   readonly onContinue?: () => void;
 
   /** Copy overrides. Any member may be replaced. */
@@ -419,6 +305,15 @@ export interface StageProgressOptions {
 
   /** Whether focus is placed on entry. Defaults to `true`. */
   readonly placeFocus?: boolean;
+
+  /**
+   * Whether this screen announces the stage clear on entry. Defaults to `true`.
+   *
+   * `false` is for a composition whose router reads the entry line, which it
+   * takes from `announcement()` below — the same words in a form free text
+   * can carry. Decision DL-STAGECLEAR-05.
+   */
+  readonly announceEntry?: boolean;
 
   /** Sink every miss, every write and every skipped write reports through. */
   readonly reporter?: UiReporter;
@@ -505,10 +400,6 @@ export interface StageProgressScreen extends Screen {
 }
 
 
-/* ==========================================================================
- * 6. Pure helpers
- * ========================================================================== */
-
 /**
  * The ambient document, where there is one.
  *
@@ -532,7 +423,8 @@ function asHtmlElement(element: Element): HTMLElement | null {
  * Resolves the copy set, member by member.
  *
  * @param overrides Replacements, any subset.
- * @returns The default set where there are none, and a frozen merge otherwise.
+ * @returns The default set where there are none, and a frozen merge
+ *   otherwise.
  */
 function mergeCopy(
   overrides: Partial<StageProgressCopy> | undefined,
@@ -575,11 +467,6 @@ function isFiniteNumber(value: unknown): value is number {
 /**
  * Whether a value is a goal fraction this screen will render.
  *
- * VALIDATION, NOT CLAMPING. `StageGoalProgress.progress` is documented as
- * finite and within the closed interval [0, 1]. A value outside that interval
- * is outside its own contract: it is rejected, it is reported, and the progress
- * line stays down. No bound is applied to a value that is inside it.
- *
  * @param value Candidate fraction.
  * @returns Whether it is finite and within [0, 1].
  */
@@ -613,10 +500,6 @@ function isStageGoalProgress(value: unknown): value is StageGoalProgress {
 
 /**
  * Calls one injected accessor, contained.
- *
- * A port is optional at every member, so an absent accessor yields `null`
- * without being called, and one that raises is reported and yields `null`, so
- * the screen renders what it has rather than failing the transition.
  *
  * @param member Name carried into the report.
  * @param read The accessor, already bound to its owner.
@@ -683,8 +566,6 @@ export function describeStageGoal(
     }
 
     default: {
-      // Exhaustive over `StageGoal`: a kind added to that union lands here as
-      // `never` and fails this file's type check rather than rendering blank.
       const unhandledGoal: never = goal;
 
       void unhandledGoal;
@@ -712,7 +593,7 @@ export interface StageProgressMeasurementSources {
   /** A whole measurement a caller already holds. */
   readonly measurement?: StageGoalProgress | null;
 
-  /** The goal fraction alone, as `RunController.goalProgress()` returns it. */
+  /** The goal fraction alone, as `RunController.goalProgress` returns it. */
   readonly fraction?: number | null;
 
   /** The highest tile value on the board at stage end. */
@@ -720,19 +601,7 @@ export interface StageProgressMeasurementSources {
 }
 
 /**
- * Resolves the measured quantity and the goal fraction, in a fixed order:
- *
- *   1. a whole `StageGoalProgress` a caller supplied, used as it stands;
- *   2. `evaluateStageGoal` of ../../config/stage-config, called only to format
- *      a quantity the `stage:end` payload does not carry, and only where the
- *      inputs for the goal's own kind are available;
- *   3. the goal fraction alone, where a run port supplied one;
- *   4. neither.
- *
- * The `cleared` verdict is NOT resolved here: it is the payload's own flag, and
- * this screen displays the resolution rather than re-deciding it. A `progress`
- * value is carried through verbatim at every step: never re-bounded, and never
- * multiplied back against the target.
+ * Resolves the measured quantity and the goal fraction, in a fixed order.
  *
  * Deterministic: identical arguments always produce a deep-equal result, and
  * nothing here reads a clock or consumes randomness.
@@ -768,9 +637,7 @@ export function measureStageProgress(
   const hasHighest = isFiniteNumber(highest);
 
   // A `'score-threshold'` goal takes its `achieved` from the score, which the
-  // payload carries, so it is measurable with no board quantity at all. A
-  // `'highest-tile'` goal takes it from the board, so it is measurable only
-  // where that quantity was supplied.
+  // payload carries, so it is measurable with no board quantity at all.
   if (goal !== null && (goal.kind === 'score-threshold' || hasHighest)) {
     try {
       const evaluated = evaluateStageGoal(goal, {
@@ -806,9 +673,6 @@ export function measureStageProgress(
 
 /**
  * States a goal fraction as a whole percentage.
- *
- * A display format of the fraction and nothing more: no bound is applied here,
- * the fraction having already been validated as finite and within [0, 1].
  *
  * @param fraction The validated fraction.
  * @returns The percentage, as a whole number.
@@ -854,20 +718,18 @@ function isStageGoal(value: unknown): value is StageGoal {
   );
 }
 
-/* ==========================================================================
- * 7. Construction
- * ========================================================================== */
-
-/** One labelled fact: its paragraph, and the node its value is written into. */
+/**
+ * One labelled fact: its paragraph, and the node its value is written into.
+ */
 interface FactNodes {
   readonly paragraph: HTMLElement;
   readonly value: Text;
 }
 
 /**
- * Every node this module owns. `all` is the append and remove set, in the order
- * the container lays them out, so `leave` and `unmount` take away exactly what
- * `mount` created and nothing the container held already.
+ * Every node this module owns. `all` is the append and remove set, in the
+ * order the container lays them out, so `leave` and `unmount` take away
+ * exactly what `mount` created and nothing the container held already.
  */
 interface StageProgressNodes {
   readonly heading: HTMLElement;
@@ -884,12 +746,12 @@ interface StageProgressNodes {
  *
  * Nothing is read or written at import time: the one guarded container lookup,
  * every node creation and every report happen inside this call and the
- * lifecycle members it returns. An absent container is reported and every write
- * is skipped; the screen stays callable and answers `hasHost()` with `false`.
+ * lifecycle members it returns. An absent container is reported and every
+ * write is skipped; the screen stays callable and answers `hasHost` with
+ * `false`.
  *
  * @param options Container, document, ports, copy, focus switch and sink.
  * @returns The mounted screen, whether or not a container resolved.
- *
  * @example
  * ```ts
  * const stageProgress = createStageProgressScreen({
@@ -910,6 +772,7 @@ export function createStageProgressScreen(
   const reporter = createSafeUiReporter(options.reporter ?? NOOP_UI_REPORTER);
   const copy = mergeCopy(options.copy);
   const placeFocusOnEntry = options.placeFocus !== false;
+  const announceOnEntry = options.announceEntry !== false;
   const run = options.run;
   const measurementPort = options.measurement;
   const announcer = options.announcer;
@@ -1003,11 +866,6 @@ export function createStageProgressScreen(
   /**
    * Builds the whole content once.
    *
-   * The children are appended to the container directly, not wrapped:
-   * style/_screens.scss lays the container out as a centred flex column with a
-   * `gap`, and that layout reaches its direct children only. Decision
-   * DL-STAGECLEAR-04.
-   *
    * @param doc Document the nodes are created in.
    * @returns Every node this module owns.
    */
@@ -1021,19 +879,17 @@ export function createStageProgressScreen(
     const progress = createFact(doc, copy.progressLabel);
 
     // Down until a fraction is available, so no line ever states a quantity no
-    // source produced. `hidden` takes it out of the render tree and the
-    // accessibility tree at once, and no rule of style/_screens.scss declares
-    // `display` on a paragraph, so the attribute is not overridden.
+    // source produced.
     progress.paragraph.hidden = true;
 
     const actions = doc.createElement('div');
 
     actions.className = SCREEN_CLASSES.actions;
 
+
     // A REAL BUTTON: focusable, activated by Enter and by Space through the
     // one `click` a native button dispatches for both, and announced as a
-    // button with no ARIA role. The hrefless anchors of the retired markup are
-    // the defect this repairs.
+    // button with no ARIA role.
     const control = doc.createElement('button');
 
     control.type = 'button';
@@ -1044,9 +900,6 @@ export function createStageProgressScreen(
     // visible label, which is what WCAG 2.5.3 requires of an extended name.
     control.setAttribute('aria-label', copy.continueName);
 
-    // The marker ../a11y/focus-manager resolves initial focus through: the
-    // `stageClear` entry of its `SCREEN_INITIAL_FOCUS` table is empty, so the
-    // marker is what makes the placement deterministic.
     control.setAttribute(FOCUS_INITIAL_ATTRIBUTE, '');
 
     actions.append(control);
@@ -1159,8 +1012,9 @@ export function createStageProgressScreen(
 
   /**
    * Takes a container on: caches it, builds this module's nodes against its
-   * document and binds the one delegated listener. Called once from `mount` and
-   * as the fallback from `enter`, and idempotent for a container already held.
+   * document and binds the one delegated listener. Called once from `mount`
+   * and as the fallback from `enter`, and idempotent for a container already
+   * held.
    *
    * @param candidate The container, or `null` where none resolved.
    * @returns Whether a container and a document are both in hand afterwards.
@@ -1413,9 +1267,6 @@ export function createStageProgressScreen(
   /**
    * Writes the stage clear to the live region, through the injected announcer.
    *
-   * PRIMITIVES ONLY, as ../a11y/live-region declares `StageClearAnnouncement`:
-   * the zero-based index and the cleared flag, never a `StageGoal`.
-   *
    * @param snapshot The render being announced.
    * @returns Whether a line was written.
    */
@@ -1489,10 +1340,6 @@ export function createStageProgressScreen(
     return false;
   };
 
-  /* ------------------------------------------------------------------------
-   * The returned screen
-   * ---------------------------------------------------------------------- */
-
   return Object.freeze({
     mount(hostElement: Element): void {
       if (!isLive('mount')) {
@@ -1508,6 +1355,33 @@ export function createStageProgressScreen(
         context: REPORT_CONTEXT,
         selector: HOST_SELECTOR,
       });
+    },
+
+    /**
+     * The line the router reads on entry: the verdict, the goal and the score
+     * this screen is showing, as free text.
+     *
+     * The router is the one speaker of an entry announcement, so the words are
+     * supplied here rather than spoken from `enter`. Decision DL-STAGECLEAR-05.
+     *
+     * @param context The context the entry carried.
+     * @returns The line, or `null` for any other state.
+     */
+    announcement(context: ScreenContext): string | null {
+      const entered = asStageClear(context, 'announcement');
+
+      if (entered === null) {
+        return null;
+      }
+
+      const snapshot = buildSnapshot(entered);
+      const heading = snapshot.cleared
+        ? copy.clearedHeading(snapshot.stageIndex + 1)
+        : copy.unclearedHeading(snapshot.stageIndex + 1);
+
+      return `${heading}. ${copy.scoreLabel} ${copy.scoreValue(
+        snapshot.score,
+      )}. ${copy.continueName}.`;
     },
 
     enter(context: ScreenContext): void {
@@ -1528,10 +1402,14 @@ export function createStageProgressScreen(
       write(snapshot);
       signature = renderSignature(snapshot);
 
-      // ONCE PER VISIT. `update` announces nothing, and the latch is released
+      // Once per visit. `update` announces nothing, and the latch is released
       // by `leave`, so a refresh cannot repeat the line and a second visit is
-      // announced again.
-      const spoken = announcedThisVisit ? false : announceClear(snapshot);
+      // announced again. A composition whose router reads the entry line leaves
+      // `announceEntry` off and this speaks nothing. DL-STAGECLEAR-05.
+      const spoken =
+        announcedThisVisit || !announceOnEntry
+          ? false
+          : announceClear(snapshot);
 
       if (spoken) {
         announcedThisVisit = true;
@@ -1584,7 +1462,7 @@ export function createStageProgressScreen(
       withdraw();
 
       // Released so the next visit renders from nothing and announces once
-      // more; the last render stays readable through `readRendered()`.
+      // more; the last render stays readable through `readRendered`.
       signature = null;
       announcedThisVisit = false;
 

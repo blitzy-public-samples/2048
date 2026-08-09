@@ -3,20 +3,7 @@
 // of every member, the call signatures of the two merge functions, and the
 // structural operand type those functions read.
 //
-// It pins no values. The vanilla-equivalent values that populate a
-// `RulesConfig` and the behaviour of the two default merge functions are pinned
-// by tests/unit/config/default-config.test.ts, and stage goals by
-// tests/unit/config/stage-config.test.ts. Neither module is imported here, and
-// the values the builders below use are not the vanilla ones.
-//
-// The module under test declares no runtime binding, and every identifier it
-// exports is imported below with `import type`. The type-level assertions are
-// enforced by `tsc --noEmit`, whose file set covers tests/**/*.ts, rather than
-// by the runner. Every test below also carries at least one runtime assertion.
-//
-// Decisions this suite is the evidence for: DL-CONFIG-01 and DL-CONFIG-02
-// in docs/DECISION_LOG.md. Traceability rows: TR-CONFIG-01 through
-// TR-CONFIG-05 of docs/TRACEABILITY_MATRIX.md.
+// Decisions: DL-CONFIG-01, DL-CONFIG-02 (docs/DECISION_LOG.md).
 
 import { describe, expect, expectTypeOf, it } from 'vitest';
 

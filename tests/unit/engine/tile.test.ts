@@ -1,22 +1,11 @@
 // Ported-fidelity suite for src/engine/tile.ts against its deleted vanilla
 // predecessor js/tile.js. The constructs pinned are the constructor,
-// `savePosition()`, `updatePosition()` and `serialize()`.
-//
-// The assertions hold those constructs to the consumers the vanilla sources
-// were: grid rehydration reconstructing a tile from a position and a value,
-// grid insertion indexing `cells[tile.x][tile.y]`, the merge condition
-// comparing values and rejecting an already-merged neighbour, the merged tile
-// carrying both source tiles in `mergedFrom`, and the change check comparing a
-// cell against a tile.
+// `savePosition`, `updatePosition` and `serialize`.
 //
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock and writes no snapshot.
 //
-// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
-// DL-TILE-01.
-// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-TILE-01,
-// TR-TILE-02, TR-TILE-03, TR-TILE-04, TR-TILE-05, TR-TILE-06, TR-TILE-07,
-// TR-TILE-08.
+// Decisions: DL-TILE-01 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 

@@ -2,13 +2,6 @@
 // Contract 5: run state is separate from board state, and a copy handed out
 // shares no mutable data with the original.
 //
-// The assertion set this suite exists for is `cloneRunState()` over a relic's
-// opaque `state` slot. The relic data shape declares `state?: unknown`, so the
-// slot holds whatever a relic put there; the copy therefore has to reach an
-// arbitrary structure without ever carrying a subtree by reference, because a
-// reference would leave the persisted or handed-out copy sharing mutable data
-// with the relic still running.
-//
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock library and writes no snapshot.
 
@@ -87,8 +80,6 @@ function firstRelicState(state: RunState): unknown {
   return state.relics[0].state;
 }
 
-/* ===== 1. No subtree of a relic's state is carried by reference ===== */
-
 describe('cloneRunState copies a relic state slot without aliasing it', () => {
   it('reproduces a nested structure by value at every level', () => {
     const original = createState({
@@ -118,8 +109,6 @@ describe('cloneRunState copies a relic state slot without aliasing it', () => {
   });
 
   it('drops a subtree past the depth bound rather than aliasing it', () => {
-    // Deeper than the levels the copy descends, so a subtree carried by
-    // reference would be observable at the leaf. It is omitted instead.
     const leaf: Record<string, unknown> = { counter: 1 };
     const original = createState({
       a: { b: { c: { d: { e: { f: { g: { h: { i: leaf } } } } } } } },
@@ -162,8 +151,6 @@ describe('cloneRunState copies a relic state slot without aliasing it', () => {
     const copy = cloneRunState(original);
     const copied = firstRelicState(copy) as Record<string, unknown>;
 
-    // A cycle is refused by the envelope validation and dropped by the copy,
-    // which is the projection `JSON.stringify` would have to make anyway.
     expect(copied['counter']).toBe(1);
     expect(copied['self']).toBeUndefined();
     expect(copied).not.toBe(cyclic);
@@ -240,8 +227,6 @@ describe('cloneRunState copies a relic state slot without aliasing it', () => {
     expect(copy.relics[0].state).toEqual(copy.relics[1].state);
   });
 });
-
-/* ===== 2. The summary copies on the same terms ===== */
 
 describe('summarizeRunState copies each relic', () => {
   it('does not alias a relic state subtree into the summary', () => {

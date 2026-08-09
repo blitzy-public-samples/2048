@@ -1,65 +1,26 @@
 // Move, spawn, merge, score-delta and overlay tweens: the timing budget of
 // style/main.scss, evaluated in JavaScript.
 //
-// Every duration, delay, easing keyword and keyframe shape is read from
-// src/theme/tokens.ts, which mirrors style/_tokens.scss. The five timings this
-// module reproduces:
-// move     100ms ease-in-out, narrowed to `transform`
-// appear   200ms ease after 100ms, opacity 0 + scale 0 to opacity 1 + scale 1
-// pop      200ms ease after 100ms, scale 0 to 1.2 to 1
-// move-up  600ms ease-in, top 25px + opacity 1 to top -50px + opacity 0
-// fade-in  800ms ease after 1200ms, opacity 0 to opacity 1
+// A delay HOLDS THE 0% KEYFRAME, which is what `animation-fill-mode:
+// backwards` specifies in the stylesheet: a tween inside its delay yields the
+// 0% value and not the natural one, so a spawning tile is at scale 0 and
+// opacity 0 for those 100ms.
 //
-// A delay HOLDS THE 0% KEYFRAME, which is what `animation-fill-mode: backwards`
-// specifies in the stylesheet: a tween inside its delay yields the 0% value and
-// not the natural one, so a spawning tile is at scale 0 and opacity 0 for those
-// 100ms.
-//
-// CSS applies a timing function between each pair of adjacent keyframes, so the
-// three-stop `pop` eases twice — once across 0% to 50% and once across 50% to
-// 100% — and its 50% stop is reached exactly.
+// CSS applies a timing function between each pair of adjacent keyframes, so
+// the three-stop `pop` eases twice — once across 0% to 50% and once across 50%
+// to 100% — and its 50% stop is reached exactly.
 //
 // Supersedes the animation mechanics of js/html_actuator.js, which is deleted:
 // the `previousPosition`/`position` pair that were the two endpoints of a move
 // tween, the `.tile-merged` class carrying `pop`, the `.tile-new` class
 // carrying `appear`, and the `.score-addition` element carrying `move-up`.
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-ANIM-01  js/html_actuator.js L54, L67-L72  the `previousPosition` and
-//                                                 `position` pair, ported as
-//                                                 `createMoveTween`
-//   TR-ANIM-02  js/html_actuator.js L73-L80       the `.tile-merged` class
-//                                                 carrying `pop`, ported as
-//                                                 `createMergeTween`
-//   TR-ANIM-03  js/html_actuator.js L82           the `.tile-new` class
-//                                                 carrying `appear`, ported as
-//                                                 `createSpawnTween`
-//   TR-ANIM-04  js/html_actuator.js L114-L120     the `.score-addition` element
-//                                                 carrying `move-up`, ported as
-//                                                 `createScoreDeltaTween`
-//   TR-ANIM-05  style/main.scss `.game-message`   the terminal overlay's
-//                with `&.game-won`, `&.game-over` `fade-in`, ported as
-//                                                 `createOverlayFadeTween`
-//   TR-ANIM-06  target-only row                   `createTween`, `TweenStop`
-//                                                 and the delay that yields the
-//                                                 0% keyframe
-//   TR-ANIM-07  target-only row                   `CSS_EASING_CURVES`,
-//                                                 `createCubicBezierEasing`
-//                                                 and `easingFor`
-//
-// This module holds no mesh, element or engine reference, touches no DOM, reads
-// no clock — every step is driven by a caller-supplied delta — consumes no
-// randomness and performs no I/O. It interpolates numbers, and the renderer
+// This module holds no mesh, element or engine reference, touches no DOM,
+// reads no clock — every step is driven by a caller-supplied delta — consumes
+// no randomness and performs no I/O. It interpolates numbers, and the renderer
 // applies them.
 //
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-ANIM-01  the five CSS timings reproduced in JavaScript
-//   DL-ANIM-02  a delay yielding the 0% keyframe, matching
-//               `animation-fill-mode: backwards`
-//   DL-ANIM-03  the three-stop `pop` eased across each adjacent pair of
-//               keyframes
+// Decisions: DL-ANIM-01, DL-ANIM-02, DL-ANIM-03 (docs/DECISION_LOG.md).
 
 import type { Position } from '../engine/types';
 import type { MotionEasing } from '../theme/tokens';
@@ -245,10 +206,6 @@ const TWEEN_COMPLETED_METRIC = 'render.animations.tween.completed';
 
 const TWEEN_REMOVED_METRIC = 'render.animations.tween.removed';
 
-/**
- * Counter name for tweens a group completed because the reduced-motion
- * preference turned on while they were running.
- */
 const TWEEN_REDUCED_METRIC = 'render.animations.tween.reduced';
 
 /** Counter incremented for each rejected step delta. */
@@ -439,8 +396,8 @@ function createDeltaGuard(
 /**
  * Interpolates one number, exactly at both ends.
  *
- * @returns `from` at or below zero, `to` at or above one, and the linear blend
- *   between them elsewhere.
+ * @returns `from` at or below zero, `to` at or above one, and the linear
+ *   blend between them elsewhere.
  */
 export function mix(from: number, to: number, ratio: number): number {
   if (ratio <= 0) {
@@ -490,12 +447,6 @@ function resolveStopValue<TValue>(
 
 /**
  * Builds a tween from its keyframes and its timing.
- *
- * The tween holds its first keyframe for the whole of `delay` and then eases
- * across the keyframes over `duration`, which is what `animation-fill-mode:
- * backwards` produces for the delayed animations of style/main.scss.
- * Built with motion reduced, it is complete from construction and yields its
- * last keyframe from the first read.
  *
  * @returns A frozen tween.
  * @throws RangeError when the definition carries no keyframe.
@@ -702,7 +653,7 @@ export function requiresMoveTween(
  * position as a transform and never as a layout change.
  *
  * A tween built with no `from` has an empty animated interval: it is complete
- * from construction and yields `to`. `requiresMoveTween()` reports that case
+ * from construction and yields `to`. `requiresMoveTween` reports that case
  * ahead of construction.
  */
 export function createMoveTween(
@@ -745,8 +696,7 @@ export function createMoveTween(
 /**
  * Builds the spawn tween: the `appear` keyframes of style/main.scss over the
  * timing that file applies them with, `200ms ease` after `$transition-speed`,
- * held
- * at `opacity 0` and `scale(0)` for that delay by `animation-fill-mode:
+ * held at `opacity 0` and `scale(0)` for that delay by `animation-fill-mode:
  * backwards`. js/html_actuator.js L82 applied it through the `.tile-new`
  * class.
  */
@@ -772,12 +722,11 @@ export function createSpawnTween(
 /**
  * Builds the merge tween: the `pop` keyframes of style/main.scss over the
  * timing that file applies them with, `200ms ease` after `$transition-speed`,
- * held
- * at `scale(0)` for that delay by `animation-fill-mode: backwards`. The middle
- * keyframe carries the overshoot of `motion.pop.keyframes.mid` at its offset,
- * and the timing function is applied across each of the two intervals, so the
- * overshoot is reached exactly. js/html_actuator.js L73-L80 applied it through
- * the `.tile-merged` class.
+ * held at `scale(0)` for that delay by `animation-fill-mode: backwards`. The
+ * middle keyframe carries the overshoot of `motion.pop.keyframes.mid` at its
+ * offset, and the timing function is applied across each of the two intervals,
+ * so the overshoot is reached exactly. js/html_actuator.js L73-L80 applied it
+ * through the `.tile-merged` class.
  */
 export function createMergeTween(
   options: TweenOptions = {},
@@ -830,9 +779,9 @@ export function createScoreDeltaTween(
 /**
  * Builds the terminal-overlay tween: the `fade-in` keyframes of
  * style/main.scss over the `800ms ease` that file applies them with, after the
- * delay it writes as `$transition-speed * 12`. The overlay is at opacity 0
- * for the whole of that delay. js/html_actuator.js L127-L133 applied it by
- * adding the `game-won` or `game-over` class to `.game-message`.
+ * delay it writes as `$transition-speed * 12`. The overlay is at opacity 0 for
+ * the whole of that delay. js/html_actuator.js L127-L133 applied it by adding
+ * the `game-won` or `game-over` class to `.game-message`.
  */
 export function createOverlayFadeTween(
   options: TweenOptions = {},
@@ -855,12 +804,11 @@ export function createOverlayFadeTween(
 
 /**
  * Tween measurements, read synchronously and returned as plain data: numbers
- * only, with no tween reference, callback or live handle, so
- * `JSON.stringify()` round-trips the snapshot and later steps do not mutate
- * it.
+ * only, with no tween reference, callback or live handle, so `JSON.stringify`
+ * round-trips the snapshot and later steps do not mutate it.
  *
  * `active` is live at the moment of the read. Every other field is sampled
- * since the group was created or since `resetTweenStats()` was last called.
+ * since the group was created or since `resetTweenStats` was last called.
  */
 export interface TweenStats {
   readonly active: number;
@@ -881,12 +829,6 @@ export interface TweenGroupOptions {
   /**
    * Whether the group follows the reduced-motion preference for the whole time
    * it is alive. Defaults to `true`.
-   *
-   * A tween reads the preference once, at construction, because that is when it
-   * decides whether it starts complete. The group is the member that outlives a
-   * change, so it is the one that subscribes: when the preference turns on, the
-   * tweens it holds are stepped to their final values and released, which is
-   * the state they would have been built in.
    */
   readonly followReducedMotion?: boolean;
 }
@@ -894,7 +836,7 @@ export interface TweenGroupOptions {
 /**
  * A set of tweens stepped together.
  *
- * `advance()` returns whether work is still outstanding, which is the value a
+ * `advance` returns whether work is still outstanding, which is the value a
  * `FrameCallback` of src/render/render-loop.ts returns to keep a loop
  * constructed with `autoStopWhenIdle` scheduling frames.
  */
@@ -918,8 +860,8 @@ export interface TweenGroup {
   /**
    * Releases the reduced-motion subscription and clears the group.
    *
-   * Calling it more than once is harmless. A group that is not disposed keeps a
-   * live subscription in the render layer's store for as long as the store
+   * Calling it more than once is harmless. A group that is not disposed keeps
+   * a live subscription in the render layer's store for as long as the store
    * lives.
    */
 

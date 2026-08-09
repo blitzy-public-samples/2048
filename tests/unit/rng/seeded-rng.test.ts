@@ -1,26 +1,8 @@
-// Unit suite over src/rng/seeded-rng.ts, the seeded generator every random draw
-// in the product originates from. It pins the three members of that module's
-// contract the rest of the product is built on: `createSeededRng`, the
-// `SeededRng` shape it returns, and `deriveStreamSeed`.
+// Unit suite over src/rng/seeded-rng.ts, the seeded generator every random
+// draw in the product originates from. It pins the three members of that
+// module's contract the rest of the product is built on.
 //
-// The randomness contract it stands for: one seed per run, derived into named
-// substreams, with each substream's consumed-draw count persisted so a resumed
-// run continues its own sequence instead of restarting it. The two vanilla call
-// sites the generator replaces are the spawn value in js/game_manager.js and
-// the spawn position in js/grid.js; each drew from the platform generator,
-// whose half-open [0, 1) interval is asserted of `next()` below.
-//
-// Every assertion is relational: a sequence is compared against another
-// sequence from this same module, against a slice of a longer sequence from the
-// same seed, or against the half-open interval. No generator output is written
-// into an expectation. Every seed is a string literal, and the suite reads no
-// clock, no environment variable and no ambient randomness. It touches no DOM
-// and no storage, writes no snapshot artifact and emits no log.
-//
-// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
-// DL-RNG-01, DL-RNG-02, DL-RNG-03.
-// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-RNG-01,
-// TR-RNG-02, TR-RNG-03, TR-RNG-04, TR-RNG-05.
+// Decisions: DL-RNG-01, DL-RNG-02, DL-RNG-03 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -60,17 +42,10 @@ const RESUME_DRAW_COUNT = 12;
 
 const DRAIN_LENGTH = 13;
 
-/**
- * Seed the anchored draw in section 6 is taken from. AAP §0.2.3.1 recorded the
- * underlying generator's first draw for this exact seed.
- */
+/** Seed the anchored draw in section 6 is taken from. */
 const ANCHOR_SEED = 'seed-42';
 
-/**
- * The first draw of `ANCHOR_SEED`, as AAP §0.2.3.1 recorded it. The one literal
- * generator output in this file: it pins the sequence to this generator, so a
- * seed a player copies out of one build still reproduces in the next.
- */
+/** The first draw of `ANCHOR_SEED`, as AAP §0.2.3.1 recorded it. */
 const ANCHOR_FIRST_DRAW = 0.6978250726799878;
 
 /** Draws the original and the restored generator then take together. */
@@ -344,8 +319,6 @@ describe('deriveStreamSeed', () => {
   });
 });
 
-/* ===== 5. Bounds, predicates and refusal reports ===== */
-
 /** A recorded rejection, and the sink that collected it. */
 interface RecordingRngReporter {
   /** The sink to hand to the module under test. */
@@ -386,7 +359,6 @@ const LONGEST_ACCEPTED_SEED = 's'.repeat(MAX_RNG_SEED_LENGTH);
 /** A seed one character past the greatest permitted length. */
 const OVERLONG_SEED = 's'.repeat(MAX_RNG_SEED_LENGTH + 1);
 
-/** Start cursors reduced to 0 because they are not a usable position. */
 const UNUSABLE_CURSORS: readonly { label: string; value: number }[] = [
   { label: 'a negative integer', value: -1 },
   { label: 'a large negative integer', value: -100_000 },
@@ -398,7 +370,6 @@ const UNUSABLE_CURSORS: readonly { label: string; value: number }[] = [
   { label: 'a magnitude past the safe integer range', value: 2 ** 53 },
 ];
 
-/** Start cursors reduced to 0 because they exceed the fast-forward bound. */
 const OUT_OF_RANGE_CURSORS: readonly { label: string; value: number }[] = [
   { label: 'one draw past the bound', value: MAX_RNG_CURSOR + 1 },
   { label: 'ten times the bound', value: MAX_RNG_CURSOR * 10 },
@@ -627,12 +598,6 @@ describe('createSeededRng refuses what the predicates refuse', () => {
   });
 });
 
-/* ===== 6. The generator behind the interface ===== */
-
-// One literal draw, so the sequence a run seed reproduces is pinned to the
-// generator this build ships rather than to whatever generator it ships.
-// AAP §0.2.3.1 recorded this value for the seed `seed-42` while selecting the
-// PRNG, and it was reproduced across independent instantiations there.
 describe('the sequence is anchored, not merely self-consistent', () => {
   it("draws the recorded first value for the seed 'seed-42'", () => {
     expect(createSeededRng(ANCHOR_SEED).next()).toBe(ANCHOR_FIRST_DRAW);
@@ -663,12 +628,6 @@ describe('the sequence is anchored, not merely self-consistent', () => {
     expect(createSeededRng(ANCHOR_SEED, 1).next()).toBe(second);
   });
 });
-
-/* ===== 7. The checkpoint primitive (F2) ===== */
-
-// `fork()` is what makes a caller's draws abandonable. The properties below
-// are the ones src/engine/hook-bus.ts depends on to keep a hook handler that
-// throws from consuming randomness.
 
 describe('SeededRng.fork', () => {
   it('hands back a different instance carrying the same seed and cursor',

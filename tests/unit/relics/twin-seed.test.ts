@@ -1,39 +1,11 @@
-// Per-relic suite for the `spawn-control` relic `twin-seed`, AAP 0.6.3 Group 5.
+// Per-relic suite for the `spawn-control` relic `twin-seed`, AAP 0.6.3 Group
+// 5.
 //
-// The handler its declaration binds is invoked DIRECTLY here, against a hook
-// context assembled by hand, and never through src/engine/hook-bus.ts. The
-// bus mechanism — pickup-order dispatch, the charge guard, error isolation
-// and the per-handler randomness fork — is asserted by the suites under
-// tests/unit/engine and is not re-asserted below.
+// Three properties, held by sections 4, 5 and 6 in turn: 1 the relic fires
+// only on the hooks its declaration binds 2 the relic produces its specified
+// effect 3 the relic respects `charges`, a zero-charge invocation included
 //
-// Three properties, held by sections 4, 5 and 6 in turn:
-//   1  the relic fires only on the hooks its declaration binds
-//   2  the relic produces its specified effect
-//   3  the relic respects `charges`, a zero-charge invocation included
-//
-// Provenance of the values asserted below:
-//   js/game_manager.js L71   `Math.random() < 0.9 ? 2 : 4`, the spawn
-//                            distribution `[2, 4]` at weights `[0.9, 0.1]`
-//                            that src/config/rules-config.ts declares and
-//                            src/config/default-config.ts carries forward.
-//                            Traceability row TR-CONFIG-04, whose other target
-//                            is the `spawn-value` substream of
-//                            src/rng/rng-streams.ts.
-//   js/grid.js L37-L43       `randomAvailableCell`, which yields no cell on a
-//                            full board. That boundary is what a spawn payload
-//                            carrying no `position` expresses.
-//   .jshintrc                two-space indentation, 80 columns and camelCase,
-//                            carried forward by AAP 0.3.3.
-//
-// The executable counterpart of Figure 7, "Seeded Determinism: One Run Seed
-// Fanned into Named RNG Substreams", of docs/architecture/data-flow.md: the
-// figure labels the `spawn-value` edge as replacing js/game_manager.js L71 and
-// draws the four substreams as separate edges, and the cursor assertions of
-// section 7 hold that separation for this relic.
-//
-// The relic under test is argued in docs/DECISION_LOG.md as DL-SPAWN-01 and
-// DL-SPAWN-02; the comments below carry provenance alone, and the test titles
-// carry the specification each one holds.
+// Decisions: DL-SPAWN-01, DL-SPAWN-02 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -75,10 +47,6 @@ import {
   createNearLossBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. What the suite dispatches, and the seeds it dispatches under
- * ========================================================================== */
-
 /** Identifier the declaration under test carries. */
 const TWIN_SEED_ID = 'twin-seed';
 
@@ -88,15 +56,14 @@ const BOUND_HOOK: HookName = 'onSpawn';
 /**
  * Run seed whose first eight `relic-draw` draws all fall below the relic's
  * promotion threshold, so every eligible spawn dispatched under it is
- * promoted. Measured against src/rng/rng-streams.ts, and asserted in
- * section 7.
+ * promoted.
  */
 const PROMOTING_SEED = 'twin-seed-1';
 
 /**
  * Run seed whose first seven `relic-draw` draws all sit at or above that
  * threshold, so every eligible spawn dispatched under it is left as it
- * arrived. Measured and asserted the same way.
+ * arrived.
  */
 const DECLINING_SEED = 'twin-seed-2';
 
@@ -106,11 +73,7 @@ const PROMOTING_RUN_LENGTH = 8;
 /** Declines `DECLINING_SEED` yields in a row from a fresh stream set. */
 const DECLINING_RUN_LENGTH = 7;
 
-/**
- * Correlation identifier every context below carries. `CorrelationId` of
- * src/engine/types.ts is a plain string, injected into a dispatch rather than
- * derived by one, so no module of src/observability/ is reached from here.
- */
+/** Correlation identifier every context below carries. */
 const RUN_CORRELATION_ID = 'run-twin-seed-suite';
 
 /** Cursor map of a run that has taken no draw from any substream. */
@@ -124,16 +87,12 @@ const NO_DRAWS: RngCursorMap = {
 /** Cursor map of a run whose only draw came from `relic-draw`. */
 const ONE_RELIC_DRAW: RngCursorMap = { ...NO_DRAWS, 'relic-draw': 1 };
 
-/* ==========================================================================
- * 2. Harness: the declaration, a hook context, and one dispatch
- * ========================================================================== */
-
 /**
  * Reads the declaration under test from the family export.
  *
  * @returns The `twin-seed` declaration.
- * @throws {Error} If the family declares no relic under that identifier, so a
- *   rename fails here instead of as a member access on `undefined` later.
+ * @throws {Error} If the family declares no relic under that identifier, so
+ *   a rename fails here instead of as a member access on `undefined` later.
  */
 function twinSeed(): Relic {
   const found = SPAWN_CONTROL_FAMILY.relics.find(
@@ -169,9 +128,7 @@ function onSpawnHandler(): HookHandler<'onSpawn'> {
 }
 
 /**
- * Wraps a live board in the query surface a handler is handed. `cellValue`
- * stands in for `Grid.cellContent`, reading the face value rather than the
- * mutable tile, and every member reads the board at call time.
+ * Wraps a live board in the query surface a handler is handed.
  *
  * @param grid Board the view reads.
  * @returns The query surface.
@@ -195,11 +152,6 @@ function readonlyGridView(grid: Grid): ReadonlyGridView {
 }
 
 /**
- * Builds the board-write channel a handler is handed: a recorder that accepts
- * every well-formed command, normalises the two commands carrying alternative
- * member names, and refuses one naming neither. Reads are answered from the
- * board view beside it.
- *
  * @param view Query surface the read members answer from.
  * @returns The recording channel.
  */
@@ -306,7 +258,7 @@ function recordingEffectQueue(view: ReadonlyGridView): BoardEffectQueue {
 /** One assembled dispatch: the collaborators a test reads, and the context. */
 interface Bench {
   /**
-   * The rules in force, as `createDefaultRulesConfig()` returns them: a fresh
+   * The rules in force, as `createDefaultRulesConfig` returns them: a fresh
    * mutable object, never the deep-frozen `DEFAULT_RULES_CONFIG` template. The
    * context below carries THIS object, so a test that writes a rule here
    * changes the rules the next dispatch reads.
@@ -390,11 +342,6 @@ function createBench(options: BenchOptions = {}): Bench {
 }
 
 /**
- * Builds a spawn payload, frozen at every level: a write by the handler raises
- * in a module's strict mode instead of passing unnoticed. An omitted member is
- * ABSENT from the object rather than present and `undefined`, which is the
- * shape js/grid.js L37-L43's full board produced for a position.
- *
  * @param value Face value the rules produced.
  * @param position Cell the engine resolved, or omitted for none.
  * @param count Tiles the spawn inserts, or omitted for the engine's own.
@@ -479,10 +426,6 @@ beforeEach(() => {
   bench = createBench();
 });
 
-/* ==========================================================================
- * 3. The declaration under test
- * ========================================================================== */
-
 describe('twin-seed, the declaration this suite dispatches', () => {
   it('is the spawn-control entry the catalogue publishes by id', () => {
     const relic = twinSeed();
@@ -494,10 +437,6 @@ describe('twin-seed, the declaration this suite dispatches', () => {
     expect(relic.description.length).toBeGreaterThan(0);
   });
 });
-
-/* ==========================================================================
- * 4. Property 1: it fires only on the hooks its declaration binds
- * ========================================================================== */
 
 describe('twin-seed fires only on the hooks its declaration binds', () => {
   it('binds onSpawn, and binds it to a function', () => {
@@ -528,10 +467,6 @@ describe('twin-seed fires only on the hooks its declaration binds', () => {
   });
 });
 
-/* ==========================================================================
- * 5. Property 2: it promotes a lowest-value spawn up the live ladder
- * ========================================================================== */
-
 describe('twin-seed promotes a lowest-value spawn up the live ladder', () => {
   it('promotes the lowest configured value to the next one above it', () => {
     // The ported vanilla distribution, js/game_manager.js L71.
@@ -546,8 +481,8 @@ describe('twin-seed promotes a lowest-value spawn up the live ladder', () => {
     const payload = spawnPayload(2, { x: 2, y: 2 });
     const result = dispatch(bench, payload);
 
-    // `HookHandler` of src/engine/hooks.ts admits either a payload or
-    // nothing; this handler answers with a PAYLOAD.
+    // `HookHandler` of src/engine/hooks.ts admits either a payload or nothing;
+    // this handler answers with a PAYLOAD.
     expect(result).toEqual({ position: { x: 2, y: 2 }, value: 4 });
     expect(typeof result).toBe('object');
 
@@ -588,7 +523,6 @@ describe('twin-seed promotes a lowest-value spawn up the live ladder', () => {
     bench.config.spawn.values = [8, 16, 32];
     bench.config.spawn.weights = [0.8, 0.15, 0.05];
 
-    // 8 is the lowest value the rules now offer, and 2 is no longer offered.
     expect(dispatch(bench, spawnPayload(8, { x: 0, y: 2 })).value).toBe(16);
     expect(dispatch(bench, spawnPayload(2, { x: 0, y: 2 })).value).toBe(2);
   });
@@ -681,10 +615,6 @@ describe('twin-seed promotes a lowest-value spawn up the live ladder', () => {
   });
 });
 
-/* ==========================================================================
- * 6. Property 3: charges, a zero-charge invocation included
- * ========================================================================== */
-
 describe('twin-seed carries no charge budget and never reads one', () => {
   it('declares no charges member at all', () => {
     const relic = twinSeed();
@@ -698,8 +628,6 @@ describe('twin-seed carries no charge budget and never reads one', () => {
   it('consults no budget, traps no error and calls no console', () => {
     const source = onSpawnHandler().toString();
 
-    // The charge guard belongs to src/engine/hook-bus.ts, error isolation to
-    // the same module, and reporting is injected rather than called.
     expect(source).not.toContain('charges');
     expect(source).not.toContain('catch');
     expect(source).not.toContain('console');
@@ -738,10 +666,6 @@ describe('twin-seed carries no charge budget and never reads one', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Determinism: one substream, and the same seed twice
- * ========================================================================== */
-
 describe('twin-seed draws only from the relic-draw substream', () => {
   it('advances the relic-draw cursor by one and no other cursor', () => {
     expect(bench.streams.snapshotCursors()).toEqual(NO_DRAWS);
@@ -749,8 +673,8 @@ describe('twin-seed draws only from the relic-draw substream', () => {
 
     const after = bench.streams.snapshotCursors();
 
-    // A pure value promotion moves neither spawn substream, so it cannot
-    // shift the cell or the value the engine's own draws resolve to.
+    // A pure value promotion moves neither spawn substream, so it cannot shift
+    // the cell or the value the engine's own draws resolve to.
     expect(after['spawn-position']).toBe(0);
     expect(after['spawn-value']).toBe(0);
     expect(after['rarity-weight']).toBe(0);
@@ -809,10 +733,6 @@ describe('twin-seed draws only from the relic-draw substream', () => {
     );
   });
 });
-
-/* ==========================================================================
- * 8. The catalogue declaration is unchanged by this suite
- * ========================================================================== */
 
 describe('the twin-seed declaration is unchanged by this suite', () => {
   it('is still frozen, still binds onSpawn alone, still uncharged', () => {

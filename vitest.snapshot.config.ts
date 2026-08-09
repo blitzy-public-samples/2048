@@ -2,22 +2,24 @@
 // --config vitest.snapshot.config.ts`, and it is a gate of its own, separate
 // from the unit gate `npm test` drives through vitest.config.ts.
 //
-// What the three projects collect, and how they stay disjoint:
+// What the three projects collect, and how they stay disjoint.
 //
-//   this project      tests/snapshot/*.spec.ts   environment 'node'
-//   vitest.config.ts  tests/unit/**/*.test.ts    environments 'node' + 'jsdom'
-//   playwright        tests/e2e/*.spec.ts        driven by playwright.config.ts
+// this project tests/snapshot/*.spec.ts environment 'node' vitest.config.ts
+// tests/unit/**/*.test.ts environments 'node' + 'jsdom' playwright
+// tests/e2e/*.spec.ts driven by playwright.config.ts
 //
-// The trees carry different file suffixes — `.spec.ts` here, `.test.ts` there —
-// and each project also names the other's directory in `exclude`, so the
+// The trees carry different file suffixes — `.spec.ts` here, `.test.ts` there
+// — and each project also names the other's directory in `exclude`, so the
 // separation holds on directory and on suffix independently.
 //
-// SNAPSHOT WRITES: `update` is not set below and package.json's `test:snapshot`
-// script passes no update flag, so Vitest resolves the mode from those two
-// facts — `none` when it detects CI, `new` otherwise. An existing snapshot is
-// never rewritten by either invocation, and a mismatched or missing one fails
-// the run under CI. Re-recording is the separate opt-in `vitest run --config
-// vitest.snapshot.config.ts -u`.
+// SNAPSHOT WRITES: `update` is set to `'none'` below, so this project neither
+// rewrites an existing snapshot nor CREATES a missing one, in CI and outside it
+// alike: a mismatched snapshot and an absent snapshot both fail the run. Left
+// unset — as it was before code review finding M7 — Vitest resolves the mode
+// from its own CI detection and writes a missing snapshot outside CI.
+// Re-recording is the separate opt-in `vitest run --config
+// vitest.snapshot.config.ts -u`, which overrides this value for that one
+// invocation; package.json's `test:snapshot` script passes no update flag.
 //
 // Decision DL-TEST-04.
 //
@@ -26,17 +28,22 @@
 // the reporter.
 //
 // The behaviour the setup file compensates for, from the deleted vanilla
-// sources: `clearGameState()` removed the board snapshot and no vanilla member
+// sources: `clearGameState` removed the board snapshot and no vanilla member
 // removed the best score; the writability probe ran once at construction; and
-// `setup()` read the snapshot once.
+// `setup` read the snapshot once.
 //
-// Decisions behind this file: DL-TEST-04, the snapshot write mode left to
-// DL-TEST-05, the snapshot gate kept in its own configuration and its own
-// construct: its constructs are target-only rows TR-TEST-04 and TR-TEST-05
+// Decisions behind this file: DL-TEST-04, the snapshot write mode pinned to
+// `'none'` in this configuration; DL-TEST-05, the snapshot gate kept in its own
+// configuration.
+//
+// Traceability rows in docs/TRACEABILITY_MATRIX.md, both target-only — the
+// pre-migration tree carried no test runner of any kind:
+//   TR-TEST-04  target-only row  the separate snapshot project, its own
+//                                include glob and its snapshot resolver
+//   TR-TEST-05  target-only row  the setup file's persistence teardown and
+//                                the fake clock the seeded gate runs under
 
 import { defineConfig } from 'vitest/config';
-
-/* ===== 1. Snapshot file placement ===== */
 
 const SNAPSHOT_DIR_NAME = '__snapshots__';
 
@@ -51,7 +58,7 @@ function resolveSnapshotPath(testPath: string, snapExtension: string): string {
   const segments = testPath.split(PATH_SEPARATOR_PATTERN);
 
   // `split` on a file path always yields at least one segment, and the last of
-  // them is the file name. The fallback covers an empty input.
+  // them is the file name.
   const fileName = segments.pop() ?? testPath;
 
   // Index of the last `tests/snapshot` pair among the directory segments.
@@ -79,8 +86,6 @@ function resolveSnapshotPath(testPath: string, snapExtension: string): string {
   ].join(separator);
 }
 
-/* ===== 2. Collected and excluded paths ===== */
-
 const SNAPSHOT_INCLUDE: string[] = ['tests/snapshot/*.spec.ts'];
 
 const SNAPSHOT_EXCLUDE: string[] = [
@@ -97,8 +102,6 @@ const SNAPSHOT_EXCLUDE: string[] = [
 
 const SNAPSHOT_SETUP_FILES: string[] = ['./tests/fixtures/storage.ts'];
 
-/* ===== 3. Project ===== */
-
 export default defineConfig({
   test: {
     name: 'snapshot',
@@ -114,11 +117,16 @@ export default defineConfig({
     globals: false,
 
     // Both are restorative: call history is dropped, then a spy's original
-    // implementation is put back, before each test. Neither installs a spy.
+    // implementation is put back, before each test.
     clearMocks: true,
     restoreMocks: true,
 
     resolveSnapshotPath,
+
+    // FAIL-CLOSED. No snapshot is written by this project: a mismatch fails and
+    // a MISSING snapshot fails too, rather than being created and passed. The
+    // `-u` invocation named above is the one path that records. DL-TEST-04.
+    update: 'none',
 
     // A snapshot mismatch prints the full diff.
     expandSnapshotDiff: true,
@@ -126,8 +134,8 @@ export default defineConfig({
     // Collecting no spec file exits non-zero.
     passWithNoTests: false,
 
-    // The run completes and exits, under `vitest run` and under a bare
-    // `vitest --config vitest.snapshot.config.ts` alike.
+    // The run completes and exits, under `vitest run` and under a bare `vitest
+    // --config vitest.snapshot.config.ts` alike.
     watch: false,
 
     // A failed spec is not re-run.
@@ -136,10 +144,9 @@ export default defineConfig({
     // Test output reaches the reporter.
     silent: false,
 
-    // One child process at a time, each with its own module registry, files
-    // in a stable order, tests and hooks in declaration order, and setup
-    // files in the order listed above. No state carries from one spec file to
-    // the next, and no ordering decision consumes randomness.
+    // One child process at a time, each with its own module registry, files in
+    // a stable order, tests and hooks in declaration order, and setup files in
+    // the order listed above.
     pool: 'forks',
     isolate: true,
     fileParallelism: false,
@@ -155,8 +162,7 @@ export default defineConfig({
 
     // Coverage is off. Vitest bundles no coverage provider and the dependency
     // set adds none, so `--coverage` reports a missing dependency and exits
-    // non-zero until a provider package is installed. The directory named
-    // here is the one .gitignore already covers.
+    // non-zero until a provider package is installed.
     coverage: {
       enabled: false,
       reportsDirectory: 'coverage',

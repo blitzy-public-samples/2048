@@ -1,85 +1,13 @@
 // Per-value tile materials, plus the board field and empty-cell plate
 // materials, for the WebGL board.
 //
-// Every colour is computed by src/theme/tile-ramp.ts and read through the
-// per-theme resolver of src/theme/themes.ts. No fill, numeral colour or glow
-// alpha is restated here as a table or a constant, so the 2D layer that
-// style/main.scss compiles and the 2.5D layer this module dresses resolve
-// through one generative implementation.
-//
-// The two tile shadows of style/main.scss map onto two material terms. The
-// outer halo, drawn in the gold glow colour at the glow opacity over 1.8,
-// becomes the emissive colour and the emissive intensity: the colour is the
-// palette's halo entry and the intensity is the same alpha, which
-// src/theme/tile-ramp.ts publishes as `haloAlpha`. The inset ring, drawn in
-// white at the glow opacity over 3, becomes a reduction in roughness scaled by
-// `insetAlpha`.
-//
-// The stylesheet emits no shadow at all for a value that took an accent
-// overlay. src/theme/tile-ramp.ts publishes that condition as `glowSuppressed`
-// and it gates the emissive term here: a suppressed value takes a flat material
-// whose emissive is left at the Three.js default. A value that is not
-// suppressed takes the halo colour even where its alpha is zero, which is the
-// state values 2 and 4 are emitted in.
-//
-// Fills are transferred from the ramp's unquantised `color` channels.
-// Quantised, those are the twelve fills the pinned compiler emits from
-// style/main.scss for the default palette. The ramp's `colorHex` form, which
-// reproduces the fills the pre-migration generated stylesheet shipped and
-// differs from `color` by one unit on the four accented values, is reachable
-// through the `fillPrecision` option.
-//
 // The empty-cell plate is declared in the stylesheet as the tile colour at 35%
 // alpha. It is pre-composited over the board field and delivered as an opaque
 // material; the `emptyCellCompositing` option delivers it as a transparent
 // material instead.
 //
-// This module holds no scene, mesh, geometry or engine reference and takes a
-// tile value rather than a tile; it touches no DOM, reads no clock, consumes no
-// randomness and performs no I/O; it imports no stylesheet and nothing from
-// src/engine or src/observability. Reporting is injected and defaults to the
-// no-op sink. One material is created per distinct tile value and shared across
-// every mesh that carries it, and every material this module creates is
-// released by `dispose()`.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-MATERIAL-01  style/main.scss L334-L402  the generated tile fill, read
-//                                              through src/theme/tile-ramp.ts
-//                                              and transferred by
-//                                              `resolveTileFill()`
-//   TR-MATERIAL-02  style/main.scss L334-L402  the bright-text threshold, as
-//                                              `resolveTileNumeralColor()`
-//   TR-MATERIAL-03  style/main.scss L360-L370  the outer halo shadow, as the
-//                                              emissive colour and intensity
-//   TR-MATERIAL-04  style/main.scss L360-L370  the inset white ring, as the
-//                                              roughness reduction scaled by
-//                                              `insetAlpha`
-//   TR-MATERIAL-05  style/main.scss L339-L349  the accent overlay's suppressed
-//                                              shadow, as the flat material
-//                                              `glowSuppressed` gates
-//   TR-MATERIAL-06  style/main.scss `.grid-cell`  the empty-cell plate at 35%
-//                                              alpha, as the pre-composited or
-//                                              transparent plate material
-//   TR-MATERIAL-07  target-only row             `createTileMaterialCache()`,
-//                                              one material per distinct value
-//   TR-MATERIAL-08  target-only row             the colour conversions
-//                                              `readThemeColor()`,
-//                                              `compositeOver()`,
-//                                              `toThreeColor()`,
-//                                              `fromThreeColor()` and
-//                                              `formatThreeColor()`
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-MATERIAL-01  the two stylesheet shadows mapped onto the emissive term
-//                   and the roughness reduction
-//   DL-MATERIAL-02  the empty-cell plate pre-composited by default, with
-//                   `emptyCellCompositing` delivering it transparent
-//   DL-MATERIAL-03  one material per distinct tile value, shared and released
-//                   by `dispose()`
-//   DL-RAMP-02      the `color` channel as the fill source
-//   DL-RAMP-04      the `colorHex` form reachable through `fillPrecision`
+// Decisions: DL-MATERIAL-01, DL-MATERIAL-02, DL-MATERIAL-03, DL-RAMP-02,
+// DL-RAMP-04 (docs/DECISION_LOG.md).
 
 import { Color, MeshStandardMaterial, SRGBColorSpace } from 'three';
 
@@ -257,7 +185,8 @@ export function readThemeColor(value: string): RampColor {
  *
  * @returns Frozen colour. Its alpha is the composite of both alphas, so an
  *   opaque backdrop yields an opaque result.
- * @throws RangeError when a channel of either operand is not a finite number.
+ * @throws RangeError when a channel of either operand is not a finite
+ *   number.
  */
 export function compositeOver(
   source: RampColor,
@@ -303,12 +232,6 @@ function assertReadableColor(name: string, color: RampColor): void {
  * Transfers a colour into a `THREE.Color`, declaring the source colour space
  * explicitly.
  *
- * Channels arrive on the 0-255 sRGB scale, which is the scale every token and
- * every ramp fill is stated on, and are handed to `setRGB` as sRGB so Three.js
- * converts them into its working colour space rather than adopting them as
- * already-converted values. Alpha is not transferred: a `THREE.Color` carries
- * none, and the two materials that need one carry it as `opacity`.
- *
  * @returns `target`, or the newly allocated colour.
  * @throws RangeError when any channel of `color` is not finite.
  */
@@ -343,15 +266,7 @@ export function fromThreeColor(color: Color): RampColor {
   });
 }
 
-/**
- * Formats a `THREE.Color` as a 6-digit hex string on the ramp's terms.
- *
- * Reads the colour back as sRGB, rounds each channel at `CHANNEL_PRECISION` to
- * absorb the transfer residue, then floors it — the quantisation
- * `formatHexColor` of src/theme/tile-ramp.ts applies. Three.js's own
- * `getHexString` rounds to the nearest 8-bit step instead, so the two disagree
- * on a fill whose channels are not integers.
- */
+/** Formats a `THREE.Color` as a 6-digit hex string on the ramp's terms. */
 export function formatThreeColor(color: Color): string {
   const transferred = fromThreeColor(color);
   return formatHexColor({
@@ -376,11 +291,6 @@ function roundTransferredChannel(channel: number): number {
  * twelve fills the pinned Dart Sass compiler emits from style/main.scss for
  * the default palette, so the 2D layer that stylesheet compiles and the
  * material built here carry the same fill on every ramp value.
- *
- * `legacy` takes `colorHex`, which reproduces the twelve fills the
- * pre-migration generated stylesheet shipped. It differs from `exact` by one
- * unit on the four accented values, where the pinned compiler and the
- * historically shipped artifact disagree.
  */
 export type TileFillPrecision = 'exact' | 'legacy';
 
@@ -418,26 +328,10 @@ const SUPER_MATERIAL_KEY = 0;
 /** Counter name for a value the ramp refused and the fallback covered. */
 const VALUE_FALLBACK_METRIC = 'render.material.value.fallback';
 
-/** Counter name for a call refused because the cache was destroyed. */
 const AFTER_DESTROY_METRIC = 'render.material.after_destroy';
 
 /**
  * The ramp value a tile value off the ramp is dressed as.
- *
- * `RulesConfig.merge.produce` may yield any positive integer, so a configured
- * or relic-created tile can carry a value the ramp is not defined over — the
- * ramp covers the powers of two from 2 to 2048 and the band above 2048. Rather
- * than refuse such a tile, it is dressed as the ramp entry at or below it:
- *
- *   above `superThreshold`  the first super value, which is the single
- *                           appearance every value above the ramp shares
- *   on the ramp             the value itself
- *   between two ramp values the lower of the two
- *   below the ramp's first  the ramp's first value
- *
- * Deterministic and total for every finite value: the same value always
- * resolves to the same ramp entry, so the material and the numeral a tile is
- * dressed with never depend on when it was requested.
  *
  * @param value Tile value to place on the ramp.
  * @returns A ramp value `computeTileTheme` resolves.
@@ -457,10 +351,6 @@ function rampValueFor(value: number): number {
 
   return rampValue(Math.floor(Math.log2(value)));
 }
-
-/* ==========================================================================
- * 4. Construction options and the reported state
- * ========================================================================== */
 
 /** Construction options for `createTileMaterialCache`. */
 export interface TileMaterialCacheOptions {
@@ -503,13 +393,7 @@ export interface TileMaterialStats {
   readonly destroyed: boolean;
 }
 
-/**
- * A per-value tile material cache, and the two board surface materials.
- *
- * One material is held per distinct tile value and shared across every mesh
- * that carries it, so a caller asking for the same value twice is handed the
- * same instance rather than a second one.
- */
+/** A per-value tile material cache, and the two board surface materials. */
 export interface TileMaterialCache {
 
   getTileMaterial(value: number): MeshStandardMaterial;
@@ -532,30 +416,13 @@ export interface TileMaterialCache {
 
   setTheme(theme: Theme | ThemeId): Theme;
 
-  /**
-   * Releases every cached material and leaves the cache ready to rebuild.
-   *
-   * The Three.js resources a material holds are not collected for a caller, so
-   * this is the call a board teardown makes — including the rebuild a
-   * board-mutating relic forces by changing the board's size. The theme
-   * subscription is left in place and the cache remains usable: a later
-   * request constructs a fresh material.
-   */
+  /** Releases every cached material and leaves the cache ready to rebuild. */
   dispose(): void;
 
   destroy(): void;
   readStats(): TileMaterialStats;
   resetStats(): void;
 }
-
-/* ==========================================================================
- * 5. Option resolution and value description
- *
- * A caught value is described by `describeRenderError` in
- * src/render/webgl-support.ts, which reads a hostile getter and a throwing
- * `toString` through contained reads. `capText` below describes a declared
- * THEME VALUE, not a throwable.
- * ========================================================================== */
 
 /** Characters a described value is capped at. */
 const MAX_THROWN_TEXT_LENGTH = 200;
@@ -730,24 +597,6 @@ function readTileRoughness(
 /**
  * Builds the material for one tile value.
  *
- * The fill style/main.scss mixes as `$mixed-background`, from
- * `color.mix($tile-gold-color, $tile-color, $gold-percent)`, becomes the
- * material colour. The outer `box-shadow` term of that loop, drawn in
- * `$tile-gold-glow-color`, becomes the emissive colour and the emissive
- * intensity, taken from the palette's halo entry and the ramp's halo alpha. Its
- * `inset` ring term becomes a roughness reduction; the ring is drawn in white
- * and its colour is not transferred separately. Where the loop's
- * `@if not $special-background` suppresses the declaration the
- * material is left flat: its emissive stays at the Three.js default and its
- * intensity is set to zero, so the emissive term contributes nothing under
- * either reading. Decision DL-MATERIAL-01.
- *
- * Written onto an existing material rather than returned as a new one, so a
- * theme change re-dresses the instances live meshes already reference instead
- * of replacing them. Every property the material carries is assigned on every
- * call, so no residue of the previous theme survives: the suppressed band
- * resets the emissive colour to black alongside the zero intensity.
- *
  * @param material Material to dress.
  * @param tileTheme Resolved tile theme.
  * @param palette Palette of the theme it was resolved against.
@@ -790,9 +639,6 @@ function applyTileMaterial(
 /**
  * Builds the material for one tile value.
  *
- * The whole of the appearance is `applyTileMaterial`; this call allocates the
- * instance the cache then holds for the lifetime of the cache.
- *
  * @param tileTheme Resolved tile theme.
  * @param palette Palette of the theme it was resolved against.
  * @param precision Which of the ramp's two fill forms to take.
@@ -817,15 +663,9 @@ function buildTileMaterial(
   );
 }
 
-/* ==========================================================================
- * 7. The two board surface materials
- * ========================================================================== */
-
 /**
  * Builds the material of the surface the cells sit on, which style/main.scss
  * L358 fills with the theme's board field.
- *
- * Written onto an existing material for the reason `applyTileMaterial` states.
  *
  * @param material Material to dress.
  * @param palette Palette in force.
@@ -877,18 +717,6 @@ function buildBoardFieldMaterial(
 /**
  * Builds the material of one empty cell of the lattice, which style/main.scss
  * L468 declares as `rgba($tile-color, .35)`.
- *
- * Under `pre-composited` that alpha is resolved against the board field of L358
- * with the source-over operator and the material is delivered opaque, which is
- * the composite a browser paints for a cell sitting on that field. Under
- * `transparent` the declared colour is delivered on a transparent material at
- * its own alpha. A palette stating an opaque cell colour, which both additive
- * palettes do, resolves to the same material either way. Decision
- * DL-MATERIAL-02.
- *
- * Written onto an existing material for the reason `applyTileMaterial` states.
- * The three transparency properties are assigned on both branches, so a palette
- * change between an opaque and a translucent cell colour leaves no residue.
  *
  * @param material Material to dress.
  * @param palette Palette in force.
@@ -965,12 +793,6 @@ function buildEmptyCellMaterial(
 
 /**
  * Builds a per-value tile material cache for the WebGL board.
- *
- * One material is constructed per distinct tile value and shared across every
- * mesh that carries it, and every value above the ramp's last one shares a
- * single material. Nothing is constructed at call time: the theme is resolved
- * and the options are validated, and each material is built on its first
- * request.
  *
  * The cache follows the theme in force unless a theme is pinned through
  * `options.theme`. On a theme change it releases every material it holds, so
@@ -1136,14 +958,7 @@ export function createTileMaterialCache(
     tileTheme.isSuper ? SUPER_MATERIAL_KEY : tileTheme.value;
 
   /**
-   * Refuses a call that would allocate or dress a material after `destroy()`.
-   *
-   * `destroy()` is terminal: it releases every material AND the theme
-   * subscription, so anything allocated after it would never be released and
-   * anything dressed would be a disposed resource. A caller that has
-   * destroyed a cache and still asks it for a material has a lifecycle defect,
-   * and this is where that defect surfaces. `dispose()` is the reusable
-   * release and is not guarded — the cache rebuilds after it.
+   * Refuses a call that would allocate or dress a material after `destroy`.
    *
    * @param method Name of the member called, for the report.
    * @throws Error when the cache has been destroyed.
@@ -1414,8 +1229,6 @@ export function createTileMaterialCache(
 
     dispose: (): void => {
       if (destroyed) {
-        // Reported rather than refused: `dispose()` releases nothing a
-        // destroyed cache still holds, so the call is harmless.
         reporter.onCount({
           name: AFTER_DESTROY_METRIC,
           value: 1,

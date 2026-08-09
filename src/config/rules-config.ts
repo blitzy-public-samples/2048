@@ -11,34 +11,13 @@
  * src/config/stage-config.ts. The engine and the relics read the same
  * `RulesConfig` instance; members are mutable and are read at each use.
  *
- * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
- * this module's area enumerated:
- *   TR-CONFIG-01  js/application.js L3          the board-size literal, as
- *                                               `boardSize`
- *   TR-CONFIG-02  js/game_manager.js L170       `2048`, as `winValue`
- *   TR-CONFIG-03  js/game_manager.js L7         `2`, as `startTiles`
- *   TR-CONFIG-04  js/game_manager.js L71        `Math.random() < 0.9 ? 2 : 4`,
- *                                               as `spawn` and
- *                                               `SpawnDistribution`
- *   TR-CONFIG-05  js/game_manager.js L156-L157  the merge condition and the
- *                                               doubled value, as
- *                                               `MergePredicate` and
- *                                               `MergeProducer`
- *   TR-CONFIG-06  target-only row               `MergeTileView`, the structural
- *                                               operand both merge members read
- *
- * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
- * only so the construct can be found from the log:
- *   DL-CONFIG-01  the merge rule expressed as a replaceable predicate and
- *                 producer pair
- *   DL-CONFIG-02  every member declared mutable and read at each use
+ * Decisions: DL-CONFIG-01, DL-CONFIG-02, DL-CONFIG-03 (docs/DECISION_LOG.md).
  */
 
 /**
  * Structural view of a tile as the merge rules see it. A tile declaring
  * `value: number` and `mergedFrom: Tile[] | null` satisfies it structurally and
- * needs no adapter. Both members are readonly: a predicate and a producer read
- * their operands and mutate neither.
+ * needs no adapter.
  */
 export interface MergeTileView {
   readonly value: number;
@@ -51,16 +30,22 @@ export interface MergeTileView {
 }
 
 /**
- * Discrete distribution a newly spawned tile's value is drawn from: two parallel
- * arrays indexed in lockstep, where `weights[i]` is the selection probability of
- * `values[i]`.
+ * Discrete distribution a newly spawned tile's value is drawn from: two
+ * parallel arrays indexed in lockstep, where `weights[i]` is the RELATIVE
+ * weight of `values[i]` — a share of the weights' own total, not a
+ * probability.
  *
- * Invariants: the arrays are non-empty and of equal length, every value is a
- * positive integer, every weight is at least 0, and the weights sum to 1.
+ * Invariants, as `RngStream.pickWeighted` of src/rng/rng-streams.ts enforces
+ * them: both arrays non-empty and of EQUAL LENGTH, every value a positive
+ * integer, every weight finite and at least 0, and their TOTAL above 0.
+ * The total need not be 1: `[9, 1]` and `[0.9, 0.1]` select identically. A
+ * shape outside those bounds selects nothing, consumes no draw and leaves the
+ * spawn to its fallback value.
  *
- * Selection takes exactly one draw `r` in [0, 1) from the spawn-value stream and
- * walks the weights in index order, accumulating a running total; the first
- * index whose total exceeds `r` selects the value. One draw per spawn.
+ * Selection takes exactly one draw from the spawn-value substream, scales it by
+ * the weight total, then walks the weights in index order accumulating a
+ * running total; the first index whose running total exceeds the scaled draw
+ * selects the value. One draw per spawn, never one per candidate.
  */
 export interface SpawnDistribution {
   /**
@@ -70,16 +55,16 @@ export interface SpawnDistribution {
   values: number[];
 
   /**
-   * Selection probability of each entry of `values`, in the same index order.
+   * Relative weight of each entry of `values`, in the same index order. Finite
+   * and at least 0 apiece, with a total greater than 0.
    */
   weights: number[];
 }
 
 /**
  * Decides whether a moving tile merges into the tile it has run into. An
- * implementation is pure with respect to its operands: it returns a verdict and
- * mutates neither tile. `target` is non-nullable — its presence is established
- * by the move resolver.
+ * implementation is pure with respect to its operands: it returns a verdict
+ * and mutates neither tile.
  */
 export type MergePredicate = (
   moving: MergeTileView,
@@ -90,9 +75,7 @@ export type MergePredicate = (
  * Produces the face value of the tile a merge yields, and is called only for a
  * pair a `MergePredicate` has already accepted. The engine constructs the
  * resulting tile; an implementation constructs nothing and mutates neither
- * operand. The schema carries no separate score rule, so a replaced producer
- * changes scoring with it; a score adjustment independent of the produced value
- * is made through the `scoreDelta` field of the `onMerge` hook payload.
+ * operand.
  */
 export type MergeProducer = (
   moving: MergeTileView,
@@ -110,14 +93,8 @@ export interface MergeRules {
 }
 
 /**
- * The effective rules of a run: the single object the base game and every relic
- * read their rules from.
- *
- * Every member is mutable and is READ AFRESH AT EACH USE — a consumer neither
- * hoists a member into a module-scope constant nor captures one in a closure
- * that outlives the call. `boardSize` in particular is reconciled against a
- * persisted board size and any active board-mutating relic, so it changes
- * during a run.
+ * The effective rules of a run: the single object the base game and every
+ * relic read their rules from.
  *
  * Numeric domains the types do not express: `boardSize` and `winValue` are
  * positive integers and `startTiles` is a non-negative integer.

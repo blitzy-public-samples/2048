@@ -1,24 +1,13 @@
 // Queue-bound suite of src/ui/a11y/live-region.ts.
 //
-// The invariant under test is the one `LiveRegionAnnouncerOptions.maxQueued`
-// states: "the queue never holds more than this many, whatever kinds they
-// are". The bound is structural, so a run of `terminal` and `relicAcquired`
-// announcements — the two kinds the eviction tiers protect longest — cannot
-// carry the queue past it.
-//
-// Sections:
-//   1  the bound holds under every sequence of kinds
-//   2  the eviction tiers, so the bound keeps the semantics it protects
-//   3  the drop report, so a discarded announcement is diagnosable
-//
-// Auto-flush is switched off throughout section 1 and 2 with an explicit
-// `autoFlush: false`, so `pending()` measures the queue rather than a queue
-// racing a scheduled flush. Section 3 flushes by hand.
+// Sections: 1 the bound holds under every sequence of kinds 2 the eviction
+// tiers, so the bound keeps the semantics it protects 3 the drop report, so a
+// discarded announcement is diagnosable
 //
 // The region is the one index.html L105 declares. The reporter is a
 // hand-written recorder: no mocking library, no spy on a global, no storage.
-// This suite is collected by the `unit:dom` project of vitest.config.ts,
-// whose environment is 'jsdom'.
+// This suite is collected by the `unit:dom` project of vitest.config.ts, whose
+// environment is 'jsdom'.
 //
 // Rationale for the decisions behind this file: docs/DECISION_LOG.md.
 
@@ -39,15 +28,12 @@ import type {
   UiReporter,
 } from '../../../src/ui/a11y/settings';
 
-/* ===== Doubles and fixtures ===== */
-
 /** One report the recorder kept. */
 interface Report {
   readonly metric: string;
   readonly fields: UiReportFields | undefined;
 }
 
-/** A reporter that records rather than discarding. */
 function createRecorder(): UiReporter & {
   readonly counts: Report[];
   readonly logs: { level: UiReportLevel; fields?: UiReportFields }[];
@@ -119,8 +105,6 @@ afterEach(() => {
 
   document.body.innerHTML = '';
 });
-
-/* ===== 1. The bound holds under every sequence of kinds ===== */
 
 describe('the queue bound is structural', () => {
   it('holds under repeated terminal announcements', () => {
@@ -225,8 +209,6 @@ describe('the queue bound is structural', () => {
   });
 });
 
-/* ===== 2. The eviction tiers ===== */
-
 describe('the bound discards in tiers, gameplay first', () => {
   it('discards a gameplay item before free text', () => {
     seedRegion();
@@ -278,8 +260,6 @@ describe('the bound discards in tiers, gameplay first', () => {
 
     region.flush();
 
-    // The relic line and the LAST verdict survived, which is the verdict
-    // `composeAnnouncements` would have composed in any case.
     expect(region.pending()).toBe(2);
   });
 
@@ -314,8 +294,6 @@ describe('the bound discards in tiers, gameplay first', () => {
     ).toBe(false);
   });
 });
-
-/* ===== 3. The drop report ===== */
 
 describe('a discarded announcement is reported, never silent', () => {
   it('counts the drop and how many of them were protected', () => {

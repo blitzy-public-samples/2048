@@ -5,23 +5,10 @@
 // Two of the three therefore have no CSS media query that expresses them, and
 // nothing in the style layer or the on-screen controls could see them.
 //
-// Three properties are pinned here:
+// Three properties are pinned here.
 //
-//   reflection   the effective value is written to the document element as an
-//                explicit `'true'` or `'false'`, never removed, because the
-//                style layer distinguishes an explicit `'false'` — keep
-//                motion — from an absent attribute, where the operating system
-//                decides.
-//   consumption  the on-screen controls resolve the value in a fixed order,
-//                pinned value first, then the reflected attribute, then the
-//                media query, so an explicit setting reaches them.
-//   liveness     a tween reads the preference once, at construction, so the
-//                group is the member that follows a later change: it steps its
-//                held tweens to their FINAL values rather than dropping them
-//                part-way, which is what `clear()` did.
-//
-// `setReducedMotionOverride` is module state in src/render/webgl-support.ts, so
-// every test restores it.
+// `setReducedMotionOverride` is module state in src/render/webgl-support.ts,
+// so every test restores it.
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -63,8 +50,6 @@ const controlsFixture = (): {
   return { host: createInputManager({}), mount };
 };
 
-/* ===== 1. The effective value is reflected (F-06) ===== */
-
 describe('the effective reduced-motion value is reflected', () => {
   it('writes an explicit true', () => {
     expect(reflectReducedMotion(document.documentElement, true)).toBe(true);
@@ -77,8 +62,6 @@ describe('the effective reduced-motion value is reflected', () => {
     reflectReducedMotion(document.documentElement, true);
     reflectReducedMotion(document.documentElement, false);
 
-    // An absent attribute would mean "the operating system decides"; an
-    // explicit `false` means the user asked to keep motion.
     expect(
       document.documentElement.getAttribute(REDUCED_MOTION_ATTRIBUTE),
     ).toBe('false');
@@ -105,8 +88,6 @@ describe('the effective reduced-motion value is reflected', () => {
     expect(readReflectedReducedMotion(null)).toBe(null);
   });
 });
-
-/* ===== 2. The setting reaches the render store (F-06) ===== */
 
 describe('the motion setting drives the render store', () => {
   it('maps each setting onto the tri-state override', () => {
@@ -165,8 +146,6 @@ describe('the motion setting drives the render store', () => {
     expect(collected.some((keys) => keys.includes('reducedMotion'))).toBe(true);
   });
 });
-
-/* ===== 3. The controls consume the effective value (F-06) ===== */
 
 describe('the on-screen controls consume the effective value', () => {
   it('honours a pinned value over the media query', () => {
@@ -275,8 +254,6 @@ describe('the on-screen controls consume the effective value', () => {
 
     reflectReducedMotion(document.documentElement, true);
 
-    // The observer's callback is a microtask, so the write is seen on the next
-    // turn of the queue rather than synchronously.
     await Promise.resolve();
     await new Promise((resolve): void => {
       setTimeout(resolve, 0);
@@ -307,8 +284,6 @@ describe('the on-screen controls consume the effective value', () => {
       setTimeout(resolve, 0);
     });
 
-    // This is why src/main.ts supplies no pin: it would make the attribute
-    // unable to move the controls.
     expect(controls.isReducedMotion()).toBe(false);
 
     controls.unmount();
@@ -330,8 +305,6 @@ describe('the on-screen controls consume the effective value', () => {
     expect(root?.hasAttribute(REDUCED_MOTION_ATTRIBUTE)).toBe(false);
   });
 });
-
-/* ===== 4. A group follows a live change (F-26) ===== */
 
 describe('a tween group follows the preference while it is alive', () => {
   /** A two-stop numeric tween, 100ms with no delay. */
@@ -410,8 +383,8 @@ describe('a tween group follows the preference while it is alive', () => {
 
     expect(group.clear()).toBe(1);
 
-    // The defect: `clear()` released without completing, leaving the surface
-    // the tween drove frozen part-way through its interval.
+    // The defect: `clear` released without completing, leaving the surface the
+    // tween drove frozen part-way through its interval.
     expect(tween.isComplete()).toBe(true);
     expect(tween.value()).toBe(100);
 

@@ -2,30 +2,10 @@
 //
 // The contracts asserted here: one run seed fanned into four named substreams
 // that advance independently, and that a substream restored from a recorded
-// cursor continues the same sequence. `RngCursorMap` is the shape the run state
-// persists as its `rngCursor` field.
+// cursor continues the same sequence. `RngCursorMap` is the shape the run
+// state persists as its `rngCursor` field.
 //
-// The two audited randomness call sites of the deleted vanilla sources, both
-// pinned by this suite: the spawn value draw, `< 0.9 ? 2 : 4` on a strict
-// less-than, now `RngStream.pickWeighted` over the spawn distribution of the
-// rules config; and the spawn position draw, `cells[Math.floor(u *
-// cells.length)]`, now `RngStream.nextInt`, with `RngStream.pick` over the same
-// array. `randomAvailableCell()` guarded on `cells.length` and carried no else
-// branch, so a full board yielded `undefined`; `availableCells()` collected
-// `{x, y}` through `eachCell`, x-outer and y-inner.
-//
-// Every expectation below is either relational — identical seeds give identical
-// sequences, a restored substream continues in lockstep, one substream's draws
-// leave the others untouched — or a range or shape check. The derived helpers
-// are cross-checked against `next()` on paired same-seed substreams. No
-// generator output appears as a literal anywhere in this file. Every seed is a
-// literal declared here, and this suite reads no clock, no environment and no
-// document.
-//
-// Decisions of docs/DECISION_LOG.md this suite is the evidence for, one apiece:
-// DL-RNG-04, DL-RNG-05.
-// Rows of docs/TRACEABILITY_MATRIX.md it covers, one apiece: TR-RNG-06,
-// TR-RNG-07, TR-RNG-08, TR-RNG-09.
+// Decisions: DL-RNG-04, DL-RNG-05 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -84,25 +64,18 @@ interface Cell {
   y: number;
 }
 
-/**
- * Candidates for the weighted walk, distinct from the spawn distribution. Three
- * of them, so the walk's middle branch is reached.
- */
+/** Candidates for the weighted walk, distinct from the spawn distribution. */
 const UNEVEN_CANDIDATES: readonly string[] = ['common', 'rare', 'legendary'];
 
-/**
- * Weights of `UNEVEN_CANDIDATES`. They total 8, so a selection that read the raw
- * draw without scaling it by the total would not match.
- */
+/** Weights of `UNEVEN_CANDIDATES`. */
 const UNEVEN_WEIGHTS: readonly number[] = [5, 2, 1];
 
 /**
- * Resolves one raw draw to a candidate through the walk
- * src/rng/rng-streams.ts performs: scale the draw by the total weight, then
- * take the first index whose running total passes it, falling back to the last
- * candidate.
+ * Resolves one raw draw to a candidate through the walk src/rng/rng-streams.ts
+ * performs: scale the draw by the total weight, then take the first index
+ * whose running total passes it, falling back to the last candidate.
  *
- * @param raw Draw in [0, 1), as `next()` returns it.
+ * @param raw Draw in [0, 1), as `next` returns it.
  * @param items Candidates, in index order.
  * @param weights Weight of each candidate, in the same order.
  * @returns The candidate that draw selects.
@@ -126,8 +99,6 @@ function candidateForDraw(
 
   return items[items.length - 1];
 }
-
-/* ===== 2. Local helpers ===== */
 
 /**
  * Takes `count` draws from `stream` and returns them in draw order.
@@ -208,8 +179,8 @@ describe('RNG_STREAM_NAMES', () => {
   });
 
   it('refuses a runtime write to an entry and keeps its contents exact', () => {
-    // The cast is how a caller reaching the tuple through a widened type
-    // would arrive at it; compile-time readonly does not stop that caller.
+    // The cast is how a caller reaching the tuple through a widened type would
+    // arrive at it; compile-time readonly does not stop that caller.
     const mutable = RNG_STREAM_NAMES as unknown as string[];
 
     expect(() => {
@@ -266,8 +237,7 @@ describe('RNG_STREAM_NAMES', () => {
     try {
       mutable[0] = 'tampered';
     } catch {
-      // Refused, which is the point; the derivation below is what it
-      // protects.
+      // Refused, which is the point; the derivation below is what it protects.
     }
 
     expect(createRngStreams(RUN_SEED).stream(SPAWN_VALUE).next()).toBe(
@@ -325,9 +295,7 @@ describe('createRngStreams — shape and substream identity', () => {
     const untouched = reference(SPAWN_VALUE, perLookup.length);
 
     // Whole-sequence equality is the contract: three draws taken through three
-    // separate lookups are the first three draws of the substream. Whether two
-    // neighbouring draws happen to differ is not something the generator
-    // promises, so nothing here asserts it.
+    // separate lookups are the first three draws of the substream.
     expect(perLookup).toEqual(untouched);
     expect(perLookup).toHaveLength(3);
     expect(streams.stream(SPAWN_VALUE).cursor).toBe(perLookup.length);
@@ -690,9 +658,7 @@ describe('RngStream.nextInt — replaces js/grid.js L41', () => {
   });
 
   // The arithmetic of js/grid.js L41, asserted draw by draw: every index is
-  // the floor of that draw scaled by the bound. A paired substream of the same
-  // seed supplies the raw draws, so the whole index list is an exact
-  // expectation rather than a property of a sample.
+  // the floor of that draw scaled by the bound.
   it('floors each raw draw scaled by the bound, index for index', () => {
     const indexing = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
     const raw = createRngStreams(RUN_SEED).stream(SPAWN_POSITION);
@@ -934,11 +900,9 @@ describe('RngStream.pickWeighted — replaces js/game_manager.js L71', () => {
     expect([...observed]).toEqual(sole);
   });
 
-  // The accumulating walk itself, over weights that neither total 1 nor share a
-  // value: one draw is scaled by the total and the first index whose running
-  // total passes it is selected. Restating that walk here makes every selection
-  // an exact expectation, where counting how often each candidate came up would
-  // only describe the sample.
+  // The accumulating walk itself, over weights that neither total 1 nor share
+  // a value: one draw is scaled by the total and the first index whose running
+  // total passes it is selected.
   it('walks the running total of the weights, selection for selection', () => {
     const selecting = createRngStreams(RUN_SEED).stream(RARITY_WEIGHT);
     const raw = createRngStreams(RUN_SEED).stream(RARITY_WEIGHT);
@@ -987,8 +951,6 @@ describe('RngStream.pickWeighted — replaces js/game_manager.js L71', () => {
   });
 });
 
-/* ===== 12. Refused run seeds and refused cursor entries ===== */
-
 /** A recorded rejection, and the sink that collected it. */
 interface RecordingRngReporter {
   /** The sink to hand to `createRngStreams`. */
@@ -1029,7 +991,6 @@ const LONGEST_ACCEPTED_RUN_SEED = 'r'.repeat(MAX_RUN_SEED_LENGTH);
 /** A run seed one character past the greatest permitted length. */
 const OVERLONG_RUN_SEED = 'r'.repeat(MAX_RUN_SEED_LENGTH + 1);
 
-/** Cursor entries reduced to 0 because they are not a usable position. */
 const UNUSABLE_CURSOR_ENTRIES: readonly { label: string; value: number }[] = [
   { label: 'a negative integer', value: -1 },
   { label: 'a fractional value', value: 2.5 },
@@ -1039,7 +1000,6 @@ const UNUSABLE_CURSOR_ENTRIES: readonly { label: string; value: number }[] = [
   { label: 'a magnitude past the safe integer range', value: 2 ** 53 },
 ];
 
-/** Cursor entries reduced to 0 because they exceed the fast-forward bound. */
 const OUT_OF_RANGE_CURSOR_ENTRIES: readonly {
   label: string;
   value: number;
@@ -1048,7 +1008,9 @@ const OUT_OF_RANGE_CURSOR_ENTRIES: readonly {
   { label: 'the greatest safe integer', value: Number.MAX_SAFE_INTEGER },
 ];
 
-/** Cursor entries that are not numbers, as a corrupted payload carries them. */
+/**
+ * Cursor entries that are not numbers, as a corrupted payload carries them.
+ */
 const NON_NUMERIC_CURSOR_ENTRIES: readonly { label: string; value: unknown }[] =
   [
     { label: 'a string', value: '7' },
@@ -1295,8 +1257,6 @@ describe('createRngStreams — refused cursor entries', () => {
   });
 });
 
-/* ===== 13. Bounds the selecting primitives decline ===== */
-
 /** `nextInt` bounds outside its domain, each yielding 0 and no draw. */
 const EMPTY_INDEX_DOMAINS: readonly { label: string; value: number }[] = [
   { label: 'zero', value: 0 },
@@ -1433,10 +1393,8 @@ describe('RngStream.pick declines a list it cannot index', () => {
 
 // The transactional fork: the checkpoint primitive of the substream layer.
 
-// `RngStream.fork()` is what src/engine/hook-bus.ts opens a hook handler's
-// randomness transaction over. The substream layer adds one property to
-// `SeededRng.fork()`: the fork keeps the name, and therefore the helpers, of
-// the substream it came from.
+// `RngStream.fork` is what src/engine/hook-bus.ts opens a hook handler's
+// randomness transaction over.
 
 describe('RngStream.fork', () => {
   it('keeps the substream name', () => {

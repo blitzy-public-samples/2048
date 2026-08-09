@@ -1,25 +1,15 @@
 // Unit suite for src/storage/memory-storage.ts: the `StorageLike` contract and
 // the `MemoryStorage` in-memory store that satisfies it.
 //
-// Provenance, from the deleted js/local_storage_manager.js: the in-memory
-// fallback was one object literal with a single shared `_data` reached through
-// a global; `setItem` returned the assigned `String(val)`; `getItem` returned
-// `undefined` for an absent key rather than `null`; `removeItem` returned the
-// result of `delete`; `clear` reassigned `_data`; the two frozen unprefixed
-// keys were `bestScore` and `gameState`; the store was chosen once at
-// construction; the best-score reader coerced an absent value with `|| 0`; and
-// the best-score writer forwarded a number unconverted.
-//
 // Every test constructs the instance it reads. No instance, key or value
-// crosses an `it()` boundary, and this file registers no `beforeEach`.
+// crosses an `it` boundary, and this file registers no `beforeEach`.
 //
 // This file imports the subject and the vitest test API and nothing else: no
 // mocking library, no spy, no storage package. It reads no DOM, no storage
 // global and no clock, consumes no randomness and installs nothing. It runs
 // unchanged in a DOM-free environment.
 //
-// Decisions this suite is the evidence for: DL-STORE-05 in
-// docs/DECISION_LOG.md. Traceability rows: TR-STORE-09 of
+// Decisions: DL-STORE-05 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 

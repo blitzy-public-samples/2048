@@ -1,34 +1,11 @@
 // Contract suite for the 2.5D renderer, AAP R1, R7 and R9.
 //
-// Five properties are pinned here:
-//
-//   inversion    the renderer subscribes and is never pushed to. js/
-//                html_actuator.js was reached by the controller calling
-//                `actuate()`; a commit this renderer was not subscribed to must
-//                leave it untouched.
-//   semantics    `#board-canvas` carries `aria-hidden="true"`, so this renderer
-//                mounts the parallel `role="grid"` layer beside it, taking the
-//                same two arguments src/render/number-only-renderer.ts takes to
-//                release it.
-//   bounds       a board-mutating relic can commit a size beyond what the
-//                product supports, and the geometry, the mesh pool and the
-//                lattice are all functions of that size. A refused commit
-//                leaves the board already drawn standing.
-//   cadence      the two blocks a merge consumed are released when they arrive,
-//                which is the frame the merged block starts to grow.
-//   lifecycle    `subscribe()` registers on an emitter that outlives this
-//                renderer, and `mount()` acquires a GPU context that Three.js
-//                frees for nobody.
-//
-// THE CONTEXT UNDER TEST
-//   jsdom implements no rendering context, so `WebGLRenderer` cannot be built
-//   under this environment. tests/fixtures/webgl.ts supplies a context mocked
-//   far enough that Three.js constructs, resizes and renders without throwing.
-//   No property above reads a rasterised pixel; the rendered image is asserted
-//   by tests/e2e/gameplay-recording.spec.ts. Decision DL-WEBGL-01.
+// Five properties are pinned here.
 //
 // The remaining decisions behind this file are recorded in
 // docs/DECISION_LOG.md.
+//
+// Decisions: DL-WEBGL-01 (docs/DECISION_LOG.md).
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -63,10 +40,6 @@ afterEach(() => {
   applyTheme('default');
   document.body.innerHTML = '';
 });
-
-/* ==========================================================================
- * Fixtures
- * ========================================================================== */
 
 interface Placed {
   readonly x: number;
@@ -242,10 +215,6 @@ const drain = (renderer: ThreeRenderer, step = 16): number => {
   return frames;
 };
 
-/* ==========================================================================
- * Mounting and the WebGL prerequisite
- * ========================================================================== */
-
 describe('the WebGL prerequisite', () => {
   it('mounts at construction when a canvas yields a context', () => {
     const fixture = harness();
@@ -285,7 +254,8 @@ describe('the WebGL prerequisite', () => {
           diagnostic.level === 'error' &&
           // The message widened when the mount guard was extended to cover
           // every initialisation step, not only the context and the scene: it
-          // now names the whole class of failure it converts into the fallback.
+          // now names the whole class of failure it converts into the
+          // fallback.
           diagnostic.message.includes('The 2.5D board did not mount'),
       ),
     ).toBe(true);
@@ -307,10 +277,6 @@ describe('the WebGL prerequisite', () => {
     fixture.renderer.destroy();
   });
 });
-
-/* ==========================================================================
- * The parallel accessibility board
- * ========================================================================== */
 
 describe('the parallel accessibility board', () => {
   it('mounts the layer rather than claiming it, and exposes the host', () => {
@@ -368,8 +334,6 @@ describe('the parallel accessibility board', () => {
     drain(fixture.renderer);
     fixture.renderer.unmount();
 
-    // Mounted still: the surface the next renderer takes over is populated
-    // rather than an empty `role="grid"`.
     expect(fixture.layer.isMounted()).toBe(true);
     expect(fixture.parallelHost.getAttribute('aria-hidden')).toBeNull();
 
@@ -389,10 +353,6 @@ describe('the parallel accessibility board', () => {
     fixture.renderer.destroy();
   });
 });
-
-/* ==========================================================================
- * Board size bounds
- * ========================================================================== */
 
 describe('board size bounds', () => {
   it('refuses a commit above the supported maximum and keeps the board drawn', () => {
@@ -422,10 +382,6 @@ describe('board size bounds', () => {
     fixture.renderer.destroy();
   });
 });
-
-/* ==========================================================================
- * The turn, and the merge cadence
- * ========================================================================== */
 
 describe('drawing one turn', () => {
   it('queues a commit and draws it on the next frame, never inside the event', () => {
@@ -578,10 +534,6 @@ describe('drawing one turn', () => {
   });
 });
 
-/* ==========================================================================
- * The granular merge event
- * ========================================================================== */
-
 describe('the tile:merge subscription', () => {
   it('queues one burst per merge, carrying the value onMerge resolved', () => {
     const fixture = harness();
@@ -594,8 +546,6 @@ describe('the tile:merge subscription', () => {
       turn: 1,
       source,
       target,
-      // A relic could have transformed this; the burst must use the resolved
-      // value rather than doubling the source itself.
       resultValue: 64,
       scoreDelta: 64,
     });
@@ -631,10 +581,6 @@ describe('the tile:merge subscription', () => {
     fixture.renderer.destroy();
   });
 });
-
-/* ==========================================================================
- * The projection a consumer reads
- * ========================================================================== */
 
 describe('readRenderedBoard', () => {
   it('describes every cell in row-major order with the ramp colours', () => {
@@ -697,8 +643,6 @@ describe('readRenderedBoard', () => {
     });
     drain(fixture.renderer);
 
-    // The shared snapshot shape carries it, so the HUD, the announcer and both
-    // renderers read one flag rather than the number-only board alone knowing.
     expect(fixture.renderer.readRenderedBoard()?.degraded).toBe(true);
 
     fixture.renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
@@ -716,10 +660,6 @@ describe('readRenderedBoard', () => {
     );
   });
 });
-
-/* ==========================================================================
- * Lifecycle
- * ========================================================================== */
 
 describe('the subscription lifecycle', () => {
   it('never touches a renderer it was not subscribed to', () => {
@@ -758,8 +698,6 @@ describe('the subscription lifecycle', () => {
 
     // All three granular triggers armed and none of them drawn: a merge, a
     // spawn, and the origins a resolved move recorded.
-    // `turn` on each, because every granular event carries the turn it belongs
-    // to: it is what lets a subscriber tell one turn's triggers from the next's.
     events.emit('tile:merge', {
       turn: 1,
       source: new Tile({ x: 0, y: 0 }, 2),
@@ -792,7 +730,7 @@ describe('the subscription lifecycle', () => {
 
     fixture.renderer.unmount();
 
-    // ALL THREE. Unmount cleared only the merge queue, so a remount drew the
+    // All three. Unmount cleared only the merge queue, so a remount drew the
     // spawn tween and the slide of a board two commits old.
     const cleared = fixture.renderer.readStats();
 
@@ -825,8 +763,8 @@ describe('the subscription lifecycle', () => {
     const fixture = harness();
     const events = createEngineEvents();
 
-    // A listener the same emitter already holds disposes the renderer while the
-    // registration below is still in flight.
+    // A listener the same emitter already holds disposes the renderer while
+    // the registration below is still in flight.
     events.on('state:commit', (): void => {
       fixture.renderer.destroy();
     });
@@ -895,10 +833,6 @@ describe('the subscription lifecycle', () => {
   });
 });
 
-/* ==========================================================================
- * Context loss
- * ========================================================================== */
-
 describe('context loss', () => {
   it('reports a lost context and keeps every other call safe', () => {
     const mock = createMockCanvas({ context: createMockWebGLContext().gl });
@@ -941,18 +875,7 @@ describe('context loss', () => {
   });
 });
 
-/* ==========================================================================
- * The change of scale
- * ========================================================================== */
-
-/**
- * A controllable stand-in for the breakpoint's `MediaQueryList`.
- *
- * jsdom answers `matchMedia` with a list that never changes and never
- * dispatches, so the breakpoint is driven from the test instead: `cross()`
- * flips `matches` and notifies every listener the renderer registered, which is
- * what the browser does when the viewport passes `$mobile-threshold`.
- */
+/** A controllable stand-in for the breakpoint's `MediaQueryList`. */
 const stubScaleQuery = (): {
   readonly cross: () => void;
   readonly restore: () => void;
@@ -1029,8 +952,7 @@ describe('the change of scale', () => {
       expect(fixture.renderer.readStats().boardsBuilt).toBe(1);
 
       // Crossing the breakpoint generates the board again, which recalls every
-      // block into the factory's pool. The board must not be left empty until
-      // the next turn commits.
+      // block into the factory's pool.
       scale.cross();
 
       expect(fixture.renderer.readStats().scale).toBe('mobile');
@@ -1059,10 +981,6 @@ describe('the change of scale', () => {
     }
   });
 });
-
-/* ==========================================================================
- * Mount guard, context lifecycle and turn-scoped buffers
- * ========================================================================== */
 
 /** A renderer over a mock canvas, with its reports collected. */
 const guardFixture = (
@@ -1123,15 +1041,13 @@ describe('the mount guard', () => {
 
     // The mount failed, and it failed WITHOUT stranding the caller: the
     // number-only host is still hidden exactly as index.html ships it, so the
-    // composition root's fallback finds it untouched, and the canvas was not left
-    // shown over an empty board.
+    // composition root's fallback finds it untouched, and the canvas was not
+    // left shown over an empty board.
     expect(fixture.renderer.mounted).toBe(false);
     expect(fixture.numberOnlyHost.hidden).toBe(true);
     expect(fixture.renderer.readStats().boardSize).toBe(0);
     expect(fixture.countOf('render.three.context.failed')).toBe(1);
 
-    // And every member stays a safe no-op, which is what makes the fallback a
-    // selection rather than a rescue.
     expect(() => {
       fixture.renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
       fixture.renderer.frame();
@@ -1162,7 +1078,6 @@ describe('the mount guard', () => {
 
     expect(after.boardSize).toBe(before.boardSize);
     expect(after.boardsBuilt).toBe(before.boardsBuilt);
-    // Counted ONCE: the second call returned early rather than rebuilding.
     expect(fixture.countOf('render.three.mount')).toBe(1);
 
     fixture.renderer.destroy();
@@ -1197,9 +1112,6 @@ describe('a lost context', () => {
     expect(stats.contextLost).toBe(true);
     expect(stats.contextLosses).toBe(1);
 
-    // PARKED: every tween, burst and camera displacement was cancelled, so the
-    // frame reports no outstanding work and an idle-stopping loop settles instead
-    // of running forever against a context that cannot draw.
     expect(stats.activeTweens).toBe(0);
     expect(
       fixture.renderer.frame({
@@ -1244,10 +1156,6 @@ describe('a lost context', () => {
 
     expect(announced).toBeDefined();
 
-    // It names what actually still works — the engine, the accessible grid and
-    // the live region — rather than claiming the number-only board is showing.
-    // No host swap happens on a transient loss, so a message promising one would
-    // be describing something the player cannot see.
     expect(announced?.message).toContain('keeps running');
     expect(announced?.message).toContain('accessible grid');
     expect(announced?.message).not.toContain('number-only board carries');
@@ -1265,10 +1173,6 @@ describe('a lost context', () => {
 
     fixture.mock.emit('webglcontextlost');
 
-    // Released HERE rather than at restoration. `webglcontextrestored` fires only
-    // after the browser has put a NEW context on the canvas, so a delete issued
-    // from the restore handler names the new context with a handle from the
-    // destroyed one — twenty `INVALID_OPERATION` warnings per restoration.
     const parked = fixture.renderer.readStats();
 
     expect(parked.boardSize).toBe(0);
@@ -1307,15 +1211,11 @@ describe('a restored context', () => {
 
     const stats = fixture.renderer.readStats();
 
-    // A restored context is a NEW context, so the board was rebuilt rather than
-    // left holding handles into the old one.
     expect(stats.contextLost).toBe(false);
     expect(stats.contextRestores).toBe(1);
     expect(stats.boardSize).toBe(4);
     expect(stats.litStageIndex).toBeNull();
 
-    // And the LATEST committed state is reconciled: the next frame repaints the
-    // board that was on screen rather than an empty one.
     drain(fixture.renderer);
 
     expect(fixture.renderer.readRenderedBoard()?.cells.length).toBe(16);
@@ -1368,8 +1268,6 @@ describe('a restored context', () => {
     mock.emit('webglcontextlost');
     mock.emit('webglcontextrestored');
 
-    // Parked rather than half-built: the flag goes back up so no frame is issued
-    // against a scene that could not be rebuilt.
     expect(renderer.readStats().contextLost).toBe(true);
     expect(
       diagnostics.some((diagnostic) =>
@@ -1377,14 +1275,12 @@ describe('a restored context', () => {
       ),
     ).toBe(true);
 
-    // AND THE VERDICT IS REPORTED, so a caller does not read a restoration that
-    // rebuilt nothing as a board that came back.
+    // And the verdict is reported, so a caller does not read a restoration
+    // that rebuilt nothing as a board that came back.
     expect(verdicts).toEqual([
       { rebuilt: false, contextLost: true, attempted: true },
     ]);
 
-    // Nothing is left allocated: the board, the scene and the factory were
-    // released rather than left holding a context that will not draw.
     const stats = renderer.readStats();
 
     expect(stats.boardSize).toBe(0);
@@ -1392,7 +1288,8 @@ describe('a restored context', () => {
     expect(stats.activeTweens).toBe(0);
     expect(renderer.readRenderedBoard()).toBeNull();
 
-    // The caught value reaches the sink unconverted, beside the bounded summary.
+    // The caught value reaches the sink unconverted, beside the bounded
+    // summary.
     const failure = diagnostics.find((diagnostic) =>
       diagnostic.message.includes('could not be rebuilt'),
     );
@@ -1452,19 +1349,14 @@ describe('a restored context', () => {
     renderer.destroy();
     mock.emit('webglcontextrestored');
 
-    // The handlers went with the renderer, so a restoration arriving afterwards
-    // reaches nothing: a destroyed renderer cannot be the reason a caller is
-    // serving another board.
     expect(verdicts).toEqual([]);
   });
 });
 
-/* ==========================================================================
- * A commit that lands while the context is lost
- * ========================================================================== */
-
 describe('a commit that lands while the context is lost', () => {
-  /** The cells of the parallel board, in the row-major order the layer builds. */
+  /**
+   * The cells of the parallel board, in the row-major order the layer builds.
+   */
   const parallelLabels = (host: HTMLElement): string[] =>
     Array.from(host.querySelectorAll<HTMLElement>('[role="gridcell"]')).map(
       (cell) => cell.getAttribute('aria-label') ?? '',
@@ -1478,17 +1370,14 @@ describe('a commit that lands while the context is lost', () => {
 
     fixture.emit('webglcontextlost');
 
-    // A turn resolves while the context is dead. Nothing can be drawn for it —
-    // the factory and the scene were released while the lost context still owned
-    // them — but the parallel layer is DOM, and it is the surface a screen reader
-    // reads the board from while the canvas is `aria-hidden`.
+    // A turn resolves while the context is dead.
     fixture.renderer.render(commitOf(4, [{ x: 3, y: 3, value: 64 }]));
     drain(fixture.renderer);
 
     const labels = parallelLabels(fixture.parallelHost);
 
-    // Row-major: the tile the outage's turn placed is the last cell, and the cell
-    // the pre-loss board held is empty again.
+    // Row-major: the tile the outage's turn placed is the last cell, and the
+    // cell the pre-loss board held is empty again.
     expect(labels.at(15) ?? '').toContain('64');
     expect((labels.at(0) ?? '').toLowerCase()).toContain('empty');
     expect(
@@ -1518,9 +1407,9 @@ describe('a commit that lands while the context is lost', () => {
     const board = fixture.renderer.readRenderedBoard();
     const cells = board?.cells ?? [];
 
-    // THE LATEST committed state, not the one the loss interrupted: the plan is
-    // plain data and `paint` keeps it current through the outage, so the board
-    // comes back showing the turn that resolved while it was dark.
+    // The latest committed state, not the one the loss interrupted: the plan
+    // is plain data and `paint` keeps it current through the outage, so the
+    // board comes back showing the turn that resolved while it was dark.
     expect(cells.find((cell) => cell.x === 3 && cell.y === 3)?.value).toBe(64);
     expect(cells.find((cell) => cell.x === 0 && cell.y === 0)?.value).toBeNull();
     expect(fixture.renderer.readStats().contextRestores).toBe(1);
@@ -1585,9 +1474,6 @@ describe('a commit that lands while the context is lost', () => {
     });
     drain(fixture.renderer);
 
-    // The plan those triggers belong to was never drawn, so they are dropped
-    // rather than carried: a pop held past its own plan would otherwise play at a
-    // cell of the board the restoration draws.
     expect(fixture.renderer.readStats().pendingMerges).toBe(0);
     expect(fixture.renderer.readStats().pendingTurn).toBeNull();
 
@@ -1618,8 +1504,6 @@ describe('animation triggers are scoped to their turn', () => {
     expect(fixture.renderer.readStats().pendingMerges).toBe(1);
     expect(fixture.renderer.readStats().pendingTurn).toBe(7);
 
-    // A commit for turn 8 arrives instead — a nested or deferred emission — and
-    // the orphan is DISCARDED rather than animated against turn 8's board.
     events.emit('state:commit', commitAt(8, [{ x: 0, y: 0, value: 4 }]));
 
     const stats = fixture.renderer.readStats();
@@ -1679,8 +1563,6 @@ describe('animation triggers are scoped to their turn', () => {
 
     const stats = fixture.renderer.readStats();
 
-    // Turn 1's trigger was never drained, so turn 2 replaces rather than joins
-    // it: exactly one cell is armed, and it is turn 2's.
     expect(stats.pendingTurn).toBe(2);
     expect(stats.pendingSpawns).toBe(1);
     expect(stats.orphanedTriggers).toBe(1);
@@ -1742,8 +1624,6 @@ describe('unmount and remount', () => {
 
     const cleared = fixture.renderer.readStats();
 
-    // `pendingSpawns` and `pendingMoveOrigins` used to survive an unmount, so a
-    // remount drained the previous mount's triggers into its own first paint.
     expect(cleared.pendingMerges).toBe(0);
     expect(cleared.pendingSpawns).toBe(0);
     expect(cleared.pendingMoves).toBe(0);
@@ -1798,9 +1678,6 @@ describe('unmount and remount', () => {
       release();
     }
 
-    // A commit reaches nothing, because every subscription was released AND
-    // removed. Before the fix the entries stayed in the shared collection and
-    // `dispose()` re-invoked each of them.
     events.emit('state:commit', commitOf(4, [{ x: 0, y: 0, value: 2 }], 4));
 
     expect(fixture.renderer.readStats().commits).toBe(0);

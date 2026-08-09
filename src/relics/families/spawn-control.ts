@@ -5,8 +5,8 @@
 // pair of independent decisions js/game_manager.js L69-L76 `addRandomTile`
 // made: the spawn VALUE, whose literal is js/game_manager.js L71, and the
 // spawn POSITION, drawn by js/grid.js L37-L43 `randomAvailableCell` over the
-// x-outer, y-inner cell list of js/grid.js L45-L64. `prospectors-eye` also
-// binds `onStageStart`.
+// x-outer, y-inner cell list of js/grid.js L45-L64. Every relic of the family
+// binds `onSpawn` and nothing else.
 //
 // Every rule parameter is read from `HookContext.config` at use time and every
 // draw is taken from the `relic-draw` substream of `HookContext.rng`. Handlers
@@ -20,7 +20,7 @@
 // order, all target-only because no vanilla construct declared a relic:
 //   TR-SPAWN-01  twin-seed         onSpawn
 //   TR-SPAWN-02  fertile-ground    onSpawn
-//   TR-SPAWN-03  prospectors-eye   onStageStart, onSpawn
+//   TR-SPAWN-03  prospectors-eye   onSpawn
 //   TR-SPAWN-04  loaded-dice       onSpawn
 //   TR-SPAWN-05  the frozen `SPAWN_CONTROL_FAMILY` export
 //
@@ -28,38 +28,34 @@
 // only so the construct can be found from the log:
 //   DL-SPAWN-01  each relic acting through the `onSpawn` payload's `value`,
 //                `position` and `count` members alone
-//   DL-SPAWN-02  every value and position a relic supplies drawn from the
-//                `spawn-value` and `spawn-position` substreams the base game
-//                already consumes
+//   DL-SPAWN-02  every draw a handler here takes coming from the `relic-draw`
+//                substream, so the engine's own `spawn-value` and
+//                `spawn-position` sequences are left where the base game put
+//                them
 //
 // The relic catalogue is published in docs/RELICS.md, the rules the relics read
 // in docs/CONFIGURATION.md, and hook dispatch in
 // docs/architecture/hook-dispatch-sequence.md.
+//
+// Decisions: DL-SPAWN-01, DL-SPAWN-02 (docs/DECISION_LOG.md).
 
 import { RARITIES, type Relic, type RelicFamily } from '../relic-types';
 import type { ReadonlyGridView } from '../../engine/hooks';
 import type { Position } from '../../engine/types';
 import type { StreamName } from '../../rng/rng-streams';
 
-/**
- * The one substream every handler below draws from.
- *
- * Typed as `StreamName`, the closed set `RNG_STREAM_NAMES` of
- * src/rng/rng-streams.ts declares. The two spawn substreams are the
- * engine's own and are never addressed here.
- */
+/** The one substream every handler below draws from. */
 const RELIC_DRAW_STREAM: StreamName = 'relic-draw';
 
 /**
  * Probability `twin-seed` promotes a lowest-value spawn, compared against one
- * draw in `[0, 1)`. The relic's own magnitude, not a rule of the game.
+ * draw in `[0, 1)`.
  */
 const TWIN_SEED_PROMOTION_CHANCE = 0.5;
 
 /**
  * The four orthogonal neighbour offsets `fertile-ground` tests a cell against,
- * walked in this order. Frozen, and read-only at compile time, so the shared
- * table cannot be mutated through this reference.
+ * walked in this order.
  */
 const NEIGHBOUR_OFFSETS: readonly Position[] = Object.freeze([
   Object.freeze({ x: 0, y: -1 }),
@@ -119,10 +115,6 @@ function isOuterRingCell(cell: Position, size: number): boolean {
 /**
  * Reports whether any of a cell's four orthogonal neighbours holds a tile.
  *
- * A neighbour outside the lattice reads as unoccupied, which is the boundary
- * js/grid.js L72-L78 expressed by treating an out-of-bounds cell as
- * available.
- *
  * @param cell Cell whose neighbours are read.
  * @param grid Board query surface carried by the dispatch.
  * @returns `true` when at least one neighbour holds a tile.
@@ -135,11 +127,7 @@ function hasAdjacentTile(cell: Position, grid: ReadonlyGridView): boolean {
 
 /**
  * Lists the empty cells that satisfy `accept`, in the x-outer, y-inner order
- * `availableCells()` returns them in.
- *
- * THE ORDER IS PART OF THE DETERMINISM CONTRACT and is never re-sorted or
- * re-indexed. It is the order the engine's own spawn-position draw resolves
- * against, and a uniform draw maps to a different cell if it changes.
+ * `availableCells` returns them in.
  *
  * @param grid Board query surface carried by the dispatch.
  * @param accept Predicate a cell must satisfy to be a candidate.
@@ -152,19 +140,9 @@ function candidateCells(
   return grid.availableCells().filter(accept);
 }
 
-/* ==========================================================================
- * The four relics, in the order `relics` below declares them
- * ========================================================================== */
-
 /**
  * Promotes a lowest-value spawn to the next configured value above it, part of
  * the time.
- *
- * Binds `onSpawn`. The configured values are copied before they are sorted,
- * and the promoted value is one of them, so the spawn stays inside
- * `config.spawn.values` whatever that list holds. The draw is taken only once
- * the incoming value has been found to be the lowest, so a spawn this relic
- * cannot act on consumes no randomness.
  */
 const twinSeed: Relic = Object.freeze<Relic>({
   id: 'twin-seed',
@@ -208,19 +186,8 @@ const twinSeed: Relic = Object.freeze<Relic>({
 });
 
 /**
- * Sprouts a SECOND tile beside a tile already on the board, leaving the
- * spawn the engine is resolving exactly as it arrived.
- *
- * Binds `onSpawn`. The extra tile is recorded through
- * `HookContext.effects.insertTile`, which src/engine/board-effects.ts applies
- * once this handler has returned, so the net effect of the dispatch is TWO
- * tiles rather than one relocated tile. The payload is returned unchanged.
- *
- * Candidates are the empty cells adjacent to an occupied cell, less the cell
- * the spawn already carries — the engine inserts that tile only after this
- * dispatch resolves, so its cell still reads as empty here. An absent
- * position is left absent, and a board offering no other adjacent cell
- * sprouts nothing.
+ * Sprouts a SECOND tile beside a tile already on the board, leaving the spawn
+ * the engine is resolving exactly as it arrived.
  */
 const fertileGround: Relic = Object.freeze<Relic>({
   id: 'fertile-ground',
@@ -266,14 +233,14 @@ const fertileGround: Relic = Object.freeze<Relic>({
 });
 
 /**
- * Steers a spawn onto the outer ring of the board, and records the edge length
- * each stage begins at.
+ * Steers a spawn onto the outer ring of the board.
  *
- * Binds `onStageStart` and `onSpawn`. The ring is computed from
- * `config.boardSize` as read at the moment of the spawn, not from the length
- * recorded at stage start, which a board-mutating relic can have changed since.
- * Candidates are filtered to cells inside that edge length as well as on its
- * ring, so a reduced board never yields a cell beyond it.
+ * Binds `onSpawn` alone. The ring is computed from `config.boardSize` as read
+ * at the moment of the spawn, which is the live value a board-mutating relic
+ * may have changed since the stage began, so there is nothing for the relic to
+ * record at stage start and it binds no stage hook. Candidates are filtered to
+ * cells inside that edge length as well as on its ring, so a reduced board
+ * never yields a cell beyond it.
  */
 const prospectorsEye: Relic = Object.freeze<Relic>({
   id: 'prospectors-eye',
@@ -283,11 +250,6 @@ const prospectorsEye: Relic = Object.freeze<Relic>({
     'New tiles appear along the edges of the board, leaving the centre clear.',
 
   hooks: Object.freeze({
-    onStageStart: (payload, context) => {
-      // Plain JSON: the slot is persisted inside the run envelope.
-      context.state = { stageBoardSize: payload.boardSize };
-    },
-
     onSpawn: (payload, context) => {
       if (payload.position === undefined) {
         return payload;
@@ -317,11 +279,6 @@ const prospectorsEye: Relic = Object.freeze<Relic>({
 /**
  * Inverts the configured spawn distribution, so the value the rules make
  * rarest becomes the value the board sees most.
- *
- * Binds `onSpawn`. Both configured arrays are read at use time and the weights
- * are reversed on a copy. The drawn value is one of `config.spawn.values`,
- * and a distribution the weighted draw cannot select from — empty, or
- * mismatched in length — leaves the spawn as the rules produced it.
  */
 const loadedDice: Relic = Object.freeze<Relic>({
   id: 'loaded-dice',
@@ -355,19 +312,9 @@ const loadedDice: Relic = Object.freeze<Relic>({
   }),
 });
 
-/* ==========================================================================
- * The family
- * ========================================================================== */
-
 /**
  * The `spawn-control` family: its name, and its four relics in declaration
  * order.
- *
- * DECLARATION ORDER IS PART OF THE DETERMINISM CONTRACT.
- * src/relics/relic-registry.ts flattens the families into its catalogue in
- * family order and, within a family, in this order, and
- * src/relics/relic-draw.ts resolves a drawn index against that catalogue. A
- * reordered array therefore changes which relics a recorded seed offers.
  *
  * One relic per tier of `RARITIES`, taken by ordinal position.
  */

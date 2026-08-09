@@ -1,30 +1,6 @@
 // Behaviour suite for the three R7 effects: the merge particle burst, the
 // camera punch and shake, and the evolving stage lighting.
 //
-// WHY THIS SUITE EXISTS
-//   All three modules shipped complete, and every assertion the suite carried
-//   was about their CONSTRUCTION: buffer ceilings, option confinement and tint
-//   derivation. Nothing called `burstAt`, nothing advanced a burst, nothing
-//   built the camera effects at all and nothing re-tuned a stage — so "the board
-//   bursts on a merge", "the camera punches", "a burst ends" and "the lighting
-//   evolves through a run" were untested claims about the three features R7
-//   names by name.
-//
-// WHAT IS PINNED HERE
-//   EMISSION      a burst is emitted, is the size it says it is, and two merges
-//                 in one move produce two bursts rather than one.
-//   ADVANCEMENT   a burst moves and fades while it runs, and RETIRES when its
-//                 lifetime is spent, so a parked loop is left with nothing
-//                 outstanding.
-//   SUPPRESSION   with motion reduced, no mote is emitted and the camera is
-//                 never written — the highest-leverage accessibility measure the
-//                 AAP names, and the one that has to be provable.
-//   DETERMINISM   a shake is a function of its own elapsed time, so the same
-//                 shake advanced the same way displaces identically.
-//   THE STAGE     `applyStageTheme` re-tunes the rig, the tuning advances with
-//                 the stage, and a palette change re-tunes it against the
-//                 palette in force.
-//
 // jsdom implements no rendering context, and none of these three needs one: a
 // particle system is a `Points` over typed arrays, the camera effects write a
 // `Camera`'s transform, and a scene is a graph of lights and a camera. Nothing
@@ -51,20 +27,15 @@ import {
 import { applyTheme, getTheme } from '../../../src/theme/themes';
 import type { Theme } from '../../../src/theme/themes';
 
-/**
- * A world point a burst is emitted at.
- *
- * Off the world origin deliberately: the first keyframe places every mote AT the
- * emission point and holds it there for the `pop` delay, so a burst emitted at
- * (0, 0, 0) writes zeros into a buffer that already held zeros and an assertion
- * on "the positions changed" could not tell an emission from a no-op.
- */
+/** A world point a burst is emitted at. */
 const ORIGIN = Object.freeze({ x: 1.5, y: 2.5, z: -3.5 });
 
 /** A second point, so two bursts are distinguishable by origin. */
 const SECOND_ORIGIN = Object.freeze({ x: -2.5, y: 1.5, z: 0.5 });
 
-/** The delay the `pop` cadence holds a burst's first keyframe across, in ms. */
+/**
+ * The delay the `pop` cadence holds a burst's first keyframe across, in ms.
+ */
 const POP_DELAY_MS = 100;
 
 /** A tile value the ramp resolves, so the tint is a ramp fill. */
@@ -93,10 +64,6 @@ afterEach(() => {
   setReducedMotionOverride(null);
 });
 
-/* ==========================================================================
- * 1. The merge burst is emitted
- * ========================================================================== */
-
 describe('the merge particle burst', () => {
   it('emits one burst of the stated size', () => {
     const system = createParticleSystem({ reducedMotion: false });
@@ -116,8 +83,7 @@ describe('the merge particle burst', () => {
     const system = createParticleSystem({ reducedMotion: false });
 
     // `tile:merge` is emitted once per merge, so a move resolving two merges
-    // reaches the renderer twice and has to burst twice. One burst for a
-    // two-merge move would under-report the move a player just made.
+    // reaches the renderer twice and has to burst twice.
     system.burstAt(ORIGIN, MERGED_VALUE);
     system.burstAt(SECOND_ORIGIN, MERGED_VALUE * 2);
 
@@ -145,8 +111,6 @@ describe('the merge particle burst', () => {
     expect(emitted).not.toEqual(before);
     expect(emitted).toContain(ORIGIN.x);
 
-    // Past the delay, the motes have travelled: they are no longer all at the
-    // point they were emitted from.
     system.advance({ delta: POP_DELAY_MS + 60 });
 
     const advanced = Array.from(positions.array as Float32Array);
@@ -159,9 +123,6 @@ describe('the merge particle burst', () => {
   it('counts a tile value the ramp does not resolve, and bursts anyway', () => {
     const system = createParticleSystem({ reducedMotion: false });
 
-    // A merge relic can produce a value off the powers of two the ramp is
-    // defined over, and the burst is cosmetic: it takes the halo colour rather
-    // than refusing to fire.
     expect(system.burstAt(ORIGIN, 6)).toBe(true);
     expect(system.readStats().invalidValues).toBe(1);
 
@@ -188,10 +149,9 @@ describe('the merge particle burst', () => {
 
     expect(system.burstAt(ORIGIN, MERGED_VALUE)).toBe(true);
 
-    // AT THE BUDGET, THE NEWEST MERGE WINS. The pool is fixed, so something has
-    // to give, and the burst a player is looking at is the one that just
-    // happened: the oldest is retired and its slots reused. Refusing instead
-    // would drop the visible merge and keep an expiring one.
+    // At the budget, the newest merge wins. The pool is fixed, so something
+    // has to give, and the burst a player is looking at is the one that just
+    // happened: the oldest is retired and its slots reused.
     expect(system.burstAt(SECOND_ORIGIN, MERGED_VALUE)).toBe(true);
     expect(system.readStats().budgetExhaustions).toBe(1);
     expect(system.activeBurstCount()).toBe(1);
@@ -210,10 +170,6 @@ describe('the merge particle burst', () => {
     expect(system.isActive()).toBe(false);
   });
 });
-
-/* ==========================================================================
- * 2. A burst advances and retires
- * ========================================================================== */
 
 describe('advancing a burst', () => {
   it('keeps it running while its lifetime has not elapsed', () => {
@@ -253,8 +209,8 @@ describe('advancing a burst', () => {
     system.burstAt(ORIGIN, MERGED_VALUE);
     system.advance({ delta: system.readStats().lifetimeMs + 1 });
 
-    // A retired burst leaves its slot free, so the next merge costs nothing: the
-    // exhaustion count stays at zero where a burst was allowed to finish.
+    // A retired burst leaves its slot free, so the next merge costs nothing:
+    // the exhaustion count stays at zero where a burst was allowed to finish.
     expect(system.burstAt(SECOND_ORIGIN, MERGED_VALUE)).toBe(true);
     expect(system.readStats().budgetExhaustions).toBe(0);
 
@@ -277,8 +233,7 @@ describe('advancing a burst', () => {
     const system = createParticleSystem({ reducedMotion: false });
     // Typed as the union a geometry may hold; this system's own attribute is a
     // `BufferAttribute`, whose `version` is the counter `needsUpdate = true`
-    // increments. `needsUpdate` itself is write-only, so the upload request is
-    // observed through the version rather than by reading the flag back.
+    // increments.
     const attribute = system.getObject().geometry.getAttribute(
       'position',
     ) as BufferAttribute;
@@ -293,10 +248,6 @@ describe('advancing a burst', () => {
     system.dispose();
   });
 });
-
-/* ==========================================================================
- * 3. Motion reduced: nothing is emitted and nothing is written
- * ========================================================================== */
 
 describe('with motion reduced', () => {
   it('emits no burst and counts the refusal', () => {
@@ -317,8 +268,6 @@ describe('with motion reduced', () => {
 
     const system = createParticleSystem();
 
-    // Read live rather than captured at construction, so an explicit override
-    // and an operating-system setting both take effect without a reload.
     expect(queryReducedMotion()).toBe(true);
     expect(system.isReducedMotion()).toBe(true);
     expect(system.burstAt(ORIGIN, MERGED_VALUE)).toBe(false);
@@ -352,10 +301,6 @@ describe('with motion reduced', () => {
   });
 });
 
-/* ==========================================================================
- * 4. The camera punch
- * ========================================================================== */
-
 describe('the camera punch', () => {
   it('starts, displaces the camera and returns it to rest', () => {
     const camera = createCamera();
@@ -367,16 +312,12 @@ describe('the camera punch', () => {
     expect(effects.readStats().punches).toBe(1);
 
     // Past the delay: the punch is `pop 200ms ease $transition-speed`, so its
-    // first keyframe carries no displacement and holds for 100 ms. Advancing 16
-    // ms would read the held keyframe and see the camera at rest, which is
-    // correct rather than broken.
+    // first keyframe carries no displacement and holds for 100 ms.
     effects.advance({ delta: POP_DELAY_MS + 50 });
 
     expect(displacement(camera, rest)).toBeGreaterThan(0);
     expect(effects.readStats().offsetDistance).toBeGreaterThan(0);
 
-    // Long enough to outrun any punch: the effect ends and the camera is put
-    // back rather than left leaning.
     effects.advance({ delta: 10_000 });
 
     expect(effects.isActive()).toBe(false);
@@ -389,9 +330,7 @@ describe('the camera punch', () => {
     const small = mergeIntensity(4);
     const large = mergeIntensity(2048);
 
-    // A 2048 landing should not feel like a 4 landing. The scale is monotonic
-    // and bounded, so the biggest merge in the game is emphatic and not
-    // nauseating.
+    // A 2048 landing should not feel like a 4 landing.
     expect(large).toBeGreaterThan(small);
     expect(small).toBeGreaterThanOrEqual(0);
     expect(large).toBeLessThanOrEqual(1);
@@ -422,10 +361,6 @@ describe('the camera punch', () => {
     expect(displacement(camera, rest)).toBe(0);
   });
 });
-
-/* ==========================================================================
- * 5. The camera shake
- * ========================================================================== */
 
 describe('the camera shake', () => {
   it('starts, oscillates and decays back to rest', () => {
@@ -518,10 +453,6 @@ describe('the camera shake', () => {
   });
 });
 
-/* ==========================================================================
- * 6. The evolving stage lighting
- * ========================================================================== */
-
 describe('the stage lighting', () => {
   it('re-tunes the rig for a later stage', () => {
     const scene = createScene({ config: createDefaultRulesConfig() });
@@ -531,9 +462,9 @@ describe('the stage lighting', () => {
 
     const later = scene.readTuning();
 
-    // The evolving lighting theme R7 names: a run that reaches stage five is lit
-    // differently from its opening stage, and the tuning is the value that says
-    // so.
+    // The evolving lighting theme R7 names: a run that reaches stage five is
+    // lit differently from its opening stage, and the tuning is the value that
+    // says so.
     expect(later.stageIndex).toBe(4);
     expect(later.progress).toBeGreaterThan(first.progress);
     expect(later).not.toEqual(first);
@@ -569,8 +500,9 @@ describe('the stage lighting', () => {
 
     scene.applyStageTheme(7);
 
-    // The rig itself is re-tuned, not merely a number in a report: the same two
-    // light instances are re-dressed, so nothing has to be rebuilt mid-run.
+    // The rig itself is re-tuned, not merely a number in a report: the same
+    // two light instances are re-dressed, so nothing has to be rebuilt
+    // mid-run.
     expect(scene.lights.count).toBe(2);
     expect(
       scene.lights.key.color.getHex() !== opening ||
@@ -615,15 +547,11 @@ describe('the stage lighting', () => {
   it('takes the light white point from the palette, not from a literal', () => {
     const scene = createScene({ theme: getTheme('default') });
 
-    // Every shipped palette states `#ffffff`, so the rig opens on the same white
-    // point it always had: this asserts WHERE the value comes from, and that it
-    // is unchanged, rather than changing the lighting.
     expect(scene.lights.ambient.color.getHexString()).toBe('ffffff');
     expect(getTheme('default').palette.neutralLight).toBe('#ffffff');
 
     // A palette stating its own white point reaches the rig through the same
-    // guarded reader every other palette entry is read through. `scene.ts` named
-    // white itself, so no palette could state it.
+    // guarded reader every other palette entry is read through.
     const warmed: Theme = {
       ...getTheme('default'),
       palette: { ...getTheme('default').palette, neutralLight: '#ff0000' },
@@ -633,8 +561,6 @@ describe('the stage lighting', () => {
 
     expect(scene.lights.ambient.color.getHexString()).toBe('ff0000');
 
-    // Unparseable, so the token's own value is held rather than a colour of the
-    // reader's choosing.
     scene.applyTheme({
       ...warmed,
       id: 'default',

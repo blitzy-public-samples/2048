@@ -4,40 +4,10 @@
 // produces its specified effect, and that it respects charges including the
 // zero-charge case the prompt names outright.
 //
-// Provenance of the anchors this suite asserts against:
-//   js/grid.js L58-L64    `eachCell` walks x-outer then y-inner, and
-//                         `availableCells` at L45-L55 collects in that same
-//                         order. That order is the tie-break the excision
-//                         resolves equal face values by.
-//   js/grid.js L93-L95    `removeTile` assigns `cells[tile.x][tile.y] = null`,
-//                         which is the removal path the excision reaches
-//                         through the board-effect queue.
-//   js/grid.js L102-L117  `serialize` retains an empty cell as `null` inside
-//                         the `{ size, cells }` shape, so a vacated cell is
-//                         asserted as `null` rather than as absent.
-//   js/game_manager.js L238-L240  the loss check is `cellsAvailable() ||
-//                         tileMatchesAvailable()`, and L243-L268 is the
-//                         neighbour probe. Both halves are reached here
-//                         through the exported functions of
-//                         src/engine/terminal-state.ts rather than restated.
-//   js/tile.js L1-L17     a tile carries its own `x` and `y`, which is why a
-//                         survivor is asserted by object identity as well as
-//                         by position.
-//
-// Figures this suite exercises, named per Rule 2:
-//   Figure 5, "Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard
-//   and Error Isolation" (docs/architecture/hook-dispatch-sequence.md) is the
-//   charge-guard path the charge cases below drive.
-//   Figure 4, "Turn Data Flow" (docs/architecture/data-flow.md) carries the
-//   `Moves available?` decision node the terminal-state cases below exercise.
-//
-// Decision-log pointers, argued in docs/DECISION_LOG.md and named here only so
-// the constructs can be found from the log: DL-BOARD-01 for a charge budget
-// declared by the relic and spent by the bus, DL-BOARD-02 for an effect
-// carried by a recorded command rather than by a live board write.
-//
 // The suite reads no DOM, takes no unseeded randomness, reads no clock and
 // starts no timer, and it runs in the `unit:dom-free` project.
+//
+// Decisions: DL-BOARD-01, DL-BOARD-02 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -88,10 +58,6 @@ import {
   createNearLossBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. Constants of the unit under test
- * ========================================================================== */
-
 /** Catalogue identifier of the relic this suite covers. */
 const RELIC_ID = 'culling-blade';
 
@@ -132,10 +98,6 @@ const PROBE_ID = 'culling-blade-context-probe';
 const SMALL_BOARD_SIZE = 3;
 const LARGE_BOARD_SIZE = 5;
 
-/* ==========================================================================
- * 2. Board composition
- * ========================================================================== */
-
 /** One tile to place while composing a board. */
 interface Placement {
   readonly x: number;
@@ -145,9 +107,6 @@ interface Placement {
 
 /**
  * A board of `size` carrying exactly the given tiles.
- *
- * Built on `createEmptyBoard`, so the board vocabulary, the `{ size, cells }`
- * shape and the `null` empty cell all come from tests/fixtures/boards.ts.
  *
  * @param size Edge length in cells.
  * @param placements Tiles to occupy, in any order.
@@ -195,8 +154,7 @@ function scanOrderPlacements(
 }
 
 /**
- * A board armed for the blade: `count` tiles at the lowest spawn value, laid
- * out in scan order, on an otherwise empty board.
+ * A board armed for the blade.
  *
  * @param size Edge length in cells.
  * @param count Tiles to place. Defaults to the arming threshold.
@@ -216,10 +174,6 @@ function armedBoard(
 function scarcityBand(size: number): number {
   return Math.ceil(size * size * SCARCITY_FRACTION);
 }
-
-/* ==========================================================================
- * 3. The bench
- * ========================================================================== */
 
 /**
  * The collaborators one case drives the relic through: the rules in force, the
@@ -249,9 +203,6 @@ interface BenchOptions {
 }
 
 /**
- * Resolves the relic out of its family, failing the case when the family no
- * longer declares it.
- *
  * @returns The family's own frozen declaration.
  */
 function blade(): Relic {
@@ -280,12 +231,6 @@ function handlerSource(): string {
 
 /**
  * Assembles a bench over one board.
- *
- * `config` is a fresh `createDefaultRulesConfig()`, which is mutable at every
- * level; `DEFAULT_RULES_CONFIG` is the deep-frozen template and is not used
- * here. `environment.grid` and the dispatch payload's board are the same
- * object: src/engine/hook-bus.ts projects its board view from
- * `environment.grid`.
  *
  * @param board Board to play the case on.
  * @param options Seed, charge override and whether to seat the relic.
@@ -339,10 +284,6 @@ function seatBlade(bus: HookBus, charges?: number): void {
   ).toBe(true);
 }
 
-/* ==========================================================================
- * 4. Dispatch, with the cursor guard on every path
- * ========================================================================== */
-
 /**
  * A before-move dispatch payload over one board, leftwards and uncancelled.
  *
@@ -374,9 +315,6 @@ function expectNoCursorMoved(
  * Dispatches `onBeforeMove` against a bench and hands back the whole result,
  * asserting on the way out that no substream advanced.
  *
- * EVERY DISPATCH IN THIS SUITE GOES THROUGH HERE, so the cursor assertion
- * covers all four substreams around all of them.
- *
  * @param target Bench to dispatch on.
  * @returns The dispatch result.
  */
@@ -397,11 +335,6 @@ function dispatch(target: Bench): HookDispatchResult<'onBeforeMove'> {
  * Runs `use` inside a live dispatch, handing it the real payload and the real
  * context the bus mints: the collaborator views, the effect queue, the
  * correlation identifier and the state slot.
- *
- * `HookContext.effects` is opened by src/engine/board-effects.ts and resolved
- * by the bus once the handler returns, so the context handed over here is a
- * live one taken from a dispatch in progress and a direct call made through it
- * runs inside that same open transaction.
  *
  * @param target Bench to dispatch on.
  * @param use Receives the payload and the context, and returns any value.
@@ -441,10 +374,6 @@ function withLiveContext<T>(
 
   return taken[0];
 }
-
-/* ==========================================================================
- * 5. Board readers and coherence
- * ========================================================================== */
 
 /** One occupied cell, as this suite reads it back. */
 interface Occupant {
@@ -558,10 +487,6 @@ function expectSerializeRoundTrips(grid: Grid): void {
   expect(occupants(rebuilt)).toEqual(occupants(grid));
 }
 
-/* ==========================================================================
- * 6. Rule invariance
- * ========================================================================== */
-
 /** The rule values one case holds the config to. */
 interface RulesSnapshot {
   readonly boardSize: number;
@@ -614,7 +539,8 @@ function expectRulesUnchanged(
  * The charge budget one bus holds for the relic.
  *
  * @param bus Bus to read.
- * @returns The budget, or `undefined` where the relic is unlimited or absent.
+ * @returns The budget, or `undefined` where the relic is unlimited or
+ *   absent.
  */
 function seatedCharges(bus: HookBus): number | undefined {
   return bus.subscribers().find((seat): boolean => seat.id === RELIC_ID)
@@ -630,10 +556,6 @@ function seatedCharges(bus: HookBus): number | undefined {
 function seatedState(bus: HookBus): unknown {
   return bus.subscribers().find((seat): boolean => seat.id === RELIC_ID)?.state;
 }
-
-/* ==========================================================================
- * 7. The declaration
- * ========================================================================== */
 
 describe('the culling-blade declaration', () => {
   it('is carried by the board-manipulation family and by the catalogue', () => {
@@ -679,10 +601,6 @@ describe('the culling-blade declaration', () => {
     expect(declared.state).toBeUndefined();
   });
 });
-
-/* ==========================================================================
- * 8. Property 1: it fires only on the hook it binds
- * ========================================================================== */
 
 describe('the hooks culling-blade binds', () => {
   it('binds onBeforeMove and no other hook', () => {
@@ -751,10 +669,6 @@ describe('the hooks culling-blade binds', () => {
       expect(seatedState(second.bus)).toBeUndefined();
     });
 });
-
-/* ==========================================================================
- * 9. Property 2: the specified effect, a deterministic excision
- * ========================================================================== */
 
 describe('the excision culling-blade performs', () => {
   it('removes the single lowest face value on the board, wherever it stands',
@@ -874,8 +788,6 @@ describe('the excision culling-blade performs', () => {
       expect(target.grid.cellOccupied(vacated)).toBe(false);
       expect(target.grid.availableCells()).toContainEqual(vacated);
 
-      // js/grid.js L102-L117 retains an empty cell as `null` rather than
-      // dropping it, so the column keeps its full length.
       const projected = target.grid.serialize();
 
       expect(projected.cells[0][0]).toBeNull();
@@ -899,8 +811,6 @@ describe('the excision culling-blade performs', () => {
   it('writes no cell of the lattice directly in its own source', () => {
     const source = handlerSource();
 
-    // js/grid.js L93-L95 is the removal path, reached through the recorded
-    // command above rather than by a subscript assignment here.
     expect(source).not.toMatch(/\bcells\s*\[/);
     expect(source).not.toMatch(/\[[^\]]*\]\s*=[^=]/);
     expect(source).not.toMatch(/\binsertTile\b/);
@@ -944,16 +854,10 @@ describe('the excision culling-blade performs', () => {
   });
 });
 
-/* ==========================================================================
- * 10. Property 2, continued: the win and loss evaluation after an excision
- * ========================================================================== */
-
 describe('the terminal-state verdict after an excision', () => {
   it('is recomputed from the thinned board, not from the board before it',
     () => {
-      // Six tiles at the lowest spawn value arm the blade. Exactly two of them
-      // are adjacent, and the blade takes the earlier of that pair, so the
-      // board's only adjacent equal pair is the one the excision destroys.
+      // Six tiles at the lowest spawn value arm the blade.
       const target = bench(
         boardWith(4, [
           { x: 0, y: 0, value: 2 },
@@ -965,8 +869,6 @@ describe('the terminal-state verdict after an excision', () => {
         ]),
       );
 
-      // js/game_manager.js L243-L268's neighbour probe, reached through the
-      // exported function rather than restated here.
       expect(tileMatchesAvailable(target.grid, target.config)).toBe(true);
       expect(movesAvailable(target.grid, target.config)).toBe(true);
 
@@ -975,8 +877,8 @@ describe('the terminal-state verdict after an excision', () => {
       expect(target.grid.cellContent({ x: 0, y: 0 })).toBeNull();
       expect(tileMatchesAvailable(target.grid, target.config)).toBe(false);
 
-      // js/game_manager.js L238-L240 is `cellsAvailable() ||
-      // tileMatchesAvailable()`, and the excision only widens the first half.
+      // js/game_manager.js L238-L240 is `cellsAvailable ||
+      // tileMatchesAvailable`, and the excision only widens the first half.
       expect(target.grid.cellsAvailable()).toBe(true);
       expect(movesAvailable(target.grid, target.config)).toBe(true);
       expectCoherentLattice(target.grid);
@@ -1013,10 +915,6 @@ describe('the terminal-state verdict after an excision', () => {
     expectCoherentLattice(target.grid);
   });
 });
-
-/* ==========================================================================
- * 11. Property 2, continued: degenerate boards
- * ========================================================================== */
 
 describe('boards the blade must leave alone', () => {
   it('fabricates no tile on the empty fixture', () => {
@@ -1094,10 +992,6 @@ describe('boards the blade must leave alone', () => {
     });
 });
 
-/* ==========================================================================
- * 12. Property 2, continued: the live board dimension
- * ========================================================================== */
-
 describe('the board dimension the blade reads', () => {
   it('holds off at 3 by 3, where the arming count exceeds the open band',
     () => {
@@ -1153,10 +1047,6 @@ describe('the board dimension the blade reads', () => {
     expect(target.grid.serialize()).toEqual(before);
   });
 });
-
-/* ==========================================================================
- * 13. Property 3: charges, and the zero-charge case
- * ========================================================================== */
 
 describe('the charge budget culling-blade draws on', () => {
   it('is never read, compared or written by the handler itself', () => {
@@ -1264,8 +1154,6 @@ describe('the charge budget culling-blade draws on', () => {
       counted.push(occupants(target.grid).length);
     }
 
-    // Two excisions, then a board the blade still finds armed and can no
-    // longer act on.
     expect(counted).toEqual([8, 7, 6, 6, 6]);
     expect(registry.find(RELIC_ID)?.charges).toBe(0);
     expect(seatedCharges(target.bus)).toBe(0);
@@ -1296,10 +1184,6 @@ describe('the charge budget culling-blade draws on', () => {
     expect(registry.degradedIds()).toEqual([]);
   });
 });
-
-/* ==========================================================================
- * 14. RNG freedom, the property that distinguishes this relic
- * ========================================================================== */
 
 describe('the randomness culling-blade consumes', () => {
   it('leaves all four named substream cursors exactly where they stood', () => {
@@ -1364,10 +1248,6 @@ describe('the randomness culling-blade consumes', () => {
     expect(source).not.toMatch(/\bperformance\b/);
   });
 });
-
-/* ==========================================================================
- * 15. The declaration, after everything above has run
- * ========================================================================== */
 
 describe('the catalogue declaration once the suite has run', () => {
   it('still declares the same budget, the same hook and no state', () => {

@@ -27,7 +27,6 @@ dispatch order, one line per spawn
 
 exports[`AAP Contract 5 — the persisted run envelope > reproduces its recorded envelope > envelope at the interruption 1`] = `
 "schemaVersion  1
-runId          seeded-runs-fixture
 seed           run-seed-2048
 stageIndex     0
 stageGoal      highest-tile 16
@@ -44,6 +43,45 @@ x=0     2     .     4     4
 x=1     .     .     .     .
 x=2     2     .     .     .
 x=3     .     .     .     ."
+`;
+
+exports[`AAP Rule 3 — the real observer stack is omittable > pins the observed board, cursors and offers > observed run: board, cursors and offers 1`] = `
+"size 4  score 24  over false  won false  keepPlaying false
+x=0     2     .     4     4
+x=1     .     .     .     8
+x=2     .     4     .     .
+x=3     .     .     .     .
+rngCursor
+  spawn-value     10
+  spawn-position  10
+  relic-draw      9
+  rarity-weight   9
+turns resolved  8 of 8
+offers
+  set 1  twin-seed, temporal-anchor, collapsing-vault
+  set 2  prospectors-eye, chain-catalyst, tumbler
+  set 3  gilded-rot, temporal-anchor, hollow-ascension"
+`;
+
+exports[`AAP V2 — a REWARD ROUND survives the reload > reproduces its recorded rounds, relics, board and cursors > a reward round carried across a reload 1`] = `
+"reward rounds, in the order they were offered
+  stage 1  TAKEN twin-seed         offered twin-seed, temporal-anchor, collapsing-vault
+  stage 2  TAKEN prospectors-eye   offered prospectors-eye, hollow-ascension, gilded-rot
+  stage 3  TAKEN fertile-ground    offered fertile-ground, echo-chamber, chain-catalyst
+
+relics held, in pickup order: twin-seed, prospectors-eye, fertile-ground
+stage reached: 4
+
+size 4  score 424  over false  won false  keepPlaying false
+x=0    64     8     4     2
+x=1     4     .    32     8
+x=2     .     4     2     .
+x=3     .     4     .     .
+rngCursor
+  spawn-value     46
+  spawn-position  46
+  relic-draw      58
+  rarity-weight   9"
 `;
 
 exports[`AAP V2 — a run interrupted and resumed from storage > reproduces the recorded board after the resume > resumed run 1`] = `

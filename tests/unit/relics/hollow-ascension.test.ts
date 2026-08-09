@@ -3,60 +3,11 @@
 // only on the hooks it binds, that it produces its specified effect, and that
 // it respects `charges`, a zero-charge invocation included.
 //
-// The relic banks one ascension charge per merge, every banked charge sweetens
-// the merges that follow it, and a stage that was NOT cleared empties the bank
-// outright. It is the one relic in the catalogue whose effect turns on a STAGE
-// VERDICT — the `cleared` member of `StageEndPayload` — rather than on board
-// or rules state, so BOTH branches are asserted here: an implementation that
-// emptied the bank unconditionally satisfies every assertion about the curse
-// while deleting the reward on every stage the player did clear.
-//
-// PROVENANCE OF THE NUMBERS THIS SUITE ASSERTS:
-//   js/game_manager.js L157  produced the merged value as `tile.value * 2`, so
-//                            the merge payloads below carry `resultValue` 4 for
-//                            a pair of 2s.
-//   js/game_manager.js L167  accrued the score as `self.score += merged.value`,
-//                            which the `scoreDelta` member of `MergePayload`
-//                            supersedes. Under the default rules `scoreDelta`
-//                            and `resultValue` carry the same number, and the
-//                            two members are therefore asserted separately.
-//   js/game_manager.js L170  compared the produced value against the literal
-//                            `2048`; that comparison now reads
-//                            `config.winValue`, and a bonus landing on
-//                            `resultValue` would reach it.
-//   js/local_storage_manager.js L52-L55  reached `JSON.parse` unguarded.
-//                            Contract 5 persists a relic's state slot inside
-//                            `PersistedRelic`, so the banked value is asserted
-//                            to survive a round trip as plain JSON.
-//   js/tile.js L6-L7         initialised `previousPosition` and `mergedFrom` to
-//                            `null`; the tiles built below are asserted to
-//                            carry both across a dispatch unchanged.
-//   onStageEnd               HAS NO VANILLA ANALOGUE. It is a target-only row
-//                            of docs/TRACEABILITY_MATRIX.md whose source column
-//                            records that no vanilla construct declared it, and
-//                            this suite is the evidence behind that row.
-//
-// The branch this relic reads is drawn in Figure 4, "Turn Data Flow: From
-// Keystroke to Composited Frame and Persisted Run State" of
-// docs/architecture/data-flow.md, at its `Stage goal met?` decision leading to
-// the `onStageEnd dispatch`; and in Figure 6, "Screen Flow State Machine: Run
-// Start to Run Summary", whose `Stage -> StageClear -> Reward` path and
-// `Stage -> GameOver` path are the two `cleared` outcomes.
-//
 // Decisions behind this file are argued in docs/DECISION_LOG.md.
 //
-// SCOPE. src/engine/hook-bus.ts owns hook dispatch, the charge guard and the
-// charge decrement, and tests/unit/engine/hook-bus.test.ts and
-// tests/unit/engine/hook-bus-charges.test.ts hold that mechanism; none of it is
-// re-proved here. This suite invokes the two bound handlers DIRECTLY over a
-// hand-built `HookContext`, so what it measures is the relic alone. The context
-// carries the run correlation identifier the bus injects, and the state slot is
-// carried in and copied back out around each dispatch exactly as the bus
-// carries it, so the slot observed between dispatches is the slot a run holds.
-//
 // This suite reads no DOM — tests/unit/relics runs in the `unit:dom-free`
-// project of vitest.config.ts — consumes no randomness, reads no clock,
-// starts no timer and touches no network.
+// project of vitest.config.ts — consumes no randomness, reads no clock, starts
+// no timer and touches no network.
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -93,10 +44,6 @@ import {
 } from '../../../src/rng/rng-streams';
 import { MERGE_PAIR_BOARD } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. The unit under test
- * ========================================================================== */
-
 /** Identifier of the relic this suite holds. */
 const RELIC_ID = 'hollow-ascension';
 
@@ -105,9 +52,6 @@ const FAMILY_NAME = 'risk-reward-cursed';
 
 /**
  * Resolves the relic out of its own family's declaration list.
- *
- * A rename fails here rather than reducing every assertion below to a check on
- * `undefined`.
  *
  * @param id Identifier to resolve.
  * @returns The declared relic.
@@ -196,16 +140,6 @@ function requireStageEndHandler(): HookHandler<'onStageEnd'> {
   return handler;
 }
 
-/* ==========================================================================
- * 2. The magnitudes the family module declares
- *
- * `HOLLOW_ASCENSION_BONUS_PER_BANK`, `HOLLOW_ASCENSION_BANK_STEP` and
- * `HOLLOW_ASCENSION_MAX_BANK` are module-private to
- * src/relics/families/risk-reward-cursed.ts, so the specification is restated
- * here and every expected number below is computed from these three rather
- * than written as a bare literal.
- * ========================================================================== */
-
 /** Score the relic adds per charge already banked. */
 const BONUS_PER_BANK = 4;
 
@@ -225,7 +159,8 @@ const PRODUCED_VALUE = PAIR_VALUE * 2;
  * Bonus a dispatch pays when `bank` charges stood in the slot as it began.
  *
  * @param bank Charges banked before the dispatch.
- * @returns The score the dispatch adds on top of the accumulated contribution.
+ * @returns The score the dispatch adds on top of the accumulated
+ *   contribution.
  */
 function bonusFor(bank: number): number {
   return Math.floor(bank * BONUS_PER_BANK);
@@ -240,16 +175,6 @@ function bonusFor(bank: number): number {
 function bankAfter(bank: number): number {
   return Math.min(bank + BANK_STEP, MAX_BANK);
 }
-
-/* ==========================================================================
- * 3. Harness
- *
- * `HookContext` carries capability-limited views rather than the live
- * collaborators, so the three views are built here over live objects: the
- * rules view over a FRESH `RulesConfig` from `createDefaultRulesConfig()`
- * rather than the deep-frozen `DEFAULT_RULES_CONFIG`, the grid view over a live
- * `Grid`, and the randomness view over the run's named substreams.
- * ========================================================================== */
 
 /** Seed every context this suite builds derives its substreams from. */
 const SUITE_SEED = 'hollow-ascension-suite';
@@ -270,12 +195,8 @@ interface EffectsProbe extends BoardEffectQueue {
 }
 
 /**
- * Builds the query view of a live board: the eight members
- * `ReadonlyGridView` declares, each reading the board at call time.
- *
- * `Grid` is not itself a `ReadonlyGridView` — it declares no `cellValue` and
- * exposes the writes and the live `Tile` objects a handler must not reach — so
- * the view is assembled rather than passed through.
+ * Builds the query view of a live board: the eight members `ReadonlyGridView`
+ * declares, each reading the board at call time.
  *
  * @param grid Live board to read.
  * @returns The frozen query view.
@@ -299,10 +220,6 @@ function createGridView(grid: Grid): ReadonlyGridView {
 
 /**
  * Builds a board-write channel that records every call and accepts none.
- *
- * Neither handler under test reaches for the board, and `calls` is what states
- * that as an assertion rather than an assumption. Refusing every command keeps
- * `length` and `requested()` consistent with a queue holding nothing.
  *
  * @param view Query view the read members delegate to.
  * @returns The probe.
@@ -377,11 +294,6 @@ interface Bench {
 
 /**
  * Builds a bench seating the relic alone.
- *
- * The board is the merge-pair fixture, whose two `2`s at row 0 are the pair the
- * merge payloads below describe. The slot opens at the relic's own declared
- * `state`, which is what src/relics/relic-registry.ts seeds a subscription
- * with.
  *
  * @returns The assembled bench.
  */
@@ -504,10 +416,6 @@ function bankOf(bench: Bench): number {
   return slot;
 }
 
-/* ==========================================================================
- * 4. Payload builders
- * ========================================================================== */
-
 /** Cell the merge's source tile stands in, row 0 of the merge-pair fixture. */
 const SOURCE_CELL: Position = { x: 1, y: 0 };
 
@@ -524,15 +432,10 @@ interface MergeCase {
 /**
  * Builds one merge of a pair of `2`s.
  *
- * The two tiles are real `Tile` instances, each carrying the cell
- * `savePosition()` recorded, so the assertions that a dispatch leaves the tiles
- * alone read the same members js/tile.js L6-L17 declared.
- *
  * @param scoreDelta Contribution the merge arrives carrying. Defaults to the
  *   value the produced tile carries, which is what js/game_manager.js L167
  *   accrued.
- * @param resultValue Value the merge produces. Defaults to
- *   `tile.value * 2`.
+ * @param resultValue Value the merge produces. Defaults to `tile.value * 2`.
  * @returns The merge and its two tiles.
  */
 function mergeCase(
@@ -576,10 +479,6 @@ function stageEnd(
 const STAGE_GOAL = stageGoalForIndex(STAGE_INDEX, createDefaultStageConfig());
 
 /**
- * Builds one stage result whose verdict is taken from the product's own
- * evaluator rather than written as a literal, which is the path the engine
- * reaches `cleared` by.
- *
  * @param highestTileValue Highest tile value the board held.
  * @param score Score the stage ended on.
  * @returns The stage result, carrying the evaluated verdict.
@@ -593,15 +492,8 @@ function evaluatedStageEnd(
   return { stageIndex: STAGE_INDEX, cleared: progress.cleared, score };
 }
 
-/* ==========================================================================
- * 5. Assertion helpers
- * ========================================================================== */
-
 /**
  * Asserts that no substream advanced across a dispatch.
- *
- * Every one of the four names is checked, and the snapshot is asserted to cover
- * exactly those four, so the loop cannot pass by iterating nothing.
  *
  * @param before Cursors as they stood before the dispatch.
  * @param after Cursors as they stand after it.
@@ -676,10 +568,6 @@ function rulesProjection(config: RulesConfig): unknown {
   };
 }
 
-/* ==========================================================================
- * 6. Shared bench
- * ========================================================================== */
-
 /** Rebuilt before every test: fresh rules, fresh board, fresh slot. */
 let bench: Bench;
 
@@ -687,18 +575,11 @@ beforeEach(() => {
   bench = createBench();
 });
 
-/* ==========================================================================
- * 7. Property 1: the relic fires only on the hooks it binds
- * ========================================================================== */
-
 describe('hollow-ascension: the hooks it binds', () => {
   it('is declared by the risk-reward-cursed family and reachable by id', () => {
     expect(RISK_REWARD_CURSED_FAMILY.name).toBe(FAMILY_NAME);
     expect(RELIC.id).toBe(RELIC_ID);
 
-    // The catalogue must flatten the family's own declaration rather than a
-    // copy of it, or a relic could be fixed in one place and dispatched from
-    // the other.
     expect(findRelicById(RELIC_ID)).toBe(RELIC);
   });
 
@@ -741,8 +622,7 @@ describe('hollow-ascension: the hooks it binds', () => {
   it('reads the bank the other binding wrote, through one shared state slot',
     () => {
       // One context object reaches both handlers here, which is the single
-      // slot src/relics/relic-registry.ts holds per subscriber. The bank is
-      // written by onMerge and emptied by onStageEnd through that one member.
+      // slot src/relics/relic-registry.ts holds per subscriber.
       const context = contextFor(bench, 'onMerge');
 
       expect(context.state).toBe(RELIC.state);
@@ -794,15 +674,6 @@ describe('hollow-ascension: the hooks it binds', () => {
     expect(bankOf(bench)).toBe(0);
   });
 });
-
-/* ==========================================================================
- * 8. Property 2a: banking at onMerge
- *
- * The bonus a dispatch pays is taken from the bank AS IT STOOD when the merge
- * began, and the bank is written on every dispatch — including one that pays
- * nothing. Both halves are asserted, so an implementation that banked only on a
- * paying dispatch, or that paid from the raised bank, fails here.
- * ========================================================================== */
 
 describe('hollow-ascension: banking a merge', () => {
   it('banks one charge on the first merge and pays nothing for it', () => {
@@ -864,10 +735,7 @@ describe('hollow-ascension: banking a merge', () => {
       const resolved = dispatchMerge(bench, subject.payload);
 
       // js/game_manager.js L167 accrued `merged.value`, so scoreDelta and
-      // resultValue carry the same number under the default rules. A bonus
-      // landing on resultValue would put an off-ladder value on the board and
-      // reach the comparison js/game_manager.js L170 made against 2048, now
-      // config.winValue.
+      // resultValue carry the same number under the default rules.
       expect(resolved?.resultValue).toBe(PRODUCED_VALUE);
       expect(subject.payload.resultValue).toBe(PRODUCED_VALUE);
       expect(resolved?.resultValue).not.toBe(resolved?.scoreDelta);
@@ -966,10 +834,6 @@ describe('hollow-ascension: banking a merge', () => {
 
   it('reads a slot of the wrong shape as an empty bank without throwing',
     () => {
-      // The run envelope is parsed rather than validated member by member, so a
-      // slot of another shape must read as empty. js/local_storage_manager.js
-      // L52-L55 reached JSON.parse unguarded, and this is the relic-level half
-      // of that guard.
       for (const corrupted of [undefined, null, {}, [], 'four', true]) {
         const target = createBench();
 
@@ -980,10 +844,6 @@ describe('hollow-ascension: banking a merge', () => {
       }
     });
 });
-
-/* ==========================================================================
- * 9. Property 2a, continued: persistence and compounding
- * ========================================================================== */
 
 describe('hollow-ascension: the bank across a reload', () => {
   it('holds the bank as plain JSON that survives a round trip', () => {
@@ -1056,19 +916,6 @@ describe('hollow-ascension: the bank across a reload', () => {
       expect(subject.payload.resultValue).toBe(PRODUCED_VALUE);
     });
 });
-
-/* ==========================================================================
- * 10. Property 2b: the conditional emptying at onStageEnd
- *
- * BOTH BRANCHES ARE ASSERTED. An implementation that emptied the bank on every
- * stage passes every assertion about the curse while deleting the reward on
- * every stage the player cleared, and the player would experience that as the
- * relic simply not working, with nothing reported anywhere. The preserving
- * branch is what rules it out.
- *
- * `onStageEnd` has no vanilla analogue; the hook is a target-only traceability
- * row and this section is the evidence behind it.
- * ========================================================================== */
 
 describe('hollow-ascension: a stage that was not cleared', () => {
   it('empties the banked charges when cleared is false', () => {
@@ -1190,9 +1037,6 @@ describe('hollow-ascension: the two stage verdicts differ', () => {
   });
 
   it('reads the same verdict the stage-goal evaluator produces', () => {
-    // The engine reaches `cleared` through evaluateStageGoal, so the two
-    // branches are exercised here through the product's own evaluator rather
-    // than through a literal. The default ladder opens on a highest-tile goal.
     expect(STAGE_GOAL.kind).toBe('highest-tile');
     expect(STAGE_GOAL.target).toBe(16);
 
@@ -1263,18 +1107,6 @@ describe('hollow-ascension: what onStageEnd does not do', () => {
   });
 });
 
-/* ==========================================================================
- * 11. Property 3: charges, and an invocation made at zero
- *
- * The relic carries no charge budget, and Contract 2 puts both the charge guard
- * and the decrement in src/engine/hook-bus.ts rather than in a handler. What
- * this section holds is therefore the relic's half: that neither handler reads
- * or spends a budget, and that being invoked while a notional budget stands at
- * zero neither throws nor corrupts the run's bank.
- *
- * The bus's skip behaviour is NOT re-proved here; tests/unit/engine holds it.
- * ========================================================================== */
-
 describe('hollow-ascension: charges', () => {
   it('declares no charge budget at all, rather than a null one', () => {
     expect('charges' in RELIC).toBe(false);
@@ -1286,8 +1118,7 @@ describe('hollow-ascension: charges', () => {
   });
 
   it('reads no charge budget in either handler', () => {
-    // Contract 2 keeps the guard in the bus. A handler repeating it would be a
-    // second, divergent guard over the same budget.
+    // Contract 2 keeps the guard in the bus.
     for (const [name, handler] of Object.entries(RELIC.hooks)) {
       expect(String(handler), `${name} source`).not.toContain('charges');
     }
@@ -1385,16 +1216,6 @@ describe('hollow-ascension: charges', () => {
       expect(payUnder(3)).toEqual(expected);
     });
 });
-
-/* ==========================================================================
- * 12. Determinism and substream hygiene
- *
- * Both halves of this relic are arithmetic over the state slot, so neither may
- * consume a draw. `onStageEnd` matters most: it fires immediately before the
- * reward screen draws, so a cursor advanced there would shift the very next
- * offer set and move every seeded snapshot the run already recorded, which is
- * validation gate V2.
- * ========================================================================== */
 
 describe('hollow-ascension: determinism', () => {
   it('advances no substream cursor across an onMerge dispatch', () => {
@@ -1495,16 +1316,6 @@ describe('hollow-ascension: determinism', () => {
   });
 });
 
-/* ==========================================================================
- * 13. Handler discipline
- *
- * The family module owns no error handling and no reporting of its own: a throw
- * surfaces through the `EngineReporter` src/engine/hook-bus.ts injects, and the
- * product makes no `console` call anywhere. These are read off the handler
- * sources rather than asserted through a spy, so nothing here replaces a
- * global.
- * ========================================================================== */
-
 describe('hollow-ascension: handler discipline', () => {
   /** Tokens neither bound handler's source may contain. */
   const forbidden: readonly string[] = [
@@ -1544,16 +1355,6 @@ describe('hollow-ascension: handler discipline', () => {
   });
 });
 
-/* ==========================================================================
- * 14. The dispatch identity a handler is handed
- *
- * src/engine/hook-bus.ts injects the run correlation identifier and carries it
- * on every context it builds, and the relic module reports nothing itself: a
- * failure surfaces through the reporter the bus holds. Both halves are asserted
- * here over the contexts this suite builds, so the correlation plumbing is
- * exercised rather than merely declared, and no assertion is made on `console`.
- * ========================================================================== */
-
 describe('hollow-ascension: the dispatch identity', () => {
   it('runs against a context carrying the run correlation identifier', () => {
     for (const hook of BOUND_HOOKS) {
@@ -1575,8 +1376,8 @@ describe('hollow-ascension: the dispatch identity', () => {
 
     requireMergeHandler()(mergeCase().payload, context);
 
-    // The slot moved on the object that carried the identifier, so the
-    // handler ran against that context and no other.
+    // The slot moved on the object that carried the identifier, so the handler
+    // ran against that context and no other.
     expect(context.state).toBe(bankAfter(0));
     expect(context.correlationId).toBe(SUITE_CORRELATION_ID);
   });
@@ -1622,13 +1423,6 @@ describe('hollow-ascension: the dispatch identity', () => {
     expect(bankOf(bench)).toBe(0);
   });
 });
-
-/* ==========================================================================
- * 15. The catalogue is not written by this suite
- *
- * Last in the file, so the declaration is read back after every dispatch this
- * suite makes.
- * ========================================================================== */
 
 describe('hollow-ascension: the declaration this suite read', () => {
   it('is frozen at every level the family module owns', () => {

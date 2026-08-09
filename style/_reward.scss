@@ -1,58 +1,10 @@
 // Reward screen: the choose-1-of-3 relic offer.
 //
 // DOM contract. Its consumer renders this tree into the empty
-// `.screen[data-screen="reward"]` container:
+// `.screen[data-screen="reward"]` container.
 //
-//   .reward-panel
-//     h2.reward-heading
-//     p.reward-hint
-//     ul.reward-offers[role="list"]      three items, drawn without replacement
-//       li.reward-offer
-//         button.relic-card[data-rarity]
-//           span.relic-card-header       shortcut digit (aria-hidden) and name
-//           span.relic-card-meta         rarity chip, and charges where present
-//           span.relic-card-description  clamped, with an ellipsis
-//           span.relic-card-hooks        one .relic-hook-badge per bound hook
-//
-// `.relic-card` is a <button>, whose content model is phrasing content, so the
-// description and the badge list are <span> elements rather than <p> and <ul>.
-// `data-rarity` drives both the card's accent edge and the rarity chip; a value
-// outside $reward-rarities renders the ramp's low anchor.
-//
-// States addressed: `:hover` behind `@media (hover: hover)`, `:focus-visible`
-// through style/_a11y.scss, `:active`, `[aria-pressed="true"]` for the chosen
-// card, and `[disabled]`/`[aria-disabled="true"]`. No rule here writes
-// `outline: none` or can displace the focus ring. The container takes
-// $z-index-modal, and the established ladder is not renumbered.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
-// file's area enumerated:
-//   TR-REWARD-01  style/main.scss L196-L221  the `.game-message` overlay
-//                                            treatment, from which the reward
-//                                            panel's surface is compiled
-//   TR-REWARD-02  style/main.scss L334-L402  the tile ramp's anchors, from which
-//                                            the per-rarity accents are
-//                                            interpolated
-//   TR-REWARD-03  style/main.scss L159-L168  the `button` mixin, from which
-//                                            `.relic-card` is compiled
-//   TR-REWARD-04  target-only row            the three-offer list and its
-//                                            without-replacement rendering
-//   TR-REWARD-05  target-only row            the rarity chip, the charges chip
-//                                            and the hook badges
-//   TR-REWARD-06  target-only row            the clamped description
-//   TR-REWARD-07  target-only row            the narrow-layout restatement at
-//                                            the mobile threshold
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-REWARD-01  `.relic-card` rendered as a `<button>`, so its children are
-//                 phrasing content
-//   DL-REWARD-02  `data-rarity` driving both the accent edge and the chip, with
-//                 an unknown value resolving to the ramp's low anchor
-//   DL-REWARD-03  the description clamped to $reward-description-lines with an
-//                 ellipsis
-//   DL-REWARD-04  the tier carried by the accent edge, the tray accent's
-//                 thickness and the chip's own text, never by colour alone
+// Decisions: DL-REWARD-01, DL-REWARD-02, DL-REWARD-03, DL-REWARD-04
+// (docs/DECISION_LOG.md).
 
 @use "sass:color";
 @use "sass:list";
@@ -92,8 +44,7 @@ $reward-heading-size: $grid-spacing + $reward-mobile-gutter !default;
 $reward-line-height: 1.65 !default;
 
 // Ceiling on the number of line boxes a relic description occupies — a count,
-// not a length. A longer description is clamped with an ellipsis, which bounds
-// the height of the equal-height row.
+// not a length.
 $reward-description-lines: 8 !default;
 
 $reward-scrim-alpha: 0.5 !default;
@@ -113,15 +64,13 @@ $reward-pop-delay: $transition-speed !default;
 $reward-state-duration: $transition-speed !default;
 
 // The rarity tiers in ascending order, as a consumer writes them into
-// `data-rarity`. Read from $rarity-tiers of style/_tokens.scss, the one
-// vocabulary style/_hud.scss reads as well, so a relic carries the same tier on
-// the reward card and on the active-relic tray it moves to.
+// `data-rarity`.
 $reward-rarities: $rarity-tiers !default;
 
 // Rarity ramp. The two functions below run the tile ramp's own interpolation —
-// linear in the exponent between the low anchor $tile-color and the high anchor
-// $tile-gold-color — over the rarity index instead, so the tiers sit on the
-// beige-to-gold axis the tiles occupy. No compiled ramp colour is written out.
+// linear in the exponent between the low anchor $tile-color and the high
+// anchor $tile-gold-color — over the rarity index instead, so the tiers sit on
+// the beige-to-gold axis the tiles occupy.
 
 // Position of one tier on the ramp, as the percentage of the high anchor the
 // interpolation mixes in.
@@ -147,13 +96,7 @@ $reward-rarities: $rarity-tiers !default;
 
 // The tier's accent as the ACTIVE palette resolves it: the
 // `--theme-rarity-<tier>` custom property style/_themes.scss publishes for
-// every palette, with the mix above as the fallback. Each palette derives its
-// four accents by running this same interpolation over its own two anchors,
-// and the default palette republishes exactly the four colours the mix
-// compiles, so a card is unchanged under the default palette and follows the
-// anchors of either additive one. style/_hud.scss reads the same property for
-// the active-relic tray, so a tier's colour is declared once per palette and
-// the two surfaces cannot disagree.
+// every palette, with the mix above as the fallback.
 @function reward-rarity-accent($rarity) {
   $name: "--theme-rarity-" + ("" + $rarity);
 
@@ -161,8 +104,8 @@ $reward-rarities: $rarity-tiers !default;
 }
 
 // Shared chip. The rarity chip, the hook badges and the charge count share one
-// outlined pill: no fill, a hairline edge in the element's own text colour, and
-// the label step on the numeral step's line box.
+// outlined pill: no fill, a hairline edge in the element's own text colour,
+// and the label step on the numeral step's line box.
 
 @mixin reward-chip($text-transform: uppercase) {
   display: inline-block;
@@ -195,8 +138,6 @@ $reward-rarities: $rarity-tiers !default;
   box-sizing: border-box;
   padding: $reward-panel-padding;
 
-  // The win-state tint of the `.game-message` overlay, carried on this
-  // element's own `background` rather than through `opacity` on a wrapper.
   background: var(
     --theme-overlay-win,
     #{rgba($tile-gold-color, $reward-scrim-alpha)}
@@ -235,8 +176,8 @@ $reward-rarities: $rarity-tiers !default;
   color: var(--theme-text, #{$text-color});
 
   // The panel's visible edge. style/_a11y.scss already draws `dialog-boundary`
-  // on the containing `[role="dialog"][aria-modal="true"]` element, so the edge
-  // here is a border alone and follows the corner radius.
+  // on the containing `[role="dialog"][aria-modal="true"]` element, so the
+  // edge here is a border alone and follows the corner radius.
   border: $reward-hairline solid var(--theme-text, #{$text-color});
   border-radius: $tile-border-radius * 2;
 
@@ -264,8 +205,7 @@ $reward-rarities: $rarity-tiers !default;
 
 // Offer list: three equal tracks that may shrink below their content width, in
 // one row whose items stretch, so cards carrying descriptions of different
-// lengths share a single height. The mobile block collapses the row to one
-// track; that is the only breakpoint in this file.
+// lengths share a single height.
 
 .reward-offers {
   margin: 0;
@@ -304,8 +244,7 @@ $reward-rarities: $rarity-tiers !default;
   background: var(--theme-tile-super, #{$reward-card-surface});
   color: var(--theme-tile-super-numeral, #{$bright-text-color});
 
-  // The block-start edge is the rarity accent. The tier rules below recolour
-  // it, and the unqualified value is the ramp's low anchor.
+  // The block-start edge is the rarity accent.
   border: $reward-hairline solid transparent;
   border-block-start: $reward-accent-thickness solid
     reward-rarity-accent(list.nth($reward-rarities, 1));
@@ -325,8 +264,8 @@ $reward-rarities: $rarity-tiers !default;
   }
 }
 
-// The keycap is held against the block-start edge, level with the first line of
-// a name that wraps.
+// The keycap is held against the block-start edge, level with the first line
+// of a name that wraps.
 .reward-offer .relic-card-header {
   display: flex;
   align-items: flex-start;
@@ -371,14 +310,8 @@ $reward-rarities: $rarity-tiers !default;
 
 // The rarity chip. It carries no colour of its own, so its label and its
 // hairline pill both take the card's own text colour, which resolves through
-// `--theme-tile-super-numeral` and is therefore the highest-contrast colour the
-// active palette has against the card surface.
-//
-// BLITZY [A11Y]: the per-tier accent is NOT applied to this chip's label. The
-// tier is carried by three channels that do not depend on this chip's colour:
-// the card's block-start accent edge, the accent's thickness on the tray, which
-// steps once per tier, and this chip's own text, which names the tier. No
-// information is available only through colour. Decision DL-REWARD-04.
+// `--theme-tile-super-numeral` and is therefore the highest-contrast colour
+// the active palette has against the card surface.
 .reward-offer .relic-card-rarity {
   @include reward-chip;
 }
@@ -417,11 +350,7 @@ $reward-rarities: $rarity-tiers !default;
 }
 
 // One block per member of $reward-rarities, carrying that tier's accent on the
-// card's block-start edge. Emitted ahead of the state rules below so the
-// disabled state's edge override wins at equal specificity. The edge is the
-// tier's whole colour signal on this surface and is drawn between the panel
-// above it and the card below it, so whichever side of the luminance range a
-// palette's accents fall on, the edge keeps one high-contrast neighbour.
+// card's block-start edge.
 
 @each $rarity in $reward-rarities {
   .reward-offer .relic-card[data-rarity="#{$rarity}"] {
@@ -433,12 +362,7 @@ $reward-rarities: $rarity-tiers !default;
 // drawn with `outline` and `box-shadow`; the hover and activation rings are
 // INSET `box-shadow` rings on that same property, each written
 // `:not(:focus-visible)`, so a card that holds keyboard focus keeps the outer
-// ring. The selected state also marks the three border sides the rarity accent
-// does not own, a property the ring never writes, so a focused selected card
-// shows both.
-//
-// Precedence, highest first: disabled, activation and selection, focus, hover,
-// default.
+// ring.
 
 .reward-offer .relic-card {
   @media (hover: hover) {
@@ -474,9 +398,7 @@ $reward-rarities: $rarity-tiers !default;
   @include focusable;
 
   // src/ui/a11y/ keeps an `aria-disabled` card focusable and announceable, so
-  // this block withdraws pointer interaction only. The accent edge switches
-  // from solid to dashed; nothing here clears `box-shadow` or `outline`, and
-  // nothing alters a colour.
+  // this block withdraws pointer interaction only.
   &[disabled],
   &[aria-disabled="true"] {
     cursor: default;
@@ -484,7 +406,7 @@ $reward-rarities: $rarity-tiers !default;
     border-block-start-style: dashed;
 
     // The card's chips restate the dashed edge, which puts the state on four
-    // outlines. `border-style` is the only property involved.
+    // outlines.
     .relic-card-rarity,
     .relic-card-charges,
     .relic-hook-badge {
@@ -493,16 +415,15 @@ $reward-rarities: $rarity-tiers !default;
   }
 
   // The entrance animation and the state transitions are declared only where
-  // motion is permitted. Under `reduce` the card carries neither, so it renders
-  // at the end state of `pop` — its natural size.
+  // motion is permitted.
   @include motion-allowed {
     @include transition(
       box-shadow $reward-state-duration ease-in-out,
       border-color $reward-state-duration ease-in-out
     );
 
-    // The `pop` keyframes style/main.scss declares, at the same duration, delay
-    // and fill mode.
+    // The `pop` keyframes style/main.scss declares, at the same duration,
+    // delay and fill mode.
     @include animation(pop $reward-pop-duration ease $reward-pop-delay);
     @include animation-fill-mode(backwards);
   }

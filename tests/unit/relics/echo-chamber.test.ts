@@ -1,54 +1,15 @@
 // The `echo-chamber` relic of the `merge-magic` family, in isolation.
 //
-// The three properties AAP 0.6.3 Group 5 requires of every relic, asserted
-// against the declaration src/relics/families/merge-magic.ts exports:
-//   1. it fires only on the hooks it binds;
-//   2. it produces its specified effect — a bonus fraction of `resultValue`
-//      added to `scoreDelta`, with `resultValue` left as it arrived;
-//   3. it respects a charge budget, an invocation at zero charges included.
-//
 // The handler is invoked DIRECTLY, over a `HookContext` assembled below, so
 // what is measured here is the relic. src/engine/hook-bus.ts owns the charge
 // guard, the pickup-order fan-out and the error isolation, and the suites
 // under tests/unit/engine/ own those mechanisms.
 //
-// PROVENANCE OF THE PAYLOAD NUMBERS — the vanilla merge branch,
-// js/game_manager.js L156-L170:
-//   L156  `next && next.value === tile.value && !next.mergedFrom`
-//         -> `config.merge.canMerge`, which accepts the value-2 pair used
-//            throughout this file.
-//   L157  `new Tile(positions.next, tile.value * 2)`
-//         -> `config.merge.produce`, whose return the payload carries as
-//            `resultValue`.
-//   L167  `self.score += merged.value`
-//         -> the payload's `scoreDelta`, which L167 held EQUAL to the produced
-//            value. Every case below therefore enters with
-//            `scoreDelta === resultValue`, and the separation of those two
-//            members is what this suite measures.
-//   L170  `merged.value === 2048`
-//         -> `config.winValue`, which reads `resultValue` and not the score.
-// js/tile.js L2-L4 flattens a position onto `x` and `y` and coerces a falsy
-// value to 2, which is the shape the tiles below are constructed in.
-//
-// FIGURES THESE ASSERTIONS ARE THE MECHANICAL INSTANCE OF: Figure 5, "Hook
-// Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard and Error
-// Isolation", of docs/architecture/hook-dispatch-sequence.md, whose
-// transformed-payload return path is this handler; and Figure 4, "Turn Data
-// Flow: From Keystroke to Composited Frame and Persisted Run State", of
-// docs/architecture/data-flow.md, whose `onMerge dispatch, score delta
-// applied` node is the step under test.
-//
-// Rows of docs/TRACEABILITY_MATRIX.md this suite is evidence for: TR-MERGE-01,
-// the `echo-chamber` declaration; and TR-HOOK-03, js/game_manager.js
-// L156-L170 mapped onto the `onMerge` payload members `resultValue` and
-// `scoreDelta`.
-//
-// Rationale for the decisions behind this file: docs/DECISION_LOG.md, entries
-// DL-MERGE-01 and DL-MERGE-02.
-//
 // This suite reads no DOM and no storage, performs no I/O, reads no clock and
 // takes no unseeded randomness: the only randomness reachable from the context
 // is the four substreams derived from the fixed seed below.
+//
+// Decisions: DL-MERGE-01, DL-MERGE-02 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -76,10 +37,6 @@ import {
 import type { RngStreams } from '../../../src/rng/rng-streams';
 import { createMergePairBoard } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. The declaration under test
- * ========================================================================== */
-
 /** Identifier the family declares the relic under. */
 const RELIC_ID = 'echo-chamber';
 
@@ -89,14 +46,7 @@ const RUN_SEED = 'blitzy-echo-chamber';
 /** Correlation identifier the dispatch context carries. */
 const RUN_CORRELATION_ID: CorrelationId = 'run-blitzy-echo-chamber';
 
-/**
- * Fraction of `resultValue` the relic adds to the score.
- *
- * The value src/relics/families/merge-magic.ts declares as the module-private
- * `ECHO_CHAMBER_SCORE_BONUS`, and the quarter the relic's own `description`
- * states. It is asserted against that description below, so the two cannot
- * drift apart unnoticed.
- */
+/** Fraction of `resultValue` the relic adds to the score. */
 const SCORE_BONUS_FRACTION = 0.25;
 
 /** Every hook name, as a set, for the membership tests below. */
@@ -181,15 +131,11 @@ function project(relic: Relic): Projection {
 /** The declaration as it stood when this file was loaded. */
 const AT_LOAD: Projection = project(DECLARATION);
 
-/* ==========================================================================
- * 2. The dispatch context, assembled by hand
- * ========================================================================== */
-
 /** One board-effect channel and the append-only log of every use of it. */
 interface EffectWitness {
   readonly queue: BoardEffectQueue;
 
-  /** Every member invocation, in call order, that `clear()` cannot erase. */
+  /** Every member invocation, in call order, that `clear` cannot erase. */
   readonly uses: readonly string[];
 }
 
@@ -215,13 +161,6 @@ function occupiedCellsOf(
 
 /**
  * Opens a board-effect channel over a live board.
- *
- * Every write member records its own name and answers `true`; every query
- * member answers from the live board, so a handler reaching for one is
- * answered rather than met with a throw. `uses` records every invocation,
- * `clear()` included, and `length` reports the commands `clear()` discards.
- * `requested()` answers the empty list; `uses` is the record this file asserts
- * over, and no command can be erased from it.
  *
  * @param grid Board the queries resolve against.
  * @returns The channel and its use log.
@@ -273,9 +212,6 @@ function openEffectWitness(grid: Grid): EffectWitness {
 /**
  * Builds the read-only board view a context carries.
  *
- * Every member reads the live board at call time. `cellValue` stands in for
- * `Grid.cellContent`, answering the face value rather than the tile.
- *
  * @param grid Live board to project.
  * @returns The query surface of that board.
  */
@@ -297,7 +233,7 @@ function readonlyGridView(grid: Grid): ReadonlyGridView {
 
 /** The collaborators one dispatch of the handler is made over. */
 interface Bench {
-  /** The live, unfrozen rules, from `createDefaultRulesConfig()`. */
+  /** The live, unfrozen rules, from `createDefaultRulesConfig`. */
   readonly config: RulesConfig;
 
   /** The live board the context's view projects. */
@@ -323,8 +259,9 @@ interface Bench {
  * Assembles one bench: a fresh rules object, a fresh board from the
  * `merge-pair` fixture, the run's substreams, and the context over them.
  *
- * @param charges Charge budget the notional subscription carries. Omitted, the
- *   context carries none, which is what the declaration under test declares.
+ * @param charges Charge budget the notional subscription carries. Omitted,
+ *   the context carries none, which is what the declaration under test
+ *   declares.
  * @returns The collaborators and the context.
  */
 function createBench(charges?: number): Bench {
@@ -367,15 +304,9 @@ function createBench(charges?: number): Bench {
   };
 }
 
-/* ==========================================================================
- * 3. The payload, and the two ways of dispatching it
- * ========================================================================== */
-
 /**
  * One merge payload and the two live `Tile` objects it carries as its `source`
- * and `target`. A `Tile` satisfies `ReadonlyTileView` structurally, and it
- * satisfies the operand shape `config.merge.canMerge` reads, so the payload is
- * built from the tiles themselves.
+ * and `target`.
  */
 interface MergeCase {
   readonly payload: MergePayload;
@@ -410,9 +341,6 @@ function buildMerge(
 /**
  * Invokes the handler once.
  *
- * `HookHandler` declares a return of the payload or nothing, so an absent
- * return is read here as `undefined`.
- *
  * @param bench Bench to dispatch over.
  * @param payload Payload to hand the handler.
  * @returns What the handler returned.
@@ -444,20 +372,12 @@ function resolved(bench: Bench, payload: MergePayload): MergePayload {
   return returned;
 }
 
-/**
- * The bench each test below dispatches over. Rebuilt before every test, so the
- * rules object, the board, the substreams and the state slot are fresh for each
- * one and no test reads what another left behind.
- */
+/** The bench each test below dispatches over. */
 let bench: Bench;
 
 beforeEach(() => {
   bench = createBench();
 });
-
-/* ==========================================================================
- * 4. Property 1: the hooks it binds, and no others
- * ========================================================================== */
 
 describe('echo-chamber: the declaration', () => {
   it('is declared by merge-magic and held in the catalogue', () => {
@@ -508,10 +428,6 @@ describe('echo-chamber: the hooks it binds', () => {
     expect(typeof DECLARATION.hooks.onMerge).toBe('function');
   });
 });
-
-/* ==========================================================================
- * 5. Property 2: the specified effect, and the decoupling it proves
- * ========================================================================== */
 
 describe('echo-chamber: the baseline a merge enters with', () => {
   it('enters from a pair the rules in force merge', () => {
@@ -711,10 +627,6 @@ describe('echo-chamber: what one merge leaves untouched', () => {
   });
 });
 
-/* ==========================================================================
- * 6. Property 3: charges, including a dispatch at zero
- * ========================================================================== */
-
 describe('echo-chamber: charges, including a dispatch at zero', () => {
   it('declares no charge budget and no state slot', () => {
     expect('charges' in DECLARATION).toBe(false);
@@ -757,10 +669,6 @@ describe('echo-chamber: charges, including a dispatch at zero', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Determinism and substream hygiene
- * ========================================================================== */
-
 describe('echo-chamber: determinism', () => {
   it('leaves all four substream cursors where they stood', () => {
     const before = bench.streams.snapshotCursors();
@@ -791,10 +699,6 @@ describe('echo-chamber: determinism', () => {
     expect(HANDLER_SOURCE).not.toContain('performance');
   });
 });
-
-/* ==========================================================================
- * 8. The shared declaration, after every dispatch above
- * ========================================================================== */
 
 describe('echo-chamber: the shared declaration after the suite', () => {
   it('is frozen at the declaration and at its hook table', () => {

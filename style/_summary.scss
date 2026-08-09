@@ -1,48 +1,15 @@
 // Run summary: the end-of-run panel — final score, stage reached, the relics
 // collected in pickup order, and the run seed, displayed and copyable.
 //
-// Selector contract. index.html declares the container and nothing inside it.
-// Its consumer renders, in source order, `section.run-summary` holding the
-// title, `.run-summary-scores` with one `.run-summary-score` per readout
-// (caption element first, value element second), the relic list
-// `ol.run-summary-relic-list` whose source order IS pickup order, the
-// no-relic paragraph, the `.run-summary-seed` group with the verbatim seed, its
-// copy control and its text confirmation, and `.run-summary-actions` with one
-// `.run-summary-action` per action. Every class this file styles is named in a
-// rule below, and the rendered tree is drawn as a named Mermaid figure in
-// docs/architecture/component-interaction.md.
-//
 // `.run-summary-relic` carries no `display`, which leaves the `<li>` at its
 // `list-item` used value, so it keeps its `::marker` and its `listitem` role
 // and the row layout is declared one level in on `.run-summary-relic-row`.
 //
-// Visibility. The router drives the `hidden` attribute and style/main.scss maps
-// `.screen[hidden]` to `display: none`, so every rule here is written
+// Visibility. The router drives the `hidden` attribute and style/main.scss
+// maps `.screen[hidden]` to `display: none`, so every rule here is written
 // `:not([hidden])` and no rule declares `display` on the two elements that are
 // themselves toggled by the attribute.
 
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this file's area enumerated, all target-only because the retired stylesheet
-// carried no run summary:
-//   TR-SUMMARY-01  the panel surface and its two measures
-//   TR-SUMMARY-02  the score readouts and their caption-then-value order
-//   TR-SUMMARY-03  the relic list and its pickup-ordered rows
-//   TR-SUMMARY-04  the no-relic paragraph
-//   TR-SUMMARY-05  the seed group, its copy control and its confirmation
-//   TR-SUMMARY-06  the action row
-//   TR-SUMMARY-07  the narrow-layout restatement at the mobile threshold
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-SUMMARY-01  every length, duration and colour derived from a token once
-//                  at the top of this file, so no rule carries a literal
-//   DL-SUMMARY-02  every rule written `:not([hidden])`, with `display` declared
-//                  on neither attribute-toggled element
-//   DL-SUMMARY-03  `.run-summary-relic` left at its `list-item` display, with
-//                  the row layout one level in
-//   DL-A11Y-06     the seed value's monospace treatment
-//   DL-A11Y-07     the copy confirmation delivered as text
-//
 @use "sass:color";
 @use "sass:math";
 @use "tokens" as *;
@@ -102,10 +69,10 @@ $summary-marker-indent: $game-container-margin-top !default;
 $summary-fade-duration: $transition-speed * 8 !default;
 $summary-fade-delay: $transition-speed * 12 !default;
 
-// The alpha both `.game-message` washes carry. A ratio, not a length.
+// The alpha both `.game-message` washes carry.
 $summary-wash-alpha: 0.5 !default;
 
-// The whole inline extent of the containing block. A ratio, not a length.
+// The whole inline extent of the containing block.
 $summary-fill: 100% !default;
 
 // Colour fallbacks. Each is the value style/_themes.scss's default palette
@@ -119,10 +86,6 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 // The treatment style/main.scss's `@mixin button` compiles, restated with
 // logical properties and bound to the theme custom properties, together with
 // the same seven user-agent resets that mixin carries.
-//
-// BLITZY [A11Y]: the control label sits below the WCAG AA 4.5:1 text threshold
-// under the default palette, the same figure style/main.scss flags for this
-// surface. Decision DL-A11Y-06.
 @mixin summary-control {
   display: inline-block;
   box-sizing: border-box;
@@ -148,11 +111,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   @include focusable;
 
   // The hover, activation and disabled states, from the shared mixin in
-  // style/_a11y.scss. This control previously carried focus only, so the copy
-  // and action buttons gave no feedback on being pointed at, pressed or made
-  // inert. The mixin is the same one style/main.scss's `button` mixin, the
-  // shared screen control and the relic-tray control include, so the states
-  // cannot drift between the four surfaces.
+  // style/_a11y.scss.
   @include interactive-states;
 }
 
@@ -175,14 +134,8 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   @include animation(fade-in $summary-fade-duration ease $summary-fade-delay);
 
   // `both` holds frame zero through the delay and the last frame afterwards.
-  // The reduced-motion layer collapses delay and duration, and the retained
-  // last frame is opacity 1, so the panel is never left invisible.
   @include animation-fill-mode(both);
 
-  // A screen the router has unhidden but not yet rendered into would otherwise
-  // paint the wash and take every pointer event across the viewport; the
-  // collapse holds until the panel is appended. The two rules are independent,
-  // so an engine without `:has()` drops only its own and keeps the first.
   &:empty {
     display: none;
   }
@@ -217,7 +170,6 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 
   // Reverses, for this subtree, the touch-callout, `user-select` and
   // `touch-action` suppression style/main.scss applies to `.game-container`.
-  // `touch-action` does not inherit and is restated on the seed field itself.
   -webkit-touch-callout: default;
   -ms-touch-callout: default;
   -webkit-user-select: text;
@@ -255,8 +207,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 }
 
 // Score readouts: final score and stage reached, in the vocabulary
-// `.score-container` and `.best-container` carry. `flex: 1 1 0` gives them
-// equal measure whatever they contain, and the space between them is a `gap`.
+// `.score-container` and `.best-container` carry.
 
 .run-summary-scores {
   display: flex;
@@ -269,9 +220,8 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   }
 }
 
-// BLITZY [A11Y]: under the default palette the readout numerals and caption sit
-// below the WCAG AA text thresholds. These are the colours style/main.scss
-// already compiles for `.score-container`. Decision DL-A11Y-07.
+// BLITZY [A11Y]: under the default palette the readout numerals and caption
+// sit below the WCAG AA text thresholds.
 .run-summary-score {
   flex: 1 1 0;
   min-inline-size: 0;
@@ -308,10 +258,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   overflow-wrap: break-word;
 }
 
-// Relics collected. An `<ol>`, so acquisition order is the list's own semantics
-// and the visible numbering is the user agent's marker rather than generated
-// content. The list is rendered in pickup order, the order the hook bus
-// dispatches in, and is never sorted by rarity or name.
+// Relics collected.
 
 .run-summary-relic-list {
   margin-block: $summary-gutter 0;
@@ -380,8 +327,6 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 }
 
 // The run seed, rendered in full, selectable and paired with a copy control.
-// The value is a `<code>` element and takes no tab stop of its own; the copy
-// control is the keyboard path to the seed.
 
 .run-summary-seed {
   display: flex;
@@ -418,8 +363,6 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   font-size: inherit;
   font-weight: normal;
 
-  // The seed is rendered whole: it wraps instead of being clipped, truncated or
-  // ellipsised, and long unbroken seeds break within a run of characters.
   white-space: normal;
   overflow-wrap: break-word;
   overflow-wrap: anywhere;
@@ -442,7 +385,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   @include summary-control;
 }
 
-// The text confirmation of the copy result. No colour change stands in for it.
+// The text confirmation of the copy result.
 .run-summary-seed-status {
   flex: 1 0 $summary-fill;
   font-size: $summary-caption-size;

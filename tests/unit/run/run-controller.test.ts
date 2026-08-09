@@ -100,6 +100,7 @@ import {
 } from '../../../src/relics/relic-registry';
 import type { Relic } from '../../../src/relics/relic-types';
 import {
+  MAX_PERSISTED_RELICS,
   RUN_STATE_SCHEMA_VERSION,
   createFreshRunState,
   runCorrelationId,
@@ -1788,7 +1789,7 @@ describe('completing a reward', () => {
     expect(stored?.stageIndex).toBe(1);
   });
 
-  it('starts the stage even when the selection was refused', () => {
+  it('starts NO stage when the selection was refused', () => {
     const { controller, engine } = composeWithRelics();
     const started: number[] = [];
 
@@ -1797,12 +1798,24 @@ describe('completing a reward', () => {
     });
 
     controller.advanceStage();
+    controller.recordRewardOffer([FIRST_RELIC]);
 
+    const before = controller.state().stageIndex;
     const resolution = controller.completeReward(engine, 'no-such-relic');
 
-    // Withholding the start would strand the run between stages.
+    // A REFUSED SELECTION LEAVES THE OFFER USABLE. The run is still owed the
+    // choice the player has not made, so nothing may advance past it: starting a
+    // stage here brought the offer back up over a board that had already moved on.
     expect(resolution.accepted).toBe(false);
-    expect(started).toEqual([1]);
+    expect(resolution.refusal).toBe('not-offered');
+    expect(started).toEqual([]);
+    expect(controller.state().stageIndex).toBe(before);
+
+    // AND THE SAME OFFER IS STILL THERE, so the second attempt succeeds and it
+    // is that attempt that opens the stage.
+    expect(controller.completeReward(engine, FIRST_RELIC).accepted).toBe(true);
+    expect(controller.state().stageIndex).toBe(before);
+    expect(started).toEqual([before]);
   });
 
   it('leaves the board in play across the transition', () => {
@@ -2288,7 +2301,16 @@ describe('state ownership', () => {
 });
 
 /* ==========================================================================
- * 16. Charge activation, and the write that follows it
+ * 16. Charges are spent by an effect, and by nothing else
+ *
+ * There is NO manual activation. Every relic in the catalogue is automatic: it
+ * fires on the hooks it binds when its own trigger condition holds and asks
+ * src/engine/hook-bus.ts for its charge on that one path. A controller member
+ * that deducted a charge on request would spend a budget and apply nothing, so
+ * the controller publishes none, and the section below pins both halves of that:
+ * the absent member, and the real relic whose effect and charge commit together
+ * through the composed Engine -> HookBus -> RelicRegistry -> RunController ->
+ * RunStateStore path.
  * ========================================================================== */
 
 /** The first catalogue relic carrying a charge budget. */
@@ -2301,176 +2323,121 @@ const CHARGED_BUDGET: number = (
   RELIC_CATALOGUE.find((relic): boolean => relic.charges !== undefined) as Relic
 ).charges as number;
 
-describe('activating a relic', () => {
-  it('spends a charge and persists the budget that remains', () => {
-    const { backing, controller, engine } = composeWithRelics();
+/**
+ * A board holding two tiles of `value` side by side in row 0, so one move left
+ * resolves exactly one merge.
+ *
+ * @param value Face value of each tile.
+ * @param size Edge length.
+ * @returns The snapshot.
+ */
+function mergePairBoard(value: number, size = 4): SerializedGameState {
+  const cells: ({ position: { x: number; y: number }; value: number } | null)[][] =
+    [];
 
-    controller.recordRewardOffer([CHARGED_RELIC]);
-    controller.resolveReward(CHARGED_RELIC);
+  for (let x = 0; x < size; x += 1) {
+    const column: (
+      | { position: { x: number; y: number }; value: number }
+      | null
+    )[] = [];
 
-    const outcome = controller.activateRelic(
-      engine,
-      () => ({}) as never,
-      CHARGED_RELIC,
-    );
+    for (let y = 0; y < size; y += 1) {
+      column.push(
+        y === 0 && x < 2 ? { position: { x, y: 0 }, value } : null,
+      );
+    }
 
-    expect(outcome.held).toBe(true);
-    expect(outcome.limited).toBe(true);
-    expect(outcome.consumed).toBe(1);
-    expect(outcome.remaining).toBe(CHARGED_BUDGET - 1);
+    cells.push(column);
+  }
 
-    // AN ACTIVATION IS NOT A MOVE, so no commit follows it on its own; the
-    // write is part of the transaction or the spend is lost on reload.
-    expect(outcome.persisted).toBe(true);
+  return {
+    grid: { size, cells },
+    score: 0,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  };
+}
+
+describe('the controller publishes no charge-spending member', () => {
+  it('exposes nothing that can spend a charge without an effect', () => {
+    const { controller } = composeWithRelics();
+
+    // A charge is a cost paid BY an effect. A member that took the cost on
+    // request would take a budget away and apply nothing, and would announce a
+    // success for it.
     expect(
-      readStored(backing)?.relics.find((relic) => relic.id === CHARGED_RELIC)
+      (controller as unknown as Record<string, unknown>).activateRelic,
+    ).toBeUndefined();
+    expect(
+      (controller as unknown as Record<string, unknown>).consumeCharge,
+    ).toBeUndefined();
+    expect(
+      (controller as unknown as Record<string, unknown>).spendCharge,
+    ).toBeUndefined();
+  });
+});
+
+describe('a charged relic held through the composed path', () => {
+  it('spends exactly one charge on the turn its effect takes hold, and '
+    + 'persists the budget that is left', () => {
+    const { backing, controller, engine, registry } = composeWithRelics();
+
+    controller.begin();
+    controller.restoreHeldRelics();
+    controller.recordRewardOffer([CHARGED_RELIC]);
+
+    expect(controller.resolveReward(CHARGED_RELIC).accepted).toBe(true);
+    expect(registry.find(CHARGED_RELIC)?.charges).toBe(CHARGED_BUDGET);
+
+    // A board one move away from a merge, so the relic's trigger condition is
+    // met by an ordinary turn rather than by a request.
+    engine.setup(mergePairBoard(2));
+
+    const rulesBefore = engine.config.merge.canMerge;
+
+    engine.move(DIRECTION_LEFT);
+
+    // THE EFFECT. `frostbind` records a merge predicate through the effect queue,
+    // which src/engine/board-effects.ts applies to the LIVE rules, so the rule in
+    // force is no longer the one the turn opened with.
+    expect(engine.config.merge.canMerge).not.toBe(rulesBefore);
+
+    // THE COST, paid once and by the effect.
+    expect(registry.find(CHARGED_RELIC)?.charges).toBe(CHARGED_BUDGET - 1);
+
+    // AND THE LEDGER REACHED STORAGE, through the commit the turn ended with.
+    const stored = readStored(backing);
+
+    expect(
+      stored?.relics.find((relic): boolean => relic.id === CHARGED_RELIC)
         ?.charges,
     ).toBe(CHARGED_BUDGET - 1);
   });
 
-  it('spends an explicit amount', () => {
-    const { controller, engine } = composeWithRelics();
-
-    controller.recordRewardOffer([CHARGED_RELIC]);
-    controller.resolveReward(CHARGED_RELIC);
-
-    expect(
-      controller.activateRelic(engine, () => ({}) as never, CHARGED_RELIC, 2)
-        .remaining,
-    ).toBe(CHARGED_BUDGET - 2);
-  });
-
-  it('stops spending once the budget is exhausted, and writes nothing', () => {
-    const { controller, engine } = composeWithRelics();
-    const cursors = (): never => ({}) as never;
-
-    controller.recordRewardOffer([CHARGED_RELIC]);
-    controller.resolveReward(CHARGED_RELIC);
-
-    for (let spent = 0; spent < CHARGED_BUDGET; spent += 1) {
-      expect(
-        controller.activateRelic(engine, cursors, CHARGED_RELIC).consumed,
-      ).toBe(1);
-    }
-
-    const exhausted = controller.activateRelic(engine, cursors, CHARGED_RELIC);
-
-    expect(exhausted.held).toBe(true);
-    expect(exhausted.consumed).toBe(0);
-    expect(exhausted.remaining).toBe(0);
-    expect(exhausted.persisted).toBe(false);
-  });
-
-  it('reports an unheld relic and writes nothing', () => {
-    const { controller, engine } = composeWithRelics();
-
-    const outcome = controller.activateRelic(
-      engine,
-      () => ({}) as never,
-      CHARGED_RELIC,
-    );
-
-    expect(outcome.held).toBe(false);
-    expect(outcome.consumed).toBe(0);
-    expect(outcome.persisted).toBe(false);
-  });
-
-  it('reports nothing spent on a relic with no budget', () => {
-    const { controller, engine } = composeWithRelics();
-
-    controller.recordRewardOffer([FIRST_RELIC]);
-    controller.resolveReward(FIRST_RELIC);
-
-    const outcome = controller.activateRelic(
-      engine,
-      () => ({}) as never,
-      FIRST_RELIC,
-    );
-
-    expect(outcome.limited).toBe(false);
-    expect(outcome.consumed).toBe(0);
-    expect(outcome.persisted).toBe(false);
-  });
-
-  it('reports nothing when no registry publishes an activation', () => {
-    const { controller, engine } = compose();
-
-    const outcome = controller.activateRelic(
-      engine,
-      () => ({}) as never,
-      CHARGED_RELIC,
-    );
-
-    expect(outcome.consumed).toBe(0);
-    expect(outcome.persisted).toBe(false);
-  });
-
-  it('contains a registry that raises during an activation', () => {
-    const backing = new MemoryStorage();
-    const manager = new LocalStorageManager({ storage: backing });
-    const config = createDefaultRulesConfig();
-    const controller = new RunController({
-      store: new RunStateStore({ storage: manager, config }),
-      identity: resolveRunIdentity({ storage: manager }),
-      config,
-      relics: {
-        activate: (): never => {
-          throw new Error('registry down');
-        },
-      },
-    });
+  it('spends nothing on a turn whose trigger condition is not met', () => {
+    const { backing, controller, engine, registry } = composeWithRelics();
 
     controller.begin();
+    controller.restoreHeldRelics();
+    controller.recordRewardOffer([CHARGED_RELIC]);
 
-    const port = {
-      events: { on: () => (): void => undefined },
-      serialize: () => emptySnapshot(),
-      endStage: () => undefined,
-      startStage: () => undefined,
-    };
+    expect(controller.resolveReward(CHARGED_RELIC).accepted).toBe(true);
 
-    expect(() =>
-      controller.activateRelic(port, () => ({}) as never, CHARGED_RELIC),
-    ).not.toThrow();
+    // Two tiles that cannot merge, so the turn moves and resolves nothing.
+    engine.setup(boardWith(2));
+    engine.move(DIRECTION_LEFT);
+    engine.move(DIRECTION_DOWN);
+
+    expect(registry.find(CHARGED_RELIC)?.charges).toBe(CHARGED_BUDGET);
     expect(
-      controller.activateRelic(port, () => ({}) as never, CHARGED_RELIC)
-        .consumed,
-    ).toBe(0);
-  });
-
-  it('refuses a registry report of the wrong shape', () => {
-    const backing = new MemoryStorage();
-    const manager = new LocalStorageManager({ storage: backing });
-    const config = createDefaultRulesConfig();
-    const controller = new RunController({
-      store: new RunStateStore({ storage: manager, config }),
-      identity: resolveRunIdentity({ storage: manager }),
-      config,
-      relics: {
-        // A structural port, so its return is measured rather than trusted: a
-        // non-finite count must not reach the write path.
-        activate: () =>
-          ({ held: true, limited: true, consumed: Number.NaN }) as never,
-      },
-    });
-
-    controller.begin();
-
-    const outcome = controller.activateRelic(
-      {
-        events: { on: () => (): void => undefined },
-        serialize: () => emptySnapshot(),
-        endStage: () => undefined,
-        startStage: () => undefined,
-      },
-      () => ({}) as never,
-      CHARGED_RELIC,
-    );
-
-    expect(outcome.consumed).toBe(0);
-    expect(outcome.persisted).toBe(false);
+      readStored(backing)?.relics.find(
+        (relic): boolean => relic.id === CHARGED_RELIC,
+      )?.charges,
+    ).toBe(CHARGED_BUDGET);
   });
 });
+
 
 /* ==========================================================================
  * 17. The reward transaction with a seeded draw port (wiring A)
@@ -2487,6 +2454,27 @@ describe('activating a relic', () => {
 interface ComposedWithRewards extends ComposedWithRelics {
   /** Identifiers the bus is dispatching to, in pickup order. */
   readonly busSubscriberIds: () => readonly string[];
+}
+
+/**
+ * Projects one catalogue relic as the reward card a screen presents.
+ *
+ * The one projection both port members use, so a drawn offer and a projected one
+ * are the same object shape and a restored round cannot be told apart from the
+ * round it restores.
+ *
+ * @param relic Catalogue declaration to project.
+ * @returns The offer.
+ */
+function asOffer(relic: Relic): RewardOffer {
+  return {
+    id: relic.id,
+    name: relic.name,
+    rarity: relic.rarity,
+    description: relic.description,
+    hooks: Object.keys(relic.hooks),
+    ...(relic.charges === undefined ? {} : { charges: relic.charges }),
+  };
 }
 
 /**
@@ -2568,14 +2556,21 @@ function composeWithRewards(
               ownedIds,
               count,
               streams,
-            }).map((relic): RewardOffer => ({
-              id: relic.id,
-              name: relic.name,
-              rarity: relic.rarity,
-              description: relic.description,
-              hooks: Object.keys(relic.hooks),
-              ...(relic.charges === undefined ? {} : { charges: relic.charges }),
-            })),
+            }).map(asOffer),
+
+      // The load-path counterpart src/main.ts also supplies: a stored round is
+      // rebuilt from the catalogue by identifier and TAKES NO DRAW, so a resumed
+      // run presents the offer it was interrupted on with every cursor where the
+      // envelope left it.
+      project: (relicIds): readonly RewardOffer[] =>
+        relicIds
+          .map((relicId) =>
+            registry
+              .catalogue()
+              .find((relic): boolean => relic.id === relicId),
+          )
+          .filter((relic): relic is Relic => relic !== undefined)
+          .map(asOffer),
     },
   });
 
@@ -2805,7 +2800,366 @@ describe('a reward drawn by the run and taken through selectReward', () => {
 });
 
 /* ==========================================================================
- * 18. The reward outcome codes mean what they say
+ * 17b. The reward selection is a transaction, and the write is part of it
+ *
+ * THE WRITE'S ANSWER WAS DISCARDED. `write()` reports whether the envelope
+ * reached storage and the selection ignored it, so a run whose storage was full
+ * took the relic on, advanced the stage, opened the next board and announced the
+ * acquisition — and the next load knew nothing about any of it. The player was
+ * told they had a relic that no reload would ever find.
+ *
+ * The write is now the commit point: the envelope is brought fully up to date and
+ * written, and a refused write rolls back the relic, the round and the stage and
+ * refuses the selection.
+ * ========================================================================== */
+
+describe('a reward selection whose write is refused', () => {
+  /**
+   * Composes a reward-ready run and then makes every later write fail.
+   *
+   * The failure is injected at the STORAGE boundary rather than by faking the
+   * store, so the refusal travels the production path: `setItem` raises as it
+   * does on an exhausted quota, `LocalStorageManager` absorbs and reports it,
+   * `RunStateStore.save()` answers `false`, and `write()` returns that.
+   */
+  function composeWithFullStorage(): ComposedWithRewards {
+    const backing = new MemoryStorage();
+    const composed = composeWithRewards({ backing, seed: 'write-refused' });
+
+    composed.engine.move(DIRECTION_LEFT);
+
+    backing.setItem = (): void => {
+      throw new Error('QuotaExceededError');
+    };
+
+    return composed;
+  }
+
+  it('refuses the selection rather than reporting a phantom acquisition', () => {
+    const { controller, engine } = composeWithFullStorage();
+    const chosen = controller.currentOffer()[0]?.id ?? '';
+
+    const selection = controller.selectReward(chosen, engine);
+
+    expect(selection.outcome).toBe('refused');
+    expect(selection.relicId).toBe(chosen);
+  });
+
+  it('puts the relic back, in the registry and in the envelope', () => {
+    const { controller, engine, registry } = composeWithFullStorage();
+    const chosen = controller.currentOffer()[0]?.id ?? '';
+
+    controller.selectReward(chosen, engine);
+
+    // NOTHING HELD, on either side of the port. A relic left registered on the
+    // bus would go on firing for a run that does not record it.
+    expect(controller.relics()).toEqual([]);
+    expect(registry.ownedIds()).toEqual([]);
+    expect(controller.state().relics).toEqual([]);
+  });
+
+  it('leaves the stage where it stood and the offer usable', () => {
+    const { controller, engine } = composeWithFullStorage();
+    const offered = controller.currentOffer().map((card): string => card.id);
+
+    controller.selectReward(offered[0] ?? '', engine);
+
+    // THE ROUND IS STILL OPEN: the stage did not advance, the same three cards
+    // are still on the table, and the round is not recorded as resolved — so the
+    // player can free some storage and choose again rather than losing the reward.
+    expect(controller.stageIndex()).toBe(0);
+    expect(controller.isRewardPending()).toBe(true);
+    expect(controller.currentOffer().map((card): string => card.id)).toEqual(
+      offered,
+    );
+  });
+
+  it('accepts the retry once the write can succeed again', () => {
+    const backing = new MemoryStorage();
+    const composed = composeWithRewards({ backing, seed: 'write-retry' });
+
+    composed.engine.move(DIRECTION_LEFT);
+
+    const chosen = composed.controller.currentOffer()[0]?.id ?? '';
+    const working = backing.setItem.bind(backing);
+
+    backing.setItem = (): void => {
+      throw new Error('QuotaExceededError');
+    };
+
+    expect(
+      composed.controller.selectReward(chosen, composed.engine).outcome,
+    ).toBe('refused');
+
+    backing.setItem = working;
+
+    // The rollback left a run a retry can complete, which is the whole point of
+    // rolling back rather than half-committing.
+    const retry = composed.controller.selectReward(chosen, composed.engine);
+
+    expect(retry.outcome).toBe('accepted');
+    expect(composed.registry.ownedIds()).toEqual([chosen]);
+    expect(readStored(backing)?.relics.map((relic) => relic.id)).toEqual([
+      chosen,
+    ]);
+
+    composed.stop();
+  });
+});
+
+/* ==========================================================================
+ * 18. An unresolved reward round survives a reload
+ *
+ * A DRAWN OFFER WAS PURELY IN MEMORY. The stage that drew it was recorded as
+ * cleared nowhere, so a reload found a run whose goal is still met — a cleared
+ * stage's goal stays met on every later commit — and resolved the same stage a
+ * second time: a second `stage:end`, a second `onStageEnd` for every relic bound
+ * to it, and a second offer drawn from cursors the first draw had already moved.
+ * The player lost the three cards they were looking at and the run lost its
+ * same-seed-same-offers guarantee in one step.
+ *
+ * The round is now persisted as identifiers plus the stage it belongs to, which
+ * is also the marker saying that stage's end is resolved. These cases pin both
+ * halves: the round comes back, and it comes back WITHOUT a draw.
+ * ========================================================================== */
+
+describe('an unresolved reward round', () => {
+  it('is persisted with the stage that drew it', () => {
+    const { controller, engine, backing } = composeWithRewards({
+      seed: 'pending-persist',
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    const offer = controller.currentOffer();
+
+    expect(offer.length).toBeGreaterThan(0);
+    expect(controller.isRewardPending()).toBe(true);
+
+    const stored = readStored(backing);
+
+    // IDENTIFIERS ALONE, and the stage index alongside them. No name,
+    // description or hook list is duplicated into storage, because the catalogue
+    // is the only place those are declared and it can move under a stored copy.
+    expect(stored?.pendingReward?.stageIndex).toBe(0);
+    expect(stored?.pendingReward?.offeredRelicIds).toEqual(
+      offer.map((card): string => card.id),
+    );
+  });
+
+  it('is cleared from storage once a card is taken', () => {
+    const { controller, engine, backing } = composeWithRewards({
+      seed: 'pending-clear',
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    const chosen = controller.currentOffer()[0]?.id ?? '';
+
+    expect(controller.selectReward(chosen, engine).outcome).toBe('accepted');
+
+    // Resolved is not pending: the marker is gone, so the next load resolves the
+    // stage the selection advanced into rather than re-opening this round.
+    expect(readStored(backing)?.pendingReward).toBeUndefined();
+    expect(controller.isRewardPending()).toBe(false);
+  });
+
+  it('comes back on the reload, as the same three cards', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRewards({ backing, seed: 'pending-reload' });
+
+    first.engine.move(DIRECTION_LEFT);
+
+    const offered = first.controller.currentOffer().map((card): string => card.id);
+    const cursorsBefore = first.controller.cursors();
+
+    expect(offered.length).toBeGreaterThan(0);
+
+    first.stop();
+
+    // THE RELOAD. A second composition over the same storage, which is what a
+    // page reload is: a new controller, a new registry and a new engine reading
+    // the envelope the first one left.
+    const second = composeWithRewards({ backing, seed: 'pending-reload' });
+
+    expect(second.controller.isRewardPending()).toBe(true);
+    expect(
+      second.controller.currentOffer().map((card): string => card.id),
+    ).toEqual(offered);
+
+    // PROJECTED, NOT REDRAWN. Every substream cursor is where the interrupted
+    // run left it, so the reward the player is now looking at cost the run
+    // nothing to restore and the seed still determines the offer sequence
+    // (AAP V2, Contract 6).
+    expect(second.controller.cursors()).toEqual(cursorsBefore);
+
+    // And the restored round is a LIVE round: the card can be taken.
+    const chosen = offered[0] ?? '';
+
+    expect(second.controller.selectReward(chosen, second.engine).outcome).toBe(
+      'accepted',
+    );
+    expect(second.registry.ownedIds()).toEqual([chosen]);
+
+    second.stop();
+  });
+
+  it('carries the full card back, not just the identifier', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRewards({ backing, seed: 'pending-cards' });
+
+    first.engine.move(DIRECTION_LEFT);
+
+    const before = first.controller.currentOffer();
+
+    first.stop();
+
+    const second = composeWithRewards({ backing, seed: 'pending-cards' });
+    const after = second.controller.currentOffer();
+
+    // The screen needs a name, a rarity, a description and the hook badges, and
+    // the projection resolves all four from the catalogue.
+    expect(after).toEqual(before);
+
+    for (const card of after) {
+      expect(card.name).not.toBe('');
+      expect(card.hooks.length).toBeGreaterThan(0);
+    }
+
+    second.stop();
+  });
+
+  it('resolves the cleared stage only once across the reload', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRewards({ backing, seed: 'pending-once' });
+
+    first.engine.move(DIRECTION_LEFT);
+
+    const offered = first.controller
+      .currentOffer()
+      .map((card): string => card.id);
+
+    expect(first.controller.isRewardPending()).toBe(true);
+
+    first.stop();
+
+    const second = composeWithRewards({ backing, seed: 'pending-once' });
+
+    expect(second.controller.isRewardPending()).toBe(true);
+    expect(second.controller.stageIndex()).toBe(0);
+
+    // A MOVE MADE WHILE THE CHOICE IS STANDING, which is the case that used to
+    // resolve the same stage over and over: the goal a cleared stage met is still
+    // met on this commit and on every later one, so the standing round is the
+    // only thing that says its end is already resolved.
+    second.engine.move(DIRECTION_LEFT);
+
+    // No second resolution: no advance, no second offer drawn, and the same three
+    // cards still standing.
+    expect(second.reports.advanced).toEqual([]);
+    expect(second.controller.stageIndex()).toBe(0);
+    expect(
+      second.controller.currentOffer().map((card): string => card.id),
+    ).toEqual(offered);
+
+    second.stop();
+  });
+
+  it('drops a round whose stage the run has since moved past', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRewards({ backing, seed: 'pending-stale' });
+
+    first.engine.move(DIRECTION_LEFT);
+
+    const offered = first.controller
+      .currentOffer()
+      .map((card): string => card.id);
+
+    // A STALE MARKER, written by hand because no production path can produce
+    // one: the envelope names stage 0's round while the run stands on stage 1.
+    first.controller.advanceStage();
+    first.controller.persist(first.engine, () => first.controller.cursors());
+    first.stop();
+
+    const stored = readStored(backing);
+
+    expect(stored).not.toBeNull();
+
+    backing.setItem(
+      RUN_STATE_KEY,
+      JSON.stringify({
+        ...stored,
+        stageIndex: 1,
+        pendingReward: { stageIndex: 0, offeredRelicIds: offered },
+      }),
+    );
+
+    const second = composeWithRewards({ backing, seed: 'pending-stale' });
+
+    // Dropped rather than trusted, and dropped FROM STORAGE too, so it cannot
+    // sit there suppressing stage resolution for the rest of the run.
+    expect(second.controller.isRewardPending()).toBe(false);
+    expect(second.controller.currentOffer()).toEqual([]);
+    expect(readStored(second.backing)?.pendingReward).toBeUndefined();
+
+    second.stop();
+  });
+
+  it('drops a round naming a relic the catalogue no longer declares', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRewards({ backing, seed: 'pending-unknown' });
+
+    first.engine.move(DIRECTION_LEFT);
+    first.controller.persist(first.engine, () => first.controller.cursors());
+    first.stop();
+
+    const stored = readStored(backing);
+
+    backing.setItem(
+      RUN_STATE_KEY,
+      JSON.stringify({
+        ...stored,
+        pendingReward: {
+          stageIndex: 0,
+          offeredRelicIds: ['no-such-relic'],
+        },
+      }),
+    );
+
+    // The projection resolves nothing, so nothing is restored — and the load
+    // completes rather than raising on a catalogue that has moved.
+    const second = composeWithRewards({ backing, seed: 'pending-unknown' });
+
+    expect(second.controller.isRewardPending()).toBe(false);
+    expect(readStored(second.backing)?.pendingReward).toBeUndefined();
+
+    second.stop();
+  });
+
+  it('restores nothing when the composition supplies no projector', () => {
+    const backing = new MemoryStorage();
+    const first = composeWithRewards({ backing, seed: 'pending-no-port' });
+
+    first.engine.move(DIRECTION_LEFT);
+    first.stop();
+
+    expect(readStored(backing)?.pendingReward).toBeDefined();
+
+    // `compose()` binds neither a registry port nor a draw port, so its rewards
+    // port has no `project`: the round is dropped and the run resolves its stage
+    // as if the offer had never been drawn. An optional member, honoured as one.
+    const second = compose({ backing, seed: 'pending-no-port' });
+
+    expect(second.controller.isRewardPending()).toBe(false);
+    expect(second.controller.currentOffer()).toEqual([]);
+    expect(readStored(second.backing)?.pendingReward).toBeUndefined();
+
+    second.stop();
+  });
+});
+
+/* ==========================================================================
+ * 19. The reward outcome codes mean what they say
  * ========================================================================== */
 
 describe('the reward selection outcome codes', () => {
@@ -3404,10 +3758,21 @@ interface RecordingRegistry {
  * re-keys, so the order the hook bus would dispatch in is the order a case reads
  * back.
  *
+ * @param extraIds Further identifiers the catalogue answers for, appended after
+ *   the three shapes above. A long run's held list is seeded through this, so a
+ *   restore is not filtered down to the four fixture identifiers — the registry
+ *   is the authority for what a run may hold, and `RunController.restoreRelics`
+ *   reads its snapshot back.
  * @returns The port and its recorders.
  */
-function createRecordingRegistry(): RecordingRegistry {
+function createRecordingRegistry(
+  extraIds: readonly string[] = [],
+): RecordingRegistry {
   const catalogue = recordingCatalogue();
+
+  for (const id of extraIds) {
+    catalogue.push({ id });
+  }
   const held: PersistedRelic[] = [];
   const calls: string[] = [];
   let refusing = false;
@@ -3683,6 +4048,9 @@ interface DriveOptions {
   /** `false` composes the controller with no registry at all. */
   readonly relics?: boolean;
 
+  /** Further identifiers the recording registry's catalogue answers for. */
+  readonly catalogue?: readonly string[];
+
   /** The offers a cleared stage draws. Absent composes no draw port. */
   readonly offers?: readonly RewardOffer[];
 
@@ -3730,7 +4098,7 @@ function drive(options: DriveOptions = {}): Driven {
   const config = createDefaultRulesConfig();
   const stages = createDefaultStageConfig();
   const sink = createReportSink();
-  const registry = createRecordingRegistry();
+  const registry = createRecordingRegistry(options.catalogue);
   const engine = createRecordingEngine({
     board: options.board,
     startStage: options.startStage,
@@ -3898,6 +4266,37 @@ function commit(run: Driven, over = false): void {
     stage: run.controller.stageCommitContextProvider()(),
     relics: run.controller.relicCommitContextProvider()(),
   });
+}
+
+/**
+ * An envelope holding `relics`, at stage 0 and cursor zero.
+ *
+ * `createFreshRunState` mints the shape and always starts from an empty held
+ * list — the envelope is the authority for what a run holds, and a run acquires
+ * a relic only through the reward transaction — so the list is placed on the
+ * result, which is what a run that had acquired them would have written.
+ *
+ * @param runId Run identifier the envelope carries.
+ * @param seed Seed the envelope was played under.
+ * @param relics Entries the run holds, in pickup order.
+ * @returns The envelope.
+ */
+function envelopeHolding(
+  runId: string,
+  seed: string,
+  relics: readonly PersistedRelic[],
+): RunState {
+  return {
+    ...createFreshRunState({
+      runId,
+      seed,
+      rngCursor: {},
+      stageIndex: 0,
+      stageGoal: stageGoalForIndex(0, createDefaultStageConfig()),
+      board: createEmptyBoard(),
+    }),
+    relics: [...relics],
+  };
 }
 
 /** The envelope as it is actually stored under one store, or `null`. */
@@ -5110,6 +5509,121 @@ describe('a selection the run cannot take', () => {
     expect(run.controller.relics()).toEqual([]);
     expect(storedEnvelope(run.backing)).toBeNull();
   });
+
+  it('refuses a relic once the run already holds the persisted maximum', () => {
+    // THE FOURTH GATE. An envelope carrying more than `MAX_PERSISTED_RELICS` is
+    // refused by the store, so a run standing at the ceiling must refuse the
+    // pickup rather than accept it and lose the whole run on the next write.
+    // The ceiling is reached the way a long run reaches it: through the stored
+    // envelope, whose relics `begin()` adopts when its seed is the seed the run
+    // is played under.
+    const seed = 'held-to-the-ceiling';
+    const held: PersistedRelic[] = Array.from(
+      { length: MAX_PERSISTED_RELICS },
+      (_entry, index): PersistedRelic => ({
+        id: `ceiling-relic-${String(index)}`,
+      }),
+    );
+    const backing = storageHolding({
+      [RUN_STATE_KEY]: JSON.stringify(
+        envelopeHolding('ceiling-run', seed, held),
+      ),
+    });
+    const run = drive({
+      backing,
+      seed,
+      observe: false,
+      catalogue: held.map((relic): string => relic.id),
+    });
+
+    expect(run.outcome).toBe('loaded');
+    expect(run.controller.relics()).toHaveLength(MAX_PERSISTED_RELICS);
+
+    const before = run.controller.relics();
+    const written = storedEnvelope(backing);
+    const picksBefore = [...run.registry.picked()];
+
+    // Offered, catalogued and unheld, so the first three gates all pass and the
+    // ceiling is the one that refuses.
+    expect(run.controller.recordRewardOffer(['port-plain'])).toBe(true);
+
+    const resolution = run.controller.resolveReward('port-plain');
+
+    expect(resolution).toEqual({ accepted: false, refusal: 'full' });
+
+    // THE OFFER IS RETAINED. A cleared offer would report `'not-offered'` on the
+    // second attempt, because that is the first gate; reporting `'full'` again
+    // is what says the same card is still standing to be chosen.
+    expect(run.controller.resolveReward('port-plain')).toEqual({
+      accepted: false,
+      refusal: 'full',
+    });
+
+    // NO PICKUP: the registry was never asked to take the relic on, so nothing
+    // reached the hook bus.
+    expect(run.registry.picked()).toEqual(picksBefore);
+    expect(run.registry.calls).not.toContain('pickUpRelic');
+
+    // NO STATE MUTATION and NO WRITE: the held list is the one the envelope
+    // carried, and the stored payload is byte-for-byte the one that was there.
+    expect(run.controller.relics()).toEqual(before);
+    expect(run.controller.relics()).toHaveLength(MAX_PERSISTED_RELICS);
+    expect(storedEnvelope(backing)).toEqual(written);
+
+    // REPORTED, naming the step that refused it.
+    const drawn = run.sink.of('reward-drawn');
+    const last = drawn[drawn.length - 1];
+
+    expect(last?.detail.refusal).toBe('full');
+    expect(last?.detail.accepted).toBe(false);
+    expect(last?.detail.selectedRelicId).toBe('port-plain');
+    expect(last?.detail.offeredRelicIds).toEqual(['port-plain']);
+    expect(last?.correlationId).toBe(run.controller.correlationId());
+  });
+
+  it('accepts the same relic one place below the ceiling', () => {
+    // The pair to the case above: the ceiling refuses and nothing else does, so
+    // one relic fewer accepts the identical selection.
+    const seed = 'one-below-the-ceiling';
+    const held: PersistedRelic[] = Array.from(
+      { length: MAX_PERSISTED_RELICS - 1 },
+      (_entry, index): PersistedRelic => ({
+        id: `ceiling-relic-${String(index)}`,
+      }),
+    );
+    const backing = storageHolding({
+      [RUN_STATE_KEY]: JSON.stringify(
+        envelopeHolding('nearly-full-run', seed, held),
+      ),
+    });
+    const run = drive({
+      backing,
+      seed,
+      observe: false,
+      catalogue: held.map((relic): string => relic.id),
+    });
+
+    expect(run.controller.relics()).toHaveLength(MAX_PERSISTED_RELICS - 1);
+    expect(takeReward(run, 'port-plain')).toEqual({
+      accepted: true,
+      refusal: null,
+    });
+    expect(run.controller.relics()).toHaveLength(MAX_PERSISTED_RELICS);
+
+    // The registry took it on, APPENDED after everything already held, so the
+    // pickup order the envelope carried is untouched.
+    expect(run.registry.picked().at(-1)).toBe('port-plain');
+    expect(run.registry.calls).toContain('pickUpRelic');
+    expect(run.controller.relics().at(-1)?.id).toBe('port-plain');
+
+    // At the ceiling now, so the next offered relic is refused for capacity.
+    run.controller.recordRewardOffer(['port-charged']);
+
+    expect(run.controller.resolveReward('port-charged')).toEqual({
+      accepted: false,
+      refusal: 'full',
+    });
+  });
 });
 
 describe('the controller branches on no individual relic', () => {
@@ -5582,17 +6096,19 @@ describe('stageCommitContextProvider', () => {
 /* ==========================================================================
  * 31. Storage isolation across the cases of this file
  *
- * The two cases below are ORDERED: the first writes the frozen best-score key
- * into a tracked store, the second finds it gone. js/local_storage_manager.js
- * L61-L63 removed the board snapshot and never the best score, so a suite that
- * ignored the key would leak the highest score into every case after it.
+ * js/local_storage_manager.js L61-L63 removed the board snapshot and never the
+ * best score, so a suite that ignored the key would leak the highest score into
+ * every case after it. The case below writes every key the product owns and then
+ * runs the teardown itself, so it holds whether it runs first, last or alone.
+ * The cross-case half of the guarantee is the `beforeEach` above, which asserts
+ * the swept state of every tracked store before every case in this file.
  * ========================================================================== */
 
-/** One store the ordered pair below shares, tracked for teardown. */
+/** One store the case below writes to, tracked for teardown. */
 const isolationBacking = trackStorage(new MemoryStorage());
 
 describe('the persistence teardown', () => {
-  it('leaves a best score and an envelope for the teardown to remove', () => {
+  it('removes every key the product owns, including the frozen best score', () => {
     const manager = new LocalStorageManager({ storage: isolationBacking });
 
     expect(manager.setBestScore(4096)).toBe(true);
@@ -5601,12 +6117,16 @@ describe('the persistence teardown', () => {
 
     takeReward(run, 'port-plain');
 
+    // WRITTEN FIRST, so the removal below has something to remove: this case
+    // does not depend on an earlier one having run.
     expect(typeof isolationBacking.getItem(BEST_SCORE_KEY)).toBe('string');
     expect(isolationBacking.getItem(RUN_STATE_KEY)).not.toBeUndefined();
     expect(manager.getBestScore()).toBe('4096');
-  });
 
-  it('finds every key the product owns gone at the start of a later case', () => {
+    // The teardown this file registers with `afterEach`, invoked here so the
+    // sweep is the assertion rather than an ordering assumption.
+    clearTrackedStorage();
+
     expect(isolationBacking.getItem(BEST_SCORE_KEY)).toBeUndefined();
     expect(isolationBacking.getItem(GAME_STATE_KEY)).toBeUndefined();
     expect(isolationBacking.getItem(RUN_STATE_KEY)).toBeUndefined();
@@ -5618,8 +6138,16 @@ describe('the persistence teardown', () => {
     // The frozen literal is one of the keys removed, named through the imported
     // constant rather than spelled out here.
     expect(CLEARED_KEYS).toContain(BEST_SCORE_KEY);
-    expect(new LocalStorageManager({ storage: isolationBacking }).getBestScore())
-      .toBe(0);
+    expect(
+      new LocalStorageManager({ storage: isolationBacking }).getBestScore(),
+    ).toBe(0);
+
+    // IDEMPOTENT, so the `afterEach` that runs straight after this case sweeps
+    // an already-swept store without raising.
+    expect(() => {
+      clearTrackedStorage();
+    }).not.toThrow();
+    expect(isolationBacking.getItem(BEST_SCORE_KEY)).toBeUndefined();
   });
 });
 
@@ -5639,56 +6167,142 @@ describe('the persistence teardown', () => {
  * the PERSISTED board member in tests/unit/run/run-state.test.ts.
  * ========================================================================== */
 
+/**
+ * The real engine, bound to the port this folder declares for it.
+ *
+ * The ASSIGNMENT is half the assertion: `EnginePort` is declared structurally in
+ * src/run/run-controller.ts and nothing imports the `Engine` class there, so a
+ * real engine that stopped satisfying it would fail this file's type check.
+ * Sections 22 to 31 drive the recording double instead, because what they assert
+ * is the ORDER the controller calls a port in; what this section asserts is the
+ * port's own contract, which only the real engine can answer for.
+ *
+ * @param board Board the engine opens on. A fresh seeded board when absent.
+ * @returns The composed world and its engine as an `EnginePort`.
+ */
+function composedPort(board?: SerializedGameState): {
+  readonly composed: Composed;
+  readonly port: EnginePort;
+} {
+  const composed = compose({ setup: false });
+  const port: EnginePort = composed.engine;
+
+  port.setup(board ?? null);
+
+  return { composed, port };
+}
+
 describe('the ported engine port', () => {
   it('publishes move, restart and continuePlaying, one per input action', () => {
-    const run = drive({ observe: false });
-    const port = run.engine.port;
+    const { port } = composedPort();
 
     // The three names js/game_manager.js L9-L11 subscribed at construction.
     expect(typeof port.move).toBe('function');
     expect(typeof port.restart).toBe('function');
     expect(typeof port.continuePlaying).toBe('function');
+
+    // And the observation half of the same port, which the controller attaches
+    // through: the emitter, the snapshot and the two stage members.
+    expect(typeof port.events.on).toBe('function');
+    expect(typeof port.serialize).toBe('function');
+    expect(typeof port.endStage).toBe('function');
+    expect(typeof port.startStage).toBe('function');
   });
 
   it('separates the terminated query from the continue command', () => {
-    const run = drive({ observe: false });
-    const port = run.engine.port;
+    const { port } = composedPort();
 
     expect(typeof port.isGameTerminated).toBe('function');
     expect(typeof port.continuePlaying).toBe('function');
 
-    // Two members, never one name carrying both a method and a boolean.
+    // Two members, never one name carrying both a method and a boolean —
+    // js/game_manager.js L24-L27 assigned `this.keepPlaying = true` over its own
+    // prototype method of that name, and L31 read the shadowed member.
     expect(port.isGameTerminated).not.toBe(port.continuePlaying);
     expect(port.isGameTerminated()).toBe(false);
-    expect(run.engine.calls).toContain('isGameTerminated');
+
+    // The query answers on the engine's own state and stays a query: asking it
+    // repeatedly changes nothing.
+    expect(port.isGameTerminated()).toBe(false);
+    expect(port.serialize().keepPlaying).toBe(false);
   });
 
   it('reads the frozen board member when it answers the query', () => {
-    const run = drive({ observe: false });
+    // A real win: `createNearWinBoard` lays two tiles of half the configured
+    // win value side by side, so the move below merges them and the engine
+    // raises `won` itself rather than being handed it.
+    const composed = compose({ setup: false });
+    const port: EnginePort = composed.engine;
 
-    // A won board with play not continued is terminated; continuing it is what
-    // the command does, and the flag it reads carries the frozen wire name.
-    run.engine.hold({ ...createMergePairBoard(), won: true });
+    port.setup(
+      createNearWinBoard(composed.config.boardSize, composed.config.winValue),
+    );
 
-    expect(run.engine.port.isGameTerminated()).toBe(true);
+    expect(port.move(DIRECTION_LEFT)).toBe(true);
 
-    run.engine.hold({
-      ...createMergePairBoard(),
-      won: true,
-      keepPlaying: true,
-    });
+    const won = port.serialize();
 
-    expect(run.engine.port.isGameTerminated()).toBe(false);
+    expect(won.won).toBe(true);
+    expect(won.keepPlaying).toBe(false);
+
+    // A won board with play not continued is terminated; the COMMAND is what
+    // continues it, and the flag it writes carries the frozen wire name.
+    expect(port.isGameTerminated()).toBe(true);
+
+    port.continuePlaying();
+
+    expect(port.isGameTerminated()).toBe(false);
+    expect(port.serialize().keepPlaying).toBe(true);
+    expect(port.serialize().won).toBe(true);
   });
 
   it('takes exactly the four directions and nothing wider', () => {
-    const run = drive({ observe: false });
+    const { port } = composedPort(createMergePairBoard());
     const directions: readonly MoveDirection[] = [0, 1, 2, 3];
 
+    // The union is the four values src/engine/types.ts declares, restated by the
+    // port rather than widened to `number`.
+    expect(directions).toEqual([
+      DIRECTION_UP,
+      DIRECTION_RIGHT,
+      DIRECTION_DOWN,
+      DIRECTION_LEFT,
+    ]);
+
     for (const direction of directions) {
-      expect(run.engine.port.move(direction)).toBe(true);
+      expect(typeof port.move(direction)).toBe('boolean');
     }
 
-    expect(run.engine.moves).toEqual([0, 1, 2, 3]);
+    // And the return is the real resolution rather than a constant: the merge
+    // pair moves left, and the board it leaves cannot move left again.
+    const settled = compose({ setup: false });
+    const fresh: EnginePort = settled.engine;
+
+    fresh.setup(createMergePairBoard());
+
+    expect(fresh.move(DIRECTION_LEFT)).toBe(true);
+    expect(fresh.serialize().score).toBeGreaterThan(0);
+  });
+
+  it('restarts through the port, discarding the board in progress', () => {
+    const { port } = composedPort(boardWith(1024));
+
+    expect(port.serialize().grid.cells[0]?.[0]?.value).toBe(1024);
+
+    port.restart();
+
+    const restarted = port.serialize();
+
+    // A fresh board carries the configured start tiles and no 1024.
+    expect(restarted.score).toBe(0);
+    expect(restarted.over).toBe(false);
+    expect(restarted.won).toBe(false);
+    expect(restarted.keepPlaying).toBe(false);
+    expect(
+      restarted.grid.cells
+        .flat()
+        .filter((cell) => cell !== null)
+        .map((cell) => cell?.value),
+    ).not.toContain(1024);
   });
 });

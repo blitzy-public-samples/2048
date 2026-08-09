@@ -1,30 +1,6 @@
 // A WebGL 2 context and a canvas, mocked far enough that Three.js runs.
 //
-// EXTERNAL CONSTRAINT
-//   jsdom implements no canvas rendering context at all — `getContext()` warns
-//   "Not implemented" and returns `null` — so `WebGLRenderer` cannot be
-//   constructed under the unit environment, and every path in
-//   src/render/three-renderer.ts past its `WebGLRenderer` is unreachable
-//   without a stand-in. This fixture reaches the RENDERER'S OWN behaviour: that
-//   a board is generated at the committed size, that a merge queues a burst,
-//   that the parallel accessibility board is mounted and updated. Pixels are
-//   asserted on the real GPU path under tests/e2e/. Decision DL-WEBGL-01.
-//
-// WHAT IT DOES AND DOES NOT GUARANTEE
-//   It guarantees that Three.js constructs, resizes and renders without
-//   throwing. It guarantees nothing about pixels: every draw call returns
-//   `null` and nothing is rasterised. A test that needs to see a pixel belongs
-//   in the recorded-gameplay suite, not here.
-//
-// HOW IT WORKS
-//   Every constant a WebGL context exposes is `SCREAMING_SNAKE_CASE`, and every
-//   method is `camelCase`. The proxy below issues a distinct integer for each
-//   constant the caller reads, remembers which name it issued, and answers every
-//   method it was not given explicitly with a function returning `null`. The
-//   handful of calls whose return value Three.js actually inspects — the version
-//   strings, the shader precision, the program link state and the active
-//   uniform and attribute counts — are answered specifically, because a wrong
-//   answer there is what makes construction throw.
+// Decisions: DL-WEBGL-01 (docs/DECISION_LOG.md).
 
 /** The one method of a context this fixture is asked for. */
 export type MockContextKind = 'webgl2' | 'webgl';
@@ -45,7 +21,6 @@ export interface MockWebGLContext {
  * Builds a WebGL 2 context mock.
  *
  * @returns The context and the two read-back helpers.
- *
  * @example
  * ```ts
  * const { gl } = createMockWebGLContext();
@@ -63,9 +38,7 @@ export function createMockWebGLContext(): MockWebGLContext {
 
   const nameOf = (code: number): string | undefined => constants.get(code);
 
-  // Only these four are inspected by Three.js. Everything else is read for its
-  // presence alone, so answering `32` is enough: it is a plausible limit for
-  // every numeric parameter the capability probe reads.
+  // Only these four are inspected by Three.js.
   const getParameter = (name: number): unknown => {
     const key = nameOf(name);
 
@@ -86,9 +59,7 @@ export function createMockWebGLContext(): MockWebGLContext {
     }
   };
 
-  // A linked program with no uniforms and no attributes. Reporting a non-zero
-  // count here and then answering `getActiveUniform` with `null` is what makes
-  // Three.js throw, so the counts are zero and the enumeration never runs.
+  // A linked program with no uniforms and no attributes.
   const getProgramParameter = (_program: unknown, name: number): unknown => {
     const key = nameOf(name);
 
@@ -200,12 +171,6 @@ const DEFAULT_CANVAS_EXTENT = 500;
 /**
  * Builds a canvas stand-in whose `getContext` answers with a mocked context.
  *
- * A real `<canvas>` from the document is used when one can be created, so the
- * element is a genuine `Element` that `querySelector` finds and `hidden`
- * applies to; `getContext`, `clientWidth` and `clientHeight` are then redefined
- * on that instance, because jsdom implements the first as a warning and the
- * other two as a constant zero.
- *
  * @param options Context, measured size and owning document.
  * @returns The element and its call log.
  */
@@ -285,7 +250,7 @@ export function createMockCanvas(
   }
 
   // No document at all: a plain object carrying the members the renderer and
-  // Three.js read. Used by the dom-free project.
+  // Three.js read.
   const element = {
     width,
     height,

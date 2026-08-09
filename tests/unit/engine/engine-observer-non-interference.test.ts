@@ -1,34 +1,28 @@
 // Observer semantics suite of src/engine/engine.ts and
 // src/engine/engine-events.ts.
 //
-// It pins the boundary AAP Contract 1 draws. A payload carries the LIVE `Grid`
-// and the LIVE `Tile` pair, so a listener CAN reach engine state; what keeps a
-// turn reproducible is that the engine reads nothing back off a payload except
-// the one member the contract declares cancellable. This suite pins both
-// halves:
+// the sanctioned channel — `move:before.cancelled`, which a listener may set
+// and the engine reads back, so a listener withdraws a move exactly as an
+// `onBeforeMove` handler does.
 //
-//   the sanctioned channel — `move:before.cancelled`, which a listener may set
-//   and the engine reads back, so a listener withdraws a move exactly as an
-//   `onBeforeMove` handler does;
-//
-//   everything else — neither a listener's presence, nor its registration
-//   order, nor a write it makes to a member the engine does not read back
-//   changes what a turn does, established by running the same move twice and
-//   comparing the results.
+// everything else — neither a listener's presence, nor its registration order,
+// nor a write it makes to a member the engine does not read back changes what
+// a turn does, established by running the same move twice and comparing the
+// results.
 //
 // The privileged path is asserted alongside: an `onBeforeMove` hook handler
 // can also REDIRECT a move, which a listener cannot.
 //
 // This suite reads no DOM and no storage; the storage port is a hand-written
-// double. It consumes randomness only through a seeded run, so every run
-// below is reproducible. It runs in the `unit:dom-free` project of
-// vitest.config.ts.
+// double. It consumes randomness only through a seeded run, so every run below
+// is reproducible. It runs in the `unit:dom-free` project of vitest.config.ts.
 
 import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_RULES_CONFIG } from '../../../src/config/default-config';
 import { Engine } from '../../../src/engine/engine';
 import type { EngineStoragePort } from '../../../src/engine/engine';
+import type { EngineEventSubscription } from '../../../src/engine/engine-events';
 import { createHookBus } from '../../../src/engine/hook-bus';
 import type {
   ChargeConsumption,
@@ -88,7 +82,7 @@ function createEngine(): Engine {
  * The result of one turn, in the terms two engines are compared by.
  *
  * @param engine Engine to read.
- * @param moved What its `move()` returned.
+ * @param moved What its `move` returned.
  * @returns The comparable result.
  */
 function resultOf(
@@ -107,7 +101,7 @@ function resultOf(
 }
 
 describe('a listener changes a turn only through the cancellable member ' +
-  '(F1)', () => {
+  '', () => {
   it('resolves the same move whether or not a listener is registered', () => {
     const plain = createEngine();
     const observed = createEngine();
@@ -136,8 +130,6 @@ describe('a listener changes a turn only through the cancellable member ' +
     const plainResult = resultOf(plain, plain.move(DIRECTION_LEFT));
     const vetoedResult = resultOf(vetoing, vetoing.move(DIRECTION_LEFT));
 
-    // AAP Contract 1 declares `move:before` cancellable, so this listener is
-    // exercising the contract rather than defeating it.
     expect(plainResult.moved).toBe(true);
     expect(vetoedResult.moved).toBe(false);
     expect(vetoing.serialize()).toEqual(before);
@@ -262,7 +254,7 @@ describe('a listener changes a turn only through the cancellable member ' +
   });
 });
 
-describe('an onBeforeMove hook handler is the privileged path (F1)', () => {
+describe('an onBeforeMove hook handler is the privileged path', () => {
   it('withdraws the move and changes no state', () => {
     const engine = createEngine();
     const before = engine.serialize();
@@ -341,7 +333,7 @@ describe('an onBeforeMove hook handler is the privileged path (F1)', () => {
   });
 });
 
-describe('the engine is the authoritative spawn-attempt boundary (F7)', () => {
+describe('the engine is the authoritative spawn-attempt boundary', () => {
   /**
    * Counts the tiles a serialised board holds.
    *
@@ -366,12 +358,6 @@ describe('the engine is the authoritative spawn-attempt boundary (F7)', () => {
    * Wraps a bus so every `onSpawn` dispatch resolves to one fixed cell,
    * whatever the wrapped bus decided.
    *
-   * Every other member delegates, so the engine holds a bus that behaves
-   * exactly like the production one apart from that single substitution. It
-   * is the only way to hand the engine a spawn cell the production bus would
-   * refuse, and therefore the only way to exercise the engine's own bounds
-   * guard.
-   *
    * @param inner Bus to delegate to.
    * @param cell Cell every `onSpawn` dispatch resolves to.
    * @param isActive Reports whether the substitution is in force, so the
@@ -384,6 +370,13 @@ describe('the engine is the authoritative spawn-attempt boundary (F7)', () => {
     isActive: () => boolean,
   ): HookBus {
     return {
+      // Delegated rather than re-created: the shared engine-event channel and
+      // its relay belong to the wrapped bus, so a peer subscribed through the
+      // wrapper reaches the same channel the engine's own events reach.
+      events: inner.events,
+      attachEvents: (source): EngineEventSubscription =>
+        inner.attachEvents(source),
+
       register: (subscriber): boolean => inner.register(subscriber),
       unregister: (id): boolean => inner.unregister(id),
 
@@ -525,7 +518,7 @@ describe('the engine is the authoritative spawn-attempt boundary (F7)', () => {
     ]);
 
     // The event is still emitted, carrying no position, so a subscriber sees
-    // the resolution. Attempts are counted above and not from this emission.
+    // the resolution.
     expect(emitted).toEqual([undefined]);
   });
 
@@ -537,10 +530,6 @@ describe('the engine is the authoritative spawn-attempt boundary (F7)', () => {
     // resolves against is the ordinary one.
     let offBoard = false;
 
-    // The production bus refuses an off-board cell for itself — it validates
-    // an `onSpawn` return against the environment's grid size — so this
-    // reaches the engine's OWN guard, which exists because the bus is an
-    // injected collaborator and the engine cannot assume which one it holds.
     const engine = createCountingEngine(counts, (inner: HookBus): HookBus =>
       createOffBoardSpawnBus(
         inner,
@@ -564,16 +553,16 @@ describe('the engine is the authoritative spawn-attempt boundary (F7)', () => {
 
     expect(engine.move(DIRECTION_LEFT)).toBe(true);
 
-    // `withinBounds` refuses the cell, so the attempt inserted nothing and
-    // is counted as suppressed.
+    // `withinBounds` refuses the cell, so the attempt inserted nothing and is
+    // counted as suppressed.
     expect(counts).toEqual([
       'engine.spawn.attempt',
       'engine.spawn.suppressed',
     ]);
 
     // AND the emission carries no position, so a subscriber counting the
-    // emissions that carry one counts tiles inserted exactly, and a
-    // subscriber drawing the position never draws a cell off the board.
+    // emissions that carry one counts tiles inserted exactly, and a subscriber
+    // drawing the position never draws a cell off the board.
     expect(emitted).toEqual([undefined]);
 
     const after = engine.serialize().grid;
@@ -586,10 +575,7 @@ describe('the engine is the authoritative spawn-attempt boundary (F7)', () => {
       occupiedCells(before),
     );
 
-    // An off-board cell and no cell at all are the SAME outcome. A control
-    // run on the same seed, suppressed the reachable way, leaves the
-    // identical board — so the guard neither placed the tile somewhere else
-    // nor perturbed the run.
+    // An off-board cell and no cell at all are the SAME outcome.
     const controlCounts: string[] = [];
     const control = createCountingEngine(controlCounts);
 
@@ -606,7 +592,7 @@ describe('the engine is the authoritative spawn-attempt boundary (F7)', () => {
   });
 });
 
-describe('a relic handler that throws does not perturb a seeded run (F2)',
+describe('a relic handler that throws does not perturb a seeded run',
   () => {
     /** Twelve moves, in the order the run below plays them. */
     const MOVES: readonly (0 | 1 | 2 | 3)[] = [
@@ -663,7 +649,7 @@ describe('a relic handler that throws does not perturb a seeded run (F2)',
     });
   });
 
-describe('an injected span wrapper does not perturb a seeded run (F2)', () => {
+describe('an injected span wrapper does not perturb a seeded run', () => {
   /** Twelve moves, in the order each run below plays them. */
   const MOVES: readonly (0 | 1 | 2 | 3)[] = [
     3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2,

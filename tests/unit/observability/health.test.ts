@@ -1,51 +1,14 @@
 // Unit suite over src/observability/health.ts: the six capability checks, the
 // three-state check status, the report roll-up and the two readiness verdicts.
 //
-// Validation gate V8 bullet 4 — "Health reports all six checks: the five
-// capability probes the product already performs but never reports, plus the
-// new WebGL probe" — is measured here. Of implicit requirement I6, this suite
-// covers one branch: the health and readiness verdict a missing WebGL context
-// produces. The renderer, composition and settings suites cover the
-// no-context and number-only rendering paths.
-//
-// Provenance of the five reused probes, from the deleted vanilla sources, in
-// HEALTH_CHECK_IDS order:
-//   functionBind           js/bind_polyfill.js L1
-//   classList              js/classlist_polyfill.js L2-L5
-//   requestAnimationFrame  js/animframe_polyfill.js L3-L10 and L23
-//   pointerEvents          js/keyboard_input_manager.js L4-L13
-//   storage                js/local_storage_manager.js L29-L40
-// The sixth check, webgl, has no vanilla origin.
-//
 // The storage strategy is fixed once, at construction:
-// js/local_storage_manager.js L26,
-// `this.storage = supported ? window.localStorage : window.fakeStorage`.
-//
-// Rows of docs/TRACEABILITY_MATRIX.md this suite is the executable evidence
-// for, one apiece. Each `describe` below is named after the HealthCheckId it
-// covers, so a matrix reader locates the proof by id:
-//   TR-HEALTH-01  the `functionBind` check
-//   TR-HEALTH-02  the `classList` check
-//   TR-HEALTH-03  the `requestAnimationFrame` pair
-//   TR-HEALTH-04  the `pointerEvents` check
-//   TR-HEALTH-05  the `storage` check
-//   TR-HEALTH-06  the added `webgl` check
-//   TR-HEALTH-07  the report roll-up and the two readiness verdicts
-//   TR-HEALTH-08  the per-check logger record and status gauge
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-HEALTH-06  the WebGL probe's negative branch as this suite's fixture
-//   DL-HEALTH-07  the unit boundary of this suite: health.ts alone, with
-//                 src/observability/diagnostics-overlay.ts not exercised here
+// js/local_storage_manager.js L26, `this.storage = supported ?
+// window.localStorage: window.fakeStorage`.
 //
 // Subject: src/observability/health.ts.
 // src/observability/diagnostics-overlay.ts is not exercised here.
 //
-// Imports are `vitest` and the modules under test. No DOM library is named:
-// vitest.config.ts selects the environment, and every assertion below reads a
-// capability rather than an implementation. `three` is not imported, matching
-// src/render/webgl-support.ts, which imports nothing.
+// Decisions: DL-HEALTH-06, DL-HEALTH-07 (docs/DECISION_LOG.md).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -104,7 +67,6 @@ import { resetWebGLSupportProbe } from '../../../src/render/webgl-support';
 // Status and identity constants, named through the imported unions
 
 // Typed through the imported union: a renamed member is a compile error here.
-// Every status assertion below names one of these three and negates none.
 const PASS: HealthStatus = 'pass';
 const FAIL: HealthStatus = 'fail';
 const NOT_APPLICABLE: HealthStatus = 'not-applicable';
@@ -138,8 +100,7 @@ const NO_CONTEXT_PROBE = (): WebGLProbeView => ({
 
 /**
  * A `StorageLike` whose `setItem` throws the quota rejection a full store
- * raises. Drives the supported-but-write-failed branch of the reused
- * writability probe.
+ * raises.
  *
  * @returns The store. Every other member is a no-op.
  */
@@ -161,11 +122,11 @@ function createQuotaExhaustedStorage(): StorageLike {
 }
 
 /**
- * A `Logger` whose every emitting member throws, and whose `child()` returns
+ * A `Logger` whose every emitting member throws, and whose `child` returns
  * itself so the surface's own child is faulty too.
  *
- * @returns The logger. The non-emitting members delegate to a real logger, so
- *   the correlation identifier and the level behave normally.
+ * @returns The logger. The non-emitting members delegate to a real logger,
+ *   so the correlation identifier and the level behave normally.
  */
 function createThrowingLogger(): Logger {
   const base = createLogger({
@@ -247,9 +208,6 @@ function createContextCanvas(level: string): ContextCanvas {
 /**
  * Reads the status gauge series the surface wrote, keyed by check id.
  *
- * Read from the snapshot: `MetricsRegistry.gauge()` creates a series it does not
- * find, so it would report every id as present. Decision DL-HEALTH-07.
- *
  * @param metrics Registry to read.
  * @returns Gauge value per check id, for the health status family only.
  */
@@ -324,8 +282,6 @@ function requireCheck(
 /**
  * Reads one member off a result's structured data bag.
  *
- * Typed `unknown` so every assertion against it states the type it expects.
- *
  * @param result Result to read.
  * @param key Member to read.
  * @returns The value, or `undefined` when the bag carries no such member.
@@ -350,14 +306,7 @@ let logger: Logger;
 let metrics: MetricsRegistry;
 let surface: HealthSurface;
 
-/**
- * Removes every storage key the product owns, plus the probe key.
- *
- * `OWNED_STORAGE_KEYS` carries the durable keys; `STORAGE_PROBE_KEY` is
- * absent from that list because the probe removes its own key, and is swept
- * here so a probe interrupted mid-round-trip leaves nothing behind. No
- * literal key name appears at this call site.
- */
+/** Removes every storage key the product owns, plus the probe key. */
 function clearProductStorage(): void {
   const store: unknown = globalThis.localStorage;
 
@@ -371,8 +320,8 @@ function clearProductStorage(): void {
     try {
       writable.removeItem(key);
     } catch {
-      // A store that refuses removal is a case under test; the sweep
-      // continues to the remaining keys.
+      // A store that refuses removal is a case under test; the sweep continues
+      // to the remaining keys.
     }
   }
 }
@@ -720,8 +669,6 @@ describe('webgl', () => {
 });
 
 
-// The reuse is real, asserted by wiring rather than by outcome
-
 describe('reuse of the probes their owners perform', () => {
   it('routes the storage check through probeWebStorage', () => {
     const spy = vi.spyOn(storageModule, 'probeWebStorage');
@@ -845,8 +792,8 @@ describe('probing reads a capability and installs none', () => {
   });
 
   it('leaves no probe-key residue in storage', () => {
-    // The reused probe writes STORAGE_PROBE_KEY and removes it again, so
-    // the key is absent once the check has run.
+    // The reused probe writes STORAGE_PROBE_KEY and removes it again, so the
+    // key is absent once the check has run.
     surface.check();
 
     expect(window.localStorage.getItem(STORAGE_PROBE_KEY)).toBeNull();
@@ -877,8 +824,8 @@ describe('the three-state check status', () => {
 
   it('observes pass, fail and not-applicable within one report', () => {
     // js/classlist_polyfill.js L2-L3 is one `if` whose two conditions mean
-    // opposite things: an absent Element is the no-DOM bail-out, and a
-    // refused write is a genuine failure.
+    // opposite things: an absent Element is the no-DOM bail-out, and a refused
+    // write is a genuine failure.
     vi.stubGlobal('Element', undefined);
     vi.stubGlobal('localStorage', createQuotaExhaustedStorage());
 
@@ -947,8 +894,6 @@ describe('the report roll-up', () => {
   });
 
   it('follows one rule across every reachable combination of counts', () => {
-    // The documented rule: a failure dominates; otherwise a pass; otherwise
-    // every check was inapplicable.
     const cases: HealthSurface[] = [
       // Five passes and the environment's failing WebGL check.
       createHealthSurface({ logger, metrics }),
@@ -973,7 +918,6 @@ describe('the report roll-up', () => {
         }),
       }),
 
-      // Two failures rather than one.
       createHealthSurface({
         logger,
         metrics,
@@ -1009,10 +953,6 @@ describe('the report roll-up', () => {
 
     const report = surface.check();
 
-    // The identifier is read on every report rather than captured at
-    // construction, so the probes of a second run are attributed to the second
-    // run — the surface, the report it returns and the readiness projection all
-    // answer with the rotated scope.
     expect(surface.correlationId).toBe('health-second-run');
     expect(report.correlationId).toBe('health-second-run');
     expect(surface.readiness().correlationId).toBe('health-second-run');
@@ -1020,8 +960,7 @@ describe('the report roll-up', () => {
 
   it('reports the empty identifier when the logger refuses the read', () => {
     // The surface logs through a CHILD of the injected logger, so the child is
-    // where the correlation read has to be made hostile. Both objects delegate
-    // every other member to the real logger.
+    // where the correlation read has to be made hostile.
     const hostileChild = Object.create(logger.child('health')) as Logger;
 
     Object.defineProperty(hostileChild, 'correlationId', {
@@ -1039,7 +978,8 @@ describe('the report roll-up', () => {
     const guarded = createHealthSurface({ logger: hostile, metrics });
 
     // Every member of the surface is total, so the refused read yields the
-    // empty string and neither the getter nor the two reports raise through it.
+    // empty string and neither the getter nor the two reports raise through
+    // it.
     expect(() => guarded.correlationId).not.toThrow();
     expect(guarded.correlationId).toBe('');
     expect(guarded.check().correlationId).toBe('');
@@ -1350,7 +1290,7 @@ describe('the live storage strategy in the readiness verdict', () => {
     // The contradiction boundary. `StorageStateView` is injected, so a view
     // naming `'localStorage'` beside a probe result that did not pass is
     // type-valid — and deriving persistence from the NAME alone reported that
-    // state as persistent and ready. Both halves are required.
+    // state as persistent and ready.
     const contradictory: StorageStateView = {
       probe: {
         supported: false,
@@ -1761,9 +1701,6 @@ describe('the log record every check is reported through', () => {
 });
 
 // Construction, and the state a surface holds before it is used
-/* ==========================================================================
- * 11a. The failure matrix: one branch driven at a time
- * ========================================================================== */
 
 describe('a probe that throws, driven one check at a time', () => {
   /**
@@ -1853,7 +1790,6 @@ describe('a probe that throws, driven one check at a time', () => {
 
     expectOnlyOneThrew(report as HealthReport, STORAGE, message);
 
-    // The readiness verdict follows the failed check rather than throwing.
     const verdicts = throwing.readiness();
 
     expect(verdicts.storageStatus).toBe(FAIL);
@@ -1933,10 +1869,6 @@ describe('the capability branches no probe injection reaches', () => {
   });
 
   it('reports classList fail where Element is present, the API absent', () => {
-    // The one branch that is a genuine FAIL rather than the third state: the
-    // host offers window, Element and a document, and `classList` is absent
-    // from the root element — which is exactly the condition
-    // js/classlist_polyfill.js L2-L5 shimmed.
     const root = document.documentElement;
     const shimmed = Object.create(null) as Record<string, unknown>;
 
@@ -1993,19 +1925,11 @@ describe('a metrics registry whose write paths throw', () => {
    * A registry whose two health write paths throw and whose every other member
    * delegates to a real one.
    *
-   * `recordHealthCheck` carries `'pass'` and `'fail'`; `gauge` carries the
-   * third state. Both are made to throw here, because a surface that reports
-   * one status through a working path and another through a throwing one would
-   * hide half the containment.
-   *
    * @returns The registry.
    */
   const createThrowingMetrics = (): MetricsRegistry => {
     const base = createMetricsRegistry({ logger });
 
-    // Spied rather than rebuilt: `MetricsRegistry` is a class, so an object
-    // literal cannot satisfy it, and `restoreMocks` in vitest.config.ts undoes
-    // both replacements after every test.
     vi.spyOn(base, 'gauge').mockImplementation((): never => {
       throw new Error('The registry refused a gauge.');
     });
@@ -2071,8 +1995,6 @@ describe('a metrics registry whose write paths throw', () => {
   });
 
   it('counts the third-state write path as well, and still returns', () => {
-    // `'not-applicable'` goes through `gauge` rather than `recordHealthCheck`,
-    // so this drives the other of the two write paths.
     vi.stubGlobal('Element', undefined);
 
     const resilient = createHealthSurface({
@@ -2104,10 +2026,6 @@ describe('a metrics registry whose write paths throw', () => {
     expect(verdicts?.correlationId).toBe(CORRELATION_ID);
   });
 });
-
-/* ==========================================================================
- * 12. Construction, and the state a surface holds before it is used
- * ========================================================================== */
 
 describe('construction', () => {
   it('probes nothing and reports nothing', () => {
@@ -2165,17 +2083,10 @@ describe('construction', () => {
 });
 
 
-/* ==========================================================================
- * 12b. The health panel a diagnostics surface renders from this one
- * ========================================================================== */
-
 // CROSS-MODULE, on purpose. Every case above verifies this surface in
 // isolation, and isolation is exactly what let the three-state status be lost
 // at the boundary: the compatibility reader collapsed `not-applicable` into a
-// boolean, and the panel that consumed the boolean showed a pass. These cases
-// pass a REAL surface and a REAL reader into the real diagnostics overlay and
-// reconcile what is rendered, what the snapshot carries, and what the exported
-// gauge says.
+// boolean, and the panel that consumed the boolean showed a pass.
 
 describe('the health panel rendered from a real surface', () => {
   let host: HTMLElement;
@@ -2234,8 +2145,6 @@ describe('the health panel rendered from a real surface', () => {
     const health = built.snapshot().health;
     const row = health.checks.find((entry) => entry.id === CLASS_LIST);
 
-    // The panel used to show `pass` here: the reader answered `healthy: true`
-    // for an inapplicable check and the panel had nothing else to read.
     expect(row?.status).toBe(NOT_APPLICABLE);
     expect(panelText()).toContain(NOT_APPLICABLE);
     expect(health.counts[NOT_APPLICABLE]).toBeGreaterThan(0);
@@ -2271,8 +2180,6 @@ describe('the health panel rendered from a real surface', () => {
     const built = openOverlay(surface);
     const health = built.snapshot().health;
 
-    // The function-shaped reader leaves both of these null; the surface does
-    // not, which is what makes readiness reachable at all.
     expect(health.report).not.toBeNull();
     expect(health.readiness).not.toBeNull();
     expect(health.report?.checks).toHaveLength(HEALTH_CHECK_COUNT);
@@ -2287,9 +2194,7 @@ describe('the health panel rendered from a real surface', () => {
   });
 
   it('writes a gauge for a check the source did not report at all', () => {
-    // A partial source: one row, five checks unreported. The panel appends the
-    // five as inapplicable, and each has to carry its own gauge or the panel
-    // and the export disagree about a check nobody reported.
+    // A partial source: one row, five checks unreported.
     const built = openOverlay(
       (): readonly HealthCheckResultView[] => [
         { name: WEBGL, status: FAIL, healthy: false, detail: 'no context' },
@@ -2333,10 +2238,6 @@ describe('the health panel rendered from a real surface', () => {
 });
 
 
-/* ==========================================================================
- * 13. Leak audit: this suite leaves the host as it found it
- * ========================================================================== */
-
 // Leak audit: this suite leaves the host as it found it
 
 describe('isolation from the suites that follow', () => {
@@ -2356,8 +2257,8 @@ describe('isolation from the suites that follow', () => {
   });
 
   it('leaves the global store writable and free of the product keys', () => {
-    // No member of js/local_storage_manager.js removed the best score, and
-    // no member of the port does either; the teardown above removes it.
+    // No member of js/local_storage_manager.js removed the best score, and no
+    // member of the port does either; the teardown above removes it.
     expect(storageModule.probeWebStorage().supported).toBe(true);
     expect(window.localStorage.getItem(BEST_SCORE_KEY)).toBeNull();
     expect(window.localStorage.getItem(GAME_STATE_KEY)).toBeNull();
@@ -2390,13 +2291,9 @@ describe('isolation from the suites that follow', () => {
   });
 });
 
-/* ==========================================================================
- * A settings bag outside the declared type
- * ========================================================================== */
-
 describe('a settings argument that is not an object', () => {
   it('constructs from an explicit null as it does from no argument', () => {
-    // A DEFAULT PARAMETER STANDS IN FOR `undefined` ALONE, so an explicit
+    // A default parameter stands in for `undefined` ALONE, so an explicit
     // `null` reached the collaborator reads and raised out of construction.
     const surface = createHealthSurface(null as never);
 

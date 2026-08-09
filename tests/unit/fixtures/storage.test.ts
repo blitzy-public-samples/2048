@@ -2,32 +2,6 @@
 // persistence teardown vitest.config.ts loads as a setup file for both unit
 // projects.
 //
-// Why the setup module carries a suite of its own: its `afterEach` is the only
-// thing that removes a best score between tests, and no member of the vanilla
-// manager ever did. A regression in it would not fail any suite — it would let
-// one test's best score leak into every later test, and the leak would surface
-// as an unrelated failure somewhere else. Every export is therefore asserted
-// here directly, against an enumerable store that records the operations it
-// receives, so a skipped removal or a lazily read key list is visible.
-//
-// Provenance of the behaviour the subject compensates for:
-//   js/local_storage_manager.js L25-L26  the writability probe runs once, at
-//                                       construction, so a fixture written
-//                                       afterwards is not observed
-//   js/game_manager.js L36               setup() reads the snapshot once
-//   js/local_storage_manager.js L61-L63  clearGameState() removes the snapshot;
-//                                       no member removes the best score
-//   js/local_storage_manager.js L43-L45  a stored best score reads back as the
-//                                       stored string
-//   js/local_storage_manager.js L57-L59  setGameState() persists
-//                                       JSON.stringify(state)
-//
-// The host store is replaced per test and restored per test: `vi.stubGlobal`
-// for a store this suite supplies, and a saved property descriptor for the two
-// cases where reading `globalThis.localStorage` must be absent or must throw.
-// The local `afterEach` restores the host before the setup module's own
-// `afterEach` runs, so that teardown always sweeps the real store.
-//
 // Collected by the unit:dom project in vitest.config.ts, which runs under
 // jsdom and supplies Web Storage.
 //
@@ -56,8 +30,6 @@ import {
 } from '../../../src/storage/storage-keys';
 import { createMergePairBoard } from '../../fixtures/boards';
 
-/* ===== 1. Fixed values ===== */
-
 /** Property the subject reads the host store from. */
 const HOST_STORAGE_PROPERTY = 'localStorage';
 
@@ -76,8 +48,6 @@ const FOREIGN_VALUE = 'untouched';
 /** A key the product does not own, offered to `seedOwnedStorage`. */
 const UNOWNED_SEED_KEY = 'theme';
 
-/* ===== 2. The recording store ===== */
-
 /** Members of the recording store configured to throw. */
 interface StorageFaults {
   /** Keys whose removal throws, each mapped to the value it throws. */
@@ -89,10 +59,6 @@ interface StorageFaults {
 
 /**
  * An enumerable `EnumerableStorage` that records every operation it receives.
- *
- * Backed by a `Map`, so `key(index)` reports insertion order and reflects a
- * removal immediately: a caller that removed while indexing would skip an
- * entry, and the sweep assertions below detect exactly that.
  */
 class RecordingStorage implements EnumerableStorage {
   /** Every operation received, as `member` or `member:key`, in call order. */
@@ -169,8 +135,6 @@ class RecordingStorage implements EnumerableStorage {
   }
 }
 
-/* ===== 3. Host installation and restoration ===== */
-
 /**
  * Installs `store` as the host Web Storage for the current test.
  *
@@ -207,7 +171,9 @@ function replaceStorageDescriptor(descriptor: PropertyDescriptor): void {
   });
 }
 
-/** Removes the host store for the current test, as a DOM-free host has none. */
+/**
+ * Removes the host store for the current test, as a DOM-free host has none.
+ */
 function removeHostStorage(): void {
   replaceStorageDescriptor({ value: undefined, writable: true });
 }
@@ -245,8 +211,6 @@ function restoreHostStorage(): void {
   savedStorageDescriptor = undefined;
 }
 
-// Runs before the setup module's own `afterEach`, so that sweep always sees the
-// real host store rather than a double this suite installed.
 afterEach(restoreHostStorage);
 
 /**
@@ -265,11 +229,6 @@ function operationsOn(store: RecordingStorage, member: string): string[] {
 /**
  * The recorded operations that address an entry, in call order.
  *
- * The two enumeration members are dropped: `getWebStorage()` reads `length`
- * while checking the store's shape, and the owned-key sweep reads `length` and
- * `key()` per index, so neither says anything about which entries were
- * touched.
- *
  * @param store Store to read the record from.
  * @returns Every `getItem`, `setItem` and `removeItem` call, in call order.
  */
@@ -281,8 +240,6 @@ function entryOperations(store: RecordingStorage): string[] {
       operation.startsWith('removeItem:'),
   );
 }
-
-/* ===== 4. getWebStorage ===== */
 
 describe('getWebStorage', () => {
   it('returns the host store when the environment offers one', () => {
@@ -332,8 +289,6 @@ describe('getWebStorage', () => {
   });
 });
 
-/* ===== 5. serializeGameState ===== */
-
 describe('serializeGameState', () => {
   it('produces exactly the text setGameState() persisted', () => {
     const board = createMergePairBoard();
@@ -348,8 +303,6 @@ describe('serializeGameState', () => {
     expect(restored).toStrictEqual(board);
   });
 });
-
-/* ===== 6. seedOwnedStorage ===== */
 
 describe('seedOwnedStorage', () => {
   it('writes every entry verbatim under the key it names', () => {
@@ -436,8 +389,6 @@ describe('seedOwnedStorage', () => {
   });
 });
 
-/* ===== 7. seedThenConstruct ===== */
-
 describe('seedThenConstruct', () => {
   it('seeds before the subject is constructed', () => {
     const store = installStore(new RecordingStorage());
@@ -494,8 +445,6 @@ describe('seedThenConstruct', () => {
   });
 });
 
-/* ===== 8. readOwnedStorage ===== */
-
 describe('readOwnedStorage', () => {
   it('reads a seeded value back as the exact stored string', () => {
     installStore(new RecordingStorage());
@@ -533,8 +482,6 @@ describe('readOwnedStorage', () => {
     expect(readOwnedStorage(GAME_STATE_KEY)).toBeNull();
   });
 });
-
-/* ===== 9. clearOwnedStorage ===== */
 
 describe('clearOwnedStorage', () => {
   it('removes every durable owned key, the best score included', () => {
@@ -605,9 +552,6 @@ describe('clearOwnedStorage', () => {
 
     clearOwnedStorage();
 
-    // Every index is read before the first removal, and every owned key is
-    // then removed: an implementation that removed while indexing would leave
-    // the second and later keys behind.
     const firstRemoval = store.operations.indexOf(
       `removeItem:${BEST_SCORE_KEY}`,
     );
@@ -729,8 +673,6 @@ describe('clearOwnedStorage', () => {
     );
   });
 });
-
-/* ===== 10. The teardown this module registers as a setup file ===== */
 
 describe('the registered persistence teardown', () => {
   it('leaves the host store free of every owned key it seeded', () => {

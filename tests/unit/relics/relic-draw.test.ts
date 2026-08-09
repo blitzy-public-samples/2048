@@ -1,61 +1,17 @@
 // The seeded reward draw: `drawRelicOffers` and `eligibleRelics` of
 // src/relics/relic-draw.ts.
 //
-// Measures AAP validation gate V6 row 6, "Reward set of three: never contains
-// duplicates", and the seeded half of AAP 0.1.2.5's second key flow, identical
-// relic draws from one seed. AAP Contract 6 fixes the mechanism:
-// rarity-weighted sampling WITHOUT replacement across the `relic-draw` and
-// `rarity-weight` substreams.
-//
-// The without-replacement property is asserted STRUCTURALLY. A three-relic pool
-// asked for three offers must return all three, once each, for every seed
+// The without-replacement property is asserted STRUCTURALLY. A three-relic
+// pool asked for three offers must return all three, once each, for every seed
 // below; no repetition loop and no statistical threshold stands in for that
 // proof.
-//
-// PROVENANCE
-//   Every generator reached here is a LOCAL INSTANCE built from a literal seed.
-//   Nothing in this file assigns to, wraps or reads `Math.random`; the global
-//   never-patched invariant belongs to tests/unit/rng/math-random-guard.test.ts
-//   and is not restated here. Section 4 carries the module-level source
-//   assertion alone.
-//   The two audited vanilla randomness sites are js/game_manager.js L71, the
-//   spawn value, and js/grid.js L41, the spawn position. A reward draw reaches
-//   neither, and the cursor assertions of section 4 are what measures that.
-//
-// TRACEABILITY (docs/TRACEABILITY_MATRIX.md)
-//   `relic-draw` and `rarity-weight` are TARGET-ONLY substreams: no vanilla
-//   construct drew for a reward, so their rows carry no source anchor. The two
-//   substreams this suite proves untouched do carry one each: `spawn-value`
-//   maps to js/game_manager.js L71 and `spawn-position` to js/grid.js L41.
-//
-// FIGURES THIS SUITE IS THE MECHANICAL PROOF OF
-//   Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
-//   Substreams", of docs/architecture/data-flow.md, whose `relic-draw` and
-//   `rarity-weight` edges feed the `Sample 3 without replacement` node that
-//   produces the `Reward offer set, no duplicates`, and whose legend records
-//   that substream separation is what lets a relic draw without shifting the
-//   spawn sequence.
-//   Figure 6, "Screen Flow State Machine: Run Start to Run Summary", whose
-//   Reward note records that three cards are drawn without replacement so no
-//   duplicate can appear in one set.
 //
 // Collected by the unit:dom-free project of vitest.config.ts, environment
 // 'node'. Nothing here reads a document, a Web Storage global, a clock, a
 // timer or a network; no snapshot artifact is written, and reporting reaches
 // this file only through an injected sink.
 //
-// COVERAGE BOUNDARIES THIS SUITE STAYS INSIDE
-//   The catalogue's own shape is tests/unit/relics/relic-registry.test.ts, the
-//   substream derivation and the draw arithmetic are tests/unit/rng/*.test.ts,
-//   the reward transaction is tests/unit/relics/reward-resolution.test.ts, and
-//   the recorded offer sequences are tests/snapshot/, run under
-//   vitest.snapshot.config.ts.
-//
-// Decisions behind the module under test, argued in docs/DECISION_LOG.md and
-// named here only so each construct can be found from the log:
-//   DL-DRAW-01  sampling without replacement
-//   DL-DRAW-02  the two substreams consumed, and no others
-//   DL-DRAW-03  one draw from each substream per offer RETURNED
+// Decisions: DL-DRAW-01, DL-DRAW-02, DL-DRAW-03 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -88,10 +44,6 @@ import {
   deriveStreamSeed,
 } from '../../../src/rng/seeded-rng';
 
-/* ==========================================================================
- * Harness
- * ========================================================================== */
-
 /** Offers one reward screen presents: three cards. */
 const OFFER_COUNT = 3;
 
@@ -104,10 +56,7 @@ const SEED = 'blitzy-relic-draw';
 /** A second seed, distinct from `SEED`. */
 const OTHER_SEED = 'blitzy-relic-draw-beta';
 
-/**
- * Seeds a structural property is asserted against, one assertion per seed.
- * Enumerated literals, so the inputs are identical on every run.
- */
+/** Seeds a structural property is asserted against, one assertion per seed. */
 const SEEDS: readonly string[] = Object.freeze([
   'alpha',
   'beta',
@@ -125,11 +74,7 @@ const CONSUMED_STREAMS: readonly StreamName[] = Object.freeze([
   'rarity-weight',
 ]);
 
-/**
- * Correlation identifier of the run these assertions stand for. Carried by the
- * handler the fixture relics bind and by the reporter injected into a restore,
- * so neither drops it.
- */
+/** Correlation identifier of the run these assertions stand for. */
 const CORRELATION_ID = 'run-blitzy-relic-draw';
 
 /** Every tier weighted out of reach, for an override to build on. */
@@ -142,8 +87,7 @@ const NO_TIER_WEIGHTED: Readonly<Record<Rarity, number>> = Object.freeze({
 
 /**
  * An override that leaves the common tier overwhelmingly likely and the
- * legendary tier reachable in principle alone. Both weights are finite, so
- * `weightOf` honours each as written rather than falling back per key.
+ * legendary tier reachable in principle alone.
  */
 const COMMON_FAVOURED: Readonly<Record<Rarity, number>> = Object.freeze({
   common: 1_000_000,
@@ -152,11 +96,7 @@ const COMMON_FAVOURED: Readonly<Record<Rarity, number>> = Object.freeze({
   legendary: 0.000_001,
 });
 
-/**
- * Handler the fixture relics bind. Carries the dispatch's correlation
- * identifier into the relic's own state slot and returns nothing, so the
- * identifier travels with the dispatch rather than being dropped.
- */
+/** Handler the fixture relics bind. */
 const carryCorrelation: HookHandler<'onAfterMove'> = (_payload, context) => {
   context.state = context.correlationId;
 };
@@ -202,7 +142,9 @@ function drawFrom(
   return drawRelicOffers({ pool, count, streams: createRngStreams(seed) });
 }
 
-/** One rejection a restore reported, tagged with the correlation identifier. */
+/**
+ * One rejection a restore reported, tagged with the correlation identifier.
+ */
 interface TaggedRejection {
   readonly correlationId: string;
   readonly rejection: RngRejection;
@@ -210,8 +152,7 @@ interface TaggedRejection {
 
 /**
  * A reporter that records what a restore refused, tagging every entry with
- * `CORRELATION_ID`. No `console` member is reached, and no observability module
- * is imported: the sink is injected and read by the assertion alone.
+ * `CORRELATION_ID`.
  */
 function recordingReporter(sink: TaggedRejection[]): RngReporter {
   return {
@@ -238,9 +179,8 @@ function candidatesOf(
 
 /**
  * The first offer a PARALLEL pair of substreams selects from `pool` under the
- * default weights: one `rarity-weight` draw over the tiers holding a candidate,
- * then one `relic-draw` draw within the tier that won. Built from `seed` at
- * cursor zero, which is where the draw under test starts.
+ * default weights: one `rarity-weight` draw over the tiers holding a
+ * candidate, then one `relic-draw` draw within the tier that won.
  */
 function firstOfferByParallelStreams(
   pool: readonly Relic[],
@@ -255,7 +195,7 @@ function firstOfferByParallelStreams(
 }
 
 /**
- * The same first offer computed from the DERIVED SUBSTREAM SEEDS directly: the
+ * The same first offer computed from the derived substream seeds directly: the
  * weighted walk src/rng/rng-streams.ts documents applied to one draw of the
  * `rarity-weight` generator, then the index arithmetic applied to one draw of
  * the `relic-draw` generator.
@@ -300,10 +240,6 @@ let streams: RngStreams;
 beforeEach(() => {
   streams = createRngStreams(SEED);
 });
-
-/* ==========================================================================
- * 1. Eligibility: the relics a run does not already hold
- * ========================================================================== */
 
 describe('eligibleRelics', () => {
   it('returns the whole pool, in pool order, for a run holding nothing', () => {
@@ -415,10 +351,6 @@ describe('eligibleRelics', () => {
     expect(cursorsOf(streams)).toEqual(before);
   });
 });
-
-/* ==========================================================================
- * 2. The offer set: sampling WITHOUT replacement
- * ========================================================================== */
 
 describe('drawRelicOffers samples without replacement', () => {
   it('returns all three of a three-relic pool, once each, per seed', () => {
@@ -604,10 +536,6 @@ describe('drawRelicOffers samples without replacement', () => {
 });
 
 
-/* ==========================================================================
- * 3. Rarity weighting
- * ========================================================================== */
-
 describe('drawRelicOffers weights the rarity tiers', () => {
   it('carries a positive finite default weight for every tier', () => {
     for (const rarity of RARITIES) {
@@ -727,8 +655,6 @@ describe('drawRelicOffers weights the rarity tiers', () => {
   it('reaches every tier an override singles out, one tier at a time', () => {
     const pool = oneOfEachTier();
 
-    // Deterministic reachability: each tier is favoured alone, so the tier the
-    // draw resolves to is fixed rather than sampled.
     for (const rarity of RARITIES) {
       const only: Readonly<Record<Rarity, number>> = {
         ...NO_TIER_WEIGHTED,
@@ -799,29 +725,28 @@ describe('drawRelicOffers weights the rarity tiers', () => {
     }
   });
 
-  it('offers the common tier more often than the legendary tier', () => {
-    const pool = oneOfEachTier();
-    const counted = new Map<Rarity, number>();
+  it('gives the common tier the widest weight and the legendary the narrowest',
+    () => {
+      // The weighting is asserted on the weight vector itself and on the
+      // isolated-tier selections above, not on how often a tier came up over a
+      // list of seeds: a tally over any finite seed list reports one sample of
+      // the distribution rather than the distribution.
+      const weights = RARITIES.map(
+        (rarity): number => DEFAULT_RARITY_WEIGHTS[rarity],
+      );
 
-    // Sixty enumerated literal seeds, drawn one offer each. The seed list is
-    // fixed, so this is a fixed computation rather than a sample. The two
-    // deterministic selection assertions above hold the same property.
-    for (let index = 0; index < 60; index += 1) {
-      for (const offered of drawFrom(pool, `frequency-${String(index)}`, 1)) {
-        counted.set(offered.rarity, (counted.get(offered.rarity) ?? 0) + 1);
+      expect(weights).toEqual([...weights].sort((a, b) => b - a));
+      expect(DEFAULT_RARITY_WEIGHTS.common).toBeGreaterThan(
+        DEFAULT_RARITY_WEIGHTS.legendary,
+      );
+
+      for (const weight of weights) {
+        expect(weight).toBeGreaterThan(0);
+        expect(Number.isFinite(weight)).toBe(true);
       }
-    }
-
-    expect(counted.get('common') ?? 0).toBeGreaterThan(
-      counted.get('legendary') ?? 0,
-    );
-  });
+    });
 });
 
-
-/* ==========================================================================
- * 4. Determinism, cursor accounting and substream discipline
- * ========================================================================== */
 
 describe('drawRelicOffers is reproducible from its seed', () => {
   it('offers the same relics, in the same order, from one seed', () => {
@@ -857,8 +782,6 @@ describe('drawRelicOffers is reproducible from its seed', () => {
 
     const after = cursorsOf(streams);
 
-    // Iterated rather than enumerated, so a substream added later is asserted
-    // untouched instead of being ignored.
     for (const name of RNG_STREAM_NAMES) {
       if (CONSUMED_STREAMS.includes(name)) {
         expect(after[name], name).toBeGreaterThan(before[name] ?? 0);
@@ -964,8 +887,8 @@ describe('drawRelicOffers is reproducible from its seed', () => {
       }),
     );
 
-    // Non-vacuous: the captured cursors stand three draws in, so a restore that
-    // silently started over would disagree.
+    // Non-vacuous: the captured cursors stand three draws in, so a restore
+    // that silently started over would disagree.
     expect(captured['relic-draw']).toBe(OFFER_COUNT);
     expect(captured['rarity-weight']).toBe(OFFER_COUNT);
     expect(afterReload).toEqual(continued);
@@ -1015,17 +938,13 @@ describe('drawRelicOffers is reproducible from its seed', () => {
 });
 
 
-/* ==========================================================================
- * 5. Pool order, which a draw resolves its index against
- * ========================================================================== */
-
 describe('drawRelicOffers resolves a draw against pool order', () => {
   it('offers a different relic from a reordered single-tier pool', () => {
     const pool = oneTierOnly('common', 4);
     const reordered = [...pool].reverse();
 
-    // One tier and an even member count: the index a draw resolves to addresses
-    // a different relic in each order, whatever the seed.
+    // One tier and an even member count: the index a draw resolves to
+    // addresses a different relic in each order, whatever the seed.
     for (const seed of SEEDS) {
       const fromPool = drawFrom(pool, seed, 1)[0]?.id;
       const fromReordered = drawFrom(reordered, seed, 1)[0]?.id;
@@ -1062,10 +981,6 @@ describe('drawRelicOffers resolves a draw against pool order', () => {
     );
   });
 });
-
-/* ==========================================================================
- * 6. The caller's own inputs
- * ========================================================================== */
 
 describe('drawRelicOffers leaves the caller inputs as it found them', () => {
   it('leaves the pool length, order and member identities untouched', () => {

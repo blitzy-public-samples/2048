@@ -1,10 +1,16 @@
 # Configuration Reference
 
 The game's rules are not literals in the engine. They are values on two
-configuration objects that the composition root builds once per page and that
-the base game and every relic read from: a `RulesConfig`, declared by
-`src/config/rules-config.ts` and populated by `src/config/default-config.ts`,
-and a `StageConfig`, declared and populated by `src/config/stage-config.ts`.
+configuration objects: a `RulesConfig`, declared by `src/config/rules-config.ts`
+and populated by `src/config/default-config.ts`, and a `StageConfig`, declared
+and populated by `src/config/stage-config.ts`.
+
+The two are **owned differently**, and [1](#1-how-a-configured-value-reaches-its-readers)
+is the section to read before assuming otherwise. The rules object is shared: in
+a composed application `src/main.ts` builds one and hands that same object to
+everything that reads a rule, relics included. The stage configuration is not
+shared that way: the run controller owns the one the run is played against, and
+the engine holds a fallback of its own.
 
 This document is the reference for those three modules. It states what each one
 declares, what every default value is and which line of the retired `js/`
@@ -20,10 +26,11 @@ is stated outright; where it is a choice that could reasonably have gone another
 way, the identifier is the answer.
 
 **Figure numbering in this document is local to it.** Its one figure is
-`Figure C1`. The unprefixed Figures 1 through 8 belong to
-[`docs/architecture/`](architecture/) and to
-[`docs/TRACEABILITY_MATRIX.md`](TRACEABILITY_MATRIX.md); none of them is
-reproduced here.
+`Figure C1`. The unprefixed Figures 1 through 8 belong to `docs/architecture/`
+and `docs/TRACEABILITY_MATRIX.md`, **both of which are planned and have not
+landed at this commit**; none of those figures is reproduced here, and where this
+document names one of those paths it is naming where a subject will be
+documented rather than where it is.
 
 ## Contents
 
@@ -36,13 +43,67 @@ reproduced here.
 
 ## 1. How a configured value reaches its readers
 
-There is exactly one live `RulesConfig` and one live `StageConfig` per
-application. `src/main.ts` builds both — `createDefaultRulesConfig()` and
+The composed application holds exactly one MUTABLE `RulesConfig` and one
+`StageConfig`. `src/main.ts` builds both — `createDefaultRulesConfig()` and
 `createDefaultStageConfig()` — and hands the same two objects to everything that
-needs them. Nothing else calls either factory at runtime.
+needs them, so a relic that changes `boardSize` changes the object every reader
+already holds. Figure C1 is the map of that distribution, from the two factories
+through the composition root to each reader, and back again along the two paths
+that write.
 
-Figure C1 is the map of that distribution, from the two factories through the
-composition root to each reader, and back again along the one path that writes.
+**No other composition calls either factory**, and the two call sites outside
+the root exist for reasons that do not create a second live pair:
+
+- `Engine`'s constructor calls `createDefaultRulesConfig()` as its own fallback
+  when no `config` is injected, so an engine built standalone — in a suite, or
+  in a harness — still has rules. When the root injects a config, that
+  fallback is never evaluated.
+- `src/config/default-config.ts` and `src/config/stage-config.ts` each call
+  their own factory once at module scope to build the deep-frozen `DEFAULT_*`
+  constant beside it. Those constants are references for comparison, not the
+  live objects, and the calls are marked `/* @__PURE__ */` so the bundler can
+  drop them.
+
+A suite may of course call a factory per test; each call returns a fresh
+mutable object, which is the point of a factory rather than a shared singleton.
+
+Two other configuration objects exist, and neither is a second live one:
+
+- **The frozen templates.** `default-config.ts` exports `DEFAULT_RULES_CONFIG`
+  and `stage-config.ts` exports `DEFAULT_STAGE_CONFIG`, each deep-frozen at
+  module scope. They are a reference to compare against and a safe default to
+  share, never a configuration in force: a write to either throws in strict
+  mode, which is what stops one being adopted as the live object by accident.
+- **The engine's own fallbacks.** `EngineOptions` defaults every member but
+  `streams`, so `new Engine({ streams })` calls `createDefaultRulesConfig()` for
+  itself, adopts the frozen `DEFAULT_STAGE_CONFIG` for `stages`, and plays a
+  complete vanilla game. Most suites that exercise the engine in isolation take
+  one or both of those paths, passing a `config` or a `stages` only where the
+  test needs a value other than the default.
+
+The rules fallback does not run in the composed application. `src/main.ts`
+passes its live `RulesConfig` to the engine, to the run-state store and to the
+run controller, so every one of them reads the one object.
+
+The **stage** fallback does run, and knowing where matters. Three readers
+default to the frozen `DEFAULT_STAGE_CONFIG` when they are not given one —
+`Engine`, `RunController` and the run-summary screen — and `src/main.ts` passes
+its live `StageConfig` to `RunController` alone, because the controller is the
+owner of stage progression. The other two therefore hold the frozen template:
+
+- `Engine` reads it in exactly one place. `goalInForce()` consults
+  `stageGoalForIndex` only when the injected stage context supplies a NEUTRAL
+  goal, and in the composed application that context is
+  `RunController.stageContext()`, which carries a real goal — so the template is
+  never consulted there. It is the fallback for an engine composed without a
+  stage owner.
+- The run-summary screen reads it only to derive the goal for a stage the run
+  port does not agree it is showing, which is the second tier of
+  `DL-SUMMARY-06`'s rule.
+
+Because both hold the template rather than a copy, a caller that needs a mutable
+stage configuration passes `createDefaultStageConfig()` explicitly; a write to
+the template throws.
 
 ### Figure C1 — Distribution of the Live Rules and Stage Configuration, from the Factories to Every Reader
 
@@ -50,53 +111,93 @@ composition root to each reader, and back again along the one path that writes.
 graph TD
     SCHEMA["src/config/rules-config.ts<br/>the RulesConfig schema<br/>types only, zero imports"]
     DEF["src/config/default-config.ts<br/>createDefaultRulesConfig"]
-    STG["src/config/stage-config.ts<br/>createDefaultStageConfig<br/>zero imports"]
-    ROOT["src/main.ts<br/>one live RulesConfig<br/>one live StageConfig"]
-    ENG["src/engine/engine.ts<br/>startTiles and boardSize"]
+    STG["src/config/stage-config.ts<br/>createDefaultStageConfig<br/>and DEFAULT_STAGE_CONFIG<br/>zero imports"]
+    ROOT["src/main.ts<br/>the one live RulesConfig<br/>the run's StageConfig"]
+    ENG["src/engine/engine.ts<br/>startTiles and boardSize<br/>plus its OWN fallbacks:<br/>createDefaultRulesConfig<br/>and DEFAULT_STAGE_CONFIG"]
     MR["src/engine/move-resolver.ts<br/>merge.canMerge and merge.produce"]
     TERM["src/engine/terminal-state.ts<br/>winValue and merge.canMerge"]
     GRID["src/engine/grid.ts<br/>the lattice edge length"]
     SPAWN["src/rng/rng-streams.ts pickWeighted<br/>spawn.values and spawn.weights"]
-    BUS["src/engine/hook-bus.ts<br/>ReadonlyRulesView, frozen per dispatch"]
+    BUS["src/engine/hook-bus.ts<br/>ReadonlyRulesView, frozen per dispatch<br/>NO StageConfig"]
     REL["src/relics<br/>every handler, through HookContext.config"]
-    FX["src/engine/board-effects.ts<br/>the only writer of the live rules"]
+    FX["src/engine/board-effects.ts<br/>writes the live rules directly"]
     REND["src/render<br/>board geometry and tile materials"]
-    RUNC["src/run/run-controller.ts<br/>stageGoalForIndex and evaluateStageGoal"]
-    STORE["src/run/run-state-store.ts<br/>board-size reconciliation on load"]
+    RUNC["src/run/run-controller.ts<br/>OWNS the run's StageConfig<br/>stageGoalForIndex and evaluateStageGoal"]
+    STORE["src/run/run-state-store.ts<br/>reconcileBoardSize on load<br/>returns a snapshot, writes no config"]
+    SNAP(["the reconciled board snapshot"])
 
     SCHEMA -.-> DEF
     SCHEMA -.-> ROOT
     DEF --> ROOT
+    DEF -.->|fallback, no argument supplied| ENG
     STG --> ROOT
-    ROOT --> ENG
-    ROOT --> REND
-    ROOT --> STORE
-    ROOT --> RUNC
+    STG -.->|fallback, stages option unwired| ENG
+    ROOT -->|the live rules object| ENG
+    ROOT -->|the live rules object| REND
+    ROOT -->|the live rules object| STORE
+    ROOT -->|the live rules object| RUNC
+    ROOT -->|the run's StageConfig| RUNC
     ENG --> GRID
     ENG --> MR
     ENG --> TERM
     ENG --> SPAWN
     ENG --> BUS
     BUS --> REL
-    REL --> FX
+    REL -->|recorded board effects| FX
     FX -->|writes boardSize, merge.canMerge, spawn.weights| ROOT
-    STORE -->|reconciled boardSize| ROOT
+    STORE --> SNAP
+    SNAP --> RUNC
+    RUNC -->|Engine.setup snapshot| ENG
+    ENG -->|writes the applied boardSize| ROOT
 ```
 
-**Legend for Figure C1.** A solid arrow is the live configuration object, or one
-of its members, reaching code that reads it; the arrow points the way the value
-travels. A dotted arrow is a type-only import, which contributes nothing to the
-running bundle. The two labelled arrows returning to `src/main.ts` are the only
-paths that *write* to the live objects, and both write the same object the
-readers hold rather than replacing it: `src/engine/board-effects.ts` applies a
-relic's recorded effects, and `src/run/run-state-store.ts` reconciles the board
-size on load. `src/engine/hook-bus.ts` is drawn between the engine and the
-relics rather than beside them, since a handler never touches the live
-`RulesConfig` — it reads a frozen `ReadonlyRulesView` the bus builds per
-dispatch, and writes by recording effects.
+**Legend for Figure C1.** A **solid arrow** carries a configuration object, one
+of its members, or a value derived from one, to code that reads it; the arrow
+points the way the value travels, and a label names what travels where that is
+not obvious. A **dotted arrow** is either a type-only import — which contributes
+nothing to the running bundle — or a **fallback the module reaches for only when
+the composition supplied nothing**, which is the case for both dotted arrows into
+`src/engine/engine.ts`. The **rounded node** is not a module: it is the
+reconciled board snapshot, drawn as a value because that is what the store
+produces and hands on.
 
-Three properties of Figure C1 are worth stating explicitly, since each one
-answers a question a reader arrives with.
+The two labelled arrows returning to `src/main.ts` are the only paths that
+*write* to the live objects, and both write the same object the readers hold
+rather than replacing it: `src/engine/board-effects.ts` applies a relic's
+recorded effects, and `src/engine/engine.ts` writes the reconciled edge length
+from `setup()`. **`src/run/run-state-store.ts` writes no rules at all**: it
+reconciles the saved board — weighing the relic-implied size, then the
+configured size, then the size the snapshot carried — and hands back the
+reconciled snapshot, which is why it is drawn producing a value rather than
+writing one. `src/run/run-controller.ts` opens the engine on that board, and
+`Engine.setup()` is what adopts its edge length into the live rules, so the
+board size reaches the rules *through* two modules rather than directly. That
+is exactly why the reconciliation can be decided before any lattice is
+allocated.
+
+`src/engine/hook-bus.ts` is drawn between the engine and the relics rather than
+beside them, since a handler never touches the live `RulesConfig` — it reads a
+frozen `ReadonlyRulesView` the bus builds per dispatch, and writes by recording
+effects.
+
+**The two arrows that write to the live rules object** are the ones returning to
+`src/main.ts`, and neither replaces the object the readers hold — both write into
+it:
+
+- `src/engine/board-effects.ts` applies a relic's recorded effects, writing
+  `boardSize`, `merge.canMerge` or `spawn.weights`.
+- `src/engine/engine.ts` writes the **applied board size** during `setup()`. This
+  is the whole write-back path for reconciliation, and it is worth following
+  precisely because it is easy to attribute to the wrong module:
+  `src/run/run-state-store.ts` **reconciles and returns a snapshot — it writes no
+  configuration at all**; `src/run/run-controller.ts` passes that snapshot to
+  `Engine.setup()`; `setup()` rebuilds the lattice from the snapshot's size and,
+  where that differs from `config.boardSize`, assigns it and counts the
+  reconciliation. Every later read — the traversals, the win test, the loss probe
+  — then sees the size the lattice actually has.
+
+Four further properties of Figure C1 are worth stating, since each answers a
+question a reader arrives with.
 
 - **Nothing hoists a value.** Every reader in the figure reads its member at the
   moment it needs it. `boardSize` in particular changes during a run, so a copy
@@ -110,7 +211,12 @@ answers a question a reader arrives with.
   the bus and changes them through the effect queue, which writes the live
   object every other reader already holds. That is how a relic's change to
   `merge.canMerge` becomes visible to the loss probe without either side knowing
-  about the other.
+  about the other. Note what does **not** travel that path: the bus builds no
+  stage configuration, so no relic can read or change the curve.
+- **The stage configuration reaches the run controller and stops there.** The
+  engine's own stage arrow is the dotted fallback, not the root's object, so
+  there are two stage configurations in a running application that happen to
+  hold equal values.
 
 ## 2. The rules schema
 
@@ -129,9 +235,9 @@ every exhaustive consumer of it — a code change, not a configuration change.
 
 | Member | Type | What it governs | What goes wrong when it is wrong |
 |---|---|---|---|
-| `boardSize` | `number` | Edge length of the square board, in cells. A positive integer. Drives the `size` by `size` lattice `src/engine/grid.ts` allocates, the traversal orders and bounds valve of `src/engine/move-resolver.ts`, the neighbour probe of `src/engine/terminal-state.ts`, the renderer's instanced blocks and the per-cell counterparts of the parallel accessibility layer. | A value that is not a positive safe integer at or below `MAX_BOARD_SIZE` is refused by `isSupportedBoardSize` and the engine allocates at `DEFAULT_BOARD_SIZE` instead, writing the fallback back onto the live config and counting `engine.board.reconciled`. A value that is merely *larger than the board actually built* is the damaging case: win and loss evaluation would probe cells the lattice does not have. The size is therefore reconciled once, before any grid is constructed — `DL-RUNSTORE-01`. |
+| `boardSize` | `number` | Edge length of the square board, in cells. A positive integer. Drives the `size` by `size` lattice `src/engine/grid.ts` allocates, the traversal orders and bounds valve of `src/engine/move-resolver.ts`, the neighbour probe of `src/engine/terminal-state.ts`, the renderer's instanced blocks and the per-cell counterparts of the parallel accessibility layer. | Two different paths, and they must not be confused. On a **fresh** board `Engine.setup()` measures `config.boardSize` with `isSupportedBoardSize` and allocates at `DEFAULT_BOARD_SIZE` where it fails, writing that fallback onto the live config and counting `engine.board.reconciled`. On a **restored** board the size is not this member's at all: it is whatever `reconcileBoardSize()` selected from the relic, configured and saved candidates — see [3.2](#32-the-board-size-hierarchy-read-this-before-changing-4) — which can legitimately be a non-default edge length, and `setup()` writes *that* back. A value merely *larger than the board actually built* is the damaging case either way: win and loss evaluation would probe cells the lattice does not have. The size is therefore reconciled once, before any grid is constructed — `DL-RUNSTORE-01`. |
 | `winValue` | `number` | Tile value that wins the game. A positive integer. Read by `isWinningMergeValue` and `hasReachedWinValue` in `src/engine/terminal-state.ts`, and by both renderers as the fallback threshold above which a tile takes the `tile-super` treatment. | The win test is **strict equality**, not a threshold, so a `winValue` no produced value lands on exactly is never reached and the run has no win state. Under the default doubling producer a tile passes exactly through every power of two; a relic that adds to a produced value can step over a `winValue` between two of them. Decision `DL-TERM-02`. |
-| `startTiles` | `number` | How many tiles are inserted when a stage's board is built fresh. A non-negative integer. The loop bound of the engine's `addStartTiles`. | `0` opens an empty board. A count above the number of cells is not an error: each attempt past a full board is suppressed, counted under `engine.spawn.suppressed`, and consumes no randomness. A fractional or negative count silently degrades to no tiles, since the loop condition fails on the first iteration. |
+| `startTiles` | `number` | How many tiles are inserted when a stage's board is built fresh. A non-negative integer — **the integer part is an invariant you maintain, not one the type enforces**. The loop bound of the engine's `addStartTiles`. | `0` opens an empty board. A count above the number of cells is not an error: each attempt past a full board is suppressed, counted under `engine.spawn.suppressed`, and consumes no randomness. The loop is `for (index = 0; index < startTiles; index += 1)`, so a **positive fraction rounds UP** — `2.5` runs three attempts, because `2 < 2.5` still holds — while a negative count, `0` and `NaN` all fail the condition on the first iteration and insert nothing. |
 | `spawn` | `SpawnDistribution` | The distribution every spawned tile's value is drawn from. | Covered in [2.2](#22-spawndistribution): the failure is silent rather than loud. |
 | `merge` | `MergeRules` | Which pairs merge, and what value a merge yields. | Covered in [2.3](#23-mergerules-mergepredicate-and-mergeproducer): the predicate governs loss detection as well as merging, so a change to it moves both. |
 
@@ -147,8 +253,9 @@ interface SpawnDistribution {
 }
 ```
 
-The two arrays are **positionally paired**: `weights[i]` is the selection
-probability of `values[i]`. Index order is the order the selection walk visits
+The two arrays are **positionally paired**: `weights[i]` is the RELATIVE weight
+of `values[i]` — a share of the total, not a probability, because the total is
+whatever the array sums to. Index order is the order the selection walk visits
 them, and it is not reversed anywhere.
 
 Selection is one draw per spawn, taken from the `spawn-value` substream and
@@ -167,16 +274,36 @@ A **length mismatch is refused, and the refusal is quiet.** `pickWeighted`
 rejects the shapes no selection can be made from — an empty `values`, arrays of
 unequal length, a negative or non-finite weight, or weights totalling zero or
 less — by returning nothing and **consuming no draw**, so the substream's cursor
-is untouched. The engine's spawn then falls back to the value `2`, which is the
-floor `js/tile.js` L4 already guaranteed by coercing a falsy tile value. Nothing
-throws and nothing is logged as an error: a run with mismatched arrays keeps
-playing and spawns nothing but `2`s. Treat equal lengths as an invariant you
-maintain, not one the type system enforces for you — `number[]` and `number[]`
-carry no relationship.
+is untouched. The engine's spawn then falls back to the value `2`. That fallback
+is `FALLBACK_SPAWN_VALUE`, a constant declared in `src/engine/engine.ts` and
+applied explicitly as `drawn ?? FALLBACK_SPAWN_VALUE` at both spawn sites — it is
+the engine's own decision, not an emergent one. The pre-migration analogue is
+`js/tile.js` L4, which guaranteed the same floor by coercing a falsy tile value,
+and that is legacy provenance rather than the mechanism in force. Nothing throws
+and nothing is logged as an error: a run with mismatched arrays keeps playing and
+spawns nothing but `2`s. Treat equal lengths as an invariant you maintain, not one
+the type system enforces for you — `number[]` and `number[]` carry no
+relationship.
 
-The invariants the module documents, none of which is expressible in the type:
-both arrays non-empty and of equal length, every value a positive integer, every
-weight at least `0`, and the weights summing to `1`.
+**Two different lists, and the difference is the point.** What `pickWeighted`
+*enforces* is narrower than what the module *recommends*:
+
+| | Constraint | Status |
+|---|---|---|
+| 1 | `values` non-empty | **Enforced.** An empty `values` yields no selection. |
+| 2 | `values.length === weights.length` | **Enforced.** An unequal pair yields no selection. |
+| 3 | Every weight finite and at least `0` | **Enforced.** A negative or non-finite weight yields no selection. |
+| 4 | The weights total more than `0` | **Enforced.** A total of zero or less yields no selection. |
+| 5 | Every value a positive integer | **Not enforced.** A non-integer or negative value is selected and spawned as it stands. |
+| 6 | The weights sum to `1` | **Not enforced, and not required.** The draw is scaled by the weights' own total, so `[9, 1]` and `[0.9, 0.1]` select identically. |
+
+Rows 1 to 4 are the selection constraints: violate one and `pickWeighted` refuses
+and the spawn falls back to `2`. Rows 5 and 6 are conventions of the **shipped
+defaults** rather than requirements — the defaults are integers summing to `1`
+because that is the clearest way to write the vanilla distribution, and a
+contributor is recommended to keep both properties for readability. Neither is
+checked, and row 6 in particular is **not** an invariant: normalising your weights
+changes nothing about which value is drawn.
 
 ### 2.3 `MergeRules`, `MergePredicate` and `MergeProducer`
 
@@ -239,12 +366,10 @@ value, and the presence or absence of merge history — and nothing else. Both a
 
 `Tile` from `src/engine/tile.ts` satisfies `MergeTileView` structurally, so
 `config.merge.canMerge` accepts a real tile with **no import in either
-direction** between the configuration modules and the engine. That is the
-mechanism by which configuration flows one way into the engine — Figure C1's
-one-way arrows — without a cycle, and it is why the operand type looks more
-minimal than a reader expecting `Tile` would predict. `mergedFrom` is typed
-`readonly unknown[] | null` rather than `Tile[] | null` for the same reason; it
-is read for presence, never for contents.
+direction** between the configuration modules and the engine — which is what
+keeps Figure C1's arrows one-way. `mergedFrom` is typed
+`readonly unknown[] | null` rather than `Tile[] | null`, and is read for
+presence, never for contents. Decision `DL-CONFIG-03`.
 
 **The existence guard lives outside the predicate.** The pre-migration merge
 condition was one expression at `js/game_manager.js` L156:
@@ -296,14 +421,13 @@ draw selects uniformly among the empty cells, with no distribution to configure.
 Both call sites are now substreams: the value is drawn from `spawn-value` and
 the cell from `spawn-position`, and the value is drawn before the cell, which is
 the order the two original call sites were reached in.
-[`docs/architecture/data-flow.md`](architecture/data-flow.md) carries the
-substream figure; it is not duplicated here.
+The substream figure is planned for `docs/architecture/data-flow.md`, which has
+not landed; it is not duplicated here either way.
 
 ### 3.2 The board-size hierarchy: read this before changing 4
 
 The board dimension used to be declared in **three independent places**, and
-only one of the three is authoritative now. This is the single most likely thing
-for a reader to get wrong, so the hierarchy is spelled out rather than implied.
+only one of the three is authoritative now. The hierarchy:
 
 | Former declaration site | What replaced it | Is it the authority? |
 |---|---|---|
@@ -317,9 +441,14 @@ The distinction between the first two rows is the one that matters in practice.
   allocated from, what the traversals iterate over, and what the win and loss
   evaluations bound their probes by. It is **mutable and live**: a
   board-mutating cursed relic changes it mid-run through the effect queue, and
-  `src/run/run-state-store.ts` reconciles it on load from three sources with a
-  stated precedence — the size an active board-mutating relic implies, then the
-  size the saved envelope carries, then the configured size. Decisions
+  `reconcileBoardSize()` in `src/run/run-state-store.ts` reconciles it on load
+  from three candidates in this order: **the size an active board-mutating relic
+  implies, then the configured size, then the size the saved envelope carries**,
+  with a fallback edge length where none of the three is usable. Read that order
+  carefully — the configured size outranks the save, so a snapshot recorded at a
+  different `boardSize` does not override the rules the running build plays by.
+  The store returns a reconciled snapshot and writes no configuration; the applied
+  size reaches the live object when `Engine.setup()` assigns it. Decisions
   `DL-CONFIG-02` and `DL-RUNSTORE-01`.
 - **`gridRowCells` mirrors it for layout.** `src/theme/tokens.ts` declares
   `export const gridRowCells = DEFAULT_BOARD_SIZE` and derives `tileSize` from
@@ -384,9 +513,17 @@ moved against.
 
 **This layer has no vanilla analogue.** No construct in `js/game_manager.js`,
 `js/grid.js` or `js/tile.js` resolved a stage, so there is no provenance to cite
-for anything in this section — every row of it is target-only in
-[`docs/TRACEABILITY_MATRIX.md`](TRACEABILITY_MATRIX.md). It is the layer
-requirement R3's stage goals and requirement R8's reward screen are built on.
+for anything in this section — every row of it will be target-only in
+`docs/TRACEABILITY_MATRIX.md`, which is planned and has not landed.
+
+**Which requirement it answers to.** Stage goals are not part of requirement R3:
+R3 is the relic system — sixteen relics across four families bound to the six
+hooks — and it says nothing about stages. A stage goal is **working assumption
+A3**, which resolves the requirements' bare phrase "clears stage goal" into a
+config-driven target evaluated against engine state, and it is a prerequisite of
+the **R8** run flow, whose reward screen is reached by clearing one. Relics and
+stage goals meet only at the `onStageStart` and `onStageEnd` hooks, and a relic
+never receives the curve — see [1](#1-how-a-configured-value-reaches-its-readers).
 
 Like `rules-config.ts`, this module **imports nothing**. It declares its own
 minimal input type — `StageProgressInput`, two numbers — rather than importing
@@ -529,8 +666,8 @@ non-negative integer, and when a resolved entry carries a `kind` outside
 reasonably assume stage goals are drawn from the run seed the way relic offers
 are; they are not. The function consumes no draw from any substream and reads no
 clock, so the same index and the same curve always yield the same goal. The seed
-governs tile spawns and relic draws — see
-[`docs/architecture/data-flow.md`](architecture/data-flow.md) — and nothing
+governs tile spawns and relic draws — the subject of the substream figure
+planned for `docs/architecture/data-flow.md`, which has not landed — and nothing
 else about a stage.
 
 ### 4.4 `evaluateStageGoal(goal, input)`
@@ -581,28 +718,47 @@ in the merge branch alone and never scanned a board for a value.
 
 ### 4.5 The evaluation lifecycle
 
-The goal is **evaluated against engine state at `onAfterMove`** and **resolved at
-`onStageEnd`**. Decision `DL-STAGE-02`.
+The goal is **measured while a turn is being committed** and **resolved after
+that commit, by the engine**. Decision `DL-STAGE-02` argues the choice of a
+config-driven target measured at `onAfterMove` and resolved through `onStageEnd`,
+with its alternatives and its risk; this section states the sequence the code
+actually runs, because it is longer than those two names suggest and because
+**two separate evaluations** are involved.
 
-This resolves working assumption **A3**: the requirements said only that a
-player "clears stage goal" and did not define what a goal is or when it is
-measured, and the plan chose a config-driven target evaluated at `onAfterMove`
-and resolved at `onStageEnd`. `DL-STAGE-02` is where that choice is argued,
-along with the alternatives and the risk it carries.
+The order below is exact. Nothing in it is reordered by a subscriber, and a
+subscriber must not assume the reverse of any step.
 
-What each of the two points does:
+This resolves working assumption **A3**, which left undefined what a stage goal
+is and when it is measured. `DL-STAGE-02` is where that choice is argued, along
+with the alternatives and the risk it carries.
 
-| Point | What happens | Who does it |
-|---|---|---|
-| `onAfterMove` | The stage is **measured**. `Engine.stageProgress()` calls `evaluateStageGoal` with the live score and `highestTileValue()` over the board in force. It is a query: it emits nothing, dispatches nothing, counts nothing and mutates nothing, and it runs once per resolved move. The run controller records the returned `progress` as `goalProgress` and remembers whether the goal is met. | `src/engine/engine.ts`, then `src/run/run-controller.ts` |
-| `onStageEnd` | The stage is **resolved**. `Engine.endStage(cleared)` dispatches `onStageEnd` and emits `stage:end`; the run controller advances the stage and opens the reward draw after `endStage()` has returned. | `src/engine/engine.ts`, then `src/run/run-controller.ts` |
+| # | Step | What happens | Who does it |
+|---|---|---|---|
+| 1 | **`move:after` — measure** | The run controller's `move:after` subscriber calls its own measurement with the highest tile on the board the move left and that move's score, and stores the resulting `progress` as `goalProgress` while remembering whether the goal is met. This precedes the commit, which is what makes the stage slice a commit carries describe the board that commit carries. | `src/run/run-controller.ts` |
+| 2 | **the commit slice** | While assembling `state:commit`, the engine asks its stage provider for the slice. The controller answers by measuring the board the engine holds right now, so the published `stageIndex`, `goal` and `goalProgress` describe the committed board rather than the previous one. | `src/engine/engine.ts` asking, `src/run/run-controller.ts` answering |
+| 3 | **`state:commit`** | Subscribers see the commit. The controller's own commit listener writes the run-state envelope, snapshots the RNG cursors and finishes a lost run. **No stage is resolved here.** | `src/engine/engine.ts`, then every subscriber |
+| 4 | **the post-commit clear check** | *After* the commit its turn ended with, the engine runs a **second, independent evaluation**: it measures its own score, goal target and highest tile for finiteness, evaluates `stageProgress()`, and calls `endStage(true)` only where the goal is cleared. A measurement that cannot be taken is recorded as degraded rather than leaving the stage silently unresolved. This is the engine's evaluation, not the controller's, and it reads the state that was committed. | `src/engine/engine.ts` |
+| 5 | **`onStageEnd` and `stage:end`** | `endStage(cleared)` dispatches the `onStageEnd` hook and emits `stage:end`, whose payload reports the stage that cleared. | `src/engine/engine.ts` |
+| 6 | **the advance, or the wait** | The controller's `stage:end` subscriber advances the stage **only where no reward gates the transition** — that is, where no draw port was injected. Where one was, it returns without advancing, so the stage index still stands at the one the offer belongs to and the HUD does not report the next stage while the player is still choosing. | `src/run/run-controller.ts` |
+| 7 | **the offer** | Where a reward gates the transition, the offer is drawn from the seeded `relic-draw` substream and admitted, and the run waits. | `src/run/run-controller.ts` |
+| 8 | **the selection** | An accepted selection takes the relic on live and finishes through the reward-round closure, which clears the offer and performs the one advance step 6 withheld. | `src/run/run-controller.ts` |
+| 9 | **the next board opens** | The next stage's board is opened after the advance, dispatching `onStageStart` for the new stage. Opening is idempotent per stage index, so a stage already reported as started is not reopened. | `src/run/run-controller.ts`, then `src/engine/engine.ts` |
 
-Two ordering facts follow, and a subscriber must not assume the reverse of
-either: the commit carrying a met goal **precedes** the stage end, and the goal
-a stage resolves against is the one its `onStageStart` handlers left in the
-`stage:start` payload — `goal` is the one transformable member of that payload,
-while `stageIndex`, `seed` and `boardSize` are invariant and the bus refuses a
-return that changes them.
+Three consequences of that sequence:
+
+- **The commit carrying a met goal precedes the stage end.** Steps 3 and 4 are
+  in that order deliberately: the resolution reads state that has already been
+  published, so no subscriber sees a stage resolved against a board it never saw.
+- **A cleared stage does not advance immediately when rewards are in play.**
+  Steps 6 through 8 are the whole reason a stage advance and a relic pickup
+  cannot come apart: exactly one advance happens per cleared stage, and which of
+  the two subscribers performs it depends on whether a draw port exists.
+- **The goal a stage resolves against is the one its `onStageStart` handlers
+  left in the `stage:start` payload.** `goal` is the one transformable member of
+  that payload; `stageIndex`, `seed` and `boardSize` are invariant and the bus
+  refuses a return that changes them. The controller adopts the event's goal
+  before taking its first measurement, so the engine and the controller measure
+  against the same goal even after a handler replaced it.
 
 ## 5. Changing a rule safely
 
@@ -623,8 +779,10 @@ risk of `DL-DEFAULT-01`.
 
 ### 5.2 Adding a `StageGoal` kind
 
-Four of the five touch points below are enforced by the compiler; the fifth is
-not, and it is the one that ships a bug.
+There are **seven** touch points. Four are closed by the compiler and will not
+let you forget them; **three are not**, and each of those three ships a bug that
+looks like working software. The table is the complete list of places a `kind` is
+branched on today.
 
 | Touch point | File | Enforced? |
 |---|---|---|
@@ -632,7 +790,9 @@ not, and it is the one that ships a bug.
 | 2. Goal construction | `src/config/stage-config.ts` — the `switch` in `createStageGoal`, which both branches of `stageGoalForIndex` build through | **Yes.** Its `default` assigns to a `never` binding, so an unhandled kind fails to compile. |
 | 3. Measurement | `src/config/stage-config.ts` — the `switch` in `evaluateStageGoal` that derives `achieved`, plus a new member on `StageProgressInput` if the kind measures a quantity neither `score` nor `highestTileValue` supplies | **Yes**, on the same `never` mechanism. Adding a `StageProgressInput` member then breaks its two producers, `Engine.stageProgress()` in `src/engine/engine.ts` and the evaluation in `src/ui/screen-router.ts`, which is the intended outcome. |
 | 4. Persistence | `src/run/run-state.ts` — the `STAGE_GOAL_KINDS` table that `isStageGoalKind` validates against, and the `switch` in `cloneStageGoal` | **Yes.** The table is a `Readonly<Record<StageGoalKind, true>>`, so it fails to compile until the kind is listed, and `cloneStageGoal` closes on `never`. |
-| 5. **Goal text in the HUD** | `src/ui/screens/hud.ts` — `hudCopy.goalValue(kind, target, measured)` | **No.** Its `kind` parameter is typed `string`, and it branches on `'score-threshold'` with the tile wording as the fallback. **A new kind silently renders as a tile goal with no compile error.** |
+| 5. The stage-clear readout | `src/ui/screens/stage-progress.ts` — the `switch` that renders the target and the measured quantity, and the goal shape guard beside it | **Yes.** The `switch` closes its `default` on a `never` binding. The guard next to it, which tests a candidate against the two kind strings literally, is **not** closed that way and must be widened in the same edit. |
+| 6. **Goal text in the HUD** | `src/ui/screens/hud.ts` — `hudCopy.goalValue(kind, target, measured)` | **No.** Its `kind` parameter is typed `string`, and it branches on `'score-threshold'` with the tile wording as the fallback. **A new kind silently renders as a tile goal with no compile error.** |
+| 7. **Goal text in the run summary** | `src/ui/screens/run-summary.ts` — the goal rendering that compares `kind` against `'score-threshold'` | **No**, for the same reason and with the same result: anything other than `'score-threshold'` renders through the tile form. |
 
 `stageGoalForIndex` itself needs no change: both of its branches construct
 through `createStageGoal` and carry `kind` through unchanged, so handling the
@@ -642,20 +802,40 @@ the *default* curve rather than only in a hand-built one, set
 
 ### 5.3 The two traps
 
-**A stage goal that is not JSON-serialisable breaks persistence silently.** The
-`StageGoal` type will happily accept a member holding a function, a closure, a
-`Map` or a class instance, and everything works until the envelope is written:
-`JSON.stringify` drops the function-valued member, the reloaded goal fails the
-loader's shape check, and the run falls back rather than resuming. A goal must
-carry string and number members only, with every number finite. See
+**A stage goal member that is not `kind` or `target` is silently lost, and the
+run loads anyway.** This is the trap, and it is worse than a load failure would
+be. The `StageGoal` type will accept a variant carrying a third member — a
+function, a closure, a `Map`, a class instance, or simply an extra number — and
+everything appears to work. What actually happens is that **nothing rejects it
+and nothing preserves it**:
+
+- The loader validates a persisted goal on **`kind` and `target` alone**:
+  `kind` must be one of the declared kinds and `target` must be a finite number.
+  An extra member is not examined, so it cannot make the envelope fail its shape
+  check, and the run resumes normally.
+- Every projection of a goal goes through `cloneStageGoal`, which **reconstructs**
+  `{ kind, target }` per branch rather than copying the object. An extra member is
+  therefore stripped on the way out of the store as well as on the way in.
+- `JSON.stringify` would have dropped a function-valued member in any case, but
+  that is not what decides the outcome: a perfectly serialisable extra number is
+  lost the same way.
+
+So do **not** rely on a fallback to tell you about this. A goal must carry
+`kind` and `target` and nothing else, with `target` finite; behaviour or state
+attached to a goal has to live somewhere the loader and the cloner know about —
+a relic's own `state` slot is the mechanism for per-run state. If a future kind
+genuinely needs a third member, the validator and `cloneStageGoal` are the two
+places that must learn about it, and until they do the member does not survive a
+reload even though the reload succeeds. See
 [4.1](#41-stagegoal-and-stagegoalkind) and decision `DL-STAGE-03`.
 
 **A configuration value cached at module scope will not see a relic's
 mutation.** `const boardSize = config.boardSize` at the top of a module reads the
 value once, at import time. A board-mutating cursed relic writes
-`config.boardSize` mid-run and `src/run/run-state-store.ts` reconciles it on
-load, so the cached copy is wrong from the first mutation onward and the module
-allocates, probes or renders at the old edge length. Read the member at each use.
+`config.boardSize` mid-run, and on load the reconciled size the store resolved is
+written into the rules by `Engine.setup()` — so the cached copy is wrong from the
+first mutation onward and the module allocates, probes or renders at the old edge
+length. Read the member at each use.
 Decision `DL-CONFIG-02`.
 
 The same trap applies to `config.merge.canMerge` and `config.spawn.weights`,
@@ -663,24 +843,28 @@ which the effect queue also writes — capture the *object*, never the member.
 
 ## 6. Where to look next
 
-This document deliberately stops at the configuration boundary. Its neighbours,
-each of which owns what this one leaves out:
+This document deliberately stops at the configuration boundary. One neighbour
+exists; the rest are planned and have not landed, so the table below is a map of
+where each subject **will** be documented rather than a reading list, and the
+planned paths are written as plain paths precisely so nothing here looks like a
+link that works.
 
-| For | Read |
-|---|---|
-| Which relics read or mutate which configuration members, with their families, rarities, hooks and charges | [`docs/RELICS.md`](RELICS.md) |
-| The turn pipeline from keystroke to committed frame, and the seeded RNG substreams | [`docs/architecture/data-flow.md`](architecture/data-flow.md) |
-| How the six hooks dispatch, in pickup order, with the charge guard and error isolation | [`docs/architecture/hook-dispatch-sequence.md`](architecture/hook-dispatch-sequence.md) |
-| Where the configuration layer sits in the architecture as a whole, before and after the split | [`docs/architecture/ARCHITECTURE.md`](architecture/ARCHITECTURE.md) and [`docs/architecture/component-interaction.md`](architecture/component-interaction.md) |
-| Which retired `js/` construct became which module, in both directions | [`docs/TRACEABILITY_MATRIX.md`](TRACEABILITY_MATRIX.md) |
-| **Why** any of it is the way it is — every alternative considered and every risk carried | [`docs/DECISION_LOG.md`](DECISION_LOG.md) |
+| For | Read | Landed? |
+|---|---|---|
+| **Why** any of it is the way it is — every alternative considered and every risk carried | [`docs/DECISION_LOG.md`](DECISION_LOG.md) | **Yes** |
+| Which relics read or mutate which configuration members, with their families, rarities, hooks and charges | `docs/RELICS.md` | No — planned. `src/relics/` and its unit suites are the authority meanwhile. |
+| The turn pipeline from keystroke to committed frame, and the seeded RNG substreams | `docs/architecture/data-flow.md` | No — planned. [4.5](#45-the-evaluation-lifecycle) carries the stage half of that sequence. |
+| How the six hooks dispatch, in pickup order, with the charge guard and error isolation | `docs/architecture/hook-dispatch-sequence.md` | No — planned. `src/engine/hook-bus.ts` and its suites are the authority meanwhile. |
+| Where the configuration layer sits in the architecture as a whole, before and after the split | `docs/architecture/ARCHITECTURE.md` and `docs/architecture/component-interaction.md` | No — planned. Figure C1 above covers the configuration layer alone. |
+| Which retired `js/` construct became which module, in both directions | `docs/TRACEABILITY_MATRIX.md` | No — planned. The `TR-*` identifiers cited from the source modules are reserved against it. |
 
 The decision identifiers cited in this document, all of which resolve in
 `docs/DECISION_LOG.md`: `DL-BUILD-03`, `DL-CONFIG-01`, `DL-CONFIG-02`,
-`DL-DEFAULT-01`, `DL-DEFAULT-02`, `DL-DEFAULT-03`, `DL-DOC-05`, `DL-MERGE-02`,
-`DL-MOVE-01`, `DL-RUN-04`, `DL-RUNCTL-03`, `DL-RUNSTORE-01`, `DL-STAGE-01`,
-`DL-STAGE-02`, `DL-STAGE-03`, `DL-TERM-02`, `DL-TERM-03`, `DL-TERM-04` and
-`DL-TOKEN-02`. `CONTRIBUTING.md` carries the registry of `DL-*` areas and the
-owning file of each; the three that own this document's subject are `CONFIG`
+`DL-CONFIG-03`, `DL-DEFAULT-01`, `DL-DEFAULT-02`, `DL-DEFAULT-03`, `DL-DOC-05`,
+`DL-MERGE-02`, `DL-MOVE-01`, `DL-RUN-04`, `DL-RUNCTL-03`, `DL-RUNSTORE-01`,
+`DL-STAGE-01`, `DL-STAGE-02`, `DL-STAGE-03`, `DL-SUMMARY-06`, `DL-TERM-02`,
+`DL-TERM-03`, `DL-TERM-04` and `DL-TOKEN-02`. `CONTRIBUTING.md` carries the
+registry of `DL-*` areas and the owning file of each; the three that own this
+document's subject are `CONFIG`
 (`src/config/rules-config.ts`), `DEFAULT` (`src/config/default-config.ts`) and
 `STAGE` (`src/config/stage-config.ts`).

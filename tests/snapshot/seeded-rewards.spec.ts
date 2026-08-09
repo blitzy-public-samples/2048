@@ -2,45 +2,13 @@
 // offers the production path actually makes.
 //
 // AAP V2 requires one seed to yield identical relic offers, not merely an
-// identical board. Two layers are recorded here:
-//
-//   sections 1-4  the raw substream values, the rarity table and tier order of
-//                 src/relics/relic-types.ts, and the shrinking-pool indices a
-//                 rarity-weighted 1-of-3 draw without replacement consumes — one
-//                 weighted tier draw per slot, then one index draw per slot
-//                 against a pool of 16, 15, 14. No relic identifier is recorded
-//                 in these four sections.
-//   section 5     the offers themselves, drawn by composing what src/main.ts
-//                 composes: `RunController` over a `RunStateStore`, a
-//                 `RelicRegistry` over `RELIC_CATALOGUE` and the shared hook
-//                 bus, `drawRelicOffers` as the draw port, and a real `Engine`.
-//                 Every card offered at every stage is recorded by identifier,
-//                 rarity, charge budget and bound hooks, along with which relic
-//                 was taken, the relics held in pickup order, the run summary and
-//                 the board and cursors the run ended on.
+// identical board. Two layers are recorded here.
 //
 // The two spawn substreams are separate from the two relic substreams, so a
 // reward draw cannot move the board's sequence. That is asserted here from the
 // draw side and in tests/snapshot/seeded-boards.spec.ts from the board side.
 //
-//   Section 4 closes the other half of AAP V2's second requirement without
-//   breaking that property. A drawn offer is only reproducible if a caller can
-//   turn it into the same relic twice, so those cases drive the SHIPPED draw and
-//   the SHIPPED reward transition — `drawRelicOffers`, `RunController` and
-//   `RelicRegistry.runPort` — twice from one seed and compare the two runs WITH
-//   EACH OTHER rather than against a recorded identifier.
-//
-//   What it does instead is pin the sequence of draws a rarity-weighted 1-of-3
-//   selection without replacement consumes, at exactly the call sites such a
-//   selection makes: one weighted tier draw per offered slot, then one index
-//   draw per slot against a pool shrinking 16, 15, 14. When the draw module
-//   lands, its offers are a pure function of these recorded values and the
-//   catalogue order — so a change to the PRNG, to the substream derivation, to
-//   `pickWeighted`'s walk or to the tier weights breaks a snapshot here and is
-//   caught before it can silently make every recorded run's offers different.
-//
-// Decision DL-RNG-04 governs that substream separation. The remaining
-// decisions behind this file are recorded in docs/DECISION_LOG.md.
+// Decisions: DL-RNG-04 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -95,10 +63,6 @@ const PRODUCTION_MOVE_CYCLE: readonly Direction[] = [
   DIRECTION_LEFT,
 ];
 
-/* ==========================================================================
- * Harness
- * ========================================================================== */
-
 /** Slots one reward offer holds, per AAP R8: choose 1 of 3. */
 const OFFER_SLOTS = 3;
 
@@ -133,13 +97,7 @@ function drawRaw(
   return drawn;
 }
 
-/**
- * Draws the rarity tier of each of the three offered slots.
- *
- * `pickWeighted` is the shipped selection: one draw per call, scaled by the
- * total of the weights, then the weights walked in index order until the running
- * total exceeds it. The weights are the shipped table, halving per tier.
- */
+/** Draws the rarity tier of each of the three offered slots. */
 function drawTiers(streams: RngStreams): (Rarity | undefined)[] {
   const stream = streams.stream('rarity-weight');
   const tiers: (Rarity | undefined)[] = [];
@@ -152,13 +110,8 @@ function drawTiers(streams: RngStreams): (Rarity | undefined)[] {
 }
 
 /**
- * Draws the pool index of each of the three offered slots, WITHOUT REPLACEMENT.
- *
- * The pool shrinks by one per slot — 16, 15, 14 — which is the mechanism that
- * makes a duplicate in one offer structurally impossible rather than filtered
- * out afterwards. Indices rather than identifiers are recorded here so a
- * reordered catalogue cannot invalidate a recorded sequence; section 5 records
- * the identifiers the shipped draw resolves them to.
+ * Draws the pool index of each of the three offered slots, WITHOUT
+ * REPLACEMENT.
  */
 function drawPoolIndices(streams: RngStreams): number[] {
   const stream = streams.stream('relic-draw');
@@ -173,12 +126,6 @@ function drawPoolIndices(streams: RngStreams): number[] {
 
 /**
  * Resolves three distinct pool positions from three shrinking-pool indices.
- *
- * The reduction a draw without replacement performs: each index selects from
- * what remains, and the selected entry is removed. Recorded so the mapping from
- * the drawn indices to distinct positions is itself pinned, and so the
- * no-duplicate property is visible in the stored artifact rather than only
- * asserted.
  */
 function resolveDistinct(indices: readonly number[]): number[] {
   const remaining: number[] = [];
@@ -189,10 +136,6 @@ function resolveDistinct(indices: readonly number[]): number[] {
 
   return indices.map((index) => remaining.splice(index, 1)[0] ?? -1);
 }
-
-/* ==========================================================================
- * 1. The raw substream sequences
- * ========================================================================== */
 
 describe('the relic substreams', () => {
   it.each(SEEDS)('reproduces its recorded relic-draw sequence for "%s"', (seed) => {
@@ -218,16 +161,9 @@ describe('the relic substreams', () => {
       first[name] = streams.stream(name).next();
     }
 
-    // Each substream is seeded with `deriveStreamSeed(seed, name)`, so four
-    // substreams of one seed are four sequences rather than one sequence read
-    // four times. Were they equal, a relic draw and a spawn would move together.
     expect(new Set(Object.values(first)).size).toBe(RNG_STREAM_NAMES.length);
   });
 });
-
-/* ==========================================================================
- * 2. The offer draw
- * ========================================================================== */
 
 describe('a reward offer drawn from a fixed seed', () => {
   it.each(SEEDS)('reproduces its recorded three tiers for "%s"', (seed) => {
@@ -253,8 +189,6 @@ describe('a reward offer drawn from a fixed seed', () => {
   it.each(SEEDS)('offers three distinct pool positions for "%s"', (seed) => {
     const positions = resolveDistinct(drawPoolIndices(createRngStreams(seed)));
 
-    // No duplicate in one set of three, and not by filtering afterwards: the
-    // pool a slot draws from no longer holds what the previous slot took.
     expect(new Set(positions).size).toBe(OFFER_SLOTS);
     expect(positions.every((position) => position >= 0 && position < POOL_SIZE)).toBe(
       true,
@@ -263,8 +197,7 @@ describe('a reward offer drawn from a fixed seed', () => {
 
   it('reproduces its recorded offers across many consecutive draws', () => {
     // Twelve consecutive offers from one seed, which is more stages than a run
-    // is likely to reach. Recorded as one artifact so a change in the sequence
-    // shows up wherever in the run it occurs, not only on the first offer.
+    // is likely to reach.
     const streams = createRngStreams('reward-sequence-long');
     const rendered: string[] = [];
 
@@ -286,10 +219,6 @@ describe('a reward offer drawn from a fixed seed', () => {
   });
 });
 
-/* ==========================================================================
- * 3. Independence — what protects every other snapshot in this suite
- * ========================================================================== */
-
 describe('drawing rewards', () => {
   it('leaves the two spawn substreams untouched', () => {
     const streams = createRngStreams('reward-independence');
@@ -301,9 +230,7 @@ describe('drawing rewards', () => {
 
     const cursors = streams.snapshotCursors();
 
-    // Forty-eight relic draws, and the board's sequence has not moved. This is
-    // the property that lets the relic system be added without invalidating a
-    // single recorded board in tests/snapshot/seeded-boards.spec.ts.
+    // Forty-eight relic draws, and the board's sequence has not moved.
     expect(cursors['spawn-value']).toBe(0);
     expect(cursors['spawn-position']).toBe(0);
     expect(cursors['rarity-weight']).toBe(24);
@@ -336,20 +263,8 @@ describe('drawing rewards', () => {
   });
 });
 
-/* ==========================================================================
- * 4. One seed, one admitted relic
- * ========================================================================== */
-
-// The draw is only half of AAP V2's second requirement: an offer that no caller
-// can turn into the same relic twice is not a reproducible run. The two cases
-// below therefore drive the SHIPPED draw and the SHIPPED reward transition —
-// `drawRelicOffers`, `RunController.recordRewardOffer`/`resolveReward` and
-// `RelicRegistry.runPort` — twice from one seed and compare the two outcomes
-// with each other.
-//
-// NO IDENTIFIER IS RECORDED IN A SNAPSHOT HERE EITHER. The comparison is
-// between the two runs, so adding, removing or reordering a relic cannot
-// invalidate a stored artifact, exactly as in the sections above.
+// The draw is only half of AAP V2's second requirement: an offer that no
+// caller can turn into the same relic twice is not a reproducible run.
 
 /** Runs one seeded offer and selection, and reports what it admitted. */
 function admitOneReward(seed: string): {
@@ -416,8 +331,8 @@ describe('admitting a drawn reward', () => {
     (seed) => {
       const run = admitOneReward(seed);
 
-      // The persisted list and the live registrations are one list: a relic that
-      // was admitted but not registered would fire on no hook.
+      // The persisted list and the live registrations are one list: a relic
+      // that was admitted but not registered would fire on no hook.
       expect(run.held).toEqual([run.offered[0]]);
       expect(run.registered).toEqual(run.held);
     },
@@ -461,15 +376,8 @@ describe('admitting a drawn reward', () => {
   });
 });
 
-/* ==========================================================================
- * 5. The shipped catalogue constants the draw reads
- * ========================================================================== */
-
 describe('the draw tables', () => {
   it('reproduces its recorded rarity tiers and weights', () => {
-    // Recorded because an offer is a function of these as much as of the seed: a
-    // reordered tier list or a reweighted tier changes every offer ever drawn,
-    // and this is the artifact that says so out loud.
     expect(
       RARITIES.map(
         (rarity) => `${rarity.padEnd(12)}${String(DEFAULT_RARITY_WEIGHTS[rarity])}`,
@@ -491,30 +399,6 @@ describe('the draw tables', () => {
   });
 });
 
-/* ==========================================================================
- * 5. The offer as the production path actually draws it
- * ==========================================================================
- *
- * Sections 1 to 4 record the DRAW SEQUENCE — the substream values, the tiers and
- * the shrinking-pool indices a rarity-weighted 1-of-3 selection consumes. They
- * were written before src/relics/relic-draw.ts and src/run/run-controller.ts's
- * reward transaction existed, and they hold no relic identifier, so on their own
- * they stay green whether or not a reward ever reaches a run.
- *
- * This section closes that gap by composing the same objects src/main.ts
- * composes — `RunController` over a `RunStateStore`, a `RelicRegistry` over
- * `RELIC_CATALOGUE` and the shared hook bus, `drawRelicOffers` as the draw port,
- * and a real `Engine` — playing a fixed move list, and recording the OFFERS
- * THEMSELVES: the identifier, rarity and charge budget of every card offered at
- * every stage, which relic was taken, and the board and cursors that state was
- * reached with.
- *
- * A break here therefore means one of: the seed no longer produces the same
- * offers, the reward no longer reaches the run at all, the draw stopped
- * excluding relics the run already holds, or the pickup order changed. None of
- * those is visible to sections 1 to 4.
- */
-
 /** Stage 1's goal is a 16 tile, so a list this long clears several stages. */
 const RUN_MOVES: readonly Direction[] = Array.from(
   { length: 160 },
@@ -532,7 +416,8 @@ interface OfferRecord {
  * Plays one seeded run through the production reward path.
  *
  * @param seed Seed the run is played under.
- * @returns Every offer made, the relics held afterwards, and the final state.
+ * @returns Every offer made, the relics held afterwards, and the final
+ *   state.
  */
 function playProductionRun(seed: string): {
   readonly offers: readonly OfferRecord[];
@@ -566,9 +451,6 @@ function playProductionRun(seed: string): {
     stages,
     createToken,
 
-    // The same two ports src/main.ts injects, delegating on every call rather
-    // than capturing, so a charge spent and a state slot advanced are read at
-    // write time.
     relics: {
       snapshotRelics: () => registry.serialize(),
       activateRelic: (relicId) => {
@@ -649,7 +531,7 @@ function playProductionRun(seed: string): {
     engine.move(direction);
     movesPlayed += 1;
 
-    // THE RUN ENDS WITH THE BOARD. A loss finishes the run and opens a fresh
+    // The run ends with the board. A loss finishes the run and opens a fresh
     // one, so playing on past it would record a state belonging to a run that
     // was never offered a reward.
     if (engine.serialize().over) {
@@ -662,8 +544,8 @@ function playProductionRun(seed: string): {
 
     const cards = controller.currentOffer();
 
-    // A deterministic choice that is not always the first card, so the recorded
-    // sequence exercises more than one position of the offer.
+    // A deterministic choice that is not always the first card, so the
+    // recorded sequence exercises more than one position of the offer.
     const chosen = cards[offers.length % cards.length];
 
     if (chosen === undefined) {
@@ -799,9 +681,6 @@ describe('a run played through the production reward path', () => {
   });
 
   it.each(SEEDS)('plays the same run twice for "%s"', (seed) => {
-    // The repeated-run half of AAP V2, asserted through the production path
-    // rather than through a simulation of it: same seed, same move list, same
-    // offers, same relics, same board.
     expect(renderProductionRun(playProductionRun(seed))).toBe(
       renderProductionRun(playProductionRun(seed)),
     );

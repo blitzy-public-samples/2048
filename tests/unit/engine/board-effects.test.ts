@@ -1,19 +1,6 @@
 // Contract suite for src/engine/board-effects.ts: the transactional board and
 // rules write channel a hook handler records through.
 //
-// What is pinned here:
-//   the seven commands and their validation;
-//   the projection a multi-step handler plans against;
-//   the record order the applier replays in;
-//   the vanilla relocation order of js/game_manager.js L123-L127 and the
-//   flattened indexing of js/grid.js L88-L94, verified by asserting every
-//   occupant's own x/y match its array coordinates after every effect;
-//   `previousPosition` as the animation protocol of js/tile.js L6-L7;
-//   `cellContent`'s off-lattice `null` valve of js/grid.js L79-L85, which the
-//   move resolver's farthest-position walk terminates on;
-//   rollback leaving NOTHING behind;
-//   the inert queue refusing every command.
-//
 // This suite reads no DOM and no storage, consumes no randomness of its own
 // beyond a seeded substream table, and writes no snapshot.
 
@@ -38,10 +25,6 @@ import type {
 import { Grid } from '../../../src/engine/grid';
 import { Tile } from '../../../src/engine/tile';
 import type { Position, SerializedGrid } from '../../../src/engine/types';
-
-/* ==========================================================================
- * Harness
- * ========================================================================== */
 
 const SIZE = DEFAULT_BOARD_SIZE;
 
@@ -127,10 +110,6 @@ function expectConsistentLattice(grid: Grid): void {
   expect(grid.cellContent({ x: -1, y: 0 })).toBeNull();
 }
 
-/* ==========================================================================
- * 1. The declared command vocabulary
- * ========================================================================== */
-
 describe('BOARD_EFFECT_NAMES', () => {
   it('declares exactly the seven commands, in declaration order', () => {
     expect([...BOARD_EFFECT_NAMES]).toEqual(EXPECTED_EFFECT_NAMES);
@@ -140,10 +119,6 @@ describe('BOARD_EFFECT_NAMES', () => {
     expect(Object.isFrozen(BOARD_EFFECT_NAMES)).toBe(true);
   });
 });
-
-/* ==========================================================================
- * 2. Nothing reaches the board until commit
- * ========================================================================== */
 
 describe('the transaction boundary', () => {
   it('records without writing the board', () => {
@@ -205,10 +180,6 @@ describe('the transaction boundary', () => {
     expect(occupants(harness.grid)).toEqual([]);
   });
 });
-
-/* ==========================================================================
- * 3. insertTile
- * ========================================================================== */
 
 describe('insertTile', () => {
   it('inserts a fresh tile that renders as a spawn, not a move', () => {
@@ -273,10 +244,6 @@ describe('insertTile', () => {
   });
 });
 
-/* ==========================================================================
- * 4. removeTile
- * ========================================================================== */
-
 describe('removeTile', () => {
   it('clears an occupied cell', () => {
     const harness = open();
@@ -306,10 +273,6 @@ describe('removeTile', () => {
     expect(harness.queue.removeTile({ x: 2, y: 2 })).toBe(false);
   });
 });
-
-/* ==========================================================================
- * 5. moveTile
- * ========================================================================== */
 
 describe('moveTile', () => {
   it('relocates a tile and records where it came from', () => {
@@ -378,10 +341,6 @@ describe('moveTile', () => {
   });
 });
 
-/* ==========================================================================
- * 6. The projection a multi-step handler plans against
- * ========================================================================== */
-
 describe('the projection', () => {
   it('reports the board as the recorded commands leave it', () => {
     const harness = open();
@@ -431,9 +390,7 @@ describe('the projection', () => {
   it('reads the live board once, not on every query', () => {
     const harness = open();
 
-    // The first query fixes the projection. A write made straight to the live
-    // board afterwards is invisible to it, which is exactly the property a
-    // handler needs: it plans against one board rather than a moving one.
+    // The first query fixes the projection.
     expect(harness.queue.cellOccupied({ x: 0, y: 0 })).toBe(false);
     place(harness.grid, 0, 0, 2);
 
@@ -447,10 +404,6 @@ describe('the projection', () => {
     expect(harness.queue.cellOccupied({ x: 0, y: SIZE })).toBe(false);
   });
 });
-
-/* ==========================================================================
- * 7. restoreBoard
- * ========================================================================== */
 
 describe('restoreBoard', () => {
   it('replaces the whole lattice with the snapshot', () => {
@@ -573,10 +526,6 @@ describe('restoreBoard', () => {
   });
 });
 
-/* ==========================================================================
- * 8. resizeBoard
- * ========================================================================== */
-
 describe('resizeBoard', () => {
   it('sets BOTH the lattice size and the configured board size', () => {
     const harness = open();
@@ -666,10 +615,6 @@ describe('resizeBoard', () => {
   });
 });
 
-/* ==========================================================================
- * 9. The rules commands
- * ========================================================================== */
-
 describe('setMergePredicate', () => {
   it('installs the predicate on the live rules', () => {
     const harness = open();
@@ -729,10 +674,6 @@ describe('setSpawnWeights', () => {
   });
 });
 
-/* ==========================================================================
- * 10. The applier, called directly
- * ========================================================================== */
-
 describe('applyBoardEffects', () => {
   it('replays commands in record order', () => {
     const grid = new Grid(SIZE);
@@ -776,10 +717,6 @@ describe('applyBoardEffects', () => {
   });
 });
 
-/* ==========================================================================
- * 11. The inert queue
- * ========================================================================== */
-
 describe('INERT_BOARD_EFFECTS', () => {
   it('refuses every command and throws nothing', () => {
     expect(INERT_BOARD_EFFECTS.insertTile({ x: 0, y: 0 }, 2)).toBe(false);
@@ -811,10 +748,6 @@ describe('INERT_BOARD_EFFECTS', () => {
     expect(Object.isFrozen(INERT_BOARD_EFFECTS)).toBe(true);
   });
 });
-
-/* ==========================================================================
- * 12. Bounds
- * ========================================================================== */
 
 describe('the queue bound', () => {
   it('refuses a command beyond the per-handler ceiling', () => {

@@ -1,53 +1,15 @@
-// Isolation suite for the `merge-magic` relic `alloy-forge`, AAP 0.6.3
-// Group 5: the three properties every per-relic suite pins — the hooks the
-// relic fires on, the effect it produces, and its charge behaviour including
-// an invocation made at a spent budget.
+// Isolation suite for the `merge-magic` relic `alloy-forge`, AAP 0.6.3 Group
+// 5: the three properties every per-relic suite pins — the hooks the relic
+// fires on, the effect it produces, and its charge behaviour including an
+// invocation made at a spent budget.
 //
-// The unit under test is the `alloy-forge` entry of `MERGE_MAGIC_FAMILY` in
-// src/relics/families/merge-magic.ts. Its handler is invoked directly, over a
-// `HookContext` assembled here from a fresh `RulesConfig`, a live `Grid`, the
-// run's named substreams and the run correlation identifier.
-// src/engine/hook-bus.ts owns the charge guard, the dispatch order and the
-// error isolation, and tests/unit/engine holds those mechanism suites.
-//
-// PROVENANCE of the arithmetic under test, from the vanilla merge branch:
-//
-//   js/game_manager.js L156  `next && next.value === tile.value &&
-//                            !next.mergedFrom`
-//                            -> `config.merge.canMerge`.
-//   js/game_manager.js L157  `new Tile(positions.next, tile.value * 2)`
-//                            -> `config.merge.produce`, the producer this
-//                               relic applies a SECOND time. Every expected
-//                               number below is computed by calling
-//                               `defaultProduceMergeValue`; none restates the
-//                               doubling as a literal.
-//   js/game_manager.js L167  `self.score += merged.value`
-//                            -> the payload's `scoreDelta`, dispatched equal
-//                               to `resultValue`.
-//   js/game_manager.js L170  `if (merged.value === 2048) self.won = true`
-//                            -> `config.winValue`. The win flag is resolved in
-//                               src/engine/terminal-state.ts and is asserted
-//                               in tests/unit/engine, not here.
-//
-// The dispatch driven here is drawn in Figure 5, "Hook Dispatch Sequence:
-// Pickup-Order Fan-Out with Charge Guard and Error Isolation"
-// (docs/architecture/hook-dispatch-sequence.md), in which `alloy-forge` is the
-// second handler of the compounding chain. The turn steps it occupies are the
-// `Merge condition from config.merge.canMerge` and `onMerge dispatch - score
-// delta applied` nodes of Figure 4, "Turn Data Flow"
-// (docs/architecture/data-flow.md).
-//
-// Traceability row of docs/TRACEABILITY_MATRIX.md evidenced here:
-//   TR-MERGE-02  the `alloy-forge` declaration and its `onMerge` binding
-//
-// Decisions this suite holds to the letter, argued in docs/DECISION_LOG.md and
-// named here only so the construct can be found from the log:
-//   DL-MERGE-01  all four merge-magic relics bound to `onMerge` alone
-//   DL-MERGE-02  `scoreDelta` transformed independently of `resultValue`
+// PROVENANCE of the arithmetic under test, from the vanilla merge branch.
 //
 // This file reads no DOM, no clock and no storage, takes no unseeded
 // randomness, installs no timer and writes no log. It is collected by the
 // `unit:dom-free` project of vitest.config.ts and runs under `npm test`.
+//
+// Decisions: DL-MERGE-01, DL-MERGE-02 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -88,10 +50,6 @@ import {
 import type { RngStreams } from '../../../src/rng/rng-streams';
 import { MERGE_PAIR_BOARD } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. Suite constants
- * ========================================================================== */
-
 /** Identifier the family declares this relic under. */
 const RELIC_ID = 'alloy-forge';
 
@@ -125,10 +83,8 @@ const TARGET_CELL: Position = { x: 0, y: 0 };
  */
 const NEAR_WIN_RESULT = 1024;
 
-/** Factor of the substituted producer that scales rather than doubles. */
 const TRIPLE_FACTOR = 3;
 
-/** Addend of the substituted producer that steps rather than scales. */
 const CONSTANT_STEP = 6;
 
 /** Value written into the state slot before every dispatch. */
@@ -136,10 +92,6 @@ const STATE_SENTINEL = 'alloy-forge-slot-untouched';
 
 /** Charge budget of the spent-budget cases. */
 const SPENT_BUDGET = 0;
-
-/* ==========================================================================
- * 2. Merge-rule access
- * ========================================================================== */
 
 /**
  * Projects a face value onto the operand shape the merge rules read, as
@@ -178,8 +130,6 @@ function tripleProducer(moving: MergeTileView): number {
 }
 
 /**
- * Producer that adds `CONSTANT_STEP` rather than scaling.
- *
  * @param moving Operand the value is read from.
  * @returns The operand's value plus the constant step.
  */
@@ -206,40 +156,26 @@ function nonFiniteProducer(): number {
   return Number.POSITIVE_INFINITY;
 }
 
-/* ==========================================================================
- * 3. The merge as it arrives at the hook
- * ========================================================================== */
-
 /**
  * Face value the merge of the pair already carries when `onMerge` is
  * dispatched: the producer of js/game_manager.js L157 applied once.
  */
 const BASELINE_RESULT = raiseWith(defaultProduceMergeValue, PAIR_VALUE);
 
-/**
- * Score the merge already carries when `onMerge` is dispatched. Equal to
- * `BASELINE_RESULT`, which is what js/game_manager.js L167 accrued.
- */
+/** Score the merge already carries when `onMerge` is dispatched. */
 const BASELINE_SCORE = BASELINE_RESULT;
-
-/* ==========================================================================
- * 4. The relic under test
- * ========================================================================== */
 
 /**
  * Reads the `alloy-forge` declaration out of the family it is declared in.
  *
- * @returns The declaration, or `undefined` where the family declares no relic
- *   under that identifier.
+ * @returns The declaration, or `undefined` where the family declares no
+ *   relic under that identifier.
  */
 function findInFamily(): Relic | undefined {
   return MERGE_MAGIC_FAMILY.relics.find((relic) => relic.id === RELIC_ID);
 }
 
 /**
- * Reads the `alloy-forge` declaration, failing loudly where the family no
- * longer declares it.
- *
  * @returns The declaration.
  * @throws {Error} If the family declares no relic under `RELIC_ID`.
  */
@@ -273,10 +209,6 @@ function requireMergeHandler(relic: Relic): HookHandler<'onMerge'> {
   return handler;
 }
 
-/* ==========================================================================
- * 5. The hand-assembled dispatch context
- * ========================================================================== */
-
 /** A board-effect queue paired with the log of the calls made on it. */
 interface EffectLog {
   /** The queue handed to the context. */
@@ -288,8 +220,7 @@ interface EffectLog {
 
 /**
  * Builds a board-effect queue that accepts nothing and logs every call made on
- * it. A board command a relic records appears in the log under the command's
- * own name.
+ * it.
  *
  * @param grid Board the read members resolve against.
  * @returns The queue and its call log.
@@ -328,8 +259,7 @@ function createRecordingEffects(grid: Grid): EffectLog {
 }
 
 /**
- * Builds the query-only board view a handler is handed. `cellValue` stands in
- * for `cellContent`: the face value of a cell rather than the tile in it.
+ * Builds the query-only board view a handler is handed.
  *
  * @param grid Live board the view reads.
  * @returns The view, resolving every read against the live board.
@@ -375,9 +305,10 @@ interface Harness {
 }
 
 /**
- * Assembles one dispatch: a fresh live `RulesConfig`, the merge-pair board, the
- * run's substreams derived from `SUITE_SEED`, a logging board-effect queue, the
- * run correlation identifier, and a state slot carrying `STATE_SENTINEL`.
+ * Assembles one dispatch: a fresh live `RulesConfig`, the merge-pair board,
+ * the run's substreams derived from `SUITE_SEED`, a logging board-effect
+ * queue, the run correlation identifier, and a state slot carrying
+ * `STATE_SENTINEL`.
  *
  * @param charges Charge budget the context reports. Omitted, the context
  *   carries no budget, which is what this relic's declaration produces.
@@ -421,10 +352,6 @@ function createHarness(charges?: number): Harness {
   };
 }
 
-/* ==========================================================================
- * 6. Payloads and comparators
- * ========================================================================== */
-
 /** One merge payload with the two live tiles it projects. */
 interface MergeCase {
   readonly payload: MergePayload;
@@ -433,9 +360,7 @@ interface MergeCase {
 }
 
 /**
- * Builds a merge payload over two freshly constructed tiles. The payload is
- * frozen: none of its members can be written in place, and a transformed
- * payload reaches the caller as the handler's return value alone.
+ * Builds a merge payload over two freshly constructed tiles.
  *
  * @param resultValue Value the merge already produces.
  * @param scoreDelta Score the merge already accrues.
@@ -521,9 +446,6 @@ interface DeclarationSnapshot {
 }
 
 /**
- * Flattens a declaration, recording whether the two optional members are
- * declared at all rather than what they hold.
- *
  * @param relic Declaration to read.
  * @returns A fresh snapshot.
  */
@@ -549,10 +471,6 @@ let harness: Harness = createHarness();
 beforeEach(() => {
   harness = createHarness();
 });
-
-/* ==========================================================================
- * 7. The declaration is reachable, and it is the catalogue's own object
- * ========================================================================== */
 
 describe('the alloy-forge declaration', () => {
   it('is declared by the merge-magic family under the id alloy-forge', () => {
@@ -580,10 +498,6 @@ describe('the alloy-forge declaration', () => {
     expect(Object.isFrozen(relic.hooks)).toBe(true);
   });
 });
-
-/* ==========================================================================
- * 8. Property 1 — it fires only on the hooks it binds
- * ========================================================================== */
 
 describe('alloy-forge fires only on the hooks it binds', () => {
   it('binds onMerge and no other hook', () => {
@@ -627,10 +541,6 @@ describe('alloy-forge fires only on the hooks it binds', () => {
     }
   });
 });
-
-/* ==========================================================================
- * 9. Property 2 — the specified effect
- * ========================================================================== */
 
 describe(
   'alloy-forge applies the live config.merge.produce a second time and ' +
@@ -806,10 +716,6 @@ describe(
   },
 );
 
-/* ==========================================================================
- * 10. Property 3 — charges, including an invocation at a spent budget
- * ========================================================================== */
-
 describe('alloy-forge carries no charge budget and consults none', () => {
   it('declares no charges member, absent rather than null', () => {
     const relic = requireRelic();
@@ -870,10 +776,6 @@ describe('alloy-forge carries no charge budget and consults none', () => {
   });
 });
 
-/* ==========================================================================
- * 11. Determinism — the relic consumes no randomness
- * ========================================================================== */
-
 describe('alloy-forge consumes no randomness', () => {
   it('leaves every named substream cursor where it stood', () => {
     const before = harness.streams.snapshotCursors();
@@ -908,10 +810,6 @@ describe('alloy-forge consumes no randomness', () => {
     expect(body).not.toContain('console');
   });
 });
-
-/* ==========================================================================
- * 12. The shared declaration and the per-test rules
- * ========================================================================== */
 
 describe('the shared alloy-forge declaration survives the suite', () => {
   it('rebuilds the rules for every test, leaking no substitution', () => {

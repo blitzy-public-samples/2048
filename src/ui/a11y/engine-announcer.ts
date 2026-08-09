@@ -1,54 +1,18 @@
 // Translates engine events into live-region announcements.
 //
-// Provenance:
-//   src/ui/a11y/live-region.ts   the announcer, its `Announcement` vocabulary
-//                                and `composeAnnouncements`
-//   src/engine/engine-events.ts  the seven event names and their payloads
-//
-// This module is the missing link between the two. `createLiveRegionAnnouncer`
-// was fully implemented and fully tested but never constructed, and nothing
-// ever fed it, so `#live-region` stayed empty for the whole life of a run: a
-// screen-reader user was told nothing about a move, a merge, a spawn or a
-// verdict. The announcer knew how to say all of it and was never asked.
-//
-// Deliberately thin. It performs no composition, no ordering and no
-// deduplication of its own, because `composeAnnouncements` already does all
-// three — it orders the clauses of one batch as move, merges, spawn, stage,
-// score no matter which order they arrived in, drops a move that changed
-// nothing, and lets a verdict supersede the gameplay items beside it. Adding a
-// second opinion here would fight it.
+// Provenance: src/ui/a11y/live-region.ts the announcer, its `Announcement`
+// vocabulary and `composeAnnouncements` src/engine/engine-events.ts the seven
+// event names and their payloads
 //
 // The one piece of state it does keep is the last verdict announced:
 // `state:commit` fires on every commit while a verdict is news exactly once.
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated, all target-only because the retired sources
-// announced nothing:
-//   TR-ANNOUNCE-01  `createEngineAnnouncer` and its subscription to the seven
-//                   event names
-//   TR-ANNOUNCE-02  the per-event translation into the `Announcement`
-//                   vocabulary of ./live-region
-//   TR-ANNOUNCE-03  the last-verdict record and the once-per-verdict rule
-//   TR-ANNOUNCE-04  `EngineAnnouncer.dispose` and the released subscriptions
-//   TR-ANNOUNCE-05  the unconfirmed-status announcement, spoken on each
-//                   transition of `StateCommitEvent.degraded` in both
-//                   directions
-//
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-ANNOUNCE-01  composition, ordering and deduplication left to
-//                   `composeAnnouncements`
-//   DL-ANNOUNCE-02  the last verdict announced held here, so a verdict is
-//                   announced once per run
+// Decisions: DL-ANNOUNCE-01, DL-ANNOUNCE-02 (docs/DECISION_LOG.md).
 
 import type { EngineEventName, EngineEvents } from '../../engine/engine-events';
 import type { AnnouncedDirection, LiveRegionAnnouncer, TerminalVerdict } from './live-region';
 import type { UiReporter } from './settings';
 import { NOOP_UI_REPORTER, createSafeUiReporter } from './settings';
-
-/* ==========================================================================
- * 1. Reported names
- * ========================================================================== */
 
 /** Context every report of this module carries. */
 const REPORT_CONTEXT = 'a11y-engine-announcer';
@@ -70,8 +34,7 @@ const DEGRADED_METRIC = 'ui.announcer.degraded';
 
 /**
  * Spoken when a commit reports that the engine could not establish the turn's
- * terminal or stage status. The HUD shows the same state as text; this is what
- * reaches a player who is not reading the run-status group.
+ * terminal or stage status.
  */
 const DEGRADED_ANNOUNCEMENT =
   'Board status unconfirmed. The game could not check for a win, a loss or a ' +
@@ -80,19 +43,7 @@ const DEGRADED_ANNOUNCEMENT =
 /** Spoken when a later commit establishes the status again. */
 const CONFIRMED_ANNOUNCEMENT = 'Board status confirmed again.';
 
-/* ==========================================================================
- * 2. Types
- * ========================================================================== */
-
-/**
- * The slice of `EngineEvents` this module uses.
- *
- * `on` alone: the translator subscribes and never emits, so the emitting half
- * of the interface is deliberately out of reach. Written as a `Pick` of the
- * real interface rather than a hand-copied signature, so the generic key and
- * payload typing carries over and a rename of an event name is a type error
- * here rather than a listener that is silently never called.
- */
+/** The slice of `EngineEvents` this module uses. */
 export type AnnouncedEngineEvents = Pick<EngineEvents, 'on'>;
 
 /** What `createEngineAnnouncer` accepts. */
@@ -114,31 +65,15 @@ export interface EngineAnnouncer {
    */
   subscribe(events: AnnouncedEngineEvents): () => void;
 
-  /**
-   * The verdict last announced, or `null` where none has been.
-   *
-   * Exposed so a caller and a test can see the transition state this module
-   * keeps, rather than inferring it from the region's text.
-   */
+  /** The verdict last announced, or `null` where none has been. */
   lastVerdict(): TerminalVerdict | null;
 
   /** Releases every subscription. Calling it more than once is harmless. */
   destroy(): void;
 }
 
-/* ==========================================================================
- * 3. Verdict resolution
- * ========================================================================== */
-
 /**
  * Reduces the three terminal flags of a commit to the verdict to announce.
- *
- * The same three-flag reduction the HUD applies to choose an overlay class, and
- * it must agree with it: `over` is a loss, and a win that is still blocked
- * pending acknowledgement is the win itself while a win the player has carried
- * on past is the continued win. `terminated` is the engine's own answer to
- * whether play is blocked, so a continued win resolves without this module
- * tracking the acknowledgement.
  *
  * @param over Whether the run is lost.
  * @param won Whether the configured win value has been reached.
@@ -161,10 +96,6 @@ function resolveVerdict(
   return terminated ? 'win' : 'continued-win';
 }
 
-/* ==========================================================================
- * 4. Construction
- * ========================================================================== */
-
 /**
  * Builds a translator that feeds one announcer from one engine.
  *
@@ -173,7 +104,6 @@ function resolveVerdict(
  *
  * @param options The announcer to feed and an optional sink.
  * @returns The translator.
- *
  * @example
  * const announcer = createLiveRegionAnnouncer({ root: document });
  * const translator = createEngineAnnouncer({ announcer });
@@ -189,24 +119,19 @@ export function createEngineAnnouncer(
 
   let destroyed = false;
 
-  /**
-   * Direction of the move in flight.
-   *
-   * Captured from `move:before` because `move:after` does not carry one — it
-   * reports what the move did, not which way it went — while a move
-   * announcement needs both halves. `move:before` carries the direction the
-   * engine will actually resolve in, so a hook that redirected the move is
-   * announced as the direction the player got rather than the one they asked
-   * for.
-   */
+  /** Direction of the move in flight. */
   let pendingDirection: AnnouncedDirection | null = null;
 
-  /** The verdict last announced, so a verdict is announced once and not per commit. */
+  /**
+   * The verdict last announced, so a verdict is announced once and not per
+   * commit.
+   */
   let lastVerdict: TerminalVerdict | null = null;
 
   /**
-   * Whether the last commit reported an unestablished status, so the transition
-   * is announced and the state is not repeated on every commit that follows it.
+   * Whether the last commit reported an unestablished status, so the
+   * transition is announced and the state is not repeated on every commit that
+   * follows it.
    */
   let lastDegraded = false;
 
@@ -247,8 +172,7 @@ export function createEngineAnnouncer(
         events.on('tile:spawn', (payload): void => {
           // An attempt that inserted nothing carries no position: the full
           // board of AAP Contract 1, a suppressing `onSpawn` handler, or a
-          // handler that named a cell off the lattice. There is no tile to
-          // narrate, so nothing is announced.
+          // handler that named a cell off the lattice.
           if (payload.position === undefined) {
             return;
           }
@@ -264,8 +188,7 @@ export function createEngineAnnouncer(
         events.on('move:after', (payload): void => {
           if (pendingDirection === null) {
             // No direction was captured, so this move did not come through
-            // `move:before` in this subscription's lifetime. Announcing a
-            // direction would mean inventing one.
+            // `move:before` in this subscription's lifetime.
             return;
           }
 
@@ -289,13 +212,9 @@ export function createEngineAnnouncer(
         }),
 
         events.on('state:commit', (payload): void => {
-          // THE UNCONFIRMED STATUS IS ANNOUNCED ON ITS TRANSITIONS, both of
+          // The unconfirmed status is announced on its transitions, both of
           // them: a commit whose terminal or stage status the engine could not
-          // establish, and the commit that establishes one again. Every commit
-          // carries the flag, so the last state announced is held and only a
-          // change is spoken. Said through the `text` announcement, which is the
-          // vocabulary ./live-region carries for a state that is not one of the
-          // gameplay kinds.
+          // establish, and the commit that establishes one again.
           if (payload.degraded !== lastDegraded) {
             lastDegraded = payload.degraded;
 

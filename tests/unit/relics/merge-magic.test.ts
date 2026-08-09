@@ -239,20 +239,33 @@ describe('a spent charge budget', () => {
     expect(relicById('frostbind').charges).toBe(8);
   });
 
-  it('skips the handler at zero charges, without throwing', () => {
+  it('skips the effect hook at zero charges, without throwing', () => {
     const target = relicBench([{ id: 'frostbind', charges: 0 }]);
 
     place(target.grid, 0, 0, 4);
 
     const started = resultOn(target, 'onStageStart', stageStartPayload(4));
 
-    // Refused at the guard rather than invoked and refused inside: the count is
-    // what proves the guard is the bus's own.
-    expect(started.invoked).toBe(0);
-    expect(started.skipped).toBe(1);
+    // STAGE PREPARATION IS NOT WITHHELD. `STANDING_HOOK_NAMES` of
+    // src/engine/hooks.ts exempts `onStageStart` from the charge guard, because
+    // the install reinstates the standing rule the ALREADY SPENT charges
+    // established and a reload hands the relic a fresh default to reinstate it
+    // over. It costs nothing: the handler asks for no charge.
+    expect(started.invoked).toBe(1);
+    expect(started.skipped).toBe(0);
+    expect(started.failed).toBe(0);
+    expect(started.chargesConsumed).toBe(0);
 
-    // The merge rule was never installed, so the base rule is still in force.
-    expect(target.config.merge.canMerge).toBe(defaultCanMerge);
+    // An empty ledger installs a wrapper that refuses no cell, so the rule in
+    // force is a layer over the base rule rather than the base rule itself.
+    expect(target.config.merge.canMerge).not.toBe(defaultCanMerge);
+
+    const moving = { value: 4, mergedFrom: null };
+    const stationary = { value: 4, mergedFrom: null };
+
+    expect(target.config.merge.canMerge(moving, stationary)).toBe(
+      defaultCanMerge(moving, stationary),
+    );
 
     const merged = resultOn(
       target,
@@ -260,6 +273,8 @@ describe('a spent charge budget', () => {
       mergePayload({ x: 1, y: 0 }, { x: 0, y: 0 }, 2, 2, 4, 4),
     );
 
+    // The EFFECT hook is the one the guard withholds, so nothing new is frosted
+    // and the merge resolves exactly as the rules produced it.
     expect(merged.invoked).toBe(0);
     expect(merged.skipped).toBe(1);
     expect(merged.failed).toBe(0);
@@ -464,7 +479,7 @@ describe('two relics that both install a merge rule', () => {
     expect(frost).toBe(defaultCanMerge);
   });
 
-  it('installs nothing for a relic whose budget is spent', () => {
+  it('reinstalls a spent relic s standing layer beside an unspent one', () => {
     const target = relicBench([
       { id: 'frostbind', charges: 0 },
       'chain-catalyst',
@@ -472,12 +487,24 @@ describe('two relics that both install a merge rule', () => {
 
     dispatchOn(target, 'onStageStart', stageStartPayload(4));
 
-    // One layer, not two: the exhausted relic installed nothing and the other
-    // wrapped the default directly.
+    // TWO LAYERS, in pickup order. The exhausted relic's stage-start install is
+    // exempt from the charge guard, so its standing layer is at the bottom of
+    // the chain and the unspent relic wraps it — which is what carries a frozen
+    // ledger through a reload that restored a spent budget.
     const ladder: unknown = (
       target.config.merge.canMerge as unknown as Record<string, unknown>
     )['__chainCatalystLadder'];
 
-    expect(ladder).toBe(defaultCanMerge);
+    expect(ladder).toBeTypeOf('function');
+    expect(ladder).not.toBe(defaultCanMerge);
+
+    const frost: unknown = (ladder as Record<string, unknown>)[
+      '__frostbindFrozenCells'
+    ];
+
+    expect(frost).toBe(defaultCanMerge);
+
+    // The spent budget is still spent: nothing was deducted to reinstate it.
+    expect(target.bus.subscribers()[0]?.charges).toBe(0);
   });
 });

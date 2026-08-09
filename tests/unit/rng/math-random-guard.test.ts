@@ -3,13 +3,6 @@
 // Contract 6 replaced exactly two randomness call sites, the only two the
 // repository ever held: the spawn value in js/game_manager.js and the spawn
 // position in js/grid.js.
-//
-// Math.random is read here and never written. Nothing below assigns to it,
-// wraps it, spies on it, stubs it, mocks it or restores it, and no expectation
-// names a particular drawn value: every one is reference identity,
-// whole-sequence equality, whole-sequence inequality, or a shape property of
-// the built-in. Within tests/unit/rng this is the only file that calls
-// Math.random; the two sibling suites take the invariant as given.
 
 import {
   PLATFORM_MATH_RANDOM,
@@ -25,11 +18,7 @@ import {
   type StreamName,
 } from '../../../src/rng/rng-streams';
 
-/* ===== 1. The captured reference ===== */
-
-// V2: Math.random is never patched. The reference was captured by the fixture
-// imported above, whose evaluation precedes that of the two RNG modules, and is
-// compared against by section 4 and by the final guard in section 8.
+// V2: Math.random is never patched.
 const originalMathRandom = PLATFORM_MATH_RANDOM;
 
 const GUARD_SEED = 'guard-seed-1';
@@ -67,8 +56,6 @@ const NO_ITEMS: readonly number[] = [];
 
 const NO_WEIGHTS: readonly number[] = [];
 
-/* ===== 3. Draw collection ===== */
-
 /** The one draw primitive `SeededRng` and `RngStream` both expose. */
 interface DrawSource {
   next(): number;
@@ -86,8 +73,6 @@ function drawSequence(source: DrawSource, count: number): number[] {
 
 /**
  * Advances the platform's own generator, discarding what it yields.
- *
- * Reads Math.random and never writes it.
  *
  * @param count Number of values to consume.
  */
@@ -195,15 +180,9 @@ describe('the seeded RNG leaves Math.random untouched', () => {
   });
 });
 
-/* ===== 5. Initialisation of the modules themselves ===== */
-
 // The cases in section 4 exercise modules this file imported statically, so
-// they
-// measure the reference across construction and drawing but not across
-// initialisation. These clear the module registry and import both modules
-// again, which runs their bodies afresh, and compare the reference on either
-// side of that. The comparison target is the fixture's capture, taken before
-// this file's own dependencies were evaluated.
+// they measure the reference across construction and drawing but not across
+// initialisation.
 describe('initialising the RNG modules leaves Math.random untouched', () => {
   it('leaves it identical across a fresh generator-module evaluation',
     async () => {
@@ -288,7 +267,6 @@ describe('seeded sequences are independent of ambient Math.random', () => {
   });
 });
 
-
 describe('Math.random is still the platform built-in', () => {
   it('holds the exact function the property was found carrying', () => {
     const current = Object.getOwnPropertyDescriptor(Math, 'random');
@@ -310,7 +288,6 @@ describe('Math.random is still the platform built-in', () => {
     expect(typeof Math.random).toBe('function');
     expect(Math.random.length).toBe(0);
   });
-
 
   it('draws a float inside the interval the two call sites assumed', () => {
     const drawn = Math.random();

@@ -6,22 +6,10 @@
  * reachable by Tab and activatable by Enter or Space, and a visible focus
  * indicator.
  *
- * Imports exactly two modules — ./settings for the injected report sink, the
- * guarded mount resolver and the effective reduced-motion value, and
- * ../../theme/tokens for the geometry scales. Nothing from src/render/,
- * src/input/, src/engine/, src/relics/, src/observability/, or any sibling
- * module under src/ui/.
- *
  * Nothing here ports a construct from js/: the retired sources carry no focus
  * management, no ARIA and no parallel board. The 1-based grid indices are
  * js/html_actuator.js's, and the cell geometry comes from style/main.scss
  * through ../../theme/tokens.
- *
- * The three controls the trap cycles were `<a>` elements with no `href` in the
- * retired markup, so none was a tab stop; index.html now declares them as
- * `<button>` elements and src/input/on-screen-controls.ts owns their bindings.
- * This module manages focus order, containment and restoration over them and
- * binds none of them.
  *
  * Arrow keys are not read anywhere in this file. The grid host is a single tab
  * stop and its cells are programmatic focus targets, reached through
@@ -32,43 +20,7 @@
  * HTML focusability pattern, evaluated only inside a container the caller
  * supplies.
  *
- * Exported functions report rather than throw: a missing host, a missing
- * container, an empty focusable set, a detached restore target, a rebuild
- * during an active trap and a `focus()` on a disconnected node are each
- * reported through the injected sink and the call continues.
- *
- * Presentation belongs to style/_a11y.scss, which owns the focus ring, the
- * visually-hidden utility, the parallel layer's grid and the reduced-motion
- * layer, and to style/_reward.scss, which owns the dialog surface. The only
- * style properties written here are the position and size of a cell
- * counterpart, and every one of their values comes from ../../theme/tokens.
- *
- * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
- * this module's area enumerated:
- *   TR-FOCUS-01  index.html L31, L38, L39      the three hrefless `<a>`
- *                                              controls, now `<button>`
- *                                              elements this module orders and
- *                                              contains
- *   TR-FOCUS-02  js/keyboard_input_manager.js  the unguarded control lookups,
- *                L139-L141                     resolved here through the
- *                                              guarded resolver of ./settings
- *   TR-FOCUS-03  target-only row               `collectFocusable`,
- *                                              `FOCUSABLE_SELECTORS` and the
- *                                              focus cycle
- *   TR-FOCUS-04  target-only row               the focus trap and its
- *                                              restoration target
- *   TR-FOCUS-05  target-only row               the parallel board layer, its
- *                                              single tab stop and `focusCell`
- *   TR-FOCUS-06  target-only row               the per-cell counterpart geometry
- *   TR-FOCUS-07  target-only row               `ScreenName`, `SCREEN_NAMES` and
- *                                              `isScreenName`
- *
- * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
- * only so the construct can be found from the log:
- *   DL-FOCUS-01  the single-tab-stop grid
- *   DL-FOCUS-02  the explicit per-cell geometry
- *   DL-FOCUS-03  `aria-disabled` elements retained in the focus cycle
- *   DL-A11Y-08   the parallel DOM beside an `aria-hidden` canvas
+ * Decisions: DL-FOCUS-01, DL-FOCUS-02, DL-FOCUS-03 (docs/DECISION_LOG.md).
  */
 
 import {
@@ -89,10 +41,6 @@ import {
 } from '../../theme/tokens';
 import type { GeometryScale, ScaleName } from '../../theme/tokens';
 
-/* --------------------------------------------------------------------------
- * 1. Shared vocabulary
- * ----------------------------------------------------------------------- */
-
 /** Context label carried into every report raised by the focus surface. */
 export const FOCUS_CONTEXT = 'focus-manager';
 
@@ -105,7 +53,7 @@ const METRIC_NO_FOCUSABLE = 'ui.focus.no_focusable';
 /** Counter raised where a focus target is not connected to a document. */
 const METRIC_DETACHED_TARGET = 'ui.focus.detached_target';
 
-/** Counter raised where `focus()` itself threw. */
+/** Counter raised where `focus` itself threw. */
 const METRIC_FOCUS_FAILED = 'ui.focus.failed';
 
 /** Counter raised where a placement resolved no target at all. */
@@ -130,8 +78,8 @@ const METRIC_RESTORE_DETACHED = 'ui.focus.trap.restore_detached';
 const METRIC_RESTORE_INSIDE = 'ui.focus.trap.restore_inside';
 
 /**
- * Counted when nothing held focus as the trap engaged, so the document body was
- * the recorded target and the fallback serves the release instead.
+ * Counted when nothing held focus as the trap engaged, so the document body
+ * was the recorded target and the fallback serves the release instead.
  */
 const METRIC_RESTORE_BODY = 'ui.focus.trap.restore_body';
 
@@ -209,7 +157,7 @@ export function isScreenName(value: unknown): value is ScreenName {
 }
 
 /**
- * An element this module may call `focus()` on.
+ * An element this module may call `focus` on.
  *
  * Both branches implement the `focus`, `blur` and `tabIndex` members, so the
  * union covers a focusable SVG child of a container as well as an HTML one.
@@ -221,9 +169,6 @@ export type FocusRoot = Element | Document | DocumentFragment;
 
 /**
  * Narrows a value to something focusable.
- *
- * Structural rather than instance-based, so a document from another realm and
- * a hand-built stand-in in a test both narrow.
  *
  * @param value Candidate element.
  * @returns Whether `value` carries a callable `focus`.
@@ -395,22 +340,17 @@ function describeElement(element: unknown): string {
   return tagName;
 }
 
-/* --------------------------------------------------------------------------
- * 2. Focusable-element collection
- * ----------------------------------------------------------------------- */
-
 /**
  * The generic HTML focusability pattern.
  *
  * Not a product mount point: every selector here is evaluated inside a
  * container the caller supplies, never against the document. index.html
- * remains the sole authority for the mount selectors this module resolves,
- * and each of those goes through the guarded resolver.
+ * remains the sole authority for the mount selectors this module resolves, and
+ * each of those goes through the guarded resolver.
  *
  * `[aria-disabled="true"]` is absent from the exclusions the filter below
- * applies. style/_reward.scss withdraws pointer interaction from
- * such a card and keeps it focusable and announceable, so it stays in the
- * cycle.
+ * applies. style/_reward.scss withdraws pointer interaction from such a card
+ * and keeps it focusable and announceable, so it stays in the cycle.
  */
 export const FOCUSABLE_SELECTORS = Object.freeze([
   'a[href]',
@@ -439,16 +379,14 @@ export interface CollectFocusableOptions {
   readonly context?: string;
 
   /**
-   * Whether elements carrying a negative `tabindex` are included. They are
-   * programmatic focus targets rather than tab stops, so a trap excludes them
-   * and `focusCell` addresses them directly. Defaults to `false`.
+   * Whether elements carrying a negative `tabindex` are included. Defaults to
+   * `false`.
    */
   readonly includeProgrammatic?: boolean;
 
   /**
    * Whether the rendered-box filter is skipped entirely. Defaults to `false`,
-   * which applies the filter only where the environment reports layout at
-   * all.
+   * which applies the filter only where the environment reports layout at all.
    */
   readonly ignoreVisibility?: boolean;
 }
@@ -473,11 +411,8 @@ function tabIndexAttributeOf(element: Element): number | null {
 }
 
 /**
- * Whether an element, or an ancestor of it, carries one of the attributes
- * that removes it from the focus order.
- *
- * `disabled`, `hidden` and `inert` are each inherited by descendants in the
- * platform's own handling, so each is tested with `closest`.
+ * Whether an element, or an ancestor of it, carries one of the attributes that
+ * removes it from the focus order.
  *
  * @param element Element to test.
  * @param reporter Contained sink.
@@ -505,9 +440,7 @@ function isAttributeExcluded(
       element.closest('[inert]') !== null
     );
   } catch (error: unknown) {
-    // `closest` rejects a selector the engine cannot parse. The three
-    // selectors above are literal, so this branch is only reachable through a
-    // stand-in, and the self-only test is the nearest equivalent answer.
+    // `closest` rejects a selector the engine cannot parse.
     reporter.error('focusable ancestor test failed', error, {
       context,
       element: describeElement(element),
@@ -546,8 +479,7 @@ function isStyleHidden(
       style.contentVisibility === 'hidden'
     );
   } catch (error: unknown) {
-    // A detached element makes `getComputedStyle` throw on some engines. An
-    // unanswerable question is not an exclusion.
+    // A detached element makes `getComputedStyle` throw on some engines.
     reporter.error('focusable style test failed', error, {
       context,
       element: describeElement(element),
@@ -593,9 +525,9 @@ function hasRenderedBox(
  *
  * The rendered-box filter is self-normalizing: it is applied only where at
  * least one surviving candidate reports a box with area. An environment that
- * reports no layout for anything — jsdom, and happy-dom — therefore keeps
- * every candidate instead of yielding an empty set, while a real engine drops
- * the collapsed ones.
+ * reports no layout for anything — jsdom, and every other DOM emulator —
+ * therefore keeps every candidate instead of yielding an empty set, while a real
+ * engine drops the collapsed ones.
  *
  * @param root Container the search runs inside. A nullish root is reported
  *   and yields an empty result.
@@ -688,10 +620,6 @@ export function collectFocusable(
   return Object.freeze(rendered);
 }
 
-/* --------------------------------------------------------------------------
- * 3. Reduced motion, and the guarded focus call
- * ----------------------------------------------------------------------- */
-
 /** How a caller supplies the effective reduced-motion value. */
 export interface ReducedMotionOptions {
   /**
@@ -701,8 +629,8 @@ export interface ReducedMotionOptions {
   readonly reducedMotion?: boolean;
 
   /**
-   * The motion setting in force, resolved against the platform query.
-   * Defaults to `DEFAULT_MOTION_SETTING`, which follows the query.
+   * The motion setting in force, resolved against the platform query. Defaults
+   * to `DEFAULT_MOTION_SETTING`, which follows the query.
    */
   readonly motionSetting?: MotionSetting;
 }
@@ -749,11 +677,7 @@ interface ApplyFocusOptions {
   /** Whether motion is to be reduced. */
   readonly reducedMotion: boolean;
 
-  /**
-   * Whether the target is scrolled into view after focusing. Defaults to
-   * `true`; the browser's own scroll-on-focus is suppressed either way so a
-   * single, motion-aware scroll happens rather than two.
-   */
+  /** Whether the target is scrolled into view after focusing. */
   readonly scrollIntoView?: boolean;
 
   /** Field naming what the placement was for, carried into a report. */
@@ -762,9 +686,6 @@ interface ApplyFocusOptions {
 
 /**
  * Focuses an element without throwing, reporting whichever way it failed.
- *
- * A detached target is reported and refused before `focus()` is reached, which
- * is the diagnostic the retired sources had no path for.
  *
  * @param element Element to focus, or `null`.
  * @param options Sink, context label, motion value and scroll switch.
@@ -815,8 +736,7 @@ function applyFocus(
       });
     } catch (error: unknown) {
       // A platform rejecting the options form leaves the element focused but
-      // unscrolled. A platform offering no method at all is skipped by the
-      // guard above rather than reported, so a DOM stand-in raises nothing.
+      // unscrolled.
       reporter.error('focus target could not be scrolled into view', error, {
         ...fields,
         target: describeElement(element),
@@ -828,10 +748,6 @@ function applyFocus(
 
   return doc === null || doc.activeElement === element;
 }
-
-/* --------------------------------------------------------------------------
- * 4. Deterministic placement on a router transition
- * ----------------------------------------------------------------------- */
 
 /**
  * Attribute a screen marks its designated initial focus target with.
@@ -846,17 +762,7 @@ export const FOCUS_INITIAL_ATTRIBUTE = 'data-focus-initial';
 /** `FOCUS_INITIAL_ATTRIBUTE` as an attribute selector. */
 export const FOCUS_INITIAL_SELECTOR = `[${FOCUS_INITIAL_ATTRIBUTE}]`;
 
-/**
- * The designated target per screen, tried inside the container in order.
- *
- * Only two screens carry one, and each is a selector another artifact
- * declares: `#board-a11y` at index.html, and `.relic-card` in the DOM
- * contract at style/_reward.scss. The remaining five resolve through
- * the marker attribute and then the first focusable element, which for `won`
- * and `gameOver` is the first control inside `.game-message`; the selectors
- * for those two controls belong to src/input/on-screen-controls.ts and are not
- * restated here.
- */
+/** The designated target per screen, tried inside the container in order. */
 export const SCREEN_INITIAL_FOCUS: Readonly<
   Record<ScreenName, readonly string[]>
 > = Object.freeze({
@@ -948,13 +854,6 @@ function isContainerFocusable(container: Element): boolean {
 
 /**
  * Places focus deterministically for a screen the router has just activated.
- *
- * The chain is fixed, so the same screen over the same markup always receives
- * focus on the same target: the caller's `initialFocus`, then the
- * `FOCUS_INITIAL_ATTRIBUTE` marker, then the screen's designated selector,
- * then the first focusable element in DOM order, then the container itself
- * where the markup made it focusable. A chain that resolves nothing is
- * reported and focus is left where it is.
  *
  * Called explicitly by the router on a transition. Nothing in this module
  * observes the document, so no DOM change moves focus on its own.
@@ -1092,11 +991,7 @@ export function focusInitial(
   return nothing;
 }
 
-/* --------------------------------------------------------------------------
- * 5. Dialog focus trapping
- * ----------------------------------------------------------------------- */
-
-/** `event.key` of the two keys a trap reads. Movement keys are not read. */
+/** `event.key` of the two keys a trap reads. */
 const KEY_TAB = 'Tab';
 
 /** `event.key` of the dismissal key a trap forwards to its callback. */
@@ -1121,8 +1016,7 @@ export interface FocusTrapOptions extends ReducedMotionOptions {
 
   /**
    * Element focus moves to on engaging, as an element or as a selector
-   * resolved inside the container. Defaults to the first focusable
-   * descendant.
+   * resolved inside the container. Defaults to the first focusable descendant.
    */
   readonly initialFocus?: FocusableElement | string | null;
 
@@ -1143,8 +1037,8 @@ export interface FocusTrapOptions extends ReducedMotionOptions {
 
   /**
    * Containers made inert for the trap's lifetime. Applied only to the
-   * elements the caller supplies; nothing is inferred by walking the
-   * document, and a container that holds the trapped container is refused.
+   * elements the caller supplies; nothing is inferred by walking the document,
+   * and a container that holds the trapped container is refused.
    */
   readonly inertBackground?: readonly (Element | null | undefined)[];
 
@@ -1358,24 +1252,13 @@ function engageTrap(
   /**
    * Whether the recorded element is the document body.
    *
-   * THE BODY IS "NOTHING HAD FOCUS", NOT A PLACE TO RETURN TO. A document with
-   * no focused element reports its body as `activeElement`, and the body is
-   * structurally an element while being unfocusable without a `tabindex` — so
-   * recording it produced a restore target that could never succeed, and every
-   * release from a trap opened while nothing held focus logged a failure that
-   * described a state rather than a fault. Which is the ordinary case here: this
-   * product binds its keys on the document, so a player who has only ever moved
-   * with the arrow keys has focus on the body when the first dialog opens.
-   *
-   * Skipping it hands the release straight to the fallback, which is what should
-   * have served it in the first place.
+   * Skipping it hands the release straight to the fallback, which is what
+   * should have served it in the first place.
    */
   const isDocumentBody = (element: unknown): boolean =>
     doc !== null && element === doc.body;
 
-  // Rule: a recorded target inside the container is not a restore target. A
-  // caller that moved focus into the dialog before engaging reaches this
-  // branch, and the fallback below serves the release.
+  // Rule: a recorded target inside the container is not a restore target.
   const insideContainer =
     recorded !== null && isElementLike(recorded) && heldByContainer(recorded);
   const bodyRecorded = recorded !== null && isDocumentBody(recorded);
@@ -1391,8 +1274,6 @@ function engageTrap(
     );
     reporter.count(METRIC_RESTORE_INSIDE, fields);
   } else if (bodyRecorded) {
-    // Counted, not warned: nothing held focus, which is a state rather than a
-    // fault, and the fallback is the correct route for it.
     reporter.count(METRIC_RESTORE_BODY, fields);
   }
   const inerted = applyInertBackground(
@@ -1540,8 +1421,7 @@ function engageTrap(
         return;
       } else {
         // Connected, yet it did not take focus: a `[hidden]` ancestor, or a
-        // rule that removes it from the rendering. Reported, then the fallback
-        // is tried rather than leaving focus on the document body.
+        // rule that removes it from the rendering.
         reporter.log('warn', 'focus trap restore target did not take focus', {
           ...fields,
           target: describeElement(restoreTarget),
@@ -1602,10 +1482,6 @@ function engageTrap(
   });
 }
 
-/* --------------------------------------------------------------------------
- * 6. The focus manager: the LIFO trap stack
- * ----------------------------------------------------------------------- */
-
 /** Options accepted by `createFocusManager`. */
 export interface FocusManagerOptions extends ReducedMotionOptions {
   /** Sink every failure is reported through. */
@@ -1617,8 +1493,7 @@ export interface FocusManagerOptions extends ReducedMotionOptions {
   /**
    * Provider consulted once per placement, so a preference changed mid-run is
    * observed. Overrides `reducedMotion` and `motionSetting`; where it is
-   * absent, those two decide, and where none is given the platform query
-   * does.
+   * absent, those two decide, and where none is given the platform query does.
    */
   readonly isReducedMotion?: () => boolean;
 
@@ -1684,7 +1559,7 @@ export interface FocusManager {
   /**
    * Releases every trap, removes every listener and clears the stack. Every
    * method afterwards is a reported no-op except the readers, which report an
-   * empty stack. Calling it more than once is harmless.
+   * empty stack.
    */
   destroy(): void;
 }
@@ -1694,8 +1569,8 @@ export interface FocusManager {
  *
  * @param options Sink, context label, motion source and scroll switch.
  * @returns A manager owning its own trap stack. Nothing is held at module
- *   scope, so two managers in one document — the application's, and a test's
- *   — do not observe each other.
+ *   scope, so two managers in one document — the application's, and a test's —
+ *   do not observe each other.
  */
 export function createFocusManager(
   options: FocusManagerOptions = {},
@@ -1706,8 +1581,7 @@ export function createFocusManager(
   /**
    * One stacked trap. The claim is pushed before the trap engages, so a trap
    * already on the stack sees itself displaced while the new one is still
-   * moving focus into its own container; `handle` is filled in once
-   * engagement has returned.
+   * moving focus into its own container.
    */
   interface TrapEntry {
     readonly claim: object;
@@ -1754,13 +1628,7 @@ export function createFocusManager(
     }
   };
 
-  /**
-   * Releases every engaged trap, innermost first.
-   *
-   * Declared as a closure over `stack` rather than as a method, so both the
-   * public member and `destroy()` reach the same function without either
-   * depending on a receiver.
-   */
+  /** Releases every engaged trap, innermost first. */
   const releaseAll = (): void => {
     // Innermost first, so each trap restores to the target recorded before it
     // engaged and the outermost restores last.
@@ -1841,8 +1709,7 @@ export function createFocusManager(
 
       // The claim is pushed first, so an already-stacked trap stops
       // considering itself topmost before this one moves focus into its
-      // container. Without that, the outer trap's focus recovery would pull
-      // focus straight back out of a nested dialog.
+      // container.
       const entry: TrapEntry = { claim: {}, handle: null };
 
       stack.push(entry);
@@ -1886,9 +1753,6 @@ export function createFocusManager(
         return;
       }
 
-      // The closure, not `this.releaseAll()`: a destructured or detached
-      // `destroy` carries no receiver, and one re-bound to another object would
-      // release that object's stack instead of this manager's.
       releaseAll();
       stack.length = 0;
       destroyed = true;
@@ -1901,7 +1765,7 @@ export function createFocusManager(
  * Engages a single trap with no enclosing manager.
  *
  * The standalone form: it owns a private manager whose stack holds only this
- * trap, so it is always its own topmost, and `release()` disposes of that
+ * trap, so it is always its own topmost, and `release` disposes of that
  * manager as well.
  *
  * `createFocusManager` is the form a router that nests dialogs calls: its
@@ -1945,16 +1809,7 @@ export function trap(
   });
 }
 
-/* --------------------------------------------------------------------------
- * 7. The parallel focusable board DOM
- * ----------------------------------------------------------------------- */
-
-/**
- * Selector index.html declares the parallel board host at.
- *
- * The element already carries `role="grid"`, an `aria-label` and
- * `aria-busy="true"`; each is honoured rather than rewritten.
- */
+/** Selector index.html declares the parallel board host at. */
 export const PARALLEL_BOARD_HOST_SELECTOR = '#board-a11y';
 
 /**
@@ -2048,11 +1903,10 @@ export interface ParallelBoardLayer {
    * Resolves the host and builds the cell counterparts.
    *
    * @param host Host element or selector. A nullish value falls back to the
-   *   host given at construction, then to
-   *   `PARALLEL_BOARD_HOST_SELECTOR`.
-   * @param boardSize Cells per row. An integer from 1 through
-   *   MAX_BOARD_SIZE of src/config/default-config.ts; any other value is
-   *   reported and refused before any element is created.
+   *   host given at construction, then to `PARALLEL_BOARD_HOST_SELECTOR`.
+   * @param boardSize Cells per row. An integer from 1 through MAX_BOARD_SIZE
+   *   of src/config/default-config.ts; any other value is reported and refused
+   *   before any element is created.
    * @returns Whether the layer mounted. A miss is reported and leaves every
    *   other method a working no-op.
    */
@@ -2060,10 +1914,6 @@ export interface ParallelBoardLayer {
 
   /**
    * Tears the cell counterparts down and recreates them at a new size.
-   *
-   * The path a board-size-altering relic takes mid-run. Nothing stale is kept,
-   * `cellAt` is consistent afterwards, and focus that was inside the layer is
-   * re-placed deterministically rather than left on an orphaned node.
    *
    * @param boardSize Cells per row, bounded exactly as `mount` bounds it.
    * @returns Whether the rebuild completed.
@@ -2076,7 +1926,8 @@ export interface ParallelBoardLayer {
    * Runs once per commit, never per frame. Only the cells whose value changed
    * since the last call are written, and no subtree is recreated.
    *
-   * @param cells Occupied cells. Any cell absent from the list is named empty.
+   * @param cells Occupied cells. Any cell absent from the list is named
+   *   empty.
    */
   update(cells: readonly ParallelCell[]): void;
 
@@ -2132,10 +1983,6 @@ interface ScaleQueryList {
 
 /**
  * Reads `key` off an event without narrowing the listener's parameter.
- *
- * `Element.addEventListener` types its listener over `Event`, so the delegated
- * activation listener below takes an `Event` and reads the member it needs
- * through this.
  *
  * @param event Event to read.
  * @returns The key, or `null` where the event carries none.
@@ -2214,20 +2061,12 @@ function geometryFor(name: ScaleName): GeometryScale {
  * The geometry scale a board of `boardSize` cells per row occupies, at one
  * scale.
  *
- * A board matching the dimension the scale declares resolves to that scale
- * unchanged, so the default board reproduces the declared lengths exactly. A
- * board-size-altering relic resolves through `createGeometryScale`, keeping the
- * scale's own field width and grid spacing, so the cells continue to fill the
- * same field rather than overflowing it or leaving it short. This is the
- * property style/_a11y.scss states for the layer: the cells follow the
- * configured board size at any value.
- *
  * @param name Scale name.
  * @param boardSize Cells per row.
  * @param reporter Contained sink.
  * @param context Label naming the caller.
- * @returns The resolved scale, or the declared one where the dimension yields
- *   no usable tile length.
+ * @returns The resolved scale, or the declared one where the dimension
+ *   yields no usable tile length.
  */
 function geometryForBoard(
   name: ScaleName,
@@ -2288,14 +2127,6 @@ function geometryForBoard(
 /**
  * Whether a value is a usable board dimension.
  *
- * The ceiling is read from MAX_BOARD_SIZE of src/config/default-config.ts
- * rather than restated, so this layer, the run-state loader and the number-only
- * renderer measure a candidate dimension against one value. `mount` and
- * `rebuild` both test through here before any geometry is resolved and before
- * any element is created, so a dimension above the ceiling produces neither the
- * `boardSize` by `boardSize` cell counterparts nor the two arrays of that
- * length.
- *
  * @param value Candidate size.
  * @returns Whether it is an integer from 1 through MAX_BOARD_SIZE.
  */
@@ -2305,10 +2136,6 @@ function isBoardSize(value: unknown): value is number {
 
 /**
  * The accessible name of one cell.
- *
- * The indices are 1-based, matching `normalizePosition` at
- * js/html_actuator.js L97-L104, which adds 1 to each axis to build
- * `tile-position-X-Y`.
  *
  * @param x Zero-based column.
  * @param y Zero-based row.
@@ -2327,30 +2154,20 @@ function cellLabel(
   return `Column ${x + 1}, row ${y + 1}, ${content}`;
 }
 
-/* --------------------------------------------------------------------------
- * 8. The parallel board layer factory
- * ----------------------------------------------------------------------- */
-
 /**
  * Creates the parallel board layer that stands beside the WebGL canvas.
  *
  * The canvas is one opaque node to assistive technology and carries its own
- * `aria-hidden`; this layer is the semantic counterpart, and nothing here reads
- * or writes any attribute of the canvas.
+ * `aria-hidden`; this layer is the semantic counterpart, and nothing here
+ * reads or writes any attribute of the canvas.
  *
  * It is not the number-only renderer. That is a rendering mode over its own
  * host, and neither module imports the other.
  *
- * Structure per board size: `role="row"` per row, `role="gridcell"` per cell,
- * each cell carrying a 1-based `aria-rowindex` and `aria-colindex`, an
- * `aria-label`, `tabindex="-1"`, and an explicit box from the geometry scales
- * in ../../theme/tokens. The host is the single tab stop. No arrow key is read
- * anywhere in this module: `src/input/input-manager.ts` owns them as the
- * movement input.
- *
  * @param options Sink, host, document, scale, activation callback and the
  *   empty-cell wording.
- * @returns A layer that degrades to a working no-op where the host is absent.
+ * @returns A layer that degrades to a working no-op where the host is
+ *   absent.
  */
 export function createParallelBoardLayer(
   options: ParallelBoardLayerOptions = {},
@@ -2417,8 +2234,8 @@ export function createParallelBoardLayer(
    *
    * The only style properties this module sets. Both lengths come from
    * ../../theme/tokens: the box is `tileBoxSize` and the offsets are
-   * `tilePositionStep`, the pair style/main.scss lays the visual
-   * tiles out with. Logical properties throughout.
+   * `tilePositionStep`, the pair style/main.scss lays the visual tiles out
+   * with. Logical properties throughout.
    */
   const applyCellGeometry = (
     cell: HTMLElement,
@@ -2435,9 +2252,7 @@ export function createParallelBoardLayer(
       cell.style.insetInlineStart = `${tilePositionStep(x, scale)}px`;
       cell.style.insetBlockStart = `${tilePositionStep(y, scale)}px`;
     } catch (error: unknown) {
-      // `tilePositionStep` rejects a non-integer or negative index. Every call
-      // site above validates first, so this is a stand-in's failure and the
-      // cell keeps whatever box the stylesheet gives it.
+      // `tilePositionStep` rejects a non-integer or negative index.
       reporter.error('board cell geometry could not be applied', error, {
         context,
         x,
@@ -2527,9 +2342,7 @@ export function createParallelBoardLayer(
       return;
     }
 
-    // Handled only for a cell this module made focusable with `tabindex`. A
-    // real <button> activates on both keys without a listener, so none is
-    // installed on one and no activation fires twice.
+    // Handled only for a cell this module made focusable with `tabindex`.
     event.preventDefault();
     event.stopPropagation();
 
@@ -2565,7 +2378,9 @@ export function createParallelBoardLayer(
     pending = [];
   };
 
-  /** Builds the rows and cells for a size, and returns whether it completed. */
+  /**
+   * Builds the rows and cells for a size, and returns whether it completed.
+   */
   const buildCells = (nextSize: number): boolean => {
     if (host === null || doc === null) {
       return false;
@@ -2631,16 +2446,7 @@ export function createParallelBoardLayer(
     }
   };
 
-  /**
-   * Returns the layer to its unmounted state.
-   *
-   * Every listener this layer installed is removed, every attribute it added is
-   * removed from the host it was added to, and every piece of host state is
-   * reset. Idempotent and safe with no host, because `mount()` calls it both on
-   * entry — a remount must not leave the previous host's listeners attached,
-   * nor carry that host's attribute-ownership flags onto a different element —
-   * and on each of its own failure paths.
-   */
+  /** Returns the layer to its unmounted state. */
   const teardown = (): void => {
     const previous = host;
 
@@ -2663,8 +2469,6 @@ export function createParallelBoardLayer(
     clearCells();
 
     if (previous !== null) {
-      // The layer no longer carries cells, so the host returns to the
-      // unpopulated state index.html L65 declares.
       setBusy(true);
 
       // Removed from the element they were added to, and only where THIS layer
@@ -2678,8 +2482,8 @@ export function createParallelBoardLayer(
       }
     }
 
-    // Cleared unconditionally, so a flag set against one host can never be read
-    // against the next one.
+    // Cleared unconditionally, so a flag set against one host can never be
+    // read against the next one.
     hostAdded.role = false;
     hostAdded.tabIndex = false;
 
@@ -2694,7 +2498,8 @@ export function createParallelBoardLayer(
   ): boolean => {
     // The COMPLETE unmount path, before a new host is resolved: clearing the
     // cells alone left the previous host's keydown and media-query listeners
-    // attached and carried its attribute-ownership flags onto the next element.
+    // attached and carried its attribute-ownership flags onto the next
+    // element.
     teardown();
 
     const candidate = requestedHost ?? options.host ?? null;
@@ -2752,8 +2557,6 @@ export function createParallelBoardLayer(
       return false;
     }
 
-    // index.html already declares the role; it is honoured rather than
-    // rewritten, and only an absent one is supplied.
     if (host.getAttribute('role') === null) {
       host.setAttribute('role', 'grid');
       hostAdded.role = true;
@@ -2785,8 +2588,6 @@ export function createParallelBoardLayer(
     setBusy(true);
 
     if (!buildCells(boardSize)) {
-      // The role, the tabindex and the scale listener were all installed above,
-      // so the whole path is undone rather than only the cells.
       teardown();
 
       return false;
@@ -2852,9 +2653,7 @@ export function createParallelBoardLayer(
     reporter.count(METRIC_BOARD_REBUILT, { context, boardSize });
 
     if (previous !== null) {
-      // Focus was on a node the rebuild has just discarded. It is re-placed on
-      // the same coordinate where the new size still holds it, and on the
-      // board's first cell otherwise.
+      // Focus was on a node the rebuild has just discarded.
       const withinBounds = previous.x < boardSize && previous.y < boardSize;
       const targetX = withinBounds ? previous.x : 0;
       const targetY = withinBounds ? previous.y : 0;

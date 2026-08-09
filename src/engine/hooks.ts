@@ -22,6 +22,8 @@
 //               receives with each live collaborator replaced by a
 //               capability view, and `HookDispatchPayloadMap`, which the
 //               engine dispatches with the live `Grid` and `Tile`
+//   DL-HOOKBUS-07  `STANDING_HOOK_NAMES`, the stage-preparation hooks the
+//                  charge guard does not withhold from an exhausted subscriber
 
 import type { RulesConfig } from '../config/rules-config';
 import type { StageGoal } from '../config/stage-config';
@@ -59,16 +61,51 @@ export const HOOK_NAMES = Object.freeze([
 export type HookName = (typeof HOOK_NAMES)[number];
 
 /**
+ * The hooks that PREPARE a stage rather than act inside one, and which
+ * src/engine/hook-bus.ts therefore dispatches to a subscriber whose charge
+ * budget is spent.
+ *
+ * `onStageStart` is the one such hook. It is where a subscriber reinstalls the
+ * standing rules its own persisted `state` slot records — the merge predicate
+ * `frostbind` rebuilds from its frozen-cell ledger being the case that names
+ * this set — and a reload yields a fresh configuration carrying the untouched
+ * default, so the install has to be made again on every stage of a resumed run.
+ * Skipping it for an exhausted subscriber dropped standing state that charges
+ * ALREADY SPENT had established, which is a different thing from letting an
+ * exhausted relic fire again.
+ *
+ * The exemption withholds nothing from the charge guard: the bus deducts only
+ * what a handler ASKS for through `HookContext.spendCharge`, and a budget at
+ * zero can pay for nothing, so a stage-start handler that does ask still spends
+ * nothing and every effect hook stays guarded. Declared by hook name, so no
+ * relic declares its own exemption and the 7-member `Relic` shape AAP Contract 3
+ * fixes is untouched. Decision `DL-HOOKBUS-07`.
+ */
+export const STANDING_HOOK_NAMES: readonly HookName[] = Object.freeze([
+  'onStageStart',
+] as const satisfies readonly HookName[]);
+
+/**
+ * Whether the charge guard applies to a hook.
+ *
+ * Total: a name outside `HOOK_NAMES` is reported as guarded, which is the
+ * conservative answer.
+ *
+ * @param hook Hook being dispatched.
+ * @returns `true` for every hook but the standing ones.
+ */
+export function isChargeGuardedHook(hook: HookName): boolean {
+  return !STANDING_HOOK_NAMES.includes(hook);
+}
+
+/**
  * Payload of `onStageStart`, dispatched once as a stage's board is prepared.
  *
  * `boardSize` is the reconciled edge length the stage's grid was built at,
  * which is the size the restored snapshot carried where one was restored.
  */
 export interface StageStartPayload {
-  /**
-   * TRANSFORMABLE: `goal` alone. INVARIANT: `stageIndex`, `seed` and
-   * `boardSize`, each of which the bus refuses a return that changes.
-   */
+  /** TRANSFORMABLE: `goal` alone. */
   readonly stageIndex: number;
 
   /**
@@ -88,17 +125,6 @@ export interface StageStartPayload {
  * TRANSFORMABLE: `direction` and `cancelled`. INVARIANT: `board`, which must
  * be returned as the same object it arrived as.
  *
- * CANCELLABLE. `cancelled` is the only mutable payload member on any hook: a
- * handler may assign it, or return a payload carrying it as `true`. Either
- * withdraws the move, and a withdrawn move changes no state at all — no tile
- * moves, no merge resolves, no tile spawns, the score does not change and
- * nothing is committed.
- *
- * `direction` is the direction the move RESOLVES in: the engine executes the
- * direction this payload carries once every handler has run, so a handler
- * that returns another one redirects the move rather than only relabelling
- * it.
- *
  * `board` is the capability view of `ReadonlyGridView`, not the live `Grid`.
  */
 export interface BeforeMovePayload {
@@ -112,14 +138,6 @@ export interface BeforeMovePayload {
 /**
  * One of the two tiles a merge consumed, as the merge payload carries it: its
  * cell and its face value, and nothing writable.
- *
- * A PROJECTION, NOT THE TILE. The merge branch builds it and freezes it before
- * the dispatch, so a handler reads which tiles merged and where without
- * holding either of them. Previously the payload carried the live `Tile`
- * objects, which the merge branch was about to write to the board: a handler
- * could set `source.value` and then throw, and no rollback could undo that
- * write because the object was the board's own. A handler changes the merge
- * through `resultValue` and `scoreDelta`, which the resolver reads back.
  */
 export interface MergeTileView {
   readonly x: number;
@@ -151,15 +169,6 @@ export interface MergePayload {
  *
  * TRANSFORMABLE: `position` and `value`. There is no invariant member.
  *
- * NOT DISPATCHED ON A FULL BOARD, AND NOT THE ATTEMPT BOUNDARY. The engine
- * returns before this dispatch when no cell is available, so a handler never
- * sees the full-board case. That early return is what keeps a full board free
- * of draws from either substream — the boundary js/grid.js L37-L43 expressed
- * by returning no cell — and it is deliberate rather than an oversight, so
- * spawn ATTEMPTS are not countable from this dispatch. The engine's own
- * `engine.spawn.attempt` counter, raised on entry to the spawn at
- * js/game_manager.js L69, is the one authoritative attempt boundary.
- *
  * `position` is therefore absent only where a handler returned the payload
  * without one, which suppresses the spawn; one that transforms `value` or
  * `position` biases it.
@@ -171,14 +180,6 @@ export interface SpawnPayload {
   /**
    * How many tiles this spawn inserts. `1` on dispatch, which is the vanilla
    * count js/game_manager.js L183 produced.
-   *
-   * TRANSFORMABLE, and the ONE pre-spawn decision that changes the number of
-   * tiles a turn adds. The first tile takes `position` and `value`; each
-   * further tile's cell and value are drawn by the engine from the
-   * `spawn-position` and `spawn-value` substreams over the cells still empty,
-   * so a raised count stays reproducible under a fixed seed. A count at or
-   * below one, a non-finite count and a count beyond the empty cells left all
-   * resolve to the tiles the board can actually take.
    */
   readonly count?: number | undefined;
 }
@@ -188,10 +189,6 @@ export interface SpawnPayload {
  *
  * TRANSFORMABLE: `score`, `over` and `won`. The engine adopts all three from
  * the payload this dispatch resolves to and emits exactly what it adopted.
- *
- * INVARIANT: `board` and `moved`. `terminated` is DERIVED — the engine
- * recomputes it from the adopted `over` and `won` rather than reading it back,
- * so a handler cannot leave a `terminated` that contradicts them.
  *
  * `board` is the capability view of `ReadonlyGridView`, not the live `Grid`.
  */
@@ -231,10 +228,6 @@ export interface HookPayloadMap {
   onAfterMove: AfterMovePayload;
   onStageEnd: StageEndPayload;
 }
-
-/* --------------------------------------------------------------------------
- * Dispatch-input payloads
- * ----------------------------------------------------------------------- */
 
 /**
  * `onBeforeMove` as the ENGINE hands it to the bus: the live board rather than
@@ -278,9 +271,6 @@ export interface AfterMoveDispatchPayload {
  * `HookPayloadMap` for the three hooks carrying a live engine object: the
  * caller supplies the live `Grid` or the live `Tile` pair and the bus hands
  * handlers the frozen capability views of `HookPayloadMap` in their place.
- *
- * The three plain-data hooks carry the same type in both maps, because a
- * handler cannot reach engine state through them at all.
  */
 export interface HookDispatchPayloadMap {
   onStageStart: StageStartPayload;
@@ -291,16 +281,7 @@ export interface HookDispatchPayloadMap {
   onStageEnd: StageEndPayload;
 }
 
-/**
- * The live collaborators a dispatch carries to its handlers.
- *
- * Supplied per dispatch, so each member is the instance in force at that
- * moment. `config` is therefore read at use time and never captured at module
- * load: its `boardSize` is the value a board-mutating relic may have changed
- * during the run, and it is the value the win and loss evaluations read.
- * `grid` is likewise the board object in force, which the engine replaces on
- * every stage start and every restore.
- */
+/** The live collaborators a dispatch carries to its handlers. */
 export interface HookEnvironment {
   readonly config: RulesConfig;
 
@@ -309,19 +290,7 @@ export interface HookEnvironment {
   readonly grid: Grid;
 }
 
-/* --------------------------------------------------------------------------
- * Capability-limited collaborator views
- * ----------------------------------------------------------------------- */
-
-/**
- * The rules a handler reads, with every member readonly.
- *
- * The projection src/engine/hook-bus.ts builds from `HookEnvironment.config`
- * once per dispatch and freezes. Structurally a `RulesConfig` with nothing
- * writable: a handler reads the rule in force — including `boardSize`,
- * which a board-mutating relic changes during the run — and changes the
- * run's rules through the payload it returns rather than by writing here.
- */
+/** The rules a handler reads, with every member readonly. */
 export interface ReadonlyRulesView {
   /** Edge length of the square board, in cells. */
   readonly boardSize: number;
@@ -352,16 +321,7 @@ export interface ReadonlyRulesView {
 }
 
 /**
- * The board a handler reads: the query half of `Grid` and none of its
- * writes.
- *
- * The facade src/engine/hook-bus.ts builds over the live board once per
- * dispatch and freezes. Reads are live — they resolve against the board in
- * force at the moment they are called — while `insertTile`, `removeTile`,
- * the `cells` matrix and the live `Tile` objects are all absent, so a
- * handler cannot rewrite the board out from under the turn that dispatched
- * it. `cellValue` is what stands in for `cellContent`: the face value of a
- * cell rather than the mutable tile occupying it.
+ * The board a handler reads: the query half of `Grid` and none of its writes.
  */
 export interface ReadonlyGridView {
   /** Edge length in cells, read at call time. */
@@ -376,8 +336,8 @@ export interface ReadonlyGridView {
   withinBounds(position: Position): boolean;
 
   /**
-   * Reports whether a cell holds no tile. A cell outside the lattice
-   * reads as available, as js/grid.js L72-L74 did.
+   * Reports whether a cell holds no tile. A cell outside the lattice reads as
+   * available, as js/grid.js L72-L74 did.
    *
    * @param cell Cell to test.
    * @returns `true` when the cell holds no tile.
@@ -402,8 +362,8 @@ export interface ReadonlyGridView {
   cellValue(cell: Position): number | null;
 
   /**
-   * Lists the empty cells, x-outer and y-inner — the order the spawn
-   * position draw resolves against.
+   * Lists the empty cells, x-outer and y-inner — the order the spawn position
+   * draw resolves against.
    *
    * @returns A fresh array of fresh coordinates on each call.
    */
@@ -427,13 +387,6 @@ export interface ReadonlyGridView {
 /**
  * One tile a handler reads: its cell, its face value and the cell it came
  * from, with nothing writable and nothing reachable through it.
- *
- * The projection src/engine/hook-bus.ts builds over a live `Tile` once per
- * dispatch and freezes. `savePosition`, `updatePosition` and `mergedFrom` are
- * all absent: the first two write the tile, and the third holds two more live
- * tiles, so exposing any of them would hand a handler the board's own objects
- * back. A handler that throws therefore cannot leave a tile moved, revalued
- * or re-parented behind it.
  */
 export interface ReadonlyTileView {
   /** Zero-based column the tile occupies, read at projection time. */
@@ -446,26 +399,15 @@ export interface ReadonlyTileView {
   readonly value: number;
 
   /**
-   * The cell `savePosition()` last recorded, as a fresh frozen pair, and
-   * `null` where none was recorded.
+   * The cell `savePosition` last recorded, as a fresh frozen pair, and `null`
+   * where none was recorded.
    */
   readonly previousPosition: Position | null;
 }
 
 /**
- * The randomness a handler draws from: the run's named substreams and
- * nothing else.
- *
- * TRANSACTIONAL. The facade src/engine/hook-bus.ts builds is opened per
- * HANDLER and frozen, and `stream` hands back a FORK of the named substream
- * standing exactly where the substream stands. A handler can therefore take
- * draws — which is how a spawn-biasing relic stays deterministic — while the
- * run's own substreams move only once the handler has returned and its return
- * has been accepted. A handler that draws and then throws, or whose return the
- * bus refuses, consumes no randomness: the fork is discarded and the sequence
- * the engine and every later handler read is the sequence they would have read
- * had the handler never run. The substream table itself cannot be replaced
- * through the facade.
+ * The randomness a handler draws from: the run's named substreams and nothing
+ * else.
  */
 export interface ReadonlyRngView {
   /** Seed of the run these substreams were derived from. */
@@ -492,27 +434,7 @@ export interface ReadonlyRngView {
   snapshotCursors(): RngCursorMap;
 }
 
-/* --------------------------------------------------------------------------
- * Board effects
- * ----------------------------------------------------------------------- */
-
-/**
- * The board-write vocabulary, RE-EXPORTED from where it is declared.
- *
- * TR-EFFECT-04. `src/engine/board-effects.ts` owns the commands, their
- * validation and their projection; this module owns what a handler is handed, so
- * a handler that imports its context from here also gets the command types from
- * here and never has to know which of the two modules declares which.
- *
- * `BoardEffect` is one recorded command, `BoardEffectRequest` the same command
- * in descriptor form, and `BoardEffectQueue` the channel itself. The channel is
- * TRANSACTIONAL exactly as `state` and the randomness fork are: commands are
- * held per handler and reach the lattice only once that handler has returned and
- * its return has been accepted, so a handler that records and then throws — or
- * whose return the bus refuses — changes nothing. It is also inert where the
- * dispatch carries no live board, and refuses mid-resolution on `onMerge` and
- * `onSpawn`, where replacing the lattice would invalidate the move walk.
- */
+/** The board-write vocabulary, RE-EXPORTED from where it is declared. */
 export type {
   BoardEffect,
   BoardEffectRequest,
@@ -520,21 +442,9 @@ export type {
 } from './board-effects';
 
 /**
- * What a handler receives besides its payload: capability-limited views of
- * the three collaborators of `HookEnvironment`, the identity of the
- * dispatch, and the subscriber's own state slot.
- *
- * Carries no bus and no logger: nothing on it re-enters dispatch, and
- * reporting is injected into src/engine/hook-bus.ts. The three
- * collaborators are the frozen views above rather than the live objects,
- * so a handler that throws cannot leave the rules, the board or the
- * substream table changed behind it.
- *
- * EVERYTHING ON IT IS TRANSACTIONAL. The three views are read-only, the
- * randomness view is per handler and commits only on success, and `state`
- * below is a full copy of the bus's slot. A handler that throws therefore
- * leaves NOTHING behind: not a payload member, not a nested state member, not
- * a tile, and not a draw.
+ * What a handler receives besides its payload: capability-limited views of the
+ * three collaborators of `HookEnvironment`, the identity of the dispatch, and
+ * the subscriber's own state slot.
  */
 export interface HookContext {
   /** The rules in force, read at use time. */
@@ -551,13 +461,6 @@ export interface HookContext {
    * applied by the bus once this handler has returned and its return has
    * validated.
    *
-   * `src/engine/board-effects.ts` declares the queue. The recorded commands
-   * are how the relic effects AAP requirement R3 names reach the lattice — the
-   * extra spawned tile, the undo, the shuffle, the excision, the row clear,
-   * the board shrink, the substituted merge predicate and the substituted
-   * spawn distribution — without a handler holding the live `Grid`, a live
-   * `Tile` or the live `RulesConfig`.
-   *
    * TRANSACTIONAL, like `rng` and `state` beside it: the queue is opened per
    * handler and resolved with them, so a handler that records and then throws,
    * or whose return the bus refuses, changes neither the board nor the rules.
@@ -566,11 +469,8 @@ export interface HookContext {
   readonly effects: BoardEffectQueue;
 
   /**
-   * Correlation identifier of the run in progress, injected into the bus
-   * and carried verbatim. Named `correlationId` because that is what it
-   * is: the run instance identifier `RunState.runId` in
-   * src/run/run-state.ts is a different value with a different purpose,
-   * and the two were previously conflated under one name.
+   * Correlation identifier of the run in progress, injected into the bus and
+   * carried verbatim.
    */
   readonly correlationId: CorrelationId;
 
@@ -584,61 +484,22 @@ export interface HookContext {
    * Requests that a charge be spent for this dispatch, because the effect the
    * handler was invoked for has been APPLIED.
    *
-   * WHY THE HANDLER ASKS AND THE BUS DECIDES. AAP Contract 2 puts both the
-   * charge guard and the decrement in the bus, once, rather than sixteen times
-   * in handlers — so no handler reads, compares or writes a budget. But only the
-   * handler knows whether its effect actually TRIGGERED: `tumbler` shuffles
-   * nothing on an open board and `culling-blade` cuts nothing until the small
-   * tiles have piled up, and a dispatch that changed nothing must not cost a
-   * charge. This is the one-line signal that resolves that split: the handler
-   * says "that counted", the bus decides what it costs and whether the budget
-   * can pay.
-   *
-   * A HANDLER THAT DOES NOT ASK PAYS NOTHING, whatever else it did. A
-   * transformed payload member and a written board command are both effects
-   * whose TRIGGER only the relic can judge, and a stage-start rule installation
-   * is the clearest case — it writes a command and must cost nothing, because it
-   * prepares the rule rather than using it. The request is therefore the whole
-   * rule, and nothing in the bus is relic-specific.
-   *
-   * FULFILLED WITH THE REST OF THE TRANSACTION. The request is recorded, not
-   * applied: the bus spends the charge only once the handler has returned and
-   * its return has been ACCEPTED, in the same commit as the state slot, the
-   * randomness and the board effects. A handler that requests a charge and then
-   * throws, or whose return the bus refuses, spends nothing.
-   *
-   * ONE POOL PER SUBSCRIBER, SHARED ACROSS ITS HOOKS. `temporal-anchor` binds
-   * two hooks and draws on one budget, so a charge spent on `onAfterMove`
-   * leaves fewer for `onBeforeMove`.
-   *
    * A subscriber carrying no budget is unlimited, and a request against it
    * spends nothing and is not an error. Repeated requests within one dispatch
    * accumulate, so a handler that triggered twice may ask twice.
    *
-   * @param amount Charges to spend. Rounded towards zero, clamped to zero from
-   *   below, clamped to the budget the subscriber holds, and defaulting to `1`.
-   *   The budget never falls below zero however much is asked for.
-   * @returns Whether a charge will be spent: `false` for a subscriber carrying
-   *   no budget, for an amount that rounds to zero, and for a call made after
-   *   the handler has returned, which belongs to no transaction.
+   * @param amount Charges to spend. Rounded towards zero, clamped to zero
+   *   from below, clamped to the budget the subscriber holds, and defaulting
+   *   to `1`.
+   * @returns Whether a charge will be spent: `false` for a subscriber
+   *   carrying no budget, for an amount that rounds to zero, and for a call
+   *   made after the handler has returned, which belongs to no transaction.
    */
   readonly spendCharge: (amount?: number) => boolean;
 
   /**
    * The subscriber's own state slot, mutable, and a COPY of the value the bus
    * holds rather than that value itself.
-   *
-   * Assigning it — or writing into it at any depth — carries state from one
-   * dispatch to the next: the bus copies what it finds here back onto the
-   * subscriber once the handler has returned and its return has been accepted.
-   * Because the slot is a copy on the way in and a copy on the way out, a
-   * handler that writes a nested member and then throws leaves the bus's slot
-   * exactly as it was; the copy the handler wrote into is discarded with the
-   * rest of the transaction.
-   *
-   * JSON DATA ONLY, which is what `Relic.state` declares: a function, a
-   * symbol or a `bigint` written here does not survive the copy, for the same
-   * reason it would not survive the run envelope's serialisation.
    */
   state: unknown;
 }
@@ -647,8 +508,8 @@ export interface HookContext {
  * A handler bound to one hook.
  *
  * The handler is given the payload as accumulated by the handlers dispatched
- * before it, and returns either a payload, which replaces the accumulated
- * one, or nothing, which leaves it as it stands.
+ * before it, and returns either a payload, which replaces the accumulated one,
+ * or nothing, which leaves it as it stands.
  */
 export type HookHandler<K extends HookName = HookName> = (
   payload: HookPayloadMap[K],
@@ -658,8 +519,7 @@ export type HookHandler<K extends HookName = HookName> = (
 /**
  * The handler table a subscriber binds, with every entry narrowed to its own
  * hook's payload. Partial by construction — a subscriber binds the hooks it
- * acts on and omits the rest. This is the `hooks` member of the relic data
- * shape.
+ * acts on and omits the rest.
  */
 export type HookHandlerTable = {
   readonly [K in HookName]?: HookHandler<K>;
@@ -667,13 +527,6 @@ export type HookHandlerTable = {
 
 /**
  * One handler paired with the metadata a dispatch needs to invoke it.
- *
- * A READ-ONLY SNAPSHOT. Every member is readonly, and
- * src/engine/hook-bus.ts freezes each object it returns: the bus owns
- * `charges` and `state`, and a caller reads them here rather than writing
- * them. `consumeCharge` on the bus is the one path that changes a charge
- * budget, and a handler's own `HookContext.state` slot is the one path
- * that changes a state slot.
  *
  * `pickupOrder` is assigned when the subscriber is taken on and is never
  * reassigned. `charges` is declared here and guarded in
@@ -685,9 +538,9 @@ export interface HookSubscription<K extends HookName = HookName> {
   readonly handler: HookHandler<K>;
 
   /**
-   * Charges remaining as at the call that returned this snapshot. Absent
-   * on a subscriber with no charge budget, which is never charge-guarded;
-   * present and at or below zero, the handler is not invoked.
+   * Charges remaining as at the call that returned this snapshot. Absent on a
+   * subscriber with no charge budget, which is never charge-guarded; present
+   * and at or below zero, the handler is not invoked.
    */
   readonly charges?: number | undefined;
 

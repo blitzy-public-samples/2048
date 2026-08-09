@@ -18,15 +18,47 @@ Please follow the house rules to have a bigger chance of your contribution being
  - Please use 2-space indentation when editing the TypeScript, SCSS and HTML, and keep lines within 80 columns. Name TypeScript identifiers in camelCase; SCSS selectors and HTML `id` and `class` names are kebab-case, as they already are. The game's sources are TypeScript modules under `src/`; the old `js/` scripts are gone.
 
    TypeScript `strict` is the gate, configured in `tsconfig.json` for the sources and `tsconfig.node.json` for the build tooling. `npm run typecheck` runs both.
- - Please test your modification thoroughly before submitting your Pull Request. Run `npm run typecheck`, `npm test` and `npm run test:snapshot` before you open it; at this commit those are the three gates with a suite to run.
+ - Please test your modification thoroughly before submitting your Pull Request. Run `npm run typecheck`, `npm test` and `npm run test:snapshot` before you open it; at this commit those are the three gates with a suite to run, and `npx sass style/main.scss` is the fourth if you touched a stylesheet.
 
    `npm run test:snapshot` is its own command because the seeded snapshot suite is a separate regression gate, with its own configuration in `vitest.snapshot.config.ts`; it collects `tests/snapshot/*.spec.ts` — the top level of that directory only, so a spec in a subdirectory of it is not run — and `npm test` collects `tests/unit/**/*.test.ts` recursively, and neither picks up the other's specs. Snapshots are never rewritten by a normal run: re-recording is the explicit `vitest run --config vitest.snapshot.config.ts -u`, which declares every previously recorded run unreproducible, so please do it deliberately and say why. `npm run test:e2e` is still configured ahead of its suite and exits reporting that it found no tests until `tests/e2e/gameplay-recording.spec.ts` lands; from that change onwards please run it whenever you touch the renderer or the run flow, and `npm run e2e:install` fetches the browser it needs the first time. The observability surfaces are exercisable: `src/observability/` carries the structured logger, the metrics registry, the diagnostics overlay, the tracer and the health surface, `src/main.ts` constructs all five, and `npm run dev` then `__blitzy2048.diagnostics.open()` in the browser console opens the overlay — `__blitzy2048.tracer.snapshot()` and `__blitzy2048.health.report()` answer from the same object. `README.md` records what the source tree can satisfy at this commit.
+ - The architecture is to be documented in Mermaid diagrams rather than prose, under `docs/architecture/`: `ARCHITECTURE.md` with Figure 1, *As-Is Architecture: Layered Globals with a Push-Based Actuator*, and Figure 2, *To-Be Architecture: Event-Driven Engine with Subscribed Renderer and Hook Bus*, plus `component-interaction.md`, `data-flow.md` and `hook-dispatch-sequence.md`. **None of those files exists at this commit — the directory is planned, so do not go looking for it.** Until it lands, the architecture is readable from `src/main.ts`, which is the only wiring site, and from the figures in `docs/DECISION_LOG.md` and `docs/CONFIGURATION.md`.
+
+   The 80-column rule is measured in bytes, so a line of prose carrying an
+   em-dash or a curly quote is as long as it looks. Two Markdown constructs
+   cannot honour it and are exempt, because neither may be broken across
+   source lines: a table row, and a Mermaid node label. `docs/DECISION_LOG.md`
+   and `docs/TRACEABILITY_MATRIX.md` are almost entirely table rows for that
+   reason; the prose around them is wrapped like source (`DL-DOC-06`).
+ - Please test your modification thoroughly before submitting your Pull Request. Run `npm run typecheck`, `npm test` and `npm run test:snapshot` before you open it; at this commit those are the three gates with a suite to run.
+
+   `npm run test:snapshot` is its own command because the seeded snapshot suite
+   is a separate regression gate, with its own configuration in
+   `vitest.snapshot.config.ts`; it collects `tests/snapshot/*.spec.ts` — the
+   top level of that directory only, so a spec in a subdirectory of it is not
+   run — and `npm test` collects `tests/unit/**/*.test.ts` recursively, and
+   neither picks up the other's specs. Snapshots are never rewritten by a
+   normal run: re-recording is the explicit `vitest run --config
+   vitest.snapshot.config.ts -u`, which declares every previously recorded run
+   unreproducible, so please do it deliberately and say why. `npm run test:e2e`
+   is still configured ahead of its suite and exits reporting that it found no
+   tests until `tests/e2e/gameplay-recording.spec.ts` lands; from that change
+   onwards please run it whenever you touch the renderer or the run flow, and
+   `npm run e2e:install` fetches the browser it needs the first time. The
+   observability surfaces are exercisable: `src/observability/` carries the
+   structured logger, the metrics registry, the diagnostics overlay, the tracer
+   and the health surface, `src/main.ts` constructs all five, and `npm run dev`
+   then `__blitzy2048.diagnostics.open()` in the browser console opens the
+   overlay — `__blitzy2048.tracer.snapshot()` and
+   `__blitzy2048.health.report()` answer from the same object. `README.md`
+   records what the source tree can satisfy at this commit.
  - The architecture is documented in diagrams rather than prose, so please read them before changing how the pieces fit together. `docs/architecture/ARCHITECTURE.md` carries Figure 1, *As-Is Architecture: Layered Globals with a Push-Based Actuator*, and Figure 2, *To-Be Architecture: Event-Driven Engine with Subscribed Renderer and Hook Bus*; `docs/architecture/component-interaction.md`, `docs/architecture/data-flow.md` and `docs/architecture/hook-dispatch-sequence.md` carry the component-interaction, data-flow and hook-dispatch figures.
 
-   Please keep rationale out of code comments and put it in `docs/DECISION_LOG.md`, the single place the reasoning behind a non-obvious change is recorded; `docs/OBSERVABILITY.md` covers the observability surfaces. Each of these documents lands with the code it describes. A code comment carries a contract, an invariant, an external constraint, an ordering or timing constraint, or the provenance of a ported behaviour — not the reasoning behind a choice.
- - Two identifier namespaces join the code to those two documents, and a comment cites an identifier rather than repeating what it stands for. `DL-<AREA>-<NN>` names one decision in `docs/DECISION_LOG.md` — for example `DL-TERM-04` or `DL-RNG-01`. A comment states *what* was decided and cites the identifier; the alternatives, the reasoning and the risks belong to the log row alone. `TR-<AREA>-<NN>` names one row of `docs/TRACEABILITY_MATRIX.md`, pairing a construct of the retired `js/` sources with the module that carries it now; a row with no `js/` source is marked target-only. `<NN>` is a two-digit ordinal, unique within its area and never reused once assigned; a new decision or row takes the next free ordinal in its area.
+   Please keep rationale out of code comments and put it in `docs/DECISION_LOG.md`, the single place the reasoning behind a non-obvious change is recorded. That document exists and is current. A separate `docs/OBSERVABILITY.md` covering the observability surfaces is **planned and not present yet**; the previous bullet's `npm run dev` recipe is how to exercise those surfaces in the meantime. A code comment carries a contract, an invariant, an external constraint, an ordering or timing constraint, or the provenance of a ported behaviour — not the reasoning behind a choice, and not a restatement of the architecture.
+ - Two identifier namespaces join the code to those documents, and a comment cites an identifier rather than repeating what it stands for. `DL-<AREA>-<NN>` names one decision in `docs/DECISION_LOG.md` — for example `DL-TERM-04` or `DL-RNG-01`. A comment states *what* was decided and cites the identifier; the alternatives, the reasoning and the risks belong to the log row alone. `TR-<AREA>-<NN>` is to name one row of `docs/TRACEABILITY_MATRIX.md`, pairing a construct of the retired `js/` sources with the module that carries it now, with a row that has no `js/` source marked target-only — but **that document is planned and does not exist at this commit, so nothing in the tree carries a `TR-*` citation**. Please do not add one until the matrix lands; state the provenance in prose instead, naming the retired file and its lines, which is what every ported module's header does. `<NN>` is a two-digit ordinal, unique within its area and never reused once assigned; a new decision or row takes the next free ordinal in its area.
 
-   `<AREA>` names one CONCERN, and the table below is the complete registry of them: every `DL-*` and `TR-*` identifier in the tree resolves to one of these, and a new area is added here in the same change that first uses it. A concern that spans a TypeScript module and the stylesheet mirroring it — accessibility, the HUD, the tokens, the themes — is ONE area, so its ordinals are unique across both files.
+   `<AREA>` names one CONCERN, and the table below is the complete registry of them: every `DL-*` identifier in the tree resolves to one of these — and every `TR-*` identifier will, once the matrix exists — and a new area is added here in the same change that first uses it. A concern that spans a TypeScript module and the stylesheet mirroring it — accessibility, the HUD, the tokens, the themes — is ONE area, so its ordinals are unique across both files.
+
+   One file is reached by two codes: `src/ui/screens/reward.ts` carries its decisions under `REWARD`, beside the stylesheet that concern spans, and its traceability rows under `REWARDSCREEN`. Both are registered and both resolve to that module; ordinals are unique within each code. It is the one exception to the paragraph above and it is not a pattern to follow — a new concern takes one code for both namespaces.
 
    | Area | Owner |
    |---|---|
@@ -37,7 +69,9 @@ Please follow the house rules to have a bigger chance of your contribution being
    | `TERM` | `src/engine/terminal-state.ts` |
    | `EVENT` | `src/engine/engine-events.ts` |
    | `HOOK` | `src/engine/hooks.ts` |
+   | `EFFECT`, `EFFECTS` | `src/engine/board-effects.ts` |
    | `HOOKBUS` | `src/engine/hook-bus.ts` |
+   | `EFFECT` | `src/engine/board-effects.ts` |
    | `TYPES` | `src/engine/types.ts` |
    | `CONFIG` | `src/config/rules-config.ts` |
    | `DEFAULT` | `src/config/default-config.ts` |
@@ -76,8 +110,13 @@ Please follow the house rules to have a bigger chance of your contribution being
    | `HUD` | `src/ui/screens/hud.ts`, `style/_hud.scss` |
    | `RUNSTART` | `src/ui/screens/run-start.ts` |
    | `STAGECLEAR` | `src/ui/screens/stage-progress.ts` |
+   | `REWARDSCREEN` | `src/ui/screens/reward.ts` |
+   | `GAMEOVER` | `src/ui/screens/game-over.ts` |
+   | `CARD` | `src/ui/components/relic-card.ts` |
    | `SCORE` | `src/ui/components/score-panel.ts` |
+   | `CARD` | `src/ui/components/relic-card.ts` |
    | `PANEL` | `src/ui/components/settings-panel.ts` |
+   | `CARD` | `src/ui/components/relic-card.ts` |
    | `LIVE` | `src/ui/a11y/live-region.ts` |
    | `FOCUS` | `src/ui/a11y/focus-manager.ts` |
    | `ANNOUNCE` | `src/ui/a11y/engine-announcer.ts` |
@@ -93,23 +132,40 @@ Please follow the house rules to have a bigger chance of your contribution being
    | `SHEET` | `style/main.scss` |
    | `HELPER` | `style/helpers.scss` |
    | `SCREEN` | `style/_screens.scss` |
-   | `REWARD` | `style/_reward.scss` |
-   | `SUMMARY` | `style/_summary.scss` |
+   | `REWARD` | `style/_reward.scss`, `src/ui/screens/reward.ts` |
+   | `SUMMARY` | `style/_summary.scss`, `src/ui/screens/run-summary.ts` |
    | `BUILD` | `vite.config.ts` |
-   | `TEST` | `vitest.config.ts`, `vitest.snapshot.config.ts` |
+   | `TEST` | `vitest.config.ts`, `vitest.snapshot.config.ts`, `tests/snapshot/**` |
    | `PW` | `playwright.config.ts` |
    | `FIXTURE` | `tests/fixtures/**` |
    | `DOC` | `docs/**`, `README.md`, `CONTRIBUTING.md`, `blitzy-deck/**` |
 
 ### Changes that might not be accepted
-The five categories this section used to name — undo/redo features, save/reload features, changes to how the tiles look or their contents, changes to the layout, and changes to the grid size — are superseded, because the run-based roguelike feature set deliberately does all five. That list no longer describes what will be declined. Decision `DL-DOC-02`.
+The five categories this section used to name — undo/redo features,
+save/reload features, changes to how the tiles look or their contents, changes
+to the layout, and changes to the grid size — are superseded, because the
+run-based roguelike feature set deliberately does all five. That list no
+longer describes what will be declined. Decision `DL-DOC-02`.
 
 That feature set is landing in stages, so here is what each of the five categories now covers, and how much of it the game carries at this commit:
 
  - Undo/redo features — the accepted change is an undo relic, one of the charge-based board-manipulation relics; redo is not part of it. `src/relics/` carries the relic vocabulary, all sixteen relics across the four families, the registry and the seeded 1-of-3 draw, and `src/main.ts` composes them: relics are in play, they fire on the six named hooks, and a charge-based one spends its charges through the hook bus
  - Save/reload features — the board and the best score persist as they always did, and run state now persists beside them: `src/run/` carries the versioned envelope, its guarded store and the run controller, and the controller resumes the seed, the RNG cursors, the stage and the active relics on reload
  - Changes to how the tiles look or their contents — the accepted change renders tiles as extruded, emissive blocks, and it is in the game: `src/render/three-renderer.ts` draws the board where a WebGL context is available, and `src/render/number-only-renderer.ts` draws it where one is not or where the number-only preference is set
- - Changes to the layout — the accepted change is a screen flow: run start, in-run HUD, reward screen, stage progress and run summary. All six screen modules have landed — `src/ui/screens/run-start.ts`, `hud.ts`, `stage-progress.ts`, `reward.ts`, `run-summary.ts` and `game-over.ts` — and `src/ui/screen-router.ts` carries the screen state machine that sequences them alongside the game region and the settings overlay. The in-run HUD is the one the composition root composes today; the other five are delivered against the router's `SCREEN_MODULES` table and are not yet reached from the entry point. The reward *moment* behind one of them is composed even though its screen is not: a cleared stage draws its seeded 1-of-3 offer, announces it and exposes it on the application handle, so the screen that lands later renders a decision that is already being made
+ - Changes to the layout — the accepted change is a screen flow, and the whole
+   of it is in the game: run start, in-run HUD, stage clear, reward, terminal
+   verdict and run summary. `src/ui/screen-router.ts` carries the state machine,
+   its `TRANSITIONS` table is the whole edge set, and `src/main.ts` registers
+   all six screen modules across the seven states —
+   `src/ui/screens/run-start.ts`, `hud.ts`, `stage-progress.ts`, `reward.ts`,
+   `game-over.ts` for both `won` and `gameOver`, and `run-summary.ts` —
+   alongside the game region and the settings overlay. A cold load holds run
+   start until the player begins; a met stage goal stops at stage clear until
+   they continue; the reward screen renders the seeded 1-of-3 offer and the run
+   controller applies the choice; and both terminal states lead to the summary,
+   which shows the run that ended and its seed. The router owns focus placement,
+   the focus traps, background inerting and the entry announcement for every
+   state, and each screen supplies its own entry line
  - Changes to the grid size — the board dimension is configuration-driven rather than a literal, and this is the one of the five already in the game: `src/config/default-config.ts` carries the size, the engine reads it, and the renderer builds the board from the size each committed state carries
 
 We are still conservative with the core game, so these will have to be evaluated carefully before being merged:

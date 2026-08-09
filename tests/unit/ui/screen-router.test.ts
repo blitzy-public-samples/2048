@@ -1,25 +1,4 @@
 // Contract suite for the screen router and the settings dialog, AAP R8 and R9.
-//
-// Four properties are pinned here, and each of the four was a live defect that
-// no type could have caught:
-//
-//   one context      the keyboard, the gesture path and the generated controls
-//                    each read a context. Left to themselves they disagreed, and
-//                    a swipe moved the board behind a modal dialog. `context()`
-//                    is the one function all three read, and it has to answer
-//                    for the dialog this router owns AND for the terminal
-//                    overlay, which is NOT inside `.screen-layer`.
-//   reachability     `.keep-playing-button`'s only context is `'overlay'`, and
-//                    nothing ever put the page into it, so the control that
-//                    continues a won game was hidden, disabled and out of the
-//                    tab order for the whole life of the page.
-//   modal semantics  index.html declares `#settings-panel` with
-//                    `aria-modal="true"`. Announcing that while focus can leave
-//                    the dialog, and while the board behind it is still in the
-//                    accessibility tree, is a false statement to a screen
-//                    reader.
-//   no double bind   two owners binding one element publish twice per
-//                    activation, which is a double restart.
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -38,7 +17,12 @@ import {
 } from '../../../src/input/on-screen-controls';
 import { DEFAULT_KEY_BINDINGS } from '../../../src/input/keymap';
 import { createScreenRouter } from '../../../src/ui/screen-router';
-import type { ScreenRouter } from '../../../src/ui/screen-router';
+import type {
+  RewardCard,
+  ScreenContext,
+  ScreenModule,
+  ScreenRouter,
+} from '../../../src/ui/screen-router';
 
 const MARKUP = `
   <main id="game-main">
@@ -95,12 +79,7 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-/**
- * Puts one focusable control in the dialog.
- *
- * A dialog holding nothing focusable is refused, which is the router's own
- * guard; every test that only needs the dialog OPEN renders this much.
- */
+/** Puts one focusable control in the dialog. */
 const renderCloseControl = (host: Element): void => {
   if (host.querySelector('button') !== null) {
     return;
@@ -133,18 +112,14 @@ const message = (): HTMLElement => {
   return found;
 };
 
-/* ==========================================================================
- * The document rule
- * ========================================================================== */
-
 describe('the document context rule', () => {
   it('reports the terminal overlay as an overlay, not as the game', () => {
     setup();
 
     expect(resolveDocumentContext(document)).toBe('game');
 
-    // js/html_actuator.js L124-L127 showed the overlay by adding this class, and
-    // `.game-message` is NOT inside `.screen-layer`.
+    // js/html_actuator.js L124-L127 showed the overlay by adding this class,
+    // and `.game-message` is NOT inside `.screen-layer`.
     message().classList.add('game-won');
 
     expect(resolveDocumentContext(document)).toBe('overlay');
@@ -170,10 +145,6 @@ describe('the document context rule', () => {
     expect(resolveDocumentContext(document)).toBe('overlay');
   });
 });
-
-/* ==========================================================================
- * One effective context
- * ========================================================================== */
 
 describe('one effective context', () => {
   it('composes the document rule with the router s own state', () => {
@@ -303,15 +274,14 @@ describe('one effective context', () => {
       '[data-action="moveUp"]',
     );
 
-    // In `'game'` the continue control is unavailable and movement is available.
+    // In `'game'` the continue control is unavailable and movement is
+    // available.
     expect(keepPlaying?.hidden).toBe(true);
     expect(moveUp?.hidden).toBe(false);
 
     message().classList.add('game-won');
     router.refresh();
 
-    // In `'overlay'` they swap — which is the whole point: the control was
-    // unreachable for the life of the page before anything refreshed it.
     expect(keepPlaying?.hidden).toBe(false);
     expect(keepPlaying?.getAttribute('tabindex')).not.toBe('-1');
     expect(moveUp?.hidden).toBe(true);
@@ -354,10 +324,6 @@ describe('one effective context', () => {
   });
 });
 
-/* ==========================================================================
- * The gesture path
- * ========================================================================== */
-
 describe('the gesture path', () => {
   it('publishes no move while the context resolves no movement', () => {
     setup();
@@ -375,8 +341,8 @@ describe('the gesture path', () => {
     });
 
     // Dispatched on the gesture host, which is `.game-container` by default:
-    // js/keyboard_input_manager.js L76 bound the three listeners to that element
-    // and src/input/touch-input.ts keeps them there.
+    // js/keyboard_input_manager.js L76 bound the three listeners to that
+    // element and src/input/touch-input.ts keeps them there.
     const host = document.querySelector('.game-container');
 
     const swipe = (): void => {
@@ -406,8 +372,6 @@ describe('the gesture path', () => {
 
     expect(moves).toBe(1);
 
-    // Behind the dialog a swipe used to move the board, because the gesture path
-    // read only its own listening and suspension flags.
     router.openSettings();
     swipe();
 
@@ -421,10 +385,6 @@ describe('the gesture path', () => {
     input.detach();
   });
 });
-
-/* ==========================================================================
- * The settings dialog
- * ========================================================================== */
 
 describe('the settings dialog', () => {
   it('opens from the input action, and closes on cancel', () => {
@@ -440,7 +400,6 @@ describe('the settings dialog', () => {
 
     expect(panel().hidden).toBe(true);
 
-    // Rendered content, because a dialog holding nothing focusable is refused.
     const close = document.createElement('button');
 
     close.type = 'button';
@@ -466,7 +425,6 @@ describe('the settings dialog', () => {
 
     expect(router.openSettings()).toBe(false);
 
-    // Taken back down rather than left announcing itself modal with no focus.
     expect(panel().hidden).toBe(true);
     expect(router.isSettingsOpen()).toBe(false);
     expect(router.context()).toBe('game');
@@ -566,9 +524,7 @@ describe('the settings dialog', () => {
       onSettingsOpen: renderCloseControl,
     });
 
-    // Present and truthful from construction, not only after the first open:
-    // `aria-haspopup` says a dialog exists and `aria-controls` names it, but
-    // neither says whether it is up right now.
+    // Present and truthful from construction, not only after the first open.
     expect(trigger?.getAttribute('aria-expanded')).toBe('false');
 
     router.openSettings();
@@ -586,7 +542,7 @@ describe('the settings dialog', () => {
     const trigger = document.querySelector<HTMLElement>('#settings-button');
 
     // No open hook, so the dialog holds nothing focusable and the open is
-    // refused. The trigger must not be left claiming an open dialog.
+    // refused.
     router = createScreenRouter({ document });
 
     expect(router.openSettings()).toBe(false);
@@ -647,10 +603,6 @@ describe('the settings dialog', () => {
     expect(router.openSettings()).toBe(false);
   });
 });
-
-/* ==========================================================================
- * One binding owner
- * ========================================================================== */
 
 describe('one binding owner per markup control', () => {
   it('publishes exactly once per activation of a legacy control', () => {
@@ -713,16 +665,12 @@ describe('one binding owner per markup control', () => {
   });
 });
 
-/* ==========================================================================
- * The Keep Going key
- * ========================================================================== */
-
 describe('the Keep Going binding', () => {
   it('has a key, in the overlay context, and collides with nothing', () => {
     const binding = DEFAULT_KEY_BINDINGS.keepPlaying;
 
-    // js/keyboard_input_manager.js bound no key at all: the control was the only
-    // way to reach the action.
+    // js/keyboard_input_manager.js bound no key at all: the control was the
+    // only way to reach the action.
     expect(binding.keys).toContain('c');
     expect(binding.codes).toContain('KeyC');
     expect(binding.contexts).toContain('overlay');
@@ -737,5 +685,800 @@ describe('the Keep Going binding', () => {
       expect(candidate.keys).not.toContain('c');
       expect(candidate.codes).not.toContain('KeyC');
     }
+  });
+});
+
+/**
+ * An input surface that records how many listeners are registered on it, so a
+ * duplicate registration is observable rather than inferred from a duplicated
+ * effect.
+ *
+ * @returns The surface, an emitter for it and its live listener count.
+ */
+const createSurface = (): {
+  readonly surface: {
+    on: (event: string, listener: (index: number) => void) => () => void;
+    setContext: () => void;
+  };
+  readonly emit: (event: string, index?: number) => void;
+  readonly count: () => number;
+} => {
+  const listeners = new Map<string, ((index: number) => void)[]>();
+
+  return {
+    surface: {
+      on: (event: string, listener: (index: number) => void): (() => void) => {
+        const bucket = listeners.get(event) ?? [];
+
+        bucket.push(listener);
+        listeners.set(event, bucket);
+
+        return (): void => {
+          const at = bucket.indexOf(listener);
+
+          if (at !== -1) {
+            bucket.splice(at, 1);
+          }
+        };
+      },
+      setContext: (): void => undefined,
+    },
+    emit: (event: string, index = 0): void => {
+      for (const listener of [...(listeners.get(event) ?? [])]) {
+        listener(index);
+      }
+    },
+    count: (): number => {
+      let total = 0;
+
+      for (const bucket of listeners.values()) {
+        total += bucket.length;
+      }
+
+      return total;
+    },
+  };
+};
+
+/* ==========================================================================
+ * Single-owner attachment
+ * ========================================================================== */
+
+/**
+ * WHAT WAS WRONG
+ *   `attach()` and `subscribe()` merely pushed their releases onto one
+ *   append-only list that only `destroy()` drained. Attaching the same input
+ *   surface twice therefore installed a second copy of all four dialog
+ *   listeners, so one Escape closed the dialog twice and one digit press chose
+ *   twice; subscribing a replaced engine left the previous engine's seven
+ *   handlers registered for the rest of the session; and the releaser
+ *   `subscribe()` returned did not remove its entries from that list, so a
+ *   released engine's closures were retained until teardown.
+ *
+ * WHAT THIS SUITE PINS
+ *   That the router owns exactly ONE input attachment and ONE engine
+ *   attachment, that a repeat of the same source registers nothing further,
+ *   that a different source releases the previous one, and that a release takes
+ *   effect at once rather than at destroy.
+ */
+describe('the router s owned attachments', () => {
+  it('registers one set of listeners however often the same surface attaches', () => {
+    setup();
+    router = createScreenRouter({
+      document,
+      onSettingsOpen: renderCloseControl,
+    });
+    router.start();
+
+    const first = createSurface();
+
+    router.attach({ input: first.surface });
+
+    const afterFirst = first.count();
+
+    router.attach({ input: first.surface });
+    router.attach({ input: first.surface });
+
+    expect(first.count()).toBe(afterFirst);
+
+    // And one press opens the dialog once: a duplicate registration would have
+    // opened it, closed nothing, and counted a refusal for the second call.
+    first.emit('openSettings');
+
+    expect(router.isSettingsOpen()).toBe(true);
+
+    first.emit('cancel');
+
+    expect(router.isSettingsOpen()).toBe(false);
+  });
+
+  it('releases the previous surface when a different one attaches', () => {
+    setup();
+    router = createScreenRouter({
+      document,
+      onSettingsOpen: renderCloseControl,
+    });
+    router.start();
+
+    const first = createSurface();
+    const second = createSurface();
+
+    router.attach({ input: first.surface });
+    router.attach({ input: second.surface });
+
+    expect(first.count()).toBe(0);
+    expect(second.count()).toBeGreaterThan(0);
+
+    // The released surface drives nothing.
+    first.emit('openSettings');
+
+    expect(router.isSettingsOpen()).toBe(false);
+
+    second.emit('openSettings');
+
+    expect(router.isSettingsOpen()).toBe(true);
+  });
+
+  it('reads one event once however often the same emitter subscribes', () => {
+    setup();
+    router = createScreenRouter({ document });
+    router.start();
+
+    const events = createEngineEvents();
+    const seen: string[] = [];
+
+    router.subscribe((transition): void => {
+      seen.push(`${transition.from}->${transition.to}`);
+    });
+
+    const release = router.subscribe(events);
+    const again = router.subscribe(events);
+
+    events.emit('stage:start', {
+      stageIndex: 0,
+      goal: { kind: 'highest-tile', target: 64 },
+      seed: 'attachment',
+      boardSize: 4,
+    });
+
+    // ONE edge, not two. A second registration of `readStageStart` would have
+    // taken `runStart -> stage` and then self-transitioned `stage -> stage`,
+    // which is exactly the double-read this ownership exists to prevent.
+    expect(seen).toEqual(['runStart->stage']);
+
+    // The releaser handed back for the repeat releases the one held set, so a
+    // caller that subscribed twice and releases once holds nothing.
+    again();
+    seen.length = 0;
+    events.emit('state:commit', commitOf({ over: true, terminated: true }));
+
+    expect(seen).toEqual([]);
+
+    // And releasing again is harmless.
+    release();
+  });
+
+  it('releases a subscription at once rather than at destroy', () => {
+    setup();
+    router = createScreenRouter({ document });
+    router.start();
+
+    const events = createEngineEvents();
+    const seen: string[] = [];
+
+    router.subscribe((transition): void => {
+      seen.push(transition.to);
+    });
+
+    const release = router.subscribe(events);
+
+    release();
+    events.emit('state:commit', commitOf({ over: true, terminated: true }));
+
+    expect(seen).toEqual([]);
+  });
+
+  it('releases the previous emitter when a different one subscribes', () => {
+    setup();
+    router = createScreenRouter({ document });
+    router.start();
+
+    const first = createEngineEvents();
+    const second = createEngineEvents();
+    const seen: string[] = [];
+
+    router.subscribe((transition): void => {
+      seen.push(transition.to);
+    });
+
+    router.subscribe(first);
+    router.subscribe(second);
+
+    // The replaced emitter reaches nothing.
+    first.emit('state:commit', commitOf({ over: true, terminated: true }));
+
+    expect(seen).toEqual([]);
+
+    second.emit('state:commit', commitOf({ over: true, terminated: true }));
+
+    // `runStart -> stage` on the way to the terminal state, then the verdict.
+    expect(seen).toEqual(['stage', 'gameOver']);
+  });
+});
+
+/* ==========================================================================
+ * The stage-clear gate
+ *
+ * `stage:end` used to take BOTH declared edges — `stage -> stageClear` and
+ * `stageClear -> reward` — inside one event, so `stageClear` was entered and left
+ * in a single tick and the stage-progress screen was unreachable however correct
+ * the transition table was. It also ignored `payload.cleared`, so a stage that
+ * ended WITHOUT its goal met put a reward screen up and offered a relic for a
+ * stage the player had not cleared.
+ * ========================================================================== */
+
+describe('a cleared stage', () => {
+  /** Emits one `stage:end` through a router attached to real engine events. */
+  const endStage = (
+    cleared: boolean,
+  ): { readonly router: ScreenRouter } => {
+    setup();
+
+    const events = createEngineEvents();
+    const built = createScreenRouter({ document });
+
+    built.subscribe(events);
+    built.start();
+    built.send('beginRun');
+
+    expect(built.current()).toBe('stage');
+
+    events.emit('stage:end', { stageIndex: 0, cleared, score: 32 });
+
+    return { router: built };
+  };
+
+  it('stops at the stage-clear screen, one edge per event', () => {
+    const { router: built } = endStage(true);
+
+    router = built;
+
+    // ONE EDGE. The reward screen is behind the player's own continue control,
+    // which publishes `stageEnd` — the only edge into `reward`.
+    expect(built.current()).toBe('stageClear');
+
+    expect(built.send('stageEnd')).toBe(true);
+    expect(built.current()).toBe('reward');
+  });
+
+  it('takes no edge at all for a stage that did not clear', () => {
+    const { router: built } = endStage(false);
+
+    router = built;
+
+    // The state stands: an uncleared stage earns no stage-clear screen and no
+    // offer, and the refusal is a counted series of its own.
+    expect(built.current()).toBe('stage');
+  });
+});
+
+/* ==========================================================================
+ * Contained injected callbacks
+ * ========================================================================== */
+
+/**
+ * WHAT WAS WRONG
+ *   `onSettingsOpen`, `onSettingsClose` and `onRewardSelect` were called bare.
+ *   A raising composition escaped through whichever listener happened to be on
+ *   the stack — the DOM event dispatch for a pointer press, the input manager's
+ *   listener walk for a keyboard press — so one failure behaved differently by
+ *   modality, none of them was reported, and a reward selection left the flow
+ *   advanced over a choice that was never applied.
+ *
+ * WHAT THIS SUITE PINS
+ *   That each of the three is contained, that the rollback is deterministic and
+ *   identical for both modalities, and that the router's own state never gets
+ *   ahead of the composition's.
+ */
+describe('the injected router callbacks', () => {
+  it('rolls the dialog back down when the body fails to render', () => {
+    setup();
+    router = createScreenRouter({
+      document,
+      onSettingsOpen: (): never => {
+        throw new Error('the panel body could not be built');
+      },
+    });
+
+    expect(() => router?.openSettings()).not.toThrow();
+    expect(router.openSettings()).toBe(false);
+    expect(router.isSettingsOpen()).toBe(false);
+    expect(panel().hidden).toBe(true);
+
+    // And the dialog is still openable once the composition recovers, because
+    // nothing was latched.
+    expect(router.context()).toBe('game');
+  });
+
+  it('completes the close even when the close callback raises', () => {
+    setup();
+    router = createScreenRouter({
+      document,
+      onSettingsOpen: renderCloseControl,
+      onSettingsClose: (): never => {
+        throw new Error('the panel body could not be torn down');
+      },
+    });
+
+    expect(router.openSettings()).toBe(true);
+    expect(() => router?.closeSettings()).not.toThrow();
+    expect(router.isSettingsOpen()).toBe(false);
+    expect(panel().hidden).toBe(true);
+  });
+
+  it('re-shows the offer when the reward applier raises, from either modality', () => {
+    setup();
+
+    const applied: string[] = [];
+
+    router = createScreenRouter({
+      document,
+      onRewardSelect: (relicId): void => {
+        applied.push(relicId);
+
+        throw new Error('the run controller refused');
+      },
+    });
+    router.start();
+
+    const surface = createSurface();
+
+    router.attach({ input: surface.surface });
+
+    const offer = [
+      {
+        id: 'first',
+        name: 'First',
+        rarity: 'common',
+        description: 'One.',
+        hooks: [],
+      },
+      {
+        id: 'second',
+        name: 'Second',
+        rarity: 'rare',
+        description: 'Two.',
+        hooks: [],
+      },
+    ];
+
+    expect(router.showReward(offer)).toBe(true);
+
+    // KEYBOARD: the digit binding the router registered itself.
+    expect(() => surface.emit('selectReward', 0)).not.toThrow();
+    expect(applied).toEqual(['first']);
+
+    // The offer is back up, so the player can choose again rather than being
+    // stranded on a stage the flow already left.
+    expect(router.isRewardOpen()).toBe(true);
+    expect(router.current()).toBe('reward');
+
+    // POINTER: the SAME rollback for a card press. This router renders no card of
+    // its own — `SCREEN_MODULES.reward` names the module that does — so a press
+    // arrives here as the `selectReward` call that module's `onSelect` makes, and
+    // it goes through the one selection path the digit went through.
+    // DL-ROUTER-04, DL-ROUTER-20.
+    expect(() => router?.selectReward('second', 'card')).not.toThrow();
+    expect(applied).toEqual(['first', 'second']);
+    expect(router.isRewardOpen()).toBe(true);
+    expect(router.current()).toBe('reward');
+  });
+});
+
+/* ==========================================================================
+ * The state machine
+ * ========================================================================== */
+
+describe('the state machine', () => {
+  /** The markup the seven states declare their containers in. */
+  const FLOW_MARKUP = `
+    <main id="game-main">
+      <button type="button" class="restart-button">New Game</button>
+      <div class="hud" id="screen-hud" data-screen="hud" hidden></div>
+      <div class="game-container">
+        <div class="game-message"><p></p></div>
+      </div>
+    </main>
+    <div class="screen-layer" id="screen-layer">
+      <div class="screen" id="screen-run-start" data-screen="run-start"
+           role="dialog" aria-modal="true" hidden></div>
+      <div class="screen" id="screen-stage-progress" data-screen="stage-progress"
+           role="dialog" aria-modal="true" hidden></div>
+      <div class="screen" id="screen-reward" data-screen="reward" role="dialog"
+           aria-modal="true" hidden></div>
+      <div class="screen" id="screen-game-over" data-screen="game-over"
+           role="dialog" aria-modal="true" hidden></div>
+      <div class="screen" id="screen-run-summary" data-screen="run-summary"
+           role="dialog" aria-modal="true" hidden></div>
+      <div class="settings-panel" id="settings-panel" role="dialog"
+           aria-modal="true" aria-label="Settings" hidden></div>
+    </div>
+  `;
+
+  /** One offer, in the shape the reward state's context carries. */
+  const OFFER: readonly RewardCard[] = Object.freeze([
+    Object.freeze({
+      id: 'first',
+      name: 'First',
+      rarity: 'common',
+      description: 'One.',
+      hooks: Object.freeze(['onMerge']),
+      charges: 2,
+    }),
+    Object.freeze({
+      id: 'second',
+      name: 'Second',
+      rarity: 'rare',
+      description: 'Two.',
+      hooks: Object.freeze(['onSpawn']),
+    }),
+  ]);
+
+  /**
+   * A screen module that renders one focusable control and records every
+   * lifecycle call it receives.
+   *
+   * A trapping state refuses to trap a container holding nothing focusable, so
+   * a module that renders nothing would leave the machine unable to enter its
+   * own state — which is what makes rendering part of the double.
+   */
+  interface Recorder {
+    readonly module: ScreenModule;
+    readonly calls: string[];
+    readonly contexts: ScreenContext[];
+  }
+
+  const recorder = (label: string): Recorder => {
+    const calls: string[] = [];
+    const contexts: ScreenContext[] = [];
+
+    let host: Element | null = null;
+
+    const render = (): void => {
+      if (host === null) {
+        return;
+      }
+
+      const control = document.createElement('button');
+
+      control.type = 'button';
+      control.className = `${label}-control`;
+      control.textContent = label;
+      host.replaceChildren(control);
+    };
+
+    return {
+      calls,
+      contexts,
+      module: {
+        mount(supplied: Element): void {
+          host = supplied;
+          calls.push('mount');
+        },
+        enter(context: ScreenContext): void {
+          calls.push('enter');
+          contexts.push(context);
+          render();
+        },
+        update(context: ScreenContext): void {
+          calls.push('update');
+          contexts.push(context);
+        },
+        leave(): void {
+          calls.push('leave');
+          host?.replaceChildren();
+        },
+        unmount(): void {
+          calls.push('unmount');
+        },
+      },
+    };
+  };
+
+  /**
+   * Whether a container is hidden.
+   *
+   * `hidden` widened to `boolean | 'until-found'` in the DOM lib, so the read is
+   * reduced to a boolean here rather than compared loosely at each call.
+   */
+  const hidden = (id: string): boolean =>
+    document.querySelector<HTMLElement>(`#${id}`)?.hidden !== false;
+
+  it('lands on the run-start state and shows only its container', () => {
+    document.body.innerHTML = FLOW_MARKUP;
+
+    const runStart = recorder('run-start');
+
+    router = createScreenRouter({
+      document,
+      screens: { runStart: runStart.module },
+    });
+
+    expect(router.isStarted()).toBe(false);
+
+    // AAP Figure 6: `[*] --> RunStart : cold load`.
+    expect(router.start()).toBe('runStart');
+    expect(router.current()).toBe('runStart');
+    expect(runStart.calls).toEqual(['mount', 'enter']);
+    expect(hidden('screen-run-start')).toBe(false);
+
+    for (const other of [
+      'screen-stage-progress',
+      'screen-reward',
+      'screen-game-over',
+      'screen-run-summary',
+    ]) {
+      expect(hidden(other)).toBe(true);
+    }
+
+    // Every state but `stage` is an overlay, so movement is withheld until a
+    // run begins.
+    expect(router.context()).toBe('overlay');
+    expect(router.send('beginRun')).toBe(true);
+    expect(router.current()).toBe('stage');
+    expect(router.context()).toBe('game');
+    expect(hidden('screen-run-start')).toBe(true);
+    expect(runStart.calls).toEqual(['mount', 'enter', 'leave']);
+  });
+
+  it('holds the stage-clear state until the explicit stageEnd trigger', () => {
+    document.body.innerHTML = FLOW_MARKUP;
+
+    const stageClear = recorder('stage-clear');
+    const reward = recorder('reward');
+
+    router = createScreenRouter({
+      document,
+      screens: { stageClear: stageClear.module, reward: reward.module },
+    });
+
+    const events = createEngineEvents();
+    const stop = router.subscribe(events);
+
+    router.start();
+    router.send('beginRun');
+
+    // ONE EVENT, ONE EDGE. The engine's own `stage:end` reaches the
+    // interstitial and stops: the Continue control the interstitial renders is
+    // what takes the second edge, so it cannot arrive to find the state it
+    // governs already left.
+    events.emit('stage:end', { stageIndex: 0, cleared: true, score: 120 });
+
+    expect(router.current()).toBe('stageClear');
+    expect(hidden('screen-stage-progress')).toBe(false);
+    expect(hidden('screen-reward')).toBe(true);
+
+    // `start()` mounts every state whose container resolved, so the reward
+    // module holds its container — and has NOT been entered.
+    expect(reward.calls).toEqual(['mount']);
+
+    // A second `stage:end` does not carry the flow past the interstitial
+    // either.
+    events.emit('stage:end', { stageIndex: 0, cleared: true, score: 120 });
+
+    expect(router.current()).toBe('stageClear');
+
+    expect(router.send('stageEnd', { offers: OFFER })).toBe(true);
+    expect(router.current()).toBe('reward');
+    expect(hidden('screen-reward')).toBe(false);
+    expect(hidden('screen-stage-progress')).toBe(true);
+    expect(reward.calls).toEqual(['mount', 'enter']);
+    expect(stageClear.calls).toEqual(['mount', 'enter', 'leave']);
+
+    stop();
+  });
+
+  it('hands the offer to the reward module and renders no card itself', () => {
+    document.body.innerHTML = FLOW_MARKUP;
+
+    const reward = recorder('reward');
+    const chosen: string[] = [];
+
+    router = createScreenRouter({
+      document,
+      screens: { reward: reward.module },
+      onRewardSelect: (relicId): void => {
+        chosen.push(relicId);
+      },
+    });
+
+    router.start();
+    router.send('beginRun');
+    router.send('stageGoalMet', { cleared: true });
+
+    expect(router.send('stageEnd', { offers: OFFER })).toBe(true);
+    expect(router.isRewardOpen()).toBe(true);
+    expect(router.screen()).toBe('reward');
+    expect(router.context()).toBe('overlay');
+
+    // The offer reached the module's own context, in draw order.
+    const entered = reward.contexts[0];
+
+    expect(entered?.screen).toBe('reward');
+    expect(
+      entered?.screen === 'reward'
+        ? entered.offers.map((card) => card.id)
+        : [],
+    ).toEqual(['first', 'second']);
+
+    // ONE OWNER. The router builds no `.relic-card` and no `.reward-offers`
+    // list of its own, so the container holds exactly what the module put in
+    // it.
+    const host = document.querySelector('#screen-reward');
+
+    expect(host?.querySelectorAll('.relic-card').length).toBe(0);
+    expect(host?.querySelectorAll('.reward-offers').length).toBe(0);
+    expect(host?.querySelectorAll('.reward-control').length).toBe(1);
+
+    // And the digit binding still resolves an index against the offer the
+    // module is showing.
+    expect(router.send('rewardSelected', { relicId: 'first' })).toBe(true);
+    expect(router.current()).toBe('stage');
+    expect(router.isRewardOpen()).toBe(false);
+    expect(hidden('screen-reward')).toBe(true);
+    expect(chosen).toEqual([]);
+  });
+
+  it('resolves a keyboard choice through the one selection path', () => {
+    document.body.innerHTML = FLOW_MARKUP;
+
+    const reward = recorder('reward');
+    const chosen: string[] = [];
+
+    router = createScreenRouter({
+      document,
+      screens: { reward: reward.module },
+      onRewardSelect: (relicId): void => {
+        chosen.push(relicId);
+      },
+    });
+
+    const input = createInputManager({
+      ownerDocument: document,
+      context: router.context,
+      keymap: DEFAULT_KEY_BINDINGS,
+    });
+
+    router.attach({ input });
+    router.start();
+    router.send('beginRun');
+    router.showReward(OFFER);
+
+    expect(router.current()).toBe('reward');
+
+    // The zero-based index the `selectReward` action publishes.
+    input.emit('selectReward', 1);
+
+    expect(chosen).toEqual(['second']);
+    expect(router.current()).toBe('stage');
+
+    // An index naming no card chooses nothing rather than the last card.
+    router.showReward(OFFER);
+    input.emit('selectReward', 7);
+
+    expect(chosen).toEqual(['second']);
+    expect(router.current()).toBe('reward');
+
+    input.detach();
+  });
+
+  it('takes the terminal and summary edges, and returns to run start', () => {
+    document.body.innerHTML = FLOW_MARKUP;
+
+    const gameOver = recorder('game-over');
+    const summary = recorder('run-summary');
+
+    router = createScreenRouter({
+      document,
+      screens: { gameOver: gameOver.module, runSummary: summary.module },
+      terminalOverlay: null,
+    });
+
+    const events = createEngineEvents();
+    const stop = router.subscribe(events);
+
+    router.start();
+    router.send('beginRun');
+
+    events.emit('state:commit', commitOf({ over: true, terminated: true }));
+
+    expect(router.current()).toBe('gameOver');
+    expect(hidden('screen-game-over')).toBe(false);
+    expect(router.context()).toBe('overlay');
+
+    expect(router.send('acknowledge')).toBe(true);
+    expect(router.current()).toBe('runSummary');
+    expect(hidden('screen-run-summary')).toBe(false);
+    expect(summary.calls).toEqual(['mount', 'enter']);
+
+    expect(router.send('newRun')).toBe(true);
+    expect(router.current()).toBe('runStart');
+    expect(hidden('screen-run-summary')).toBe(true);
+
+    stop();
+  });
+
+  it('takes the restart edge without leaving the stage', () => {
+    document.body.innerHTML = FLOW_MARKUP;
+
+    router = createScreenRouter({ document });
+
+    const events = createEngineEvents();
+    const stop = router.subscribe(events);
+
+    router.start();
+    router.send('beginRun');
+
+    // AAP Figure 6 declares `stage --restart--> stage`: a fresh board inside the
+    // run, not a new run, so the flow stays where it is.
+    expect(router.send('restart')).toBe(true);
+    expect(router.current()).toBe('stage');
+    expect(router.context()).toBe('game');
+
+    events.emit('stage:start', {
+      stageIndex: 0,
+      goal: { kind: 'highest-tile', target: 16 },
+      seed: 'restart-seed',
+      boardSize: 4,
+    });
+
+    expect(router.current()).toBe('stage');
+
+    stop();
+  });
+});
+
+/* ==========================================================================
+ * The trigger is validated, not trusted (CWE-20)
+ * ========================================================================== */
+
+describe('send', () => {
+  it('refuses a trigger no state declares, however truthy the lookup', () => {
+    setup();
+    router = createScreenRouter({ document });
+    router.start();
+
+    const before = router.current();
+
+    // THE PROTOTYPE READ. Each entry of `TRANSITIONS` is an object literal, so it
+    // inherits from `Object.prototype`: an unvalidated index read answered
+    // `Object.prototype.toString` — a function, and therefore truthy — and the
+    // router then transitioned to a function as though it were a screen name.
+    expect(router.send('toString' as never)).toBe(false);
+    expect(router.send('constructor' as never)).toBe(false);
+    expect(router.send('hasOwnProperty' as never)).toBe(false);
+    expect(router.send('__proto__' as never)).toBe(false);
+    expect(router.current()).toBe(before);
+  });
+
+  it('refuses an unknown trigger name and stands', () => {
+    setup();
+    router = createScreenRouter({ document });
+    router.start();
+
+    expect(router.send('nope' as never)).toBe(false);
+    expect(router.send('' as never)).toBe(false);
+    expect(router.current()).toBe('runStart');
+  });
+
+  it('tolerates a payload that is not an object', () => {
+    setup();
+    router = createScreenRouter({ document });
+    router.start();
+
+    // Replaced by an empty payload rather than read member by member, so a
+    // primitive cannot reach a context builder.
+    expect(router.send('beginRun', 'seed' as never)).toBe(true);
+    expect(router.current()).toBe('stage');
   });
 });

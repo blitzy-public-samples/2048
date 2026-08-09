@@ -3,48 +3,18 @@
  * identity, plus the two additive accessibility palettes, plus the activation
  * contract that switches between them at runtime.
  *
- * MIRROR CONTRACT: style/_themes.scss owns the CSS half of this contract and
- * MUST agree with this module. It selects on the `THEME_ATTRIBUTE` name and the
- * `themeAttributeValues` strings declared below, its `$theme-names` list is
- * `themeIds`, and each of its palette maps is the palette of the same name
- * here. A difference in either direction makes a theme a no-op or splits the 2D
- * and 3D presentations apart.
- *
  * No palette carries a per-value tile colour: a themed ramp is new INPUT to
  * `computeTileTheme` of src/theme/tile-ramp.ts, which stays the one generative
- * implementation, so all three themes share the ramp's shape and differ only in
- * hue. `resolveTileTheme` is the resolver a renderer calls.
+ * implementation, so all three themes share the ramp's shape and differ only
+ * in hue. `resolveTileTheme` is the resolver a renderer calls.
  *
  * `applyTheme` is the only DOM access in src/theme and it is guarded, so this
  * module stays importable by the DOM-free unit and snapshot suites. The module
- * reads no storage, queries no media feature, emits no log and performs no work
- * at import time beyond freezing its own declarations.
+ * reads no storage, queries no media feature, emits no log and performs no
+ * work at import time beyond freezing its own declarations.
  *
- * One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THEME is one area
- * across both halves of the mirror, so these ordinals are unique across this
- * module and style/_themes.scss:
- *   TR-THEME-01  style/main.scss L4-L22   the existing palette, carried as the
- *                                         default theme
- *   TR-THEME-02  target-only row          the additive high-contrast palette
- *   TR-THEME-03  target-only row          the additive colourblind-safe palette
- *   TR-THEME-04  target-only row          `THEME_ATTRIBUTE`,
- *                                         `themeAttributeValues` and
- *                                         `applyTheme`
- *   TR-THEME-05  target-only row          `resolveTileTheme`, the per-theme
- *                                         resolver a renderer calls
- *   TR-THEME-06  target-only row          `subscribeToThemeChange` and
- *                                         `getActiveTheme`
- *   TR-THEME-11  target-only row          `ThemePalette.neutralLight`, the
- *                                         lighting white point each palette
- *                                         states; decision DL-TOKEN-07
- *
- * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
- * only so the construct can be found from the log:
- *   DL-THEME-01  the high-contrast palette
- *   DL-THEME-02  the colourblind-safe palette
- *   DL-THEME-03  the attribute the activation contract is carried on
- *   DL-THEME-04  a themed ramp supplied as input to `computeTileTheme`, which
- *                stays the one generative implementation
+ * Decisions: DL-TOKEN-07, DL-THEME-01, DL-THEME-02, DL-THEME-03, DL-THEME-04
+ * (docs/DECISION_LOG.md).
  */
 
 import {
@@ -132,14 +102,8 @@ export function isThemeId(value: unknown): value is ThemeId {
  *
  * The key set mirrors each Sass palette map of style/_themes.scss one key at a
  * time, less its `name` key, which is carried by `Theme.id`. Every field is
- * required, so a palette is a total override and no theme falls back to another
- * theme's colour for any surface.
- *
- * Colours are CSS colour strings. A field the ramp consumes — `tileLow`,
- * `tileHigh`, `tileAccents`, `text`, `brightText` and `tileSuperTint` — must be
- * a 3- or 6-digit hex colour, the form `parseHexColor` of
- * src/theme/tile-ramp.ts reads. Every other field may carry any CSS colour, and
- * the five translucent surfaces carry `rgba()`.
+ * required, so a palette is a total override and no theme falls back to
+ * another theme's colour for any surface.
  */
 export interface ThemePalette {
   readonly pageBackground: string;
@@ -169,12 +133,7 @@ export interface ThemePalette {
    */
   readonly neutralLight: string;
 
-  /**
-   * Tint mixed over the high anchor for a tile above the ramp. With
-   * `tileSuperWeight` it replaces the resolved `tile-super` key of
-   * style/_themes.scss: the fill is derived by `resolveTileTheme` rather than
-   * stated, so it cannot disagree with the ramp that produces every other fill.
-   */
+  /** Tint mixed over the high anchor for a tile above the ramp. */
   readonly tileSuperTint: string;
   readonly tileSuperWeight: number;
   readonly scoreSurface: string;
@@ -200,8 +159,8 @@ export interface ThemePalette {
 }
 
 /**
- * CSS `white`, the keyword style/main.scss applies to the score numerals and to
- * the tile glow's inset highlight, in its hex spelling.
+ * CSS `white`, the keyword style/main.scss applies to the score numerals and
+ * to the tile glow's inset highlight, in its hex spelling.
  */
 const WHITE = '#ffffff';
 
@@ -213,22 +172,15 @@ const BLACK = '#000000';
  */
 const ADDITIVE_OVERLAY_ALPHA = 0.94;
 
-/**
- * Exponent from which a numeral takes the bright text colour.
- *
- * `$ramp-bright-from` of style/_themes.scss. Applied to every palette by
- * `createTileSpecialColors`, and it reproduces the `bright` flag of
- * `tileSpecialColors` of src/theme/tile-ramp.ts exactly, so values 2 and 4 take
- * the text colour and every value from 8 up takes the bright one.
- */
+/** Exponent from which a numeral takes the bright text colour. */
 const RAMP_BRIGHT_FROM_EXPONENT = 3;
 
 /**
- * Composes the `rgba()` form style/_themes.scss produces from `rgba($hex, $a)`,
+ * Composes the `rgba` form style/_themes.scss produces from `rgba($hex, $a)`,
  * so a translucent palette entry is derived from its opaque colour.
  *
- * @throws RangeError when `hex` is not a hex colour, or when `alpha` is not a
- *   finite number in 0-1.
+ * @throws RangeError when `hex` is not a hex colour, or when `alpha` is not
+ *   a finite number in 0-1.
  */
 function rgbaLiteral(hex: string, alpha: number): string {
   if (!Number.isFinite(alpha) || alpha < 0 || alpha > 1) {
@@ -240,14 +192,6 @@ function rgbaLiteral(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-/**
- * The accents of the default ramp, read off `tileSpecialColors` of
- * src/theme/tile-ramp.ts rather than restated, so this list and the ported
- * `$special-colors` list of style/main.scss cannot diverge.
- *
- * Resolves to the four accents of exponents 3 through 6 — tile values 8, 16, 32
- * and 64 — and `null` at every other exponent.
- */
 const defaultTileAccents: readonly (string | null)[] = Object.freeze(
   tileSpecialColors.map((entry) => entry.accent),
 );
@@ -289,14 +233,7 @@ export const defaultThemePalette: ThemePalette = Object.freeze({
 
   // The outer band is `color.adjust($text-color, $lightness: -22%)`, the same
   // derivation `diagnosticsSurface` below is written from, in place of
-  // `$text-color` itself; the inner band is unchanged. Against every default
-  // surface the ring is drawn on — the page, the board field, an empty cell,
-  // a score box, a primary button, both overlay washes, all eleven ramp fills
-  // and the band above the ramp — the stronger of the two bands now measures
-  // at least 3.7:1, where `$text-color` reached only 2.28:1 on the board field
-  // and the score boxes. The rest of the palette is unchanged: these are the
-  // only two entries the ring resolves through, and style/_themes.scss
-  // L117-L118 states the same pair.
+  // `$text-color` itself; the inner band is unchanged.
   focusRing: derivedColors.focusRingColor,
   focusRingContrast: brightTextColor,
 
@@ -318,11 +255,9 @@ const highContrastTileAccents: readonly (string | null)[] = Object.freeze(
 
 /**
  * The high-contrast palette, mirroring `$palette-high-contrast` of
- * style/_themes.scss key for key. Its ramp runs from a mid-tone low anchor to a
- * near-black high anchor and declares no accent band, so every step differs
+ * style/_themes.scss key for key. Its ramp runs from a mid-tone low anchor to
+ * a near-black high anchor and declares no accent band, so every step differs
  * from its neighbours in luminance.
- *
- * DL-THEME-01.
  */
 export const highContrastThemePalette: ThemePalette = Object.freeze({
   pageBackground: WHITE,
@@ -361,8 +296,8 @@ export const highContrastThemePalette: ThemePalette = Object.freeze({
 
 /**
  * The accent list of the colourblind-safe ramp, at the same four exponents the
- * default ramp accents — 3 through 6, tile values 8, 16, 32 and 64 — and `null`
- * at every other exponent.
+ * default ramp accents — 3 through 6, tile values 8, 16, 32 and 64 — and
+ * `null` at every other exponent.
  */
 const colorblindSafeTileAccents: readonly (string | null)[] = Object.freeze([
   null,
@@ -380,13 +315,8 @@ const colorblindSafeTileAccents: readonly (string | null)[] = Object.freeze([
 
 /**
  * The colourblind-safe palette, mirroring `$palette-colorblind-safe` of
- * style/_themes.scss key for key. Its anchors and its four accents are drawn
- * from the Okabe-Ito colour set and sit on a monotonic luminance ladder, so the
- * ramp separates by lightness as well as by hue and its axis runs yellow to
- * blue rather than orange to red. Its page background and board field are the
+ * style/_themes.scss key for key. Its page background and board field are the
  * default palette's, carried through the same two tokens.
- *
- * DL-THEME-02.
  */
 export const colorblindSafeThemePalette: ThemePalette = Object.freeze({
   pageBackground,
@@ -520,8 +450,8 @@ function createTheme(
 }
 
 /**
- * The palette the game has always rendered, and the derivation source for every
- * 2.5D material. Never superseded by either additive palette.
+ * The palette the game has always rendered, and the derivation source for
+ * every 2.5D material. Never superseded by either additive palette.
  */
 export const defaultTheme: Theme = /* @__PURE__ */ createTheme(
   'default',
@@ -596,14 +526,6 @@ function resolveTheme(theme?: Theme | ThemeId): Theme {
 
 /**
  * Themes already resolved, keyed by the theme OBJECT and then by tile value.
- *
- * Identity is the key, so a theme assembled outside the catalogue resolves
- * against its own palette even where it reuses a catalogue id, and is collected
- * together with it.
- *
- * Per catalogue theme the map is bounded by the number of distinct values a
- * board reaches and carries no eviction policy — the same bound
- * `defaultThemeCache` of src/theme/tile-ramp.ts carries.
  */
 const tileThemeCaches = new WeakMap<Theme, Map<number, TileTheme>>();
 
@@ -616,8 +538,8 @@ const tileThemeCaches = new WeakMap<Theme, Map<number, TileTheme>>();
  * `getTileTheme` of src/theme/tile-ramp.ts value for value.
  *
  * @returns Frozen tile theme, identical between calls for the same pair.
- * @throws RangeError when `value` is not a power of `tileRampConstants.base` at
- *   `tileRampConstants.exponentStart` or above, or when an id is unknown.
+ * @throws RangeError when `value` is not a power of `tileRampConstants.base`
+ *   at `tileRampConstants.exponentStart` or above, or when an id is unknown.
  */
 export function resolveTileTheme(
   value: number,
@@ -643,8 +565,8 @@ export function resolveTileTheme(
  *
  * Declared locally and deliberately not imported: `$rarity-tiers` of
  * style/_tokens.scss and the `Rarity` enumeration of src/relics/relic-types.ts
- * carry the same four names in the same order. Adding a tier means adding it to
- * all three.
+ * carry the same four names in the same order. Adding a tier means adding it
+ * to all three.
  */
 export type RarityTier = 'common' | 'uncommon' | 'rare' | 'legendary';
 
@@ -665,8 +587,8 @@ export const rarityTiers: readonly RarityTier[] = Object.freeze([
 export const THEME_RARITY_PROPERTY_PREFIX = '--theme-rarity-';
 
 /**
- * Position of one tier in `rarityTiers`, the guard both exported tier functions
- * validate through.
+ * Position of one tier in `rarityTiers`, the guard both exported tier
+ * functions validate through.
  *
  * @throws RangeError when `tier` is not one of the four tiers.
  */
@@ -704,8 +626,8 @@ export function rarityCustomProperty(tier: RarityTier): string {
 /**
  * Share of a palette's high anchor in one tier's accent, as a 0-1 fraction.
  *
- * The `ramp-rarity()` weight of style/_themes.scss and the
- * `reward-rarity-weight()` of style/_reward.scss: linear in the tier's ordinal,
+ * The `ramp-rarity` weight of style/_themes.scss and the
+ * `reward-rarity-weight` of style/_reward.scss: linear in the tier's ordinal,
  * so the lowest tier is the low anchor itself and the highest is the high
  * anchor itself.
  *
@@ -743,14 +665,14 @@ export interface RarityColor {
  * rather than picked.
  *
  * Interpolates the palette's two tile anchors across the ladder with `sassMix`
- * of src/theme/tile-ramp.ts, the same interpolation style/_themes.scss runs, so
- * a rarer relic sits further along the same progression its tiles climb.
+ * of src/theme/tile-ramp.ts, the same interpolation style/_themes.scss runs,
+ * so a rarer relic sits further along the same progression its tiles climb.
  *
  * Rarity is not conveyed by this colour alone: the reward card and the rarity
  * chip also carry the tier as text.
  *
- * @throws RangeError when `tier` is unknown, when an id is unknown, or when an
- *   anchor is not a hex colour.
+ * @throws RangeError when `tier` is unknown, when an id is unknown, or when
+ *   an anchor is not a hex colour.
  */
 export function resolveRarityColor(
   tier: RarityTier,
@@ -790,13 +712,7 @@ export function resolveRarityColors(
   );
 }
 
-/**
- * The id in force.
- *
- * Held in memory only: this module reads and writes no storage, so importing it
- * neither reads nor writes anything. A caller that persists a preference calls
- * `applyTheme` with the value it resolved.
- */
+/** The id in force. */
 let activeThemeId: ThemeId = DEFAULT_THEME_ID;
 
 /** Notified after the active theme changes. */
@@ -805,12 +721,7 @@ export type ThemeChangeListener = (
   previousTheme: Theme,
 ) => void;
 
-/**
- * Registered listeners.
- *
- * A set, so a listener registered twice is notified once and removing one
- * leaves the rest in place.
- */
+/** Registered listeners. */
 const themeChangeListeners = new Set<ThemeChangeListener>();
 
 /** The id in force. */
@@ -828,7 +739,7 @@ export function getActiveTheme(): Theme {
  *
  * A listener is notified only when the active theme actually changes, so a
  * subscriber that also needs the theme in force at construction reads
- * `getActiveTheme()` once for itself. The returned function is idempotent.
+ * `getActiveTheme` once for itself. The returned function is idempotent.
  *
  * @throws TypeError when `listener` is not a function.
  */
@@ -850,12 +761,6 @@ export function subscribeToThemeChange(
 /**
  * Notifies every listener, then reports any that threw.
  *
- * Iterates a snapshot, so a listener that subscribes or unsubscribes while
- * being notified neither is skipped nor is notified twice in the same pass. A
- * listener that throws does not stop the others: every failure is collected and
- * raised together once the pass completes, so no error is discarded and none is
- * logged from here.
- *
  * @throws AggregateError when one or more listeners threw.
  */
 function notifyThemeChange(theme: Theme, previousTheme: Theme): void {
@@ -876,14 +781,7 @@ function notifyThemeChange(theme: Theme, previousTheme: Theme): void {
   }
 }
 
-/**
- * Writes the activation attribute onto the root element.
- *
- * The only DOM access in src/theme. Both the global and the element are checked
- * before use, so the module is importable where no document exists — the
- * DOM-free unit and snapshot suites — and a document without a root element is
- * a no-op rather than a throw.
- */
+/** Writes the activation attribute onto the root element. */
 function writeThemeAttribute(theme: Theme): void {
   if (typeof document === 'undefined') {
     return;
@@ -899,9 +797,10 @@ function writeThemeAttribute(theme: Theme): void {
  * Activates a theme: records it as the theme in force, writes the activation
  * attribute, and notifies every listener when the theme actually changed.
  *
- * The attribute is written on every call, including a call that does not change
- * the theme, so a first call at boot establishes it on a document that does not
- * yet carry it. This is the only place in src/theme that writes the attribute.
+ * The attribute is written on every call, including a call that does not
+ * change the theme, so a first call at boot establishes it on a document that
+ * does not yet carry it. This is the only place in src/theme that writes the
+ * attribute.
  *
  * @throws RangeError when `id` is not one of the three ids.
  * @throws AggregateError when one or more listeners threw. The theme is in

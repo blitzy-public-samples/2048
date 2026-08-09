@@ -1,31 +1,5 @@
 // The charge DECREMENT: `HookContext.spendCharge`, the bus-owned consumption
 // signal a handler requests and the bus fulfils.
-//
-// WHY THIS SUITE EXISTS
-//   The bus already guarded a spent budget and `consumeCharge` already wrote
-//   one, but nothing ever called it: every charge-carrying relic stayed
-//   permanently full, so "relics with limited charges must stop firing once
-//   exhausted" held only in the sense that a budget nothing spends never runs
-//   out. The signal asserted here is what closes that.
-//
-// THE SPLIT IT RESOLVES
-//   AAP Contract 2 puts the guard AND the decrement in the bus, once, so no
-//   handler reads, compares or writes a budget. But only the handler knows
-//   whether its effect actually triggered — `tumbler` shuffles nothing on an
-//   open board — and a dispatch that changed nothing must not cost a charge. So
-//   the handler REQUESTS and the bus DECIDES: the request is recorded and spent
-//   only once the return has been accepted, in the same commit as the state slot
-//   and the randomness.
-//
-// The four properties this suite pins:
-//   ATOMICITY — a handler that requests a charge and then throws, or whose
-//   return the bus refuses, spends nothing.
-//   ONE POOL PER SUBSCRIBER — a subscriber binding several hooks draws on one
-//   budget, and a manual `consumeCharge` spends from the same one.
-//   FLOOR AT ZERO — however much is asked for, the budget never goes negative,
-//   and an amount that is not a whole number at or above zero spends nothing.
-//   EXHAUSTION — once the budget is gone every handler of that subscriber is
-//   skipped, and the dispatch reports the skip rather than raising.
 
 import { describe, expect, it } from 'vitest';
 
@@ -43,8 +17,6 @@ import type {
 import { DIRECTION_UP } from '../../../src/engine/types';
 import { createRngStreams } from '../../../src/rng/rng-streams';
 
-/* ===== Harness ===== */
-
 const RUN_SEED = 'blitzy-charge-signal';
 
 const BOARD_SIZE = 4;
@@ -57,8 +29,8 @@ function createEnvironment(): HookEnvironment {
   };
 }
 
-// The DISPATCH payloads, which carry the LIVE board a caller hands the bus; the
-// bus projects a read-only view of it for each handler.
+// The DISPATCH payloads, which carry the LIVE board a caller hands the bus;
+// the bus projects a read-only view of it for each handler.
 function beforeMove(
   environment: HookEnvironment,
 ): BeforeMoveDispatchPayload {
@@ -76,13 +48,7 @@ function afterMove(environment: HookEnvironment): AfterMoveDispatchPayload {
   };
 }
 
-/**
- * A read-only board view over a board the dispatch did not carry.
- *
- * The bus measures a returned payload against the IDENTITY of the board it
- * handed over, so this is what a substitution attempt looks like from a
- * handler's side.
- */
+/** A read-only board view over a board the dispatch did not carry. */
 function foreignBoardView(): BeforeMovePayload['board'] {
   const foreign = new Grid(BOARD_SIZE);
 
@@ -114,8 +80,6 @@ function spentBy(bus: HookBus, id: string): number {
       ?.chargesConsumed ?? 0
   );
 }
-
-/* ===== The signal ===== */
 
 describe('HookContext.spendCharge', () => {
   it('is a function on every dispatch context', () => {
@@ -177,8 +141,8 @@ describe('HookContext.spendCharge', () => {
   });
 
   it('spends nothing on a handler that returns nothing but changes the payload copy', () => {
-    // A void return is adopted as the payload copy, so a void-returning handler
-    // that asked DOES spend. This case is the other side: it did not ask.
+    // A void return is adopted as the payload copy, so a void-returning
+    // handler that asked DOES spend.
     const environment = createEnvironment();
     const bus = createHookBus();
 
@@ -344,8 +308,6 @@ describe('HookContext.spendCharge', () => {
   });
 });
 
-/* ===== Atomicity ===== */
-
 describe('a charge is spent with the rest of the transaction', () => {
   it('spends nothing when the handler throws after asking', () => {
     const environment = createEnvironment();
@@ -386,8 +348,7 @@ describe('a charge is spent with the rest of the transaction', () => {
           context.spendCharge();
 
           // A board that is not the board the dispatch arrived with, which the
-          // bus refuses. Shaped as the projection a handler holds rather than as
-          // a live `Grid`, because that is the type a return carries.
+          // bus refuses.
           return {
             direction: DIRECTION_UP,
             board: foreignBoardView(),
@@ -457,8 +418,6 @@ describe('a charge is spent with the rest of the transaction', () => {
     expect(budgetOf(bus, 'rolled-back')).toBe(2);
   });
 });
-
-/* ===== One pool per subscriber ===== */
 
 describe('one charge pool per subscriber, shared across its hooks', () => {
   function registerTwoHooked(bus: HookBus, charges: number): void {
@@ -574,8 +533,6 @@ describe('one charge pool per subscriber, shared across its hooks', () => {
     expect(budgetOf(bus, 'bystander')).toBe(3);
   });
 });
-
-/* ===== The context member the handler reads ===== */
 
 describe('HookContext.charges', () => {
   it('reports the budget as it stood when the dispatch opened', () => {

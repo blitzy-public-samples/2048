@@ -3,12 +3,6 @@
 // exported merge rules, the factory's mutability contract and the frozen
 // template's immutability.
 //
-// The vanilla constructs pinned here, each named in the test that pins it:
-// boardSize 4 from the composition root, startTiles 2, spawn values [2, 4] at
-// weights [0.9, 0.1], the merge condition and the face value a merge yields,
-// the populated `mergedFrom` a merged tile carries, winValue 2048, and the
-// operand shape both merge rules read.
-//
 // Scope held here: the schema — which members exist and what their types are —
 // is pinned by tests/unit/config/rules-config.test.ts, and how a tile value is
 // compared against winValue by the terminal-state suite. This file pins values
@@ -18,9 +12,7 @@
 // runs without a DOM. It reads no DOM node, no persisted state and no
 // environment value, opens no network call and needs no external fixture.
 //
-// Decisions this suite is the evidence for: DL-CONFIG-01 and DL-CONFIG-02
-// in docs/DECISION_LOG.md. Traceability rows: TR-CONFIG-01 through
-// TR-CONFIG-05 of docs/TRACEABILITY_MATRIX.md, the four extracted rule
+// Decisions: DL-CONFIG-01, DL-CONFIG-02 (docs/DECISION_LOG.md).
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -30,18 +22,17 @@ import {
   DEFAULT_RULES_CONFIG,
   defaultCanMerge,
   defaultProduceMergeValue,
+  restoreRulesConfig,
+  snapshotRulesConfig,
 } from '../../../src/config/default-config';
 import type {
   MergeTileView,
   RulesConfig,
 } from '../../../src/config/rules-config';
 
-/* ===== 1. Operands ===== */
-
 /**
  * `Math.random` as this environment supplied it, read at module scope before
- * any case installs a spy on it. The restoration case in section 11 compares
- * against this rather than against whatever it finds.
+ * any case installs a spy on it.
  */
 const PRISTINE_MATH_RANDOM = Math.random;
 
@@ -82,22 +73,15 @@ function producedValueFor(value: number): number {
   return defaultProduceMergeValue(unmergedTile(value), unmergedTile(value));
 }
 
-/* ===== 2. Subjects ===== */
-
-/**
- * Calls one pure subject makes in a purity case. Repetition is what a static
- * purity check stands on: a subject reading randomness, a clock or any other
- * ambient source would not answer identically across every pass.
- */
+/** Calls one pure subject makes in a purity case. */
 const PURITY_REPEATS = 32;
 
 /**
  * Runs `assert` twice, once against each carrier of the defaults: the frozen
- * template, then a freshly built config. A value that diverges between the two
- * fails the assertion.
+ * template, then a freshly built config.
  *
- * @param assert Assertion to run, receiving the config and a label naming the
- *   carrier for the failure message.
+ * @param assert Assertion to run, receiving the config and a label naming
+ *   the carrier for the failure message.
  */
 function forEachDefaultConfig(
   assert: (config: RulesConfig, label: string) => void,
@@ -498,8 +482,6 @@ describe('DEFAULT_RULES_CONFIG', () => {
   });
 });
 
-/* ===== 11. Purity ===== */
-
 describe('purity', () => {
   it('builds the same configuration on every call', () => {
     const built = Array.from({ length: PURITY_REPEATS }, () =>
@@ -538,9 +520,7 @@ describe('purity', () => {
   });
 
   // Self-contained: the spy this case asserts the restoration of is installed
-  // by this case. Reading `Math.random` without installing one would pass
-  // whether or not restoration works, because it would only be describing the
-  // state the file started in.
+  // by this case.
   it('leaves Math.random unspied once a spy is restored', () => {
     expect(vi.isMockFunction(Math.random)).toBe(false);
 
@@ -554,5 +534,131 @@ describe('purity', () => {
 
     expect(vi.isMockFunction(Math.random)).toBe(false);
     expect(Math.random).toBe(PRISTINE_MATH_RANDOM);
+  });
+});
+
+/* ==========================================================================
+ * 12. The run-boundary pair: snapshot a baseline, restore it in place
+ *
+ * `RulesConfig` IS ONE MUTABLE OBJECT, held by reference by the engine, the move
+ * resolver, the terminal-state checks, the renderer, the hook bus's per-dispatch
+ * view and the board effects that write it. A relic that shrinks the board, bends
+ * the merge predicate or biases the spawn weights writes THAT object, so a new
+ * run started on the same page inherited the last run's curse: the board opened
+ * at the size a cursed relic collapsed it to, with a merge rule no relic in the
+ * new run had granted.
+ *
+ * A new run cannot simply be handed a replacement object without reconstructing
+ * every collaborator, so the baseline is restored THROUGH the live reference.
+ * ========================================================================== */
+
+describe('snapshotRulesConfig', () => {
+  it('shares nothing mutable with the config it copies', () => {
+    const live = createDefaultRulesConfig();
+    const baseline = snapshotRulesConfig(live);
+
+    expect(baseline).toEqual(live);
+    expect(baseline).not.toBe(live);
+    expect(baseline.spawn).not.toBe(live.spawn);
+    expect(baseline.spawn.values).not.toBe(live.spawn.values);
+    expect(baseline.spawn.weights).not.toBe(live.spawn.weights);
+    expect(baseline.merge).not.toBe(live.merge);
+  });
+
+  it('carries the two merge rules by reference, so the same rule returns', () => {
+    const live = createDefaultRulesConfig();
+    const baseline = snapshotRulesConfig(live);
+
+    // The predicate a run opened with is an OBJECT IDENTITY: a relic replaces it
+    // with a wrapper around it, and restoring the baseline has to reinstate the
+    // original rather than an equal-looking copy.
+    expect(baseline.merge.canMerge).toBe(live.merge.canMerge);
+    expect(baseline.merge.produce).toBe(live.merge.produce);
+  });
+
+  it('is unaffected by later writes to the config it copied', () => {
+    const live = createDefaultRulesConfig();
+    const baseline = snapshotRulesConfig(live);
+
+    live.boardSize = 3;
+    live.spawn.weights[0] = 0.5;
+    live.spawn.values.push(8);
+
+    expect(baseline.boardSize).toBe(DEFAULT_BOARD_SIZE);
+    expect(baseline.spawn.weights).toEqual(DEFAULT_RULES_CONFIG.spawn.weights);
+    expect(baseline.spawn.values).toEqual(DEFAULT_RULES_CONFIG.spawn.values);
+  });
+});
+
+describe('restoreRulesConfig', () => {
+  it('returns every relic-writable member to the baseline', () => {
+    const live = createDefaultRulesConfig();
+    const baseline = snapshotRulesConfig(live);
+
+    // The three members src/engine/board-effects.ts writes, which is the whole
+    // set a relic can change.
+    live.boardSize = 3;
+    live.merge.canMerge = (): boolean => true;
+    live.spawn.weights = [0.1, 0.9];
+
+    restoreRulesConfig(live, baseline);
+
+    expect(live.boardSize).toBe(DEFAULT_BOARD_SIZE);
+    expect(live.merge.canMerge).toBe(defaultCanMerge);
+    expect(live.spawn.weights).toEqual(DEFAULT_RULES_CONFIG.spawn.weights);
+    expect(live).toEqual(createDefaultRulesConfig());
+  });
+
+  it('writes IN PLACE, keeping every reference a collaborator holds', () => {
+    const live = createDefaultRulesConfig();
+    const baseline = snapshotRulesConfig(live);
+    const spawn = live.spawn;
+    const merge = live.merge;
+
+    live.boardSize = 5;
+
+    const returned = restoreRulesConfig(live, baseline);
+
+    // IDENTITY PRESERVED at all three levels. A collaborator that captured
+    // `config`, `config.spawn` or `config.merge` at construction reads the
+    // restored values through the reference it already holds.
+    expect(returned).toBe(live);
+    expect(live.spawn).toBe(spawn);
+    expect(live.merge).toBe(merge);
+    expect(live.boardSize).toBe(DEFAULT_BOARD_SIZE);
+  });
+
+  it('leaves the baseline untouched, so it can restore run after run', () => {
+    const live = createDefaultRulesConfig();
+    const baseline = snapshotRulesConfig(live);
+
+    for (const size of [3, 2, 5]) {
+      live.boardSize = size;
+      live.spawn.weights[0] = 0.25;
+
+      restoreRulesConfig(live, baseline);
+
+      expect(live.boardSize).toBe(DEFAULT_BOARD_SIZE);
+      expect(live.spawn.weights).toEqual(DEFAULT_RULES_CONFIG.spawn.weights);
+    }
+
+    expect(baseline).toEqual(createDefaultRulesConfig());
+  });
+
+  it('replaces the spawn arrays with copies, not with the baseline s own', () => {
+    const live = createDefaultRulesConfig();
+    const baseline = snapshotRulesConfig(live);
+
+    restoreRulesConfig(live, baseline);
+
+    live.spawn.weights[0] = 0.42;
+    live.spawn.values[0] = 16;
+
+    // Aliasing them would let the next run's first relic write reach back into
+    // the baseline and make the reset a no-op from then on.
+    expect(baseline.spawn.weights[0]).toBe(
+      DEFAULT_RULES_CONFIG.spawn.weights[0],
+    );
+    expect(baseline.spawn.values[0]).toBe(DEFAULT_RULES_CONFIG.spawn.values[0]);
   });
 });

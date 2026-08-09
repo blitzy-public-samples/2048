@@ -3,58 +3,10 @@
 // on its bound hooks, it produces its specified effect, and it respects
 // charges, including an invocation made with none left.
 //
-// SPECIFICATION, from the family module contract. `gilded-rot` binds two hooks
-// and is the family's only relic on both the merge and the spawn path. At
-// `onMerge` it multiplies `scoreDelta` and leaves `resultValue` alone; at
-// `onSpawn` it raises the spawning tile to the largest value the live rules can
-// spawn. It declares no charge budget and no state slot.
-//
-// The two handlers are invoked DIRECTLY here, through a `HookContext` this file
-// builds by hand out of a live `RulesConfig`, a live `Grid` and the run's named
-// substreams. tests/unit/relics/risk-reward-cursed.test.ts drives the same
-// relic through the real src/engine/hook-bus.ts, and tests/unit/engine/ owns
-// the bus mechanisms themselves, the charge guard included. No assertion below
-// re-states either of those two.
-//
-// Provenance of the numbers this suite asserts against, from the deleted
-// vanilla sources:
-//   js/game_manager.js L71   `Math.random() < 0.9 ? 2 : 4`, the distribution
-//                            `RulesConfig.spawn` carries as values [2, 4] at
-//                            weights [0.9, 0.1]
-//   js/game_manager.js L157  `new Tile(positions.next, tile.value * 2)`, the
-//                            producer behind `MergePayload.resultValue`
-//   js/game_manager.js L167  `self.score += merged.value`, the accrual behind
-//                            `MergePayload.scoreDelta`. L157 and L167 read the
-//                            same number, so the two payload members arrive
-//                            carrying it
-//   js/grid.js L37-L43       `randomAvailableCell()` returns no cell on a full
-//                            board, the boundary `SpawnPayload.position` is
-//                            optional for
-//   .jshintrc L3-L6          two-space indentation, 80 columns and camelCase,
-//                            carried forward by AAP 0.3.3
-//
-// Figures this suite exercises, named as Rule 2 requires:
-//   Figure 4  "Turn Data Flow: From Keystroke to Composited Frame and
-//             Persisted Run State", docs/architecture/data-flow.md. Its
-//             `onMerge dispatch — score delta applied` and `onSpawn
-//             dispatch — value + position from named RNG substreams` steps
-//             are the two this relic transforms.
-//   Figure 5  "Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard
-//             and Error Isolation", in
-//             docs/architecture/hook-dispatch-sequence.md, for the
-//             transformed-payload return each handler makes.
-//
-// Traceability row of docs/TRACEABILITY_MATRIX.md this suite evidences:
-//   TR-RISK-02  gilded-rot  onMerge, onSpawn
-//
-// Decisions behind the constructs asserted below, argued in
-// docs/DECISION_LOG.md and named here only so each can be found from the log:
-//   DL-RISK-02  each cursed effect paid for through a transformable payload
-//               member or a `context.effects` command the engine applies
-//   DL-TEST-01  tests/unit/relics/ collected by the DOM-free unit project
-//
 // This suite reads no DOM, no storage and no clock, performs no I/O, takes no
 // unseeded randomness, patches no global and writes no log.
+//
+// Decisions: DL-RISK-02, DL-TEST-01 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -90,10 +42,6 @@ import {
 import type { RngCursorMap, RngStreams } from '../../../src/rng/rng-streams';
 import { createMergePairBoard } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. Constants
- * ========================================================================== */
-
 /** Identifier the family module declares the relic under. */
 const RELIC_ID = 'gilded-rot';
 
@@ -105,8 +53,7 @@ const SUITE_SEED = 'blitzy-gilded-rot';
 
 /**
  * Run correlation identifier every context below carries, and that section 10
- * reads back off the context. `CorrelationId` is a string, and
- * src/observability/logger.ts is the one deriver of a real one.
+ * reads back off the context.
  */
 const SUITE_CORRELATION_ID: CorrelationId = 'run-gilded-rot-suite';
 
@@ -118,8 +65,7 @@ const PICKUP_ORDER = 1;
 
 /**
  * Factor the merge half declares: the relic's own description states that
- * every merge pays double. Every expected score below is this factor applied
- * to the arriving contribution, never a transcribed number.
+ * every merge pays double.
  */
 const SCORE_MULTIPLIER = 2;
 
@@ -131,12 +77,7 @@ const UNBOUND_HOOKS: readonly HookName[] = HOOK_NAMES.filter(
   (name) => !BOUND_HOOKS.includes(name),
 );
 
-/**
- * Tokens neither bound handler's own source may contain. `charges` is guarded
- * in src/engine/hook-bus.ts and read by no handler; randomness is drawn from
- * named substreams; and the family module owns no error handling and no
- * reporting of its own, both of which are injected into the bus.
- */
+/** Tokens neither bound handler's own source may contain. */
 const FORBIDDEN_HANDLER_TOKENS: readonly string[] = [
   'charges',
   'Math.random',
@@ -149,10 +90,6 @@ const LONGER_SPAWN_VALUES: readonly number[] = [2, 4, 8, 16];
 
 /** Weights paired with `LONGER_SPAWN_VALUES`, summing to 1. */
 const LONGER_SPAWN_WEIGHTS: readonly number[] = [0.7, 0.1, 0.1, 0.1];
-
-/* ==========================================================================
- * 2. Harness
- * ========================================================================== */
 
 /** What one hand-built dispatch environment hands a test. */
 interface Bench {
@@ -180,9 +117,7 @@ interface Bench {
 
 /**
  * Builds the board-write channel a handler is handed: every command is refused
- * and logged, and every query reads an empty board. This mirrors
- * `INERT_BOARD_EFFECTS` of src/engine/board-effects.ts, with an added log of
- * every refused command that the assertions read.
+ * and logged, and every query reads an empty board.
  *
  * @param attempts Log every refused command's name is appended to.
  * @returns The channel, refusing everything.
@@ -227,10 +162,8 @@ function createRefusingEffects(attempts: string[]): BoardEffectQueue {
 }
 
 /**
- * Builds the board a handler reads: the query half of the live lattice and none
- * of its writes. The view declares `cellValue` where `Grid` declares
- * `cellContent`; this facade maps the one onto the other. Every member
- * delegates on each call, so a read resolves against the lattice as it stands.
+ * Builds the board a handler reads: the query half of the live lattice and
+ * none of its writes.
  *
  * @param grid Live lattice to read through.
  * @returns The board view, reading live and writing nothing.
@@ -265,12 +198,8 @@ function createGridView(grid: Grid): ReadonlyGridView {
 
 /**
  * Assembles one dispatch environment: a fresh mutable `RulesConfig`, a live
- * `Grid` restored from the merge-pair fixture, the four substreams derived from
- * `SUITE_SEED`, and one context carrying the correlation identifier.
- *
- * The rules come from `createDefaultRulesConfig()`, which allocates a fresh
- * mutable config on every call. `DEFAULT_RULES_CONFIG` is deep-frozen and
- * shared, and no member of this suite reads it.
+ * `Grid` restored from the merge-pair fixture, the four substreams derived
+ * from `SUITE_SEED`, and one context carrying the correlation identifier.
  *
  * @param charges Charge budget the context reports. Absent on a subscriber
  *   carrying no budget, which is what the catalogue declares for this relic.
@@ -319,10 +248,6 @@ function createBench(charges?: number): Bench {
     chargeRequests,
   };
 }
-
-/* ==========================================================================
- * 3. Reaching the relic and its two handlers
- * ========================================================================== */
 
 /**
  * Reads the declaration out of the family the module under test exports.
@@ -446,17 +371,10 @@ function resolveSpawn(bench: Bench, payload: SpawnPayload): SpawnPayload {
   return returned;
 }
 
-/**
- * The declaration and its two handlers as they stand at module load. Section 11
- * reads each of them again and compares by identity.
- */
+/** The declaration and its two handlers as they stand at module load. */
 const DECLARED_RELIC: Relic = relicUnderTest();
 const DECLARED_MERGE_HANDLER: HookHandler<'onMerge'> = mergeHandler();
 const DECLARED_SPAWN_HANDLER: HookHandler<'onSpawn'> = spawnHandler();
-
-/* ==========================================================================
- * 4. Payloads and readings
- * ========================================================================== */
 
 /**
  * Builds one live tile, which satisfies the merge payload's tile view.
@@ -552,10 +470,6 @@ beforeEach(() => {
   bench = createBench();
 });
 
-/* ==========================================================================
- * 5. The declaration
- * ========================================================================== */
-
 describe('the gilded-rot declaration', () => {
   it('is reachable by identifier from the family it belongs to', () => {
     expect(relicUnderTest().id).toBe(RELIC_ID);
@@ -583,15 +497,11 @@ describe('the gilded-rot declaration', () => {
   });
 
   it('opens the bench on the vanilla distribution of two and four', () => {
-    // js/game_manager.js L71, `Math.random() < 0.9 ? 2 : 4`.
+    // js/game_manager.js L71, `Math.random < 0.9 ? 2: 4`.
     expect(bench.config.spawn.values).toEqual([2, 4]);
     expect(bench.config.spawn.weights).toEqual([0.9, 0.1]);
   });
 });
-
-/* ==========================================================================
- * 6. Property 1: it fires only on the hooks it binds
- * ========================================================================== */
 
 describe('gilded-rot binds onMerge and onSpawn and no other hook', () => {
   it('carries exactly the two keys onMerge and onSpawn', () => {
@@ -676,10 +586,6 @@ describe('gilded-rot binds onMerge and onSpawn and no other hook', () => {
     expect(second.context.state).toEqual({ run: 'second' });
   });
 });
-
-/* ==========================================================================
- * 7. Property 2a: onMerge multiplies scoreDelta and leaves resultValue alone
- * ========================================================================== */
 
 describe('onMerge: gilded-rot multiplies scoreDelta, not resultValue', () => {
   it('multiplies the contribution and leaves resultValue unchanged', () => {
@@ -799,10 +705,6 @@ describe('onMerge: gilded-rot multiplies scoreDelta, not resultValue', () => {
   });
 });
 
-/* ==========================================================================
- * 8. Property 2b: onSpawn raises the value to the configured ceiling
- * ========================================================================== */
-
 describe('onSpawn: gilded-rot raises the value to the live maximum', () => {
   it('raises the lowest spawnable value to the highest one', () => {
     const values = bench.config.spawn.values;
@@ -865,9 +767,7 @@ describe('onSpawn: gilded-rot raises the value to the live maximum', () => {
 
   it('carries a spawn that arrived with no cell across unchanged', () => {
     // js/grid.js L37-L43 returns no cell on a full board, which is the case
-    // `SpawnPayload.position` is optional for. The handler transforms nothing
-    // here, so the payload the dispatch carries forward is the one that
-    // arrived, and no cell is invented for it.
+    // `SpawnPayload.position` is optional for.
     const arriving = spawnOf(undefined, 2);
     const returned = dispatchSpawn(bench, arriving);
 
@@ -904,17 +804,6 @@ describe('onSpawn: gilded-rot raises the value to the live maximum', () => {
     expect(bench.effectAttempts).toEqual([]);
   });
 });
-
-/* ==========================================================================
- * 9. Property 3: charges
- *
- * The five charge-bearing relics are `frostbind` and the four of
- * board-manipulation. `gilded-rot` is not one of them, and the guard that
- * skips a spent subscriber lives in src/engine/hook-bus.ts, which
- * tests/unit/engine/ asserts. What is asserted here is the relic's own half:
- * it declares no budget, neither handler reads one, and neither handler is
- * harmed by being invoked while a budget stands at zero.
- * ========================================================================== */
 
 describe('gilded-rot carries no charge budget and reads none', () => {
   it('declares no charges member at all, absent rather than null', () => {
@@ -999,10 +888,6 @@ describe('gilded-rot carries no charge budget and reads none', () => {
   });
 });
 
-/* ==========================================================================
- * 10. Determinism: neither half consumes randomness
- * ========================================================================== */
-
 describe('gilded-rot consumes no randomness on either hook', () => {
   it('opens every one of the four substreams at zero', () => {
     const cursors = bench.streams.snapshotCursors();
@@ -1073,10 +958,6 @@ describe('gilded-rot consumes no randomness on either hook', () => {
     expect(bench.context.pickupOrder).toBe(PICKUP_ORDER);
   });
 });
-
-/* ==========================================================================
- * 11. What the suite leaves behind
- * ========================================================================== */
 
 describe('the catalogue and the vanilla defaults outlive the suite', () => {
   it('leaves the declaration frozen and its handler table intact', () => {

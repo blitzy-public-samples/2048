@@ -1,34 +1,5 @@
 // Reload snapshots: an interrupted run resumed from storage reaches the same
 // state as one that was never interrupted.
-//
-// THE PROPERTY
-//   AAP V2 requires the same seed and the same move list to yield an identical
-//   board and identical relic offers "across repeated runs AND ACROSS A RELOAD".
-//   The reload half is a different claim from the repeated-run half and fails
-//   differently: repeated runs share one process and one set of substreams,
-//   while a reload rebuilds the substreams from a persisted cursor map. A build
-//   that resumed by REPLAYING rather than fast-forwarding, or that restarted the
-//   substreams at zero, or that persisted the cursors one commit late, passes
-//   every repeated-run test and fails this one.
-//
-// HOW IT IS PROVED
-//   Two runs of one seed and one move list. The first plays the whole list
-//   uninterrupted. The second plays part of it, is torn down entirely — engine,
-//   controller, substreams, all of it — and is rebuilt from nothing but what is
-//   in storage, then plays the rest. The two boards are compared to each other
-//   AND recorded, so the suite catches both "the resume diverged" and "the
-//   sequence changed for both".
-//
-// THE RUN IDENTIFIER
-//   Originated per run instance, so it cannot appear in a stored snapshot unless
-//   the spec originates it deterministically. These specs do: the token factory
-//   is a fixed list, which also makes the recorded envelope show that a resumed
-//   run adopts the STORED identifier rather than the next token in that list.
-//
-// The project environment is `node`. Storage is a `MemoryStorage` behind the
-// real manager, which is what makes a "reload" expressible here at all: the
-// backing store outlives the composition built over it, exactly as a browser's
-// Web Storage outlives the page.
 
 import { describe, expect, it } from 'vitest';
 
@@ -52,10 +23,6 @@ import { MemoryStorage } from '../../src/storage/memory-storage';
 import { RUN_STATE_KEY } from '../../src/storage/storage-keys';
 import { formatBoard, formatRunState } from '../fixtures/snapshot-format';
 
-/* ==========================================================================
- * Harness
- * ========================================================================== */
-
 /** The move list, cycling all four directions so every seed resolves turns. */
 const MOVES: readonly Direction[] = [
   DIRECTION_UP,
@@ -75,13 +42,7 @@ const MOVES: readonly Direction[] = [
 /** Where the interrupted run is torn down. */
 const INTERRUPT_AFTER = 5;
 
-/**
- * Deterministic run tokens.
- *
- * A fresh composition takes the first for its seed and the second for its run
- * identifier. A resumed composition takes NEITHER — it adopts both from storage
- * — which is why a resumed envelope below still carries `run-instance-1`.
- */
+/** Deterministic run tokens. */
 const TOKENS: readonly string[] = [
   'snapshot-run-seed',
   'run-instance-1',
@@ -98,11 +59,8 @@ interface Composition {
 
 /**
  * Composes a run over an existing backing store, in the composition root's
- * order: storage, identity, store, controller, substreams, engine, subscribers.
- *
- * Deliberately excludes the renderer, the HUD, the input layer, the announcer
- * and the observability layer. None of them may influence the recorded state,
- * and leaving them out is how that is guaranteed rather than assumed.
+ * order: storage, identity, store, controller, substreams, engine,
+ * subscribers.
  */
 function compose(backing: MemoryStorage): Composition {
   const manager = new LocalStorageManager({ storage: backing });
@@ -153,7 +111,10 @@ function play(engine: Engine, moves: readonly Direction[]): void {
   }
 }
 
-/** The stored envelope, parsed. Throws where none is stored, which is a failure. */
+/**
+ * The stored envelope, parsed. Throws where none is stored, which is a
+ * failure.
+ */
 function storedRun(backing: MemoryStorage): RunState {
   const raw = backing.getItem(RUN_STATE_KEY);
 
@@ -174,10 +135,6 @@ function render(board: SerializedGameState, state: RunState): string {
     formatRunState(state, { showRunId: true }),
   ].join('\n');
 }
-
-/* ==========================================================================
- * 1. One uninterrupted run
- * ========================================================================== */
 
 describe('an uninterrupted run', () => {
   it('reproduces its recorded board and envelope', () => {
@@ -203,10 +160,6 @@ describe('an uninterrupted run', () => {
     expect(render(run.engine.serialize(), storedRun(backing))).toMatchSnapshot();
   });
 });
-
-/* ==========================================================================
- * 2. The same run, interrupted and resumed
- * ========================================================================== */
 
 describe('a run interrupted and resumed from storage', () => {
   it('reaches the state the uninterrupted run reached', () => {
@@ -236,8 +189,6 @@ describe('a run interrupted and resumed from storage', () => {
 
     const resumed = render(after.engine.serialize(), storedRun(interrupted));
 
-    // Byte for byte, including the cursors: the resumed run took the draws that
-    // came next in the sequence rather than the draws it had already taken.
     expect(resumed).toBe(expected);
 
     // And recorded, so a change that moves BOTH sides together is caught too.
@@ -254,8 +205,7 @@ describe('a run interrupted and resumed from storage', () => {
     const expected = formatBoard(uninterrupted.engine.serialize());
 
     // Torn down and rebuilt after every single move: twelve compositions over
-    // one backing store. Persisting the cursors one commit late, or rounding a
-    // cursor, would show up here long before it showed up in a single resume.
+    // one backing store.
     const stepwise = new MemoryStorage();
 
     for (const direction of MOVES) {
@@ -281,17 +231,9 @@ describe('a run interrupted and resumed from storage', () => {
 
     const after = compose(backing);
 
-    // `setup()` restored the board rather than seeding one, so the two starting
-    // tiles were not spawned again. A resume that replayed instead of
-    // fast-forwarding would show these cursors two higher and a board with two
-    // extra tiles.
     expect(after.streams.snapshotCursors()).toEqual(cursorsBefore);
   });
 });
-
-/* ==========================================================================
- * 3. What a resume does NOT carry over
- * ========================================================================== */
 
 describe('resuming', () => {
   it('adopts the stored run identifier rather than originating one', () => {
@@ -302,8 +244,6 @@ describe('resuming', () => {
 
     const second = compose(backing);
 
-    // The token factory would have handed out `snapshot-run-seed` and
-    // `run-instance-1` again; the resumed composition asked it for neither.
     expect(second.controller.runId()).toBe('run-instance-1');
     expect(second.controller.identity.seedProvided).toBe(false);
     expect(second.controller.identity.resumed).toBe(true);

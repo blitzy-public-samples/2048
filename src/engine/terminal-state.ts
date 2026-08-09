@@ -2,39 +2,16 @@
 // literal.
 //
 // Ported from js/game_manager.js, which is deleted: the inline win test of the
-// merge branch, movesAvailable(), tileMatchesAvailable() and
-// isGameTerminated(). hasReachedWinValue and highestTileValue are additions
-// and are marked as such at their declarations.
-//
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
-// this module's area enumerated:
-//   TR-TERM-01  js/game_manager.js L170      the win test the merge branch
-//                                            performed inline
-//   TR-TERM-02  js/game_manager.js L238-L240 movesAvailable()
-//   TR-TERM-03  js/game_manager.js L243-L268 tileMatchesAvailable()
-//   TR-TERM-04  js/game_manager.js L30-L32   isGameTerminated()
-//   TR-TERM-05  hasReachedWinValue           target-only row
-//   TR-TERM-06  highestTileValue             target-only row
-//
-// The win value and the board's edge length are read from the arguments at
-// every call: no binding in this module holds either. The vanilla flag
-// `keepPlaying` is carried as `continuedPlay` here and in
-// src/engine/engine.ts; the input event name and the persisted member name
-// keep the vanilla spelling.
+// merge branch, movesAvailable, tileMatchesAvailable and isGameTerminated.
+// hasReachedWinValue and highestTileValue are additions and are marked as such
+// at their declarations.
 //
 // Every export is a query that mutates no grid and no tile. This module reads
 // no DOM, performs no I/O, consumes no randomness, reads no clock, memoises
 // nothing and reports nothing.
 //
-// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
-// only so the construct can be found from the log:
-//   DL-TERM-01  relocating the win evaluation out of the merge branch into
-//               this module
-//   DL-TERM-02  strict equality against `config.winValue`
-//   DL-TERM-03  reading the win value, the merge predicate and the board size
-//               at use time
-//   DL-TERM-04  the loss probe reading the configured merge predicate rather
-//               than an equality comparison of its own
+// Decisions: DL-TERM-01, DL-TERM-02, DL-TERM-03, DL-TERM-04
+// (docs/DECISION_LOG.md).
 
 import type { MergeTileView, RulesConfig } from '../config/rules-config';
 import type { Grid } from './grid';
@@ -43,18 +20,12 @@ import type { Direction, Position } from './types';
 
 /**
  * The directions the neighbour probe walks, in the order the vanilla probe
- * counted them: 0 up, 1 right, 2 down, 3 left. Frozen: the order is fixed for
- * every probe.
+ * counted them: 0 up, 1 right, 2 down, 3 left.
  */
 const PROBE_DIRECTIONS: readonly Direction[] = Object.freeze([0, 1, 2, 3]);
 
 /**
  * Presents a face value to the merge predicate with no merge history.
- *
- * `mergedFrom` is `null` on every view this builds. js/game_manager.js
- * L243-L268 ran between turns, after L116 had cleared `mergedFrom` on
- * every tile, so the state the predicate reads here is the state the
- * vanilla probe read.
  *
  * @param value Face value to present.
  * @returns A frozen view carrying that value and no merge history.
@@ -63,16 +34,12 @@ function probeView(value: number): MergeTileView {
   return Object.freeze({ value, mergedFrom: null });
 }
 
-/**
- * The value `highestTileValue` reports for a board holding no tiles. It
- * is the empty-board reading src/config/stage-config.ts specifies for
- * `StageProgressInput.highestTileValue`.
- */
+/** The value `highestTileValue` reports for a board holding no tiles. */
 const EMPTY_BOARD_HIGHEST_VALUE = 0;
 
 /**
- * Reports whether a face value a merge produced wins the game, by comparing
- * it against `config.winValue`, read at call time.
+ * Reports whether a face value a merge produced wins the game, by comparing it
+ * against `config.winValue`, read at call time.
  *
  * The comparison is EQUALITY and not a threshold: a value above
  * `config.winValue` is not a winning value, which is what the vanilla merge
@@ -89,8 +56,8 @@ export function isWinningMergeValue(
  * Reports whether any tile on the board carries the win value.
  *
  * ADDITION — no vanilla source: the vanilla game evaluated the win in the
- * merge branch alone and read the flag back from the persisted snapshot, so
- * it never scanned a board for the value.
+ * merge branch alone and read the flag back from the persisted snapshot, so it
+ * never scanned a board for the value.
  *
  * The scan is x-outer and y-inner, reads each cell through `cellContent`, and
  * returns at the first tile carrying the value. A board holding no tiles
@@ -114,30 +81,7 @@ export function hasReachedWinValue(
 }
 
 /**
- * Reports whether any two adjacent tiles can merge under the rules in
- * force.
- *
- * ONE CHANGE TO THE PORTED BEHAVIOUR. L259 wrote the match test inline as
- * `other.value === tile.value`. It is `config.merge.canMerge` here, the
- * same member src/engine/move-resolver.ts resolves a merge through, read
- * off the argument at every probe. Both operands reach it as `probeView`
- * projections, which supply cleared merge-history views: each carries the
- * face value L259 compared and a `mergedFrom` fixed to `null` whatever the
- * live tile holds, which is the cleared merge state L113-L120 produced. A
- * tile whose `mergedFrom` is set therefore still counts as a match, and
- * under the default predicate in src/config/default-config.ts the two tests
- * agree for every pair.
- *
- * The walked tile is the moving operand and the probed neighbour the
- * target, which is the operand order src/engine/move-resolver.ts passes
- * at its merge branch. Each adjacent pair is probed twice, once from each
- * of its two cells, which is what L253's per-cell walk over all four
- * directions did, so an asymmetric predicate is asked both ways.
- *
- * Each probe steps one cell off the walked cell, so along every edge it
- * addresses a cell outside the lattice. `Grid.cellContent` returns `null` for
- * such a cell rather than raising, and the probe relies on that valve and
- * adds no bounds test of its own.
+ * Reports whether any two adjacent tiles can merge under the rules in force.
  *
  * `grid.size` is read at call time.
  */
@@ -170,10 +114,8 @@ export function tileMatchesAvailable(
 }
 
 /**
- * Reports whether any move can still change the board:
- * `cellsAvailable() || tileMatchesAvailable()`. The operands keep their order
- * and the `||` keeps its short circuit, so the neighbour probe runs only when
- * no cell is empty.
+ * Reports whether any move can still change the board: `cellsAvailable ||
+ * tileMatchesAvailable`.
  */
 export function movesAvailable(grid: Grid, config: RulesConfig): boolean {
   return grid.cellsAvailable() || tileMatchesAvailable(grid, config);
@@ -190,15 +132,14 @@ export interface TerminalStateInput {
 
   /**
    * Whether play continued past the win. This is the boolean the vanilla game
-   * held as `keepPlaying`, which src/engine/engine.ts carries under this
-   * name.
+   * held as `keepPlaying`, which src/engine/engine.ts carries under this name.
    */
   readonly continuedPlay: boolean;
 }
 
 /**
- * Reports whether the engine refuses further moves:
- * `over || (won && !continuedPlay)`, the vanilla expression unchanged.
+ * Reports whether the engine refuses further moves: `over || (won &&
+ * !continuedPlay)`, the vanilla expression unchanged.
  */
 export function isGameTerminated(state: TerminalStateInput): boolean {
   return state.over || (state.won && !state.continuedPlay);

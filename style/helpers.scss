@@ -1,22 +1,13 @@
-// The vanilla Ruby Sass helpers, migrated to Dart Sass and otherwise unchanged.
-// Two edits, both of them required by the compiler change and nothing else:
-//
-//   exponent()   `$value / $base` became `math.div($value, $base)`; the
-//                `@use "sass:math"` below is what that call needs.
-//   keyframes()  `@keyframes $animation-name` became
-//                `@keyframes #{$animation-name}`. Ruby Sass evaluated the bare
-//                variable in an at-rule name; Dart Sass emits it literally, so
-//                without the interpolation every block compiles to the animation
-//                name `$animation-name` and every `animation:` reference to a
-//                real name finds no keyframes at all. The failure is silent —
-//                the compile succeeds — so it is repaired here rather than left.
+// The vanilla Ruby Sass helpers, migrated to Dart Sass and otherwise
+// unchanged. Two edits, both of them required by the compiler change and
+// nothing else.
 //
 // Nothing else lives in this file. A colour helper written for the ramp was
 // moved to style/_tokens.scss, the token layer that exists for that parity.
 @use "sass:math";
 
-// Exponent
-// From: https://github.com/Team-Sass/Sassy-math/blob/master/sass/math.scss#L36
+// Exponent From:
+// https://github.com/Team-Sass/Sassy-math/blob/master/sass/math.scss#L36
 
 @function exponent($base, $exponent) {
   // reset value
@@ -69,9 +60,9 @@
   transform: $args;
 }
 
-// Keyframe animations
-// Dart Sass does not interpolate a variable in an at-rule prelude, so an
-// uninterpolated $animation-name emits the literal text "$animation-name".
+// Keyframe animations Dart Sass does not interpolate a variable in an at-rule
+// prelude, so an uninterpolated $animation-name emits the literal text
+// "$animation-name".
 @mixin keyframes($animation-name) {
   @-webkit-keyframes #{$animation-name} {
     @content;

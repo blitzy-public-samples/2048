@@ -2,13 +2,6 @@
 // rules, dispatched through a real `HookBus` against a real `Grid` and a real
 // `RulesConfig`.
 //
-// Each case asserts the EFFECT rather than the handler's return, because the
-// effect is what a handler records and src/engine/hook-bus.ts applies. Every
-// board assertion also checks the lattice is internally consistent — every
-// occupant's own x/y matching its array coordinates, and `cellContent` still
-// returning `null` off-lattice — which is the corruption mode the grid-mutation
-// discipline exists to prevent.
-//
 // This suite reads no DOM and no storage, and installs no mock library.
 
 import { describe, expect, it } from 'vitest';
@@ -36,10 +29,6 @@ import { createRngStreams } from '../../../src/rng/rng-streams';
 import type { RngStreams } from '../../../src/rng/rng-streams';
 import { findRelicById } from '../../../src/relics/relic-registry';
 import type { Relic } from '../../../src/relics/relic-types';
-
-/* ==========================================================================
- * Harness
- * ========================================================================== */
 
 const SEED = 'relic-effects-suite';
 
@@ -219,10 +208,6 @@ function stageEndPayload(
   return { stageIndex: 0, cleared, score };
 }
 
-/* ==========================================================================
- * M2 — fertile-ground inserts an EXTRA tile
- * ========================================================================== */
-
 describe('fertile-ground (spawn-control)', () => {
   it('inserts a second tile and leaves the spawn payload untouched', () => {
     const target = bench('fertile-ground');
@@ -298,10 +283,6 @@ describe('fertile-ground (spawn-control)', () => {
     expect(occupants(first.grid)).toEqual(occupants(second.grid));
   });
 });
-
-/* ==========================================================================
- * M3 — frostbind and chain-catalyst install tagged merge predicates
- * ========================================================================== */
 
 describe('frostbind (merge-magic)', () => {
   it('installs a merge predicate on stage start', () => {
@@ -430,8 +411,6 @@ describe('frostbind (merge-magic)', () => {
     expect(target.config.merge.canMerge(moving, stationary)).toBe(false);
 
     // The board shrinks and the stage begins again, where (3,3) is gone.
-    // The payload's `boardSize` must be the LIVE edge length; hook-bus.ts
-    // refuses a stage-start return that reports any other.
     target.grid.size = 3;
     target.grid.cells = target.grid.empty();
     target.config.boardSize = 3;
@@ -532,10 +511,6 @@ describe('chain-catalyst (merge-magic)', () => {
     expect(payload.scoreDelta).toBe(4);
   });
 });
-
-/* ==========================================================================
- * M4 — the four board-manipulation effects
- * ========================================================================== */
 
 describe('temporal-anchor (board-manipulation)', () => {
   it('rewinds the board to the anchor and withdraws the move', () => {
@@ -803,8 +778,10 @@ describe('scouring-wind (board-manipulation)', () => {
   it('clears every tile of the first fully-occupied row', () => {
     const target = bench('scouring-wind');
 
-    for (let y = 0; y < target.grid.size; y += 1) {
-      place(target.grid, 1, y, 2);
+    // A ROW is one fixed `y` across every `x`, so row 1 is filled and the tile
+    // at (0, 0) stands outside it.
+    for (let x = 0; x < target.grid.size; x += 1) {
+      place(target.grid, x, 1, 2);
     }
 
     place(target.grid, 0, 0, 8);
@@ -831,14 +808,18 @@ describe('scouring-wind (board-manipulation)', () => {
 
     dispatch(target, 'onAfterMove', afterMovePayload(target.grid));
 
+    // Row 0 went; row 1 is a later row and stands.
     expect(target.grid.cellContent({ x: 0, y: 0 })).toBeNull();
-    expect(target.grid.cellContent({ x: 1, y: 0 })?.value).toBe(2);
+    expect(target.grid.cellContent({ x: 1, y: 0 })).toBeNull();
+    expect(target.grid.cellContent({ x: 0, y: 1 })?.value).toBe(2);
+    expect(target.grid.cellContent({ x: 1, y: 1 })?.value).toBe(2);
   });
 
   it('does nothing when no row is fully occupied', () => {
     const target = bench('scouring-wind');
 
     place(target.grid, 0, 0, 2);
+    place(target.grid, 0, 1, 2);
 
     const before = target.grid.serialize();
 
@@ -850,8 +831,8 @@ describe('scouring-wind (board-manipulation)', () => {
   it('consumes no randomness', () => {
     const target = bench('scouring-wind');
 
-    for (let y = 0; y < target.grid.size; y += 1) {
-      place(target.grid, 0, y, 2);
+    for (let x = 0; x < target.grid.size; x += 1) {
+      place(target.grid, x, 0, 2);
     }
 
     const before = target.streams.snapshotCursors();
@@ -861,10 +842,6 @@ describe('scouring-wind (board-manipulation)', () => {
     expect(target.streams.snapshotCursors()).toEqual(before);
   });
 });
-
-/* ==========================================================================
- * M5 — the two cursed effects
- * ========================================================================== */
 
 describe('collapsing-vault (risk-reward-cursed)', () => {
   it('shrinks the live board and sets BOTH size fields', () => {
@@ -1104,10 +1081,6 @@ describe('brittle-crown (risk-reward-cursed)', () => {
     expect(target.streams.snapshotCursors()).toEqual(before);
   });
 });
-
-/* ==========================================================================
- * The read-only facade is still the only board a handler holds
- * ========================================================================== */
 
 describe('the write channel does not widen a handler s reach', () => {
   it('still hands onBeforeMove the read-only facade, not the board', () => {

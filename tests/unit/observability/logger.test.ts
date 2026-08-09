@@ -2,22 +2,15 @@
 // the log record, the level filter, the sink registry, the bounded
 // recent-record buffer, error serialisation, and the three reporter adapters.
 //
-// The source construct this suite is the executable evidence for is the
-// discarded-error `catch` of js/local_storage_manager.js, which bound `error`
-// and returned `false` without reporting it. The `serializeError` describe
-// block below is its coverage, and the storage-adapter block covers the two
-// silent-failure sites in that same file: an unguarded `setItem` and an
-// unguarded `JSON.parse`.
-//
 // `deriveCorrelationId` is the tree's single derivation. The final describe
 // block is the end-to-end identity evidence: the logger, the engine reporter
-// adapter, the hook bus and the run layer all carry one
-// identical value for one run.
+// adapter, the hook bus and the run layer all carry one identical value for
+// one run.
 //
 // Collected by the unit:dom project in vitest.config.ts, which supplies a
-// document. No test below reads or writes storage. tests/fixtures/storage.ts is
-// loaded as a setup file for every unit suite and removes every owned key after
-// each test.
+// document. No test below reads or writes storage. tests/fixtures/storage.ts
+// is loaded as a setup file for every unit suite and removes every owned key
+// after each test.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -100,19 +93,13 @@ const SUITE_CORRELATION_ID = deriveCorrelationId(SUITE_SEED);
 const SUITE_SUBSYSTEM = 'suite';
 
 /**
- * A source location in any of the three forms a stack frame writes one: a
- * URL, a Windows absolute path, or a POSIX absolute path of two segments or
- * more. No record this suite reads may still match it.
+ * A source location in any of the three forms a stack frame writes one: a URL,
+ * a Windows absolute path, or a POSIX absolute path of two segments or more.
  */
 const SOURCE_LOCATION_PATTERN =
   /[a-z][a-z0-9+.-]*:\/\/|[a-z]:\\|(?:\/[\w.@~+-]+){2,}/i;
 
-/**
- * Identifier `deriveCorrelationId` returns for each of these seeds. A fixed
- * value per seed is the static evidence that the derivation reads no
- * randomness, no clock and no platform entropy: a derivation that read any of
- * them could not reproduce these across processes.
- */
+/** Identifier `deriveCorrelationId` returns for each of these seeds. */
 const CORRELATION_ID_GOLDEN: ReadonlyArray<readonly [string, string]> = [
   ['', 'run-0ztntfp000045h'],
   ['run-seed-2048', 'run-1davmkd1yax7kz'],
@@ -121,14 +108,10 @@ const CORRELATION_ID_GOLDEN: ReadonlyArray<readonly [string, string]> = [
 
 /**
  * `Math.random` as it stood when this suite's module graph finished loading.
- * Read by the isolation cases, which install and then restore a spy on it.
  */
 const PRISTINE_MATH_RANDOM = Math.random;
 
-/**
- * `Date.now` as it stood when this suite's module graph finished loading. Read
- * by the isolation cases, which install and then restore a spy on it.
- */
+/** `Date.now` as it stood when this suite's module graph finished loading. */
 const PRISTINE_DATE_NOW = Date.now;
 
 /** A logger paired with the records its subscribed sink has captured. */
@@ -240,13 +223,7 @@ const PARSE_ERROR_INFO: StorageErrorInfo = {
   quota: false,
 };
 
-/**
- * The value the platform threw for the quota failure below.
- *
- * A `DOMException` subclass carrying a stack, which is exactly what a
- * reduction to `StorageErrorInfo` cannot express — so the assertions on the
- * failure channel measure whether this object survives to the record (F5).
- */
+/** The value the platform threw for the quota failure below. */
 const QUOTA_THROWN = new DOMException(
   'The storage quota has been exceeded.',
   'QuotaExceededError',
@@ -375,7 +352,6 @@ describe('deriveCorrelationId', () => {
     }
   });
 
-
   it('neither mutates its argument nor depends on call order', () => {
     const first = 'purity-seed-one';
     const second = 'purity-seed-two';
@@ -391,14 +367,7 @@ describe('deriveCorrelationId', () => {
   });
 
   it('groups a replay when it is given the seed alone', () => {
-    // The seed-grouping form. This case previously also asserted the function
-    // took exactly ONE argument, to keep the identifier of a seed from varying
-    // between runs. That constraint was wrong: it made the value unable to
-    // identify a run instance at all, so two runs of one seed — which this
-    // product invites, since the seed is displayed and copyable — landed in a
-    // log stream under one identifier with nothing to separate them. The
-    // grouping property is kept as this form; instance identity is the second
-    // form, below.
+    // The seed-grouping form.
     const replayed = 'run-seed-replayed';
 
     expect(deriveCorrelationId(replayed)).toBe(deriveCorrelationId(replayed));
@@ -410,12 +379,8 @@ describe('deriveCorrelationId', () => {
     const first = deriveCorrelationId(seed, 'instance-one');
     const second = deriveCorrelationId(seed, 'instance-two');
 
-    // The whole point of the correction: same seed, different run, different
-    // identifier.
     expect(first).not.toBe(second);
 
-    // And still deterministic, so a record's identifier is reproducible from a
-    // persisted run rather than being a fresh value each process.
     expect(deriveCorrelationId(seed, 'instance-one')).toBe(first);
   });
 
@@ -466,9 +431,8 @@ describe('deriveCorrelationId', () => {
   });
 
   it('is the identifier every injected reporter reports under', () => {
-    // One derivation, injected into the engine and into the logger, puts
-    // the report's identifier and the record's own identifier in
-    // agreement. Both sides below read the same call.
+    // One derivation, injected into the engine and into the logger, puts the
+    // report's identifier and the record's own identifier in agreement.
     const seed = 'run-seed-single-authority';
     const injected = deriveCorrelationId(seed);
     const { logger, records } = createCapturingLogger({ runSeed: seed });
@@ -656,10 +620,6 @@ describe('Logger.child', () => {
     expect(tags).toEqual(['render', SUITE_SUBSYSTEM]);
   });
 });
-
-/* ==========================================================================
- * Rotating the correlation identifier
- * ========================================================================== */
 
 describe('Logger.setCorrelationId', () => {
   it('carries the new identifier on every later record', () => {
@@ -1445,10 +1405,6 @@ describe('serializeError', () => {
   });
 });
 
-/* --------------------------------------------------------------------------
- * Field sanitisation
- * ----------------------------------------------------------------------- */
-
 describe('field sanitisation', () => {
   it('deep-copies, so a later mutation cannot reach a buffered record', () => {
     const { logger, records } = createCapturingLogger();
@@ -1617,14 +1573,6 @@ describe('field sanitisation', () => {
   });
 });
 
-/* --------------------------------------------------------------------------
- * Bounded, redacted records
- *
- * A record is what leaves this module — to a sink, to the console, and into
- * the JSON-Lines download — so each bound below is asserted on the record
- * rather than on the serialiser alone.
- * ----------------------------------------------------------------------- */
-
 describe('emitted records are bounded and carry no source location', () => {
   it('redacts the stack a sink receives', () => {
     const { logger, records } = createCapturingLogger();
@@ -1779,13 +1727,10 @@ describe('emitted records are bounded and carry no source location', () => {
 
 describe('createEngineReporter', () => {
   it('satisfies the EngineReporter contract src/engine declares, every ' +
-    'member of it (F3)', () => {
+    'member of it', () => {
     const { logger } = createCapturingLogger();
     const reporter: EngineReporter = createEngineReporter(logger);
 
-    // Enumerated from the contract rather than listed by hand, so a member
-    // added to `EngineReporter` and omitted here fails this test instead of
-    // passing unnoticed — which is how `onListenerError` came to be missing.
     const contract: readonly (keyof EngineReporter)[] = [
       'onHookError',
       'onListenerError',
@@ -1856,8 +1801,6 @@ describe('createEngineReporter', () => {
       throw new Error('a stage-end subscriber threw');
     });
 
-    // The emitter contains the throw; the log is the only place it becomes
-    // visible, which is what makes this wiring load-bearing.
     expect(() => {
       events.emit('stage:end', { stageIndex: 0, cleared: true, score: 0 });
     }).not.toThrow();
@@ -1900,7 +1843,7 @@ describe('createEngineReporter', () => {
   });
 
   it('records a contained event-listener throw at error, with the thrown ' +
-    'value serialised (F3)', () => {
+    'value serialised', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: EngineReporter = createEngineReporter(logger);
     const thrown = new TypeError('Cannot assign to read only property', {
@@ -1928,15 +1871,13 @@ describe('createEngineReporter', () => {
       listenerIndex: 2,
     });
 
-    // The value itself, so the subclass, the stack and the cause chain all
-    // survive; a name-and-message reduction would have carried none of them.
     expect(record.error).toEqual(serializeError(thrown));
     expect(record.error?.name).toBe('TypeError');
     expect(record.error?.cause?.message).toBe('the projection is frozen');
     expect(record.error?.stack).toBeDefined();
   });
 
-  it('records a non-Error listener throwable whole (F3)', () => {
+  it('records a non-Error listener throwable whole', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: EngineReporter = createEngineReporter(logger);
 
@@ -1999,7 +1940,7 @@ describe('createEngineReporter', () => {
   });
 
   it('records the event dimension of an event count, leaving hook absent ' +
-    '(F8)', () => {
+    '', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: EngineReporter = createEngineReporter(logger);
     const report: EngineCountReport = {
@@ -2077,7 +2018,7 @@ describe('createInputReporter', () => {
     });
   });
 
-  it('carries a caught Error through the failure channel unconverted (F4)',
+  it('carries a caught Error through the failure channel unconverted',
     () => {
       const { logger, records } = createCapturingLogger();
       const reporter: InputReporter = createInputReporter(logger);
@@ -2100,7 +2041,7 @@ describe('createInputReporter', () => {
       expect(records[0].error?.stack).toBeDefined();
     });
 
-  it('carries a caught non-Error through the failure channel whole (F4)',
+  it('carries a caught non-Error through the failure channel whole',
     () => {
       const { logger, records } = createCapturingLogger();
       const reporter: InputReporter = createInputReporter(logger);
@@ -2125,7 +2066,7 @@ describe('createInputReporter', () => {
       expect(records[4].error).toEqual(serializeError(undefined));
     });
 
-  it('records a failure at the level the input layer reports (F4)', () => {
+  it('records a failure at the level the input layer reports', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: InputReporter = createInputReporter(logger);
 
@@ -2141,7 +2082,7 @@ describe('createInputReporter', () => {
   });
 
   it('drops raw keystroke fields from a failure as it does from a message ' +
-    '(F4)', () => {
+    '', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: InputReporter = createInputReporter(logger);
 
@@ -2246,7 +2187,7 @@ describe('createStorageReporter', () => {
   });
 
   it('records the writability probe outcome, without duplicating the ' +
-    'failure channel (F11)', () => {
+    'failure channel', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: StorageReporter = createStorageReporter(logger);
     const supported: StorageProbeResult = {
@@ -2271,10 +2212,8 @@ describe('createStorageReporter', () => {
       quota: false,
     });
 
-    // A probe that caught something also reaches `onFailure`, which records
-    // it at warning level with the thrown value. This channel therefore
-    // records the outcome and the strategy at `'debug'` so one failure yields
-    // one warning and not two.
+    // A probe that caught something also reaches `onFailure`, which records it
+    // at warning level with the thrown value.
     expect(records[1].level).toBe('debug');
     expect(records[1].fields).toEqual({
       supported: false,
@@ -2284,7 +2223,7 @@ describe('createStorageReporter', () => {
   });
 
   it('keeps the warning for a probe that caught nothing, which reaches no ' +
-    'failure channel (F11)', () => {
+    'failure channel', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: StorageReporter = createStorageReporter(logger);
 
@@ -2296,7 +2235,7 @@ describe('createStorageReporter', () => {
   });
 
   it('emits exactly one error-level record per failed probe across both ' +
-    'channels (F11)', () => {
+    'channels', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: StorageReporter = createStorageReporter(logger);
     const refused: StorageProbeResult = {
@@ -2339,8 +2278,6 @@ describe('createStorageReporter', () => {
     expect(record.level).toBe('error');
     expect(record.subsystem).toBe('storage');
     expect(record.correlationId).toBe(SUITE_CORRELATION_ID);
-    // The bounded description travels as fields, so a consumer that
-    // publishes rather than diagnoses has a scrubbed string (F12).
     expect(record.fields).toEqual({
       operation: 'write',
       key: RUN_STATE_KEY,
@@ -2350,9 +2287,6 @@ describe('createStorageReporter', () => {
       errorName: QUOTA_ERROR_INFO.name,
     });
 
-    // The ORIGINAL throwable reaches `LogRecord.error`, not the reduction of
-    // it: the reduction has no stack, so serialising it would have discarded
-    // one (F5).
     expect(record.error).toBeDefined();
     expect(record.error?.name).toBe('QuotaExceededError');
     expect(record.error).toEqual(serializeError(QUOTA_THROWN));
@@ -2361,7 +2295,7 @@ describe('createStorageReporter', () => {
   });
 
   it('carries the original throwable\'s cause chain through to the record ' +
-    '(F5)', () => {
+    '', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: StorageReporter = createStorageReporter(logger);
 
@@ -2376,7 +2310,7 @@ describe('createStorageReporter', () => {
   });
 
   it('carries a non-Error throwable\'s structure through to the record ' +
-    '(F5)', () => {
+    '', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: StorageReporter = createStorageReporter(logger);
     const thrown = { code: 'not-an-error' };
@@ -2393,7 +2327,7 @@ describe('createStorageReporter', () => {
   });
 
   it('falls back to the bounded description for a failure nothing was ' +
-    'thrown for (F5)', () => {
+    'thrown for', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: StorageReporter = createStorageReporter(logger);
 
@@ -2442,9 +2376,6 @@ describe('createStorageReporter', () => {
     reporter.onWrite?.(completed);
     reporter.onWrite?.(refused);
 
-    // Both at `'debug'`: a write that did not complete has already reached
-    // `onFailure`, so raising this one would be the second record for one
-    // failure. `ok` is what tells the two apart (F11).
     expect(records[0].level).toBe('debug');
     expect(records[0].fields).toEqual({
       key: BEST_SCORE_KEY,
@@ -2461,7 +2392,7 @@ describe('createStorageReporter', () => {
   });
 
   it('emits exactly one error-level record per failed write across both ' +
-    'channels (F11)', () => {
+    'channels', () => {
     const { logger, records } = createCapturingLogger();
     const reporter: StorageReporter = createStorageReporter(logger);
 
@@ -2529,17 +2460,6 @@ describe('no-op reporters', () => {
     expect(records).toHaveLength(0);
   });
 });
-
-/* --------------------------------------------------------------------------
- * A hostile host
- *
- * The module reaches `performance`, `console` and a caller's field bag through
- * guarded reads, and each guard has a documented fallback: no clock reads as 0,
- * a console that cannot be written to is skipped, and a field whose accessor
- * throws is carried as the placeholder. Every host member below is replaced
- * through its property descriptor and put back from the saved descriptor, so a
- * replacement cannot leak into a later case.
- * ----------------------------------------------------------------------- */
 
 describe('Logger under a hostile host', () => {
   /** Descriptors saved before a replacement, newest first. */
@@ -2846,19 +2766,12 @@ describe('Logger under a hostile host', () => {
   });
 });
 
-/* --------------------------------------------------------------------------
- * Isolation
- * ----------------------------------------------------------------------- */
-
 describe('suite isolation', () => {
   it('leaves the clock this suite spied on at the platform built-in', () => {
     expect(Date.now.toString()).toContain('native code');
   });
 
   // Self-contained: this case installs the spies whose restoration it asserts.
-  // Reading the two references without having replaced either would pass
-  // whether or not restoration works, because it would only be describing the
-  // state the file started in.
   it('restores a global this case spied on itself', () => {
     const randomSpy = vi
       .spyOn(Math, 'random')
@@ -2883,23 +2796,6 @@ describe('suite isolation', () => {
     expect(Date.now).toBe(PRISTINE_DATE_NOW);
   });
 });
-
-/* --------------------------------------------------------------------------
- * One canonical correlation identifier across every adapter
- *
- * This function is the authority src/main.ts calls, and every consumer takes
- * the value by injection: src/run/ receives it, and the engine's hook bus
- * carries the value it is constructed with into every report and every
- * dispatch context. This block drives all three and asserts they agree on one
- * string.
- *
- * src/run/run-state.ts declares `runCorrelationId()` as well, because its own
- * contract requires the run layer to be able to re-derive the identifier from
- * the two members it persists without reaching an observability module. The two
- * are separate implementations of one algorithm, so they are asserted equal
- * here and in tests/unit/run/run-state.test.ts rather than being allowed to
- * drift.
- * ----------------------------------------------------------------------- */
 
 describe('the canonical correlation identifier', () => {
   it('is the value every adapter carries', () => {
@@ -3009,8 +2905,6 @@ describe('the canonical correlation identifier', () => {
   });
 });
 
-/* ===== Hot-path cost of a filtered level ===== */
-
 describe('a filtered level costs nothing to report at', () => {
   it('records no counter once the level rises above debug', () => {
     const { logger, records } = createCapturingLogger({ level: 'info' });
@@ -3026,8 +2920,7 @@ describe('a filtered level costs nothing to report at', () => {
     const reporter: InputReporter = createInputReporter(logger);
 
     // Records alone cannot prove this: the logger filters at the sink too, so
-    // the count is absent either way. What the filter changes is whether the
-    // clone runs at all, and enumerating the fields is how the clone starts.
+    // the count is absent either way.
     let enumerated = 0;
 
     const watched = new Proxy(
@@ -3060,8 +2953,8 @@ describe('a filtered level costs nothing to report at', () => {
     const first = reporter.startSpan?.('input.dispatch');
     const second = reporter.startSpan?.('input.parse');
 
-    // Identity is the observable proof that no per-span object is allocated:
-    // a fresh object per call could not be the same reference.
+    // Identity is the observable proof that no per-span object is allocated: a
+    // fresh object per call could not be the same reference.
     expect(first).toBeDefined();
     expect(first).toBe(second);
 
@@ -3131,8 +3024,6 @@ describe('a filtered level costs nothing to report at', () => {
   it('reads one finite elapsed time per record, however many', () => {
     const { logger, records } = createCapturingLogger();
 
-    // The clock reader is resolved once and held, so a run of records shares
-    // one binding rather than allocating a closure each.
     for (let index = 0; index < 12; index += 1) {
       logger.debug('emitted');
     }
@@ -3184,13 +3075,7 @@ describe('a filtered level costs nothing to report at', () => {
   });
 });
 
-/* ===== End-to-end reporter deduplication (F11) ===== */
-
-// The two sections above measure the adapter with hand-built reports. This one
-// drives the real `LocalStorageManager` through the real adapter into a real
-// logger, because the duplication F11 named was only visible once all three
-// were connected: the manager delivers a failed write on two channels, and an
-// adapter that raised both produced two error-level records for one failure.
+// The two sections above measure the adapter with hand-built reports.
 
 /** A store whose `setItem` always reports an exhausted quota. */
 class FullStore implements StorageLike {
@@ -3216,7 +3101,7 @@ class FullStore implements StorageLike {
   }
 }
 
-describe('LocalStorageManager through createStorageReporter (F11)', () => {
+describe('LocalStorageManager through createStorageReporter', () => {
   it('emits exactly one error-level record for one failed write', () => {
     const { logger, records } = createCapturingLogger();
     const manager = new LocalStorageManager({
@@ -3264,8 +3149,8 @@ describe('LocalStorageManager through createStorageReporter (F11)', () => {
     expect(raised).toHaveLength(1);
     expect(raised[0].fields?.['errorName']).toBe('StorageKeyError');
 
-    // The refused key is a field of its own and is not in the message a
-    // record leads with, nor in the scrubbed public description (F12).
+    // The refused key is a field of its own and is not in the message a record
+    // leads with, nor in the scrubbed public description.
     expect(raised[0].fields?.['key']).toBe('theme');
     expect(raised[0].message).not.toContain('theme');
     expect(String(raised[0].fields?.['publicMessage'])).not.toContain('theme');
@@ -3289,8 +3174,6 @@ describe('LocalStorageManager through createStorageReporter (F11)', () => {
   });
 });
 
-/* ===== Hot-path cost of a filtered level ===== */
-
 describe('a filtered level costs nothing to report at', () => {
   it('records no counter once the level rises above debug', () => {
     const { logger, records } = createCapturingLogger({ level: 'info' });
@@ -3306,8 +3189,7 @@ describe('a filtered level costs nothing to report at', () => {
     const reporter: InputReporter = createInputReporter(logger);
 
     // Records alone cannot prove this: the logger filters at the sink too, so
-    // the count is absent either way. What the filter changes is whether the
-    // clone runs at all, and enumerating the fields is how the clone starts.
+    // the count is absent either way.
     let enumerated = 0;
 
     const watched = new Proxy(
@@ -3340,8 +3222,8 @@ describe('a filtered level costs nothing to report at', () => {
     const first = reporter.startSpan?.('input.dispatch');
     const second = reporter.startSpan?.('input.parse');
 
-    // Identity is the observable proof that no per-span object is allocated:
-    // a fresh object per call could not be the same reference.
+    // Identity is the observable proof that no per-span object is allocated: a
+    // fresh object per call could not be the same reference.
     expect(first).toBeDefined();
     expect(first).toBe(second);
 
@@ -3411,8 +3293,6 @@ describe('a filtered level costs nothing to report at', () => {
   it('reads one finite elapsed time per record, however many', () => {
     const { logger, records } = createCapturingLogger();
 
-    // The clock reader is resolved once and held, so a run of records shares
-    // one binding rather than allocating a closure each.
     for (let index = 0; index < 12; index += 1) {
       logger.debug('emitted');
     }

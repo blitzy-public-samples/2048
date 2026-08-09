@@ -1,25 +1,7 @@
 // Contract suite for input dispatch containment, dispatch determinism and
 // indexed-action remapping, AAP R9.
 //
-// Three properties are pinned here, none of them visible to the type checker:
-//
-//   containment  every modality — keyboard, swipe and on-screen control —
-//                publishes through `InputManager.emit`, so one subscriber that
-//                throws must neither reach the publisher nor stop the
-//                subscribers after it. js/keyboard_input_manager.js L25-L32
-//                invoked each callback bare, which is the behaviour being
-//                replaced.
-//   determinism  `on()` pushes onto the array `emit` walks and the removal
-//                handle splices it, so a subscription taken or released from
-//                inside a callback would otherwise change the publication that
-//                is running: a removal shifts the index of a callback not yet
-//                invoked, and an addition is reached by the walk that is
-//                already under way.
-//   remapping    `selectReward` and `activateRelic` publish a zero-based index
-//                naming which offer or relic the press addresses. The index
-//                comes off the matched `InputBindingSlot`, never off the text
-//                of the key, so a remap onto keys carrying no ordinal at all
-//                still addresses the right target.
+// Three properties are pinned here, none of them visible to the type checker.
 
 import { describe, expect, it } from 'vitest';
 
@@ -79,8 +61,6 @@ const recordingReporter = (): {
   };
 };
 
-/* ===== 1. Per-subscriber containment (F-11) ===== */
-
 describe('emit contains each subscriber individually', () => {
   it('does not propagate a throwing subscriber to the publisher', () => {
     const manager = createInputManager({});
@@ -118,7 +98,6 @@ describe('emit contains each subscriber individually', () => {
       throw new Error('failed');
     });
     manager.on('move', () => {
-      // Reached because the throw above was contained.
     });
 
     expect(manager.emit('move', 1)).toBe(2);
@@ -178,15 +157,14 @@ describe('emit contains each subscriber individually', () => {
 
     // This sink implements no `failure` member, so the guarded wrapper of
     // src/input/keymap.ts applies its one documented reduction, which reports
-    // the name and the message as separate fields. The manager itself no
-    // longer flattens the caught value onto a field of its own (F4).
+    // the name and the message as separate fields.
     expect(logged[0]?.fields?.['errorName']).toBe('Error');
     expect(logged[0]?.fields?.['errorMessage']).toBe('boom');
     expect(logged[0]?.fields?.['error']).toBeUndefined();
   });
 
   it('hands a sink that implements failure the caught value unconverted ' +
-    '(F4)', () => {
+    '', () => {
     const failures: {
       level: string;
       message: string;
@@ -225,7 +203,7 @@ describe('emit contains each subscriber individually', () => {
   });
 
   it('hands a sink that implements failure a non-Error throwable whole ' +
-    '(F4)', () => {
+    '', () => {
     const caught: unknown[] = [];
     const thrown = { code: 'not-an-error', detail: { nested: true } };
     const manager = createInputManager({
@@ -300,8 +278,6 @@ describe('emit contains each subscriber individually', () => {
   });
 });
 
-/* ===== 2. Dispatch determinism (F-25) ===== */
-
 describe('emit dispatches to a snapshot of the membership', () => {
   it('does not invoke a subscriber registered during the publication', () => {
     const manager = createInputManager({});
@@ -347,8 +323,6 @@ describe('emit dispatches to a snapshot of the membership', () => {
 
     manager.emit('move', 0);
 
-    // Walking the live array would have spliced 'second' out and skipped
-    // 'third' with it.
     expect(seen).toEqual(['first', 'second', 'third']);
 
     seen.length = 0;
@@ -385,8 +359,6 @@ describe('emit dispatches to a snapshot of the membership', () => {
     expect(seen).toEqual([0, 1, 2, 3, 4]);
   });
 });
-
-/* ===== 3. Indexed actions carry an explicit payload index (F-24) ===== */
 
 describe('indexed actions resolve their payload from the binding', () => {
   it('declares one slot per reward offer', () => {
@@ -432,11 +404,6 @@ describe('indexed actions resolve their payload from the binding', () => {
   it('keeps the index after a remap onto keys carrying no digit', () => {
     // The defect: the index was read out of the digit text, so this remap
     // collapsed all three offers onto index 0.
-    //
-    // X, Y and Z rather than A, B and C: `keepPlaying` is bound to C in
-    // `'overlay'` and stands earlier in `INPUT_ACTIONS` than `selectReward`, so
-    // C resolves to that action and would make this a conflict test rather than
-    // an index test. The conflict itself is asserted separately below.
     const remapped = remapAction(DEFAULT_KEY_BINDINGS, 'selectReward', {
       keys: ['x', 'y', 'z'],
       codes: ['KeyX', 'KeyY', 'KeyZ'],
@@ -460,9 +427,7 @@ describe('indexed actions resolve their payload from the binding', () => {
 
   it('lets the earlier action win where a remap collides with it', () => {
     // `keepPlaying` is bound to C in `'overlay'` and stands earlier in
-    // `INPUT_ACTIONS`, so a remap of a later action onto C is shadowed. The
-    // resolution order is the contract; the settings surface is what refuses a
-    // colliding rebind, so the collision cannot be made from the UI.
+    // `INPUT_ACTIONS`, so a remap of a later action onto C is shadowed.
     const remapped = remapAction(DEFAULT_KEY_BINDINGS, 'selectReward', {
       keys: ['c'],
       codes: ['KeyC'],
@@ -674,15 +639,7 @@ describe('indexed actions resolve their payload from the binding', () => {
   });
 });
 
-/* ==========================================================================
- * The single rebind api
- * ========================================================================== */
-
-// One api validates, applies, persists and announces a rebind. Before it, the
-// settings dialog computed the table and checked the conflict itself and then
-// wrote the result in through `setKeymap`, so the validation lived outside the
-// owner of the table and two call sites had to agree for a rebind to take
-// effect (N2). These are the four properties that make one call sufficient.
+// One api validates, applies, persists and announces a rebind.
 
 describe('remap is the one api a rebind goes through', () => {
   it('validates, applies, persists and announces exactly once', () => {
@@ -783,11 +740,8 @@ describe('remap is the one api a rebind goes through', () => {
 
     manager.detach();
 
-    // A FREE KEY ON AN OCCUPIED CODE, which is the collision `binding.keys`
-    // alone cannot see: `KeyR` is the code `restart` holds, and both actions are
-    // active in `'game'`. On an alternate layout the character that key produces
-    // is not `r`, so validating the logical dimension alone accepted the rebind
-    // and shadowed `restart` by physical key.
+    // A free key on an occupied code, which is the collision `binding.keys`
+    // alone cannot see.
     expect(DEFAULT_KEY_BINDINGS.restart.codes).toContain('KeyR');
 
     const result = manager.remap('moveUp', {
@@ -835,9 +789,6 @@ describe('remap is the one api a rebind goes through', () => {
 
     manager.detach();
 
-    // `selectReward` holds `Digit1` in `'overlay'` alone, so the code is free
-    // where a `'game'` action would read it. The code dimension is validated in
-    // exactly the contexts the key dimension is.
     const result = manager.remap('moveUp', {
       keys: ['\u00e0'],
       codes: ['Digit1'],
@@ -855,8 +806,6 @@ describe('remap is the one api a rebind goes through', () => {
 
     manager.detach();
 
-    // `selectReward` binds 1, 2 and 3 in `'overlay'` alone, and `moveUp` is a
-    // `'game'` action, so the digit is free where it would be read.
     expect(DEFAULT_KEY_BINDINGS.selectReward.contexts).toEqual(['overlay']);
     expect(DEFAULT_KEY_BINDINGS.moveUp.contexts).toContain('game');
 
@@ -874,10 +823,7 @@ describe('remap is the one api a rebind goes through', () => {
 
     manager.detach();
 
-    // `restart` holds key `r` AND code `KeyR` in `'game'`. A capture on a layout
-    // where that physical key produces something else reports a free `key` and
-    // the same `code`, so validating `keys` alone accepted a binding that fires
-    // two actions from one keystroke.
+    // `restart` holds key `r` AND code `KeyR` in `'game'`.
     const result = manager.remap('moveUp', {
       keys: ['é'],
       codes: ['KeyR'],
@@ -895,10 +841,7 @@ describe('remap is the one api a rebind goes through', () => {
 
     manager.detach();
 
-    // `selectReward` holds 1, 2 and 3 in `'overlay'` alone. Requesting `1` for a
-    // `'game'` action while ALSO moving that action into `'overlay'` collides,
-    // and validating against the action's declared contexts could not see it:
-    // `mergeBinding` replaces the contexts with the ones the override names.
+    // `selectReward` holds 1, 2 and 3 in `'overlay'` alone.
     const result = manager.remap('moveUp', {
       keys: ['1'],
       codes: ['Digit1'],
@@ -921,9 +864,8 @@ describe('remap is the one api a rebind goes through', () => {
 
     manager.detach();
 
-    // NO KEY IS REQUESTED AT ALL: the override moves the action into `'overlay'`,
-    // where the keys it already holds are `selectReward`'s. `mergeBinding` keeps
-    // those keys, so the merged binding is the colliding one.
+    // No key is requested at all: the override moves the action into
+    // `'overlay'`, where the keys it already holds are `selectReward`'s.
     const result = manager.remap('moveUp', { contexts: ['game', 'overlay'] });
 
     expect(result.applied).toBe(false);
@@ -938,8 +880,7 @@ describe('remap is the one api a rebind goes through', () => {
 
     manager.detach();
 
-    // The complete validation must still accept a legitimate rebind: `q` and
-    // `KeyQ` are held by nothing in `'game'`.
+    // The complete validation must still accept a legitimate rebind.
     const result = manager.remap('moveUp', { keys: ['q'], codes: ['KeyQ'] });
 
     expect(result.applied).toBe(true);
@@ -1011,9 +952,6 @@ describe('remap is the one api a rebind goes through', () => {
   });
 
   it('round-trips a persisted table through the serialisation guard', () => {
-    // The durable half: what `persistKeymap` is handed is what a later session
-    // reads back, and an unreadable payload answers with the defaults rather
-    // than throwing, which is what makes the load safe to do at construction.
     let stored: unknown = null;
     const first = createInputManager({
       keymap: DEFAULT_KEY_BINDINGS,

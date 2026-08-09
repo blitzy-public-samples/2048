@@ -1,11 +1,4 @@
 // The engine-to-announcer translation, and the single-region guarantee.
-//
-// The defect this covers was not a broken translation — it was the total
-// absence of one. `createLiveRegionAnnouncer` shipped complete and tested and
-// was never constructed, so `#live-region` stayed empty for the whole life of a
-// run: a screen-reader user was told nothing about a move, a merge, a spawn or a
-// verdict. These cases therefore assert that announcements REACH THE REGION,
-// not merely that a function was called.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -58,12 +51,6 @@ const setup = (): Harness => {
     throw new Error('the fixture lost the region');
   }
 
-  // The announcer writes in two phases — clear the region, then write on a
-  // LATER task, which is what makes assistive technology re-announce a line
-  // identical to the one before it. The default scheduler is a zero-delay
-  // `setTimeout`, so a synchronous read would see an empty region and prove
-  // nothing. Draining the queued tasks by hand makes each read deterministic
-  // without a fake clock.
   const queued: (() => void)[] = [];
   const built = createLiveRegionAnnouncer({
     root: document,
@@ -110,11 +97,6 @@ const setup = (): Harness => {
       built.flush();
       drain();
 
-      // BOTH regions, because a verdict is assertive and a polite
-      // `role="status"` region does not interrupt — so the announcer creates an
-      // `aria-live="assertive"` sibling on first assertive use and writes
-      // verdicts there. Reading only the polite region would miss every verdict,
-      // which is what the user is most owed.
       return Array.from(document.querySelectorAll('[aria-live]'))
         .map((live) => live.textContent ?? '')
         .join(' ')
@@ -154,10 +136,6 @@ const moveAfter = (moved: boolean, score: number): MoveAfterEvent => ({
   terminated: false,
 });
 
-/* ==========================================================================
- * A move reaches the region
- * ========================================================================== */
-
 describe('a move reaches the region', () => {
   it('announces the direction the engine resolved, with the score', () => {
     const harness = setup();
@@ -181,8 +159,7 @@ describe('a move reaches the region', () => {
     const harness = setup();
 
     // A hook may redirect a move, and `move:before` carries the direction the
-    // engine will actually resolve in. Announcing the request would tell the
-    // player something that did not happen.
+    // engine will actually resolve in.
     harness.events.emit('move:before', {
       direction: 1,
       board: new Grid(4),
@@ -221,10 +198,6 @@ describe('a move reaches the region', () => {
     expect(harness.read()).toBe('');
   });
 });
-
-/* ==========================================================================
- * Merges and spawns
- * ========================================================================== */
 
 describe('merges and spawns reach the region', () => {
   it('announces a merge with the value it produced', () => {
@@ -268,7 +241,7 @@ describe('merges and spawns reach the region', () => {
     const text = harness.read();
 
     // `tile:merge` is emitted once per merge, so a listener counting emissions
-    // counts merges. Both must survive into the line.
+    // counts merges.
     expect(text).toContain('2');
     expect(text).toContain('24');
   });
@@ -301,10 +274,6 @@ describe('merges and spawns reach the region', () => {
   });
 });
 
-/* ==========================================================================
- * Verdicts
- * ========================================================================== */
-
 describe('a verdict reaches the region', () => {
   it('announces a win once, not on every later commit', () => {
     const harness = setup();
@@ -319,8 +288,7 @@ describe('a verdict reaches the region', () => {
 
     const after = harness.read();
 
-    // Every commit carries the terminal flags. Without transition tracking the
-    // verdict would be repeated after every subsequent move.
+    // Every commit carries the terminal flags.
     harness.events.emit('state:commit', commit(2048, {
       won: true,
       terminated: true,
@@ -366,10 +334,6 @@ describe('a verdict reaches the region', () => {
   });
 });
 
-/* ==========================================================================
- * The unconfirmed terminal or stage status
- * ========================================================================== */
-
 describe('an unestablished status reaches the region', () => {
   it('announces the transition into it, and not again', () => {
     const harness = setup();
@@ -385,7 +349,7 @@ describe('an unestablished status reaches the region', () => {
 
     const spoken = harness.read();
 
-    // THE FLAG IS SPOKEN. Before this the announcer read only the three
+    // The flag is spoken. Before this the announcer read only the three
     // ordinary terminal flags, so a commit whose status the engine could not
     // establish sounded exactly like one it could.
     expect(spoken).not.toBe(settled);
@@ -412,10 +376,6 @@ describe('an unestablished status reaches the region', () => {
   });
 });
 
-/* ==========================================================================
- * Lifecycle
- * ========================================================================== */
-
 describe('the translator lifecycle', () => {
   it('stops announcing once its subscription is released', () => {
     const harness = setup();
@@ -423,8 +383,6 @@ describe('the translator lifecycle', () => {
 
     release();
 
-    // The first subscription from `setup` is still live, so this proves the
-    // release is scoped to its own subscription rather than global.
     harness.events.emit('tile:spawn', {
       turn: 1,
       position: { x: 0, y: 0 },
