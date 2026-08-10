@@ -1163,6 +1163,17 @@ interface MetricFamily {
   readonly series: Map<string, MetricSeries>;
 }
 
+/**
+ * A validated label set and the characters retaining it would cost.
+ *
+ * The two travel together so the cost is computed once, during validation, and
+ * charged once, by the caller that actually creates the series.
+ */
+interface NormalisedLabels {
+  readonly labels: LabelSet;
+  readonly chars: number;
+}
+
 /** The in-page metrics registry. */
 export class MetricsRegistry {
   /**
@@ -1730,6 +1741,26 @@ export class MetricsRegistry {
   }
 
   /**
+   * Reports a reader this registry pulls from that raised, on the same
+   * rejection channel every refused call is reported on.
+   *
+   * The pull integrations — the hook-bus counts, the RNG cursors — read a
+   * function the composition root supplied, and a reader that throws is a
+   * refused call rather than a failure of the registry. Public so
+   * `attachRngCursorMetrics` can report through the one channel instead of
+   * swallowing the throw or reaching a logger of its own.
+   *
+   * @param message What could not be read.
+   * @param thrown The caught value. Only its type is carried, so no message
+   *   text a reader raised reaches the record.
+   */
+  reportReaderFault(message: string, thrown: unknown): void {
+    this.reportRejection(message, {
+      thrownType: typeof thrown,
+    });
+  }
+
+  /**
    * Folds the draw cursors of the named RNG substreams into the per-stream
    * draw counter.
    *
@@ -2236,11 +2267,13 @@ export class MetricsRegistry {
     kind: MetricKind,
     buckets: readonly number[] | undefined,
   ): MetricSeries {
-    const normalised = this.normaliseLabels(name, labels);
+    const resolved = this.normaliseLabels(name, labels);
 
-    if (normalised === null) {
+    if (resolved === null) {
       return this.detachedSeries(name, kind);
     }
+
+    const normalised = resolved.labels;
 
     const family = this.ensureFamily(name, kind, buckets);
 
@@ -2251,6 +2284,8 @@ export class MetricsRegistry {
     const key = buildSeriesKey(normalised);
     const existing = family.series.get(key);
 
+    // An existing series retains nothing new, so it is served without touching
+    // the budget: only the creation below charges.
     if (existing !== undefined) {
       return existing;
     }
@@ -2260,6 +2295,16 @@ export class MetricsRegistry {
         metric: family.name,
         reason: 'seriesLimitReached',
         limit: MAX_SERIES_PER_FAMILY,
+      });
+
+      return this.detachedSeries(family.name, family.kind);
+    }
+
+    if (!this.chargeMetadata(resolved.chars)) {
+      this.reportRejection('metric series rejected', {
+        metric: family.name,
+        reason: 'metadataBudgetReached',
+        limit: MAX_METADATA_CHARS,
       });
 
       return this.detachedSeries(family.name, family.kind);
@@ -2278,7 +2323,10 @@ export class MetricsRegistry {
     return series;
   }
 
-  private normaliseLabels(name: string, labels: LabelSet): LabelSet | null {
+  private normaliseLabels(
+    name: string,
+    labels: LabelSet,
+  ): NormalisedLabels | null {
     const metric = typeof name === 'string' ? name : '';
 
     if (typeof labels !== 'object' || labels === null) {
@@ -2366,17 +2414,15 @@ export class MetricsRegistry {
       normalised[labelName] = value;
     }
 
-    if (!this.chargeMetadata(chars)) {
-      this.reportRejection('metric labels rejected', {
-        metric,
-        reason: 'metadataBudgetReached',
-        limit: MAX_METADATA_CHARS,
-      });
-
-      return null;
-    }
-
-    return Object.freeze(normalised);
+    // The metadata budget is NOT charged here. Charging on every resolve
+    // charged a series that already existed, so the budget drained with call
+    // VOLUME rather than with label CARDINALITY: a bounded two-label set
+    // exhausted 262144 characters after roughly five thousand increments, after
+    // which every further observation was refused into a detached series and
+    // reported, so the counter stopped recording mid-session and the report
+    // repeated once per observation. `resolveSeries` charges instead, once, on
+    // the path that actually retains the labels. Decision DL-METRIC-07.
+    return Object.freeze({ labels: Object.freeze(normalised), chars });
   }
 
   /**
@@ -2713,4 +2759,80 @@ export function createMetricsRegistry(
   options: MetricsRegistryOptions = {},
 ): MetricsRegistry {
   return new MetricsRegistry(options);
+}
+
+/** Removes one subscription, as the engine's emitter returns it. */
+export type RngCursorSubscription = () => void;
+
+/**
+ * The one member of the engine's emitter this attachment uses.
+ *
+ * Declared here rather than imported from src/observability/tracer.ts, which
+ * declares the same shape: that module imports this one, so importing it back
+ * would close a cycle. Narrowed to `on`, so the observer can neither emit an
+ * event nor remove another subscriber's listener.
+ */
+export interface RngCursorEventSource {
+  on(
+    event: 'state:commit',
+    listener: (payload: unknown) => void,
+  ): RngCursorSubscription;
+}
+
+/** Reads the draw cursor of each named substream. */
+export type RngCursorReader = () => Readonly<Record<string, number>>;
+
+/**
+ * Folds the RNG substream cursors into `rng_draws_total` on every committed
+ * state.
+ *
+ * THE ONE ATTACHMENT, shared by the composition root and by the seeded
+ * snapshot suite, which is what makes the suite's non-interference evidence
+ * evidence about the graph production actually runs: the suite subscribed an
+ * observer of its own and the root subscribed none, so the cursor family was
+ * absent from every production snapshot and the property under test — that
+ * READING a substream does not advance it — was proven for a subscription
+ * nothing shipped.
+ *
+ * NON-CONSUMING. `snapshotCursors()` of src/rng/rng-streams.ts reports draw
+ * counts and takes no draw, and this attachment neither draws nor writes: the
+ * cursor map it hands the registry is the same map the run envelope persists.
+ * A reader that throws is contained and reported through the registry's own
+ * rejection channel, so a fault here cannot reach the emitter's loop.
+ *
+ * @param events The emitter, whose `on` is the only member used.
+ * @param metrics Registry the cursors are folded into.
+ * @param cursors Reader of the substream draw counts.
+ * @returns A handle that removes the subscription. Calling it more than once
+ *   removes nothing further and throws nothing.
+ */
+export function attachRngCursorMetrics(
+  events: RngCursorEventSource,
+  metrics: MetricsRegistry,
+  cursors: RngCursorReader,
+): RngCursorSubscription {
+  const stop = events.on('state:commit', (): void => {
+    let read: Readonly<Record<string, number>>;
+
+    try {
+      read = cursors();
+    } catch (thrown) {
+      metrics.reportReaderFault('rng cursor reader raised', thrown);
+
+      return;
+    }
+
+    metrics.recordRngCursors(read);
+  });
+
+  let removed = false;
+
+  return (): void => {
+    if (removed) {
+      return;
+    }
+
+    removed = true;
+    stop();
+  };
 }

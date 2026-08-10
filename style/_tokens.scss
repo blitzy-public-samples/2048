@@ -1,5 +1,18 @@
 // Design tokens. This file declares variables only and emits no CSS.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece. TOKEN is one area
+// across both halves of the mirror, so these ordinals do not collide with the
+// ones src/theme/tokens.ts carries:
+//   TR-TOKEN-09  style/main.scss L4-L22  the fourteen-variable token block,
+//                                        moved here unchanged in name, value
+//                                        and order
+//   TR-TOKEN-10  target-only row         `_resolve-token()`, `$projection` and
+//                                        the `@error` that holds the two sides
+//                                        together
+//   TR-TOKEN-11  target-only row         the new token families: the z-index
+//                                        ladder extension, the depth scale and
+//                                        the mobile restatements
+//
 // Decisions: DL-TOKEN-05, DL-TOKEN-06 (docs/DECISION_LOG.md).
 
 @use "sass:color";
@@ -57,7 +70,23 @@ $_token-fallbacks: (
 
 // Serialises a colour the way a `background` or `color` declaration serialises
 // it, so a colour published into a custom property carries the same channels
-// as one declared directly.
+// as one declared directly: Dart Sass writes a declared colour as hex with
+// each channel floored, while a colour interpolated into a custom property
+// keeps its fractional channels and is written as percentages instead.
+// src/theme/tile-ramp.ts floors, and that is the parity the compiled ramp is
+// verified against, so each channel is floored here before `rgb()` rebuilds it.
+//
+// THE ONE DECLARATION. A second, identical one once stood at the end of this
+// file and silently superseded this one — Sass takes the last, so the two
+// could drift with nothing reporting it. One declaration per stylesheet is now
+// pinned by tests/unit/quality/formatting.test.ts.
+//
+// Provenance: moved here from style/helpers.scss, whose change boundary is the
+// Dart Sass migration of the vanilla helpers alone. Decision DL-TOKEN-01,
+// traceability row TR-TOKEN-01 (target-only).
+//
+// @param {Color} $color - the colour to serialise.
+// @return {Color} the same colour with each RGB channel floored to an integer.
 @function quantised($color) {
   @return rgb(
     math.floor(color.channel($color, "red", $space: rgb)),
@@ -83,6 +112,19 @@ $tile-gold-glow-color: color.adjust($tile-gold-color, $lightness: 15%) !default;
 
 $game-container-margin-top: _resolve-token(game-container-margin-top) !default;
 $game-container-background: _resolve-token(game-container-background) !default;
+
+// The two accessible component surfaces of this feature's own screens, derived
+// from the frozen board colour above. `derivedColors.controlSurfaceBackground`
+// and `derivedColors.readoutSurfaceBackground` of src/theme/tokens.ts are the
+// quantised forms of these two, pinned equal to the compiled output by
+// tests/unit/quality/stylesheet-contract.test.ts. The retained buttons and
+// score boxes take neither: they keep the -20% surface and the board colour
+// itself.
+// Decision DL-THEME-08.
+$control-surface: color.adjust($game-container-background, $lightness: -26%)
+  !default;
+$readout-surface: color.adjust($game-container-background, $lightness: -30%)
+  !default;
 
 $transition-speed: _resolve-token(transition-speed) !default;
 

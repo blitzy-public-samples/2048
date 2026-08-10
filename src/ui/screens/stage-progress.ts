@@ -2,6 +2,66 @@
 // entered when a stage is resolved and left when the player continues into the
 // reward screen.
 //
+// module owns in docs/TRACEABILITY_MATRIX.md is therefore a target-only row,
+// declared as having no source construct so the reverse direction of that
+// matrix carries no gap.
+//
+// WHAT IT RENDERS, AND WHERE EACH VALUE COMES FROM
+//   the stage that ended, whether it cleared, and the score at stage end —
+//     the three members of the `stage:end` payload, typed here as
+//     `StageEndEvent` of ../../engine/engine-events and delivered by the router
+//     on the `StageClearScreenContext` of ../screen-router;
+//   the goal in force — the `StageGoal` of ../../config/stage-config, carried
+//     on the same context, rendered by branching on its `kind` discriminant;
+//   the measured quantity and the goal fraction — the `achieved` and the
+//     `progress` members of that module's `StageGoalProgress`. The `stageClear`
+//     context carries neither, so both arrive through the injected ports of
+//     `StageProgressOptions`, whose shapes are the accessor triple of
+//     `RunController` in ../../run/run-controller.
+//
+// WHAT IT DOES NOT DO
+//   it never subscribes to an engine event: every payload arrives from the
+//     router, which is the sole subscriber that drives screens;
+//   it never evaluates or re-evaluates a stage goal for the verdict. The
+//     `cleared` flag rendered is the payload's own. `evaluateStageGoal` is
+//     called for one purpose only — formatting a measured quantity the
+//     payload does not carry — and its `progress` is used verbatim: never
+//     re-clamped, never re-scaled against the target;
+//   it never advances the run: `RunController.advanceStage()` owns the
+//     lifecycle and the router owns the transition. The continue control
+//     publishes the `continueStage` action and nothing more;
+//   it never writes the container's `hidden` attribute, its `role`, its
+//     `aria-modal` or its `aria-label`: index.html declares all four and the
+//     router owns the attribute.
+//
+// LAYERING AND MOTION, BOTH READ FROM ../../theme/tokens
+//   `STAGE_PROGRESS_LAYER` is `zIndex.screenOverlay`, the 300 rung of the
+//     ladder extension, and is at or below `zIndex.modal` so the z-index-500
+//     diagnostics overlay is never shadowed. No rule is emitted from here: the
+//     container's stacking slot is declared by style/_screens.scss.
+//   `STAGE_PROGRESS_CADENCE` is `motion.fadeIn`, the frozen overlay cadence of
+//     an 800 ms fade after a 1200 ms delay. This module starts no animation and
+//     schedules no timer, so there is nothing here to retime; the cadence is
+//     published so a gate can read the interval it has to clear.
+//   The one entrance behaviour that is sequenced is the scroll that follows
+//     focus placement, and it is gated on the effective reduced-motion value:
+//     the injected preference port first, then the value the router read at
+//     the moment of the transition. style/_a11y.scss collapses the container's
+//     fade for the same preference.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece:
+//   TR-STAGECLEAR-01  target-only row  `createStageProgressScreen()` and the
+//                                      five-member `Screen` lifecycle over the
+//                                      `#screen-stage-progress` container
+//   TR-STAGECLEAR-02  target-only row  the three `stage:end` facts rendered:
+//                                      the stage index, the cleared flag and
+//                                      the score
+//   TR-STAGECLEAR-03  target-only row  the `StageGoal` kind branch and the
+//                                      `StageGoalProgress` readout
+//   TR-STAGECLEAR-04  target-only row  the hosted continue control, its
+//                                      delegated activation and its
+//                                      `data-focus-initial` marker
+//
 // Decisions: DL-STAGECLEAR-01, DL-STAGECLEAR-02, DL-STAGECLEAR-03,
 // DL-STAGECLEAR-04 (docs/DECISION_LOG.md).
 

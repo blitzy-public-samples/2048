@@ -5,6 +5,38 @@
 // and touches no storage key of its own — every persistence call goes through
 // the injected port.
 //
+// Ported from js/game_manager.js, which is deleted. Method for method,
+// each row a traceability row of docs/TRACEABILITY_MATRIX.md:
+//   TR-ENGINE-01  L1-L14    constructor        -> constructor
+//   TR-ENGINE-02  L17-L21   restart()          -> restart()
+//   TR-ENGINE-03  L24-L27   keepPlaying()      -> continuePlaying()
+//   TR-ENGINE-04  L30-L32   isGameTerminated() -> isGameTerminated()
+//   TR-ENGINE-05  L35-L59   setup()            -> setup()
+//   TR-ENGINE-06  L62-L66   addStartTiles()    -> addStartTiles()
+//   TR-ENGINE-07  L69-L76   addRandomTile()    -> addRandomTile()
+//   TR-ENGINE-08  L79-L99   actuate()          -> commit()
+//   TR-ENGINE-09  L102-L110 serialize()        -> serialize()
+//   TR-ENGINE-10  L130-L191 move()             -> move()
+// The tile preparation, tile relocation, vector, traversal,
+// farthest-position and comparison helpers and the merge branch — L113-L127,
+// L146-L180, L194-L236 and L270-L272 — moved to src/engine/move-resolver.ts,
+// whose `resolveMove` this file's `move()` calls, and the terminal-state
+// checks to src/engine/terminal-state.ts.
+//
+// The members below have no vanilla counterpart and are target-only rows of
+// the same matrix; each carries the phrase "no vanilla source" at its
+// declaration:
+//   TR-ENGINE-11  endStage()
+//   TR-ENGINE-12  stageProgress()
+//   TR-ENGINE-13  goalInForce()
+//   TR-ENGINE-14  resolveMetStageGoal()
+//   TR-ENGINE-15  resolveStage()
+//   TR-ENGINE-16  hookEnvironment()
+//   TR-ENGINE-17  throughPort()
+//   TR-ENGINE-18  deriveTerminalState()
+//   TR-ENGINE-19  settleEffectOnlyTurn()
+//   TR-ENGINE-20  publishRaisedDegradation()
+//
 // Decisions: DL-ENGINE-01, DL-ENGINE-02, DL-ENGINE-03, DL-ENGINE-04,
 // DL-ENGINE-05, DL-ENGINE-06, DL-ENGINE-07, DL-ENGINE-08, DL-ENGINE-09,
 // DL-ENGINE-10 (docs/DECISION_LOG.md).

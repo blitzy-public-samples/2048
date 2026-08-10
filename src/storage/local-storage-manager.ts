@@ -1,6 +1,20 @@
 /**
  * Web Storage persistence adapter.
  *
+ * Ported from js/local_storage_manager.js, which is deleted. One traceability
+ * row of docs/TRACEABILITY_MATRIX.md apiece, every row of this module's area
+ * enumerated:
+ *   TR-STORE-01  L22-L23  the two unprefixed key literals
+ *   TR-STORE-02  L25-L26  the construction-time strategy selection
+ *   TR-STORE-03  L29-L40  the writability probe
+ *   TR-STORE-04  L43-L45  getBestScore(), the frozen `string | 0` contract
+ *   TR-STORE-05  L47-L49  setBestScore()
+ *   TR-STORE-06  L52-L55  getGameState(), whose unguarded `JSON.parse` is now
+ *                         guarded
+ *   TR-STORE-07  L57-L59  setGameState()
+ *   TR-STORE-08  L61-L63  clearGameState()
+ * TR-STORE-09 is the in-memory double, in ./memory-storage.
+ *
  * Decisions: DL-STORE-01, DL-STORE-02, DL-STORE-03, DL-STORE-04
  * (docs/DECISION_LOG.md).
  */

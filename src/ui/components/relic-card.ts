@@ -205,6 +205,13 @@ export const relicCardAttributes = Object.freeze({
 
   /** Remaining charges, where `"0"` is the exhausted state. */
   charges: 'data-charges',
+
+  /**
+   * `"true"` on a tray row whose relic the hook bus has marked DEGRADED: one of
+   * its handlers threw and the bus skips it for the rest of its registration,
+   * so it is held but no longer firing. style/_hud.scss draws it.
+   */
+  degraded: 'data-degraded',
 });
 
 /** Selector the reward grid's host is resolved at. index.html L99. */
@@ -281,6 +288,12 @@ export interface RelicCardCopy {
   /** Text a relic whose budget is spent carries beside its count. */
   readonly exhausted: string;
 
+  /**
+   * Text a relic the hook bus has marked degraded carries, in the tray. Read by
+   * a screen reader from the row's own text, so the state is not announced-only.
+   */
+  readonly degraded: string;
+
   /** Names the badge row for a reader that cannot see it is a row. */
   readonly hooksLabel: string;
 
@@ -316,6 +329,7 @@ export const defaultRelicCardCopy: RelicCardCopy = Object.freeze({
     `${charges} ${charges === 1 ? 'charge' : 'charges'}`,
   chargesRemaining: (charges: number): string => `${charges} left`,
   exhausted: 'Exhausted',
+  degraded: 'Not firing',
   hooksLabel: 'Fires on',
   separator: ', ',
   slot: (slot: number): string => `Slot ${slot}`,
@@ -599,6 +613,18 @@ export interface RelicTrayItemOptions extends RelicCardSharedOptions {
    * recomputed here.
    */
   readonly relic: ActiveRelic;
+
+  /**
+   * Whether the hook bus has marked this relic DEGRADED: one of its handlers
+   * threw, so the bus skips it for the rest of its registration and the relic
+   * is held but no longer firing. `RelicRegistry.degradedIds()` is the reader
+   * this comes from.
+   *
+   * A degraded row carries `data-degraded="true"` for the stylesheet and a
+   * hidden text run for a screen reader, so the state is not visual-only and
+   * not announced-only.
+   */
+  readonly degraded?: boolean;
 }
 
 /** One rendered tray row. */
@@ -616,8 +642,10 @@ export interface RelicTrayItem {
    * Re-renders the row.
    *
    * @param activeRelic Held relic to show, used as given.
+   * @param degraded Whether the bus has marked the relic degraded. Omitted,
+   *   the state the row already carries stands.
    */
-  update(activeRelic: ActiveRelic): void;
+  update(activeRelic: ActiveRelic, degraded?: boolean): void;
 
   /**
    * The tier's accent under the palette in force.
@@ -2047,8 +2075,10 @@ export function createRelicTrayItem(
 ): RelicTrayItem {
   const reporter = createSafeUiReporter(options.reporter ?? NOOP_UI_REPORTER);
   const slot = readSlot(options.relic);
+  const copy = resolveCopy(options.copy);
 
   let held: ActiveRelic = options.relic;
+  let degraded = options.degraded === true;
   let destroyed = false;
 
   const card = createRelicCard({
@@ -2067,6 +2097,39 @@ export function createRelicTrayItem(
     copy: options.copy,
   });
 
+  /**
+   * Applies the degraded state to the row.
+   *
+   * Run after construction and after every `card.update`, because that call
+   * replaces the row's children and would otherwise drop the hidden run.
+   */
+  const applyDegraded = (): void => {
+    const element = card.element;
+
+    if (element === null) {
+      return;
+    }
+
+    if (!degraded) {
+      element.removeAttribute(relicCardAttributes.degraded);
+
+      return;
+    }
+
+    element.setAttribute(relicCardAttributes.degraded, 'true');
+
+    const owner = element.ownerDocument;
+
+    if (owner === null) {
+      return;
+    }
+
+    element.append(createHiddenText(owner, copy.separator));
+    element.append(createHiddenText(owner, copy.degraded));
+  };
+
+  applyDegraded();
+
   reporter.count(TRAY_RENDERED_METRIC, {
     context: REPORT_CONTEXT,
     mount: TRAY_MOUNT,
@@ -2078,7 +2141,7 @@ export function createRelicTrayItem(
 
     relic: (): ActiveRelic => held,
 
-    update: (next: ActiveRelic): void => {
+    update: (next: ActiveRelic, nextDegraded?: boolean): void => {
       if (destroyed) {
         reporter.count(AFTER_DESTROY_METRIC, {
           context: REPORT_CONTEXT,
@@ -2092,7 +2155,9 @@ export function createRelicTrayItem(
       const nextSlot = readSlot(next);
 
       held = next;
+      degraded = nextDegraded ?? degraded;
       card.update(readDefinition(next), readHeldCharges(next), nextSlot);
+      applyDegraded();
       reporter.count(TRAY_RENDERED_METRIC, {
         context: REPORT_CONTEXT,
         mount: TRAY_MOUNT,

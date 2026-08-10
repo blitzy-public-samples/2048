@@ -3,7 +3,7 @@
 // tests/unit/relics/** pins each relic, the registry and the sampler in
 // isolation. This suite pins only that the root joins them to the engine.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { start } from '../../../src/main';
 import type { Application } from '../../../src/main';
@@ -285,13 +285,24 @@ describe('the reward offer', () => {
     }
   });
 
-  it('announces the offer through the live region', async () => {
+  it('announces the offer as the reward state is ENTERED, and not before', async () => {
     const subject = clearOpeningStage();
+
+    await settleAnnouncements();
+
+    // Nothing yet: the cards were drawn on this commit and the state in force is
+    // still the board, so the offer is not spoken over a surface that cannot
+    // choose from it. DL-REWARD-14.
+    expect(announced()).not.toContain('choose a relic');
+
+    expect(subject.router.showReward(subject.rewards.offers())).toBe(true);
 
     await settleAnnouncements();
 
     const spoken = announced();
 
+    // Read on entry, from the reward screen's own `announcement(context)`, so
+    // the three cards are named at the moment they become operable.
     expect(spoken).toContain('choose a relic');
 
     for (const offer of subject.rewards.offers()) {
@@ -380,6 +391,46 @@ describe('taking an offered relic', () => {
     // The offer is untouched by a refusal: the player still has a choice to
     // make.
     expect(subject.rewards.offers()).toHaveLength(3);
+  });
+
+  it('holds the reward state when the ROUTER path is refused', () => {
+    const subject = clearOpeningStage();
+
+    // stageClear -> reward, which is the state the cards are pressed in. Driven
+    // through the router rather than through the stage-clear control, because
+    // this suite's markup carries the board and no screen containers.
+    expect(subject.router.showReward(subject.rewards.offers())).toBe(true);
+    expect(subject.router.current()).toBe('reward');
+
+    // The transaction's own refusal, injected at the storage boundary: the
+    // write that commits the pickup fails, the controller rolls the relic and
+    // the round back, and `selectReward` reports `'refused'`. Installed on
+    // `Storage.prototype`, because jsdom's storage object records an assignment
+    // to one of its own members as a stored ITEM.
+    const write = vi
+      .spyOn(Storage.prototype, 'setItem')
+      .mockImplementation((): void => {
+        throw new Error('quota exceeded');
+      });
+
+    const chosen = OPENING_OFFER[0] ?? '';
+    const accepted = subject.router.selectReward(chosen, 'card');
+
+    write.mockRestore();
+
+    // THE ROUTER MUST SEE THE REFUSAL. A dropped result reads as acceptance,
+    // so the `rewardSelected` edge was taken over a rolled-back transaction and
+    // the player was returned to a board holding none of the relic they chose.
+    expect(accepted).toBe(false);
+    expect(subject.router.current()).toBe('reward');
+    expect(subject.rewards.offers().map((offer): string => offer.id)).toEqual([
+      ...OPENING_OFFER,
+    ]);
+
+    // And the model rolled back with it: the relic is not held, so the run the
+    // player is returned to is the run they left. A bus row outlives its
+    // registration by design, so the registry is what is read here.
+    expect(subject.relics.ownedIds()).not.toContain(chosen);
   });
 
   it('is refused twice over, so one clear earns one relic', () => {

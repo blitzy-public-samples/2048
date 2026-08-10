@@ -50,6 +50,7 @@ import {
 } from '../../src/observability/logger';
 import {
   METRIC_PREFIX,
+  attachRngCursorMetrics,
   createMetricsRegistry,
   type MetricsRegistry,
   type SpawnDetail,
@@ -583,10 +584,21 @@ function createRealObservers(seed: string): RealObservers {
       // A READING observer, and the one that matters most here: the cursor
       // gauge family is fed from the same map the run envelope persists, so
       // this leg proves that reading the substreams does not advance them.
+      //
+      // THROUGH THE SHIPPING ATTACHMENT, not a listener written here.
+      // `attachRngCursorMetrics` is what src/main.ts installs, so the
+      // subscription graph this leg measures is the one production runs; a
+      // listener of this suite's own proved non-interference for a graph
+      // nothing shipped. `cursorsRead` counts the same commits by subscribing
+      // beside it.
+      stops.push(
+        attachRngCursorMetrics(engine.events, metrics, () =>
+          streams.snapshotCursors(),
+        ),
+      );
       stops.push(
         engine.events.on('state:commit', (): void => {
           cursorsRead += 1;
-          metrics.recordRngCursors(streams.snapshotCursors());
         }),
       );
     },
@@ -1190,32 +1202,23 @@ describe('AAP V2 — a run interrupted and resumed from storage', () => {
  * 6b. A REWARD ROUND carried across the reload — AAP V2
  * ==========================================================================
  *
- * Section 6 interrupts and resumes a run, and section 7 draws offer sets. Both
- * are true and neither is the guarantee: section 6 composes an `Engine` and
- * nothing else, so no reward is ever offered and only the two spawn substreams
- * move; section 7 draws from a generator that was never persisted. So the half
- * of validation gate V2 (0.8.2) that says a run replayed from the same seed
- * yields identical board state AND IDENTICAL RELIC DRAWS across a reload had no
- * case standing behind it: a resume that recovered the board and lost the reward
- * cursors, or recovered the cursors and lost the held relics, passed both.
+ * The leg composes what src/main.ts composes — a `RelicRegistry` over
+ * `RELIC_CATALOGUE`, a `RunController` over a `RunStateStore`, `drawRelicOffers`
+ * as the draw port and a real `Engine` over the shared hook bus — plays a fixed
+ * move list, takes a real relic from a real offer, throws the whole stack away,
+ * rebuilds it over the same storage and plays on. It is compared against the
+ * same run played straight through with no interruption.
  *
- * This section closes it by composing what src/main.ts composes — a
- * `RelicRegistry` over `RELIC_CATALOGUE`, a `RunController` over a
- * `RunStateStore`, `drawRelicOffers` as the draw port and a real `Engine` over
- * the shared hook bus — playing a fixed move list, TAKING A REAL RELIC from a
- * real offer, then throwing the whole stack away, rebuilding it over the same
- * storage, and playing on. What it compares against is the same run played
- * straight through, with no interruption at all.
+ * What it measures: board state, the relics held, the offer sets drawn and the
+ * persisted `rngCursor` are all identical across the two legs, which is the half
+ * of gate V2 (AAP 0.8.2) covering IDENTICAL RELIC DRAWS across a reload.
+ * Decisions DL-RUNCTL-02, DL-RUN-06, DL-TEST-08.
  */
 
 /**
- * Directions the reward-carrying leg plays.
- *
- * Long enough that three stages clear and a relic is taken at each — two before
- * the interruption and one after it — and SHORT ENOUGH THAT THE RUN IS STILL
- * LIVE at the end. A list that played on to a loss would have both legs comparing
- * a finished run whose controller had already opened a fresh one, which is a
- * weaker statement than the one this section makes.
+ * Directions the reward-carrying leg plays: 44 moves, over which three stages
+ * clear and a relic is taken at each — two before the interruption and one after
+ * it — with the run still LIVE at the end. DL-TEST-08.
  */
 const REWARD_MOVE_LIST: readonly Direction[] = Array.from(
   { length: 44 },
@@ -1574,6 +1577,227 @@ describe('AAP V2 — a REWARD ROUND survives the reload', () => {
   it('reproduces its recorded rounds, relics, board and cursors', () => {
     expect(renderRewardLeg(playAcrossReload().leg)).toMatchSnapshot(
       'a reward round carried across a reload',
+    );
+  });
+});
+
+/* ==========================================================================
+ * 6c. A STANDING OFFER carried across the reload — AAP V2, K2
+ * ==========================================================================
+ *
+ * Section 6b interrupts between rounds: every offer it draws is taken in the
+ * same move it is drawn, so no round is ever standing when the stack is thrown
+ * away. This section interrupts WITH ONE STANDING — after the draw and before
+ * the selection — which is the state a player reloading the reward screen is in.
+ *
+ * Contract 5's `rngCursor` is what the leg measures: the envelope written while
+ * a round stands must carry the counts the draw itself reached, or the resumed
+ * substreams are rebuilt behind their real position and the spent draws come
+ * out again. Decisions DL-RUNCTL-02, DL-RUNCTL-19.
+ * ========================================================================== */
+
+/** Takes the standing offer's first card and records the round. */
+function takeStandingOffer(
+  stack: ProductionStack,
+  rounds: RewardRound[],
+): readonly string[] {
+  const cards = stack.controller.currentOffer();
+  const chosen = cards[0];
+
+  if (chosen === undefined) {
+    throw new Error('a pending reward held no card');
+  }
+
+  const stageIndex = stack.controller.stageIndex();
+  const selection = stack.controller.selectReward(chosen.id, stack.engine);
+
+  expect(selection.outcome).toBe('accepted');
+
+  const offered = cards.map((card): string => card.id);
+
+  rounds.push({ stageIndex, offered, taken: chosen.id });
+
+  return offered;
+}
+
+/** Where a pause left the move list, and the offer left standing on it. */
+interface StandingOffer {
+  /** First move index not yet played. */
+  readonly next: number;
+  readonly offered: readonly string[];
+}
+
+/**
+ * Plays moves from `from` and stops on the first one that leaves an offer
+ * standing, WITHOUT taking it.
+ *
+ * @param stack Stack to play on.
+ * @param from First move index to play, inclusive.
+ * @param to Last move index to play, exclusive.
+ * @returns The pause, or `null` where no round stood and no move was left.
+ */
+function playToStandingOffer(
+  stack: ProductionStack,
+  from: number,
+  to: number,
+): StandingOffer | null {
+  for (let index = from; index < to; index += 1) {
+    const direction = REWARD_MOVE_LIST[index];
+
+    if (direction === undefined) {
+      return null;
+    }
+
+    stack.engine.move(direction);
+
+    if (stack.engine.serialize().over) {
+      return null;
+    }
+
+    if (stack.controller.isRewardPending()) {
+      return {
+        next: index + 1,
+        offered: stack.controller
+          .currentOffer()
+          .map((card): string => card.id),
+      };
+    }
+  }
+
+  return null;
+}
+
+/** The cursors the stored envelope carries, read through the store. */
+function readPersistedCursors(backing: MemoryStorage): RngCursorMap {
+  const loaded = new RunStateStore({
+    storage: new LocalStorageManager({ storage: backing }),
+    config: createDefaultRulesConfig(),
+  }).load();
+  const envelope = loaded.state;
+
+  if (envelope === null) {
+    throw new Error('the persisted run envelope was refused on load');
+  }
+
+  return envelope.rngCursor;
+}
+
+/** What the standing-offer interruption produced. */
+interface StandingInterruption {
+  readonly leg: RewardLeg;
+
+  /** Offer identifiers standing when the stack was thrown away. */
+  readonly interrupted: readonly string[];
+
+  /** The same offer as the rebuilt stack restored it. */
+  readonly restored: readonly string[];
+
+  /** Cursors the live generator had reached at the interruption. */
+  readonly live: RngCursorMap;
+
+  /** Cursors the envelope carried at the interruption. */
+  readonly persisted: RngCursorMap;
+
+  /** Rounds taken before the interruption. */
+  readonly before: number;
+}
+
+/**
+ * Plays the move list with the stack thrown away while a round stands, and the
+ * standing card taken by the rebuilt stack.
+ *
+ * One round is taken before the interruption and the rest after it, so the leg
+ * is a continuation rather than a replay.
+ */
+function playAcrossStandingReload(): StandingInterruption {
+  const backing = createBacking();
+  const first = composeProductionStack(RUN_SEED, backing);
+  const rounds: RewardRound[] = [];
+  const opened = playToStandingOffer(first, 0, REWARD_MOVE_LIST.length);
+
+  if (opened === null) {
+    throw new Error('no reward round stood before the interruption');
+  }
+
+  takeStandingOffer(first, rounds);
+
+  const paused = playToStandingOffer(
+    first,
+    opened.next,
+    REWARD_MOVE_LIST.length,
+  );
+
+  if (paused === null) {
+    throw new Error('no second reward round stood to be interrupted');
+  }
+
+  const live = first.streams().snapshotCursors();
+  const persisted = readPersistedCursors(backing);
+  const before = rounds.length;
+
+  first.stop();
+
+  const second = composeProductionStack(RUN_SEED, backing);
+  const restored = second.controller
+    .currentOffer()
+    .map((card): string => card.id);
+
+  takeStandingOffer(second, rounds);
+  playTakingRewards(second, paused.next, REWARD_MOVE_LIST.length, rounds);
+
+  return {
+    leg: closeLeg(second, rounds),
+    interrupted: paused.offered,
+    restored,
+    live,
+    persisted,
+    before,
+  };
+}
+
+describe('AAP V2 — a STANDING reward offer survives the reload', () => {
+  it('interrupts with a round standing, after one has been taken', () => {
+    const observed = playAcrossStandingReload();
+
+    expect(observed.before).toBeGreaterThan(0);
+    expect(observed.interrupted).toHaveLength(OFFERS_PER_SET);
+    expect(observed.leg.rounds.length).toBeGreaterThan(observed.before + 1);
+    expect(observed.leg.board.over).toBe(false);
+  });
+
+  it('persists the cursors the standing draw itself reached', () => {
+    const observed = playAcrossStandingReload();
+
+    expect(observed.persisted).toEqual(observed.live);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(observed.persisted[name]).toBe(observed.live[name]);
+    }
+
+    expect(observed.live['relic-draw']).toBeGreaterThan(0);
+    expect(observed.live['rarity-weight']).toBeGreaterThan(0);
+  });
+
+  it('restores the same three cards the interruption left standing', () => {
+    const observed = playAcrossStandingReload();
+
+    expect(observed.restored).toEqual(observed.interrupted);
+  });
+
+  it('reaches the board, relics, offers and cursors of one straight run', () => {
+    const observed = playAcrossStandingReload();
+    const straight = playStraightThrough();
+
+    expect(observed.leg.rounds).toEqual(straight.rounds);
+    expect(observed.leg.owned).toEqual(straight.owned);
+    expect(observed.leg.board).toEqual(straight.board);
+    expect(observed.leg.cursors).toEqual(straight.cursors);
+    expect(observed.leg.stageIndex).toBe(straight.stageIndex);
+  });
+
+  it('reproduces its recorded rounds, relics, board and cursors', () => {
+    expect(renderRewardLeg(playAcrossStandingReload().leg)).toMatchSnapshot(
+      'a standing reward offer carried across a reload',
     );
   });
 });

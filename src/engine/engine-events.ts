@@ -8,6 +8,16 @@
 // The seven event names are colon-namespaced; the six hook names are
 // camelCase. The two sets share no name.
 //
+// docs/TRACEABILITY_MATRIX.md apiece:
+//   TR-EVENT-01  stage:start   js/game_manager.js L35-L59   setup()
+//   TR-EVENT-02  move:before   js/game_manager.js L130-L143 move() entry
+//   TR-EVENT-03  tile:merge    js/game_manager.js L156-L170 merge branch
+//   TR-EVENT-04  tile:spawn    js/game_manager.js L69-L76   addRandomTile()
+//   TR-EVENT-05  move:after    js/game_manager.js L182-L190 post-move branch
+//   TR-EVENT-06  stage:end     no vanilla analogue, target-only row
+//   TR-EVENT-07  state:commit  js/game_manager.js L91-L97   actuate()
+//   TR-EVENT-08  the emitter   js/keyboard_input_manager.js L18-L32, `on`
+//
 // Decisions: DL-EVENT-01, DL-EVENT-02, DL-EVENT-03 (docs/DECISION_LOG.md).
 
 import type { Grid } from './grid';

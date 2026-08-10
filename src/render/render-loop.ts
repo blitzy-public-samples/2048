@@ -6,6 +6,31 @@
  * and `cancelAnimationFrame` are read through guards and are never assumed
  * present; nothing here writes to the global object.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-LOOP-01  js/html_actuator.js L11-L35   the outer
+ *                                             `requestAnimationFrame`, ported
+ *                                             as `createRenderLoop()` and its
+ *                                             scheduled frame
+ *   TR-LOOP-02  js/html_actuator.js L66-L69   the nested
+ *                                             `requestAnimationFrame`, ported
+ *                                             as the two-phase paint a
+ *                                             `FrameCallback` requests
+ *   TR-LOOP-03  js/animframe_polyfill.js      the shim's presence assumption,
+ *                                             replaced by
+ *                                             `isFrameSchedulingAvailable()`
+ *                                             and the guarded reads
+ *   TR-LOOP-04  target-only row               `FrameContext` and
+ *                                             `FrameSubscription`
+ *   TR-LOOP-05  target-only row               `onFrameBegin` and `onFrameEnd`,
+ *                                             the frame-callback seam a tracer
+ *                                             spans
+ *   TR-LOOP-06  target-only row               `FrameStats`,
+ *                                             `FrameDurationBucket` and
+ *                                             `getFrameStats()`
+ *   TR-LOOP-07  target-only row               `FrameScheduler`, the injected
+ *                                             scheduler and clock
+ *
  * Decisions: DL-LOOP-01, DL-LOOP-02, DL-LOOP-03, DL-LOOP-04
  * (docs/DECISION_LOG.md).
  */

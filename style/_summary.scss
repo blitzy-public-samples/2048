@@ -9,6 +9,17 @@
 // maps `.screen[hidden]` to `display: none`, so every rule here is written
 // `:not([hidden])` and no rule declares `display` on the two elements that are
 // themselves toggled by the attribute.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this file's area enumerated, all target-only because the retired stylesheet
+// carried no run summary:
+//   TR-SUMMARY-01  the panel surface and its two measures
+//   TR-SUMMARY-02  the score readouts and their caption-then-value order
+//   TR-SUMMARY-03  the relic list and its pickup-ordered rows
+//   TR-SUMMARY-04  the no-relic paragraph
+//   TR-SUMMARY-05  the seed group, its copy control and its confirmation
+//   TR-SUMMARY-06  the action row
+//   TR-SUMMARY-07  the narrow-layout restatement at the mobile threshold
 
 @use "sass:color";
 @use "sass:math";
@@ -79,8 +90,6 @@ $summary-fill: 100% !default;
 // publishes for the custom property it is paired with, so the fallback and the
 // published value agree.
 $summary-rule-color: color.adjust($text-color, $lightness: 40%) !default;
-$summary-control-surface:
-  color.adjust($game-container-background, $lightness: -20%) !default;
 $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
 
 // The treatment style/main.scss's `@mixin button` compiles, restated with
@@ -94,8 +103,8 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   padding-inline: $summary-control-inline-padding;
   border: none;
   border-radius: $tile-border-radius;
-  background: var(--theme-button-surface, $summary-control-surface);
-  color: var(--theme-button-label, $bright-text-color);
+  background: var(--theme-control-surface, $control-surface);
+  color: var(--theme-control-label, $bright-text-color);
   font-family: inherit;
   font-size: inherit;
   font-weight: bold;
@@ -220,8 +229,11 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   }
 }
 
-// BLITZY [A11Y]: under the default palette the readout numerals and caption
-// sit below the WCAG AA text thresholds.
+// The readout resolves the `--theme-readout-*` triple, not the retained
+// `--theme-score-*` one: the retained triple carries the frozen 1.74:1 caption
+// and 2.19:1 numeral of the score boxes, and this readout clears WCAG 2.1 AA in
+// the default palette at 4.79:1 and 6.01:1 with the same two foreground colours
+// on a darker surface. Decision DL-THEME-08.
 .run-summary-score {
   flex: 1 1 0;
   min-inline-size: 0;
@@ -234,8 +246,8 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   padding-block: $summary-gutter;
   padding-inline: $summary-readout-inline-padding;
   border-radius: $tile-border-radius;
-  background: var(--theme-score-surface, $game-container-background);
-  color: var(--theme-score-value, $bright-text-color);
+  background: var(--theme-readout-surface, $readout-surface);
+  color: var(--theme-readout-value, #ffffff);
   font-weight: bold;
   text-align: center;
 
@@ -248,7 +260,7 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   font-size: $summary-caption-size;
   line-height: $summary-caption-size;
   text-transform: uppercase;
-  color: var(--theme-score-label, $tile-color);
+  color: var(--theme-readout-label, $tile-color);
 }
 
 .run-summary-score-value {

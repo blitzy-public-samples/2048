@@ -167,12 +167,20 @@ const SUMMARY_MEMBERS: readonly string[] = [
   'stageIndex',
 ];
 
-/** Every channel the injected report sink declares. */
+/**
+ * Every channel the injected report sink declares.
+ *
+ * `onWriteFailed` is the DIAGNOSTIC half of a refused write — the key, the
+ * serialised size and the cause — and `onPersistenceStatusChanged` the
+ * PLAYER-FACING half, reported on a change of status rather than per refused
+ * write. Decision DL-RUNCTL-20.
+ */
 const REPORTER_CHANNELS: readonly string[] = [
   'onLoadCorrupted',
   'onVersionMigrated',
   'onBoardSizeReconciled',
   'onWriteFailed',
+  'onPersistenceStatusChanged',
   'onRunStarted',
   'onStageAdvanced',
   'onRewardOffered',
@@ -2592,18 +2600,28 @@ describe('runCorrelationId derives the identifier from what is persisted',
         const instance = runCorrelationId('grouped-seed', 'instance');
 
         expect(instance).toHaveLength(26);
-        expect(instance.startsWith(runCorrelationId('grouped-seed'))).toBe(
-          true
-        );
+        expect(instance).toMatch(/^run-[0-9a-z]{14}-[0-9a-z]{7}$/);
+
+        // NO SEED-ONLY SEGMENT. The recoverable seed-grouping form is not
+        // inside the form the composition root exports. DL-LOG-09.
+        expect(
+          instance.startsWith(runCorrelationId('grouped-seed'))
+        ).toBe(false);
       });
 
-    it('groups every run of one seed under one prefix', () => {
+    it('keys every run of one seed by its own run identifier', () => {
       const grouped = runCorrelationId('shared-seed');
       const first = runCorrelationId('shared-seed', 'run-a');
       const second = runCorrelationId('shared-seed', 'run-b');
 
-      expect(first.startsWith(grouped)).toBe(true);
-      expect(second.startsWith(grouped)).toBe(true);
+      // TWO RUNS OF ONE SEED SHARE NOTHING. A shared prefix was a grouping
+      // convenience no module reads and a dictionary matcher every export
+      // carried; the run identifier keys both segments instead, and a consumer
+      // grouping replays compares `seed` — which the envelope holds and no
+      // report carries.
+      expect(first.startsWith(grouped)).toBe(false);
+      expect(second.startsWith(grouped)).toBe(false);
+      expect(first.slice(0, 18)).not.toBe(second.slice(0, 18));
       expect(first).not.toBe(second);
     });
 

@@ -9,6 +9,32 @@
  * resolves each of its tokens through it and raises a Sass `@error` where a
  * projected value and that file's own fallback disagree.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece. TOKEN is one area
+ * across both halves of the mirror, so these ordinals continue the ones
+ * style/_tokens.scss carries:
+ *   TR-TOKEN-02  style/main.scss L4-L22   the fourteen-token block, mirrored
+ *                                        here name for name and value for value
+ *   TR-TOKEN-03  style/main.scss L6-L7    `$grid-row-cells` and `$tile-size`,
+ *                                        mirrored as `gridRowCells` and the
+ *                                        geometry scales, with the board size
+ *                                        read from src/config/default-config.ts
+ *   TR-TOKEN-04  style/main.scss L475-L548 the mobile scale, mirrored as the
+ *                                        second `GeometryScale`
+ *   TR-TOKEN-05  style/main.scss L404-L430 the tile numeral sizes, mirrored as
+ *                                        `tileNumeralSize`
+ *   TR-TOKEN-06  style/helpers.scss       the Sass colour derivations, carried
+ *                                        here in their compiled form as
+ *                                        `derivedColors`
+ *   TR-TOKEN-07  target-only row          `depthScale`, the extrusion depths
+ *                                        expressed as arithmetic on
+ *                                        `gridSpacing`
+ *   TR-TOKEN-08  target-only row          `sassTokenProjection`, the map
+ *                                        vite.config.ts passes to Dart Sass
+ *   TR-TOKEN-12  target-only row          `neutralLightColor`, the neutral
+ *                                        white point of the 2.5D lighting rig,
+ *                                        the one token the stylesheet has no
+ *                                        counterpart for
+ *
  * Decisions: DL-TOKEN-02, DL-TOKEN-03, DL-TOKEN-04, DL-TOKEN-07
  * (docs/DECISION_LOG.md).
  */
@@ -127,6 +153,31 @@ export const ruleColor = '#d8d4d0';
 export const derivedColors = {
   /** Primary action buttons. */
   buttonBackground: '#8f7a66',
+
+  /**
+   * Surface of the controls this feature's own screens render:
+   * `color.adjust($game-container-background, $lightness: -26%)`.
+   *
+   * The retained restart, retry and keep-playing buttons keep
+   * `buttonBackground` above, whose ratio against `brightTextColor` is 3.79:1 —
+   * the frozen identity of AAP 0.5.2, and below the 4.5:1 floor. This surface
+   * is six points darker in the same hue and clears it at 4.73:1, so a screen
+   * delivered by this feature meets WCAG 2.1 AA in the DEFAULT theme rather
+   * than only under the two additive palettes. Decision DL-THEME-08.
+   */
+  controlSurfaceBackground: '#7d6b59',
+
+  /**
+   * Surface of the readouts this feature's own screens render:
+   * `color.adjust($game-container-background, $lightness: -30%)`.
+   *
+   * The retained score and best-score boxes keep `gameContainerBackground`,
+   * against which their label measures 1.74:1 and their numeral 2.19:1. This
+   * surface carries the same two foreground colours at 4.79:1 and 6.01:1, which
+   * keeps the label dimmer than the numeral — the hierarchy the score boxes
+   * have — while both clear the floor. Decision DL-THEME-08.
+   */
+  readoutSurfaceBackground: '#716051',
 
   /** Empty board cells. */
   gridCellBackground: 'rgba(238, 228, 218, 0.35)',

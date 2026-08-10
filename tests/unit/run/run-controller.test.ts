@@ -58,6 +58,7 @@ import type {
   EngineEventSubscription,
 } from '../../../src/engine/engine-events';
 import { Grid } from '../../../src/engine/grid';
+import { createHookBus } from '../../../src/engine/hook-bus';
 import { highestTileValue } from '../../../src/engine/terminal-state';
 import {
   DIRECTION_DOWN,
@@ -140,6 +141,16 @@ interface RecordedReports {
   readonly ended: { outcome: string; stageIndex: number; score: number }[];
   readonly corrupted: string[];
   readonly reconciled: number[];
+
+  /** Refused writes, one entry per `onWriteFailed` report, in order. */
+  readonly writeFailures: { key: string; byteLength: number }[];
+
+  /** Persistence transitions, one entry per report, in order. */
+  readonly persistence: {
+    status: string;
+    previous: string;
+    refusedWrites: number;
+  }[];
 }
 
 function createRecorder(): { reports: RecordedReports; reporter: RunReporter } {
@@ -149,6 +160,8 @@ function createRecorder(): { reports: RecordedReports; reporter: RunReporter } {
     ended: [],
     corrupted: [],
     reconciled: [],
+    writeFailures: [],
+    persistence: [],
   };
 
   const reporter: RunReporter = {
@@ -179,6 +192,19 @@ function createRecorder(): { reports: RecordedReports; reporter: RunReporter } {
     },
     onBoardSizeReconciled(report): void {
       reports.reconciled.push(report.appliedSize);
+    },
+    onWriteFailed(report): void {
+      reports.writeFailures.push({
+        key: report.key,
+        byteLength: report.byteLength,
+      });
+    },
+    onPersistenceStatusChanged(report): void {
+      reports.persistence.push({
+        status: report.status,
+        previous: report.previous,
+        refusedWrites: report.refusedWrites,
+      });
     },
   };
 
@@ -991,6 +1017,152 @@ describe('run-state persistence', () => {
 
     // The pre-existing best score survives the upgrade untouched.
     expect(read(backing, BEST_SCORE_KEY)).toBe('4096');
+  });
+});
+
+/* ==========================================================================
+ * 4b. One refused write, one record, one player-facing status
+ *
+ * ONE EXHAUSTED QUOTA DESCRIBED ITSELF THREE TIMES. `LocalStorageManager`
+ * reported the refused `setItem`, `RunStateStore.save` reported the refused
+ * envelope, and `write()` reported a third time — three records of one event,
+ * none of which reached the player, who went on being shown a run that no
+ * reload would ever find.
+ *
+ * The store's record is now the only one the write itself produces, and the
+ * consequence is carried separately: the run's persistence status, reported on
+ * the CHANGE rather than per refused write, and read back through
+ * `persistenceStatus()` by whatever projects it into the interface. Decision
+ * DL-RUNCTL-20.
+ * ========================================================================== */
+
+describe('a commit whose write is refused', () => {
+  /** One composed run with every write after composition refused. */
+  interface Refusing extends Composed {
+    /** Restores the working `setItem`, so a retry can succeed. */
+    readonly restore: () => void;
+  }
+
+  /**
+   * Composes a run over a one-tile legacy board and then makes every later
+   * write fail.
+   *
+   * The failure is injected at the STORAGE boundary rather than by faking the
+   * store, so the refusal travels the production path: `setItem` raises as it
+   * does on an exhausted quota, `LocalStorageManager` absorbs it,
+   * `RunStateStore.save()` reports it once and answers `false`, and `write()`
+   * resolves the status from that answer.
+   *
+   * The board holds a single 8 at the left wall, so `DIRECTION_RIGHT` always
+   * moves and therefore always commits, and stage 0's goal of 16 stays
+   * unresolved throughout.
+   */
+  function composeRefusing(): Refusing {
+    const backing = new MemoryStorage();
+
+    backing.setItem(GAME_STATE_KEY, JSON.stringify(boardWith(8)));
+
+    const composed = compose({ backing, seed: 'commit-write-refused' });
+    const working = backing.setItem.bind(backing);
+
+    backing.setItem = (): void => {
+      throw new Error('QuotaExceededError');
+    };
+
+    return {
+      ...composed,
+      restore: (): void => {
+        backing.setItem = working;
+      },
+    };
+  }
+
+  it('reports the refusal once, and from the store alone', () => {
+    const { engine, reports, stop } = composeRefusing();
+
+    engine.move(DIRECTION_RIGHT);
+
+    // ONE ATTEMPT, ONE RECORD. The size is the diagnostic half's whole point:
+    // a record that cannot say how large the refused payload was cannot be
+    // acted on.
+    expect(reports.writeFailures).toHaveLength(1);
+    expect(reports.writeFailures[0]?.key).toBe(RUN_STATE_KEY);
+    expect(reports.writeFailures[0]?.byteLength ?? 0).toBeGreaterThan(0);
+
+    stop();
+  });
+
+  it('reports the status change once, however many writes are refused', () => {
+    const { controller, engine, reports, stop } = composeRefusing();
+
+    play(engine, [
+      DIRECTION_RIGHT,
+      DIRECTION_LEFT,
+      DIRECTION_RIGHT,
+      DIRECTION_LEFT,
+    ]);
+
+    // The diagnostic record is per attempt; the player-facing one is per
+    // transition. A store out of quota refuses every write of the rest of the
+    // run, and a report per attempt would be one record a turn saying what the
+    // first already said.
+    expect(reports.writeFailures.length).toBeGreaterThan(1);
+    expect(reports.persistence).toEqual([
+      { status: 'ephemeral', previous: 'persistent', refusedWrites: 1 },
+    ]);
+    expect(controller.persistenceStatus()).toBe('ephemeral');
+
+    stop();
+  });
+
+  it('plays the turn from memory rather than abandoning it', () => {
+    const { backing, controller, engine, reports, stop } = composeRefusing();
+
+    engine.move(DIRECTION_RIGHT);
+
+    // THE TURN STANDS. The board is played from memory whether or not it was
+    // stored, so an exhausted quota degrades the run instead of ending it.
+    const played = engine.serialize();
+
+    expect(played.grid.cells[0]?.[0]).toBeNull();
+    expect(controller.state().board).toEqual(played);
+    expect(reports.ended).toEqual([]);
+
+    // And storage still holds the envelope the last accepted write left, which
+    // is exactly what makes the run ephemeral from here on.
+    expect(readStored(backing)?.board.grid.cells[0]?.[0]?.value).toBe(8);
+
+    stop();
+  });
+
+  it('reports the recovery, with the refused count cleared', () => {
+    const { backing, controller, engine, reports, restore, stop } =
+      composeRefusing();
+
+    engine.move(DIRECTION_RIGHT);
+    restore();
+    engine.move(DIRECTION_LEFT);
+
+    expect(reports.persistence).toEqual([
+      { status: 'ephemeral', previous: 'persistent', refusedWrites: 1 },
+      { status: 'persistent', previous: 'ephemeral', refusedWrites: 0 },
+    ]);
+    expect(controller.persistenceStatus()).toBe('persistent');
+    expect(readStored(backing)?.board).toEqual(engine.serialize());
+
+    stop();
+  });
+
+  it('says nothing at all about a run that is reaching storage', () => {
+    const { controller, engine, reports, stop } = compose();
+
+    play(engine, MOVES);
+
+    expect(reports.writeFailures).toEqual([]);
+    expect(reports.persistence).toEqual([]);
+    expect(controller.persistenceStatus()).toBe('persistent');
+
+    stop();
   });
 });
 
@@ -2454,6 +2626,13 @@ describe('a charged relic held through the composed path', () => {
 interface ComposedWithRewards extends ComposedWithRelics {
   /** Identifiers the bus is dispatching to, in pickup order. */
   readonly busSubscriberIds: () => readonly string[];
+
+  /**
+   * The ONE generator the engine's spawns, the reward draws and the persisted
+   * cursors all come from, so a persisted cursor map can be compared with the
+   * counts the run has actually reached.
+   */
+  readonly streams: () => RngStreams;
 }
 
 /**
@@ -2478,8 +2657,56 @@ function asOffer(relic: Relic): RewardOffer {
 }
 
 /**
+ * Writes the merge-ready fixture as the RUN'S OWN ENVELOPE, so the board the
+ * composition opens on arrives through `RunController.openEngineBoard()` and
+ * the store's reconciliation rather than past them.
+ *
+ * Written only where nothing is stored, so a second composition over one
+ * backing — which is what every reload case below is — adopts the envelope the
+ * first run left instead of this fixture.
+ *
+ * @param manager Storage the envelope is written through.
+ * @param config Rules the store measures the board against.
+ * @param stages Ladder stage 0's goal is derived from.
+ * @param seed Seed the envelope is written under, which is the seed
+ *   `begin()` adopts it for.
+ */
+function seedRewardFixture(
+  manager: LocalStorageManager,
+  config: RulesConfig,
+  stages: StageConfig,
+  seed: string,
+): void {
+  const store = new RunStateStore({ storage: manager, config });
+
+  if (store.exists()) {
+    return;
+  }
+
+  store.save(
+    createFreshRunState({
+      runId: `${seed}-fixture`,
+      seed,
+      rngCursor: {},
+      stageIndex: 0,
+      stageGoal: stageGoalForIndex(0, stages),
+      board: mergeReadyBoard(),
+    }),
+  );
+}
+
+/**
  * Composes storage, store, controller, registry, substreams and engine with a
- * seeded draw port bound, in the order src/main.ts uses.
+ * seeded draw port bound, in the order src/main.ts uses: the hook bus first,
+ * then the registry over it, then the controller, then `begin()`, then the ONE
+ * generator built from the adopted cursors, then the engine over that same bus
+ * and that same generator, and finally the board the controller opens.
+ *
+ * ONE GENERATOR, NOT TWO. The engine's spawns, the reward draws and the cursor
+ * map `observe()` persists all read the same `RngStreams` instance, exactly as
+ * src/main.ts wires them through its stream holder. A composition that gave the
+ * engine a second instance persisted counts no draw had moved, so a stale
+ * cursor map and a current one were indistinguishable.
  *
  * The registry is bound through `runPort()` rather than as the instance, which
  * is the route src/relics/relic-registry.ts documents as the one between the
@@ -2493,6 +2720,7 @@ function composeWithRewards(
   const config = createDefaultRulesConfig();
   const stages = createDefaultStageConfig();
   const { reports, reporter } = createRecorder();
+  const seed = options.seed ?? 'wiring-a';
 
   const issued: string[] = [];
   let next = 0;
@@ -2505,34 +2733,28 @@ function composeWithRewards(
     return token;
   };
 
+  if (options.setup !== false) {
+    seedRewardFixture(manager, config, stages, seed);
+  }
+
   const identity = resolveRunIdentity({
     storage: manager,
     createToken,
-    seed: options.seed ?? 'wiring-a',
+    seed,
   });
 
-  const holder: { controller: RunController | null } = { controller: null };
-
-  const engine = new Engine({
-    config,
-    stages,
-    streams: createRngStreams(identity.seed, {}),
-    storage: manager,
-    stageContext: () =>
-      holder.controller?.stageContext() ?? {
-        stageIndex: 0,
-        goal: stages.ladder[0],
-        goalProgress: 0,
-      },
-    relicContext: () => holder.controller?.relicContext() ?? [],
+  // One bus, built before both its users: the registry seats relics on it and
+  // the engine dispatches through it, which is why the root builds it first.
+  const hooks = createHookBus({
+    correlationId: runCorrelationId(identity.seed, identity.runId),
   });
 
   const registry = new RelicRegistry({
-    bus: engine.hooks,
+    bus: hooks,
     catalogue: RELIC_CATALOGUE,
   });
 
-  let streams: ReturnType<typeof createRngStreams> | null = null;
+  let streams: RngStreams | null = null;
 
   const controller = new RunController({
     store: new RunStateStore({ storage: manager, config, reporter }),
@@ -2574,17 +2796,31 @@ function composeWithRewards(
     },
   });
 
-  holder.controller = controller;
+  // ADOPTED BEFORE THE GENERATOR IS BUILT, and before the engine exists: the
+  // cursors the run resumes on come out of the envelope this reads, so a
+  // generator built any earlier starts a resumed run at zero.
   controller.begin();
 
   const live = createRngStreams(controller.seed(), controller.cursors());
 
   streams = live;
 
+  const engine = new Engine({
+    config,
+    stages,
+    streams: live,
+    storage: manager,
+    hooks,
+    stageContext: () => controller.stageContext(),
+    relicContext: () => controller.relicContext(),
+  });
+
   const stop = controller.observe(engine, () => live.snapshotCursors());
 
   if (options.setup !== false) {
-    engine.setup(mergeReadyBoard());
+    // The reconciled board of the adopted envelope, opened through the
+    // controller — the same call src/main.ts makes.
+    controller.openEngineBoard(engine);
   }
 
   return {
@@ -2598,6 +2834,7 @@ function composeWithRewards(
     tokens: issued,
     stop,
     registry,
+    streams: (): RngStreams => live,
     busSubscriberIds: (): readonly string[] =>
       engine.hooks.subscribers().map((subscriber): string => subscriber.id),
   };
@@ -2802,15 +3039,11 @@ describe('a reward drawn by the run and taken through selectReward', () => {
 /* ==========================================================================
  * 17b. The reward selection is a transaction, and the write is part of it
  *
- * THE WRITE'S ANSWER WAS DISCARDED. `write()` reports whether the envelope
- * reached storage and the selection ignored it, so a run whose storage was full
- * took the relic on, advanced the stage, opened the next board and announced the
- * acquisition — and the next load knew nothing about any of it. The player was
- * told they had a relic that no reload would ever find.
- *
- * The write is now the commit point: the envelope is brought fully up to date and
- * written, and a refused write rolls back the relic, the round and the stage and
- * refuses the selection.
+ * The contract asserted here: `selectReward()` brings the envelope fully up to
+ * date and writes it BEFORE reporting acceptance, and a refused write rolls back
+ * the registry append, the envelope's relic list, the round and the stage, and
+ * answers `'refused'`. The refusal is injected at the storage boundary, so it
+ * travels the production path. Decision DL-RUNCTL-15.
  * ========================================================================== */
 
 describe('a reward selection whose write is refused', () => {
@@ -2947,6 +3180,33 @@ describe('an unresolved reward round', () => {
     );
   });
 
+  it('is persisted beside the cursors the draw itself reached', () => {
+    const { engine, backing, streams } = composeWithRewards({
+      seed: 'pending-cursors',
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    // THE LIVE GENERATOR, NOT THE ENVELOPE READ BACK. The draw that produced
+    // the round on screen consumed `relic-draw` and `rarity-weight`, so an
+    // envelope whose counts do not reach the live ones is an envelope a reload
+    // rebuilds the substreams behind — and the spent draws come out a second
+    // time. DL-RUNCTL-19.
+    const live = streams().snapshotCursors();
+    const persisted = readStored(backing)?.rngCursor;
+
+    expect(persisted).toEqual(live);
+
+    for (const name of RNG_STREAM_NAMES) {
+      expect(persisted?.[name]).toBe(live[name]);
+    }
+
+    // And the two reward substreams actually moved, so the equality above is
+    // not two zero maps agreeing.
+    expect(live['relic-draw']).toBeGreaterThan(0);
+    expect(live['rarity-weight']).toBeGreaterThan(0);
+  });
+
   it('is cleared from storage once a card is taken', () => {
     const { controller, engine, backing } = composeWithRewards({
       seed: 'pending-clear',
@@ -2971,9 +3231,14 @@ describe('an unresolved reward round', () => {
     first.engine.move(DIRECTION_LEFT);
 
     const offered = first.controller.currentOffer().map((card): string => card.id);
-    const cursorsBefore = first.controller.cursors();
+
+    // READ OFF THE LIVE GENERATOR. `controller.cursors()` reports the envelope's
+    // own copy, so comparing it with the envelope after a reload compares one
+    // stored value with itself and passes whether or not the draw was recorded.
+    const cursorsBefore = first.streams().snapshotCursors();
 
     expect(offered.length).toBeGreaterThan(0);
+    expect(readStored(backing)?.rngCursor).toEqual(cursorsBefore);
 
     first.stop();
 
@@ -3126,12 +3391,20 @@ describe('an unresolved reward round', () => {
       }),
     );
 
-    // The projection resolves nothing, so nothing is restored — and the load
-    // completes rather than raising on a catalogue that has moved.
+    // The projection resolves nothing, so the stored round is dropped and the
+    // load completes rather than raising on a catalogue that has moved. The
+    // board the envelope carries still meets stage 0's goal, so the run
+    // resolves that stage again and draws a round of its own — and every card
+    // in it is a relic the catalogue declares.
     const second = composeWithRewards({ backing, seed: 'pending-unknown' });
+    const offeredNow = second.controller
+      .currentOffer()
+      .map((card): string => card.id);
 
-    expect(second.controller.isRewardPending()).toBe(false);
-    expect(readStored(second.backing)?.pendingReward).toBeUndefined();
+    expect(offeredNow).not.toContain('no-such-relic');
+    expect(
+      readStored(second.backing)?.pendingReward?.offeredRelicIds ?? [],
+    ).not.toContain('no-such-relic');
 
     second.stop();
   });
@@ -5945,11 +6218,18 @@ describe('correlationId', () => {
       first.controller.correlationId(),
     );
 
-    // Both still group under the seed, which is the grouping form's whole point.
+    // AND NEITHER CARRIES THE SEED-GROUPING FORM. That form is recoverable by
+    // dictionary search, so the identifier a run reports under is keyed by its
+    // own run identifier throughout and shares no segment with it. A consumer
+    // lining a replay up against the original compares the seed itself, which
+    // the envelope holds and no report carries. DL-LOG-09.
     const grouped = runCorrelationId('one-seed-two-runs');
 
-    expect(first.controller.correlationId().startsWith(grouped)).toBe(true);
-    expect(second.controller.correlationId().startsWith(grouped)).toBe(true);
+    expect(first.controller.correlationId().startsWith(grouped)).toBe(false);
+    expect(second.controller.correlationId().startsWith(grouped)).toBe(false);
+    expect(first.controller.correlationId().slice(0, 18)).not.toBe(
+      second.controller.correlationId().slice(0, 18),
+    );
   });
 
   it('is carried by every report the run makes', () => {
@@ -5978,6 +6258,13 @@ describe('correlationId', () => {
   it('reports a failed write with the key, a size and the cause', () => {
     // A store whose port refuses every write, which is what a full quota looks
     // like from here.
+    //
+    // THE STORE IS THE ONE THAT REPORTS IT. A refused write produces exactly
+    // one record and the store owns it, because it alone holds the key, the
+    // serialised size and the cause; the controller answers a refusal with the
+    // run's persistence status instead. So the store is given the same
+    // correlation source the controller is, exactly as src/main.ts gives both
+    // the logger's. Decision DL-RUNCTL-20.
     const run = drive();
     const refusing = new RunStateStore({
       storage: {
@@ -5988,6 +6275,7 @@ describe('correlationId', () => {
       },
       config: run.config,
       reporter: run.sink.reporter,
+      correlationId: 'pinned-correlation-id',
     });
     const controller = new RunController({
       store: refusing,

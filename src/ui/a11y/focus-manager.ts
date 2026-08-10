@@ -20,6 +20,26 @@
  * HTML focusability pattern, evaluated only inside a container the caller
  * supplies.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-FOCUS-01  index.html L31, L38, L39      the three hrefless `<a>`
+ *                                              controls, now `<button>`
+ *                                              elements this module orders and
+ *                                              contains
+ *   TR-FOCUS-02  js/keyboard_input_manager.js  the unguarded control lookups,
+ *                L139-L141                     resolved here through the
+ *                                              guarded resolver of ./settings
+ *   TR-FOCUS-03  target-only row               `collectFocusable`,
+ *                                              `FOCUSABLE_SELECTORS` and the
+ *                                              focus cycle
+ *   TR-FOCUS-04  target-only row               the focus trap and its
+ *                                              restoration target
+ *   TR-FOCUS-05  target-only row               the parallel board layer, its
+ *                                              single tab stop and `focusCell`
+ *   TR-FOCUS-06  target-only row               the per-cell counterpart geometry
+ *   TR-FOCUS-07  target-only row               `ScreenName`, `SCREEN_NAMES` and
+ *                                              `isScreenName`
+ *
  * Decisions: DL-FOCUS-01, DL-FOCUS-02, DL-FOCUS-03 (docs/DECISION_LOG.md).
  */
 
@@ -762,12 +782,22 @@ export const FOCUS_INITIAL_ATTRIBUTE = 'data-focus-initial';
 /** `FOCUS_INITIAL_ATTRIBUTE` as an attribute selector. */
 export const FOCUS_INITIAL_SELECTOR = `[${FOCUS_INITIAL_ATTRIBUTE}]`;
 
-/** The designated target per screen, tried inside the container in order. */
+/**
+ * The designated target per screen, tried inside the container in order.
+ *
+ * `stage` names the board's tab stop under EITHER renderer, most specific
+ * first. The number-only renderer of src/render/number-only-renderer.ts roves a
+ * tab stop across the cells of its own `#board-number-only` lattice and hides
+ * `#board-a11y` while it holds one, so the parallel board's host — which is the
+ * single tab stop under the Three renderer — is a hidden element for the whole
+ * of a number-only session. Naming it alone therefore placed stage focus on
+ * something that cannot take it. Decision DL-FOCUS-04.
+ */
 export const SCREEN_INITIAL_FOCUS: Readonly<
   Record<ScreenName, readonly string[]>
 > = Object.freeze({
   runStart: Object.freeze([]),
-  stage: Object.freeze(['#board-a11y']),
+  stage: Object.freeze(['#board-number-only [tabindex="0"]', '#board-a11y']),
   stageClear: Object.freeze([]),
   reward: Object.freeze(['.relic-card']),
   won: Object.freeze([]),

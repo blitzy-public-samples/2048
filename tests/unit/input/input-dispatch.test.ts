@@ -11,6 +11,7 @@ import {
   RELIC_SLOT_COUNT,
   REWARD_SLOT_COUNT,
   createKeymap,
+  describeAction,
   deserializeKeymap,
   remapAction,
   resolveInput,
@@ -379,6 +380,19 @@ describe('indexed actions resolve their payload from the binding', () => {
     expect(binding.slots?.map((slot) => slot.index)).toEqual([
       0, 1, 2, 3, 4, 5, 6, 7, 8,
     ]);
+  });
+
+  it('labels the relic slot action for what it does: inspection', () => {
+    // The label is the accessible name of the generated control per slot and the
+    // name the settings panel rebinds under, so it is the whole of what the
+    // action promises a player. Every relic in the catalogue fires on its own
+    // hooks and takes its own charge there: this action reads a slot out and
+    // spends nothing, so a label promising activation described an effect the
+    // press cannot have. DL-RUNCTL-18, DL-KEYMAP-05.
+    expect(describeAction('activateRelic')).toBe('Inspect relic');
+    expect(describeAction('activateRelic').toLowerCase()).not.toContain(
+      'activate',
+    );
   });
 
   it('resolves each default digit to its own offer', () => {

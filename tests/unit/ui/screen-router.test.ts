@@ -1278,6 +1278,82 @@ describe('the state machine', () => {
     stop();
   });
 
+  it('restores focus to the board tab stop the resolver answers with', () => {
+    document.body.innerHTML = FLOW_MARKUP;
+
+    // The two board surfaces, as index.html declares them: the number-only
+    // lattice roving its stop across its own cells, and the parallel board
+    // hidden for as long as that lattice stands.
+    const region = document.querySelector('#game-main')!;
+    const lattice = document.createElement('div');
+    const parallel = document.createElement('div');
+
+    lattice.id = 'board-number-only';
+    parallel.id = 'board-a11y';
+    parallel.hidden = true;
+    parallel.setAttribute('aria-hidden', 'true');
+
+    for (let index = 0; index < 4; index += 1) {
+      const cell = document.createElement('div');
+
+      cell.setAttribute('role', 'gridcell');
+      cell.setAttribute('tabindex', index === 3 ? '0' : '-1');
+      lattice.appendChild(cell);
+    }
+
+    region.append(lattice, parallel);
+
+    const reward = recorder('reward');
+    const resolved: (Element | null)[] = [];
+
+    router = createScreenRouter({
+      document,
+      screens: { reward: reward.module },
+
+      // Resolved per engage, as the composition root supplies it: the selector
+      // it evaluates names EVERY tab stop the two renderers can hold, in
+      // document order, so the surface in force is matched and the hidden one is
+      // not.
+      rewardRestoreFocusTo: (): Element | null => {
+        const target = document.querySelector(
+          '#board-number-only [tabindex="0"], #board-a11y[tabindex="0"], ' +
+            '#board-a11y [tabindex="0"]',
+        );
+
+        resolved.push(target);
+
+        return target;
+      },
+    });
+
+    router.start();
+    router.send('beginRun');
+    router.send('stageGoalMet', { cleared: true });
+
+    expect(router.send('stageEnd', { offers: OFFER })).toBe(true);
+    expect(router.screen()).toBe('reward');
+
+    // Called once, as the trap engaged, and it answered with the roving cell
+    // rather than the hidden parallel host.
+    expect(resolved).toEqual([lattice.children[3]]);
+
+    // Inside the trap while the offer stands.
+    expect(
+      document.querySelector('#screen-reward')?.contains(document.activeElement),
+    ).toBe(true);
+
+    expect(router.send('rewardSelected', { relicId: 'first' })).toBe(true);
+
+    // THE BOARD, NOT THE CONTROL THAT LED HERE: reward is reached by clearing a
+    // stage, so there is no trigger to go back to, and the stage entry that
+    // follows the release resolves the same surface from
+    // `SCREEN_INITIAL_FOCUS.stage`. DL-ROUTER-35, DL-FOCUS-04.
+    expect(document.activeElement).toBe(lattice.children[3]);
+
+    router.destroy();
+    router = null;
+  });
+
   it('hands the offer to the reward module and renders no card itself', () => {
     document.body.innerHTML = FLOW_MARKUP;
 

@@ -1499,7 +1499,7 @@ describe('the log panel', () => {
       correlationId: deriveCorrelationId('stack-seed', 'stack-run'),
       subsystem: 'test',
       consoleOutput: false,
-      stackDetail: 'full',
+      errorDetail: 'full',
     });
     const built = createDiagnosticsOverlay({
       metrics: createMetricsRegistry({ logger }),

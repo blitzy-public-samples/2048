@@ -4,6 +4,25 @@
 // JSON-lines export, and the three adapters that satisfy the reporter
 // contracts src/engine, src/input and src/storage each declare for themselves.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-LOG-01  js/local_storage_manager.js  the discarded-error `catch`, whose
+//              L37-L39                      target is `serializeError`
+//   TR-LOG-02  js/local_storage_manager.js  the unguarded `setItem`, reported
+//              L47-L49                      through `createStorageReporter`
+//   TR-LOG-03  js/local_storage_manager.js  the unguarded `JSON.parse`,
+//              L54                          reported through the same adapter
+//   TR-LOG-04  target-only row              `deriveCorrelationId` and its
+//                                           two-hash rendering
+//   TR-LOG-05  target-only row              the log record, its level filter
+//                                           and the sink registry
+//   TR-LOG-06  target-only row              the bounded recent-record buffer
+//                                           and `Logger.recent`
+//   TR-LOG-07  target-only row              the JSON-lines export
+//   TR-LOG-08  target-only row              the three reporter adapters for
+//                                           src/engine, src/input and
+//                                           src/storage
+//
 // Decisions: DL-LOG-01, DL-LOG-02, DL-LOG-03, DL-LOG-04, DL-LOG-05,
 // DL-LOG-06, DL-LOG-07 (docs/DECISION_LOG.md).
 
@@ -73,27 +92,39 @@ function renderHash(hash: number): string {
  * Derives the correlation identifier every log record carries. The one
  * authority: no other module in src/ derives a value of this type.
  *
- * ONE CONTRACT, in two forms. The seed-derived prefix GROUPS: every
- * run replaying one seed carries the same prefix, which is what lines a
- * replay's records up against the original's. Passing `runId` — which the
- * composition root always does — appends a run-instance component, so the FULL
- * identifier differs whenever `runId` differs. Two replays of one seed share a
- * prefix and never share a full identifier, and a consumer telling two runs of
- * one seed apart reads either the full value or `RunState.runId` beside it.
+ * ONE CONTRACT, in two forms, and the RUN-INSTANCE form is the one the
+ * composition root uses. Passing `runId` derives every segment of the
+ * identifier from the run instance AND the seed together, so no part of the
+ * returned value is a function of the seed alone. The seed-grouping form,
+ * derived when `runId` is absent or empty, is the opt-in exception described
+ * below.
  *
- * PSEUDONYMOUS, NOT ANONYMOUS. The derivation is unsalted and deterministic, so
- * anyone can compute it: a party holding candidate seeds can hash each one and
- * match it against the prefix, which recovers a low-entropy seed — a word, a
- * date, a short phrase — by search. What it does give is that the seed TEXT is
- * not carried in the record. It is neither a secret nor a safe carrier for a
- * sensitive seed, so nothing in the product may put personal data in a seed.
+ * KEYED, NOT UNSALTED. The instance form's key is `runId`, which
+ * `createRunToken` of src/main.ts originates from `crypto.getRandomValues`, and
+ * which is deliberately carried in NO report: the identifier travels, the key
+ * does not. A party holding an export therefore cannot hash candidate seeds and
+ * match them against it. Every segment carrying the key is what closes that
+ * search; a segment derived from the seed alone reopened it, because a
+ * low-entropy seed — a word, a date, a short phrase — falls to a dictionary in
+ * moments. Decision DL-LOG-09.
+ *
+ * THE SEED-GROUPING FORM IS RECOVERABLE, and is offered for a caller that
+ * deliberately wants every run of one seed under one identifier — a fixture, a
+ * replay harness. It is unsalted and deterministic, so anyone can compute it,
+ * and it must not be attached to a logger whose records leave the machine. What
+ * both forms do give is that the seed TEXT is carried in neither.
+ *
+ * A seed is PUBLIC either way: the run summary shows it and copies it, and a
+ * replay is the point of it. Nothing in the product may put personal data in
+ * one, and the run-start field says so where a seed is entered.
  *
  * Neither form is unique by construction — each concatenates 32-bit hashes —
  * so distinct inputs can collide, and a consumer that needs an exact identity
  * compares the seed and `runId` themselves.
  *
  * Reads no clock and no randomness in either form, so a record's identifier is
- * reproducible from a persisted run.
+ * reproducible from a persisted run: `runId` is persisted beside the seed, so a
+ * resumed run keeps the identifier it was recording under.
  *
  * A caller holding an identifier already derived supplies it as
  * `LoggerOptions.correlationId`, which is carried verbatim and takes precedence
@@ -101,8 +132,8 @@ function renderHash(hash: number): string {
  *
  * @param runSeed Seed of the run. Coerced with `String`, so any value is
  *   accepted and none throws.
- * @param runId Run instance identifier. Omit it, or pass an empty value, for
- *   the seed-grouping form.
+ * @param runId Run instance identifier, and the key of the instance form. Omit
+ *   it, or pass an empty value, for the seed-grouping form.
  * @returns An 18-character identifier for the seed-grouping form and a
  *   26-character one for the run-instance form, non-empty for every input, the
  *   empty string included.
@@ -112,20 +143,26 @@ export function deriveCorrelationId(
   runId?: string,
 ): CorrelationId {
   const seed = String(runSeed);
-  const grouped =
-    CORRELATION_ID_PREFIX +
-    renderHash(fnv1a32(seed)) +
-    renderHash(djb2Hash32(seed));
 
   if (runId === undefined || String(runId) === '') {
-    return grouped;
+    return (
+      CORRELATION_ID_PREFIX +
+      renderHash(fnv1a32(seed)) +
+      renderHash(djb2Hash32(seed))
+    );
   }
 
+  // The key first, so the two hashes below are keyed hashes of the seed rather
+  // than hashes of the seed with a key appended.
   const instance = `${String(runId)}\u0000${seed}`;
 
-  return `${grouped}${CORRELATION_ID_INSTANCE_SEPARATOR}${renderHash(
-    fnv1a32(instance) ^ djb2Hash32(instance),
-  )}`;
+  return (
+    CORRELATION_ID_PREFIX +
+    renderHash(fnv1a32(instance)) +
+    renderHash(djb2Hash32(instance)) +
+    CORRELATION_ID_INSTANCE_SEPARATOR +
+    renderHash(fnv1a32(instance) ^ djb2Hash32(instance))
+  );
 }
 
 const CIRCULAR_PLACEHOLDER = '[circular]';
@@ -278,17 +315,24 @@ const POSIX_LOCATION_PATTERN =
   /(?:\/[\w.@~+-]+){2,}(?::\d+(?::\d+)?)?/g;
 
 /**
- * How much of a stack a record carries.
+ * How much of a caught value a record carries — of its STACK and of its
+ * MESSAGE alike, and of every cause behind it.
  *
  * `'redacted'` replaces the locations of the three forms `redactLocations`
- * matches, leaving the frame names and the shape of the stack. `'full'` carries
- * the stack text as it was thrown, for a private development sink; the export
+ * matches and the further forms `redactMessage` matches, leaving the frame
+ * names, the shape of the stack and the wording of the message. `'full'`
+ * carries both as they were thrown, for a private development sink; the export
  * surfaces redact regardless.
+ *
+ * Named for the caught value rather than for the stack because it governs the
+ * message too: a mode called after the stack alone invited a caller to select
+ * `'full'` for a stack trace and receive raw message text with it. Decision
+ * DL-LOG-10.
  */
-export type StackDetail = 'redacted' | 'full';
+export type ErrorDetail = 'redacted' | 'full';
 
-/** How much of a stack a logger built without an opinion carries. */
-export const DEFAULT_STACK_DETAIL: StackDetail = 'redacted';
+/** How much of a caught value a logger built without an opinion carries. */
+export const DEFAULT_ERROR_DETAIL: ErrorDetail = 'redacted';
 
 /**
  * Replaces the source locations of three enumerated forms in `text` with
@@ -297,8 +341,9 @@ export const DEFAULT_STACK_DETAIL: StackDetail = 'redacted';
  *
  * What it is NOT is a general guarantee that no location survives. A bare file
  * name and a single-segment path match none of the three and are copied as they
- * stand, and this is applied to stack text alone — a location a caller puts in
- * a message or a field is untouched. Decision DL-LOG-08.
+ * stand, and a location a caller puts in a FIELD is untouched. A location in a
+ * MESSAGE is covered, through `redactMessage` below, which applies this and
+ * three further forms. Decisions DL-LOG-08, DL-LOG-10.
  *
  * @param text Text to redact.
  * @returns The text with every location of those three forms replaced.
@@ -308,6 +353,77 @@ function redactLocations(text: string): string {
     .replace(URL_LOCATION_PATTERN, REDACTED_LOCATION)
     .replace(WINDOWS_LOCATION_PATTERN, REDACTED_LOCATION)
     .replace(POSIX_LOCATION_PATTERN, REDACTED_LOCATION);
+}
+
+/**
+ * Substituted for each further sensitive form a redacted message carried.
+ *
+ * The same marker `REDACTED_LOCATION` uses, so a reader sees one word whatever
+ * was replaced and `logRecordBounds.redactedLocation` names it for both.
+ */
+const REDACTED_VALUE = REDACTED_LOCATION;
+
+/**
+ * A `data:` URI, which carries its payload inline and matches no scheme pattern
+ * above because it has no authority component.
+ */
+const DATA_URI_PATTERN =
+  /\bdata:[a-z0-9!#$&^_.+-]*(?:;[a-z0-9-]+=?[^\s,]*)*,[^\s)'"]*/gi;
+
+/** The seven key words a credential-like assignment is recognised by. */
+const CREDENTIAL_KEY_WORDS = 'token|key|secret|password|passwd|auth|session';
+
+/**
+ * A token-like query or assignment value: one of the key words above, then `=`
+ * or `:`, then the value up to the next separator.
+ */
+const CREDENTIAL_ASSIGNMENT_PATTERN = new RegExp(
+  `\\b(${CREDENTIAL_KEY_WORDS})\\b(\\s*[=:]\\s*)` +
+    `(?:"[^"]*"|'[^']*'|[^\\s,;&)]+)`,
+  'gi',
+);
+
+/**
+ * Longest double-quoted run a redacted message keeps, in characters.
+ *
+ * A parse failure quotes the text it was given: `JSON.parse` embeds a fragment
+ * of the payload in its message, and this product's payloads carry the run seed
+ * the player typed. Short quoted runs — a key name, a state name — are kept,
+ * because they are what makes a message readable.
+ */
+const MAX_QUOTED_RUN_LENGTH = 24;
+
+/** A double-quoted run longer than `MAX_QUOTED_RUN_LENGTH`. */
+const LONG_QUOTED_RUN_PATTERN = new RegExp(
+  `"[^"]{${String(MAX_QUOTED_RUN_LENGTH + 1)},}"`,
+  'g',
+);
+
+/**
+ * Replaces in `text` every location `redactLocations` covers, plus three
+ * further enumerated forms: a `data:` URI, a credential-like assignment of one
+ * of seven key words, and a double-quoted run longer than
+ * `MAX_QUOTED_RUN_LENGTH` — which is how a parse failure carries a fragment of
+ * the payload it was given, and how a run seed reaches a message.
+ *
+ * What it is NOT is a general guarantee that nothing sensitive survives: a
+ * message is arbitrary text written by whatever threw, and only the enumerated
+ * forms are matched. It is applied to the message of a caught value and of
+ * every cause behind it, on the emission path unless the logger carries
+ * `'full'`, and on every export surface regardless. Decision DL-LOG-10.
+ *
+ * @param text Message text to redact.
+ * @returns The text with every matched form replaced.
+ */
+function redactMessage(text: string): string {
+  return redactLocations(text)
+    .replace(DATA_URI_PATTERN, REDACTED_VALUE)
+    .replace(
+      CREDENTIAL_ASSIGNMENT_PATTERN,
+      (_match, key: string, separator: string): string =>
+        `${key}${separator}${REDACTED_VALUE}`,
+    )
+    .replace(LONG_QUOTED_RUN_PATTERN, `"${REDACTED_VALUE}"`);
 }
 
 /**
@@ -385,7 +501,8 @@ export interface SerializedError {
    * The value's own `stack`, absent when it carries none. Every location of
    * the three forms `redactLocations` matches is replaced with
    * `REDACTED_LOCATION` unless the record was built by a logger carrying
-   * `stackDetail: 'full'`, and the export surfaces redact in either case.
+   * `errorDetail: 'full'`, and the export surfaces redact in either case. The
+   * `message` above is redacted on the same mode, by `redactMessage`.
    */
   readonly stack?: string;
 
@@ -431,7 +548,7 @@ function readStringMember(
 function readCause(
   holder: object,
   depth: number,
-  stackDetail: StackDetail
+  errorDetail: ErrorDetail
 ): SerializedError | undefined {
   if (depth >= MAX_CAUSE_DEPTH) {
     return undefined;
@@ -444,7 +561,7 @@ function readCause(
       return undefined;
     }
 
-    return serializeThrown(cause, depth + 1, stackDetail);
+    return serializeThrown(cause, depth + 1, errorDetail);
   } catch {
     return undefined;
   }
@@ -456,8 +573,17 @@ function buildSerializedError(
   message: string,
   stack: string | undefined,
   cause: SerializedError | undefined,
-  stackDetail: StackDetail
+  errorDetail: ErrorDetail
 ): SerializedError {
+  // THE MESSAGE IS REDACTED TOO, and on the same mode as the stack. A stack was
+  // redacted while the message beside it carried the location, the payload
+  // fragment or the credential-like value that made redacting the stack worth
+  // doing — and the message is the part a console line shows first. Redacted
+  // before it is clamped, so the limit measures the text the record actually
+  // carries. DL-LOG-10.
+  const resolvedMessage =
+    errorDetail === 'full' ? message : redactMessage(message);
+
   const record: {
     name: string;
     message: string;
@@ -465,14 +591,12 @@ function buildSerializedError(
     cause?: SerializedError;
   } = {
     name: clamp(name, MAX_ERROR_NAME_LENGTH),
-    message: clamp(message, MAX_ERROR_MESSAGE_LENGTH),
+    message: clamp(resolvedMessage, MAX_ERROR_MESSAGE_LENGTH),
   };
 
   if (stack !== undefined) {
-    // Redacted before it is clamped, so the limit measures the text the record
-    // actually carries.
     const resolved =
-      stackDetail === 'full' ? stack : redactLocations(stack);
+      errorDetail === 'full' ? stack : redactLocations(stack);
 
     record.stack = clamp(resolved, MAX_ERROR_STACK_LENGTH);
   }
@@ -489,13 +613,13 @@ function buildSerializedError(
  *
  * @param thrown Value that was thrown.
  * @param depth Number of causes already followed.
- * @param stackDetail How much of each stack in the chain to carry.
+ * @param errorDetail How much of each message and stack in the chain to carry.
  * @returns The serialised value.
  */
 function serializeThrown(
   thrown: unknown,
   depth: number,
-  stackDetail: StackDetail
+  errorDetail: ErrorDetail
 ): SerializedError {
   try {
     if (typeof thrown === 'object' && thrown !== null) {
@@ -503,8 +627,8 @@ function serializeThrown(
         readStringMember(thrown, 'name') ?? UNKNOWN_ERROR_NAME,
         readStringMember(thrown, 'message') ?? describeValue(thrown),
         readStringMember(thrown, 'stack'),
-        readCause(thrown, depth, stackDetail),
-        stackDetail
+        readCause(thrown, depth, errorDetail),
+        errorDetail
       );
     }
 
@@ -513,7 +637,7 @@ function serializeThrown(
       describeValue(thrown),
       undefined,
       undefined,
-      stackDetail
+      errorDetail
     );
   } catch {
     return FALLBACK_SERIALIZED_ERROR;
@@ -527,9 +651,9 @@ function serializeThrown(
  */
 export function serializeError(
   thrown: unknown,
-  stackDetail: StackDetail = DEFAULT_STACK_DETAIL
+  errorDetail: ErrorDetail = DEFAULT_ERROR_DETAIL
 ): SerializedError {
-  return serializeThrown(thrown, 0, stackDetail);
+  return serializeThrown(thrown, 0, errorDetail);
 }
 
 /** Severity of a log record. */
@@ -807,13 +931,14 @@ export interface LoggerOptions {
   readonly consoleOutput?: boolean;
 
   /**
-   * How much of a stack the records this logger emits carry. Defaults to
-   * `DEFAULT_STACK_DETAIL`, which is `'redacted'`; only the exact value
-   * `'full'` selects the unredacted form, and it is for a private development
-   * sink. `toJsonLines()` and `snapshot()` redact in either case, to the extent
-   * `redactLocations` covers.
+   * How much of a caught value the records this logger emits carry — its
+   * message as well as its stack. Defaults to `DEFAULT_ERROR_DETAIL`, which is
+   * `'redacted'`; only the exact value `'full'` selects the unredacted form,
+   * and it is for a private development sink. `toJsonLines()` and `snapshot()`
+   * redact in either case, to the extent `redactLocations` and `redactMessage`
+   * cover.
    */
-  readonly stackDetail?: StackDetail;
+  readonly errorDetail?: ErrorDetail;
 }
 
 /** A logger's state and its buffered records, as `snapshot` reports them. */
@@ -953,7 +1078,7 @@ interface LoggerState {
   sinkFaults: number;
   lastSinkFault: SerializedError | undefined;
   consoleOutput: boolean;
-  readonly stackDetail: StackDetail;
+  readonly errorDetail: ErrorDetail;
 }
 
 /** What one emission carries besides its level, message and subsystem. */
@@ -1288,7 +1413,7 @@ function buildRecord(
   }
 
   if (args.hasThrown) {
-    record.error = serializeError(args.thrown, state.stackDetail);
+    record.error = serializeError(args.thrown, state.errorDetail);
   }
 
   enforceRecordBudget(record);
@@ -1362,13 +1487,13 @@ function stripStack(error: SerializedError): SerializedError {
 }
 
 /**
- * Rebuilds a serialised error with the locations of the three forms
- * `redactLocations` covers replaced in its stack, and in the stack of every
- * cause behind it.
+ * Rebuilds a serialised error with every form `redactLocations` covers replaced
+ * in its stack and every form `redactMessage` covers replaced in its message,
+ * and the same in every cause behind it.
  *
  * @param error Error to redact.
- * @returns The error itself where it carries no location to replace, and a
- *   frozen rebuilt error otherwise.
+ * @returns The error itself where it carries nothing to replace, and a frozen
+ *   rebuilt error otherwise.
  */
 function redactSerializedError(error: SerializedError): SerializedError {
   const cause =
@@ -1377,8 +1502,13 @@ function redactSerializedError(error: SerializedError): SerializedError {
       : redactSerializedError(error.cause);
   const stack =
     error.stack === undefined ? undefined : redactLocations(error.stack);
+  const message = redactMessage(error.message);
 
-  if (stack === error.stack && cause === error.cause) {
+  if (
+    stack === error.stack &&
+    cause === error.cause &&
+    message === error.message
+  ) {
     return error;
   }
 
@@ -1387,7 +1517,7 @@ function redactSerializedError(error: SerializedError): SerializedError {
     message: string;
     stack?: string;
     cause?: SerializedError;
-  } = { name: error.name, message: error.message };
+  } = { name: error.name, message };
 
   if (stack !== undefined) {
     rebuilt.stack = stack;
@@ -1404,9 +1534,10 @@ function redactSerializedError(error: SerializedError): SerializedError {
  * Redacts the reported error of one record for an export surface.
  *
  * Applied by `toJsonLines()` and by `snapshot()` whatever the logger's
- * `stackDetail` is, so an export carries no location of the three forms
- * `redactLocations` covers even where the sinks were given full stacks. A form
- * outside those three is not removed here either.
+ * `errorDetail` is, so an export carries no location of the three forms
+ * `redactLocations` covers and no form `redactMessage` covers, even where the
+ * sinks were given the value as it was thrown. A form outside those is not
+ * removed here either.
  *
  * @param record Record to redact.
  * @returns The record itself where it carries no location to replace, and a
@@ -1478,7 +1609,7 @@ function buildJsonLines(
 ): string {
   let text = '';
 
-  // The export surface redacts whatever the logger's `stackDetail` is.
+  // The export surface redacts whatever the logger's `errorDetail` is.
   for (const record of recentRecords(state, limit)) {
     text += `${stringifyRecord(redactRecordForExport(record))}\n`;
   }
@@ -1501,7 +1632,7 @@ function buildSnapshot(
     dropped: state.dropped,
     sinkCount: state.registrations.length,
     sinkFaults: state.sinkFaults,
-    // The export surface redacts whatever the logger's `stackDetail` is.
+    // The export surface redacts whatever the logger's `errorDetail` is.
     records: recentRecords(state, limit).map(redactRecordForExport),
   };
 
@@ -1718,8 +1849,8 @@ export function createLogger(options: LoggerOptions = {}): Logger {
     sinkFaults: 0,
     lastSinkFault: undefined,
     consoleOutput: options.consoleOutput !== false,
-    stackDetail:
-      options.stackDetail === 'full' ? 'full' : DEFAULT_STACK_DETAIL,
+    errorDetail:
+      options.errorDetail === 'full' ? 'full' : DEFAULT_ERROR_DETAIL,
   };
 
   return createBoundLogger(state, toSubsystem(options.subsystem));

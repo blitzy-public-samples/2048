@@ -1520,3 +1520,41 @@ describe('the focus trap over a screen a module renders', () => {
     expect(document.activeElement).toBe(marked);
   });
 });
+
+/* ==========================================================================
+ * F-11. Disposal order around the parallel-board handoff
+ * ======================================================================== */
+
+describe('disposal leaves no accessibility board behind', () => {
+  it('unmounts the board the renderer teardown handed back', () => {
+    window.localStorage.setItem(
+      GAME_STATE_KEY,
+      JSON.stringify(boardWithTiles([{ x: 0, y: 0, value: 8 }])),
+    );
+
+    application = start(document);
+
+    const parallel = document.getElementById('board-a11y');
+
+    // jsdom carries no WebGL context, so the number-only renderer draws the
+    // board and holds the parallel board hidden for as long as it does.
+    expect(parallel?.hidden).toBe(true);
+    expect(parallel?.getAttribute('aria-hidden')).toBe('true');
+
+    application.dispose();
+    application = null;
+
+    // THE HANDOFF LANDED WHILE ITS OWNER WAS STILL ALIVE. Tearing the renderer
+    // down remounts `ParallelBoardLayer` and restores the attributes it hid the
+    // board behind, so running that teardown after the focus owners left a
+    // rebuilt subtree and its listeners in a disposed page. DL-MAIN-23,
+    // DL-NUMBER-07.
+    expect(parallel?.querySelectorAll('[role="gridcell"]').length).toBe(0);
+    expect(parallel?.children.length).toBe(0);
+
+    // The attributes the renderer changed are still given back, so a page that
+    // composes a second application finds the markup it shipped with.
+    expect(parallel?.hidden).toBe(false);
+    expect(parallel?.hasAttribute('aria-hidden')).toBe(false);
+  });
+});

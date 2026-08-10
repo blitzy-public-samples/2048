@@ -2240,6 +2240,95 @@ describe('the health panel rendered from a real surface', () => {
 
 // Leak audit: this suite leaves the host as it found it
 
+describe('forget: the correlation boundary of a held report', () => {
+  it('drops the held report so the next reader re-probes', () => {
+    let probes = 0;
+    const surface = createHealthSurface({
+      storageProbe: (): StorageProbeView => {
+        probes += 1;
+
+        return { supported: true, strategy: 'localStorage' };
+      },
+    });
+
+    surface.check();
+
+    const held = surface.lastReport();
+    const afterFirst = probes;
+
+    expect(held).not.toBeNull();
+
+    // A `report()` before the drop answers from the held reading and probes
+    // nothing further.
+    surface.report();
+
+    expect(probes).toBe(afterFirst);
+    expect(surface.forget()).toBe(true);
+    expect(surface.lastReport()).toBeNull();
+
+    // And after it, the next reader takes a fresh reading — which is what stops
+    // a report taken under one run being answered under the next run's
+    // identifier.
+    const refreshed = surface.report();
+
+    expect(probes).toBeGreaterThan(afterFirst);
+    expect(refreshed).not.toBe(held);
+    expect(refreshed.checks).toHaveLength(HEALTH_CHECK_COUNT);
+  });
+
+  it('reports nothing dropped on a surface that has never been checked', () => {
+    const surface = createHealthSurface();
+
+    expect(surface.forget()).toBe(false);
+    expect(surface.lastReport()).toBeNull();
+  });
+
+  it('keeps the probes and the subscribers, so it discards a reading and not a capability', () => {
+    const reports: HealthReport[] = [];
+    const surface = createHealthSurface({
+      storageProbe: (): StorageProbeView => ({
+        supported: true,
+        strategy: 'localStorage',
+      }),
+    });
+
+    surface.subscribe((report) => {
+      reports.push(report);
+    });
+
+    surface.check();
+    surface.forget();
+
+    // NOT NOTIFIED by the drop: nothing has been checked to notify of.
+    expect(reports).toHaveLength(1);
+
+    surface.check();
+
+    expect(reports).toHaveLength(2);
+    expect(reports[1].checks).toHaveLength(HEALTH_CHECK_COUNT);
+  });
+
+  it('leaves readiness derivable, from a fresh reading', () => {
+    const surface = createHealthSurface({
+      storageProbe: (): StorageProbeView => ({
+        supported: true,
+        strategy: 'localStorage',
+      }),
+      webglProbe: (): WebGLProbeView => ({ supported: true, level: 'webgl2' }),
+    });
+
+    const before: ReadinessReport = surface.readiness();
+
+    expect(before.ready).toBe(true);
+    surface.forget();
+
+    const after: ReadinessReport = surface.readiness();
+
+    expect(after.ready).toBe(true);
+    expect(after.renderer).toBe('webgl');
+  });
+});
+
 describe('isolation from the suites that follow', () => {
   it('leaves the five stubbed globals at their original references', () => {
     // The stubs this suite installs are Element, cancelAnimationFrame and

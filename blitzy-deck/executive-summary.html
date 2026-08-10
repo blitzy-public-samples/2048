@@ -1,0 +1,778 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>2048 Roguelike — Executive Summary</title>
+
+    <!-- Pinned CDN versions. No local file dependency: the Blitzy theme is
+         inlined below rather than linked, so this file is self-contained and is
+         deliberately outside the Vite entry graph. -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css"
+    />
+    <link
+      rel="preconnect"
+      href="https://fonts.googleapis.com"
+    />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Space+Grotesk:wght@500;700&family=Fira+Code:wght@400;500&display=swap"
+    />
+
+    <style>
+      /* ==================================================================
+       * Blitzy visual identity, inlined.
+       * ================================================================== */
+      :root {
+        --blitzy-purple-900: #1b0f38;
+        --blitzy-purple-800: #2a1259;
+        --blitzy-purple-700: #3d1a7a;
+        --blitzy-purple-500: #6d3ce8;
+        --blitzy-purple-300: #a98bf7;
+        --blitzy-teal-500: #12c7c0;
+        --blitzy-teal-300: #62e6df;
+        --blitzy-ink: #f4f1fb;
+        --blitzy-ink-dim: #c6bce0;
+        --blitzy-ink-faint: #9a8fbc;
+        --blitzy-surface: rgba(255, 255, 255, 0.05);
+        --blitzy-surface-strong: rgba(255, 255, 255, 0.09);
+        --blitzy-border: rgba(169, 139, 247, 0.28);
+        --blitzy-good: #34d399;
+        --blitzy-warn: #fbbf24;
+        --blitzy-bad: #fb7185;
+        --blitzy-hero-gradient: linear-gradient(
+          135deg,
+          #1b0f38 0%,
+          #3d1a7a 55%,
+          #0f4f6b 100%
+        );
+        --blitzy-divider-gradient: linear-gradient(
+          120deg,
+          #2a1259 0%,
+          #6d3ce8 60%,
+          #12c7c0 100%
+        );
+        --blitzy-accent-bar-gradient: linear-gradient(
+          90deg,
+          var(--blitzy-purple-500) 0%,
+          var(--blitzy-teal-500) 100%
+        );
+        --blitzy-font-body: "Inter", "Helvetica Neue", Arial, sans-serif;
+        --blitzy-font-display: "Space Grotesk", "Inter", sans-serif;
+        --blitzy-font-mono: "Fira Code", "SFMono-Regular", Consolas, monospace;
+        --blitzy-space-1: 8px;
+        --blitzy-space-2: 16px;
+        --blitzy-space-3: 24px;
+        --blitzy-space-4: 40px;
+        --blitzy-radius: 14px;
+      }
+
+      .reveal {
+        font-family: var(--blitzy-font-body);
+        color: var(--blitzy-ink);
+        font-size: 30px;
+      }
+
+      /* `.reveal-viewport` is a class reveal.js adds to `<body>` at runtime, so
+         the page background is declared on the document as well: without it a
+         deck whose scripts did not load draws light text on the browser's
+         default white. DL-DOC-07. */
+      html,
+      body,
+      .reveal-viewport {
+        background: var(--blitzy-purple-900);
+      }
+
+      /* reveal.js paints its own chrome in its stylesheet's default ink, which
+         is black on the dark slides and unreadable on the bright dividers, so
+         both surfaces are themed here. DL-DOC-07. */
+      .reveal .controls {
+        color: var(--blitzy-teal-300);
+      }
+
+      .reveal .progress {
+        color: var(--blitzy-teal-500);
+      }
+
+      .reveal h1,
+      .reveal h2,
+      .reveal h3 {
+        font-family: var(--blitzy-font-display);
+        color: var(--blitzy-ink);
+        text-transform: none;
+        letter-spacing: -0.01em;
+        margin: 0 0 var(--blitzy-space-2);
+      }
+
+      .reveal h1 {
+        font-size: 92px;
+        line-height: 1.05;
+      }
+
+      .reveal h2 {
+        font-size: 58px;
+      }
+
+      .reveal h3 {
+        font-size: 40px;
+        color: var(--blitzy-teal-300);
+      }
+
+      .reveal p,
+      .reveal li {
+        line-height: 1.45;
+      }
+
+      .reveal section {
+        text-align: left;
+      }
+
+      /* Opaque rather than transparent: the counter sits over both the dark
+         content slides and the bright divider gradient. DL-DOC-07. */
+      .reveal .slide-number {
+        font-family: var(--blitzy-font-mono);
+        background: var(--blitzy-purple-900);
+        color: var(--blitzy-ink-faint);
+      }
+
+      /* ---------- Slide type: title ---------- */
+      .slide-title {
+        background: var(--blitzy-hero-gradient);
+        padding: var(--blitzy-space-4);
+      }
+
+      .slide-title .eyebrow {
+        font-family: var(--blitzy-font-mono);
+        font-size: 24px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--blitzy-teal-300);
+        margin: 0 0 var(--blitzy-space-2);
+      }
+
+      .slide-title .lede {
+        font-size: 34px;
+        color: var(--blitzy-ink-dim);
+        max-width: 26ch;
+      }
+
+      /* ---------- Slide type: divider ---------- */
+      .slide-divider {
+        background: var(--blitzy-divider-gradient);
+        padding: var(--blitzy-space-4);
+      }
+
+      .slide-divider h2 {
+        font-size: 74px;
+      }
+
+      .slide-divider .step {
+        font-family: var(--blitzy-font-mono);
+        font-size: 26px;
+        color: rgba(255, 255, 255, 0.72);
+      }
+
+      /* ---------- Slide type: content ---------- */
+      .slide-content {
+        padding: var(--blitzy-space-3) var(--blitzy-space-4);
+      }
+
+      .slide-content h2 {
+        font-size: 52px;
+      }
+
+      /* ---------- Slide type: closing ---------- */
+      .slide-closing {
+        background: var(--blitzy-hero-gradient);
+        padding: var(--blitzy-space-4);
+      }
+
+      /* ---------- Components ---------- */
+      .accent-bar {
+        width: 220px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--blitzy-accent-bar-gradient);
+        margin: 0 0 var(--blitzy-space-3);
+      }
+
+      .icon-row {
+        display: flex;
+        gap: var(--blitzy-space-3);
+        margin: 0 0 var(--blitzy-space-3);
+      }
+
+      .icon-badge {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 76px;
+        height: 76px;
+        border-radius: var(--blitzy-radius);
+        background: var(--blitzy-surface-strong);
+        border: 1px solid var(--blitzy-border);
+      }
+
+      .icon-badge svg {
+        width: 40px;
+        height: 40px;
+        stroke: var(--blitzy-teal-300);
+        stroke-width: 1.8;
+      }
+
+      .bullets {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .bullets li {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--blitzy-space-2);
+        margin: 0 0 var(--blitzy-space-2);
+        font-size: 30px;
+      }
+
+      .bullets svg {
+        flex: 0 0 auto;
+        width: 30px;
+        height: 30px;
+        margin-top: 6px;
+        stroke: var(--blitzy-purple-300);
+        stroke-width: 2;
+      }
+
+      .two-up {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: var(--blitzy-space-3);
+        align-items: start;
+      }
+
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: var(--blitzy-space-2);
+      }
+
+      .metric {
+        padding: var(--blitzy-space-2);
+        border-radius: var(--blitzy-radius);
+        background: var(--blitzy-surface);
+        border: 1px solid var(--blitzy-border);
+      }
+
+      .metric .value {
+        display: block;
+        font-family: var(--blitzy-font-display);
+        font-size: 54px;
+        color: var(--blitzy-teal-300);
+      }
+
+      .metric .label {
+        display: block;
+        font-size: 20px;
+        color: var(--blitzy-ink-dim);
+      }
+
+      .risk-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 26px;
+      }
+
+      .risk-table th,
+      .risk-table td {
+        padding: 10px 14px;
+        text-align: left;
+        border-bottom: 1px solid var(--blitzy-border);
+      }
+
+      .risk-table th {
+        font-size: 20px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--blitzy-ink-faint);
+      }
+
+      .risk-table svg {
+        width: 26px;
+        height: 26px;
+        stroke: var(--blitzy-warn);
+        vertical-align: -5px;
+      }
+
+      .command {
+        display: inline-block;
+        padding: 10px 18px;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid var(--blitzy-border);
+        font-family: var(--blitzy-font-mono);
+        font-size: 30px;
+        color: var(--blitzy-teal-300);
+      }
+
+      .caption {
+        font-size: 22px;
+        color: var(--blitzy-ink-faint);
+        margin: var(--blitzy-space-1) 0 0;
+      }
+
+      .mermaid {
+        background: var(--blitzy-surface);
+        border: 1px solid var(--blitzy-border);
+        border-radius: var(--blitzy-radius);
+        padding: var(--blitzy-space-2);
+      }
+
+      .mermaid svg {
+        max-height: 620px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="reveal">
+      <div class="slides">
+        <!-- 1. Title -->
+        <section class="slide-title">
+          <div class="accent-bar"></div>
+          <p class="eyebrow">Delivery summary</p>
+          <h1>2048, rebuilt as a roguelike</h1>
+          <p class="lede">
+            A twelve-year-old browser game is now a run-based game with relics,
+            a 3D board, and the tests it never had.
+          </p>
+          <div class="icon-row" aria-hidden="true">
+            <span class="icon-badge"><i data-lucide="dices"></i></span>
+            <span class="icon-badge"><i data-lucide="boxes"></i></span>
+            <span class="icon-badge"><i data-lucide="shield-check"></i></span>
+            <span class="icon-badge"><i data-lucide="gauge"></i></span>
+          </div>
+        </section>
+
+        <!-- 2. Divider -->
+        <section class="slide-divider">
+          <p class="step">01</p>
+          <div class="accent-bar"></div>
+          <h2>What we did</h2>
+          <div class="icon-row" aria-hidden="true">
+            <span class="icon-badge"><i data-lucide="hammer"></i></span>
+          </div>
+        </section>
+
+        <!-- 3. Content -->
+        <section class="slide-content">
+          <h2>Four things shipped</h2>
+          <div class="accent-bar"></div>
+          <ul class="bullets">
+            <li><i data-lucide="split" aria-hidden="true"></i>Game rules separated from the screen.</li>
+            <li><i data-lucide="box" aria-hidden="true"></i>The board now renders as animated 3D blocks.</li>
+            <li><i data-lucide="gem" aria-hidden="true"></i>Sixteen relics, chosen one per stage.</li>
+            <li><i data-lucide="flask-conical" aria-hidden="true"></i>Six thousand automated tests.</li>
+          </ul>
+        </section>
+
+        <!-- 4. Content -->
+        <section class="slide-content">
+          <h2>One change unlocked the rest</h2>
+          <div class="accent-bar"></div>
+          <div class="two-up">
+            <ul class="bullets">
+              <li><i data-lucide="unplug" aria-hidden="true"></i>The rules no longer touch the screen.</li>
+              <li><i data-lucide="radio" aria-hidden="true"></i>They announce what happened instead.</li>
+              <li><i data-lucide="layers" aria-hidden="true"></i>Anything can listen: 3D, relics, sound.</li>
+              <li><i data-lucide="plus-circle" aria-hidden="true"></i>New features stop touching old code.</li>
+            </ul>
+            <div class="mermaid">
+              graph TD
+                R["Game rules"] --> E["Announcement"]
+                E --> V["3D board"]
+                E --> L["Relics"]
+                E --> U["Screens"]
+                E --> O["Monitoring"]
+            </div>
+          </div>
+          <p class="caption">Every listener is independent and optional.</p>
+        </section>
+
+        <!-- 5. Divider -->
+        <section class="slide-divider">
+          <p class="step">02</p>
+          <div class="accent-bar"></div>
+          <h2>Why it matters</h2>
+          <div class="icon-row" aria-hidden="true">
+            <span class="icon-badge"><i data-lucide="trending-up"></i></span>
+          </div>
+        </section>
+
+        <!-- 6. Content -->
+        <section class="slide-content">
+          <h2>Hosting still costs nothing</h2>
+          <div class="accent-bar"></div>
+          <div class="two-up">
+            <ul class="bullets">
+              <li><i data-lucide="cloud-off" aria-hidden="true"></i>No servers, no databases, no accounts.</li>
+              <li><i data-lucide="folder-up" aria-hidden="true"></i>Deployment stays a folder copy.</li>
+              <li><i data-lucide="shield" aria-hidden="true"></i>Nothing to breach, nothing to patch.</li>
+              <li><i data-lucide="infinity" aria-hidden="true"></i>The same free hosting as before.</li>
+            </ul>
+            <div class="mermaid">
+              graph LR
+                B["One build command"] --> D["Output folder"]
+                D --> H["Any static host"]
+                H --> P["Players"]
+            </div>
+          </div>
+        </section>
+
+        <!-- 7. Content -->
+        <section class="slide-content">
+          <h2>The safety net we added</h2>
+          <div class="accent-bar"></div>
+          <div class="metric-grid">
+            <div class="metric">
+              <span class="value">0</span>
+              <span class="label">Tests before this work</span>
+            </div>
+            <div class="metric">
+              <span class="value">5994</span>
+              <span class="label">Automated checks now</span>
+            </div>
+            <div class="metric">
+              <span class="value">136</span>
+              <span class="label">Replay checks now</span>
+            </div>
+            <div class="metric">
+              <span class="value">6</span>
+              <span class="label">Startup health checks</span>
+            </div>
+          </div>
+          <p class="caption">
+            Every change is now checked before it reaches a player.
+          </p>
+        </section>
+
+        <!-- 8. Divider -->
+        <section class="slide-divider">
+          <p class="step">03</p>
+          <div class="accent-bar"></div>
+          <h2>What changed inside</h2>
+          <div class="icon-row" aria-hidden="true">
+            <span class="icon-badge"><i data-lucide="workflow"></i></span>
+          </div>
+        </section>
+
+        <!-- 9. Content -->
+        <section class="slide-content">
+          <h2>Before: everything tangled</h2>
+          <div class="accent-bar"></div>
+          <div class="mermaid">
+            graph TD
+              S["Ten script files&lt;br/&gt;loaded in a fixed order"] --> C["Rules file"]
+              C -->|"writes directly"| P["Page"]
+              C --> G["Board data"]
+              C --> ST["Saved score"]
+              P --> PL["Player"]
+          </div>
+          <p class="caption">
+            The rules wrote to the page, so neither could change alone.
+          </p>
+        </section>
+
+        <!-- 10. Content -->
+        <section class="slide-content">
+          <h2>After: one publisher, many listeners</h2>
+          <div class="accent-bar"></div>
+          <div class="mermaid">
+            graph TD
+              I["Keys, touch, buttons"] --> E["Rules engine"]
+              E --> B["Announcement bus"]
+              B --> R["Relics"]
+              B --> T["3D board"]
+              B --> U["Screens and audio"]
+              B --> M["Monitoring"]
+              E --> SV["Saved run"]
+          </div>
+          <p class="caption">
+            The engine holds no reference to the screen. Adding a relic edits nothing.
+          </p>
+        </section>
+
+        <!-- 11. Content -->
+        <section class="slide-content">
+          <h2>The board reaches players twice</h2>
+          <div class="accent-bar"></div>
+          <div class="two-up">
+            <div class="mermaid">
+              graph LR
+                B["Board state"] --> C["3D canvas"]
+                B --> A["Readable layer"]
+                C --> P["Sighted play"]
+                A --> S["Screen readers"]
+            </div>
+            <ul class="bullets">
+              <li><i data-lucide="eye" aria-hidden="true"></i>Pixels for players who can see them.</li>
+              <li><i data-lucide="ear" aria-hidden="true"></i>Spoken labels for players who cannot.</li>
+              <li><i data-lucide="keyboard" aria-hidden="true"></i>Every action reachable by keyboard.</li>
+              <li><i data-lucide="pause" aria-hidden="true"></i>Motion can be switched off.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- 12. Content -->
+        <section class="slide-content">
+          <h2>Same seed, same run</h2>
+          <div class="accent-bar"></div>
+          <div class="two-up">
+            <div class="mermaid">
+              graph LR
+                SD["Run seed"] --> S1["Tile values"]
+                SD --> S2["Tile places"]
+                SD --> S3["Relic offers"]
+                S1 --> RUN["Identical replay"]
+                S2 --> RUN
+                S3 --> RUN
+            </div>
+            <ul class="bullets">
+              <li><i data-lucide="repeat" aria-hidden="true"></i>A seed replays a run exactly.</li>
+              <li><i data-lucide="bug-off" aria-hidden="true"></i>Bugs become reproducible reports.</li>
+              <li><i data-lucide="share-2" aria-hidden="true"></i>Shareable daily runs become possible later.</li>
+              <li><i data-lucide="lock" aria-hidden="true"></i>Seeds are public, and labelled so.</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- 13. Divider -->
+        <section class="slide-divider">
+          <p class="step">04</p>
+          <div class="accent-bar"></div>
+          <h2>Risks we accepted</h2>
+          <div class="icon-row" aria-hidden="true">
+            <span class="icon-badge"><i data-lucide="triangle-alert"></i></span>
+          </div>
+        </section>
+
+        <!-- 14. Content -->
+        <section class="slide-content">
+          <h2>Four risks, four answers</h2>
+          <div class="accent-bar"></div>
+          <table class="risk-table">
+            <thead>
+              <tr>
+                <th>Risk</th>
+                <th>Mitigation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><i data-lucide="monitor-off" aria-hidden="true"></i> 3D needs modern hardware</td>
+                <td>Numbered board takes over</td>
+              </tr>
+              <tr>
+                <td><i data-lucide="history" aria-hidden="true"></i> Old browsers dropped</td>
+                <td>Deliberate, documented choice</td>
+              </tr>
+              <tr>
+                <td><i data-lucide="terminal" aria-hidden="true"></i> Developers need a build</td>
+                <td>One install, one command</td>
+              </tr>
+              <tr>
+                <td><i data-lucide="video" aria-hidden="true"></i> Video can record blank</td>
+                <td>Check fails unless visible</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- 15. Content -->
+        <section class="slide-content">
+          <h2>How the team starts</h2>
+          <div class="accent-bar"></div>
+          <div class="two-up">
+            <ul class="bullets">
+              <li><i data-lucide="download" aria-hidden="true"></i>Install once with <span class="command">npm install</span></li>
+              <li><i data-lucide="play" aria-hidden="true"></i>Play locally with <span class="command">npm run dev</span></li>
+              <li><i data-lucide="package" aria-hidden="true"></i>Ship with <span class="command">npm run build</span></li>
+              <li><i data-lucide="book-open" aria-hidden="true"></i>Every choice is written down.</li>
+            </ul>
+            <div class="mermaid">
+              graph TD
+                N["npm install"] --> DV["npm run dev"]
+                DV --> T["npm test"]
+                T --> BD["npm run build"]
+                BD --> SH["Static host"]
+            </div>
+          </div>
+        </section>
+
+        <!-- 16. Closing -->
+        <section class="slide-closing">
+          <div class="accent-bar"></div>
+          <h2>Ready for the next stage</h2>
+          <div class="two-up">
+            <ul class="bullets">
+              <li><i data-lucide="check-circle-2" aria-hidden="true"></i>Playable, tested and documented.</li>
+              <li><i data-lucide="rocket" aria-hidden="true"></i>New relics cost hours, not weeks.</li>
+              <li><i data-lucide="calendar" aria-hidden="true"></i>Daily seeded runs are the natural next step.</li>
+              <li><i data-lucide="users" aria-hidden="true"></i>Onboarding is two commands.</li>
+            </ul>
+            <div class="icon-row" aria-hidden="true">
+              <span class="icon-badge"><i data-lucide="flag"></i></span>
+              <span class="icon-badge"><i data-lucide="sparkles"></i></span>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lucide@0.417.0/dist/umd/lucide.min.js"></script>
+
+    <script>
+      "use strict";
+
+      // Mermaid draws on demand, never on load: automatic start would run
+      // before reveal.js has laid the deck out. Diagrams and icons are drawn
+      // after `ready` and offered again after every `slidechanged`.
+      if (typeof mermaid !== "undefined") {
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          theme: "base",
+          themeVariables: {
+            background: "#1b0f38",
+            primaryColor: "#2a1259",
+            primaryBorderColor: "#a98bf7",
+            primaryTextColor: "#f4f1fb",
+            secondaryColor: "#3d1a7a",
+            tertiaryColor: "#0f4f6b",
+            lineColor: "#12c7c0",
+            fontFamily: "Inter, Helvetica Neue, Arial, sans-serif",
+            fontSize: "20px"
+          }
+        });
+      }
+
+      // Diagrams are drawn away from the slide that holds them and the finished
+      // markup is injected, rather than drawn in place: reveal.js keeps every
+      // slide but the current one at `display: none`, mermaid measures label
+      // text through the layout box of the node it is handed, and a box inside a
+      // hidden subtree measures zero, which collapses the drawing to an empty
+      // 16x16 viewBox. `mermaid.render` measures inside a temporary element
+      // mermaid attaches to the document itself, so it is unaffected by which
+      // slide is on screen. `data-diagram-drawn` records the outcome; mermaid's
+      // own `data-processed` is not consulted, because mermaid sets that on a
+      // failed drawing too and a deck that trusted it would never retry.
+      // DL-DOC-07.
+      var DIAGRAM_DRAWN = "data-diagram-drawn";
+      var diagramSources = null;
+
+      function diagramNodes() {
+        return Array.prototype.slice.call(
+          document.querySelectorAll(".mermaid")
+        );
+      }
+
+      // Runs before the first drawing, while every node still holds its source.
+      function captureDiagramSources() {
+        if (diagramSources === null) {
+          diagramSources = diagramNodes().map(function (node) {
+            return node.textContent.trim();
+          });
+        }
+      }
+
+      function drawDiagram(node, source, index) {
+        var drawing;
+
+        node.setAttribute(DIAGRAM_DRAWN, "pending");
+
+        try {
+          drawing = mermaid.render("blitzy-diagram-" + index, source);
+        } catch (error) {
+          node.removeAttribute(DIAGRAM_DRAWN);
+          return;
+        }
+
+        if (!drawing || typeof drawing.then !== "function") {
+          node.removeAttribute(DIAGRAM_DRAWN);
+          return;
+        }
+
+        drawing
+          .then(function (result) {
+            node.innerHTML = result.svg;
+            node.setAttribute(DIAGRAM_DRAWN, "true");
+
+            if (typeof result.bindFunctions === "function") {
+              result.bindFunctions(node);
+            }
+          })
+          .catch(function () {
+            // A diagram that cannot be drawn must not take the deck down and
+            // must not leave a broken frame behind: the node keeps its source
+            // text and is offered again on the next slide change.
+            node.removeAttribute(DIAGRAM_DRAWN);
+          });
+      }
+
+      function drawDiagrams() {
+        if (typeof mermaid === "undefined") {
+          return;
+        }
+
+        captureDiagramSources();
+
+        diagramNodes().forEach(function (node, index) {
+          var source = diagramSources[index];
+
+          if (source && !node.hasAttribute(DIAGRAM_DRAWN)) {
+            drawDiagram(node, source, index);
+          }
+        });
+      }
+
+      function drawIcons() {
+        if (typeof lucide !== "undefined") {
+          lucide.createIcons();
+        }
+      }
+
+      if (typeof Reveal !== "undefined") {
+        Reveal.initialize({
+          width: 1920,
+          height: 1080,
+          margin: 0.04,
+          minScale: 0.2,
+          maxScale: 1.6,
+          hash: true,
+          slideNumber: "c/t",
+          transition: "fade",
+          controls: true,
+          progress: true
+        });
+
+        Reveal.on("ready", function () {
+          drawIcons();
+          drawDiagrams();
+        });
+
+        Reveal.on("slidechanged", function () {
+          drawIcons();
+          drawDiagrams();
+        });
+      } else {
+        // Without reveal.js the markup is still a readable document, so the
+        // icons and diagrams are drawn anyway.
+        drawIcons();
+        drawDiagrams();
+      }
+    </script>
+  </body>
+</html>

@@ -12,8 +12,10 @@ import type {
   UiReporter,
 } from '../../../src/ui/a11y/settings';
 import {
+  SCREEN_INITIAL_FOCUS,
   createFocusManager,
   createParallelBoardLayer,
+  focusInitial,
 } from '../../../src/ui/a11y/focus-manager';
 import type { AnnouncerScheduler } from '../../../src/ui/a11y/live-region';
 import {
@@ -847,5 +849,86 @@ describe('a board renderer hands the parallel layer over rather than emptying it
 
     renderer.dispose();
     document.body.innerHTML = '';
+  });
+});
+
+describe('F-05 stage focus resolves the board surface in force', () => {
+  /**
+   * The game region as index.html declares it: the number-only host first, the
+   * parallel board second, both inside the region the router focuses within.
+   *
+   * @param numberOnlyHoldsLattice Whether the number-only renderer has built a
+   *   lattice, which is also when it hides the parallel board.
+   * @returns The region and the two candidate tab stops.
+   */
+  const region = (
+    numberOnlyHoldsLattice: boolean,
+  ): {
+    container: HTMLElement;
+    parallel: HTMLElement;
+    cells: HTMLElement[];
+  } => {
+    document.body.innerHTML = `
+      <main id="game-main">
+        <div id="board-number-only"></div>
+        <div id="board-a11y" role="grid" tabindex="0"></div>
+      </main>
+    `;
+
+    const container = document.querySelector<HTMLElement>('#game-main')!;
+    const host = document.querySelector<HTMLElement>('#board-number-only')!;
+    const parallel = document.querySelector<HTMLElement>('#board-a11y')!;
+    const cells: HTMLElement[] = [];
+
+    if (numberOnlyHoldsLattice) {
+      for (let index = 0; index < 4; index += 1) {
+        const cell = document.createElement('div');
+
+        cell.setAttribute('role', 'gridcell');
+        cell.setAttribute('tabindex', index === 2 ? '0' : '-1');
+        host.appendChild(cell);
+        cells.push(cell);
+      }
+
+      // What `claimParallelBoard()` does: hidden, never emptied.
+      parallel.hidden = true;
+      parallel.setAttribute('aria-hidden', 'true');
+    }
+
+    return { container, parallel, cells };
+  };
+
+  it('names the number-only tab stop ahead of the parallel host', () => {
+    // Document order decides `querySelector`, and the composition root resolves
+    // the same two names in the same order for the reward restore.
+    expect(SCREEN_INITIAL_FOCUS.stage).toEqual([
+      '#board-number-only [tabindex="0"]',
+      '#board-a11y',
+    ]);
+  });
+
+  it('places stage focus on the lattice cell holding the roving stop', () => {
+    const { cells } = region(true);
+
+    const placement = focusInitial('stage', document.querySelector('#game-main'));
+
+    // The DESIGNATED target, not the first focusable element that happens to be
+    // in the region: the stop had roved to the third cell, and that is where a
+    // returning player resumes reading. DL-FOCUS-04.
+    expect(placement.source).toBe('screen-selector');
+    expect(placement.element).toBe(cells.at(2));
+    expect(document.activeElement).toBe(cells.at(2));
+  });
+
+  it('still places stage focus on the parallel host under the Three renderer', () => {
+    const { parallel } = region(false);
+
+    const placement = focusInitial('stage', document.querySelector('#game-main'));
+
+    // No lattice, so the first selector matches nothing and the parallel board —
+    // the single tab stop that layer publishes — takes it.
+    expect(placement.source).toBe('screen-selector');
+    expect(placement.element).toBe(parallel);
+    expect(document.activeElement).toBe(parallel);
   });
 });

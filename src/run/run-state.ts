@@ -10,10 +10,12 @@
  *   `RunState.runId` identifies the run instance and is persisted with the
  *   envelope. The correlation identifier is derived from the seed AND that run
  *   identifier, is not persisted, and is what the observability layer keys
- *   records on. Both inputs are load-bearing: the seed supplies the prefix a
- *   stream is grouped by, and the run identifier is what separates two runs of
- *   one seed within it. Because the run identifier is persisted, a resumed run
- *   re-derives the identifier it was already reporting under.
+ *   records on. Both inputs are load-bearing, and the run identifier is the
+ *   KEY: every segment of the identifier is derived from the two together, so
+ *   no part of it is a function of the seed alone and an exported record cannot
+ *   be matched against candidate seeds. The run identifier itself is carried in
+ *   no report. Because it is persisted, a resumed run re-derives the identifier
+ *   it was already reporting under. Decision DL-LOG-09.
  *
  *   `runCorrelationId()` below is this module's derivation of it, and is what
  *   the run layer calls when no identifier was injected. It is byte-identical
@@ -2150,6 +2152,42 @@ export interface RunEndedReport {
 }
 
 /**
+ * Whether the run in force is reaching storage.
+ *
+ * `persistent` is the ordinary state. `ephemeral` says a write was refused or
+ * raised, so the run is being played but not saved: a reload will not resume
+ * it.
+ */
+export type RunPersistence = 'persistent' | 'ephemeral';
+
+/**
+ * One TRANSITION of the run's persistence status.
+ *
+ * Reported on the change alone, not per write: a store that has run out of
+ * quota refuses every write of the rest of the run, and a report per attempt
+ * would be one record per turn saying what the first already said.
+ *
+ * This is the PLAYER-FACING half of a write failure. `RunStateWriteFailureReport`
+ * is the diagnostic half and carries the key, the serialised size and the error;
+ * this carries neither, because it exists to be projected into the interface.
+ */
+export interface RunPersistenceStatusReport {
+  readonly correlationId: CorrelationId;
+
+  /** The status now in force. */
+  readonly status: RunPersistence;
+
+  /** The status it replaced. */
+  readonly previous: RunPersistence;
+
+  /**
+   * Writes refused since the run last persisted, counting the one that caused
+   * this transition. `0` on a transition back to `persistent`.
+   */
+  readonly refusedWrites: number;
+}
+
+/**
  * Sink for everything this folder reports: refused payloads, migrations,
  * board-size reconciliations, failed writes and the run lifecycle.
  *
@@ -2165,6 +2203,16 @@ export interface RunReporter {
   ) => void;
 
   readonly onWriteFailed?: (report: RunStateWriteFailureReport) => void;
+
+  /**
+   * The run's persistence status CHANGED. Reported by the run controller
+   * alone, which is the one member of this folder that knows whether the run
+   * is still reaching storage across a sequence of writes.
+   */
+  readonly onPersistenceStatusChanged?: (
+    report: RunPersistenceStatusReport
+  ) => void;
+
   readonly onRunStarted?: (report: RunStartedReport) => void;
   readonly onStageAdvanced?: (report: StageAdvancedReport) => void;
   readonly onRewardOffered?: (report: RewardOfferedReport) => void;
@@ -2188,6 +2236,9 @@ export const NOOP_RUN_REPORTER: RunReporter = Object.freeze({
     return;
   },
   onWriteFailed(): void {
+    return;
+  },
+  onPersistenceStatusChanged(): void {
     return;
   },
   onRunStarted(): void {
@@ -2254,32 +2305,44 @@ function renderHash(hash: number): string {
  * Derives the run correlation identifier from the two members this envelope
  * persists.
  *
+ * THE RUN IDENTIFIER KEYS THE RUN-INSTANCE FORM: every segment is derived from
+ * it and the seed together, so no segment is a function of the seed alone. The
+ * seed-grouping form, derived when `runId` is absent or empty, is unsalted and
+ * therefore recoverable by dictionary search, and exists for a caller that
+ * deliberately wants one identifier per seed. Byte-identical to
+ * `deriveCorrelationId` in src/observability/logger.ts in both forms, pinned by
+ * tests/unit/run/run-state.test.ts. Decision DL-LOG-09.
+ *
  * Neither form is unique by construction — each concatenates 32-bit hashes —
  * so distinct inputs can collide, and a consumer needing exact identity
  * compares `seed` and `runId` themselves.
  *
  * @param seed Seed of the run. Coerced with `String`, so any value is
  *   accepted and none throws.
- * @param runId Run instance identifier. Omit it, or pass an empty value, for
- *   the seed-grouping form.
+ * @param runId Run instance identifier, and the key of the instance form. Omit
+ *   it, or pass an empty value, for the seed-grouping form.
  * @returns An 18-character identifier for the seed-grouping form and a
  *   26-character one for the run-instance form, non-empty for every input, the
  *   empty string included.
  */
 export function runCorrelationId(seed: string, runId?: string): CorrelationId {
   const runSeed = String(seed);
-  const grouped =
-    CORRELATION_ID_PREFIX +
-    renderHash(fnv1a32(runSeed)) +
-    renderHash(djb2Hash32(runSeed));
 
   if (runId === undefined || String(runId) === '') {
-    return grouped;
+    return (
+      CORRELATION_ID_PREFIX +
+      renderHash(fnv1a32(runSeed)) +
+      renderHash(djb2Hash32(runSeed))
+    );
   }
 
   const instance = `${String(runId)}\u0000${runSeed}`;
 
-  return `${grouped}${CORRELATION_ID_INSTANCE_SEPARATOR}${renderHash(
-    fnv1a32(instance) ^ djb2Hash32(instance),
-  )}`;
+  return (
+    CORRELATION_ID_PREFIX +
+    renderHash(fnv1a32(instance)) +
+    renderHash(djb2Hash32(instance)) +
+    CORRELATION_ID_INSTANCE_SEPARATOR +
+    renderHash(fnv1a32(instance) ^ djb2Hash32(instance))
+  );
 }

@@ -10,6 +10,16 @@
 // This module reads no DOM, performs no I/O, consumes no randomness, reads no
 // clock and reports nothing.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, all target-only
+// because no vanilla construct declared a relic:
+//   TR-RELIC-01  `RARITIES` and `Rarity`, the rarity ladder
+//   TR-RELIC-02  `DEFAULT_RARITY_WEIGHTS`, the draw weighting
+//   TR-RELIC-03  `RELIC_FAMILY_NAMES`, `RelicFamilyName` and `RelicFamily`
+//   TR-RELIC-04  `Relic` and `RelicHooks`, the seven-member declaration shape
+//                AAP Contract 3 mandates
+//   TR-RELIC-05  `ActiveRelic` and `PersistedRelic`, the held and persisted
+//                records
+//
 // Decisions: DL-RELIC-01, DL-RELIC-02 (docs/DECISION_LOG.md).
 
 import type { HookHandlerTable } from '../engine/hooks';
@@ -97,6 +107,13 @@ export interface Relic {
   /**
    * Charge budget a run starts this relic with. Absent on a relic that fires
    * for the rest of the run, which is never charge-guarded.
+   *
+   * A budget is spent by the relic's OWN EFFECT: a handler calls
+   * `HookContext.spendCharge()` on the path where its effect takes hold, and
+   * src/engine/hook-bus.ts deducts it once that handler's return has
+   * validated. A dispatch that reached a handler which then did nothing
+   * spends nothing, and at zero the bus's guard skips every handler the relic
+   * binds. Decision DL-HOOKBUS-01.
    */
   readonly charges?: number;
 
@@ -133,7 +150,16 @@ export interface ActiveRelic {
 
   /**
    * Charges remaining, counting down from `definition.charges`. `undefined` on
-   * a relic with no charge budget, which is never charge-guarded.
+   * a relic with no charge budget, which is never charge-guarded; `0` on one
+   * whose budget is spent, whose handlers are skipped.
+   *
+   * WRITTEN ONLY BY THE BUS, and transactionally: src/engine/hook-bus.ts is
+   * the only construct that deducts from it, and a spend requested through
+   * `HookContext.spendCharge` is applied only once that handler's return has
+   * validated, so a handler that asked and then threw, or whose return was
+   * refused, leaves the budget where it stood. `HookBus.consumeCharge` is the
+   * other entry point, which a manual activation reaches, and both paths draw
+   * on this ONE budget however many hooks the relic binds.
    */
   charges: number | undefined;
 

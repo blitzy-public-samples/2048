@@ -27,8 +27,17 @@
 // named above is the only source of draws it reaches for.
 //
 // The catalogue of families, rarities, hooks and charge counts is
-// docs/RELICS.md; the charge guard and the compounding protocol are the named
-// figure of docs/architecture/hook-dispatch-sequence.md.
+// docs/RELICS.md, and the charge guard and the compounding protocol are
+// `Figure 5` of docs/architecture/hook-dispatch-sequence.md. The guard itself is
+// src/engine/hook-bus.ts, which its own suites exercise.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, in declaration
+// order, all target-only because no vanilla construct declared a relic:
+//   TR-BOARD-01  temporal-anchor   onBeforeMove
+//   TR-BOARD-02  tumbler           onBeforeMove
+//   TR-BOARD-03  culling-blade     onAfterMove
+//   TR-BOARD-04  scouring-wind     onAfterMove
+//   TR-BOARD-05  the frozen `BOARD_MANIPULATION_FAMILY` export
 //
 // Decisions: DL-BOARD-01, DL-BOARD-02 (docs/DECISION_LOG.md).
 
@@ -330,8 +339,8 @@ function countTilesWithValue(
  * outer index.
  *
  * @param board The board in force.
- * @returns The column's `x` and the values it held, or `null` where no column
- *   is fully occupied.
+ * @returns The row's `y` and the values it held, in ascending `x`, or `null`
+ *   where no row is fully occupied.
  */
 function firstFullRow(board: ReadonlyGridView): ScouredRow | null {
   const size = board.size;
@@ -715,7 +724,7 @@ const CULLING_BLADE: Relic = Object.freeze({
   charges: CULLING_BLADE_CHARGES,
 });
 
-/** Column clear, on the legendary tier: clears a fully-occupied column. */
+/** Row clear, on the legendary tier: clears a fully-occupied row. */
 const SCOURING_WIND: Relic = Object.freeze({
   id: 'scouring-wind',
   name: 'Scouring Wind',

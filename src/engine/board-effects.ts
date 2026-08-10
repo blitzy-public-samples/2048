@@ -31,6 +31,19 @@
 //   TR-EFFECTS-07  target-only row               `setSpawnWeights`, the
 //                                                substituted spawn
 //                                                distribution
+//
+// Three further rows of the same matrix, the EFFECT area, all target-only and
+// all owned here:
+//   TR-EFFECT-01  the optional `score` a `restoreBoard` reinstates alongside
+//                 the lattice, which an undo needs so a withdrawn move's
+//                 points are withdrawn with it; written by
+//                 src/engine/engine.ts, not here
+//   TR-EFFECT-02  `BoardEffectRequest`, the descriptor form of the same
+//                 commands, for a caller holding a command it did not build
+//                 inline
+//   TR-EFFECT-03  `BoardEffectQueue.refused`, the refusal count a caller and
+//                 the `engine.effect.refused` dispatch counter read
+//
 // Decisions behind this file are recorded in docs/DECISION_LOG.md.
 
 import { Tile } from './tile';

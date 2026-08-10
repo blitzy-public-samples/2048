@@ -7,6 +7,26 @@
  * reads no DOM, holds no clock and consumes no randomness, and it neither
  * originates a seed nor a run identifier: both arrive as arguments.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-RUNSTORE-01  js/local_storage_manager.js L47-L50  the unguarded
+ *                   `JSON.parse` of the stored snapshot, replaced by `load()`,
+ *                   which returns a result for every input
+ *   TR-RUNSTORE-02  js/local_storage_manager.js L57-L59  the handler-free
+ *                   `setItem`, replaced by `save()`, which returns `false` on
+ *                   a failed write including an exhausted quota
+ *   TR-RUNSTORE-03  js/local_storage_manager.js L33-L39  the `catch` that
+ *                   discarded its caught value; every caught value here
+ *                   reaches the injected `RunReporter`
+ *   TR-RUNSTORE-04  js/game_manager.js L36-L45           the lattice rebuilt
+ *                   from the size the snapshot recorded, replaced by
+ *                   `reconcileBoardSize()`, which runs before any grid is
+ *                   constructed
+ *   TR-RUNSTORE-05  js/game_manager.js L88-L89           the over-or-write
+ *                   branch, split into `clear()` and `save()`
+ *   TR-RUNSTORE-06  target-only row                      `RunStatePersistencePort`,
+ *                   `NULL_PERSISTENCE_PORT` and `migrateRunState()`
+ *
  * Decisions: DL-RUNSTORE-01, DL-RUNSTORE-02, DL-RUNSTORE-03, DL-RUNSTORE-04,
  * DL-RUNSTORE-05, DL-RUN-03 (docs/DECISION_LOG.md).
  */

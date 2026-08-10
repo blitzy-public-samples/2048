@@ -6,6 +6,36 @@
 // through `geometryScales` of src/theme/tokens.ts, and the scale is selected
 // once per factory.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-MESH-01  index.html L43-L68            the sixteen static `.grid-cell`
+//                                             elements, replaced by the
+//                                             generated board
+//   TR-MESH-02  index.html L70-L72            the empty `.tile-container`,
+//                                             replaced by the tile layer of
+//                                             `BoardMeshes`
+//   TR-MESH-03  js/html_actuator.js L97-L104  `normalizePosition` and
+//                                             `positionClass`, ported as
+//                                             `cellToWorld()` and
+//                                             `cellToWorldIn()`
+//   TR-MESH-04  style/main.scss L171-L194     the field geometry, as
+//                                             `resolveBoardGeometry()`
+//   TR-MESH-05  style/main.scss L475-L548     the mobile scale, selected once
+//                                             per factory through
+//                                             `geometryScales`
+//   TR-MESH-06  style/main.scss L404-L430     the tile numeral sizes, as
+//                                             `resolveNumeralLayout()` and
+//                                             `NumeralLayout`
+//   TR-MESH-07  target-only row               the extruded block geometry and
+//                                             `tileOutlineSize()`
+//   TR-MESH-08  target-only row               `boardLayers`, the z-order the
+//                                             stylesheet's stacking replaced
+//   TR-MESH-09  target-only row               the numeral texture cache,
+//                                             `numeralCacheBounds` and
+//                                             `isDrawableTileValue()`
+//   TR-MESH-10  target-only row               `createTileMeshFactory()` and
+//                                             `cellArrayIndex()`
+//
 // Decisions: DL-MESH-01, DL-MESH-02, DL-MESH-03, DL-MESH-04
 // (docs/DECISION_LOG.md).
 

@@ -71,6 +71,7 @@ import type { MetricsRegistry } from '../../../src/observability/metrics';
 import {
   BOUNDARY_SPAN_NAMES,
   COMMIT_ATTRIBUTIONS,
+  COMMIT_PHASES,
   DEFAULT_FRAME_BUDGET_MS,
   DEFAULT_TRACE_CAPACITY,
   INERT_SPAN,
@@ -2322,6 +2323,250 @@ describe('attachEngineTracing over the append-only emitter', () => {
       second.recent().filter((record) => record.name === SPAN_NAMES.engineTurn),
     ).toHaveLength(1);
     expect(listenerErrors).toHaveLength(0);
+  });
+});
+
+describe('the effect-only turn: a turn that committed without moving', () => {
+  /** The debug records `attachEngineTracing` accounts a commit with. */
+  const accountedRecords = (): readonly {
+    message: string;
+    fields?: LogFields;
+  }[] => {
+    const held: { message: string; fields?: LogFields }[] = [];
+
+    logger.subscribe((record) => {
+      held.push({ message: record.message, fields: record.fields });
+    });
+
+    return held;
+  };
+
+  it('attributes the idle commit of a reseated board to its turn, not to nothing', () => {
+    logger.setLevel('debug');
+
+    const records = accountedRecords();
+    const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
+
+    attachEngineTracing(events, tracer);
+
+    // The sequence src/engine/engine.ts L1383-L1424 emits when an
+    // `onBeforeMove` effect reseated the board and the slide then moved
+    // nothing: the completion signal carries `moved: false` and the turn
+    // number the commit that follows carries.
+    events.emit('move:before', beforeEvent(false));
+    events.emit('move:after', afterEvent(false));
+    events.emit('state:commit', commitEvent(64));
+
+    const snapshot = tracer.snapshot();
+
+    // NOT AN ANOMALY. Before this was classified, every effect-only turn raised
+    // one, so the anomaly count measured how many undo, shuffle and excise
+    // charges had been spent.
+    expect(snapshot.anomalies).toBe(0);
+
+    // Attributed to the TURN, not to the unattributed bucket.
+    expect(snapshot.commits.turn).toBe(1);
+    expect(snapshot.commits.unattributed).toBe(0);
+    expect(snapshot.commits.lifecycle).toBe(0);
+
+    const accounted = records.filter(
+      (record) => record.message === 'commit outside a turn',
+    );
+
+    expect(accounted).toHaveLength(1);
+    expect(accounted[0].fields?.path).toBe(UNTRACED_COMMIT_PATHS.effectOnly);
+
+    // The turn moved nothing, so its span still closes as `unmoved` and takes
+    // no latency sample.
+    expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.unmoved);
+    expect(latency.count).toBe(0);
+  });
+
+  it('spends the idle turn account on one commit and no more', () => {
+    attachEngineTracing(events, tracer);
+
+    events.emit('move:before', beforeEvent(false));
+    events.emit('move:after', afterEvent(false));
+    events.emit('state:commit', commitEvent(64));
+
+    // A second commit with nothing to explain it is still an anomaly: the
+    // account belongs to one commit.
+    events.emit('state:commit', commitEvent(64));
+
+    expect(tracer.snapshot().anomalies).toBe(1);
+  });
+
+  it('records the idle commit on the stage span under the effect phase', () => {
+    const subscription = attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+    events.emit('state:commit', commitEvent(0));
+    events.emit('move:before', beforeEvent(false));
+    events.emit('move:after', afterEvent(false));
+    events.emit('state:commit', commitEvent(8));
+
+    // The stage span is detached and stays open, so it is settled here to file
+    // its record and the events it collected.
+    subscription.settleStage();
+
+    const phases = oneRecordFor(SPAN_NAMES.engineStage)
+      .events.filter((event) => event.name === SPAN_EVENT_NAMES.stageCommit)
+      .map((event) => event.attributes?.[SPAN_ATTRIBUTES.phase]);
+
+    // KEPT WHERE IT HAPPENED: the setup commit that opened the stage, then the
+    // effect-only commit of the idle turn.
+    expect(phases).toEqual([COMMIT_PHASES.setup, COMMIT_PHASES.effect]);
+  });
+
+  it('closes the span of a withdrawn attempt that committed under the effect outcome', () => {
+    const latency = registry.histogram(METRIC_NAMES.turnLatencyMilliseconds);
+    const subscription = attachEngineTracing(events, tracer);
+
+    // A withdrawn move emits `move:before` and nothing further, so the span is
+    // still open when the caller reports the attempt.
+    events.emit('move:before', beforeEvent(false));
+
+    expect(
+      subscription.settleMove({ resolution: 'cancelled', committed: true }),
+    ).toBe(true);
+
+    expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.effect);
+
+    // `effect` is neither `unmoved` nor `committed`, so the turn-latency
+    // histogram — which measures resolved slides — takes no sample.
+    expect(latency.count).toBe(0);
+  });
+
+  it('closes an idle attempt that committed under the effect outcome too', () => {
+    const subscription = attachEngineTracing(events, tracer);
+
+    events.emit('move:before', beforeEvent(false));
+
+    expect(
+      subscription.settleMove({ resolution: 'idle', committed: true }),
+    ).toBe(true);
+    expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.effect);
+  });
+
+  it('leaves an attempt that committed nothing classified by its resolution', () => {
+    const subscription = attachEngineTracing(events, tracer);
+
+    events.emit('move:before', beforeEvent(false));
+
+    expect(
+      subscription.settleMove({ resolution: 'cancelled', committed: false }),
+    ).toBe(true);
+    expect(oneRecordFor(SPAN_NAMES.engineTurn).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.cancelled);
+  });
+
+  it('accounts for a withdrawn attempt whose commit had already closed its span', () => {
+    logger.setLevel('debug');
+
+    const records = accountedRecords();
+    const subscription = attachEngineTracing(events, tracer);
+
+    // The production order for a withdrawn move that reseated the board: the
+    // engine commits inside `attemptMove`, so the commit closes the span
+    // before the caller can report the withdrawal.
+    events.emit('move:before', beforeEvent(false));
+    events.emit('state:commit', commitEvent(32));
+
+    expect(
+      subscription.settleMove({ resolution: 'cancelled', committed: true }),
+    ).toBe(false);
+
+    const accounted = records.filter(
+      (record) => record.message === 'turn committed without a move',
+    );
+
+    expect(accounted).toHaveLength(1);
+    expect(accounted[0].fields?.resolution).toBe('cancelled');
+    expect(accounted[0].fields?.path).toBe(UNTRACED_COMMIT_PATHS.effectOnly);
+    expect(tracer.snapshot().anomalies).toBe(0);
+  });
+
+  it('accounts for nothing where an ordinary turn resolved', () => {
+    const records = accountedRecords();
+    const subscription = attachEngineTracing(events, tracer);
+
+    events.emit('move:before', beforeEvent(false));
+    events.emit('move:after', afterEvent(true));
+    events.emit('state:commit', commitEvent(32));
+
+    expect(subscription.settleMove({ resolution: 'moved', committed: true }))
+      .toBe(false);
+    expect(
+      records.filter(
+        (record) => record.message === 'turn committed without a move',
+      ),
+    ).toHaveLength(0);
+  });
+});
+
+describe('settleStage: the stage span of a run that ended', () => {
+  it('closes an open stage span under the unwound outcome, carrying the run outcome', () => {
+    const subscription = attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(3));
+    events.emit('state:commit', commitEvent(4, 3));
+
+    expect(
+      subscription.settleStage(SPAN_OUTCOMES.unwound, {
+        [SPAN_ATTRIBUTES.action]: 'lost',
+      }),
+    ).toBe(true);
+
+    const stage = oneRecordFor(SPAN_NAMES.engineStage);
+
+    expect(stage.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.unwound,
+    );
+    expect(stage.attributes[SPAN_ATTRIBUTES.action]).toBe('lost');
+    expect(stage.attributes[SPAN_ATTRIBUTES.stageIndex]).toBe(3);
+    expect(tracer.snapshot().open).toBe(0);
+  });
+
+  it('unwinds by default and is idempotent', () => {
+    const subscription = attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+
+    expect(subscription.settleStage()).toBe(true);
+    expect(subscription.settleStage()).toBe(false);
+    expect(oneRecordFor(SPAN_NAMES.engineStage).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.unwound);
+  });
+
+  it('reports no span where no stage is open, and after detaching', () => {
+    const subscription = attachEngineTracing(events, tracer);
+
+    expect(subscription.settleStage()).toBe(false);
+
+    events.emit('stage:start', stageStartEvent(0));
+    subscription();
+
+    expect(subscription.settleStage()).toBe(false);
+  });
+
+  it('leaves a stage that RESOLVED closed as committed', () => {
+    const subscription = attachEngineTracing(events, tracer);
+
+    events.emit('stage:start', stageStartEvent(0));
+    events.emit('stage:end', stageEndEvent(0));
+
+    expect(subscription.settleStage()).toBe(false);
+    expect(oneRecordFor(SPAN_NAMES.engineStage).attributes[
+      SPAN_ATTRIBUTES.outcome
+    ]).toBe(SPAN_OUTCOMES.committed);
   });
 });
 

@@ -6,6 +6,14 @@
 // Every duration in a descriptor is in milliseconds and every time handed to
 // the Web Audio API is in seconds.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated, all target-only because js/ plays no sound:
+//   TR-AUDIO-01  `createSoundEngine()` and the audio context created and
+//                resumed on a user gesture
+//   TR-AUDIO-02  the oscillator and noise-buffer voices
+//   TR-AUDIO-03  `subscribe()` and the per-event voice selection
+//   TR-AUDIO-04  the mute and volume surface, and `getState()`
+//
 // Decisions: DL-AUDIO-01, DL-AUDIO-02, DL-AUDIO-03, DL-AUDIO-04
 // (docs/DECISION_LOG.md).
 

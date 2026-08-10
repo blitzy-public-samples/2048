@@ -626,3 +626,384 @@ describe('the rendered snapshot carries the unestablished-status flag', () => {
     renderer.dispose();
   });
 });
+
+describe('F-05 the focused board coordinate survives a rebuild', () => {
+  /** Every cell of the lattice, in row-major order. */
+  const cellsOf = (host: HTMLElement): HTMLElement[] =>
+    Array.from(host.querySelectorAll<HTMLElement>('.grid-cell'));
+
+  /** The index of the one cell carrying the tab stop, or `-1`. */
+  const tabStopIndex = (host: HTMLElement): number =>
+    cellsOf(host).findIndex((cell) => cell.getAttribute('tabindex') === '0');
+
+  it('keeps the tab stop and focus on the same coordinate across a resize', () => {
+    const { host } = hostFixture();
+    const renderer = createNumberOnlyRenderer({ host });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    // Column 2, row 1 of a four-wide board.
+    cellsOf(host).at(1 * 4 + 2)?.focus();
+
+    expect(tabStopIndex(host)).toBe(6);
+
+    renderer.render(commitOf(5, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    // The rebuild discards every node, so the coordinate — not the index — is
+    // what carries: column 2, row 1 of a five-wide board. DL-FOCUS-04.
+    expect(tabStopIndex(host)).toBe(1 * 5 + 2);
+    expect(document.activeElement).toBe(cellsOf(host).at(1 * 5 + 2));
+
+    renderer.dispose();
+  });
+
+  it('clamps a carried coordinate into a board that shrank under it', () => {
+    const { host } = hostFixture();
+    const renderer = createNumberOnlyRenderer({ host });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+    cellsOf(host).at(3 * 4 + 3)?.focus();
+
+    renderer.render(commitOf(3, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    // The far corner of a three-wide board, which is the nearest cell to the
+    // one a cursed relic took away.
+    expect(tabStopIndex(host)).toBe(2 * 3 + 2);
+    expect(document.activeElement).toBe(cellsOf(host).at(8));
+
+    renderer.dispose();
+  });
+
+  it('moves no focus when the rebuild happened with focus elsewhere', () => {
+    const { host } = hostFixture();
+    const elsewhere = document.createElement('button');
+
+    document.body.appendChild(elsewhere);
+
+    const renderer = createNumberOnlyRenderer({ host });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+    cellsOf(host).at(2)?.focus();
+    elsewhere.focus();
+
+    renderer.render(commitOf(4, [{ x: 1, y: 1, value: 4 }]));
+    renderer.render(commitOf(5, [{ x: 1, y: 1, value: 4 }]));
+    drain(renderer);
+
+    // The coordinate is still adopted, so a later Tab opens on it; focus itself
+    // stays where the player put it.
+    expect(tabStopIndex(host)).toBe(2);
+    expect(document.activeElement).toBe(elsewhere);
+
+    renderer.dispose();
+  });
+});
+
+describe('F-05 the coordinate crosses the parallel-board handoff', () => {
+  /** A parallel board whose cells carry the layer's coordinate attributes. */
+  const parallelWithCells = (size: number): HTMLElement => {
+    const board = document.createElement('div');
+
+    board.id = 'board-a11y';
+    board.setAttribute('role', 'grid');
+    board.setAttribute('aria-busy', 'true');
+
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        const cell = document.createElement('div');
+
+        cell.setAttribute('role', 'gridcell');
+        cell.setAttribute('data-cell-x', String(x));
+        cell.setAttribute('data-cell-y', String(y));
+        cell.setAttribute('tabindex', '-1');
+        board.appendChild(cell);
+      }
+    }
+
+    return board;
+  };
+
+  /** A lifecycle double recording what the renderer asked of the layer. */
+  const layerDouble = (
+    withFocusCell: boolean,
+  ): {
+    layer: {
+      isMounted(): boolean;
+      mount(): boolean;
+      unmount(): void;
+      focusCell?(x: number, y: number): boolean;
+    };
+    calls: string[];
+  } => {
+    const calls: string[] = [];
+    let mounted = true;
+    const layer: {
+      isMounted(): boolean;
+      mount(): boolean;
+      unmount(): void;
+      focusCell?(x: number, y: number): boolean;
+    } = {
+      isMounted: (): boolean => mounted,
+      mount: (): boolean => {
+        mounted = true;
+        calls.push('mount');
+
+        return true;
+      },
+      unmount: (): void => {
+        mounted = false;
+        calls.push('unmount');
+      },
+    };
+
+    if (withFocusCell) {
+      layer.focusCell = (x: number, y: number): boolean => {
+        calls.push(`focusCell:${String(x)},${String(y)}`);
+
+        return true;
+      };
+    }
+
+    return { layer, calls };
+  };
+
+  it('adopts the coordinate the parallel board was focused on', () => {
+    const host = document.createElement('div');
+
+    host.id = 'board-number-only';
+    host.hidden = true;
+
+    const parallel = parallelWithCells(4);
+
+    document.body.append(host, parallel);
+
+    const handedOver = parallel.children[2 * 4 + 1] as HTMLElement;
+
+    handedOver.setAttribute('tabindex', '0');
+    handedOver.focus();
+
+    const renderer = createNumberOnlyRenderer({ host, parallelBoard: parallel });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    const cells = Array.from(host.querySelectorAll<HTMLElement>('.grid-cell'));
+
+    // Column 1, row 2 — read off the layer's own data attributes, so the swap
+    // opens the lattice on the cell the player was reading. DL-FOCUS-04.
+    expect(cells.at(2 * 4 + 1)?.getAttribute('tabindex')).toBe('0');
+    expect(document.activeElement).toBe(cells.at(2 * 4 + 1));
+
+    renderer.dispose();
+  });
+
+  it('hands the coordinate back to the layer taking the board over', () => {
+    const { host, parallel } = hostFixture();
+    const { layer, calls } = layerDouble(true);
+    const renderer = createNumberOnlyRenderer({
+      host,
+      parallelBoard: parallel,
+      parallelBoardLayer: layer,
+    });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    Array.from(host.querySelectorAll<HTMLElement>('.grid-cell'))
+      .at(0 * 4 + 2)
+      ?.focus();
+
+    renderer.unmount();
+
+    expect(calls).toEqual(['unmount', 'mount', 'focusCell:2,0']);
+
+    renderer.dispose();
+  });
+
+  it('takes no focus from elsewhere when it hands the board back', () => {
+    const { host, parallel } = hostFixture();
+    const elsewhere = document.createElement('button');
+
+    document.body.appendChild(elsewhere);
+
+    const { layer, calls } = layerDouble(true);
+    const renderer = createNumberOnlyRenderer({
+      host,
+      parallelBoard: parallel,
+      parallelBoardLayer: layer,
+    });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+    elsewhere.focus();
+    renderer.unmount();
+
+    // The board comes back, and the caret stays in the dialog or on the card
+    // the player had reached.
+    expect(calls).toEqual(['unmount', 'mount']);
+    expect(document.activeElement).toBe(elsewhere);
+
+    renderer.dispose();
+  });
+
+  it('restores a layer that publishes no focusCell without throwing', () => {
+    const { host, parallel } = hostFixture();
+    const { layer, calls } = layerDouble(false);
+    const renderer = createNumberOnlyRenderer({
+      host,
+      parallelBoard: parallel,
+      parallelBoardLayer: layer,
+    });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+    Array.from(host.querySelectorAll<HTMLElement>('.grid-cell')).at(5)?.focus();
+
+    expect(() => {
+      renderer.unmount();
+    }).not.toThrow();
+
+    // `focusCell` is optional on the port, so the attributes come back and the
+    // focus move is simply not made.
+    expect(calls).toEqual(['unmount', 'mount']);
+    expect(parallel.hasAttribute('aria-hidden')).toBe(false);
+
+    renderer.dispose();
+  });
+});
+
+describe('F-05 the coordinate crosses a renderer swap', () => {
+  const cellsOf = (host: HTMLElement): HTMLElement[] =>
+    Array.from(host.querySelectorAll<HTMLElement>('.grid-cell'));
+
+  const tabStopIndex = (host: HTMLElement): number =>
+    cellsOf(host).findIndex((cell) => cell.getAttribute('tabindex') === '0');
+
+  it('publishes the cell its tab stop stands on, and whether focus is on it', () => {
+    const { host } = hostFixture();
+    const renderer = createNumberOnlyRenderer({ host });
+
+    // No lattice yet: there is no coordinate to report.
+    expect(renderer.focusedCell()).toBeNull();
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    expect(renderer.focusedCell()).toEqual({ x: 0, y: 0, focused: false });
+
+    cellsOf(host).at(2 * 4 + 1)?.focus();
+
+    // Column 1, row 2, and this surface is the one holding focus — which is what
+    // lets a caller tell a live caret from a stale tab stop.
+    expect(renderer.focusedCell()).toEqual({ x: 1, y: 2, focused: true });
+
+    renderer.dispose();
+  });
+
+  it('opens the first lattice on the cell the caller supplied', () => {
+    const { host } = hostFixture();
+    const renderer = createNumberOnlyRenderer({
+      host,
+      initialCell: { x: 2, y: 1 },
+    });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    // The next Tab lands there. Focus is NOT moved: a swap reached from the
+    // settings dialog leaves focus in that dialog. DL-NUMBER-08.
+    expect(tabStopIndex(host)).toBe(1 * 4 + 2);
+    expect(document.activeElement).not.toBe(cellsOf(host).at(6));
+
+    renderer.dispose();
+  });
+
+  it('lets a rebuild s own carry outrank the supplied cell', () => {
+    const { host } = hostFixture();
+    const renderer = createNumberOnlyRenderer({
+      host,
+      initialCell: { x: 3, y: 3 },
+    });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    expect(tabStopIndex(host)).toBe(15);
+
+    cellsOf(host).at(1)?.focus();
+    renderer.render(commitOf(5, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    // Consumed on the first build, so the supplied corner cannot come back over
+    // a coordinate the player has since moved to.
+    expect(tabStopIndex(host)).toBe(1);
+
+    renderer.dispose();
+  });
+
+  it('clamps a supplied cell into the board in force', () => {
+    const { host } = hostFixture();
+    const renderer = createNumberOnlyRenderer({
+      host,
+      initialCell: { x: 9, y: 9 },
+    });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    expect(tabStopIndex(host)).toBe(15);
+
+    renderer.dispose();
+  });
+
+  it('lets a live handoff outrank the supplied cell', () => {
+    const host = document.createElement('div');
+
+    host.id = 'board-number-only';
+    host.hidden = true;
+
+    const parallel = document.createElement('div');
+
+    parallel.id = 'board-a11y';
+    parallel.setAttribute('role', 'grid');
+
+    for (let y = 0; y < 4; y += 1) {
+      for (let x = 0; x < 4; x += 1) {
+        const cell = document.createElement('div');
+
+        cell.setAttribute('role', 'gridcell');
+        cell.setAttribute('data-cell-x', String(x));
+        cell.setAttribute('data-cell-y', String(y));
+        cell.setAttribute('tabindex', '-1');
+        parallel.appendChild(cell);
+      }
+    }
+
+    document.body.append(host, parallel);
+
+    const holding = parallel.children[3 * 4 + 0] as HTMLElement;
+
+    holding.setAttribute('tabindex', '0');
+    holding.focus();
+
+    const renderer = createNumberOnlyRenderer({
+      host,
+      parallelBoard: parallel,
+      initialCell: { x: 1, y: 1 },
+    });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    // Where focus IS beats where the caller guessed it was: column 0, row 3.
+    expect(tabStopIndex(host)).toBe(3 * 4 + 0);
+    expect(document.activeElement).toBe(cellsOf(host).at(12));
+
+    renderer.dispose();
+  });
+});

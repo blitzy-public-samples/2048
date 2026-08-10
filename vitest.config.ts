@@ -10,6 +10,12 @@
 // @vitest-environment jsdom` on its first line, which overrides the project's
 // environment for that file alone.
 //
+// any kind. One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every
+// row of this file's area enumerated, all target-only:
+//   TR-TEST-01  the two environment-split projects and their partitioning globs
+//   TR-TEST-02  the shared setup file and the persistence teardown it registers
+//   TR-TEST-03  the exclusions that keep the snapshot and Playwright trees out
+//
 // Decisions: DL-TEST-01, DL-FIXTURE-03, DL-FIXTURE-04, DL-TEST-02, DL-TEST-03
 // (docs/DECISION_LOG.md).
 

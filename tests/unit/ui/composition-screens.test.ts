@@ -365,6 +365,41 @@ describe('a cold load', () => {
     expect(showing()).toBe('screen-run-start');
   });
 
+  it('plays the seed the controller reduced, and clears the field behind it', () => {
+    application = start(document);
+
+    const field = el('#run-start-seed') as HTMLInputElement;
+
+    // Reduced by `normalizeEnteredSeed`: the surrounding whitespace goes, so
+    // the value the run is played under is not the text that was typed.
+    field.value = '  padded-seed  ';
+    el('#run-start-begin').click();
+
+    // THE READBACK PORT IS COMPOSED. Left uncomposed the screen could not learn
+    // what its text was reduced to, so no reduction was ever visible.
+    expect(application.run.seed()).toBe('padded-seed');
+
+    // The state machine left run start inside the press, and its departure
+    // clears the field: the reduced seed is NOT written back into a screen that
+    // is no longer showing, so the next visit opens empty.
+    expect(hidden('screen-run-start')).toBe(true);
+    expect(field.value).toBe('');
+    expect(el('#run-start-seed-status').hidden).toBe(true);
+
+    // The reduction is still REPORTED, which is the observable half of the
+    // readback: the screen compared what it emitted with what the run is played
+    // under and found them different.
+    const adjusted = application.metrics
+      .snapshot()
+      .series.filter(
+        (entry) =>
+          entry.labels['report'] === 'ui.runStart.seed.adjusted' &&
+          entry.kind === 'counter',
+      );
+
+    expect(adjusted.length).toBeGreaterThan(0);
+  });
+
   it('begins the run from the begin-run control, on the entered seed', () => {
     application = start(document);
 
@@ -457,6 +492,98 @@ describe('a cleared stage', () => {
     // The tray lists what is held, in pickup order.
     expect(el('#relic-tray').children).toHaveLength(1);
   });
+
+  it('returns focus to the board tab stop the renderer in force holds', () => {
+    storeRun(NEAR_CLEAR_BOARD);
+    application = start(document);
+
+    const cells = (): HTMLElement[] => [
+      ...el('#board-number-only').querySelectorAll<HTMLElement>(
+        '[role="gridcell"]',
+      ),
+    ];
+
+    // The stop is roved off the first cell while the stage is the state in
+    // force, as reading the board does, so a restore that resolved the wrong
+    // surface cannot pass by landing on cell one.
+    cells().at(6)?.focus();
+
+    expect(cells().at(6)?.getAttribute('tabindex')).toBe('0');
+
+    press('ArrowLeft', 'ArrowLeft');
+    el('.stage-progress-continue').click();
+
+    expect(showing()).toBe('screen-reward');
+
+    el(`#screen-reward .relic-card[data-relic-id="${offeredIds()[0] ?? ''}"]`)
+      .click();
+
+    // BACK ON THE COORDINATE IT LEFT. `#board-a11y` is hidden for the whole of a
+    // number-only session, so a restore naming only that host restored to an
+    // element that cannot take focus, and the caret was left wherever the
+    // dismissed screen had it. DL-FOCUS-04.
+    const active = document.activeElement;
+
+    expect(cells().indexOf(active as HTMLElement)).toBe(6);
+    expect(active?.getAttribute('tabindex')).toBe('0');
+    expect(el('#board-a11y').hidden).toBe(true);
+  });
+
+  it('announces the offer on entry and the acquisition once per press', async () => {
+    /**
+     * Every distinct line the live region held while the queue drained. The
+     * region holds ONE line at a time and holds it across several tasks, so a
+     * repeated sample of the same text is one line rather than several.
+     */
+    const collect = async (): Promise<string[]> => {
+      const lines: string[] = [];
+
+      for (let turn = 0; turn < 24; turn += 1) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
+
+        const text = (
+          document.querySelector('#live-region')?.textContent ?? ''
+        ).toLowerCase();
+
+        if (text.trim() !== '' && text !== lines[lines.length - 1]) {
+          lines.push(text);
+        }
+      }
+
+      return lines;
+    };
+
+    storeRun(NEAR_CLEAR_BOARD);
+    application = start(document);
+    press('ArrowLeft', 'ArrowLeft');
+    el('.stage-progress-continue').click();
+
+    const entering = await collect();
+
+    // ONE offer line, read as the reward state was entered rather than on the
+    // commit that drew the cards. DL-REWARD-14.
+    expect(
+      entering.filter((line) => line.includes('choose a relic')),
+    ).toHaveLength(1);
+    expect(entering.some((line) => line.includes('relic acquired'))).toBe(
+      false,
+    );
+
+    const chosen = offeredIds()[0] ?? '';
+
+    el(`#screen-reward .relic-card[data-relic-id="${chosen}"]`).click();
+
+    const choosing = await collect();
+
+    // ONE acquisition line for the pointer press: the screen carries no region
+    // of its own, so the transaction is the single speaker and a card press and
+    // a digit press are announced identically.
+    expect(
+      choosing.filter((line) => line.includes('relic acquired')),
+    ).toHaveLength(1);
+  });
 });
 
 /* ==========================================================================
@@ -464,6 +591,38 @@ describe('a cleared stage', () => {
  * ========================================================================== */
 
 describe('a lost run', () => {
+  it('restarts no board from a terminal state, and leaves the ended run intact', () => {
+    storeRun(BLOCKED_BOARD, 8, 4_096);
+    application = start(document);
+
+    expect(showing()).toBe('screen-game-over');
+
+    const before = application.engine.serialize();
+    const endedRun = application.run.lastSummary();
+
+    // THE GATE ITSELF, which is what refuses an action however it arrives: a
+    // remapped binding, a generated control or a caller's own emission all
+    // resolve against this one decision. DL-ROUTER-39.
+    expect(application.router.authorizes('restart')).toBe(false);
+
+    // Every modality that reaches `restart`: the key, the header control and the
+    // retained overlay control. `restart` discards the board inside the run in
+    // force, and this run has ENDED — so all three are refused and the board the
+    // player lost on is still the board on screen. DL-ROUTER-39, DL-CONTROL-08.
+    press('r', 'KeyR');
+    el('.restart-button').click();
+    el('.retry-button').click();
+
+    expect(application.engine.serialize()).toEqual(before);
+    expect(showing()).toBe('screen-game-over');
+    expect(application.run.lastSummary()).toEqual(endedRun);
+
+    // The way out is the screen's own edge, which is what AAP Figure 6 declares.
+    el('#screen-game-over [data-action="acknowledge"]').click();
+
+    expect(showing()).toBe('screen-run-summary');
+  });
+
   it('reaches the terminal screen, the summary and back to run start', () => {
     // A board with no move left, at a stage its highest tile does not clear, so
     // the opening commit is a loss and nothing else.

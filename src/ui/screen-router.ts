@@ -523,19 +523,12 @@ export type AuthorizationScreen = ScreenName | 'settings';
 /**
  * The exact screens each action is authorized in.
  *
- * Every entry but three mirrors `TRANSITIONS`: an action that drives a trigger
- * is authorized exactly where that trigger has an outgoing edge — `move` and
+ * Every entry but two mirrors `TRANSITIONS`: an action that drives a trigger is
+ * authorized exactly where that trigger has an outgoing edge — `move` and
  * `restart` from `stage`, `startRun` from `runStart`, `continueStage` from
  * `stageClear`, `selectReward` from `reward`, `keepPlaying` and `endRun` from
- * `won`. The three that do not:
+ * `won`. The two that do not:
  *
- *   `restart`        widened beyond its `stage` edge to `runStart`, `won`,
- *                    `gameOver` and `runSummary`, because
- *                    `LEGACY_CONTROL_BINDINGS` of ../input/on-screen-controls
- *                    declares `.retry-button` in the `'overlay'` context on
- *                    purpose — that is the control js/html_actuator.js L51
- *                    offered on a terminal turn. It is absent from `reward`:
- *                    the stage is cleared and a relic must be taken.
  *   `activateRelic`  drives no trigger; the relic tray is part of the board, so
  *                    it is authorized in `stage` alone.
  *   `openSettings`   drives no trigger and is reachable from every state, which
@@ -543,19 +536,24 @@ export type AuthorizationScreen = ScreenName | 'settings';
  *                    ../input/keymap declares. It is absent from `'settings'`,
  *                    which is the `'already-open'` refusal stated as data.
  *
+ * `restart` IS THE BOARD'S OWN ACTION AND `stage` IS ITS ONLY STATE. AAP Figure
+ * 6 declares exactly one restart edge, `stage --restart--> stage`, and the sole
+ * subscriber discards the board and opens a fresh one inside the run in force.
+ * Authorizing it in `runStart`, `won`, `gameOver` or `runSummary` therefore
+ * offered a board reset in states where the run has ended or has not begun: the
+ * ended run's summary, seed and relics stood while the board silently returned
+ * to its opening tiles. A new run is reached through the screens' own triggers
+ * instead — `acknowledge` to the summary, `newRun` to run start, `startRun`
+ * from there — and `LEGACY_CONTROL_BINDINGS` of ../input/on-screen-controls
+ * narrows `.retry-button` to the `'game'` context to match. DL-ROUTER-39.
+ *
  * `'settings'` appears for `closeSettings` and for nothing else, so while the
  * dialog is topmost EVERY other action is refused by table lookup rather than
  * by a special case.
  */
 export const ACTION_SCREENS = Object.freeze({
   move: Object.freeze<AuthorizationScreen[]>(['stage']),
-  restart: Object.freeze<AuthorizationScreen[]>([
-    'runStart',
-    'stage',
-    'won',
-    'gameOver',
-    'runSummary',
-  ]),
+  restart: Object.freeze<AuthorizationScreen[]>(['stage']),
   keepPlaying: Object.freeze<AuthorizationScreen[]>(['won']),
   startRun: Object.freeze<AuthorizationScreen[]>(['runStart']),
   selectReward: Object.freeze<AuthorizationScreen[]>(['reward']),
@@ -2358,9 +2356,10 @@ export function createScreenRouter(
   /**
    * The container focus is placed inside for a state.
    *
-   * `stage` resolves to the game region: the designated target
-   * `SCREEN_INITIAL_FOCUS` declares for it — `#board-a11y` — is a
-   * descendant of that region and not of `#screen-hud`.
+   * `stage` resolves to the game region: every target `SCREEN_INITIAL_FOCUS`
+   * declares for it — the number-only lattice's roving cell under
+   * `#board-number-only`, then `#board-a11y` — is a descendant of that region
+   * and not of `#screen-hud`. DL-FOCUS-04.
    */
   const focusContainerFor = (screen: ScreenName): Element | null =>
     screen === 'stage'

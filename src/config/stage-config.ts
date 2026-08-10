@@ -4,6 +4,13 @@
  * Type declarations, frozen constants and pure functions only: this module
  * imports nothing, reads no DOM, consumes no randomness and performs no I/O.
  *
+ * traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+ * module's area enumerated:
+ *   TR-STAGE-01  `StageGoalKind`, `StageGoal` and the two goal variants
+ *   TR-STAGE-02  `evaluateStageGoal` and `StageGoalProgress`
+ *   TR-STAGE-03  `StageConfig` and `stageGoalForIndex`
+ *   TR-STAGE-04  `createDefaultStageConfig` and `DEFAULT_STAGE_CONFIG`
+ *
  * Decisions: DL-STAGE-01, DL-STAGE-02, DL-STAGE-03 (docs/DECISION_LOG.md).
  */
 

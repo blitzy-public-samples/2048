@@ -6,6 +6,14 @@
  * platform's own randomness keeps its stock behaviour for the lifetime of the
  * process.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece:
+ *   TR-RNG-01  js/game_manager.js L71  the spawn-value `Math.random()` call
+ *   TR-RNG-02  js/grid.js L41          the spawn-position `Math.random()` call
+ *   TR-RNG-03  target-only row         `createSeededRng` and the `SeededRng`
+ *                                      interface
+ *   TR-RNG-04  target-only row         the bounded seed and resume cursor
+ *   TR-RNG-05  target-only row         `pick`, `weighted` and `int`
+ *
  * Decisions: DL-RNG-01, DL-RNG-02, DL-RNG-03 (docs/DECISION_LOG.md).
  */
 

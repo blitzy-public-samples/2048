@@ -384,15 +384,35 @@ describe('deriveCorrelationId', () => {
     expect(deriveCorrelationId(seed, 'instance-one')).toBe(first);
   });
 
-  it('keeps the seed-grouping prefix inside the instance identifier', () => {
+  it('keeps no seed-only segment inside the instance identifier', () => {
     const seed = 'run-seed-prefixed';
     const grouped = deriveCorrelationId(seed);
     const instance = deriveCorrelationId(seed, 'instance');
 
-    // A stream can still be grouped by seed with a prefix match, which is what
-    // retaining the seed in the derivation buys.
-    expect(instance.startsWith(grouped)).toBe(true);
+    // KEYED, NOT PREFIXED. Every segment of the instance form is derived from
+    // the run identifier and the seed together, so the form a dictionary CAN
+    // recover — the seed-grouping one — appears nowhere inside it. It did
+    // appear, as the leading 18 characters, and that made every exported
+    // identifier a matcher for candidate seeds.
     expect(instance).toHaveLength(26);
+    expect(instance.startsWith(grouped)).toBe(false);
+    expect(instance).not.toContain(grouped.slice('run-'.length));
+
+    // The shape is unchanged: the prefix, 14 characters, a separator and 7.
+    expect(instance).toMatch(/^run-[0-9a-z]{14}-[0-9a-z]{7}$/);
+    expect(grouped).toMatch(/^run-[0-9a-z]{14}$/);
+  });
+
+  it('changes every segment when the run instance changes', () => {
+    const seed = 'run-seed-keyed';
+    const first = deriveCorrelationId(seed, 'instance-one');
+    const second = deriveCorrelationId(seed, 'instance-two');
+
+    // Both segments move with the key, which is what stops a reader lining two
+    // runs of one seed up — and stops a holder of candidate seeds testing them
+    // against either segment without the key.
+    expect(first.slice(0, 18)).not.toBe(second.slice(0, 18));
+    expect(first.slice(-7)).not.toBe(second.slice(-7));
   });
 
   it('treats an absent and an empty run instance as the grouping form', () => {
@@ -1593,7 +1613,7 @@ describe('emitted records are bounded and carry no source location', () => {
       runSeed: SUITE_SEED,
       subsystem: SUITE_SUBSYSTEM,
       consoleOutput: false,
-      stackDetail: 'full',
+      errorDetail: 'full',
     });
 
     logger.subscribe((record: LogRecord): void => {
@@ -1613,6 +1633,99 @@ describe('emitted records are bounded and carry no source location', () => {
     expect(logger.snapshot().records[0].error?.stack).not.toMatch(
       SOURCE_LOCATION_PATTERN
     );
+  });
+
+  it('redacts the MESSAGE a sink receives, and its causes', () => {
+    const { logger, records } = createCapturingLogger();
+    const cause = new Error(
+      'ENOENT: no such file or directory, open ' +
+        "'/home/player/Documents/2048/save.json'",
+    );
+    const thrown = new Error(
+      'The module at https://example.test/assets/index-a1b2c3.js failed',
+      { cause },
+    );
+
+    logger.error('a load failed', undefined, thrown);
+
+    const error = records[0].error;
+
+    // THE MESSAGE IS THE PART A CONSOLE LINE SHOWS FIRST, and it carried the
+    // very locations the stack beside it had redacted.
+    expect(error?.message).not.toContain('example.test');
+    expect(error?.message).toContain(logRecordBounds.redactedLocation);
+    expect(error?.cause?.message).not.toContain('/home/player');
+    expect(error?.cause?.message).toContain(logRecordBounds.redactedLocation);
+
+    // The wording either side of the location is kept: a redacted message must
+    // still say what went wrong.
+    expect(error?.cause?.message).toContain('ENOENT');
+  });
+
+  it('redacts a payload fragment a parse failure quoted', () => {
+    const { logger, records } = createCapturingLogger();
+
+    // What `JSON.parse` reports for a truncated payload: a fragment of the text
+    // it was given, which for this product's own keys carries the run seed the
+    // player typed.
+    logger.error(
+      'the stored run could not be read',
+      undefined,
+      new SyntaxError(
+        'Unexpected end of JSON input at ' +
+          '"{\\"seed\\":\\"my-private-seed-text-here\\",\\"stageIndex\\":0}"',
+      ),
+    );
+
+    expect(records[0].error?.message).not.toContain('my-private-seed-text');
+    expect(records[0].error?.message).toContain('Unexpected end of JSON input');
+  });
+
+  it('redacts a credential-like assignment, keeping its key', () => {
+    const { logger, records } = createCapturingLogger();
+
+    logger.error(
+      'a request was refused',
+      undefined,
+      new Error('refused: token=abc123def456 session=zzz'),
+    );
+
+    const message = records[0].error?.message ?? '';
+
+    expect(message).not.toContain('abc123def456');
+    expect(message).not.toContain('zzz');
+
+    // The keys survive, so the record still says WHICH value was withheld.
+    expect(message).toContain('token=');
+    expect(message).toContain('session=');
+  });
+
+  it('keeps the raw message for a private development sink and redacts the ' +
+    'export anyway', () => {
+    const records: LogRecord[] = [];
+    const logger = createLogger({
+      runSeed: SUITE_SEED,
+      subsystem: SUITE_SUBSYSTEM,
+      consoleOutput: false,
+      errorDetail: 'full',
+    });
+
+    logger.subscribe((record: LogRecord): void => {
+      records.push(record);
+    });
+
+    logger.error(
+      'a load failed',
+      undefined,
+      new Error('failed to open /srv/app/dist/assets/index.js'),
+    );
+
+    // The one mode that opts back in, and it opts in for the sink alone.
+    expect(records[0].error?.message).toContain('/srv/app/dist/assets');
+    expect(logger.toJsonLines()).not.toContain('/srv/app/dist/assets');
+    expect(
+      logger.snapshot().records[0].error?.message,
+    ).not.toContain('/srv/app/dist/assets');
   });
 
   it('bounds a record whose fields are wide, deep or huge', () => {

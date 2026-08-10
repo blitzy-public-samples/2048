@@ -7,6 +7,30 @@
 // `DEFAULT_FRAME_BUDGET_MS` carries the 16 of js/animframe_polyfill.js L13,
 // `Math.max(0, 16 - (currTime - lastTime))`.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-TRACE-01  js/html_actuator.js L13       the frame `actuate` wrapped
+//                                              every DOM write in
+//   TR-TRACE-02  js/html_actuator.js L69       the nested frame inside
+//                                              `addTile`
+//   TR-TRACE-03  js/application.js L2          the frame construction was
+//                                              deferred to
+//   TR-TRACE-04  js/animframe_polyfill.js L13  the 16ms budget, carried as
+//                                              `DEFAULT_FRAME_BUDGET_MS`
+//   TR-TRACE-05  js/game_manager.js L130,      the turn boundary, where the
+//                L91-L97                       turn span opens and closes
+//   TR-TRACE-06  js/keyboard_input_manager.js  the appended listener array
+//                L18-L23                       `attachEngineTracing` attaches
+//                                              through
+//   TR-TRACE-07  target-only row               the span vocabulary,
+//                                              `SPAN_NAMES`, `SPAN_NAME_LIST`
+//                                              and `BOUNDARY_SPAN_NAMES`
+//   TR-TRACE-08  target-only row               the bounded span-record buffer
+//   TR-TRACE-09  target-only row               the parent stack and the span
+//                                              identifier
+//   TR-TRACE-10  target-only row               `createBoundaryTracing` and the
+//                                              boundary helpers
+//
 // Decisions: DL-TRACE-01, DL-TRACE-02, DL-TRACE-03, DL-TRACE-04, DL-TRACE-05,
 // DL-TRACE-06, DL-TRACE-07, DL-TRACE-08, DL-TRACE-09, DL-TRACE-10,
 // DL-TRACE-11, DL-TRACE-12 (docs/DECISION_LOG.md).
@@ -80,8 +104,8 @@ export const SPAN_NAME_LIST: readonly SpanName[] = Object.freeze([
 
 /**
  * The module-boundary chain, in the order one turn reaches it, and the list
- * validation gate V8 is asserted against. The chain is drawn as a named
- * Mermaid figure in docs/architecture/hook-dispatch-sequence.md.
+ * validation gate V8 is asserted against. The chain is drawn as `Figure 5`,
+ * "Hook Dispatch Sequence", in docs/architecture/hook-dispatch-sequence.md.
  */
 export const BOUNDARY_SPAN_NAMES: readonly SpanName[] = Object.freeze([
   SPAN_NAMES.inputDispatch,
@@ -144,11 +168,24 @@ export const SPAN_ATTRIBUTES = Object.freeze({
   commits: 'commits',
 } as const);
 
-/** Every outcome a span closes with, frozen. */
+/**
+ * Every outcome a span closes with, frozen.
+ *
+ * `effect` is the outcome of a turn that COMMITTED STATE WITHOUT MOVING: an
+ * `onBeforeMove` handler reseated the board — an undo restoring an anchored
+ * position, a permutation, an excision — and the slide then resolved to
+ * nothing, or the same handler withdrew the move outright.
+ * `Engine.attemptMove` reports those as `{ resolution: 'idle' | 'cancelled',
+ * committed: true }` (src/engine/engine.ts L1319-L1339, L1383-L1424), so they
+ * are neither `unmoved` nor `committed`: the turn changed the board, and no
+ * tile slid. Closed under this outcome the turn is left out of
+ * `turn_latency_milliseconds`, which measures resolved slides.
+ */
 export const SPAN_OUTCOMES = Object.freeze({
   committed: 'committed',
   cancelled: 'cancelled',
   unmoved: 'unmoved',
+  effect: 'effect',
   blocked: 'blocked',
   failed: 'failed',
   superseded: 'superseded',
@@ -159,11 +196,17 @@ export const SPAN_OUTCOMES = Object.freeze({
 /**
  * Every phase a `state:commit` arriving with no turn span open belongs to,
  * frozen.
+ *
+ * `effect` is the effect-only commit of a turn whose span the `move:after`
+ * listener has already closed: the engine emits `move:after` carrying
+ * `moved: false` and THEN commits the board the pre-move effect left, so that
+ * commit arrives after the span it belongs to has gone.
  */
 export const COMMIT_PHASES = Object.freeze({
   setup: 'setup',
   stage: 'stage',
   continue: 'continue',
+  effect: 'effect',
   unknown: 'unknown',
 } as const);
 
@@ -193,6 +236,20 @@ export type FinalMoveResolution =
 export interface FinalMoveResult {
   /** Which path the attempt took. */
   readonly resolution: FinalMoveResolution;
+
+  /**
+   * Whether the attempt committed state, as `MoveAttempt.committed` of
+   * src/engine/engine.ts reports it.
+   *
+   * `true` beside a resolution of `'idle'` or `'cancelled'` is the legal
+   * effect-only turn: an `onBeforeMove` handler reseated the board and the
+   * slide resolved to nothing, or the move was withdrawn after the board had
+   * already changed. Such a turn closes under `SPAN_OUTCOMES.effect`.
+   *
+   * Optional so a caller holding the boolean alone still reports the path it
+   * took; absent is read as `false`.
+   */
+  readonly committed?: boolean;
 }
 
 /**
@@ -212,6 +269,31 @@ const MOVE_SPAN_OUTCOMES: Readonly<Record<FinalMoveResolution, SpanOutcome>> =
   });
 
 /**
+ * The two resolutions that can arrive with `committed: true` — the effect-only
+ * turn — as against the three that cannot.
+ */
+const EFFECT_ONLY_RESOLUTIONS: readonly FinalMoveResolution[] = Object.freeze([
+  'idle',
+  'cancelled',
+]);
+
+/**
+ * The outcome one whole attempt closes its span under.
+ *
+ * `SPAN_OUTCOMES.effect` for a withdrawn or idle attempt that COMMITTED, and
+ * the resolution's own outcome otherwise.
+ *
+ * @param result The attempt's outcome as its caller reports it.
+ * @returns The span outcome.
+ */
+function moveSpanOutcome(result: FinalMoveResult): SpanOutcome {
+  return result.committed === true &&
+    EFFECT_ONLY_RESOLUTIONS.includes(result.resolution)
+    ? SPAN_OUTCOMES.effect
+    : MOVE_SPAN_OUTCOMES[result.resolution];
+}
+
+/**
  * The value `settledStageIndex` carries while no closed stage span is
  * standing.
  */
@@ -227,6 +309,13 @@ export const UNTRACED_COMMIT_PATHS = Object.freeze({
 
   /** `endStage`: emits `stage:end`, then commits. */
   stageEnd: 'stage:end',
+
+  /**
+   * `settleEffectOnlyTurn`: emits `move:after` carrying `moved: false`, which
+   * closes the turn span, and then commits the board the pre-move effect
+   * left.
+   */
+  effectOnly: 'move:effect',
 } as const);
 
 /** One of the paths `UNTRACED_COMMIT_PATHS` declares. */
@@ -524,9 +613,9 @@ export interface TraceSnapshot {
 
   /**
    * Commits observed with no turn span open: the setup, stage and continue
-   * commits of src/engine/engine.ts, which are lifecycle commits rather than
-   * anomalies. Counted by `attachEngineTracing` through
-   * `recordLifecycleCommit`.
+   * commits of src/engine/engine.ts and the effect-only commit of an idle
+   * turn, none of which is an anomaly. Counted by `attachEngineTracing`
+   * through `recordLifecycleCommit`.
    */
   readonly lifecycleCommits: number;
   /** How the `state:commit` emissions seen were attributed. */
@@ -712,11 +801,48 @@ export interface EngineTracingSubscription {
    * Safe on every path: a committed turn has already closed its own span and a
    * blocked move opened none, so both are no-ops.
    *
+   * `FinalMoveResult.committed` is what separates an attempt that changed
+   * nothing from the effect-only turn — idle or withdrawn, yet committed
+   * because an `onBeforeMove` handler reseated the board. The second closes
+   * under `SPAN_OUTCOMES.effect`, which is neither `unmoved` nor `committed`
+   * and takes no turn-latency sample.
+   *
    * @param result The attempt's outcome. `'failed'` is the caller's to
    *   report: an attempt that threw returned no outcome at all.
    * @returns `true` when a span was open and has been closed.
    */
   readonly settleMove: (result: FinalMoveResult) => boolean;
+
+  /**
+   * Closes the stage span a run that ENDED left open, and reports whether
+   * there was one.
+   *
+   * WHY A caller has to say so. A stage span opens on `stage:start` and closes
+   * on `stage:end`, and `stage:end` is emitted only where a stage RESOLVED —
+   * `RunController.endStage()`. Two terminal paths end a run without one: a
+   * loss, where `RunController.onCommit` finishes the run on `event.over`
+   * (src/run/run-controller.ts L2712-L2717), and an explicit end-run from the
+   * run-summary screen, where `endRun()` finishes it directly. Neither emits
+   * `stage:end`, so the span of the stage that was being played stayed open
+   * until a LATER stage superseded it or the subscription detached, which
+   * dated the stage a reader saw to the whole gap between runs.
+   *
+   * The caller that knows the run ended — the composition root, from the run
+   * reporter's own completion report — closes it here.
+   *
+   * Safe when no stage span is open, after detaching, and repeatedly: each
+   * does nothing.
+   *
+   * @param outcome Outcome to close the span under; `'unwound'` by default,
+   *   which is the outcome of a stage that ended without resolving.
+   * @param attributes Extra attributes for the closing record, such as the run
+   *   outcome that ended it.
+   * @returns `true` when a span was open and has been closed.
+   */
+  readonly settleStage: (
+    outcome?: SpanOutcome,
+    attributes?: SpanAttributes,
+  ) => boolean;
 
   /** The turn span open right now, or `undefined` between turns. */
   readonly currentTurnSpan: () => Span | undefined;
@@ -2331,6 +2457,17 @@ export function attachEngineTracing(
   let expectedUntracedCommit: string | null = null;
 
   /**
+   * The turn number an idle `move:after` announced, or `null` when the last
+   * turn observed was not idle.
+   *
+   * `move:after` on an idle turn carries the number the commit that MAY follow
+   * it will carry (src/engine/engine.ts L1400-L1403), so a commit arriving
+   * with no turn span and this number is that turn's own effect-only commit
+   * rather than a lifecycle commit or an unattributed one.
+   */
+  let idleTurnNumber: number | null = null;
+
+  /**
    * Classifies a `state:commit` that arrived with no turn span open.
    *
    * The classification `Tracer.recordLifecycleCommit` counts under, and the
@@ -2353,6 +2490,10 @@ export function attachEngineTracing(
     openedStage: boolean,
     commit: StateCommitEvent,
   ): CommitPhase => {
+    if (path === UNTRACED_COMMIT_PATHS.effectOnly) {
+      return COMMIT_PHASES.effect;
+    }
+
     if (path === UNTRACED_COMMIT_PATHS.stageEnd) {
       return COMMIT_PHASES.stage;
     }
@@ -2496,6 +2637,10 @@ export function attachEngineTracing(
         // A turn supersedes a lifecycle emission awaiting a commit: the commit
         // this turn ends with is the turn's own.
         expectedUntracedCommit = null;
+
+        // No earlier idle turn's commit can be accounted for once a new turn
+        // has begun.
+        idleTurnNumber = null;
         turnStart = readNow();
         turnSpan = tracer.startSpan(SPAN_NAMES.engineTurn, {
           attributes: {
@@ -2567,6 +2712,11 @@ export function attachEngineTracing(
         span.setAttribute(SPAN_ATTRIBUTES.terminated, payload.terminated);
 
         if (!payload.moved) {
+          // CLOSED HERE STILL, so a caller that never settles is left with no
+          // open span — and the turn number is kept, because the engine may
+          // yet commit the board a pre-move effect reseated. The commit
+          // listener recognises that commit by this number.
+          idleTurnNumber = payload.turn;
           endTurn(SPAN_OUTCOMES.unmoved);
         }
       }),
@@ -2609,7 +2759,23 @@ export function attachEngineTracing(
           // stage span open and no turn span, and it is recorded on the stage
           // span. A commit with NEITHER an armed path nor a stage span has no
           // boundary to belong to and is reported as an anomaly.
-          const path = expectedUntracedCommit;
+          //
+          // THE EFFECT-ONLY COMMIT IS THE THIRD BOUNDARY, and it belongs to a
+          // TURN rather than to a lifecycle path: an `onBeforeMove` handler
+          // reseated the board, the slide then moved nothing, and the engine
+          // emitted `move:after` — which closed this turn's span — before
+          // committing what the effect left. It is recognised by the turn
+          // number that emission announced, spent once, and attributed to the
+          // turn.
+          const effectOnly =
+            idleTurnNumber !== null && payload.turn === idleTurnNumber;
+
+          idleTurnNumber = null;
+
+          const path = effectOnly
+            ? UNTRACED_COMMIT_PATHS.effectOnly
+            : expectedUntracedCommit;
+
           expectedUntracedCommit = null;
 
           // KEPT WHERE IT HAPPENED, whatever accounts for it. The commit is
@@ -2625,16 +2791,19 @@ export function attachEngineTracing(
           tracer.recordLifecycleCommit(phase);
 
           // AND INTO THE THREE-WAY BREAKDOWN, beside the turn commits
-          // accounted below: `lifecycle` for a commit an observed signal
-          // explains, and `unattributed` for one nothing does — which is the
-          // same commit this reports as an anomaly a few lines on.
-          // `state:commit` carries no commit source (AAP 0.6.1.1 fixes its
-          // members), so a lifecycle commit made outside the accounted paths
-          // and a commit no engine method produced share that bucket.
+          // accounted below: `turn` for the effect-only commit, whose turn is
+          // known, `lifecycle` for a commit an observed signal explains, and
+          // `unattributed` for one nothing does — which is the same commit
+          // this reports as an anomaly a few lines on. `state:commit` carries
+          // no commit source (AAP 0.6.1.1 fixes its members), so a lifecycle
+          // commit made outside the accounted paths and a commit no engine
+          // method produced share that bucket.
           tracer.recordCommitAttribution(
-            phase === COMMIT_PHASES.unknown
-              ? COMMIT_ATTRIBUTIONS.unattributed
-              : COMMIT_ATTRIBUTIONS.lifecycle,
+            effectOnly
+              ? COMMIT_ATTRIBUTIONS.turn
+              : phase === COMMIT_PHASES.unknown
+                ? COMMIT_ATTRIBUTIONS.unattributed
+                : COMMIT_ATTRIBUTIONS.lifecycle,
             {
               phase,
               score: payload.score,
@@ -2687,12 +2856,21 @@ export function attachEngineTracing(
         }
 
         expectedUntracedCommit = null;
+        idleTurnNumber = null;
 
         turnSpan.setAttribute(SPAN_ATTRIBUTES.score, payload.score);
         turnSpan.setAttribute(
           SPAN_ATTRIBUTES.terminated,
           payload.terminated,
         );
+
+        // A COMMIT REACHING AN OPEN SPAN IS THAT TURN'S OWN, and the state it
+        // carries was committed, so the span closes as `committed` however the
+        // slide resolved. The WITHDRAWN effect-only turn reaches here too — the
+        // engine commits the board its `onBeforeMove` effect reseated before
+        // `attemptMove` returns — and `settleMove` accounts for it once the
+        // caller reports the resolution, which is the only point at which a
+        // withdrawal is observable.
         endTurn(SPAN_OUTCOMES.committed);
         tracer.recordCommitAttribution(COMMIT_ATTRIBUTIONS.turn);
   });
@@ -2778,13 +2956,47 @@ export function attachEngineTracing(
     return true;
   };
 
-  // The outcome of A WHOLE ATTEMPT, not of the boolean it projects to.
-  const settleMove = (result: FinalMoveResult): boolean =>
-    settleTurn(MOVE_SPAN_OUTCOMES[result.resolution]);
+  // The outcome of A WHOLE ATTEMPT, not of the boolean it projects to, and
+  // `effect` where that attempt committed without moving.
+  const settleMove = (result: FinalMoveResult): boolean => {
+    const closed = settleTurn(moveSpanOutcome(result));
+
+    // THE WITHDRAWN EFFECT-ONLY TURN, ACCOUNTED FOR. Its commit reached the
+    // turn span while it was still open and closed it, so there is nothing left
+    // to settle — but the withdrawal is observable only here, from the outcome
+    // the caller holds, and without this record a reader saw a committed turn
+    // and no statement that the move it committed for never resolved.
+    if (
+      !closed &&
+      !detached &&
+      result.committed === true &&
+      EFFECT_ONLY_RESOLUTIONS.includes(result.resolution)
+    ) {
+      tracer.reportExpected('turn committed without a move', {
+        path: UNTRACED_COMMIT_PATHS.effectOnly,
+        resolution: result.resolution,
+      });
+    }
+
+    return closed;
+  };
 
   return Object.assign(detach, {
     settleTurn,
     settleMove,
+
+    settleStage: (
+      outcome: SpanOutcome = SPAN_OUTCOMES.unwound,
+      attributes?: SpanAttributes,
+    ): boolean => {
+      if (detached || stageSpan === undefined) {
+        return false;
+      }
+
+      endStage(outcome, attributes);
+
+      return true;
+    },
 
     closeIdleTurn: (): void => {
       settleTurn();

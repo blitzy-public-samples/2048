@@ -15,6 +15,11 @@
 //   TR-HOOK-05  onAfterMove   js/game_manager.js L185-L189 loss, actuation
 //   TR-HOOK-06  onStageEnd    no vanilla analogue, target-only row
 //
+// One further row of the same matrix, target-only and owned here:
+//   TR-EFFECT-04  the board-write vocabulary re-exported from this module, so
+//                 a handler takes its context and its command types from one
+//                 module
+//
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
 //   DL-HOOK-01  the exact six names AAP R2 mandates as the whole hook surface

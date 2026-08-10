@@ -47,6 +47,7 @@ import {
   METRIC_LABELS,
   METRIC_NAMES,
   METRIC_PREFIX,
+  attachRngCursorMetrics,
   createMetricsRegistry,
   isValidMetricName,
 } from '../../../src/observability/metrics';
@@ -3859,6 +3860,115 @@ describe('the registry reports through the logger it was given', () => {
   });
 });
 
+describe('attachRngCursorMetrics: the one cursor fold both callers install', () => {
+  /** The `rng_draws_total` series of one substream. */
+  const drawsFor = (
+    registry: MetricsRegistry,
+    stream: string,
+  ): number | undefined => {
+    const held = registry
+      .snapshot()
+      .series.find(
+        (series) =>
+          series.name === METRIC_NAMES.rngDrawsTotal &&
+          series.labels[METRIC_LABELS.stream] === stream,
+      );
+
+    return held !== undefined && held.kind === 'counter'
+      ? held.value
+      : undefined;
+  };
+
+  it('folds the cursors of every named substream on each committed state', () => {
+    const registry = createMetricsRegistry();
+    const streams = createRngStreams('cursor-fold');
+    let commits = 0;
+    let listeners: ((payload: unknown) => void)[] = [];
+    const events = {
+      on: (
+        _event: 'state:commit',
+        listener: (payload: unknown) => void,
+      ): (() => void) => {
+        listeners.push(listener);
+
+        return (): void => {
+          listeners = listeners.filter((held) => held !== listener);
+        };
+      },
+    };
+    const stop = attachRngCursorMetrics(events, registry, () => {
+      commits += 1;
+
+      return streams.snapshotCursors();
+    });
+
+    streams.stream('spawn-value').next();
+    streams.stream('spawn-value').next();
+    streams.stream('spawn-position').next();
+
+    for (const listener of listeners) {
+      listener({});
+    }
+
+    expect(commits).toBe(1);
+    expect(drawsFor(registry, 'spawn-value')).toBe(2);
+    expect(drawsFor(registry, 'spawn-position')).toBe(1);
+    expect(drawsFor(registry, 'relic-draw')).toBe(0);
+
+    // FOLDED ABSOLUTELY, so a second reading of the same cursors adds nothing.
+    for (const listener of listeners) {
+      listener({});
+    }
+
+    expect(drawsFor(registry, 'spawn-value')).toBe(2);
+
+    // READING TAKES NO DRAW: the cursors after two folds are the cursors before
+    // them.
+    expect(streams.snapshotCursors()['spawn-value']).toBe(2);
+
+    stop();
+
+    for (const listener of listeners) {
+      listener({});
+    }
+
+    expect(commits).toBe(2);
+    expect(listeners).toHaveLength(0);
+  });
+
+  it('contains a reader that throws, reports it, and stays subscribed', () => {
+    const registry = createMetricsRegistry();
+    let listener: ((payload: unknown) => void) | null = null;
+    const stop = attachRngCursorMetrics(
+      {
+        on: (
+          _event: 'state:commit',
+          held: (payload: unknown) => void,
+        ): (() => void) => {
+          listener = held;
+
+          return (): void => {
+            listener = null;
+          };
+        },
+      },
+      registry,
+      () => {
+        throw new Error('the cursor reader failed');
+      },
+    );
+
+    expect(() => listener?.({})).not.toThrow();
+    expect(registry.snapshot().rejected).toBeGreaterThan(0);
+
+    // Nothing was folded, so the per-stream series was never created.
+    expect(drawsFor(registry, 'spawn-value')).toBeUndefined();
+
+    stop();
+    stop();
+  });
+});
+
 describe('two registries share no state', () => {
   afterEach((): void => {
     vi.restoreAllMocks();
@@ -4439,5 +4549,62 @@ describe('the exposition validator has teeth', () => {
     );
 
     expectRejected(corrupted, 'carries trailing content');
+  });
+});
+
+describe('the metadata budget is charged per retained series, not per call', () => {
+  // The budget drained with call VOLUME rather than with label CARDINALITY: the
+  // label characters were charged on every resolve, including for a series that
+  // already existed. A bounded two-label set therefore exhausted 262144
+  // characters after roughly five thousand increments, and from then on every
+  // observation was refused into a detached series and reported, so the counter
+  // silently stopped recording mid-session and the report repeated once per
+  // observation. Decision DL-METRIC-07.
+  const OBSERVATIONS = 8000;
+
+  it('keeps counting one series over far more calls than the budget covers', () => {
+    const logger = createSilentLogger('run-budget-volume');
+    const registry = createMetricsRegistry({ logger });
+
+    for (let index = 0; index < OBSERVATIONS; index += 1) {
+      registry
+        .counter('suite_reports_total', {
+          report: 'engine.turn.committed',
+          subsystem: 'engine',
+        })
+        .inc();
+    }
+
+    expect(loggedReasons(logger)).not.toContain('metadataBudgetReached');
+    expect(registry.toPrometheusText()).toContain(
+      `suite_reports_total{report="engine.turn.committed",subsystem="engine"} ${OBSERVATIONS}`,
+    );
+  });
+
+  it('serves the same series object on every resolve after the first', () => {
+    const registry = createMetricsRegistry();
+    const labels = { report: 'ui.hud.commit', subsystem: 'ui' };
+
+    const first = registry.counter('suite_repeat_total', labels);
+    const second = registry.counter('suite_repeat_total', labels);
+
+    expect(second).toBe(first);
+  });
+
+  it('still admits a second, distinct label set after many repeats', () => {
+    const logger = createSilentLogger('run-budget-distinct');
+    const registry = createMetricsRegistry({ logger });
+
+    for (let index = 0; index < OBSERVATIONS; index += 1) {
+      registry.counter('suite_two_total', { report: 'first' }).inc();
+    }
+
+    registry.counter('suite_two_total', { report: 'second' }).inc(5);
+
+    const text = registry.toPrometheusText();
+
+    expect(text).toContain(`suite_two_total{report="first"} ${OBSERVATIONS}`);
+    expect(text).toContain('suite_two_total{report="second"} 5');
+    expect(loggedReasons(logger)).not.toContain('metadataBudgetReached');
   });
 });

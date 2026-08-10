@@ -2,6 +2,22 @@
  * Web Storage key registry. String declarations only: this module imports
  * nothing and touches no storage.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-KEYS-01  js/local_storage_manager.js L22  `bestScore`, the frozen
+ *                                                unprefixed literal
+ *   TR-KEYS-02  js/local_storage_manager.js L23  `gameState`, the frozen
+ *                                                unprefixed literal
+ *   TR-KEYS-03  js/local_storage_manager.js L31  the probe's key literal,
+ *                                                minted here as
+ *                                                `STORAGE_PROBE_KEY`
+ *   TR-KEYS-04  target-only row                  `STORAGE_NAMESPACE` and
+ *                                                `namespacedKey()`
+ *   TR-KEYS-05  target-only row                  `RUN_STATE_KEY`
+ *   TR-KEYS-06  target-only row                  `OwnedStorageKey`,
+ *                                                `isOwnedStorageKey()` and
+ *                                                `OWNED_STORAGE_KEYS`
+ *
  * Decisions: DL-KEYS-01, DL-KEYS-02, DL-KEYS-03 (docs/DECISION_LOG.md).
  */
 

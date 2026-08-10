@@ -27,10 +27,9 @@ way, the identifier is the answer.
 
 **Figure numbering in this document is local to it.** Its one figure is
 `Figure C1`. The unprefixed Figures 1 through 8 belong to `docs/architecture/`
-and `docs/TRACEABILITY_MATRIX.md`, **both of which are planned and have not
-landed at this commit**; none of those figures is reproduced here, and where this
-document names one of those paths it is naming where a subject will be
-documented rather than where it is.
+and `docs/TRACEABILITY_MATRIX.md`; none of them is reproduced here, so a
+reference to one of those numbers is a reference into those documents and never
+into this one.
 
 ## Contents
 
@@ -421,8 +420,9 @@ draw selects uniformly among the empty cells, with no distribution to configure.
 Both call sites are now substreams: the value is drawn from `spawn-value` and
 the cell from `spawn-position`, and the value is drawn before the cell, which is
 the order the two original call sites were reached in.
-The substream figure is planned for `docs/architecture/data-flow.md`, which has
-not landed; it is not duplicated here either way.
+The substream figure is `Figure 7` of
+[`docs/architecture/data-flow.md`](architecture/data-flow.md); it is not
+duplicated here.
 
 ### 3.2 The board-size hierarchy: read this before changing 4
 
@@ -463,7 +463,7 @@ layer — and the two are only equal while no board-mutating relic is active.
 
 ### 3.3 The factory, the frozen template, and the two named merge functions
 
-`src/config/default-config.ts` exports seven identifiers.
+`src/config/default-config.ts` exports nine identifiers.
 
 | Export | Kind | What it is |
 |---|---|---|
@@ -474,6 +474,8 @@ layer — and the two are only equal while no board-mutating relic is active.
 | `DEFAULT_BOARD_SIZE` | constant | `4`. The starting value of `RulesConfig.boardSize`, and the value `src/theme/tokens.ts` mirrors. |
 | `MAX_BOARD_SIZE` | constant | `16`. The one board-edge ceiling every allocating module measures a candidate against, so an edge cannot be accepted by one module and refused by another. Decision `DL-DEFAULT-02`. |
 | `isSupportedBoardSize(value)` | type guard | Pure, total and accepts `unknown`: `true` only for a positive safe integer at or below `MAX_BOARD_SIZE`. Rejects `NaN`, both infinities, fractions, negatives, zero, magnitudes beyond the safe-integer range and every non-number. Candidate edges arrive from persisted JSON, from a `state:commit` payload and from a cursed relic's state slot, so this is the single gate they pass through. |
+| `snapshotRulesConfig(config)` | function | Takes the run's baseline: a **freshly allocated, unfrozen** copy with its own `spawn`, its own two spawn arrays and its own `merge`, holding the SAME two merge function references the live config holds. Reads `config` and writes nothing, so a baseline taken at composition survives every later mutation of the live object. |
+| `restoreRulesConfig(target, baseline)` | function | Writes every mutable member of the LIVE object back to the baseline's values **in place** — through the same `target`, the same `target.spawn` and the same `target.merge` — replacing the two spawn arrays with fresh copies of the baseline's, and returns `target`. The three members a relic effect can write (`boardSize`, `merge.canMerge`, `spawn.weights`) are all returned. Decision `DL-DEFAULT-04`. |
 
 Both merge functions are named exports, not anonymous expressions buried in the
 factory. The practical consequence is that a relic can **wrap or substitute**
@@ -513,8 +515,8 @@ moved against.
 
 **This layer has no vanilla analogue.** No construct in `js/game_manager.js`,
 `js/grid.js` or `js/tile.js` resolved a stage, so there is no provenance to cite
-for anything in this section — every row of it will be target-only in
-`docs/TRACEABILITY_MATRIX.md`, which is planned and has not landed.
+for anything in this section — every row of it is target-only in
+[`docs/TRACEABILITY_MATRIX.md`](TRACEABILITY_MATRIX.md).
 
 **Which requirement it answers to.** Stage goals are not part of requirement R3:
 R3 is the relic system — sixteen relics across four families bound to the six
@@ -666,8 +668,8 @@ non-negative integer, and when a resolved entry carries a `kind` outside
 reasonably assume stage goals are drawn from the run seed the way relic offers
 are; they are not. The function consumes no draw from any substream and reads no
 clock, so the same index and the same curve always yield the same goal. The seed
-governs tile spawns and relic draws — the subject of the substream figure
-planned for `docs/architecture/data-flow.md`, which has not landed — and nothing
+governs tile spawns and relic draws — the subject of `Figure 7` in
+[`docs/architecture/data-flow.md`](architecture/data-flow.md) — and nothing
 else about a stage.
 
 ### 4.4 `evaluateStageGoal(goal, input)`
@@ -841,22 +843,56 @@ Decision `DL-CONFIG-02`.
 The same trap applies to `config.merge.canMerge` and `config.spawn.weights`,
 which the effect queue also writes — capture the *object*, never the member.
 
+### 5.4 The run boundary: what a relic mutation does not outlive
+
+A relic effect writes three members of the LIVE rules object —
+`config.boardSize`, `config.merge.canMerge` and `config.spawn.weights` — and that
+object is the one every collaborator holds a reference to. The run boundary is
+where those writes are undone, and it is undone **in place** rather than by
+handing out a replacement object.
+
+The flow, exactly as `src/main.ts` performs it:
+
+1. **At composition**, immediately after `createDefaultRulesConfig()`, the root
+   takes `baselineConfig = snapshotRulesConfig(config)`. The snapshot is a
+   separate, unfrozen object with its own `spawn`, its own two spawn arrays and
+   its own `merge`, holding the same two merge function references — so it cannot
+   be reached by a later write through the live object, and restoring it
+   reinstates the *same* predicate the run opened with. Taken from the live config
+   rather than from `DEFAULT_RULES_CONFIG`, so a caller that composes over its own
+   rules gets its own rules back.
+2. **At a new run** — `startNewRun()`, whether reached from the run-start screen,
+   the `startRun` action or the summary's new-run control — the root calls
+   `restoreRulesConfig(config, baselineConfig)` before the next board is opened,
+   alongside `registry.clear()`, `router.hideReward()` and
+   `storage.clearGameState()`. Every mutable member is written back through the
+   same object, and the two spawn arrays are replaced with fresh copies of the
+   baseline's.
+3. **On the next turn**, every reader sees the restored values because each reads
+   the member at the point of use ([5.3](#53-the-two-traps)).
+
+Two consequences worth stating outright. A shrunk board, a widened merge
+predicate or a reversed spawn distribution **cannot be inherited by the next
+run**. And a RESUMED run is a different case: it is not a boundary, so a
+persisted mutation is deliberately kept — the reconciled board size the store
+resolved is written into the rules by `Engine.setup()`, and the relics the
+envelope carries re-apply their own effects as their hooks fire. Decisions
+`DL-DEFAULT-04`, `DL-MAIN-06` and `DL-CONFIG-02`.
+
 ## 6. Where to look next
 
-This document deliberately stops at the configuration boundary. One neighbour
-exists; the rest are planned and have not landed, so the table below is a map of
-where each subject **will** be documented rather than a reading list, and the
-planned paths are written as plain paths precisely so nothing here looks like a
-link that works.
+This document deliberately stops at the configuration boundary. The table
+below is the reading list for everything on the other side of it; every entry
+exists in the tree.
 
-| For | Read | Landed? |
+| For | Read | Where it stops |
 |---|---|---|
-| **Why** any of it is the way it is — every alternative considered and every risk carried | [`docs/DECISION_LOG.md`](DECISION_LOG.md) | **Yes** |
-| Which relics read or mutate which configuration members, with their families, rarities, hooks and charges | `docs/RELICS.md` | No — planned. `src/relics/` and its unit suites are the authority meanwhile. |
-| The turn pipeline from keystroke to committed frame, and the seeded RNG substreams | `docs/architecture/data-flow.md` | No — planned. [4.5](#45-the-evaluation-lifecycle) carries the stage half of that sequence. |
-| How the six hooks dispatch, in pickup order, with the charge guard and error isolation | `docs/architecture/hook-dispatch-sequence.md` | No — planned. `src/engine/hook-bus.ts` and its suites are the authority meanwhile. |
-| Where the configuration layer sits in the architecture as a whole, before and after the split | `docs/architecture/ARCHITECTURE.md` and `docs/architecture/component-interaction.md` | No — planned. Figure C1 above covers the configuration layer alone. |
-| Which retired `js/` construct became which module, in both directions | `docs/TRACEABILITY_MATRIX.md` | No — planned. The `TR-*` identifiers cited from the source modules are reserved against it. |
+| **Why** any of it is the way it is — every alternative considered and every risk carried | [`docs/DECISION_LOG.md`](DECISION_LOG.md) | It carries reasoning only; a contract or a value belongs here or in the code |
+| Which relics read or mutate which configuration members, with their families, rarities, hooks and charges | [`docs/RELICS.md`](RELICS.md) | It catalogues the sixteen declarations; `src/relics/` and its unit suites remain the authority on behaviour |
+| The turn pipeline from keystroke to committed frame, and the seeded RNG substreams | [`docs/architecture/data-flow.md`](architecture/data-flow.md) | `Figures 4` and `7`; [4.5](#45-the-evaluation-lifecycle) carries the stage half of that sequence |
+| How the six hooks dispatch, in pickup order, with the charge guard and error isolation | [`docs/architecture/hook-dispatch-sequence.md`](architecture/hook-dispatch-sequence.md) | `Figure 5`; `src/engine/hook-bus.ts` and its suites remain the authority on the mechanism |
+| Where the configuration layer sits in the architecture as a whole, before and after the split | [`docs/architecture/ARCHITECTURE.md`](architecture/ARCHITECTURE.md) and [`component-interaction.md`](architecture/component-interaction.md) | `Figures 1`, `2` and `3`; `Figure C1` above covers the configuration layer alone |
+| Which retired `js/` construct became which module, in both directions | [`docs/TRACEABILITY_MATRIX.md`](TRACEABILITY_MATRIX.md) | Every `TR-*` identifier cited from a source module has a row there, gated in both directions |
 
 The decision identifiers cited in this document, all of which resolve in
 `docs/DECISION_LOG.md`: `DL-BUILD-03`, `DL-CONFIG-01`, `DL-CONFIG-02`,

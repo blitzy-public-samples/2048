@@ -6,6 +6,34 @@
 // material; the `emptyCellCompositing` option delivers it as a transparent
 // material instead.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-MATERIAL-01  style/main.scss L334-L402  the generated tile fill, read
+//                                              through src/theme/tile-ramp.ts
+//                                              and transferred by
+//                                              `resolveTileFill()`
+//   TR-MATERIAL-02  style/main.scss L334-L402  the bright-text threshold, as
+//                                              `resolveTileNumeralColor()`
+//   TR-MATERIAL-03  style/main.scss L360-L370  the outer halo shadow, as the
+//                                              emissive colour and intensity
+//   TR-MATERIAL-04  style/main.scss L360-L370  the inset white ring, as the
+//                                              roughness reduction scaled by
+//                                              `insetAlpha`
+//   TR-MATERIAL-05  style/main.scss L339-L349  the accent overlay's suppressed
+//                                              shadow, as the flat material
+//                                              `glowSuppressed` gates
+//   TR-MATERIAL-06  style/main.scss `.grid-cell`  the empty-cell plate at 35%
+//                                              alpha, as the pre-composited or
+//                                              transparent plate material
+//   TR-MATERIAL-07  target-only row             `createTileMaterialCache()`,
+//                                              one material per distinct value
+//   TR-MATERIAL-08  target-only row             the colour conversions
+//                                              `readThemeColor()`,
+//                                              `compositeOver()`,
+//                                              `toThreeColor()`,
+//                                              `fromThreeColor()` and
+//                                              `formatThreeColor()`
+//
 // Decisions: DL-MATERIAL-01, DL-MATERIAL-02, DL-MATERIAL-03, DL-RAMP-02,
 // DL-RAMP-04 (docs/DECISION_LOG.md).
 

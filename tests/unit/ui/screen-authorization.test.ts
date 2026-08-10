@@ -11,8 +11,9 @@
 //   persisting board state the player could not see; a reward digit or a pointer
 //   press selected a relic from behind that same dialog, because the reward
 //   container is a SIBLING of the panel inside `.screen-layer` and so was not
-//   covered by the game region the dialog marks inert; and the `.retry-button`,
-//   whose context is deliberately `'overlay'`, discarded the whole run.
+//   covered by the game region the dialog marks inert; and the `.retry-button`
+//   discarded the board of whatever run was in force from any state that showed
+//   it.
 //
 // WHAT THIS SUITE PINS
 //   `ACTION_SCREENS` agrees with `TRANSITIONS` rather than merely resembling it;
@@ -328,27 +329,19 @@ describe('the authorization table', () => {
     }
   });
 
-  it('widens only restart beyond its declared edge, and never into reward', () => {
-    // js/html_actuator.js L51 offered "Try again" on a terminal turn, which is
-    // why `LEGACY_CONTROL_BINDINGS` declares `.retry-button` in `'overlay'`. The
-    // reward screen is the one state it must not reach: the stage is cleared and
-    // a relic has to be taken.
-    expect([...ACTION_SCREENS.restart]).toEqual([
-      'runStart',
-      'stage',
-      'won',
-      'gameOver',
-      'runSummary',
-    ]);
-    expect(ACTION_SCREENS.restart).not.toContain('reward');
-    expect(ACTION_SCREENS.restart).not.toContain('settings');
+  it('widens no trigger-backed action beyond its declared edges', () => {
+    // `restart` is the board's own action and `stage --restart--> stage` is the
+    // one edge AAP Figure 6 declares for it, so the authorized set is that one
+    // state: the subscriber discards the board inside the run in force, which no
+    // other state has. DL-ROUTER-39.
+    expect([...ACTION_SCREENS.restart]).toEqual(['stage']);
 
     for (const action of AUTHORIZED_ACTIONS) {
       const trigger = (
         ACTION_TRIGGERS as Partial<Record<AuthorizedAction, string>>
       )[action];
 
-      if (trigger === undefined || action === 'restart') {
+      if (trigger === undefined) {
         continue;
       }
 
@@ -571,9 +564,10 @@ describe('the composed application behind the settings dialog', () => {
 
     openSettings();
 
-    // `.retry-button`'s contexts are `['game', 'overlay']` on purpose, so the
-    // control is available while the dialog holds the screen and the click
-    // reaches the subscription. The gate is what refuses it.
+    // Two guards refuse this press, and either alone is enough: the control
+    // follows its action's `['game']` contexts so the availability layer has
+    // withdrawn it while the dialog holds the screen, and the gate refuses
+    // `restart` outside `stage`. DL-CONTROL-08, DL-ROUTER-39.
     control('.retry-button').click();
 
     expect(tiles()).toBe(played);

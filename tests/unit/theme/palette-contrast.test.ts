@@ -1,8 +1,16 @@
-// Contract suite for the contrast of the four text/surface pairs a code review
-// measured below WCAG 2.1 AA, across all three palettes.
+// Contract suite for text/surface contrast across all three palettes, in two
+// groups.
 //
-// All four pairs resolve entirely through the fourteen frozen tokens of AAP
-// 0.5.2, whose values that section requires be kept.
+// THE RETAINED SURFACES — the classic buttons, the score and best-score boxes
+// and the tile ramp — resolve entirely through the fourteen frozen tokens of AAP
+// 0.5.2, whose values that section requires be kept, and measure below WCAG 2.1
+// AA in the default palette. Their ratios are pinned here as the frozen identity
+// they are.
+//
+// THE COMPONENT PAIRS of this feature's own screens — its controls and its
+// readouts — are separate palette entries and clear AA in EVERY palette, the
+// default one included, so a screen this feature delivers is accessible without
+// the player first choosing an additive theme. Decision DL-THEME-08.
 //
 // button label $bright-text-color on darken($game-container-background, 20%)
 // score label $tile-color on $game-container-background score value white on
@@ -17,7 +25,7 @@
 // This suite reads no DOM, no storage and no clock, consumes no randomness,
 // installs no mock library and writes no snapshot.
 //
-// Decisions: DL-THEME-05, DL-RAMP-01 (docs/DECISION_LOG.md).
+// Decisions: DL-THEME-05, DL-THEME-08, DL-RAMP-01 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -176,6 +184,41 @@ function measuredPairs(theme: Theme): readonly Pair[] {
   ];
 }
 
+/**
+ * The pairs this feature's own screens render, resolved against one theme.
+ *
+ * Each is a NEW palette entry, not one of the frozen ones above: the controls of
+ * the run-start, reward, summary and game-over screens, and the summary
+ * readouts. Decision DL-THEME-08.
+ *
+ * @param theme Theme to resolve against.
+ * @returns The three pairs.
+ */
+function componentPairs(theme: Theme): readonly Pair[] {
+  const palette = theme.palette;
+
+  return [
+    {
+      name: 'screen control label on control surface',
+      front: palette.controlLabel,
+      back: palette.controlSurface,
+      minimum: TEXT_MINIMUM,
+    },
+    {
+      name: 'readout caption on readout surface',
+      front: palette.readoutLabel,
+      back: palette.readoutSurface,
+      minimum: TEXT_MINIMUM,
+    },
+    {
+      name: 'readout numeral on readout surface',
+      front: palette.readoutValue,
+      back: palette.readoutSurface,
+      minimum: TEXT_MINIMUM,
+    },
+  ];
+}
+
 describe('the contrast formula', () => {
   it('measures the two extremes WCAG 2.1 fixes', () => {
     // Black on white is 21:1 and a colour on itself is 1:1.
@@ -195,7 +238,7 @@ describe('the contrast formula', () => {
   });
 });
 
-describe('the default palette carries the frozen identity, not AA', () => {
+describe('the retained surfaces carry the frozen identity, not AA', () => {
   it('measures the four pairs at the ratios the review reported', () => {
     const measured = new Map(
       measuredPairs(defaultTheme).map((pair) => [
@@ -219,6 +262,80 @@ describe('the default palette carries the frozen identity, not AA', () => {
     expect(palette.scoreLabel).toBe('#eee4da');
     expect(resolveTileTheme(MEASURED_TILE, defaultTheme).colorHex).toBe(
       '#f2b179',
+    );
+  });
+});
+
+describe.each([
+  ['default', defaultTheme],
+  ['high contrast', highContrastTheme],
+  ['colourblind safe', colorblindSafeTheme],
+])('the %s palette clears AA for every component pair', (_name, theme) => {
+  it.each(componentPairs(theme).map((pair) => [pair.name, pair]))(
+    'clears its floor for %s',
+    (_pairName, pair) => {
+      // EVERY palette, the default included: this is the whole of M14's
+      // resolution, and a regression here means a screen this feature delivers
+      // is inaccessible until the player finds the settings panel.
+      expect(contrast(pair.front, pair.back)).toBeGreaterThanOrEqual(
+        pair.minimum,
+      );
+    },
+  );
+});
+
+describe('the default component pairs, at the ratios they render', () => {
+  it('measures each of the three above the normal-text floor', () => {
+    const measured = new Map(
+      componentPairs(defaultTheme).map((pair) => [
+        pair.name,
+        contrast(pair.front, pair.back),
+      ]),
+    );
+
+    expect(
+      measured.get('screen control label on control surface'),
+    ).toBeCloseTo(4.7319, 3);
+    expect(measured.get('readout caption on readout surface')).toBeCloseTo(
+      4.7921,
+      3,
+    );
+    expect(measured.get('readout numeral on readout surface')).toBeCloseTo(
+      6.0102,
+      3,
+    );
+  });
+
+  it('keeps the caption dimmer than the numeral, as the score boxes do', () => {
+    const palette = defaultTheme.palette;
+
+    // The hierarchy of the retained boxes is preserved: the caption reads as a
+    // caption rather than being promoted to the numeral's weight of colour.
+    expect(palette.readoutLabel).toBe(defaultTheme.palette.scoreLabel);
+    expect(palette.readoutValue).toBe(defaultTheme.palette.scoreValue);
+    expect(
+      contrast(palette.readoutLabel, palette.readoutSurface),
+    ).toBeLessThan(contrast(palette.readoutValue, palette.readoutSurface));
+  });
+
+  it('derives both surfaces from the frozen board colour, in its hue', () => {
+    const palette = defaultTheme.palette;
+
+    // `color.adjust($game-container-background, $lightness: -26%)` and `-30%`:
+    // the same hue as the frozen surfaces, darker, so the new screens read as
+    // part of the same product rather than as a foreign palette.
+    expect(palette.controlSurface).toBe('#7d6b59');
+    expect(palette.readoutSurface).toBe('#716051');
+
+    // Darker than the two frozen surfaces they descend from, and not equal to
+    // them, which is what buys the ratio.
+    expect(palette.controlSurface).not.toBe(palette.buttonSurface);
+    expect(palette.readoutSurface).not.toBe(palette.scoreSurface);
+    expect(luminance(palette.controlSurface)).toBeLessThan(
+      luminance(palette.buttonSurface),
+    );
+    expect(luminance(palette.readoutSurface)).toBeLessThan(
+      luminance(palette.scoreSurface),
     );
   });
 });

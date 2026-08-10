@@ -19,14 +19,14 @@ the code drifts from it, and the drift is undetectable. The declaration in the
 file is authoritative; if the two ever disagree, the file is right and this
 document is stale.
 
-There are **552 rows across 71 areas**. 259 of them carry a pre-migration
-construct; 293 are **target-only**, meaning the retired tree contained nothing
+There are **554 rows across 71 areas**. 260 of them carry a pre-migration
+construct; 294 are **target-only**, meaning the retired tree contained nothing
 that became them — the relic system, the seeded RNG, the run envelope, the
 screen flow, the 2.5D renderer, the accessibility layer, the observability
 surfaces, the build and the test suites are all new capability rather than
 ported behaviour.
 
-## Figure 1 — File Transformation Map: Retired Sources and Their Successors
+## Figure 8 — File Transformation Map: Retired Sources and Their Successors
 
 ```mermaid
 graph LR
@@ -74,8 +74,13 @@ graph LR
     A10 --> B10
 ```
 
-**Legend for Figure 1.** *File Transformation Map: Retired Sources and Their
-Successors* is a file-level index of the row-level tables below. A **solid
+**Legend for Figure 8.** *File Transformation Map: Retired Sources and Their
+Successors* is a file-level index of the row-level tables below. Its number is
+`8` because the bare numerals `1` and `2` are reserved for the as-is and to-be
+architecture views of
+[`docs/architecture/ARCHITECTURE.md`](architecture/ARCHITECTURE.md), so a
+reference by name resolves to exactly one figure across the documentation set.
+A **solid
 arrow** is a construct's principal successor — the module a reader should open
 first when looking for what a retired file's behaviour became. A **dotted
 arrow**, labelled with what travelled, is a pattern or a value that was
@@ -289,7 +294,7 @@ subsection exactly once.
 | `TR-TOUCH-04` | js/keyboard_input_manager.js | the touchend handler and its L119-L137 10px threshold, ported as the resolved swipe and `SWIPE_THRESHOLD_PX` | `src/input/touch-input.ts` |
 | `TR-TRACE-06` | js/keyboard_input_manager.js | the appended listener array L18-L23 `attachEngineTracing` attaches through | `src/observability/tracer.ts` |
 
-### js/local_storage_manager.js — DELETED, 22 rows
+### js/local_storage_manager.js — DELETED, 23 rows
 
 | TR id | Pre-migration construct | Successor construct | Owning file |
 |---|---|---|---|
@@ -314,6 +319,7 @@ subsection exactly once.
 | `TR-STORE-06` | js/local_storage_manager.js L52-L55 | getGameState(), whose unguarded `JSON.parse` is now guarded | `src/storage/local-storage-manager.ts` |
 | `TR-STORE-07` | js/local_storage_manager.js L57-L59 | setGameState() | `src/storage/local-storage-manager.ts` |
 | `TR-STORE-08` | js/local_storage_manager.js L61-L63 | clearGameState() | `src/storage/local-storage-manager.ts` |
+| `TR-STORE-09` | js/local_storage_manager.js L1-L19 | the `window.fakeStorage` object literal, ported as the `MemoryStorage` class | `src/storage/memory-storage.ts` |
 | `TR-TYPES-05` | js/local_storage_manager.js L43-L45 | `BestScorePort` and `BestScoreValue`, the string-or-0 return | `src/engine/types.ts` |
 
 ### js/application.js — DELETED, 3 rows
@@ -476,7 +482,7 @@ a construct this document does not account for.
 | `TR-AUDIO-06` | the pure resolvers that select a descriptor | **target-only** — no pre-migration construct |
 | `TR-AUDIO-07` | the audio bounds `MIN_VOLUME`, `MAX_VOLUME`, `DEFAULT_VOLUME` and `DEFAULT_MUTED` | **target-only** — no pre-migration construct |
 
-### `src/config/default-config.ts` — 8 rows, 2 target-only
+### `src/config/default-config.ts` — 9 rows, 3 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -488,6 +494,7 @@ a construct this document does not account for.
 | `TR-DEFAULT-06` | `defaultProduceMergeValue` | js/game_manager.js L157 |
 | `TR-DEFAULT-07` | `MAX_BOARD_SIZE` and `isSupportedBoardSize` | **target-only** — no pre-migration construct |
 | `TR-DEFAULT-08` | `createDefaultRulesConfig` and `DEFAULT_RULES_CONFIG` | **target-only** — no pre-migration construct |
+| `TR-DEFAULT-09` | `snapshotRulesConfig` and `restoreRulesConfig`, the run-scoped reset of the live rules | **target-only** — no pre-migration construct |
 
 ### `src/config/rules-config.ts` — 6 rows, 1 target-only
 
@@ -522,7 +529,7 @@ a construct this document does not account for.
 | `TR-EFFECTS-04` | the `setup()` rehydration, reached by `restoreBoard` | js/game_manager.js L36-L45 |
 | `TR-EFFECTS-05` | `Grid.empty()`, the lattice rebuild a `resizeBoard` performs | js/grid.js L7-L19 |
 | `TR-EFFECTS-06` | `setMergePredicate`, the substituted merge rule | **target-only** — no pre-migration construct |
-| `TR-EFFECTS-07` | `setSpawnWeights`, the substituted spawn distribution Decisions behind this file are recorded in docs/DECISION_LOG.md. | **target-only** — no pre-migration construct |
+| `TR-EFFECTS-07` | `setSpawnWeights`, the substituted spawn distribution | **target-only** — no pre-migration construct |
 
 ### `src/engine/engine-events.ts` — 8 rows, 1 target-only
 
@@ -550,7 +557,7 @@ a construct this document does not account for.
 | `TR-ENGINE-07` | addRandomTile() | js/game_manager.js L69-L76 addRandomTile() |
 | `TR-ENGINE-08` | commit() | js/game_manager.js L79-L99 actuate() |
 | `TR-ENGINE-09` | serialize() | js/game_manager.js L102-L110 serialize() |
-| `TR-ENGINE-10` | move() The tile preparation, tile relocation, vector, traversal, farthest-position and comparison helpers and the merge branch — L113-L127, L146-L180, L194-L236 and L270-L272 — moved to src/engine/move-resolver.ts, whose `resolveMove` this file's `move()` calls, and the terminal-state checks to src/engine/terminal-state.ts. | js/game_manager.js L130-L191 move() |
+| `TR-ENGINE-10` | move(), whose traversal, farthest-position and merge work is delegated to `resolveMove` of src/engine/move-resolver.ts | js/game_manager.js L130-L191 move() |
 | `TR-ENGINE-11` | endStage() | **target-only** — no pre-migration construct |
 | `TR-ENGINE-12` | stageProgress() | **target-only** — no pre-migration construct |
 | `TR-ENGINE-13` | goalInForce() | **target-only** — no pre-migration construct |
@@ -1018,7 +1025,7 @@ a construct this document does not account for.
 | `TR-RUNSTORE-05` | the over-or-write branch, split into `clear()` and `save()` | js/game_manager.js L88-L89 |
 | `TR-RUNSTORE-06` | `RunStatePersistencePort`, `NULL_PERSISTENCE_PORT` and `migrateRunState()` | **target-only** — no pre-migration construct |
 
-### `src/run/run-state.ts` — 11 rows, 8 target-only
+### `src/run/run-state.ts` — 12 rows, 9 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -1033,8 +1040,9 @@ a construct this document does not account for.
 | `TR-RUN-09` | `summarizeRunState()`, `redactRunSummary()` and `summarizeRunStateForReport()` | **target-only** — no pre-migration construct |
 | `TR-RUN-10` | `RunReporter` and `NOOP_RUN_REPORTER` | **target-only** — no pre-migration construct |
 | `TR-RUN-11` | `cloneBoardSnapshot()`, the one board copier every projection of a stored board passes through | **target-only** — no pre-migration construct |
+| `TR-RUN-12` | `pendingReward`, `PendingRewardRound`, `clonePendingReward()` and `checkPendingReward()`, the unresolved reward round | **target-only** — no pre-migration construct |
 
-### `src/storage/local-storage-manager.ts` — 9 rows, 1 target-only
+### `src/storage/local-storage-manager.ts` — 8 rows, 0 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -1046,12 +1054,12 @@ a construct this document does not account for.
 | `TR-STORE-06` | getGameState(), whose unguarded `JSON.parse` is now guarded | js/local_storage_manager.js L52-L55 |
 | `TR-STORE-07` | setGameState() | js/local_storage_manager.js L57-L59 |
 | `TR-STORE-08` | clearGameState() | js/local_storage_manager.js L61-L63 |
-| `TR-STORE-09` | is the in-memory double, in ./memory-storage. | **target-only** — no pre-migration construct |
 
-### `src/storage/memory-storage.ts` — 1 rows, 1 target-only
+### `src/storage/memory-storage.ts` — 2 rows, 1 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
+| `TR-STORE-09` | the `window.fakeStorage` object literal that file already shipped, ported as this class | js/local_storage_manager.js L1-L19 |
 | `TR-STORE-10` | `StorageLike`, the structural surface both stores satisfy | **target-only** — no pre-migration construct |
 
 ### `src/storage/storage-keys.ts` — 6 rows, 3 target-only
@@ -1349,7 +1357,7 @@ a construct this document does not account for.
 
 | TR id | Construct here | Origin |
 |---|---|---|
-| `TR-TOKEN-01` | provenance was split across both, and a reader had no way to tell which was authoritative. This is the declaration. | **target-only** — no pre-migration construct |
+| `TR-TOKEN-01` | `quantised()`, the one declaration of the colour serialiser both the default ramp and each palette's ramp interpolate through | **target-only** — no pre-migration construct |
 | `TR-TOKEN-09` | the fourteen-variable token block, moved here unchanged in name, value and order | style/main.scss L4-L22 |
 | `TR-TOKEN-10` | `_resolve-token()`, `$projection` and the `@error` that holds the two sides together | **target-only** — no pre-migration construct |
 | `TR-TOKEN-11` | the new token families: the z-index ladder extension, the depth scale and the mobile restatements | **target-only** — no pre-migration construct |
@@ -1391,7 +1399,7 @@ a construct this document does not account for.
 | TR id | Construct here | Origin |
 |---|---|---|
 | `TR-TEST-04` | the separate snapshot project, its own include glob and its snapshot resolver | **target-only** — no pre-migration construct |
-| `TR-TEST-05` | the setup file's persistence teardown and the fake clock the seeded gate runs under | **target-only** — no pre-migration construct |
+| `TR-TEST-05` | the setup file's persistence teardown: the board snapshot AND the best score are both removed, which no vanilla member did | **target-only** — no pre-migration construct |
 
 ## 4. Source-artifact ledger
 
@@ -1428,14 +1436,14 @@ decision rather than by a ported construct, and the decision is named.
 Both directions are complete, and the completeness is arithmetic rather than
 assertion:
 
-- **552 rows** across **71 areas**, enumerated from the
+- **554 rows** across **71 areas**, enumerated from the
 declarations in the tree rather than counted by hand.
-- **Direction A** accounts for the **259 rows** that carry a pre-migration
+- **Direction A** accounts for the **260 rows** that carry a pre-migration
 construct, distributed across the 16 artifacts listed in §2. Every retired
 source file appears there.
-- **Direction B** accounts for **all 552 rows**, distributed across the
+- **Direction B** accounts for **all 554 rows**, distributed across the
 78 modules that declare them, so every row has exactly one owning module.
-- **293 rows are target-only.** Each is declared as such by its owning
+- **294 rows are target-only.** Each is declared as such by its owning
 module, so the reverse walk ends in a positive statement rather than in a gap.
 - The one retired artifact with no row, `.jshintrc`, is accounted for in the
 ledger above by decision `DL-BUILD-10`.

@@ -9,6 +9,14 @@
 // clock, reports nothing, holds no mutable module-level state and reads no
 // `charges`.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, in declaration
+// order, all target-only because no vanilla construct declared a relic:
+//   TR-RISK-01  collapsing-vault   onStageEnd
+//   TR-RISK-02  gilded-rot         onMerge, onSpawn
+//   TR-RISK-03  brittle-crown      onStageStart, onStageEnd
+//   TR-RISK-04  hollow-ascension   onMerge, onStageEnd
+//   TR-RISK-05  the frozen `RISK_REWARD_CURSED_FAMILY` export
+//
 // Decisions: DL-RISK-01, DL-RISK-02 (docs/DECISION_LOG.md).
 
 import type {

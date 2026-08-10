@@ -13,6 +13,52 @@
 // src/render/webgl-support.ts and is not re-decided here. This module reads no
 // storage and consumes no randomness.
 //
+// in either direction. One traceability row of docs/TRACEABILITY_MATRIX.md
+// apiece, every row of this module's area enumerated:
+//   TR-THREE-01  actuate            L10-L36   `render()` queues, `frame()`
+//                                             draws
+//   TR-THREE-02  the x-major walk   L16-L22   `planCommit()`
+//   TR-THREE-03  clearContainer     L43-L47   `clearLiveTiles()`
+//   TR-THREE-04  addTile            L49-L91   `planTile()` and `addTile()`
+//   TR-THREE-05  previousPosition   L54       `PlannedTile.from`
+//   TR-THREE-06  super threshold    L60       `resolveTileTheme().isSuper`
+//   TR-THREE-07  nested-frame move  L67-L72   `createMoveTween` of
+//                                             ./animations
+//   TR-THREE-08  the mergedFrom     L73-L80   `PlannedTile.merged`,
+//                                             `addTile(_, true)` recursion
+//   TR-THREE-09  the tile-new       L82       `createSpawnTween` of
+//                                             ./animations
+//   TR-THREE-10  applyClasses       L93-L95   material and mesh acquisition;
+//                                             no class attribute is written
+//                                             and the classList workaround is
+//                                             not carried forward
+//   TR-THREE-11  normalizePosition  L97-L99   `cellToWorldIn` of
+//                                             ./tile-mesh-factory
+//   TR-THREE-12  positionClass      L101-L104 `cellToWorldIn` of
+//                                             ./tile-mesh-factory
+//   TR-THREE-13  updateScore        L106-L121 src/ui/components/score-panel.ts.
+//                                             NOT here: this module carries the
+//                                             difference as
+//                                             `PaintPlan.scoreDelta` into
+//                                             `readRenderedBoard()` and writes
+//                                             no score outlet and no
+//                                             rising-delta node
+//   TR-THREE-14  updateBestScore    L123-L125 src/ui/screens/hud.ts. Not here
+//   TR-THREE-15  message            L127-L133 src/ui/screens/hud.ts. Not here
+//   TR-THREE-16  clearMessage       L135-L139 src/ui/screens/hud.ts. Not here
+//   TR-THREE-17  continueGame       L39-L41   src/ui/screens/hud.ts. Not here
+//   TR-THREE-18  target-only row              the hook-free subscription
+//                                             surface
+//   TR-THREE-19  target-only row              the WebGL surface and its
+//                                             context-loss handling
+//   TR-THREE-20  target-only row              the parallel accessibility board
+//   TR-THREE-21  target-only row              the stage lighting and the
+//                                             stage-clear punch
+//   TR-THREE-22  target-only row              `degraded` carried by the paint
+//                                             plan, the same member
+//                                             src/render/number-only-renderer.ts
+//                                             carries
+//
 // Decisions: DL-THREE-01, DL-THREE-02, DL-THREE-03, DL-THREE-04
 // (docs/DECISION_LOG.md).
 

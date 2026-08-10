@@ -12,6 +12,18 @@
 //
 // src/render/three-renderer.ts forwards here.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-CAMERA-01  style/main.scss `pop` keyframes  the overshoot shape, ported
+//                                                  as the punch impulse
+//   TR-CAMERA-02  target-only row                  `createCameraEffects()` and
+//                                                  the punch
+//   TR-CAMERA-03  target-only row                  the shake, clamped to the
+//                                                  terminal overlay's delay
+//   TR-CAMERA-04  target-only row                  the reduced-motion gate
+//   TR-CAMERA-05  target-only row                  `mergeIntensity()`, linear
+//                                                  in the tile-ramp exponent
+//
 // Decisions: DL-CAMERA-01, DL-CAMERA-02, DL-CAMERA-03 (docs/DECISION_LOG.md).
 
 import type {

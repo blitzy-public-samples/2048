@@ -254,10 +254,19 @@ export const runStartCopy = Object.freeze({
   /** Accessible name of the seed field, stating that it is optional. */
   seedLabel: 'Seed (optional)',
 
-  /** Static description of the seed field. */
+  /**
+   * Static description of the seed field, INCLUDING that a seed is public.
+   *
+   * A seed is shown on the run summary and copied from it by anyone replaying
+   * the run, which is what it is for, so the field says so where it is typed
+   * rather than leaving a player to discover it afterwards. Decision
+   * DL-RUNSTART-11.
+   */
   seedHint:
     'Leave this empty for a fresh seed. The same seed played with the same ' +
-    'moves gives the same board and the same relic offers.',
+    'moves gives the same board and the same relic offers. A seed is public: ' +
+    'it is shown on the run summary and can be copied from there, so do not ' +
+    'type anything personal or secret into it.',
 
   /** Label of the begin-run control. */
   beginLabel: 'Begin run',
@@ -669,6 +678,17 @@ export function createRunStartScreen(
 
   /** What the last begin-run attempt did. */
   let lastBegin: RunStartBegin | null = null;
+
+  /**
+   * One token per VISIT: raised on entry and again on departure, so a value
+   * read before the begin-run action is delivered and compared with the value
+   * after it says whether this screen is still the one on screen.
+   *
+   * The action is published synchronously and the state machine leaves this
+   * state inside that call, so the seed readback below happens after `leave()`
+   * has already cleared the field. DL-RUNSTART-10.
+   */
+  let visit = 0;
 
   /** Whether `unmount` has been called. */
   let unmounted = false;
@@ -1169,30 +1189,45 @@ export function createRunStartScreen(
     // THE TEXT IS EMITTED VERBATIM. `RunController.startRun` is the one
     // normaliser, so nothing here trims, case-folds, hashes, parses or bounds
     // the value; the reduced seed is read back below.
+    const opened = visit;
     const delivered = emitStartRun(typed);
     const inForce = readSeedInForce();
     const seed = inForce ?? typed;
     const adjusted = seed !== typed;
 
-    if (adjusted) {
-      // REFLECTED FROM THE CONTROLLER, and announced: the seed on screen is the
-      // seed the run is played under, read back from the authority that decided
-      // it rather than recomputed here. Decision `DL-RUNSTART-03`.
+    // THE VISIT THAT PRESSED THE CONTROL. A delivered action begins the run,
+    // and the state machine leaves this state inside that same call, so by this
+    // point `leave()` has cleared the field for the next visit. Writing the
+    // reduced seed into it then re-populated a screen nobody is looking at and
+    // a later visit opened carrying a seed its player never typed.
+    const showing = visit === opened;
+
+    if (adjusted && showing) {
+      // REFLECTED FROM THE CONTROLLER: the seed on screen is the seed the run
+      // is played under, read back from the authority that decided it rather
+      // than recomputed here. Decision `DL-RUNSTART-03`.
       field.value = seed;
       writeStatus(copy.seedAdjusted(seed));
+    } else if (showing) {
+      writeStatus('');
+    }
+
+    if (adjusted) {
+      // ANNOUNCED EITHER WAY. The live region is outside this screen's subtree
+      // and outlives the visit, so the reduction is spoken whether or not the
+      // field it describes is still on screen. DL-RUNSTART-10.
       announce(copy.seedAdjusted(seed));
       reporter.count(SEED_ADJUSTED_METRIC, {
         context: REPORT_CONTEXT,
         typedLength: typed.length,
         seedLength: seed.length,
+        showing,
       });
       reporter.log('info', 'the entered seed was reduced by the run', {
         context: REPORT_CONTEXT,
         typedLength: typed.length,
         seedLength: seed.length,
       });
-    } else {
-      writeStatus('');
     }
 
     return recordBegin({
@@ -1327,6 +1362,10 @@ export function createRunStartScreen(
 
     const entered = narrowContext(context, 'enter');
 
+    // A NEW VISIT. Raised before anything renders, so feedback owed to the
+    // previous visit cannot be written into this one.
+    visit += 1;
+
     adoptContextHost(entered);
 
     if (!render()) {
@@ -1391,6 +1430,10 @@ export function createRunStartScreen(
     if (refuseAfterUnmount('leave')) {
       return;
     }
+
+    // THE VISIT IS OVER. Raised here as well as on entry, so a begin-run
+    // attempt still unwinding through this departure sees a token that moved.
+    visit += 1;
 
     const built = elements;
 

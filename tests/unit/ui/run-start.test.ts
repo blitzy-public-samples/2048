@@ -270,6 +270,27 @@ describe('the rendered screen', () => {
     ).toBe(runStartCopy.seedHint);
   });
 
+  it('says in the hint that a seed is public before one is typed', () => {
+    const harness = mounted();
+    const hint =
+      harness.container.querySelector(`#${RUN_START_IDS.seedHint}`)
+        ?.textContent ?? '';
+
+    // THE ONE MOMENT A PLAYER CAN ACT ON IT is before they type: the seed they
+    // enter is shown on the run summary and copied from there by anyone
+    // replaying the run, and the field is where that has to be said. The hint
+    // is the field's `aria-describedby` target, so it is announced with the
+    // field rather than sitting somewhere a screen reader never reaches.
+    // DL-RUNSTART-11.
+    expect(hint).toContain('public');
+    expect(hint).toContain('run summary');
+    expect(hint.toLowerCase()).toContain('personal');
+    expect(hint.toLowerCase()).toContain('secret');
+    expect(harness.seed.getAttribute('aria-describedby')).toBe(
+      RUN_START_IDS.seedHint,
+    );
+  });
+
   it('uses real button, input and label elements only', () => {
     const harness = mounted();
 
@@ -505,6 +526,79 @@ describe('beginning a run', () => {
     // THE PAYLOAD IS THE RAW TEXT. The controller is the normaliser, so what
     // travels is what the player typed and what is shown is what came back.
     expect(harness.input.emitted[0]?.payload).toBe('  padded-seed  ');
+  });
+
+  it('writes no reduced seed into a visit the action already left', () => {
+    const container = host();
+    const reporter = sink();
+    const voice = announcer();
+    const emitted: Emitted[] = [];
+    const holder: { screen: RunStartScreen | null } = { screen: null };
+
+    const screen = createRunStartScreen({
+      reporter,
+      announcer: voice,
+
+      // The composed flow: the begin-run action starts the run and the state
+      // machine leaves this state inside that same call, which is what clears
+      // the field before the seed is read back.
+      input: {
+        emit: (event, payload): number => {
+          emitted.push({ event, payload });
+          holder.screen?.leave();
+
+          return 1;
+        },
+      },
+
+      seedInForce: (): string | null => {
+        const last = emitted[emitted.length - 1];
+
+        return last === undefined || typeof last.payload !== 'string'
+          ? null
+          : normalizeEnteredSeed(last.payload);
+      },
+    });
+
+    holder.screen = screen;
+    screen.mount(container);
+    screen.enter(context());
+
+    const field = container.querySelector<HTMLInputElement>(
+      `#${RUN_START_IDS.seedInput}`,
+    );
+    const status = container.querySelector<HTMLElement>(
+      `#${RUN_START_IDS.seedStatus}`,
+    );
+
+    if (field === null || status === null) {
+      throw new Error('subtree missing');
+    }
+
+    field.value = '  padded-seed  ';
+
+    const outcome = screen.beginRun();
+
+    // The record is truthful and the reduction is announced and reported, and
+    // NOTHING is written into the departed subtree.
+    expect(outcome.adjusted).toBe(true);
+    expect(outcome.seed).toBe('padded-seed');
+    expect(voice.lines).toHaveLength(2);
+    expect(reporter.counts('ui.runStart.seed.adjusted')).toHaveLength(1);
+    expect(field.value).toBe('');
+    expect(status.hidden).toBe(true);
+    expect(status.textContent).toBe('');
+
+    // And the next visit opens on an empty field, carrying no seed from the run
+    // that has already begun.
+    screen.enter(context());
+
+    expect(
+      container.querySelector<HTMLInputElement>(
+        `#${RUN_START_IDS.seedInput}`,
+      )?.value,
+    ).toBe('');
+    expect(status.hidden).toBe(true);
   });
 
   it('surfaces a seed the reduction had to shorten', () => {

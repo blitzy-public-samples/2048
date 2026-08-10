@@ -10,8 +10,32 @@
 // reads no DOM and touches no storage. Its functions are pure, except that the
 // deserialising helpers call into the injected `InputReporter`.
 //
-// Decisions: DL-KEYMAP-01, DL-KEYMAP-02, DL-KEYMAP-03, DL-KEYMAP-04
-// (docs/DECISION_LOG.md).
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-KEYMAP-01  js/keyboard_input_manager.js  the `event.which` code map,
+//                 L37-L50                       ported as the default binding
+//                                               table keyed on
+//                                               `KeyboardEvent.key` and
+//                                               `KeyboardEvent.code`
+//   TR-KEYMAP-02  js/keyboard_input_manager.js  the three event names, ported
+//                 L9-L11, L54-L70               as `INPUT_EVENT_NAMES` and
+//                                               `InputEventPayload`
+//   TR-KEYMAP-03  js/game_manager.js L104-L116  the direction encoding
+//                                               0 up / 1 right / 2 down /
+//                                               3 left, declared here as
+//                                               `Direction`
+//   TR-KEYMAP-04  target-only row               `INPUT_ACTIONS`, `MoveAction`
+//                                               and `directionForAction`
+//   TR-KEYMAP-05  target-only row               `INPUT_CONTEXTS` and the
+//                                               per-context binding resolution
+//   TR-KEYMAP-06  target-only row               the remapping surface and the
+//                                               serialised keymap with its
+//                                               parse limits
+//   TR-KEYMAP-07  target-only row               `InputReporter` and
+//                                               `createSafeInputReporter`
+//
+// Decisions: DL-KEYMAP-01, DL-KEYMAP-02, DL-KEYMAP-03, DL-KEYMAP-04,
+// DL-KEYMAP-05 (docs/DECISION_LOG.md).
 
 /** A board direction, carried as the bare number the engine consumes. */
 export type Direction = 0 | 1 | 2 | 3;
@@ -730,8 +754,13 @@ const DEFAULT_BINDING_TABLE: Keymap = {
     modifierSuppressed: true,
   },
 
-  // Activated through the relic tray's own controls, and by a key bound to one
-  // of the indexed slots below.
+  // READS A TRAY SLOT OUT AND SPENDS NOTHING. Every relic in the catalogue
+  // fires on its own hooks and asks the bus for its charge there, so this
+  // action's subscriber reports what the slot holds — name, tier, remaining
+  // budget and description — and changes no state. The label above says
+  // `Inspect relic` for that reason. Reached by a key bound to one of the
+  // indexed slots below and by the generated control per slot. DL-RUNCTL-18,
+  // DL-KEYMAP-05.
   activateRelic: {
     action: 'activateRelic',
     keys: [],
@@ -1151,7 +1180,7 @@ const ACTION_LABELS: Readonly<Record<InputAction, string>> = Object.freeze({
   selectReward: 'Choose relic',
   continueStage: 'Continue',
   endRun: 'End run',
-  activateRelic: 'Activate relic',
+  activateRelic: 'Inspect relic',
   openSettings: 'Open settings',
   closeSettings: 'Close settings',
   cancel: 'Cancel',

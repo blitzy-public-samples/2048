@@ -5,6 +5,24 @@
 // deliberate per-invocation opt-in: `npm run dev -- --host <address>` and `npm
 // run preview -- --host <address>` override the value below.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+// file's area enumerated:
+//   TR-BUILD-01  Rakefile                the Ruby/Rake build path, superseded by
+//                                        this configuration and the npm scripts
+//   TR-BUILD-02  CONTRIBUTING.md L12-L15 the `gem install sass` / `sass --watch`
+//                (source branch)         workflow, superseded by the Dart Sass
+//                                        pipeline configured here
+//   TR-BUILD-03  style/main.css          the committed generated stylesheet,
+//                                        deleted and now emitted into dist/ by
+//                                        this build
+//   TR-BUILD-04  index.html L88-L97      the ten ordered script tags, replaced
+//                (source branch)         by the single module entry this graph
+//                                        starts from
+//   TR-BUILD-05  target-only row         the token bridge:
+//                                        `emitSassTokenProjection()` delivered
+//                                        through `additionalData`
+//   TR-BUILD-06  target-only row         the loopback binding of both servers
+//
 // Decisions: DL-BUILD-01, DL-BUILD-02, DL-BUILD-03, DL-BUILD-04
 // (docs/DECISION_LOG.md).
 import { defineConfig } from 'vite';

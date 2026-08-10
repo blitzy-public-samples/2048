@@ -4,6 +4,25 @@
 //
 // EXPORTS
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+// file's area enumerated:
+//   TR-SCREEN-01  style/main.scss L196-L221  the `.game-message` overlay
+//                                            treatment, generalised into the
+//                                            shared screen-container surface
+//   TR-SCREEN-02  style/main.scss L159-L168  the `button` mixin, restated as
+//                                            `@mixin screen-control` with its
+//                                            user-agent reset
+//   TR-SCREEN-03  style/main.scss L475-L548  the mobile scale, restated for
+//                                            every screen state
+//   TR-SCREEN-04  target-only row            the run-start, stage-progress and
+//                                            game-over states
+//   TR-SCREEN-05  target-only row            `@mixin screen-text-field` and the
+//                                            seed entry field
+//   TR-SCREEN-06  target-only row            `.settings-slider` and the settings
+//                                            rows
+//   TR-SCREEN-07  target-only row            `@mixin screen-panel-surface` and
+//                                            `@mixin screen-modal-surface`
+//
 // Decisions: DL-SCREEN-01, DL-SCREEN-02, DL-SCREEN-03, DL-SCREEN-04
 // (docs/DECISION_LOG.md).
 
@@ -150,17 +169,18 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
   @include focusable;
 }
 
+// The control surface and label resolve `--theme-control-surface` and
+// `--theme-control-label`, not the retained `--theme-button-*` pair: the retained
+// pair carries the frozen 3.79:1 of AAP 0.5.2, and a control this feature renders
+// must clear WCAG 2.1 AA in the default palette. Decision DL-THEME-08.
 @mixin screen-control {
   display: inline-block;
   box-sizing: border-box;
-  background: var(
-    --theme-button-surface,
-    #{color.adjust($game-container-background, $lightness: -20%)}
-  );
+  background: var(--theme-control-surface, #{$control-surface});
   border-radius: $tile-border-radius;
   padding: 0 $screen-control-padding-inline;
   text-decoration: none;
-  color: var(--theme-button-label, #{$bright-text-color});
+  color: var(--theme-control-label, #{$bright-text-color});
   block-size: $screen-control-height;
   line-height: $screen-control-line-height;
 
@@ -364,10 +384,7 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
 // The volume slider of src/ui/components/settings-panel.ts, carrying the
 // `SETTINGS_SLIDER_CLASS` that module exports.
 .settings-slider {
-  accent-color: var(
-    --theme-button-surface,
-    #{color.adjust($game-container-background, $lightness: -20%)}
-  );
+  accent-color: var(--theme-control-surface, #{$control-surface});
 
   @include focusable;
   @include interactive-states;

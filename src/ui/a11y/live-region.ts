@@ -12,6 +12,19 @@
 // spawn position, a refused subscription, a throwing listener and a failed DOM
 // write are each reported through the injected sink and the call continues.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated, all target-only because the retired sources
+// announced nothing:
+//   TR-LIVE-01  `createLiveRegionAnnouncer` and the single `#live-region` host
+//   TR-LIVE-02  the announcement queue and its bound
+//   TR-LIVE-03  `composeAnnouncements` and the coalescing rules
+//   TR-LIVE-04  the clear-then-write sequence, one utterance per task
+//   TR-LIVE-05  the polite default and the two assertive options
+//   TR-LIVE-06  the move, merge and spawn announcement vocabulary
+//   TR-LIVE-07  the stage and score announcement vocabulary
+//   TR-LIVE-08  `TerminalVerdict` and its labels
+//   TR-LIVE-09  the injected report sink and the per-listener error isolation
+//
 // Decisions: DL-LIVE-01, DL-LIVE-02, DL-LIVE-03, DL-LIVE-04
 // (docs/DECISION_LOG.md).
 

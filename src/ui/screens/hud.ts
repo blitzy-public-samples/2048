@@ -11,7 +11,11 @@
 //   the `.game-message` overlay: the two state classes js/html_actuator.js
 //   L131-L133 toggled and the verdict text L129 wrote;
 //   the unconfirmed-status notice `.hud-degraded` and the `data-degraded` flag
-//   on the run-status group.
+//   on the run-status group;
+//   the run-not-saved notice `.hud-ephemeral` and the `data-ephemeral` flag on
+//   the same group, and the `data-degraded` marker on the tray row of a relic
+//   the hook bus has stopped firing — the two FAILURE STATES the run can be in
+//   while it is still playable.
 //
 // WHAT IT DOES NOT OWN
 //   the two score writes themselves. `updateScore` and `updateBestScore` of
@@ -20,7 +24,7 @@
 //   this module calls that component and restates none of it;
 //   the tray row's element tree, built by src/ui/components/relic-card.ts;
 //   every element-to-action binding: `.restart-button`, `.retry-button`,
-//   `.keep-playing-button`, the direction pad and the relic-activation control
+//   `.keep-playing-button`, the direction pad and the relic tray control
 //   all belong to src/input/on-screen-controls.ts and are hosted here, never
 //   bound here;
 //   the engine subscription. A payload arrives from the host: a commit
@@ -164,6 +168,12 @@ const STAGE_SCREEN = 'stage' as const satisfies FocusScreenName;
 /** Class of the unconfirmed-status notice. style/_hud.scss. */
 const DEGRADED_CLASS = 'hud-degraded';
 
+/** Class of the run-not-saved notice. style/_hud.scss. */
+const EPHEMERAL_CLASS = 'hud-ephemeral';
+
+/** Attribute the run-status group carries while the run is not being saved. */
+const EPHEMERAL_ATTRIBUTE = 'data-ephemeral';
+
 /** Attribute the run-status group carries while a status is unestablished. */
 const DEGRADED_ATTRIBUTE = 'data-degraded';
 
@@ -224,6 +234,9 @@ export const HUD_Z_INDEX: number = zIndex.hud;
 
 /** The ids an empty tray reports. */
 const EMPTY_RELIC_IDS: readonly string[] = Object.freeze([]);
+
+/** The degraded set of a HUD whose reader is absent or answered nothing. */
+const EMPTY_ID_SET: ReadonlySet<string> = new Set<string>();
 
 /** The tier a synthesised declaration carries when none was resolved. */
 const UNRESOLVED_RARITY = '';
@@ -301,6 +314,25 @@ export const hudCopy = Object.freeze({
    * announcement is src/ui/a11y/engine-announcer.ts's.
    */
   degradedNotice: 'Board status unconfirmed',
+
+  /**
+   * Shown while the run in force is not reaching storage: a write was refused
+   * or raised, so the board is played from memory and a reload will not resume
+   * it. The player-facing half of a persistence failure, whose diagnostic half
+   * src/run/run-state-store.ts reports.
+   */
+  ephemeralNotice: 'This run is not being saved',
+
+  /** Announced once when the run stops being saved. */
+  ephemeralAnnouncement:
+    'This run is no longer being saved. It will not resume after a reload.',
+
+  /** Announced once when the run starts being saved again. */
+  persistentAnnouncement: 'This run is being saved again.',
+
+  /** Announced once per relic the hook bus stops firing. */
+  degradedRelicAnnouncement: (name: string): string =>
+    `${name} stopped firing and is no longer affecting the run.`,
 });
 
 export type HudCopy = typeof hudCopy;
@@ -317,8 +349,25 @@ const HOST_MOUNTED_METRIC = 'ui.hud.host_mounted';
 /** Counter raised per `mount` call after the first. */
 const HOST_REMOUNTED_METRIC = 'ui.hud.host_remounted';
 
-/** Counter raised once per payload written. */
+/**
+ * Counter raised once per COMMITTED payload written, which is `render` and no
+ * other member.
+ *
+ * It was raised by the shared writer, so the router's own `enter` and `update`
+ * — which write the context they were handed rather than a commit — counted
+ * here too, and one `state:commit` that arrived while the flow entered the
+ * stage state raised it twice. A reader reconciling this against
+ * `engine_events_total{event="state:commit"}` was reading lifecycle writes as
+ * commits.
+ */
 const COMMIT_METRIC = 'ui.hud.commit';
+
+/**
+ * Counter raised once per LIFECYCLE payload written: a context the router
+ * handed to `enter` or `update`, which re-renders what the last commit left
+ * rather than reporting a new one.
+ */
+const REFRESH_METRIC = 'ui.hud.refresh';
 
 /** Counter raised per terminal overlay shown, carrying the verdict. */
 const VERDICT_METRIC = 'ui.hud.verdict';
@@ -337,6 +386,12 @@ const STAGE_SKIPPED_METRIC = 'ui.hud.stage.skipped';
 
 /** Counter raised once per tray reconciliation, carrying the row counts. */
 const RELIC_TRAY_METRIC = 'ui.hud.relic_tray';
+
+/** Counter raised per persistence-status CHANGE written, carrying the status. */
+const PERSISTENCE_METRIC = 'ui.hud.persistence';
+
+/** Counter raised once per relic first shown as degraded, and per recovery. */
+const DEGRADED_RELIC_METRIC = 'ui.hud.relic_degraded';
 
 /** Counter raised per lifecycle call, carrying the member. */
 const LIFECYCLE_METRIC = 'ui.hud.lifecycle';
@@ -481,6 +536,26 @@ export interface HudOptions {
    * none. Called on every write; nothing is cached from it.
    */
   readonly boardSize?: HudBoardSizeSource;
+
+  /**
+   * Reads the identifiers of the held relics the hook bus has marked DEGRADED.
+   * `RelicRegistry.degradedIds()` satisfies it, and it is durable state: the
+   * bus skips a marked relic for the rest of its registration.
+   *
+   * Absent, or raising, no row is marked — which is the state before this
+   * reader existed, and which showed a relic that no longer fires as healthy.
+   * Called on every write; nothing is cached from it.
+   */
+  readonly degradedRelics?: () => readonly string[];
+
+  /**
+   * Reads whether the run in force is reaching storage.
+   * `RunController.persistenceStatus()` satisfies it. Called on every write.
+   *
+   * Absent, or raising, the run is treated as persistent, which is what a run
+   * whose writes are all succeeding reports.
+   */
+  readonly persistence?: () => 'persistent' | 'ephemeral';
 
   /**
    * Resolves a relic identifier to the name the tray shows.
@@ -887,6 +962,15 @@ export function createHud(options: HudOptions = {}): Hud {
   /** The unconfirmed-status notice, built on first use and kept afterwards. */
   let degradedNotice: HTMLElement | null = null;
 
+  /** The run-not-saved notice, built on first use and kept afterwards. */
+  let ephemeralNotice: HTMLElement | null = null;
+
+  /** The persistence status last written, so a change is announced once. */
+  let lastPersistence: 'persistent' | 'ephemeral' | null = null;
+
+  /** Relics already announced as degraded, so each is announced once. */
+  const announcedDegraded = new Set<string>();
+
   /** The empty-state row, built on first use and kept afterwards. */
   let emptyRow: HTMLElement | null = null;
 
@@ -1105,6 +1189,69 @@ export function createHud(options: HudOptions = {}): Hud {
     degradedNotice.hidden = !degraded;
 
     return degraded;
+  };
+
+  /**
+   * Shows or clears the run-not-saved notice, and announces a CHANGE of it
+   * once.
+   *
+   * The player-facing half of a persistence failure: the run continues to be
+   * played from memory, and this is what says a reload will not resume it.
+   * Announced on the transition alone, because a store that has run out of
+   * quota refuses every write of the rest of the run.
+   *
+   * @param status The status the run's last write left.
+   * @returns The status written.
+   */
+  const renderPersistence = (
+    status: 'persistent' | 'ephemeral',
+  ): 'persistent' | 'ephemeral' => {
+    const changed = lastPersistence !== null && lastPersistence !== status;
+    const first = lastPersistence === null;
+
+    lastPersistence = status;
+
+    if (hudGroup !== null) {
+      const ephemeral = status === 'ephemeral';
+
+      if (ephemeral) {
+        hudGroup.setAttribute(EPHEMERAL_ATTRIBUTE, ARIA_TRUE);
+      } else {
+        hudGroup.removeAttribute(EPHEMERAL_ATTRIBUTE);
+      }
+
+      const doc = hudGroup.ownerDocument ?? owner;
+
+      if (ephemeralNotice === null && doc !== null) {
+        ephemeralNotice = doc.createElement('p');
+        ephemeralNotice.className = EPHEMERAL_CLASS;
+        ephemeralNotice.textContent = copy.ephemeralNotice;
+        hudGroup.append(ephemeralNotice);
+      }
+
+      if (ephemeralNotice !== null) {
+        ephemeralNotice.hidden = !ephemeral;
+      }
+    }
+
+    // Announced on a change, and on a FIRST write that is already ephemeral —
+    // a run resumed into a store that is refusing writes — and never on the
+    // ordinary first write, which would say the run is being saved to a player
+    // who has no reason to think otherwise.
+    if (changed || (first && status === 'ephemeral')) {
+      announceLine(
+        status === 'ephemeral'
+          ? copy.ephemeralAnnouncement
+          : copy.persistentAnnouncement,
+        'persistence',
+      );
+      reporter.count(PERSISTENCE_METRIC, {
+        context: REPORT_CONTEXT,
+        status,
+      });
+    }
+
+    return status;
   };
 
   /**
@@ -1366,6 +1513,80 @@ export function createHud(options: HudOptions = {}): Hud {
   });
 
   /**
+   * Reads the degraded relic identifiers through the injected reader.
+   *
+   * @returns The identifiers the bus has marked, empty where no reader is
+   *   supplied, it answered with anything but an array, or it raised.
+   */
+  const readDegradedRelics = (): ReadonlySet<string> => {
+    const read = options.degradedRelics;
+
+    if (read === undefined) {
+      return EMPTY_ID_SET;
+    }
+
+    try {
+      const answer = read();
+
+      if (!Array.isArray(answer)) {
+        reporter.count(READER_FAULT_METRIC, {
+          context: REPORT_CONTEXT,
+          reader: 'degradedRelics',
+          cause: 'not-an-array',
+        });
+
+        return EMPTY_ID_SET;
+      }
+
+      return new Set(
+        answer.filter((id): id is string => typeof id === 'string'),
+      );
+    } catch (error: unknown) {
+      reporter.error('the HUD degraded-relic reader raised', error, {
+        context: REPORT_CONTEXT,
+        reader: 'degradedRelics',
+      });
+      reporter.count(READER_FAULT_METRIC, {
+        context: REPORT_CONTEXT,
+        reader: 'degradedRelics',
+      });
+
+      return EMPTY_ID_SET;
+    }
+  };
+
+  /**
+   * Reads the run's persistence status through the injected reader.
+   *
+   * @returns The status, and `'persistent'` where no reader is supplied, it
+   *   answered with anything else, or it raised.
+   */
+  const readPersistence = (): 'persistent' | 'ephemeral' => {
+    const read = options.persistence;
+
+    if (read === undefined) {
+      return 'persistent';
+    }
+
+    try {
+      const answer = read();
+
+      return answer === 'ephemeral' ? 'ephemeral' : 'persistent';
+    } catch (error: unknown) {
+      reporter.error('the HUD persistence reader raised', error, {
+        context: REPORT_CONTEXT,
+        reader: 'persistence',
+      });
+      reporter.count(READER_FAULT_METRIC, {
+        context: REPORT_CONTEXT,
+        reader: 'persistence',
+      });
+
+      return 'persistent';
+    }
+  };
+
+  /**
    * Reads the held relics through the injected reader.
    *
    * @returns The relics, or `null` where no reader is supplied or it
@@ -1409,6 +1630,14 @@ export function createHud(options: HudOptions = {}): Hud {
   /**
    * The relics one write renders, in the order supplied.
    *
+   * THE READER IS THE AUTHORITY WHENEVER IT ANSWERS, and an empty answer is an
+   * answer: a run holding no relic renders an empty tray. The payload's slice
+   * is the fallback for a HUD composed WITHOUT a reader, and for a reader that
+   * answered with a non-array or raised — both of which `readLiveRelics`
+   * reports as `null`. An empty answer fell through to the slice, so a registry
+   * emptied by a new run kept the previous run's rows on screen for as long as
+   * the slice carried them. Decision DL-HUD-14.
+   *
    * @param slice The payload's relic slice, already in pickup order.
    * @returns The relics to render.
    */
@@ -1417,7 +1646,7 @@ export function createHud(options: HudOptions = {}): Hud {
   ): readonly ActiveRelic[] => {
     const live = readLiveRelics();
 
-    if (live !== null && live.length > 0) {
+    if (live !== null) {
       return live;
     }
 
@@ -1510,10 +1739,37 @@ export function createHud(options: HudOptions = {}): Hud {
    */
   const renderRelics = (
     relics: readonly ActiveRelic[],
+    degraded: ReadonlySet<string>,
   ): readonly string[] => {
     const ids = Object.freeze(
       relics.map((relic): string => relic.definition.id),
     );
+
+    // ANNOUNCED AND COUNTED WHATEVER THE TRAY CAN SHOW, and before the rows are
+    // reconciled: a relic the bus has stopped firing is a change to the run,
+    // and a page whose tray outlet never resolved must still say so. Each
+    // identifier is announced once, and a relic that is no longer marked —
+    // dropped and taken again — is forgotten so a later degradation is
+    // announced afresh.
+    for (const relic of relics) {
+      const id = relic.definition.id;
+
+      if (degraded.has(id)) {
+        if (!announcedDegraded.has(id)) {
+          announcedDegraded.add(id);
+          announceLine(
+            copy.degradedRelicAnnouncement(relic.definition.name),
+            'relicDegraded',
+          );
+          reporter.count(DEGRADED_RELIC_METRIC, {
+            context: REPORT_CONTEXT,
+            relic: id,
+          });
+        }
+      } else {
+        announcedDegraded.delete(id);
+      }
+    }
 
     if (relicTray === null) {
       return ids;
@@ -1558,7 +1814,7 @@ export function createHud(options: HudOptions = {}): Hud {
       const existing = reusable.get(id)?.shift();
 
       if (existing !== undefined) {
-        existing.item.update(relic);
+        existing.item.update(relic, degraded.has(id));
         next.push(existing);
 
         continue;
@@ -1569,6 +1825,7 @@ export function createHud(options: HudOptions = {}): Hud {
         id,
         item: createRelicTrayItem({
           relic,
+          degraded: degraded.has(id),
           host: relicTray,
           ...(owner === null ? {} : { document: owner }),
           reporter,
@@ -1594,6 +1851,7 @@ export function createHud(options: HudOptions = {}): Hud {
       relics: relics.length,
       created,
       removed,
+      degraded: ids.filter((id): boolean => degraded.has(id)).length,
     });
 
     return ids;
@@ -1692,9 +1950,18 @@ export function createHud(options: HudOptions = {}): Hud {
    *
    * @param view The view to write.
    * @param rewriteScore Whether an unchanged score pair is written again.
+   * @param source Which counter the write is recorded on: `'commit'` for the
+   *   payload `render` was handed, and `'lifecycle'` for a context the router
+   *   handed `enter` or `update`. The two are counted apart because one
+   *   `state:commit` produces exactly one commit write and any number of
+   *   lifecycle writes.
    * @returns What was written.
    */
-  const write = (view: HudView, rewriteScore: boolean): HudSnapshot => {
+  const write = (
+    view: HudView,
+    rewriteScore: boolean,
+    source: 'commit' | 'lifecycle',
+  ): HudSnapshot => {
     if (destroyed) {
       reportAfterDestroy('write');
 
@@ -1729,8 +1996,12 @@ export function createHud(options: HudOptions = {}): Hud {
     // owned, so their original write order stands and this addition cannot
     // delay them.
     const stage = renderStage(view);
-    const relics = renderRelics(view.relics);
+    const relics = renderRelics(view.relics, readDegradedRelics());
     const degraded = renderDegraded(view.degraded);
+
+    // The run-status half's second notice, written after the board's own so the
+    // two read top to bottom in the order they were added.
+    renderPersistence(readPersistence());
 
     reconcileAnnouncements(view.relics);
 
@@ -1745,7 +2016,7 @@ export function createHud(options: HudOptions = {}): Hud {
       degraded,
     });
 
-    reporter.count(COMMIT_METRIC, {
+    reporter.count(source === 'commit' ? COMMIT_METRIC : REFRESH_METRIC, {
       context: REPORT_CONTEXT,
       score: view.score,
       terminal: view.terminal ?? 'none',
@@ -1948,12 +2219,17 @@ export function createHud(options: HudOptions = {}): Hud {
     // ours.
     degradedNotice?.remove();
     degradedNotice = null;
+    ephemeralNotice?.remove();
+    ephemeralNotice = null;
     hideEmptyRow();
     emptyRow = null;
     hudGroup?.removeAttribute(DEGRADED_ATTRIBUTE);
+    hudGroup?.removeAttribute(EPHEMERAL_ATTRIBUTE);
 
     clearTrayRows();
     lastCharges.clear();
+    announcedDegraded.clear();
+    lastPersistence = null;
     scorePanel.destroy();
 
     reporter.count(DESTROYED_METRIC, { context: REPORT_CONTEXT });
@@ -2008,13 +2284,21 @@ export function createHud(options: HudOptions = {}): Hud {
         return;
       }
 
-      active = true;
-
       const view = viewFromContext(context, 'enter');
 
-      if (view !== null) {
-        write(view, false);
+      // A REFUSED CONTEXT ENTERS NOTHING. `viewFromContext` answers `null` for
+      // a context belonging to another screen and reports the refusal; this
+      // member went on to mark the HUD active and place focus inside a host it
+      // had just declined to render, which left the stage screen holding focus
+      // and answering `isActive()` for a state it is not in. The refusal is
+      // counted by `viewFromContext` itself, so nothing is reported twice here.
+      if (view === null) {
+        return;
       }
+
+      active = true;
+
+      write(view, false, 'lifecycle');
 
       // An in-state refresh never moves focus, whichever member delivered it.
       if (!context.refresh) {
@@ -2038,7 +2322,7 @@ export function createHud(options: HudOptions = {}): Hud {
       const view = viewFromContext(context, 'update');
 
       if (view !== null) {
-        write(view, false);
+        write(view, false, 'lifecycle');
       }
 
       reporter.count(LIFECYCLE_METRIC, {
@@ -2077,7 +2361,7 @@ export function createHud(options: HudOptions = {}): Hud {
       copy.stageAnnouncement(rendered?.stage ?? lastStageNumber),
 
     render(commit: StateCommitEvent): HudSnapshot {
-      return write(viewFromCommit(commit), true);
+      return write(viewFromCommit(commit), true, 'commit');
     },
 
     readRendered: (): HudSnapshot | null => rendered,

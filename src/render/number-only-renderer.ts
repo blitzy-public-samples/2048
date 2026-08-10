@@ -17,6 +17,48 @@
 // `state:commit` event, and it retains no part of a payload after the event
 // that carried it.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-NUMBER-01  js/html_actuator.js L10-L36   `actuate`, ported as `render()`
+//                                               queueing and `frame()` drawing,
+//                                               which src/render/render-loop.ts
+//                                               drives in place of the two
+//                                               nested `requestAnimationFrame`
+//                                               calls
+//   TR-NUMBER-02  js/html_actuator.js L43-L47   `clearContainer`, ported as
+//                                               `clearElement()` and the
+//                                               tile-layer reconciliation
+//   TR-NUMBER-03  js/html_actuator.js L49-L91   `addTile`, ported as
+//                                               `planTile()` and `drawTile()`
+//   TR-NUMBER-04  js/html_actuator.js L93-L95   `applyClasses`, ported onto
+//                                               `classList` where the actuator
+//                                               wrote the whole class
+//                                               attribute and cited
+//                                               js/classlist_polyfill.js,
+//                                               which is deleted
+//   TR-NUMBER-05  js/html_actuator.js L97-L104  `normalizePosition` and
+//                                               `positionClass`, ported as
+//                                               `positionClass()` and
+//                                               `positionTransform()`
+//   TR-NUMBER-06  js/html_actuator.js L1-L8     the four unchecked
+//                                               `querySelector` results, ported
+//                                               as guarded lookups that report
+//                                               an absent element once
+//   TR-NUMBER-07  target-only row               the generated lattice and its
+//                                               grid semantics
+//   TR-NUMBER-08  target-only row               `readRenderedBoard()`
+//   TR-NUMBER-09  target-only row               the fill, numeral colour and
+//                                               numeral size published as
+//                                               custom properties, resolved
+//                                               through `resolveTileTheme` of
+//                                               src/theme/themes.ts and
+//                                               `tileNumeralSize` of
+//                                               src/theme/tokens.ts
+//   TR-NUMBER-10  target-only row               `degraded` carried by the
+//                                               paint plan and by the
+//                                               rendered-board snapshot, from
+//                                               `StateCommitEvent.degraded`
+//
 // Decisions: DL-NUMBER-01, DL-NUMBER-02, DL-NUMBER-03, DL-NUMBER-04,
 // DL-NUMBER-05 (docs/DECISION_LOG.md).
 
@@ -135,6 +177,17 @@ const ARIA_TRUE = 'true';
 const FOCUS_EVENT = 'focusin';
 
 const CELL_VALUE_ATTRIBUTE = 'data-tile-value';
+
+/**
+ * The two attributes `ParallelBoardLayer` of src/ui/a11y/focus-manager.ts marks
+ * each of its cell counterparts with, read here so the focused coordinate can
+ * cross the renderer handoff. Restated rather than imported: this module reaches
+ * the parallel board as an opaque `Element` and imports nothing from src/ui.
+ * DL-FOCUS-04.
+ */
+const PARALLEL_CELL_X_ATTRIBUTE = 'data-cell-x';
+
+const PARALLEL_CELL_Y_ATTRIBUTE = 'data-cell-y';
 
 const BOARD_SIZE_ATTRIBUTE = 'data-board-size';
 
@@ -278,6 +331,17 @@ export interface ParallelBoardLifecycle {
    */
   mount(host: Element | string | null | undefined, boardSize: number): boolean;
 
+  /**
+   * Moves focus to one cell counterpart, so a board handed back to this layer
+   * opens on the cell the surface being torn down was reading. OPTIONAL: a
+   * caller may supply a layer that only mounts and unmounts. DL-FOCUS-04.
+   *
+   * @param x Zero-based column.
+   * @param y Zero-based row.
+   * @returns Whether focus moved.
+   */
+  focusCell?(x: number, y: number): boolean;
+
   /** Removes the cell counterparts and every listener the layer added. */
   unmount(): void;
 }
@@ -348,6 +412,40 @@ export interface NumberOnlyRendererOptions {
    * Absent, the caller drives `frame` on its own schedule.
    */
   readonly onWork?: () => void;
+
+  /**
+   * Coordinate the lattice's tab stop opens on, clamped into the board in
+   * force, so a renderer built to replace another resumes on the cell that one
+   * was being read at.
+   *
+   * Adopted for the FIRST lattice this renderer builds and never afterwards: a
+   * rebuild carries its own coordinate (`carriedFocus`), and a live handoff from
+   * the parallel board outranks both. Focus is NOT moved by it — a coordinate
+   * supplied here is where the next Tab lands, not a placement. DL-FOCUS-04,
+   * DL-NUMBER-08.
+   */
+  readonly initialCell?: BoardCoordinate | null;
+}
+
+/** One board cell, and whether that cell was the one holding focus. */
+export interface BoardFocus {
+  /** Zero-based column. */
+  readonly x: number;
+
+  /** Zero-based row. */
+  readonly y: number;
+
+  /** Whether the surface reporting it was the one holding focus. */
+  readonly focused: boolean;
+}
+
+/** One board cell. */
+export interface BoardCoordinate {
+  /** Zero-based column. */
+  readonly x: number;
+
+  /** Zero-based row. */
+  readonly y: number;
 }
 
 /**
@@ -419,6 +517,19 @@ export interface NumberOnlyRenderer {
    * @returns A frozen snapshot, safe to read after the engine has moved on.
    */
   readRenderedBoard(): RenderedBoard | null;
+
+  /**
+   * The coordinate this lattice's tab stop stands on, and whether that cell is
+   * the one holding focus.
+   *
+   * Read by a caller that is about to swap renderers, so the coordinate can be
+   * handed to the renderer taking over as its `initialCell`: the two surfaces
+   * are separate objects with separate lattices, so nothing carries between them
+   * on its own. `null` while no lattice is built. DL-FOCUS-04, DL-NUMBER-08.
+   *
+   * @returns The coordinate, or `null` where there is no lattice.
+   */
+  focusedCell(): BoardFocus | null;
 
   /**
    * Unmounts the board, drops the queued commit and the last rendered board,
@@ -908,6 +1019,17 @@ export function createNumberOnlyRenderer(
 
   let activeCellIndex = 0;
 
+  /**
+   * The coordinate the FIRST lattice opens its tab stop on, from the caller's
+   * `initialCell`, and `null` once a lattice has been built or where the caller
+   * supplied none. Held separately from `activeCellIndex` because that index is
+   * meaningless until an edge length is known. DL-FOCUS-04, DL-NUMBER-08.
+   */
+  let openingCell: CarriedFocus | null =
+    options.initialCell === undefined || options.initialCell === null
+      ? null
+      : { x: options.initialCell.x, y: options.initialCell.y, focused: false };
+
   let shownScore = 0;
 
   /** The plan awaiting a paint, or `null`. */
@@ -1080,6 +1202,53 @@ export function createNumberOnlyRenderer(
     }
   };
 
+  /** One board coordinate, and whether focus was on it. */
+  type CarriedFocus = BoardFocus;
+
+  /** Whether the active element is one of this lattice's cells. */
+  const focusHeldInLattice = (): boolean => {
+    const active = owner?.activeElement ?? null;
+
+    return active !== null && cellElements.some((cell) => cell === active);
+  };
+
+  /**
+   * The coordinate the tab stop stands on, or `null` while no lattice is built.
+   *
+   * Read BEFORE a rebuild or a handoff, because both discard the nodes the
+   * index addresses.
+   */
+  const carriedFocus = (): CarriedFocus | null =>
+    latticeSize > 0
+      ? {
+          x: activeCellIndex % latticeSize,
+          y: Math.floor(activeCellIndex / latticeSize),
+          focused: focusHeldInLattice(),
+        }
+      : null;
+
+  /**
+   * Moves the tab stop to a coordinate, clamped into the lattice in force.
+   *
+   * @param x Zero-based column.
+   * @param y Zero-based row.
+   */
+  const adoptCoordinate = (x: number, y: number): void => {
+    if (latticeSize <= 0) {
+      return;
+    }
+
+    const clampedX = Math.min(Math.max(x, 0), latticeSize - 1);
+    const clampedY = Math.min(Math.max(y, 0), latticeSize - 1);
+
+    activeCellIndex = clampedY * latticeSize + clampedX;
+  };
+
+  /** Moves focus to the cell the tab stop stands on. */
+  const focusActiveCell = (): void => {
+    cellElements.at(activeCellIndex)?.focus();
+  };
+
   /** Moves the tab stop to the cell that has taken focus. */
   const onFocusIn = (event: Event): void => {
     const target = event.target;
@@ -1245,6 +1414,12 @@ export function createNumberOnlyRenderer(
       return;
     }
 
+    // READ BEFORE THE TEARDOWN. The rebuild discards every cell, so the
+    // coordinate the tab stop stood on and whether it held focus have to be
+    // taken now; both are restored below, clamped into the new edge length.
+    // DL-FOCUS-04.
+    const carried = carriedFocus();
+
     detachFocusListener();
     clearElement(host);
 
@@ -1308,11 +1483,35 @@ export function createNumberOnlyRenderer(
     transient = [];
     resolveGeometry();
 
-    // There is a semantic lattice now, so the other one stands down.
-    claimParallelBoard();
+    // There is a semantic lattice now, so the other one stands down — and the
+    // coordinate it was standing on comes across with it, so a swap from the
+    // Three renderer's parallel board resumes on the same cell.
+    const handedOver = claimParallelBoard();
+
+    // THREE SOURCES, IN PRECEDENCE ORDER. A live handoff — the parallel board
+    // was holding focus as this lattice took the board — outranks a rebuild's
+    // own coordinate, which outranks the one the caller supplied for the first
+    // build. `supplied` is consumed here whether or not it is used, so it can
+    // never re-apply over a later rebuild's carry. DL-FOCUS-04, DL-NUMBER-08.
+    const supplied = openingCell;
+
+    openingCell = null;
+
+    const restored = handedOver ?? carried ?? supplied;
+
+    if (restored !== null) {
+      adoptCoordinate(restored.x, restored.y);
+    }
 
     applyRovingTabStop();
     attachFocusListener();
+
+    // MOVED ONLY WHERE IT WAS ALREADY HELD. A rebuild or a handoff that happened
+    // while focus was elsewhere leaves focus where it is; one that discarded the
+    // focused node puts focus back on the cell that replaced it.
+    if (restored?.focused === true) {
+      focusActiveCell();
+    }
 
     reporter.onCount({
       name: LATTICE_METRIC,
@@ -1767,20 +1966,51 @@ export function createNumberOnlyRenderer(
       : null;
 
   /**
+   * Reads the coordinate a parallel-board cell holds focus on.
+   *
+   * The layer marks each counterpart with the cell coordinates as data
+   * attributes, which is what makes the handoff possible without importing that
+   * module.
+   *
+   * @param board The parallel board host.
+   * @returns The focused coordinate, or `null` where focus is elsewhere.
+   */
+  const readParallelFocus = (board: Element): CarriedFocus | null => {
+    const active = owner?.activeElement ?? null;
+
+    if (active === null || !board.contains(active)) {
+      return null;
+    }
+
+    const x = Number(active.getAttribute(PARALLEL_CELL_X_ATTRIBUTE));
+    const y = Number(active.getAttribute(PARALLEL_CELL_Y_ATTRIBUTE));
+
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0) {
+      return null;
+    }
+
+    return { x, y, focused: true };
+  };
+
+  /**
    * Takes the parallel accessibility board out of the accessibility tree for
    * as long as this renderer holds a semantic lattice of its own.
+   *
+   * @returns The coordinate the parallel board held focus on, for this lattice
+   *   to adopt, or `null` where it held none.
    */
-  const claimParallelBoard = (): void => {
+  const claimParallelBoard = (): CarriedFocus | null => {
     if (parallelBoard !== null) {
-      return;
+      return null;
     }
 
     const board = options.parallelBoard ?? null;
 
     if (board === null) {
-      return;
+      return null;
     }
 
+    const handedOver = readParallelFocus(board);
     const element = asHtmlElement(board);
 
     parallelBoard = board;
@@ -1809,14 +2039,20 @@ export function createNumberOnlyRenderer(
     reporter.onCount({
       name: PARALLEL_BOARD_METRIC,
       value: 1,
-      detail: Object.freeze({ claimed: true }),
+      detail: Object.freeze({ claimed: true, handedOver: handedOver !== null }),
     });
+
+    return handedOver;
   };
 
   /**
    * Restores the parallel accessibility board to the state it was found in.
+   *
+   * @param carried The coordinate this lattice's tab stop stood on, so the layer
+   *   taking the board back resumes on the same cell. Focus is moved only where
+   *   this lattice was the surface holding it.
    */
-  const releaseParallelBoard = (): void => {
+  const releaseParallelBoard = (carried: CarriedFocus | null = null): void => {
     const board = parallelBoard;
     const state = parallelBoardState;
 
@@ -1845,17 +2081,30 @@ export function createNumberOnlyRenderer(
       element.hidden = state.hidden;
     }
 
+    let remounted = false;
+
     if (parallelBoardLayer !== null && !parallelBoardLayer.isMounted()) {
-      parallelBoardLayer.mount(
+      remounted = parallelBoardLayer.mount(
         board,
         latticeSize > 0 ? latticeSize : readConfiguredSize(),
       );
     }
 
+    // THE COORDINATE CROSSES BACK. A swap away from this renderer discards its
+    // lattice, so a player reading the board on one cell would otherwise return
+    // to a board with nothing focused. Moved only where this lattice held focus:
+    // taking focus from elsewhere would be a steal. DL-FOCUS-04.
+    if (remounted && carried?.focused === true) {
+      const place = parallelBoardLayer?.focusCell;
+
+      // Called through its owner, and only where the layer publishes it.
+      place?.call(parallelBoardLayer, carried.x, carried.y);
+    }
+
     reporter.onCount({
       name: PARALLEL_BOARD_METRIC,
       value: 1,
-      detail: Object.freeze({ claimed: false }),
+      detail: Object.freeze({ claimed: false, handedBack: carried !== null }),
     });
   };
 
@@ -1865,6 +2114,10 @@ export function createNumberOnlyRenderer(
     if (mountedHost === null) {
       return;
     }
+
+    // READ BEFORE THE LATTICE GOES, and handed to `releaseParallelBoard()` below
+    // so the layer taking the board back opens on the same cell. DL-FOCUS-04.
+    const carried = carriedFocus();
 
     detachFocusListener();
     clearElement(mountedHost);
@@ -1883,7 +2136,7 @@ export function createNumberOnlyRenderer(
     }
 
     closeScale();
-    releaseParallelBoard();
+    releaseParallelBoard(carried);
 
     host = null;
     hostElement = null;
@@ -2152,6 +2405,8 @@ export function createNumberOnlyRenderer(
     frame,
 
     readRenderedBoard: (): RenderedBoard | null => rendered,
+
+    focusedCell: (): BoardFocus | null => carriedFocus(),
 
     dispose,
     destroy: dispose,

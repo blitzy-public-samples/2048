@@ -84,6 +84,27 @@ rngCursor
   rarity-weight   9"
 `;
 
+exports[`AAP V2 — a STANDING reward offer survives the reload > reproduces its recorded rounds, relics, board and cursors > a standing reward offer carried across a reload 1`] = `
+"reward rounds, in the order they were offered
+  stage 1  TAKEN twin-seed         offered twin-seed, temporal-anchor, collapsing-vault
+  stage 2  TAKEN prospectors-eye   offered prospectors-eye, hollow-ascension, gilded-rot
+  stage 3  TAKEN fertile-ground    offered fertile-ground, echo-chamber, chain-catalyst
+
+relics held, in pickup order: twin-seed, prospectors-eye, fertile-ground
+stage reached: 4
+
+size 4  score 424  over false  won false  keepPlaying false
+x=0    64     8     4     2
+x=1     4     .    32     8
+x=2     .     4     2     .
+x=3     .     4     .     .
+rngCursor
+  spawn-value     46
+  spawn-position  46
+  relic-draw      58
+  rarity-weight   9"
+`;
+
 exports[`AAP V2 — a run interrupted and resumed from storage > reproduces the recorded board after the resume > resumed run 1`] = `
 "size 4  score 24  over false  won false  keepPlaying false
 x=0     2     .     4     4

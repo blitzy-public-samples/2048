@@ -38,18 +38,13 @@
 //   TR-BOARD-04 `scouring-wind` on `onAfterMove`, and the four `js/grid.js`
 //   anchors above together with js/game_manager.js L238-L268.
 //
-// Named figures, per docs/architecture/: Figure 5, "Hook Dispatch Sequence:
-// Pickup-Order Fan-Out with Charge Guard and Error Isolation"
-// (docs/architecture/hook-dispatch-sequence.md), carries the charge-guard path
-// this suite's budget section exercises; Figure 4, "Turn Data Flow"
-// (docs/architecture/data-flow.md), carries the `Moves available?` decision
-// node the terminal-board case exercises.
+// Named figures these sections map onto: Figure 5, "Hook Dispatch Sequence"
+// (docs/architecture/hook-dispatch-sequence.md) for the charge-guard path the
+// budget section exercises, and Figure 4, "Turn Data Flow"
+// (docs/architecture/data-flow.md) for the `Moves available?` decision node the
+// terminal-board case exercises.
 //
-// Decisions behind the unit under test are argued in docs/DECISION_LOG.md and
-// named here only so they can be found from the log: DL-BOARD-01, the budget a
-// handler asks for through `HookContext.spendCharge` without reading it, and
-// DL-BOARD-02, the effect carried by a `context.effects` command the engine
-// applies.
+// Decisions: DL-BOARD-01, DL-BOARD-02 (docs/DECISION_LOG.md).
 //
 // HOW THE EFFECT IS OBSERVED. A handler never holds the live `Grid`: it reads a
 // `ReadonlyGridView` and RECORDS `removeTile` commands on

@@ -11,6 +11,12 @@
  * tables. Nothing here is ported: js/ plays no sound, so every row below is
  * target-only.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece:
+ *   TR-AUDIO-05  the descriptor table and its per-event entries
+ *   TR-AUDIO-06  the pure resolvers that select a descriptor
+ *   TR-AUDIO-07  the audio bounds `MIN_VOLUME`, `MAX_VOLUME`,
+ *                `DEFAULT_VOLUME` and `DEFAULT_MUTED`
+ *
  * Decisions: DL-AUDIO-01 (docs/DECISION_LOG.md).
  */
 

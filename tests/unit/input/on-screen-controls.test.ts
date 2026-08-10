@@ -137,13 +137,15 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-describe('LEGACY_CONTROL_BINDINGS declares the overlay control', () => {
-  it('gives .retry-button both contexts and the rest none of their own', () => {
+describe('LEGACY_CONTROL_BINDINGS declares the three markup controls', () => {
+  it('gives none of the three contexts of its own', () => {
     const [retry, restart, keepPlaying] = LEGACY_CONTROL_BINDINGS;
 
+    // Each follows the contexts its action carries in the keymap, so a control
+    // is live exactly where its action is. DL-CONTROL-08.
     expect(retry.selector).toBe('.retry-button');
     expect(retry.action).toBe('restart');
-    expect(retry.contexts).toEqual(['game', 'overlay']);
+    expect(retry.contexts).toBeUndefined();
 
     expect(restart.selector).toBe('.restart-button');
     expect(restart.contexts).toBeUndefined();
@@ -152,9 +154,8 @@ describe('LEGACY_CONTROL_BINDINGS declares the overlay control', () => {
     expect(keepPlaying.contexts).toBeUndefined();
   });
 
-  it('leaves the restart key bound in game alone', () => {
-    // The control is reachable from the overlay; the key is not, so a keypress
-    // during a dialog still restarts nothing.
+  it('reads restart in game and keepPlaying in the overlay', () => {
+    // The two contexts every one of the three resolves against.
     expect(DEFAULT_KEY_BINDINGS.restart.contexts).toEqual(['game']);
     expect(DEFAULT_KEY_BINDINGS.keepPlaying.contexts).toEqual(['overlay']);
   });
@@ -170,13 +171,15 @@ describe('a markup control follows the active context', () => {
     expect(isSuppressed('.restart-button')).toBe(false);
   });
 
-  it('suppresses restart but not retry in the overlay context', () => {
+  it('suppresses both restart controls in the overlay context', () => {
     seedMarkup();
     mount(createHost(), 'overlay');
 
+    // `restart` is a game-context action, so both controls that publish it are
+    // withdrawn together; the terminal states offer their own controls instead.
     expect(isSuppressed('.restart-button')).toBe(true);
+    expect(isSuppressed('.retry-button')).toBe(true);
     expect(isSuppressed('.keep-playing-button')).toBe(false);
-    expect(isSuppressed('.retry-button')).toBe(false);
   });
 
   it('suppresses all three during text entry', () => {
@@ -199,7 +202,7 @@ describe('a markup control follows the active context', () => {
 
     expect(isSuppressed('.keep-playing-button')).toBe(false);
     expect(isSuppressed('.restart-button')).toBe(true);
-    expect(isSuppressed('.retry-button')).toBe(false);
+    expect(isSuppressed('.retry-button')).toBe(true);
 
     handle.setContext('game');
 
@@ -241,9 +244,9 @@ describe('a markup control follows the active context', () => {
 
     expect(isSuppressed('.restart-button')).toBe(true);
 
-    // `.retry-button` declares its own, so a remapped binding does not move it
-    // out of the overlay it lives in.
-    expect(isSuppressed('.retry-button')).toBe(false);
+    // `.retry-button` declares no contexts either, so the remap moves both
+    // controls that publish `restart` together.
+    expect(isSuppressed('.retry-button')).toBe(true);
   });
 
   it('reports the markup controls beside the generated ones', () => {
@@ -359,10 +362,11 @@ describe('an unavailable markup control publishes nothing', () => {
 
     expect(host.log.published).toEqual([]);
 
-    // The overlay's own retry control is still the way out of it.
+    // And the retained retry control alongside it: `restart` belongs to the
+    // board's context, so neither control publishes from an overlay.
     control('.retry-button').dispatchEvent(new Event('click'));
 
-    expect(host.log.published).toEqual(['restart']);
+    expect(host.log.published).toEqual([]);
   });
 
   it('reports the rejection rather than dropping it silently', () => {

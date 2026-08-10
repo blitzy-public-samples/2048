@@ -1,0 +1,873 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>2048 Roguelike — Client Observability Dashboard</title>
+
+    <!--
+      The server-free half of the Rule 3 dashboard template. It parses the
+      Prometheus text exported by src/observability/metrics.ts and draws the same
+      panels docs/dashboards/dashboard.json declares, as inline SVG.
+
+      NO network access, NO data source, NO build step: open this file from disk,
+      load a game2048-metrics.prom exported by the diagnostics overlay's
+      "Export metrics" control, and the panels populate from it. A small built-in
+      sample renders before any file is chosen so the page is never blank.
+
+      See docs/OBSERVABILITY.md section 7.
+    -->
+    <style>
+      :root {
+        --bg: #faf8ef;
+        --panel: #fdfcf7;
+        --ink: #776e65;
+        --ink-strong: #5c554e;
+        --rule: #d8d4d0;
+        --accent: #8f7a66;
+        --accent-2: #7d6b59;
+        --good: #3f7a4a;
+        --warn: #b8791f;
+        --bad: #a33223;
+        --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--ink);
+        font: 16px/1.5 "Helvetica Neue", Arial, sans-serif;
+      }
+
+      header {
+        max-width: 1180px;
+        margin: 0 auto 20px;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 26px;
+        color: var(--ink-strong);
+      }
+
+      .sub {
+        margin: 0 0 16px;
+        font-size: 14px;
+      }
+
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 16px;
+        background: var(--panel);
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+      }
+
+      .controls label {
+        font-weight: 700;
+        font-size: 14px;
+      }
+
+      .controls input[type="file"] {
+        font: inherit;
+        font-size: 14px;
+      }
+
+      button {
+        font: inherit;
+        font-size: 14px;
+        font-weight: 700;
+        padding: 8px 14px;
+        border: none;
+        border-radius: 3px;
+        background: var(--accent-2);
+        color: #f9f6f2;
+        cursor: pointer;
+      }
+
+      button:focus-visible {
+        outline: 3px solid var(--ink-strong);
+        outline-offset: 2px;
+      }
+
+      .status {
+        margin: 12px auto 0;
+        max-width: 1180px;
+        font-size: 14px;
+      }
+
+      main {
+        max-width: 1180px;
+        margin: 0 auto;
+      }
+
+      h2 {
+        margin: 28px 0 10px;
+        padding-bottom: 6px;
+        font-size: 17px;
+        color: var(--ink-strong);
+        border-bottom: 1px solid var(--rule);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+        gap: 16px;
+      }
+
+      .panel {
+        padding: 14px 16px 16px;
+        background: var(--panel);
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+      }
+
+      .panel h3 {
+        margin: 0 0 4px;
+        font-size: 15px;
+        color: var(--ink-strong);
+      }
+
+      .panel p.desc {
+        margin: 0 0 12px;
+        font-size: 12.5px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+      }
+
+      th,
+      td {
+        padding: 5px 8px;
+        text-align: left;
+        border-bottom: 1px solid var(--rule);
+      }
+
+      th {
+        font-size: 11.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      td.num {
+        text-align: right;
+        font-family: var(--mono);
+      }
+
+      .empty {
+        margin: 0;
+        font-size: 13px;
+        font-style: italic;
+      }
+
+      .pill {
+        display: inline-block;
+        min-width: 44px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+        text-align: center;
+        color: #f9f6f2;
+      }
+
+      .pill.pass {
+        background: var(--good);
+      }
+
+      .pill.fail {
+        background: var(--bad);
+      }
+
+      .pill.na {
+        background: var(--accent);
+      }
+
+      .stat {
+        font-family: var(--mono);
+        font-size: 26px;
+        color: var(--ink-strong);
+      }
+
+      svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      footer {
+        max-width: 1180px;
+        margin: 32px auto 0;
+        padding-top: 14px;
+        border-top: 1px solid var(--rule);
+        font-size: 13px;
+      }
+
+      code {
+        font-family: var(--mono);
+        font-size: 0.92em;
+      }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h1>2048 Roguelike — Client Observability</h1>
+      <p class="sub">
+        Reads a Prometheus-text export from
+        <code>src/observability/metrics.ts</code>. No server, no data source, no
+        network access.
+      </p>
+
+      <div class="controls">
+        <label for="file">Load a metrics export</label>
+        <input id="file" type="file" accept=".prom,.txt,text/plain" />
+        <button id="sample" type="button">Load the built-in sample</button>
+      </div>
+    </header>
+
+    <p class="status" id="status" role="status">
+      Showing the built-in sample. Export
+      <code>game2048-metrics.prom</code> from the diagnostics overlay and load it
+      to see a real run.
+    </p>
+
+    <main id="board"></main>
+
+    <footer>
+      Panels mirror <code>docs/dashboards/dashboard.json</code>. Reused and added
+      capabilities are inventoried in <code>docs/OBSERVABILITY.md</code>.
+    </footer>
+
+    <script>
+      "use strict";
+
+      /* ====================================================================
+       * 1. Parsing Prometheus text
+       * ==================================================================== */
+
+      /**
+       * Parses an exposition into samples grouped by family.
+       *
+       * Handles the subset the registry emits: `# HELP`, `# TYPE`, and sample
+       * lines with optional labels. Escaped quotes and backslashes inside a
+       * label value are unescaped, and a malformed line is skipped rather than
+       * failing the whole parse.
+       */
+      function parseExposition(text) {
+        var families = Object.create(null);
+        var lines = String(text).split(/\r?\n/);
+
+        function family(name) {
+          if (!families[name]) {
+            families[name] = { name: name, type: "untyped", help: "", samples: [] };
+          }
+          return families[name];
+        }
+
+        for (var i = 0; i < lines.length; i += 1) {
+          var line = lines[i].trim();
+
+          if (line === "") {
+            continue;
+          }
+
+          if (line.charAt(0) === "#") {
+            var meta = /^#\s+(HELP|TYPE)\s+(\S+)\s*(.*)$/.exec(line);
+
+            if (meta) {
+              var entry = family(meta[2]);
+              if (meta[1] === "TYPE") {
+                entry.type = meta[3].trim() || "untyped";
+              } else {
+                entry.help = meta[3].trim();
+              }
+            }
+            continue;
+          }
+
+          var sample = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{.*\})?\s+(-?[0-9.eE+]+|NaN|\+Inf|-Inf)\s*$/.exec(
+            line
+          );
+
+          if (!sample) {
+            continue;
+          }
+
+          var metric = sample[1];
+          var labels = parseLabels(sample[2]);
+          var value = Number(sample[3]);
+          var base = metric.replace(/_(bucket|sum|count)$/, "");
+          var suffix = metric === base ? "" : metric.slice(base.length + 1);
+          var target = families[base] ? base : metric;
+
+          family(target).samples.push({
+            metric: metric,
+            suffix: suffix,
+            labels: labels,
+            value: isFinite(value) ? value : Number(sample[3] === "+Inf" ? Infinity : NaN)
+          });
+        }
+
+        return families;
+      }
+
+      function parseLabels(block) {
+        var labels = Object.create(null);
+
+        if (!block) {
+          return labels;
+        }
+
+        var body = block.slice(1, -1);
+        var pattern = /([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g;
+        var found;
+
+        while ((found = pattern.exec(body)) !== null) {
+          labels[found[1]] = found[2]
+            .replace(/\\"/g, '"')
+            .replace(/\\n/g, "\n")
+            .replace(/\\\\/g, "\\");
+        }
+
+        return labels;
+      }
+
+      /* ====================================================================
+       * 2. Reading values out of the parse
+       * ==================================================================== */
+
+      function samplesOf(model, name, suffix) {
+        var entry = model[name];
+
+        if (!entry) {
+          return [];
+        }
+
+        return entry.samples.filter(function (sample) {
+          return sample.suffix === (suffix || "");
+        });
+      }
+
+      function totalOf(model, name) {
+        return samplesOf(model, name, "").reduce(function (sum, sample) {
+          return sum + (isFinite(sample.value) ? sample.value : 0);
+        }, 0);
+      }
+
+      function byLabel(model, name, label) {
+        var rows = [];
+
+        samplesOf(model, name, "").forEach(function (sample) {
+          rows.push({ key: sample.labels[label] || "(none)", value: sample.value });
+        });
+
+        rows.sort(function (left, right) {
+          return right.value - left.value;
+        });
+
+        return rows;
+      }
+
+      /**
+       * Interpolates a quantile from cumulative histogram buckets, the way
+       * `histogram_quantile` does, per label group.
+       */
+      function quantiles(model, name, quantile, groupLabel) {
+        var groups = Object.create(null);
+
+        samplesOf(model, name, "bucket").forEach(function (sample) {
+          var key = groupLabel ? sample.labels[groupLabel] || "(none)" : "all";
+          var bound = sample.labels.le;
+
+          if (bound === undefined) {
+            return;
+          }
+
+          if (!groups[key]) {
+            groups[key] = [];
+          }
+
+          groups[key].push({
+            bound: bound === "+Inf" ? Infinity : Number(bound),
+            count: sample.value
+          });
+        });
+
+        return Object.keys(groups)
+          .map(function (key) {
+            var buckets = groups[key].sort(function (left, right) {
+              return left.bound - right.bound;
+            });
+            var total = buckets.length ? buckets[buckets.length - 1].count : 0;
+
+            if (!total) {
+              return { key: key, value: 0, total: 0 };
+            }
+
+            var wanted = quantile * total;
+            var previousBound = 0;
+            var previousCount = 0;
+
+            for (var i = 0; i < buckets.length; i += 1) {
+              if (buckets[i].count >= wanted) {
+                var bound = buckets[i].bound;
+
+                if (!isFinite(bound)) {
+                  return { key: key, value: previousBound, total: total };
+                }
+
+                var span = buckets[i].count - previousCount;
+                var offset = span > 0 ? (wanted - previousCount) / span : 0;
+
+                return {
+                  key: key,
+                  value: previousBound + (bound - previousBound) * offset,
+                  total: total
+                };
+              }
+
+              previousBound = isFinite(buckets[i].bound) ? buckets[i].bound : previousBound;
+              previousCount = buckets[i].count;
+            }
+
+            return { key: key, value: previousBound, total: total };
+          })
+          .sort(function (left, right) {
+            return right.value - left.value;
+          });
+      }
+
+      /* ====================================================================
+       * 3. Rendering
+       * ==================================================================== */
+
+      function el(tag, attrs, children) {
+        var node = document.createElement(tag);
+
+        Object.keys(attrs || {}).forEach(function (key) {
+          if (key === "class") {
+            node.className = attrs[key];
+          } else if (key === "text") {
+            node.textContent = attrs[key];
+          } else {
+            node.setAttribute(key, attrs[key]);
+          }
+        });
+
+        (children || []).forEach(function (child) {
+          node.appendChild(child);
+        });
+
+        return node;
+      }
+
+      function panel(title, description, body) {
+        return el("section", { class: "panel" }, [
+          el("h3", { text: title }),
+          el("p", { class: "desc", text: description }),
+          body
+        ]);
+      }
+
+      function rowsTable(headings, rows, format) {
+        if (!rows.length) {
+          return el("p", { class: "empty", text: "No samples in this export." });
+        }
+
+        var head = el(
+          "tr",
+          {},
+          headings.map(function (heading) {
+            return el("th", { text: heading });
+          })
+        );
+
+        var body = rows.map(function (row) {
+          return el("tr", {}, [
+            el("td", { text: row.key }),
+            el("td", { class: "num", text: format ? format(row.value) : integer(row.value) })
+          ]);
+        });
+
+        return el("table", {}, [el("thead", {}, [head]), el("tbody", {}, body)]);
+      }
+
+      function integer(value) {
+        return isFinite(value) ? String(Math.round(value)) : "—";
+      }
+
+      function millis(value) {
+        return isFinite(value) ? value.toFixed(2) + " ms" : "—";
+      }
+
+      /** A horizontal bar chart, drawn as inline SVG. */
+      function barChart(rows, format) {
+        if (!rows.length) {
+          return el("p", { class: "empty", text: "No samples in this export." });
+        }
+
+        var visible = rows.slice(0, 10);
+        var rowHeight = 26;
+        var labelWidth = 150;
+        var width = 640;
+        var height = visible.length * rowHeight + 8;
+        var peak = Math.max.apply(
+          null,
+          visible.map(function (row) {
+            return isFinite(row.value) ? row.value : 0;
+          })
+        );
+        var scale = peak > 0 ? (width - labelWidth - 90) / peak : 0;
+        var svgns = "http://www.w3.org/2000/svg";
+        var svg = document.createElementNS(svgns, "svg");
+
+        svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+        svg.setAttribute("role", "img");
+
+        visible.forEach(function (row, index) {
+          var y = index * rowHeight + 4;
+          var length = Math.max(isFinite(row.value) ? row.value * scale : 0, 1);
+
+          var name = document.createElementNS(svgns, "text");
+          name.setAttribute("x", "0");
+          name.setAttribute("y", String(y + 14));
+          name.setAttribute("font-size", "12");
+          name.setAttribute("fill", "#776e65");
+          name.textContent = row.key.length > 24 ? row.key.slice(0, 23) + "…" : row.key;
+          svg.appendChild(name);
+
+          var bar = document.createElementNS(svgns, "rect");
+          bar.setAttribute("x", String(labelWidth));
+          bar.setAttribute("y", String(y + 3));
+          bar.setAttribute("width", String(length));
+          bar.setAttribute("height", "14");
+          bar.setAttribute("rx", "2");
+          bar.setAttribute("fill", "#7d6b59");
+          svg.appendChild(bar);
+
+          var value = document.createElementNS(svgns, "text");
+          value.setAttribute("x", String(labelWidth + length + 6));
+          value.setAttribute("y", String(y + 14));
+          value.setAttribute("font-size", "12");
+          value.setAttribute("font-family", "monospace");
+          value.setAttribute("fill", "#5c554e");
+          value.textContent = format ? format(row.value) : integer(row.value);
+          svg.appendChild(value);
+        });
+
+        return svg;
+      }
+
+      function healthPanel(model) {
+        var rows = byLabel(model, "game2048_health_check_status", "check");
+
+        if (!rows.length) {
+          return el("p", { class: "empty", text: "No health samples in this export." });
+        }
+
+        rows.sort(function (left, right) {
+          return left.key.localeCompare(right.key);
+        });
+
+        var body = rows.map(function (row) {
+          var status = row.value === 1 ? "pass" : row.value === 0 ? "fail" : "na";
+          var text = status === "pass" ? "pass" : status === "fail" ? "fail" : "n/a";
+
+          return el("tr", {}, [
+            el("td", { text: row.key }),
+            el("td", {}, [el("span", { class: "pill " + status, text: text })])
+          ]);
+        });
+
+        return el("table", {}, [
+          el("thead", {}, [el("tr", {}, [el("th", { text: "Check" }), el("th", { text: "Status" })])]),
+          el("tbody", {}, body)
+        ]);
+      }
+
+      function statPanel(value) {
+        return el("p", { class: "stat", text: integer(value) });
+      }
+
+      function section(title, panels) {
+        return [el("h2", { text: title }), el("div", { class: "grid" }, panels)];
+      }
+
+      function render(model) {
+        var board = document.getElementById("board");
+        board.textContent = "";
+
+        var blocks = [];
+
+        blocks = blocks.concat(
+          section("Turns and the board", [
+            panel(
+              "Turns by resolution",
+              "game2048_turns_total — one series per resolution, so an idle or cancelled turn is visible beside a committed one.",
+              barChart(byLabel(model, "game2048_turns_total", "resolution"))
+            ),
+            panel(
+              "Merges and spawns",
+              "A merge is counted once per merge, so a double-merge turn raises it by two. Suppressed spawns are attempts a relic or a full board refused.",
+              rowsTable(
+                ["Series", "Count"],
+                [
+                  { key: "merges", value: totalOf(model, "game2048_merges_total") },
+                  { key: "spawns", value: totalOf(model, "game2048_spawns_total") },
+                  { key: "spawn attempts", value: totalOf(model, "game2048_spawn_attempts_total") },
+                  { key: "spawns suppressed", value: totalOf(model, "game2048_spawn_suppressed_total") },
+                  { key: "frames rendered", value: totalOf(model, "game2048_frames_rendered_total") }
+                ]
+              )
+            ),
+            panel(
+              "Engine events by name",
+              "game2048_engine_events_total — the seven typed events of the engine contract.",
+              barChart(byLabel(model, "game2048_engine_events_total", "event"))
+            )
+          ])
+        );
+
+        blocks = blocks.concat(
+          section("Latency and frames", [
+            panel(
+              "Turn latency",
+              "game2048_turn_latency_milliseconds, interpolated from cumulative buckets the way histogram_quantile does.",
+              rowsTable(
+                ["Quantile", "Value"],
+                [
+                  { key: "p50", value: (quantiles(model, "game2048_turn_latency_milliseconds", 0.5)[0] || {}).value },
+                  { key: "p95", value: (quantiles(model, "game2048_turn_latency_milliseconds", 0.95)[0] || {}).value },
+                  { key: "p99", value: (quantiles(model, "game2048_turn_latency_milliseconds", 0.99)[0] || {}).value }
+                ],
+                millis
+              )
+            ),
+            panel(
+              "Frame time, against a 16.7 ms budget",
+              "game2048_frame_time_milliseconds — the render loop is the product's first per-frame JavaScript work.",
+              rowsTable(
+                ["Quantile", "Value"],
+                [
+                  { key: "p50", value: (quantiles(model, "game2048_frame_time_milliseconds", 0.5)[0] || {}).value },
+                  { key: "p95", value: (quantiles(model, "game2048_frame_time_milliseconds", 0.95)[0] || {}).value }
+                ],
+                millis
+              )
+            ),
+            panel(
+              "Span duration p95 by name",
+              "game2048_span_duration_milliseconds — every span of the tracer, including render.frame, the frame-callback seam that was unmeasured before this project.",
+              barChart(quantiles(model, "game2048_span_duration_milliseconds", 0.95, "span"), millis)
+            )
+          ])
+        );
+
+        blocks = blocks.concat(
+          section("Hooks and relics", [
+            panel(
+              "Hook dispatches by hook",
+              "game2048_hook_dispatches_total — one series per hook name.",
+              barChart(byLabel(model, "game2048_hook_dispatches_total", "hook"))
+            ),
+            panel(
+              "Handlers invoked, skipped and refused",
+              "A skip is the charge guard doing its job: once a budget is spent the bus skips every handler that relic binds.",
+              rowsTable(
+                ["Series", "Count"],
+                [
+                  { key: "invoked", value: totalOf(model, "game2048_hook_handler_invocations_total") },
+                  { key: "skipped", value: totalOf(model, "game2048_hook_handler_skipped_total") },
+                  { key: "payload refused", value: totalOf(model, "game2048_hook_payload_rejections_total") }
+                ]
+              )
+            ),
+            panel(
+              "Relic handler errors",
+              "Above zero means a relic threw and was marked degraded, and the HUD shows it as no longer firing.",
+              statPanel(totalOf(model, "game2048_relic_handler_errors_total"))
+            )
+          ])
+        );
+
+        blocks = blocks.concat(
+          section("Determinism, health and the registry itself", [
+            panel(
+              "RNG draws by substream",
+              "Four substreams kept separate so a relic drawing once cannot shift the spawn sequence.",
+              barChart(byLabel(model, "game2048_rng_draws_total", "stream"))
+            ),
+            panel(
+              "Health checks",
+              "Five reused pre-migration probes plus the webgl check added for the renderer.",
+              healthPanel(model)
+            ),
+            panel(
+              "Registry refusals by reason",
+              "The registry bounding itself rather than throwing. A rising seriesLimitReached is the real cardinality alarm.",
+              barChart(byLabel(model, "game2048_metrics_rejected_total", "reason"))
+            )
+          ])
+        );
+
+        blocks.forEach(function (block) {
+          board.appendChild(block);
+        });
+      }
+
+      /* ====================================================================
+       * 4. Wiring
+       * ==================================================================== */
+
+      var SAMPLE = [
+        "# HELP game2048_turns_total Turns counted by resolution.",
+        "# TYPE game2048_turns_total counter",
+        'game2048_turns_total{resolution="committed"} 184',
+        'game2048_turns_total{resolution="idle"} 12',
+        'game2048_turns_total{resolution="cancelled"} 3',
+        "# HELP game2048_merges_total Merges resolved.",
+        "# TYPE game2048_merges_total counter",
+        "game2048_merges_total 271",
+        "# HELP game2048_spawns_total Tiles inserted.",
+        "# TYPE game2048_spawns_total counter",
+        "game2048_spawns_total 184",
+        "# HELP game2048_spawn_attempts_total Spawn attempts.",
+        "# TYPE game2048_spawn_attempts_total counter",
+        "game2048_spawn_attempts_total 191",
+        "# HELP game2048_spawn_suppressed_total Attempts suppressed.",
+        "# TYPE game2048_spawn_suppressed_total counter",
+        "game2048_spawn_suppressed_total 7",
+        "# HELP game2048_frames_rendered_total Frames composited.",
+        "# TYPE game2048_frames_rendered_total counter",
+        "game2048_frames_rendered_total 9421",
+        "# HELP game2048_engine_events_total Engine events by name.",
+        "# TYPE game2048_engine_events_total counter",
+        'game2048_engine_events_total{event="state:commit"} 184',
+        'game2048_engine_events_total{event="move:before"} 199',
+        'game2048_engine_events_total{event="move:after"} 184',
+        'game2048_engine_events_total{event="tile:merge"} 271',
+        'game2048_engine_events_total{event="tile:spawn"} 184',
+        'game2048_engine_events_total{event="stage:start"} 5',
+        'game2048_engine_events_total{event="stage:end"} 4',
+        "# HELP game2048_hook_dispatches_total Hook dispatches by hook.",
+        "# TYPE game2048_hook_dispatches_total counter",
+        'game2048_hook_dispatches_total{hook="onBeforeMove"} 199',
+        'game2048_hook_dispatches_total{hook="onMerge"} 271',
+        'game2048_hook_dispatches_total{hook="onSpawn"} 184',
+        'game2048_hook_dispatches_total{hook="onAfterMove"} 184',
+        'game2048_hook_dispatches_total{hook="onStageStart"} 5',
+        'game2048_hook_dispatches_total{hook="onStageEnd"} 4',
+        "# HELP game2048_hook_handler_invocations_total Handlers invoked.",
+        "# TYPE game2048_hook_handler_invocations_total counter",
+        "game2048_hook_handler_invocations_total 612",
+        "# HELP game2048_hook_handler_skipped_total Handlers skipped.",
+        "# TYPE game2048_hook_handler_skipped_total counter",
+        "game2048_hook_handler_skipped_total 46",
+        "# HELP game2048_hook_payload_rejections_total Returns refused.",
+        "# TYPE game2048_hook_payload_rejections_total counter",
+        "game2048_hook_payload_rejections_total 0",
+        "# HELP game2048_relic_handler_errors_total Handlers that threw.",
+        "# TYPE game2048_relic_handler_errors_total counter",
+        "game2048_relic_handler_errors_total 0",
+        "# HELP game2048_rng_draws_total Draws by substream.",
+        "# TYPE game2048_rng_draws_total counter",
+        'game2048_rng_draws_total{stream="spawn-value"} 184',
+        'game2048_rng_draws_total{stream="spawn-position"} 184',
+        'game2048_rng_draws_total{stream="relic-draw"} 12',
+        'game2048_rng_draws_total{stream="rarity-weight"} 4',
+        "# HELP game2048_metrics_rejected_total Registry refusals by reason.",
+        "# TYPE game2048_metrics_rejected_total counter",
+        'game2048_metrics_rejected_total{reason="valueNotAString"} 0',
+        "# HELP game2048_health_check_status Health check status.",
+        "# TYPE game2048_health_check_status gauge",
+        'game2048_health_check_status{check="functionBind"} 1',
+        'game2048_health_check_status{check="classList"} 1',
+        'game2048_health_check_status{check="requestAnimationFrame"} 1',
+        'game2048_health_check_status{check="pointerEvents"} 1',
+        'game2048_health_check_status{check="storage"} 1',
+        'game2048_health_check_status{check="webgl"} 1',
+        "# HELP game2048_turn_latency_milliseconds Turn latency.",
+        "# TYPE game2048_turn_latency_milliseconds histogram",
+        'game2048_turn_latency_milliseconds_bucket{le="1"} 22',
+        'game2048_turn_latency_milliseconds_bucket{le="2.5"} 96',
+        'game2048_turn_latency_milliseconds_bucket{le="5"} 158',
+        'game2048_turn_latency_milliseconds_bucket{le="10"} 179',
+        'game2048_turn_latency_milliseconds_bucket{le="25"} 184',
+        'game2048_turn_latency_milliseconds_bucket{le="+Inf"} 184',
+        "game2048_turn_latency_milliseconds_sum 741.2",
+        "game2048_turn_latency_milliseconds_count 184",
+        "# HELP game2048_frame_time_milliseconds Frame time.",
+        "# TYPE game2048_frame_time_milliseconds histogram",
+        'game2048_frame_time_milliseconds_bucket{le="1"} 512',
+        'game2048_frame_time_milliseconds_bucket{le="2.5"} 4102',
+        'game2048_frame_time_milliseconds_bucket{le="5"} 8233',
+        'game2048_frame_time_milliseconds_bucket{le="10"} 9218',
+        'game2048_frame_time_milliseconds_bucket{le="25"} 9421',
+        'game2048_frame_time_milliseconds_bucket{le="+Inf"} 9421',
+        "game2048_frame_time_milliseconds_sum 29144.5",
+        "game2048_frame_time_milliseconds_count 9421",
+        "# HELP game2048_span_duration_milliseconds Span duration by name.",
+        "# TYPE game2048_span_duration_milliseconds histogram",
+        'game2048_span_duration_milliseconds_bucket{span="engine.turn",le="2.5"} 121',
+        'game2048_span_duration_milliseconds_bucket{span="engine.turn",le="5"} 175',
+        'game2048_span_duration_milliseconds_bucket{span="engine.turn",le="+Inf"} 184',
+        'game2048_span_duration_milliseconds_bucket{span="render.frame",le="2.5"} 4102',
+        'game2048_span_duration_milliseconds_bucket{span="render.frame",le="5"} 8233',
+        'game2048_span_duration_milliseconds_bucket{span="render.frame",le="+Inf"} 9421',
+        'game2048_span_duration_milliseconds_bucket{span="hook.dispatch",le="1"} 780',
+        'game2048_span_duration_milliseconds_bucket{span="hook.dispatch",le="+Inf"} 847',
+        'game2048_span_duration_milliseconds_bucket{span="input.dispatch",le="1"} 190',
+        'game2048_span_duration_milliseconds_bucket{span="input.dispatch",le="+Inf"} 199',
+        ""
+      ].join("\n");
+
+      function show(text, note) {
+        try {
+          render(parseExposition(text));
+          document.getElementById("status").textContent = note;
+        } catch (error) {
+          document.getElementById("status").textContent =
+            "That file could not be parsed as Prometheus text: " + String(error);
+        }
+      }
+
+      document.getElementById("file").addEventListener("change", function (event) {
+        var file = event.target.files && event.target.files[0];
+
+        if (!file) {
+          return;
+        }
+
+        var reader = new FileReader();
+
+        reader.onload = function () {
+          show(String(reader.result), "Showing " + file.name + ".");
+        };
+
+        reader.onerror = function () {
+          document.getElementById("status").textContent = "That file could not be read.";
+        };
+
+        reader.readAsText(file);
+      });
+
+      document.getElementById("sample").addEventListener("click", function () {
+        show(SAMPLE, "Showing the built-in sample.");
+      });
+
+      show(SAMPLE, "Showing the built-in sample. Export game2048-metrics.prom from the diagnostics overlay and load it to see a real run.");
+    </script>
+  </body>
+</html>

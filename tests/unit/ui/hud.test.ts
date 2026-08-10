@@ -15,6 +15,7 @@ import { Grid } from '../../../src/engine/grid';
 import { createNumberOnlyRenderer } from '../../../src/render/number-only-renderer';
 import { HUD_Z_INDEX, createHud, hudCopy } from '../../../src/ui/screens/hud';
 import type { Hud, HudAnnouncerPort } from '../../../src/ui/screens/hud';
+import { defaultRelicCardCopy } from '../../../src/ui/components/relic-card';
 import type { ActiveRelic, Rarity } from '../../../src/relics/relic-types';
 import type { StageScreenContext } from '../../../src/ui/screen-router';
 import { LocalStorageManager } from '../../../src/storage/local-storage-manager';
@@ -1137,6 +1138,44 @@ describe('the tray renders the held relics in pickup order', () => {
     hud.destroy();
   });
 
+  it('renders an empty registry as empty, not as the payload slice', () => {
+    const outlets = runFixture();
+    let active: readonly ActiveRelic[] = [
+      { ...held('twin-seed', 'Twin Seed', 'common'), pickupOrder: 0 },
+    ];
+    const hud = createHud({
+      document,
+      relics: (): readonly ActiveRelic[] => active,
+      relicName: (relicId): string => `Name of ${relicId}`,
+    });
+    const stage = stageSlice(0, 'highest-tile', 16, 0);
+
+    // A commit slice that still carries the relic the registry has dropped,
+    // which is what a payload built before the run boundary looks like.
+    hud.render(runCommit(0, stage, [{ id: 'twin-seed', charges: 2 }]));
+
+    expect(hud.readRendered()?.relics).toEqual(['twin-seed']);
+
+    active = [];
+    hud.render(runCommit(4, stage, [{ id: 'twin-seed', charges: 2 }]));
+
+    // AN EMPTY ANSWER IS AN ANSWER. The reader is the authority whenever it
+    // answers, so a run holding no relic shows an empty tray; falling back to
+    // the slice on an empty answer kept the previous run's row on screen.
+    expect(hud.readRendered()?.relics).toEqual([]);
+    expect(
+      outlets.tray.querySelectorAll('.relic-tray-item:not([data-relic-empty])'),
+    ).toHaveLength(0);
+
+    // The empty-state row stands in its place, which is the tray's own contract
+    // for a run holding nothing.
+    expect(outlets.tray.querySelector('[data-relic-empty]')?.textContent).toBe(
+      hudCopy.relicTrayEmpty,
+    );
+
+    hud.destroy();
+  });
+
   it('falls back to the payload slice when the reader answers badly', () => {
     const outlets = runFixture();
     const hud = createHud({
@@ -1536,6 +1575,53 @@ describe('the HUD is the stage screen of the router', () => {
     hud.destroy();
   });
 
+  it('enters nothing at all on a context it refuses', () => {
+    const outlets = routedFixture();
+    const counted: string[] = [];
+    const hud = createHud({
+      document,
+      reporter: {
+        log: (): void => undefined,
+        error: (): void => undefined,
+        count: (metric: string): void => {
+          counted.push(metric);
+        },
+      },
+    });
+
+    hud.mount(outlets.hudGroup);
+    outlets.board.blur();
+
+    hud.enter({
+      screen: 'reward',
+      trigger: 'stageEnd',
+      reducedMotion: false,
+      host: outlets.hudGroup,
+      refresh: false,
+      offers: [],
+      drawn: [],
+      stageIndex: 1,
+    });
+
+    // NOTHING WAS ENTERED. The HUD refused the context, so it is not the screen
+    // in force, it wrote nothing, it holds no focus, and the entry is not
+    // counted as one — it marked itself active and pulled focus into the board
+    // for a state the router had put another screen in.
+    expect(hud.isActive()).toBe(false);
+    expect(hud.readRendered()).toBeNull();
+    expect(document.activeElement).not.toBe(outlets.board);
+    expect(counted).toContain('ui.hud.context_refused');
+    expect(counted).not.toContain('ui.hud.lifecycle');
+
+    // And the stage context that follows enters normally.
+    hud.enter(stageContext({ host: outlets.hudGroup, score: 12 }));
+
+    expect(hud.isActive()).toBe(true);
+    expect(hud.readRendered()?.score).toBe(12);
+
+    hud.destroy();
+  });
+
   it('keeps the delta a commit showed across an unchanged refresh', () => {
     const outlets = routedFixture();
     const hud = createHud({
@@ -1579,6 +1665,314 @@ describe('the HUD is the stage screen of the router', () => {
       hud.leave();
       hud.unmount();
     }).not.toThrow();
+  });
+});
+
+describe('a commit is counted once, and a lifecycle write is not counted as one', () => {
+  it('separates ui.hud.commit from ui.hud.refresh', () => {
+    const outlets = routedFixture();
+    const counted: string[] = [];
+    const hud = createHud({
+      document,
+      reporter: {
+        log: (): void => undefined,
+        error: (): void => undefined,
+        count: (metric: string): void => {
+          counted.push(metric);
+        },
+      },
+    });
+
+    hud.mount(outlets.hudGroup);
+
+    const countOf = (metric: string): number =>
+      counted.filter((held) => held === metric).length;
+
+    // One commit, through the member the engine's emitter reaches.
+    hud.render(commit(24));
+
+    expect(countOf('ui.hud.commit')).toBe(1);
+    expect(countOf('ui.hud.refresh')).toBe(0);
+
+    // The router's own lifecycle writes render the context they were handed —
+    // the same values the last commit left — and are NOT commits. Counting them
+    // here made one `state:commit` arriving as the flow entered the stage state
+    // raise the commit counter twice.
+    hud.enter(stageContext({ score: 24, host: outlets.hudGroup }));
+    hud.update(stageContext({ refresh: true, score: 24 }));
+
+    expect(countOf('ui.hud.commit')).toBe(1);
+    expect(countOf('ui.hud.refresh')).toBe(2);
+
+    hud.render(commit(48));
+
+    expect(countOf('ui.hud.commit')).toBe(2);
+    expect(countOf('ui.hud.refresh')).toBe(2);
+
+    hud.destroy();
+  });
+});
+
+/* ==========================================================================
+ * The two failure states a run can be in, projected
+ *
+ * A RELIC THAT NO LONGER FIRES WAS SHOWN HEALTHY, and a run that was no longer
+ * reaching storage said nothing at all. The bus marks a relic degraded the
+ * moment its handler throws, and a refused write leaves the run ephemeral;
+ * both were known to the layers below and neither reached the surface the
+ * player reads, so a player went on planning around a relic that does nothing
+ * and playing a run no reload would ever find.
+ * ========================================================================== */
+
+/** A reporter that records the metrics it was handed. */
+function counting(): {
+  readonly reporter: {
+    log: () => void;
+    error: () => void;
+    count: (metric: string) => void;
+  };
+  readonly counted: string[];
+} {
+  const counted: string[] = [];
+
+  return {
+    reporter: {
+      log: (): void => undefined,
+      error: (): void => undefined,
+      count: (metric: string): void => {
+        counted.push(metric);
+      },
+    },
+    counted,
+  };
+}
+
+describe('a relic the bus has stopped firing', () => {
+  it('is marked, named as not firing, and announced once', () => {
+    const outlets = runFixture();
+    const sink = recorder();
+    const meter = counting();
+    const active: readonly ActiveRelic[] = [
+      { ...held('twin-seed', 'Twin Seed', 'common'), pickupOrder: 0 },
+      { ...held('frostbind', 'Frostbind', 'legendary', 5), pickupOrder: 1 },
+    ];
+    let degraded: readonly string[] = [];
+    const hud = createHud({
+      document,
+      relics: (): readonly ActiveRelic[] => active,
+      degradedRelics: (): readonly string[] => degraded,
+      announcer: (): HudAnnouncerPort => sink.announcer,
+      reporter: meter.reporter,
+    });
+    const stage = stageSlice(0, 'highest-tile', 16, 0);
+    const rows = (): Element[] =>
+      Array.from(outlets.tray.querySelectorAll('.relic-tray-item'));
+    const countOf = (metric: string): number =>
+      meter.counted.filter((name) => name === metric).length;
+
+    hud.render(runCommit(0, stage, []));
+
+    // Nothing is marked while both relics are firing, which is what makes the
+    // mark mean something when it appears.
+    expect(rows().map((row) => row.getAttribute('data-degraded'))).toEqual([
+      null,
+      null,
+    ]);
+    expect(countOf('ui.hud.relic_degraded')).toBe(0);
+
+    degraded = ['frostbind'];
+    hud.render(runCommit(4, stage, []));
+
+    const marked = rows();
+
+    expect(marked[0]?.getAttribute('data-degraded')).toBeNull();
+    expect(marked[1]?.getAttribute('data-degraded')).toBe('true');
+
+    // A CLASS ALONE IS NOT A STATE. The row carries the words too, so the tray
+    // reads the same to a screen reader as it looks.
+    expect(hiddenTexts(marked[1])).toContain(defaultRelicCardCopy.degraded);
+    expect(sink.lines).toContain(
+      hudCopy.degradedRelicAnnouncement('Frostbind'),
+    );
+    expect(countOf('ui.hud.relic_degraded')).toBe(1);
+
+    // ONCE PER RELIC, not once per write: the bus never un-marks a relic, so a
+    // line per commit would say the same thing every turn for the rest of the
+    // run.
+    hud.render(runCommit(8, stage, []));
+
+    expect(
+      sink.lines.filter(
+        (line) => line === hudCopy.degradedRelicAnnouncement('Frostbind'),
+      ),
+    ).toHaveLength(1);
+    expect(countOf('ui.hud.relic_degraded')).toBe(1);
+
+    hud.destroy();
+  });
+
+  it('is unmarked and announced afresh when it is no longer listed', () => {
+    const outlets = runFixture();
+    const sink = recorder();
+    const active: readonly ActiveRelic[] = [
+      { ...held('frostbind', 'Frostbind', 'legendary', 5), pickupOrder: 0 },
+    ];
+    let degraded: readonly string[] = ['frostbind'];
+    const hud = createHud({
+      document,
+      relics: (): readonly ActiveRelic[] => active,
+      degradedRelics: (): readonly string[] => degraded,
+      announcer: (): HudAnnouncerPort => sink.announcer,
+    });
+    const stage = stageSlice(0, 'highest-tile', 16, 0);
+    const row = (): Element | null =>
+      outlets.tray.querySelector('.relic-tray-item');
+
+    hud.render(runCommit(0, stage, []));
+
+    expect(row()?.getAttribute('data-degraded')).toBe('true');
+
+    degraded = [];
+    hud.render(runCommit(4, stage, []));
+
+    // The mark and the words go together, so a relic dropped and taken again
+    // does not read as broken.
+    expect(row()?.getAttribute('data-degraded')).toBeNull();
+    expect(hiddenTexts(row())).not.toContain(defaultRelicCardCopy.degraded);
+
+    degraded = ['frostbind'];
+    hud.render(runCommit(8, stage, []));
+
+    expect(row()?.getAttribute('data-degraded')).toBe('true');
+    expect(
+      sink.lines.filter(
+        (line) => line === hudCopy.degradedRelicAnnouncement('Frostbind'),
+      ),
+    ).toHaveLength(2);
+
+    hud.destroy();
+  });
+
+  it('is shown healthy, and the fault counted, when the reader raises', () => {
+    const outlets = runFixture();
+    const meter = counting();
+    const hud = createHud({
+      document,
+      relics: (): readonly ActiveRelic[] => [
+        { ...held('frostbind', 'Frostbind', 'legendary', 5), pickupOrder: 0 },
+      ],
+      degradedRelics: (): readonly string[] => {
+        throw new Error('the registry is unavailable');
+      },
+      reporter: meter.reporter,
+    });
+
+    // CONTAINED. A reader that raises must not take the HUD's write with it:
+    // the tray is written, unmarked, and the fault is counted.
+    hud.render(runCommit(0, stageSlice(0, 'highest-tile', 16, 0), []));
+
+    expect(
+      outlets.tray.querySelector('.relic-tray-item')?.getAttribute(
+        'data-degraded',
+      ),
+    ).toBeNull();
+    expect(meter.counted).toContain('ui.hud.reader.faulted');
+
+    hud.destroy();
+  });
+});
+
+describe('a run that is no longer reaching storage', () => {
+  it('raises the notice and announces the change once, each way', () => {
+    const outlets = runFixture();
+    const sink = recorder();
+    const meter = counting();
+    let status: 'persistent' | 'ephemeral' = 'persistent';
+    const hud = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => status,
+      announcer: (): HudAnnouncerPort => sink.announcer,
+      reporter: meter.reporter,
+    });
+    const notice = (): HTMLElement | null =>
+      outlets.hudGroup.querySelector<HTMLElement>('.hud-ephemeral');
+    const countOf = (metric: string): number =>
+      meter.counted.filter((name) => name === metric).length;
+
+    hud.render(commit(10));
+
+    // A RUN THAT IS BEING SAVED SAYS NOTHING. The notice exists so it can be
+    // shown without a reflow, and stays hidden and unannounced until it means
+    // something.
+    expect(outlets.hudGroup.hasAttribute('data-ephemeral')).toBe(false);
+    expect(notice()?.hidden).toBe(true);
+    expect(sink.lines).not.toContain(hudCopy.ephemeralAnnouncement);
+    expect(countOf('ui.hud.persistence')).toBe(0);
+
+    status = 'ephemeral';
+    hud.render(commit(20));
+
+    expect(outlets.hudGroup.getAttribute('data-ephemeral')).toBe('true');
+    expect(notice()?.hidden).toBe(false);
+    expect(notice()?.textContent).toBe(hudCopy.ephemeralNotice);
+    expect(sink.lines).toContain(hudCopy.ephemeralAnnouncement);
+    expect(countOf('ui.hud.persistence')).toBe(1);
+
+    // ON THE CHANGE, NOT PER WRITE: an exhausted quota refuses every write of
+    // the rest of the run, so a line per commit would be a line per turn.
+    hud.render(commit(30));
+
+    expect(
+      sink.lines.filter((line) => line === hudCopy.ephemeralAnnouncement),
+    ).toHaveLength(1);
+    expect(countOf('ui.hud.persistence')).toBe(1);
+
+    status = 'persistent';
+    hud.render(commit(40));
+
+    expect(outlets.hudGroup.hasAttribute('data-ephemeral')).toBe(false);
+    expect(notice()?.hidden).toBe(true);
+    expect(sink.lines).toContain(hudCopy.persistentAnnouncement);
+    expect(countOf('ui.hud.persistence')).toBe(2);
+
+    hud.destroy();
+  });
+
+  it('announces a resumed run that is already ephemeral on its first write', () => {
+    runFixture();
+
+    const sink = recorder();
+    const hud = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => 'ephemeral',
+      announcer: (): HudAnnouncerPort => sink.announcer,
+    });
+
+    hud.render(commit(10));
+
+    // A run resumed into a store that is already refusing writes has no earlier
+    // status to have changed from, and is exactly the case the player most needs
+    // told.
+    expect(sink.lines).toContain(hudCopy.ephemeralAnnouncement);
+
+    hud.destroy();
+  });
+
+  it('leaves nothing behind when the HUD is destroyed', () => {
+    const outlets = runFixture();
+    const hud = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => 'ephemeral',
+    });
+
+    hud.render(commit(10));
+
+    expect(outlets.hudGroup.querySelector('.hud-ephemeral')).not.toBeNull();
+
+    hud.destroy();
+
+    expect(outlets.hudGroup.querySelector('.hud-ephemeral')).toBeNull();
+    expect(outlets.hudGroup.hasAttribute('data-ephemeral')).toBe(false);
   });
 });
 

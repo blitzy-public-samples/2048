@@ -7,6 +7,19 @@
 // The one piece of state it does keep is the last verdict announced:
 // `state:commit` fires on every commit while a verdict is news exactly once.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated, all target-only because the retired sources
+// announced nothing:
+//   TR-ANNOUNCE-01  `createEngineAnnouncer` and its subscription to the seven
+//                   event names
+//   TR-ANNOUNCE-02  the per-event translation into the `Announcement`
+//                   vocabulary of ./live-region
+//   TR-ANNOUNCE-03  the last-verdict record and the once-per-verdict rule
+//   TR-ANNOUNCE-04  `EngineAnnouncer.dispose` and the released subscriptions
+//   TR-ANNOUNCE-05  the unconfirmed-status announcement, spoken on each
+//                   transition of `StateCommitEvent.degraded` in both
+//                   directions
+//
 // Decisions: DL-ANNOUNCE-01, DL-ANNOUNCE-02 (docs/DECISION_LOG.md).
 
 import type { EngineEventName, EngineEvents } from '../../engine/engine-events';

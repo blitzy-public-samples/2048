@@ -1,6 +1,14 @@
 // In-memory Web Storage double: no persistence, no DOM reference and no
 // imports. Exported as a class; it installs no global.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row this
+// module carries:
+//   TR-STORE-09  js/local_storage_manager.js L1-L19  the `window.fakeStorage`
+//                object literal that file already shipped, ported as this
+//                class
+//   TR-STORE-10  target-only row                     `StorageLike`, the
+//                structural surface both stores satisfy
+//
 // Decisions: DL-STORE-05, DL-STORE-06 (docs/DECISION_LOG.md).
 
 /**

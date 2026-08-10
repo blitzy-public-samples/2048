@@ -2,6 +2,25 @@
 // tray. Every colour, length, radius, duration and z-index resolves to a token
 // in style/_tokens.scss or to a derivation over tokens below.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece. HUD is one area
+// across the stylesheet and TypeScript halves, so these ordinals continue the
+// ones src/ui/screens/hud.ts carries:
+//   TR-HUD-07  style/main.scss L26-L44    the `.above-game` score row, extended
+//                                         by the stage and goal readouts
+//   TR-HUD-08  style/main.scss L334-L402  the tile ramp's two anchors, from
+//                                         which the rarity accents are
+//                                         interpolated with no compiled colour
+//                                         written out
+//   TR-HUD-09  target-only row            the active-relic tray and its
+//                                         pickup-ordered items
+//   TR-HUD-10  target-only row            `data-charges`, including the
+//                                         exhausted `0` state and the absent
+//                                         value
+//   TR-HUD-11  target-only row            the narrow-layout restatement at the
+//                                         mobile threshold
+//   TR-HUD-14  target-only row            the `.hud-degraded` notice, the
+//                                         visible half of TR-HUD-12
+//
 // Decisions: DL-HUD-04, DL-HUD-05, DL-HUD-06 (docs/DECISION_LOG.md).
 
 @use "sass:color";
@@ -42,6 +61,14 @@ $hud-fraction-full: 100% !default;
 // sit between them, which is the same derivation style/_reward.scss uses for a
 // relic card.
 $hud-item-max-inline: $tile-size * 2 + $grid-spacing !default;
+
+// A degraded tray row's opacity. Derived from the alpha style/_a11y.scss dims a
+// disabled control by, halved towards full opacity: a relic that has stopped
+// firing is dimmed less than a control that cannot be used at all, because its
+// name and its charge count still have to be readable.
+$hud-degraded-opacity:
+  a11y.$a11y-disabled-alpha +
+  math.div(1 - a11y.$a11y-disabled-alpha, 2) !default;
 
 $hud-mobile-field-width: $mobile-field-width !default;
 $hud-mobile-gap: $mobile-grid-spacing !default;
@@ -166,6 +193,28 @@ $hud-rarity-tiers: $rarity-tiers !default;
   color: var(--theme-text, #{$text-color});
 }
 
+// The run-not-saved notice. `src/ui/screens/hud.ts` appends one
+// `.hud-ephemeral` to the run-status group and toggles its `hidden` from
+// `RunController.persistenceStatus()`, and marks the group `data-ephemeral` for
+// the same state. Same treatment as the notice above, and a solid border rather
+// than a dashed one: the board's status is merely unconfirmed, while a refused
+// write is settled.
+.hud-ephemeral {
+  margin: 0;
+
+  padding-block: $hud-gap-tight;
+  padding-inline: $hud-gap-inner;
+
+  border: $hud-hairline solid $hud-rule;
+  border-radius: $tile-border-radius;
+
+  font-size: $hud-label-size;
+  line-height: $hud-numeral-size;
+  font-weight: bold;
+
+  color: var(--theme-text, #{$text-color});
+}
+
 // Active-relic tray. One `.relic-tray-item` per active relic in pickup order,
 // which is the order src/engine/hook-bus.ts dispatches them in.
 
@@ -210,6 +259,19 @@ $hud-rarity-tiers: $rarity-tiers !default;
   line-height: $hud-label-size;
 }
 
+// A relic the hook bus has stopped firing. `src/ui/components/relic-card.ts`
+// writes `data-degraded` on the row and a hidden text run inside it, so the
+// state reads to a screen reader as well as showing here. Dimmed and dashed:
+// the relic is still held, and it is no longer acting.
+.relic-tray-item[data-degraded] {
+  border-style: dashed;
+  opacity: $hud-degraded-opacity;
+}
+
+.relic-tray-item[data-degraded] .relic-tray-name {
+  text-decoration: line-through;
+}
+
 // The slot number. Reads before the relic on both writing directions.
 .relic-tray-item[data-relic-empty] {
   counter-increment: none;
@@ -235,6 +297,16 @@ $hud-rarity-tiers: $rarity-tiers !default;
 }
 
 // The item's interior.
+//
+// NON-INTERACTIVE, AND STYLED AS SUCH. src/ui/components/relic-card.ts renders
+// this element as a `<span>`: the tray is a reading of what the run holds, in
+// pickup order, and nothing in it is pressed. The focus ring and the hover,
+// activation and disabled treatments were removed with the button they belonged
+// to — a row that cannot take focus cannot show a focus ring, and offering the
+// affordances of a control for an element that is not one is the same false
+// promise in the visual layer as an activation label is in the spoken one. The
+// resets below are retained: they neutralise the user-agent styling of whatever
+// element carries the class. DL-CARD-01, DL-KEYMAP-05.
 .relic-tray-control {
   display: flex;
   align-items: center;
@@ -249,16 +321,6 @@ $hud-rarity-tiers: $rarity-tiers !default;
   color: inherit;
   font: inherit;
   text-align: start;
-
-  @include a11y.focusable;
-
-  // The hover, activation and disabled states, from the shared mixin in
-  // style/_a11y.scss.
-  @include a11y.interactive-states;
-}
-
-button.relic-tray-control {
-  cursor: pointer;
 }
 
 .relic-tray-name {

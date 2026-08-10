@@ -4,6 +4,19 @@
 // Its `diagnostics-*` and `focus-*` entries are the only new values, both
 // derived from the text tokens; no inherited value is altered here.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THEME is one area
+// across the stylesheet and TypeScript halves, so these ordinals continue the
+// ones src/theme/themes.ts carries:
+//   TR-THEME-07  style/main.scss L4-L22     the established palette, restated as
+//                                           the default theme's entries
+//   TR-THEME-08  style/main.scss L334-L402  the tile-ramp loop, ported here once
+//                                           per palette with no compiled row
+//                                           restated as a table
+//   TR-THEME-09  target-only row            the `data-theme` activation contract
+//                                           and its three values
+//   TR-THEME-10  target-only row            the `diagnostics-*` and `focus-*`
+//                                           entries derived from the text tokens
+//
 // Decisions: DL-THEME-05, DL-THEME-06, DL-THEME-07 (docs/DECISION_LOG.md).
 
 @use "sass:color";
@@ -93,6 +106,15 @@ $palette-default: (
   button-surface: color.adjust($game-container-background, $lightness: -20%),
   button-label: $bright-text-color,
 
+  // The accessible component pairs of this feature's own screens: same hue as
+  // the two frozen surfaces above, darker, and clearing WCAG 2.1 AA in this
+  // palette rather than only under the two additive ones. DL-THEME-08.
+  control-surface: $control-surface,
+  control-label: $bright-text-color,
+  readout-surface: $readout-surface,
+  readout-label: $tile-color,
+  readout-value: #ffffff,
+
   overlay-loss: rgba($tile-color, 0.5),
   overlay-loss-text: $text-color,
   overlay-win: rgba($tile-gold-color, 0.5),
@@ -137,6 +159,12 @@ $palette-high-contrast: (
 
   button-surface: #00308f,
   button-label: #ffffff,
+
+  control-surface: #00308f,
+  control-label: #ffffff,
+  readout-surface: #000000,
+  readout-label: #ffffff,
+  readout-value: #ffffff,
 
   overlay-loss: rgba(#9e9e9e, 0.94),
   overlay-loss-text: #000000,
@@ -183,6 +211,12 @@ $palette-colorblind-safe: (
 
   button-surface: #00355c,
   button-label: #ffffff,
+
+  control-surface: #00355c,
+  control-label: #ffffff,
+  readout-surface: #3f3a33,
+  readout-label: #ffffff,
+  readout-value: #ffffff,
 
   overlay-loss: rgba(#9b9384, 0.94),
   overlay-loss-text: #000000,
@@ -364,6 +398,12 @@ $themes: (
 
   --theme-button-surface: #{palette-value($palette, button-surface)};
   --theme-button-label: #{palette-value($palette, button-label)};
+
+  --theme-control-surface: #{palette-value($palette, control-surface)};
+  --theme-control-label: #{palette-value($palette, control-label)};
+  --theme-readout-surface: #{palette-value($palette, readout-surface)};
+  --theme-readout-label: #{palette-value($palette, readout-label)};
+  --theme-readout-value: #{palette-value($palette, readout-value)};
 
   --theme-overlay-loss: #{palette-value($palette, overlay-loss)};
   --theme-overlay-loss-text: #{palette-value($palette, overlay-loss-text)};

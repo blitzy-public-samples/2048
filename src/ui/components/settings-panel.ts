@@ -4,6 +4,40 @@
 // Origin: requirement R9, AAP section 0.6.2.6 Group 6, and working assumption
 // A5 for the mute and volume controls.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-PANEL-01  js/keyboard_input_manager.js L37-L50  the `event.which` code
+//                                                      map, presented as the
+//                                                      remappable bindings read
+//                                                      from
+//                                                      `KeyboardEvent.key` and
+//                                                      `KeyboardEvent.code`
+//   TR-PANEL-02  index.html L31, L38, L39              the three hrefless `<a>`
+//                                                      controls, superseded by
+//                                                      real `<button>` and
+//                                                      `<input>` elements
+//   TR-PANEL-03  style/main.scss L159-L168             the button mixin,
+//                                                      applied through
+//                                                      `.screen-button`
+//   TR-PANEL-04  style/main.scss L109-L115             the `:after`
+//                                                      pseudo-content captions,
+//                                                      replaced by real text
+//                                                      nodes and the
+//                                                      `.visually-hidden`
+//                                                      utility
+//   TR-PANEL-05  js/html_actuator.js L3-L4,            the unchecked host
+//                js/keyboard_input_manager.js L141     lookups, replaced by
+//                                                      `resolveMount`
+//   TR-PANEL-06  js/local_storage_manager.js L37       the discarded caught
+//                                                      value, replaced by a
+//                                                      report that always
+//                                                      carries its error object
+//   TR-PANEL-07  target-only row                       `createSettingsPanel()`
+//                                                      and the focus-managed
+//                                                      dialog
+//   TR-PANEL-08  target-only row                       `settingsPanelCopy` and
+//                                                      the section vocabulary
+//
 // Decisions: DL-PANEL-01, DL-PANEL-02, DL-PANEL-03, DL-PANEL-04
 // (docs/DECISION_LOG.md).
 

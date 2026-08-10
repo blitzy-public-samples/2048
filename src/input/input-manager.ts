@@ -3,6 +3,25 @@
 //
 // This module reads no clock, consumes no randomness and touches no storage.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-INPUT-01  L1-L2      the event registry, held below as `listeners`
+//   TR-INPUT-02  L15        the constructor-time `listen()` call
+//   TR-INPUT-03  L18-L23    `on()`, appending to the array for its event name
+//   TR-INPUT-04  L25-L32    `emit()`, walking that array in registration order
+//   TR-INPUT-05  L34, L53   the single `keydown` listener, on the document
+//   TR-INPUT-06  L54-L55    the modifier guard
+//   TR-INPUT-07  L56        the recognised-key test
+//   TR-INPUT-08  L60-L61    `preventDefault()` before the move is published
+//   TR-INPUT-09  L66-L67    the separate `R` test, routed through `restart`
+//   TR-INPUT-10  L76-L127   the swipe path, by way of src/input/touch-input.ts
+//   TR-INPUT-11  L130-L133  `restart()`
+//   TR-INPUT-12  L135-L138  `keepPlaying()`
+//   TR-INPUT-13  target-only row  `resolveDocumentContext` and the per-context
+//                                 binding resolution
+//   TR-INPUT-14  target-only row  `classifyKeyModality` and the report that
+//                                 carries no key or code
+//
 // Decisions: DL-INPUT-01, DL-INPUT-02, DL-INPUT-03, DL-INPUT-04, DL-INPUT-05
 // (docs/DECISION_LOG.md).
 

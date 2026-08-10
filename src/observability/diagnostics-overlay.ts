@@ -9,6 +9,31 @@
 // that carries each rendered health verdict into the exported snapshot, and
 // the fold of the hook bus's dispatch counts taken ahead of each snapshot.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-DIAG-01  js/local_storage_manager.js   the construction-time capability
+//               L25-L26                       probe, surfaced by the health
+//                                             panel
+//   TR-DIAG-02  js/html_actuator.js L13, L69  the two `requestAnimationFrame`
+//                                             sites, summarised by the trace
+//                                             panel
+//   TR-DIAG-03  js/keyboard_input_manager.js  the subscriber registry, whose
+//               L18-L32                       pull successors are the only
+//                                             sources this module reads
+//   TR-DIAG-04  style/main.scss L4-L22        the token block every style value
+//                                             below resolves to
+//   TR-DIAG-05  style/main.scss L217-L245     `.diagnostics-overlay:not([hidden])`,
+//                                             restated by the inline
+//                                             declarations from the same tokens
+//   TR-DIAG-06  style/_themes.scss L552-L562  the three diagnostics custom
+//                                             properties, each consumed with a
+//                                             token fallback
+//   TR-DIAG-07  index.html L105               `#diagnostics-overlay`, adopted
+//                                             where the markup declares it
+//   TR-DIAG-08  target-only row               the four panels, the Prometheus
+//                                             text export and the combined JSON
+//                                             snapshot
+//
 // Decisions: DL-DIAG-01, DL-DIAG-02, DL-DIAG-03, DL-DIAG-04, DL-DIAG-05,
 // DL-DIAG-06 (docs/DECISION_LOG.md).
 
@@ -368,6 +393,12 @@ export interface TracerView {
  */
 export type HookCountsReader = () => HookDispatchCountsView;
 
+/**
+ * A reader of the RNG substreams' draw cursors. `snapshotCursors()` of
+ * src/rng/rng-streams.ts satisfies it, and takes no draw.
+ */
+export type RngCursorsReader = () => Readonly<Record<string, number>>;
+
 /** The two members `isDiagnosticsRequested` reads off a location. */
 export interface DiagnosticsRequestSource {
   /** Query string, with or without its leading `?`. */
@@ -434,7 +465,8 @@ export interface DiagnosticsSnapshot {
   /**
    * The recent log records, as the logger's `snapshot` export surface reports
    * them: in every stack, the locations of the three forms DL-LOG-08 enumerates
-   * are replaced, whatever the logger's own `stackDetail` is.
+   * are replaced, and in every message the further forms DL-LOG-10 enumerates,
+   * whatever the logger's own `errorDetail` is.
    */
   readonly logs: readonly LogRecord[];
 }
@@ -475,6 +507,17 @@ export interface DiagnosticsOverlayOptions {
    * asked to push.
    */
   readonly hookCounts?: HookCountsReader;
+
+  /**
+   * Supplies the RNG substreams' draw cursors, folded into the registry before
+   * every read this surface answers — the combined snapshot and the Prometheus
+   * text alike. Pull only, and non-consuming: reading a cursor takes no draw.
+   *
+   * The composition root also folds the cursors on each committed state, so
+   * this reader is what keeps a read taken BETWEEN two commits current rather
+   * than the only feed the family has.
+   */
+  readonly rngCursors?: RngCursorsReader;
 
   /** Whether zero-valued series are hidden. Defaults to `true`. */
   readonly hideEmpty?: boolean;
@@ -1296,6 +1339,7 @@ export function createDiagnosticsOverlay(
   let healthSource: HealthSource | null = options.health ?? null;
   let tracer: TracerView | null = options.tracer ?? null;
   let hookCounts: HookCountsReader | null = options.hookCounts ?? null;
+  let rngCursors: RngCursorsReader | null = options.rngCursors ?? null;
   const hideEmpty = options.hideEmpty ?? DEFAULT_HIDE_EMPTY;
   const logLimit = limitOf(options.logLimit, DEFAULT_LOG_LIMIT);
   const spanLimit = limitOf(options.spanLimit, DEFAULT_SPAN_LIMIT);
@@ -1983,6 +2027,55 @@ export function createDiagnosticsOverlay(
     }
   };
 
+  /**
+   * Folds the RNG substream cursors, once per read.
+   *
+   * @returns Whether a reader was attached and answered.
+   */
+  const foldRngCursors = (): boolean => {
+    if (rngCursors === null) {
+      return false;
+    }
+
+    try {
+      metrics.recordRngCursors(rngCursors());
+
+      return true;
+    } catch (thrown) {
+      reportFailure(METRICS_EXPORT_CONTROL_LABEL, thrown);
+
+      return false;
+    }
+  };
+
+  /**
+   * Folds EVERY pulled source into the registry.
+   *
+   * The one place the pull integrations are read, called by each surface that
+   * answers from the registry — the combined snapshot and the Prometheus text
+   * — so a direct export carries the same values the panel shows. The
+   * Prometheus text was taken straight off the registry, so the hook counts and
+   * the cursor family in it were whatever the last render had folded, or absent
+   * on a surface nothing had rendered.
+   *
+   * Every fold is ABSOLUTE, not additive: `foldHookDispatchCounts` and
+   * `recordRngCursors` both compare the source's total against the value the
+   * last fold read, so folding twice for one snapshot adds nothing.
+   *
+   * @returns The hook view that was read, or `null` where none was.
+   */
+  const foldSources = (): HookDispatchCountsView | null => {
+    const hookView = readHookView();
+
+    if (hookView !== null) {
+      foldHookView(hookView);
+    }
+
+    foldRngCursors();
+
+    return hookView;
+  };
+
   const takeMetrics = (): MetricsSnapshot => {
     try {
       return metrics.snapshot();
@@ -2016,9 +2109,9 @@ export function createDiagnosticsOverlay(
   /**
    * Reads the logger's ring buffer through its export surface, oldest record
    * first. `snapshot` rather than `recent`: the export surface redacts the
-   * locations of the three forms DL-LOG-08 enumerates whatever the logger's own
-   * `stackDetail` is, where `recent` reports the records as the sinks received
-   * them.
+   * locations of the three forms DL-LOG-08 enumerates and the message forms
+   * DL-LOG-10 enumerates, whatever the logger's own `errorDetail` is, where
+   * `recent` reports the records as the sinks received them.
    *
    * @returns Records carrying no location of those three forms, empty where no
    *   logger is attached or it threw.
@@ -2304,12 +2397,7 @@ export function createDiagnosticsOverlay(
     const focusedControl = focusedControlIndex();
     const target = host;
     const health = readHealth();
-    const hookView = readHookView();
-
-    if (hookView !== null) {
-      foldHookView(hookView);
-    }
-
+    const hookView = foldSources();
     const taken = takeMetrics();
 
     lastMetrics = taken;
@@ -2538,12 +2626,7 @@ export function createDiagnosticsOverlay(
    */
   const buildSnapshot = (): DiagnosticsSnapshot => {
     const health = readHealth();
-    const hookView = readHookView();
-
-    if (hookView !== null) {
-      foldHookView(hookView);
-    }
-
+    const hookView = foldSources();
     const taken = takeMetrics();
 
     return {
@@ -2588,6 +2671,11 @@ export function createDiagnosticsOverlay(
    */
   const exportPrometheusText = (): boolean => {
     try {
+      // FOLDED FIRST, as every other read of the registry is: a scrape
+      // substitute that reported stale pulled families would be a scrape of the
+      // last render rather than of now.
+      foldSources();
+
       return metrics.download();
     } catch (thrown) {
       reportFailure(METRICS_EXPORT_CONTROL_LABEL, thrown);
@@ -2743,6 +2831,10 @@ export function createDiagnosticsOverlay(
       }
 
       try {
+        // The pulled families are folded before the text is taken, so this
+        // export and `snapshot()` answer from one reading.
+        foldSources();
+
         return metrics.toPrometheusText();
       } catch (thrown) {
         reportFailure(METRICS_EXPORT_CONTROL_LABEL, thrown);
@@ -2798,11 +2890,13 @@ export function createDiagnosticsOverlay(
       lastMetrics = null;
 
       // The optional collaborators are released, so a destroyed overlay keeps
-      // neither the health surface, the tracer nor the hook-count source
-      // alive, and nothing it was given stays reachable through it.
+      // neither the health surface, the tracer, the hook-count source nor the
+      // cursor reader alive, and nothing it was given stays reachable through
+      // it.
       healthSource = null;
       tracer = null;
       hookCounts = null;
+      rngCursors = null;
     },
   });
 }

@@ -436,8 +436,8 @@ describe('the board-manipulation family', () => {
     expect(registry.find('culling-blade')?.charges).toBe(1);
   });
 
-  it('clears the first fully-occupied column outright (scouring-wind)', () => {
-    const { engine } = compose(['scouring-wind'], {
+  it('clears the first fully-occupied row outright (scouring-wind)', () => {
+    const { engine, registry } = compose(['scouring-wind'], {
       board: boardFrom([
         [2, 4, 8, 16],
         [2, 32, 64, 128],
@@ -449,18 +449,25 @@ describe('the board-manipulation family', () => {
     engine.move(DIRECTION_UP);
 
     const after = engine.serialize();
-    let cleared = 0;
+    const slot = registry.find('scouring-wind')?.state as
+      | { readonly row?: { readonly y: number } }
+      | undefined;
+    const swept = slot?.row;
+
+    // A ROW, AND THE SLOT NAMES WHICH: one fixed `y` across every `x`, which is
+    // one element taken from each sub-array of the x-major `cells`. Counting
+    // emptied sub-arrays instead would have measured a column and passed on a
+    // relic clearing the wrong axis.
+    expect(swept).toBeDefined();
+
+    const y = swept?.y ?? -1;
 
     for (let x = 0; x < DEFAULT_BOARD_SIZE; x += 1) {
-      const column = after.grid.cells[x] ?? [];
-
-      if (column.every((cell) => cell === null)) {
-        cleared += 1;
-      }
+      expect(valueAt(after, x, y)).toBe(0);
     }
 
-    // One column is empty apart from anything the spawn placed in it.
-    expect(cleared + values(after).length).toBeGreaterThan(0);
+    // The spawn is placed before `onAfterMove`, so the sweep clears it too when
+    // it landed in the row — which is why the row above is empty outright.
     expect(values(after).length).toBeLessThan(
       DEFAULT_BOARD_SIZE * DEFAULT_BOARD_SIZE,
     );

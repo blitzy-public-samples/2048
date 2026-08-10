@@ -1,0 +1,409 @@
+{
+  "__comment": "Grafana-compatible dashboard TEMPLATE for the game2048_ metric families exported by src/observability/metrics.ts. It declares panels, expressions and units only; it names no data source of its own and is not wired to a running Prometheus. Load an exported game2048-metrics.prom into a Prometheus-compatible source, then select that source for the ${DS} variable. docs/dashboards/dashboard.html is the server-free equivalent that consumes the exported file directly. See docs/OBSERVABILITY.md section 7.",
+  "schemaVersion": 39,
+  "title": "2048 Roguelike — Client Observability",
+  "uid": "game2048-client",
+  "tags": ["game2048", "client", "observability"],
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "",
+  "templating": {
+    "list": [
+      {
+        "name": "DS",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Turns and the board",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Turns by resolution",
+      "description": "game2048_turns_total. One series per resolution, so an idle or cancelled turn is visible beside a committed one.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0 },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "game2048_turns_total",
+          "legendFormat": "{{resolution}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Merges and spawns",
+      "description": "game2048_merges_total is incremented once per merge, so a turn resolving two merges raises it by two. game2048_spawns_total counts tiles actually inserted; game2048_spawn_suppressed_total counts attempts a relic or a full board suppressed.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "sum(game2048_merges_total)",
+          "legendFormat": "merges"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "sum(game2048_spawns_total)",
+          "legendFormat": "spawns"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "sum(game2048_spawn_attempts_total)",
+          "legendFormat": "spawn attempts"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "sum(game2048_spawn_suppressed_total)",
+          "legendFormat": "spawns suppressed"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Engine events by name",
+      "description": "game2048_engine_events_total. The seven typed events of the engine contract.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "game2048_engine_events_total",
+          "legendFormat": "{{event}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Latency and frames",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Turn latency quantiles",
+      "description": "game2048_turn_latency_milliseconds. Buckets are shared with frame time so the two are directly comparable.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "histogram_quantile(0.50, sum by (le) (game2048_turn_latency_milliseconds_bucket))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (game2048_turn_latency_milliseconds_bucket))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "histogram_quantile(0.99, sum by (le) (game2048_turn_latency_milliseconds_bucket))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Frame time quantiles, against a 16.7 ms budget",
+      "description": "game2048_frame_time_milliseconds. The render loop is the product's first per-frame JavaScript work, so this is the panel that shows whether the 2.5D renderer holds a frame budget.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 16.7 },
+              { "color": "red", "value": 33.4 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "histogram_quantile(0.50, sum by (le) (game2048_frame_time_milliseconds_bucket))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "histogram_quantile(0.95, sum by (le) (game2048_frame_time_milliseconds_bucket))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Span duration by name",
+      "description": "game2048_span_duration_milliseconds. Every span of src/observability/tracer.ts lands here, including render.frame — the frame-callback seam that was unmeasured before this project.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "histogram_quantile(0.95, sum by (le, span) (game2048_span_duration_milliseconds_bucket))",
+          "legendFormat": "p95 {{span}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Hooks and relics",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "barchart",
+      "title": "Hook dispatches by hook",
+      "description": "game2048_hook_dispatches_total. One series per hook name, so an unbound hook reads zero rather than being absent.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 29 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "game2048_hook_dispatches_total",
+          "legendFormat": "{{hook}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Handlers invoked, skipped and refused",
+      "description": "A skip is the charge guard doing its job: once a budget is spent the bus skips every handler that relic binds. A payload rejection is a handler return the bus refused, which leaves the accumulated payload as it stood.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 29 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "sum(game2048_hook_handler_invocations_total)",
+          "legendFormat": "invoked"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "sum(game2048_hook_handler_skipped_total)",
+          "legendFormat": "skipped"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "sum(game2048_hook_payload_rejections_total)",
+          "legendFormat": "payload refused"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Relic handler errors",
+      "description": "game2048_relic_handler_errors_total. A non-zero value means a relic threw and was marked degraded; the HUD shows that relic as no longer firing. Any value above zero deserves a look.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 29 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name",
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "game2048_relic_handler_errors_total",
+          "legendFormat": "{{relic}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "row",
+      "title": "Determinism, health and the registry itself",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 14,
+      "type": "barchart",
+      "title": "RNG draws by substream",
+      "description": "game2048_rng_draws_total. Four substreams — spawn-value, spawn-position, relic-draw and rarity-weight — kept separate so a relic drawing once cannot shift the spawn sequence. These are the counts a resumed run's persisted cursors must agree with.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 38 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "game2048_rng_draws_total",
+          "legendFormat": "{{stream}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Health checks",
+      "description": "game2048_health_check_status. One series per check: 1 is pass, 0 is fail, -1 is not-applicable. Five of the six are reused pre-migration probes; webgl is the one added for the renderer.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 38 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "pass", "color": "green", "index": 0 },
+                "0": { "text": "fail", "color": "red", "index": 1 },
+                "-1": { "text": "n/a", "color": "text", "index": 2 }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "game2048_health_check_status",
+          "legendFormat": "{{check}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Registry refusals by reason",
+      "description": "game2048_metrics_rejected_total. The registry bounding itself rather than throwing. A rising seriesLimitReached or familyLimitReached is the real unbounded-cardinality alarm; metadataBudgetReached is a backstop that the two ceilings normally reach first.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 38 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "game2048_metrics_rejected_total",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Reports by subsystem, and frames rendered",
+      "description": "game2048_reports_total collapses every subsystem's reports onto one family, labelled by report and subsystem. game2048_frames_rendered_total is the render loop's own counter.",
+      "datasource": { "type": "prometheus", "uid": "${DS}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "sum by (subsystem) (game2048_reports_total)",
+          "legendFormat": "reports: {{subsystem}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "expr": "sum(game2048_frames_rendered_total)",
+          "legendFormat": "frames rendered"
+        }
+      ]
+    }
+  ]
+}

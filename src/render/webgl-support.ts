@@ -11,6 +11,25 @@
  * caller drives that override, so an accessibility preference reaches this
  * module without it importing src/ui/.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-WEBGL-01  target-only row  `probeWebGLSupport()`, `WebGLSupportResult`
+ *                                 and `resetWebGLSupportProbe()` — the sixth
+ *                                 capability check and the first reported
+ *   TR-WEBGL-02  target-only row  `attachContextLossHandlers()`,
+ *                                 `ContextLossHandlers` and
+ *                                 `WebGLContextLossInfo`
+ *   TR-WEBGL-03  target-only row  `RenderReporter`, `NOOP_RENDER_REPORTER`,
+ *                                 `createRenderReporter()` and
+ *                                 `createGuardedRenderReporter()`
+ *   TR-WEBGL-04  target-only row  `readMotionPreference()`,
+ *                                 `queryReducedMotion()`,
+ *                                 `setReducedMotionOverride()`,
+ *                                 `subscribeReducedMotion()` and
+ *                                 `REDUCED_MOTION_QUERY`
+ *   TR-WEBGL-05  target-only row  `describeRenderError()` and the contained
+ *                                 reporter counters
+ *
  * Decisions: DL-WEBGL-01, DL-WEBGL-02, DL-WEBGL-03, DL-WEBGL-04, DL-WEBGL-05
  * (docs/DECISION_LOG.md).
  */

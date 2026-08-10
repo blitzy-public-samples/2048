@@ -161,6 +161,11 @@ function surfacesOf(theme: Theme): Record<string, string> {
     'empty cell': palette.cell,
     'score surface': palette.scoreSurface,
     'button surface': palette.buttonSurface,
+
+    // The two surfaces this feature's own screens draw controls on, which the
+    // ring has to be discernible against as well. Decision DL-THEME-08.
+    'control surface': palette.controlSurface,
+    'readout surface': palette.readoutSurface,
     'overlay loss': palette.overlayLoss,
     'overlay win': palette.overlayWin,
     'diagnostics surface': palette.diagnosticsSurface,

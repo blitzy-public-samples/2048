@@ -2,26 +2,22 @@
 // --config vitest.snapshot.config.ts`, and it is a gate of its own, separate
 // from the unit gate `npm test` drives through vitest.config.ts.
 //
-// What the three projects collect, and how they stay disjoint.
+// What the three projects collect, and how they stay disjoint:
 //
-// this project tests/snapshot/*.spec.ts environment 'node' vitest.config.ts
-// tests/unit/**/*.test.ts environments 'node' + 'jsdom' playwright
-// tests/e2e/*.spec.ts driven by playwright.config.ts
+//   this project      tests/snapshot/*.spec.ts   environment 'node'
+//   vitest.config.ts  tests/unit/**/*.test.ts    environments 'node' + 'jsdom'
+//   playwright        tests/e2e/*.spec.ts        driven by playwright.config.ts
 //
 // The trees carry different file suffixes — `.spec.ts` here, `.test.ts` there
 // — and each project also names the other's directory in `exclude`, so the
 // separation holds on directory and on suffix independently.
 //
-// SNAPSHOT WRITES: `update` is set to `'none'` below, so this project neither
-// rewrites an existing snapshot nor CREATES a missing one, in CI and outside it
-// alike: a mismatched snapshot and an absent snapshot both fail the run. Left
-// unset — as it was before code review finding M7 — Vitest resolves the mode
-// from its own CI detection and writes a missing snapshot outside CI.
-// Re-recording is the separate opt-in `vitest run --config
-// vitest.snapshot.config.ts -u`, which overrides this value for that one
+// SNAPSHOT WRITES: `update` is `'none'` below, so this project neither rewrites
+// an existing snapshot nor creates a missing one, in CI and outside it alike —
+// both fail the run. Re-recording is `vitest run --config
+// vitest.snapshot.config.ts -u`, which overrides the value for that one
 // invocation; package.json's `test:snapshot` script passes no update flag.
-//
-// Decision DL-TEST-04.
+// DL-TEST-04.
 //
 // No option below installs, replaces or unstubs a global, and none installs a
 // fake clock. `silent` is `false`, so a log record a spec asserts on reaches
@@ -32,16 +28,14 @@
 // removed the best score; the writability probe ran once at construction; and
 // `setup` read the snapshot once.
 //
-// Decisions behind this file: DL-TEST-04, the snapshot write mode pinned to
-// `'none'` in this configuration; DL-TEST-05, the snapshot gate kept in its own
-// configuration.
+// Decisions behind this file: DL-TEST-04, the pinned snapshot write mode;
+// DL-TEST-05, the snapshot gate in its own configuration.
 //
 // Traceability rows in docs/TRACEABILITY_MATRIX.md, both target-only — the
 // pre-migration tree carried no test runner of any kind:
 //   TR-TEST-04  target-only row  the separate snapshot project, its own
 //                                include glob and its snapshot resolver
-//   TR-TEST-05  target-only row  the setup file's persistence teardown and
-//                                the fake clock the seeded gate runs under
+//   TR-TEST-05  target-only row  the setup file's persistence teardown
 
 import { defineConfig } from 'vitest/config';
 
@@ -123,8 +117,7 @@ export default defineConfig({
 
     resolveSnapshotPath,
 
-    // FAIL-CLOSED. No snapshot is written by this project: a mismatch fails and
-    // a MISSING snapshot fails too, rather than being created and passed. The
+    // FAIL-CLOSED: a mismatched snapshot fails and a missing one fails too. The
     // `-u` invocation named above is the one path that records. DL-TEST-04.
     update: 'none',
 

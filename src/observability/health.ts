@@ -9,6 +9,24 @@
 // are deleted with no code replacement, and their three probe constructs are
 // traced to this module.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-HEALTH-01  js/bind_polyfill.js L1                the `functionBind`
+//                                                       probe
+//   TR-HEALTH-02  js/classlist_polyfill.js L2-L5        the `classList` probe
+//   TR-HEALTH-03  js/animframe_polyfill.js L3-L10, L23  the
+//                                                       `requestAnimationFrame`
+//                                                       pair
+//   TR-HEALTH-04  js/keyboard_input_manager.js L4-L13   the `pointerEvents`
+//                                                       probe
+//   TR-HEALTH-05  js/local_storage_manager.js L29-L40   the `storage` probe
+//   TR-HEALTH-06  target-only row                       the added `webgl` check
+//   TR-HEALTH-07  target-only row                       the report roll-up and
+//                                                       the two readiness
+//                                                       verdicts
+//   TR-HEALTH-08  target-only row                       the per-check logger
+//                                                       record and status gauge
+//
 // Decisions: DL-HEALTH-01, DL-HEALTH-02, DL-HEALTH-03, DL-HEALTH-04,
 // DL-HEALTH-05, DL-HEALTH-06 (docs/DECISION_LOG.md).
 
@@ -1076,6 +1094,32 @@ export class HealthSurface {
    */
   lastReport(): HealthReport | null {
     return this.latest;
+  }
+
+  /**
+   * Drops the held report and the held Web Storage result, leaving the surface
+   * as one that has never been checked.
+   *
+   * THE CORRELATION BOUNDARY. `correlationId` above is a getter over the
+   * logger, so a report taken under one run and still held after the
+   * identifier rotates would be REPORTED under the next run's identifier while
+   * describing the previous one's probes. The composition root calls this as
+   * it rotates, so the next `report()` or `readiness()` re-probes and the
+   * report a reader sees was taken under the identifier it carries.
+   *
+   * The probes, the listeners and the fault count all survive: this discards a
+   * reading, not a capability. Subscribers are NOT notified — nothing has been
+   * checked to notify them of.
+   *
+   * @returns Whether a report was held and has been dropped.
+   */
+  forget(): boolean {
+    const held = this.latest !== null;
+
+    this.latest = null;
+    this.probedStorage = undefined;
+
+    return held;
   }
 
   /**

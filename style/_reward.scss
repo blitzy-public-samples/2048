@@ -3,6 +3,24 @@
 // DOM contract. Its consumer renders this tree into the empty
 // `.screen[data-screen="reward"]` container.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+// file's area enumerated:
+//   TR-REWARD-01  style/main.scss L196-L221  the `.game-message` overlay
+//                                            treatment, from which the reward
+//                                            panel's surface is compiled
+//   TR-REWARD-02  style/main.scss L334-L402  the tile ramp's anchors, from which
+//                                            the per-rarity accents are
+//                                            interpolated
+//   TR-REWARD-03  style/main.scss L159-L168  the `button` mixin, from which
+//                                            `.relic-card` is compiled
+//   TR-REWARD-04  target-only row            the three-offer list and its
+//                                            without-replacement rendering
+//   TR-REWARD-05  target-only row            the rarity chip, the charges chip
+//                                            and the hook badges
+//   TR-REWARD-06  target-only row            the clamped description
+//   TR-REWARD-07  target-only row            the narrow-layout restatement at
+//                                            the mobile threshold
+//
 // Decisions: DL-REWARD-01, DL-REWARD-02, DL-REWARD-03, DL-REWARD-04
 // (docs/DECISION_LOG.md).
 

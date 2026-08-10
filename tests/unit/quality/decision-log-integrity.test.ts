@@ -36,12 +36,34 @@ const REGISTRY_PATH = 'CONTRIBUTING.md';
 /**
  * Directories the citation sweep descends into.
  *
- * The documentation tree is deliberately excluded: a document may reference an
- * identifier in prose — the coverage section names several — and a reference is
- * not a citation from code. What is asserted is that every identifier the
- * SHIPPING SOURCES and their tests cite resolves to a row.
+ * The documentation tree is deliberately excluded from THIS sweep: the log
+ * itself names identifiers that do not resolve, because it records the next
+ * free ordinal of every area in prose. What this sweep asserts is that every
+ * identifier the SHIPPING SOURCES and their tests cite resolves to a row.
+ * `SIBLING_DOCUMENTS` below carries the documents that are swept separately.
  */
 const CITING_ROOTS: readonly string[] = ['src', 'style', 'tests'];
+
+/**
+ * Documents outside the log that cite identifiers, swept separately.
+ *
+ * A citation here means "the row behind this", exactly as one in a source file
+ * does, so it must resolve. The log is the one document excluded, because its
+ * next-free-ordinal pointers are deliberately unresolved.
+ */
+const SIBLING_DOCUMENTS: readonly string[] = [
+  'README.md',
+  'CONTRIBUTING.md',
+  'docs/CONFIGURATION.md',
+  'docs/OBSERVABILITY.md',
+  'docs/RELICS.md',
+  'docs/TRACEABILITY_MATRIX.md',
+  'docs/architecture/ARCHITECTURE.md',
+  'docs/architecture/component-interaction.md',
+  'docs/architecture/data-flow.md',
+  'docs/architecture/hook-dispatch-sequence.md',
+  'blitzy-deck/executive-summary.html',
+];
 
 /** Files the citation sweep reads, by extension. */
 const CITING_EXTENSIONS: ReadonlySet<string> = new Set([
@@ -162,6 +184,35 @@ describe('every cited decision identifier resolves to a row', () => {
   it('found citations to sweep, so an empty sweep cannot pass', () => {
     expect(citations.size).toBeGreaterThan(300);
     expect(definitions.length).toBeGreaterThan(300);
+  });
+});
+
+describe('every identifier a sibling document cites resolves to a row', () => {
+  it('leaves no citation in the documentation undefined', () => {
+    const defined = new Set(definitions);
+    const unresolved: string[] = [];
+
+    for (const path of SIBLING_DOCUMENTS) {
+      for (const identifier of new Set(read(path).match(CITATION_PATTERN))) {
+        if (!defined.has(identifier)) {
+          unresolved.push(`${identifier} (${path})`);
+        }
+      }
+    }
+
+    // The failure this catches is a prose range whose upper end overshoots the
+    // highest ordinal its area actually reaches: the end of the range names no
+    // row. The message carries the citing document, because the fix is either a
+    // row in the log or a corrected citation and the document decides which.
+    expect(unresolved.sort()).toEqual([]);
+  });
+
+  it('swept documents that actually carry citations', () => {
+    const carrying = SIBLING_DOCUMENTS.filter(
+      (path) => (read(path).match(CITATION_PATTERN) ?? []).length > 0,
+    );
+
+    expect(carrying.length).toBeGreaterThan(5);
   });
 });
 

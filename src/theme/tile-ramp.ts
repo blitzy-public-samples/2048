@@ -18,6 +18,28 @@
  * unit suite and the separately stored seeded snapshot suite import it with no
  * DOM, no WebGL and no observability stack.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-RAMP-01  style/main.scss L334-L402  the `@while` generation loop, ported
+ *                                          as `computeTileTheme`
+ *   TR-RAMP-02  style/main.scss L336-L337  the `$gold-percent` interpolation,
+ *                                          ported as `goldPercent` and
+ *                                          `sassMix`
+ *   TR-RAMP-03  style/main.scss L339-L349  the `$special-colors` accent list,
+ *                                          ported as `tileSpecialColors`
+ *   TR-RAMP-04  style/main.scss L351-L356  the bright-text threshold, ported as
+ *                                          `TileTheme.brightText`
+ *   TR-RAMP-05  style/main.scss L358-L370  the `$glow-opacity` term and its
+ *                                          two-part shadow, ported as
+ *                                          `haloAlpha`, `insetAlpha` and
+ *                                          `glowSuppressed`
+ *   TR-RAMP-06  style/main.scss L372-L380  the `tile-super` band above the
+ *                                          ramp's last value
+ *   TR-RAMP-07  target-only row            `parseHexColor`, `quantiseColor` and
+ *                                          `formatHexColor`
+ *   TR-RAMP-08  target-only row            `rampValue`, `rampExponent` and
+ *                                          `tileRampConstants`
+ *
  * Decisions: DL-RAMP-01, DL-RAMP-02, DL-RAMP-03, DL-RAMP-04
  * (docs/DECISION_LOG.md).
  */
@@ -361,6 +383,17 @@ export interface TileTheme {
    * super tint above it, and `null` where neither applies.
    */
   readonly accentColor: string | null;
+
+  /**
+   * The fill in the two forms one code path emits — `overlayBackground`,
+   * parameterised by `quantiseIntermediate` — which are NOT interchangeable.
+   *
+   * `color` keeps unquantised float channels, reproducing the pinned Dart Sass
+   * output to full precision, and is the fill source. `colorHex` floors the
+   * interpolated base BEFORE mixing the overlay over it and floors the result
+   * again, reproducing the twelve hex fills the pre-migration generated
+   * stylesheet shipped, byte for byte. Decisions DL-RAMP-02, DL-RAMP-04.
+   */
   readonly color: RampColor;
   readonly colorHex: string;
 

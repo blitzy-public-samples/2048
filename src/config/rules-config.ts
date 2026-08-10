@@ -11,6 +11,22 @@
  * src/config/stage-config.ts. The engine and the relics read the same
  * `RulesConfig` instance; members are mutable and are read at each use.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+ * this module's area enumerated:
+ *   TR-CONFIG-01  js/application.js L3          the board-size literal, as
+ *                                               `boardSize`
+ *   TR-CONFIG-02  js/game_manager.js L170       `2048`, as `winValue`
+ *   TR-CONFIG-03  js/game_manager.js L7         `2`, as `startTiles`
+ *   TR-CONFIG-04  js/game_manager.js L71        `Math.random() < 0.9 ? 2 : 4`,
+ *                                               as `spawn` and
+ *                                               `SpawnDistribution`
+ *   TR-CONFIG-05  js/game_manager.js L156-L157  the merge condition and the
+ *                                               doubled value, as
+ *                                               `MergePredicate` and
+ *                                               `MergeProducer`
+ *   TR-CONFIG-06  target-only row               `MergeTileView`, the structural
+ *                                               operand both merge members read
+ *
  * Decisions: DL-CONFIG-01, DL-CONFIG-02, DL-CONFIG-03 (docs/DECISION_LOG.md).
  */
 

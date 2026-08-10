@@ -8,6 +8,14 @@
 // A merge arrives as an engine event, once per merge, so a move carrying two
 // merges requests two bursts on one frame and each runs its own tween.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated, all target-only because the deleted actuator
+// drew no particle:
+//   TR-PARTICLE-01  the fixed-capacity mote pool and its buffer geometry
+//   TR-PARTICLE-02  `createParticleSystem()` and one burst per merge
+//   TR-PARTICLE-03  `readBurstTint()`, the tint taken from the ramp fill
+//   TR-PARTICLE-04  the reduced-motion gate that suppresses a burst
+//
 // Decisions: DL-PARTICLE-01, DL-PARTICLE-02, DL-PARTICLE-03, DL-PARTICLE-04,
 // DL-PARTICLE-05 (docs/DECISION_LOG.md).
 

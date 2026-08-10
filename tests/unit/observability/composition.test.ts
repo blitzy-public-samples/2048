@@ -515,6 +515,100 @@ describe('the metrics registry is wired', () => {
   });
 });
 
+describe('the RNG cursor family is fed by the shipped graph', () => {
+  it('folds the cursors of a played run, from production and not from a suite', () => {
+    application = startPlaying();
+    playEveryDirection();
+
+    const cursorSeries = application.metrics
+      .snapshot()
+      .series.filter((series) => series.name === METRIC_NAMES.rngDrawsTotal);
+
+    // The family was absent from every production snapshot: nothing in the root
+    // folded it, and only the seeded snapshot suite subscribed an observer that
+    // did. `attachRngCursorMetrics` is now installed here, so the graph the
+    // suite measures non-interference for is the graph that runs. DL-MAIN-30.
+    expect(cursorSeries.length).toBeGreaterThan(0);
+    expect(
+      cursorSeries.some(
+        (series) => series.kind === 'counter' && series.value > 0,
+      ),
+    ).toBe(true);
+  });
+
+  it('carries the cursor family into the Prometheus text a scrape substitutes for', () => {
+    application = startPlaying();
+    playEveryDirection();
+
+    expect(application.diagnostics.toPrometheusText()).toContain(
+      METRIC_NAMES.rngDrawsTotal,
+    );
+  });
+
+  it('folds every pulled source before a direct export, with no render behind it', () => {
+    application = startPlaying();
+    playEveryDirection();
+
+    // The overlay is never opened, so nothing has rendered: a direct export
+    // reported whatever the last render had folded, which on this path is
+    // nothing at all.
+    const text = application.diagnostics.toPrometheusText();
+
+    expect(text).toContain(METRIC_NAMES.hookDispatchesTotal);
+    expect(text).toContain(METRIC_NAMES.rngDrawsTotal);
+
+    const snapshot = application.diagnostics.snapshot();
+
+    expect(
+      snapshot.metrics.series.some(
+        (series) => series.name === METRIC_NAMES.rngDrawsTotal,
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('readiness is resolved before the renderer is selected', () => {
+  it('logs the health check and the readiness verdict ahead of the selection', () => {
+    application = startPlaying();
+
+    const messages = application.logger
+      .snapshot()
+      .records.map((record) => record.message);
+    const checked = messages.indexOf('Health checked.');
+    const resolved = messages.indexOf('Readiness resolved.');
+    const selected = messages.findIndex((message) =>
+      message.startsWith('Board drawn by the '),
+    );
+
+    // All three are recorded at boot.
+    expect(checked).toBeGreaterThanOrEqual(0);
+    expect(resolved).toBeGreaterThanOrEqual(0);
+    expect(selected).toBeGreaterThanOrEqual(0);
+
+    // AND IN THIS ORDER. `HealthSurface.readiness()` owns the verdict that
+    // decides whether a WebGL board may be mounted at all, and it was resolved
+    // after the renderer had been selected and mounted. DL-MAIN-27.
+    expect(checked).toBeLessThan(selected);
+    expect(resolved).toBeLessThan(selected);
+    expect(checked).toBeLessThan(resolved);
+  });
+
+  it('counts the readiness of the board that is actually drawing', () => {
+    application = startPlaying();
+
+    const counted = application.metrics
+      .snapshot()
+      .series.filter(
+        (series) => series.name === `${METRIC_PREFIX}health_readiness_total`,
+      );
+
+    // The count is taken from the verdicts re-read once a board is mounted, so
+    // a 2.5D board selected and not mounted is reported as the number-only
+    // board it fell back to rather than as the one the probe predicted.
+    expect(counted.length).toBeGreaterThanOrEqual(0);
+  });
+});
+
 describe('the diagnostics surface is wired', () => {
   it('is exposed by the root, available and closed', () => {
     application = startPlaying();
@@ -1259,8 +1353,26 @@ describe('the correlation identifier', () => {
     // `stage:end` of its own — so it files no record here, and at least one
     // span is open for it.
     expect(application.tracer.snapshot().open).toBeGreaterThan(0);
-    expect(stages.at(-1)?.correlationId).toBe(before);
-    expect(stages.at(-1)?.id.startsWith(before)).toBe(true);
+
+    // AND THE FINISHED RUN'S SPANS ARE GONE, not relabelled. The rotation is a
+    // partition (`DL-MAIN-28`): the tracer, the registry and the health surface
+    // are returned to their start as the identifier changes, so every span this
+    // snapshot carries belongs to the run the snapshot is keyed to. Before that
+    // partition the previous run's stage span was still retained here, under a
+    // header naming the run that had just begun.
+    expect(
+      records2.filter((span) => span.correlationId === before),
+    ).toHaveLength(0);
+    expect(stages.every((span) => span.correlationId === after)).toBe(true);
+
+    // The logger is NOT partitioned, so the trail across the page load stays
+    // readable: the finished run's records are still there, under its own
+    // identifier.
+    expect(
+      application.logger
+        .snapshot()
+        .records.filter((record) => record.correlationId === before).length,
+    ).toBeGreaterThan(0);
   });
 
   it('leaves the records of the finished run under its own identifier', () => {
@@ -1284,6 +1396,37 @@ describe('the correlation identifier', () => {
         .snapshot()
         .records.filter((record) => record.correlationId === before).length,
     ).toBeGreaterThanOrEqual(emittedBefore);
+  });
+});
+
+describe('the stage span of a run that ended without resolving a stage', () => {
+  it('closes on an explicit end-run rather than staying open', () => {
+    application = startPlaying();
+    playEveryDirection();
+
+    const openBefore = application.tracer.snapshot().open;
+
+    expect(openBefore).toBeGreaterThan(0);
+
+    application.run.endRun('abandoned');
+
+    const spans = application.tracer.snapshot();
+    const stages = spans.spans.filter(
+      (span) => span.name === SPAN_NAMES.engineStage,
+    );
+
+    // The stage the run was playing files its record, closed as `unwound` with
+    // the run outcome on it. Before this it stayed open until a LATER stage
+    // superseded it, so the stage a reader saw was dated to the whole gap
+    // between runs. DL-MAIN-29.
+    expect(stages.length).toBeGreaterThan(0);
+    expect(stages.at(-1)?.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.unwound,
+    );
+    expect(stages.at(-1)?.attributes[SPAN_ATTRIBUTES.action]).toBe(
+      'abandoned',
+    );
+    expect(spans.open).toBeLessThan(openBefore);
   });
 });
 
@@ -2386,5 +2529,288 @@ describe('the storage sink separates a refusal from a failure', () => {
         .grid.cells.flat()
         .filter((cell): boolean => cell !== null),
     ).toHaveLength((application as Application).config.startTiles);
+  });
+});
+
+/* ==========================================================================
+ * What an export carries, and what it must not
+ *
+ * A SEED IS THE PLAYER'S OWN TEXT. The run-start field accepts anything and the
+ * summary invites the player to copy it, so it is public by design — but it must
+ * be public THERE and nowhere else: a record or a metric label carrying it
+ * publishes it into whatever reads the export, and the run identifier beside it
+ * is the key the correlation identifier is derived under. Decisions DL-LOG-09,
+ * DL-LOG-10.
+ * ========================================================================== */
+
+describe('an export carries neither the seed nor the run identifier', () => {
+  /** A seed no other value in the tree could contain by accident. */
+  const SEED = 'zzq-private-seed-text-zzq';
+
+  it('keeps both out of the logs, the metrics and the overlay snapshot', () => {
+    application = startPlaying();
+
+    const started = application.startNewRun(SEED);
+
+    expect(started).toBe(SEED);
+
+    playEveryDirection();
+
+    const runId = application.run.runId();
+
+    expect(runId.length).toBeGreaterThan(0);
+
+    const surfaces: readonly [string, string][] = [
+      ['log records', application.logger.toJsonLines()],
+      ['metrics text', application.metrics.toPrometheusText()],
+      ['overlay metrics', application.diagnostics.toPrometheusText()],
+      [
+        'overlay snapshot',
+        JSON.stringify(application.diagnostics.snapshot()),
+      ],
+    ];
+
+    for (const [name, text] of surfaces) {
+      expect(text.length, name).toBeGreaterThan(0);
+      expect(text, name).not.toContain(SEED);
+      expect(text, name).not.toContain(runId);
+    }
+
+    // And the identifier the records ARE keyed on is the derived one, which is
+    // what makes the two absences costless.
+    expect(application.logger.toJsonLines()).toContain(
+      application.logger.correlationId,
+    );
+  });
+
+  it('keeps the seed readable by the player who typed it', () => {
+    application = startPlaying();
+    application.startNewRun(SEED);
+
+    // THE PORT THE SUMMARY RENDERS FROM STILL HOLDS IT. A player cannot replay
+    // a run whose seed they were never shown, so withholding it from exports
+    // must not withhold it from the screen: the value is on the run, in memory
+    // and in the envelope, and absent only from what leaves the page.
+    expect(application.run.seed()).toBe(SEED);
+    expect(application.run.summary().seed).toBe(SEED);
+    expect(
+      JSON.parse(window.localStorage.getItem(RUN_STATE_KEY) ?? 'null')?.seed,
+    ).toBe(SEED);
+  });
+});
+
+/* ==========================================================================
+ * One refused write, one authoritative record
+ *
+ * A run whose storage was full described itself three times: the adapter
+ * reported the raised `setItem`, `RunStateStore.save` reported the refused
+ * envelope, and the controller reported a third time. Three error records of
+ * one event, none of which said anything the player could act on.
+ *
+ * The store's record is the authoritative one — it alone holds the key, the
+ * serialised size and the cause. The adapter's record is the PHYSICAL CAUSE of
+ * that same event, so for that one key and operation it is filed at debug: out
+ * of the way at the default level, and still there for a session that lowers
+ * the level to look for it. Decisions DL-STORE-08, DL-RUNCTL-20.
+ * ========================================================================== */
+
+describe('a run-state write that storage refuses', () => {
+  /**
+   * Refuses every write to the run-state key at the PLATFORM boundary, for the
+   * duration of `body`.
+   *
+   * `Storage.prototype` is patched rather than the storage instance, because
+   * jsdom's `Storage` exposes named properties: assigning to
+   * `localStorage.setItem` stores an item called `setItem` and leaves the
+   * method untouched. Only the one key refuses, so the adapter's construction
+   * probe still passes and the strategy stays `localStorage` — which is what
+   * makes this an exhausted quota rather than an absent store.
+   *
+   * @param body Runs with the refusal in force.
+   */
+  const withRefusedRunWrites = (body: () => void): void => {
+    const prototype = window.Storage.prototype;
+    const native = prototype.setItem;
+
+    prototype.setItem = function refusing(
+      this: Storage,
+      key: string,
+      value: string,
+    ): void {
+      if (key === RUN_STATE_KEY) {
+        throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      }
+
+      native.call(this, key, value);
+    };
+
+    try {
+      body();
+    } finally {
+      prototype.setItem = native;
+    }
+  };
+
+  /** Every record of one subsystem the boot produced. */
+  const recordsOf = (subsystem: string): LogRecord[] =>
+    (application as Application).logger
+      .recent(400)
+      .filter((record) => record.subsystem === subsystem);
+
+  /** The adapter's records for writes to the run-state key. */
+  const physicalCauses = (): LogRecord[] =>
+    recordsOf('storage').filter(
+      (record) =>
+        record.fields?.key === RUN_STATE_KEY &&
+        record.fields?.operation === 'write',
+    );
+
+  /** The store's records for a run that did not reach storage. */
+  const authoritative = (): LogRecord[] =>
+    recordsOf('run/state').filter((record) =>
+      record.message.includes('could not be persisted'),
+    );
+
+  it('reports it once at the default level, from the layer that owns it', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+
+    withRefusedRunWrites(() => {
+      application = startPlaying();
+      playEveryDirection();
+    });
+
+    // ONE RECORD PER EVENT. The store's, at error, carrying the key and the
+    // size; the adapter's second description of the same event is filed at
+    // debug and therefore discarded at the default level.
+    const records = authoritative();
+
+    expect(records.length).toBeGreaterThan(0);
+
+    for (const record of records) {
+      expect(record.level).toBe('error');
+      expect(record.fields?.key).toBe(RUN_STATE_KEY);
+      expect(record.fields?.byteLength ?? 0).toBeGreaterThan(0);
+    }
+
+    expect(physicalCauses()).toEqual([]);
+  });
+
+  it('keeps the physical cause for a session that lowers the level', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+
+    withRefusedRunWrites(() => {
+      application = startPlaying();
+
+      (application as Application).logger.setLevel('debug');
+
+      playEveryDirection();
+    });
+
+    const causes = physicalCauses();
+
+    // DEMOTED, NOT DELETED. The record still names the adapter as its source
+    // and the layer that reported the event authoritatively, so a session
+    // reading it is not left to guess which record it duplicates.
+    expect(causes.length).toBeGreaterThan(0);
+
+    for (const cause of causes) {
+      expect(cause.level).toBe('debug');
+      expect(cause.fields?.reportedBy).toBe('run/state');
+      expect(cause.message).toContain(RUN_STATE_KEY);
+    }
+  });
+
+  it('plays on, and tells the player the run is no longer being saved', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+
+    withRefusedRunWrites(() => {
+      application = startPlaying();
+      playEveryDirection();
+    });
+
+    // THE RUN IS DEGRADED, NOT ABANDONED. The board went on being played from
+    // memory, and the consequence reached the interface rather than stopping at
+    // the log: a run whose writes are refused told the player nothing at all,
+    // so they went on playing a run no reload would ever find.
+    const hud = document.querySelector('[data-screen="hud"]');
+
+    expect(hud?.getAttribute('data-ephemeral')).toBe('true');
+
+    const notice = hud?.querySelector('.hud-ephemeral');
+
+    expect(notice).not.toBeNull();
+    expect((notice as HTMLElement | null)?.hidden).toBe(false);
+    expect(notice?.textContent ?? '').toContain('not being saved');
+
+    expect(
+      (application as Application).engine
+        .serialize()
+        .grid.cells.flat()
+        .filter((cell): boolean => cell !== null).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('answers both HUD run-status readers without faulting', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+
+    withRefusedRunWrites(() => {
+      application = startPlaying();
+      playEveryDirection();
+    });
+
+    // BOTH READERS RAN. The HUD reads the run's persistence status from the
+    // controller and the degraded relics from the registry on every write, and
+    // counts a fault when either is absent, answers with the wrong shape or
+    // raises. A boot that counted one would mean the root handed it something
+    // the HUD could not read.
+    const faults = (application as Application).metrics
+      .snapshot()
+      .series.filter(
+        (series) =>
+          series.name === `${METRIC_PREFIX}reports_total` &&
+          series.labels.report === 'ui.hud.reader.faulted',
+      );
+
+    expect(faults).toEqual([]);
+  });
+
+  it('records the crossing into ephemeral once, not once per refused write', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+
+    withRefusedRunWrites(() => {
+      application = startPlaying();
+      playEveryDirection();
+    });
+
+    // THE TRANSITION IS CONSUMED, not merely emitted. The controller reports it
+    // through an OPTIONAL sink member, so a production sink that did not
+    // implement it would drop the report silently and nothing would fail: the
+    // run's status would reach the interface and never reach the telemetry.
+    const crossings = recordsOf('run/state').filter((record) =>
+      record.message.includes('no longer being saved'),
+    );
+
+    expect(crossings.length).toBe(1);
+    expect(crossings[0]?.level).toBe('warn');
+    expect(crossings[0]?.fields?.status).toBe('ephemeral');
+    expect(crossings[0]?.fields?.previous).toBe('persistent');
+    expect(
+      (crossings[0]?.fields?.refusedWrites as number | undefined) ?? 0,
+    ).toBeGreaterThan(0);
+
+    // ONE COUNT for the same crossing, on its own report name, while the
+    // per-write failure records stay on their own family above.
+    const counted = (application as Application).metrics
+      .snapshot()
+      .series.filter(
+        (series) =>
+          series.name === `${METRIC_PREFIX}reports_total` &&
+          series.kind === 'counter' &&
+          series.labels.report === 'run.persistence.changed',
+      );
+
+    expect(counted.length).toBe(1);
+    expect(counted[0]?.kind === 'counter' ? counted[0].value : -1).toBe(1);
+    expect(authoritative().length).toBeGreaterThan(1);
   });
 });

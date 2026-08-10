@@ -1,6 +1,22 @@
 // The reward screen: the choose-one-of-three relic offer, rendered for the
 // router state `reward`.
 //
+// Rows of docs/TRACEABILITY_MATRIX.md. Every row is TARGET-ONLY: the reward
+// screen has NO vanilla source construct — the pre-migration product had one
+// screen, no router, no relic and no offer — so the reverse direction of the
+// matrix maps none of these to a `js/` construct, and that absence is declared
+// rather than left as a gap:
+//   TR-REWARDSCREEN-01  target-only row  `createRewardScreen()` and the
+//                                        `Screen` lifecycle it implements
+//   TR-REWARDSCREEN-02  target-only row  the panel chrome and the offer list
+//                                        hosted inside it
+//   TR-REWARDSCREEN-03  target-only row  the `selectReward` publication and
+//                                        the once-per-offer selection guard
+//   TR-REWARDSCREEN-04  target-only row  the focus trap, its adoption and its
+//                                        release on every exit path
+//   TR-REWARDSCREEN-05  target-only row  the three-tier offer resolution and
+//                                        the view-only projection
+//
 // Decisions: DL-REWARD-05, DL-REWARD-06, DL-REWARD-07, DL-REWARD-08,
 // DL-REWARD-09, DL-REWARD-10 (docs/DECISION_LOG.md).
 
@@ -232,6 +248,10 @@ export interface RewardScreenOptions {
   /**
    * Region the state and the selection are announced through. Absent, both
    * announcements are skipped and nothing is written to a console instead.
+   *
+   * A composition whose reward transaction announces the acquisition supplies
+   * none, so one accepted selection produces one line however it was chosen.
+   * DL-REWARD-14.
    */
   readonly announcer?: LiveRegionAnnouncer | null;
 
@@ -1030,9 +1050,11 @@ export function createRewardScreen(
    * carries one, its budget. The relic object itself is never handed to the
    * region: ../a11y/live-region names no type of src/relics.
    *
-   * Made here and nowhere else, so the acquisition is announced exactly once:
-   * the card component is constructed with no region of its own for that
-   * reason.
+   * SPOKEN ONLY BY A STAND-ALONE MOUNT. The cards are constructed with no region
+   * of their own, so within this module the acquisition is announced here and
+   * nowhere else — but a composition whose reward transaction announces the
+   * acquisition itself supplies no `announcer` at all, and this then speaks
+   * nothing. src/main.ts is such a composition. DL-REWARD-07, DL-REWARD-14.
    *
    * @param relic The chosen relic.
    */

@@ -33,9 +33,10 @@
 //                `spawn-position` sequences are left where the base game put
 //                them
 //
-// The relic catalogue is published in docs/RELICS.md, the rules the relics read
-// in docs/CONFIGURATION.md, and hook dispatch in
-// docs/architecture/hook-dispatch-sequence.md.
+// The rules the relics read are documented in docs/CONFIGURATION.md, the relic
+// catalogue in docs/RELICS.md, and hook dispatch in
+// docs/architecture/hook-dispatch-sequence.md. Dispatch itself is
+// src/engine/hook-bus.ts.
 //
 // Decisions: DL-SPAWN-01, DL-SPAWN-02 (docs/DECISION_LOG.md).
 

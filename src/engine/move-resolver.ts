@@ -30,6 +30,16 @@
 // This module reads no DOM, performs no I/O, consumes no randomness and reads
 // no clock.
 //
+// docs/TRACEABILITY_MATRIX.md:
+//   TR-MOVE-01  L113-L120 prepareTiles()         -> prepareTiles()
+//   TR-MOVE-02  L123-L127 moveTile()             -> moveTile()
+//   TR-MOVE-03  L138-L143 vector, traversals and -> resolveMove()
+//   TR-MOVE-04  L146-L180 traversal walk and     -> resolveMove()
+//   TR-MOVE-05  L194-L204 getVector()            -> vectorForDirection()
+//   TR-MOVE-06  L207-L220 buildTraversals()      -> buildTraversals()
+//   TR-MOVE-07  L222-L236 findFarthestPosition() -> findFarthestPosition()
+//   TR-MOVE-08  L270-L272 positionsEqual()       -> positionsEqual()
+//
 // Decisions: DL-MOVE-01, DL-MOVE-02, DL-MOVE-03 (docs/DECISION_LOG.md).
 
 import type { RulesConfig } from '../config/rules-config';

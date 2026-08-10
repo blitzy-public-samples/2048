@@ -9,6 +9,24 @@
 // member below converts it, retains it or compares it: js/game_manager.js
 // L80-L82 promotes it and its L95 re-reads it after the write.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-SCORE-01  js/html_actuator.js L106-L121  `updateScore` and the rising
+//                                               `.score-addition` delta
+//   TR-SCORE-02  js/html_actuator.js L123-L125  `updateBestScore`
+//   TR-SCORE-03  index.html                     the two outlets, each seeded
+//                                               with `0`
+//   TR-SCORE-04  style/main.scss                the `Score` and `Best` `:after`
+//                                               captions, given a real
+//                                               accessible counterpart
+//   TR-SCORE-05  js/game_manager.js L80-L82     the best-score value shape,
+//                                               carried to the DOM unconverted
+//   TR-SCORE-06  js/game_manager.js L95         the best score re-read after
+//                                               the write
+//   TR-SCORE-07  target-only row                `createScorePanel()`,
+//                                               `ScoreSnapshot` and the guarded
+//                                               lookups
+//
 // Decisions: DL-SCORE-01, DL-SCORE-02, DL-SCORE-03 (docs/DECISION_LOG.md).
 
 import type { BestScoreValue } from '../../engine/types';

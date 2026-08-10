@@ -82,12 +82,17 @@ import type {
 import {
   SPAN_ATTRIBUTES,
   SPAN_NAMES,
+  SPAN_OUTCOMES,
   attachEngineTracing,
   createBoundaryTracing,
   createTracer,
 } from './observability/tracer';
 import type { MetricsRegistry } from './observability/metrics';
-import { METRIC_PREFIX, createMetricsRegistry } from './observability/metrics';
+import {
+  METRIC_PREFIX,
+  attachRngCursorMetrics,
+  createMetricsRegistry,
+} from './observability/metrics';
 import type { WebGLProbeView } from './observability/health';
 import type { DiagnosticsOverlay } from './observability/diagnostics-overlay';
 import {
@@ -95,12 +100,14 @@ import {
   isDiagnosticsRequested,
 } from './observability/diagnostics-overlay';
 import { createNumberOnlyRenderer } from './render/number-only-renderer';
+import type { BoardFocus } from './render/number-only-renderer';
 import { createRenderLoop } from './render/render-loop';
 import type { FrameContext } from './render/render-loop';
 import type { ContextRestoreOutcome } from './render/three-renderer';
 import { createThreeRenderer } from './render/three-renderer';
 import type {
   RenderCount,
+  RenderDetail,
   RenderDiagnostic,
   RenderReporter,
   RenderTiming,
@@ -147,7 +154,7 @@ import type {
 import { RunStateStore } from './run/run-state-store';
 import type { StorageFailure } from './storage/local-storage-manager';
 import { LocalStorageManager } from './storage/local-storage-manager';
-import { KEYMAP_KEY } from './storage/storage-keys';
+import { KEYMAP_KEY, RUN_STATE_KEY } from './storage/storage-keys';
 import {
   LEGACY_CONTROL_BINDINGS,
   mountOnScreenControls,
@@ -277,10 +284,18 @@ const SELECTORS = Object.freeze({
   liveRegion: '#live-region',
   diagnostics: '#diagnostics-overlay',
   rewardScreen: '#screen-reward',
-  // Both the host and a descendant: the parallel board's roving tab stop sits
-  // on the HOST under the Three renderer and on the active CELL under the
-  // number-only renderer.
-  boardTabStop: '#board-a11y[tabindex="0"], #board-a11y [tabindex="0"]',
+  // EVERY BOARD TAB STOP, IN DOCUMENT ORDER. The two renderers put the board's
+  // tab stop in different places: `ParallelBoardLayer` of
+  // src/ui/a11y/focus-manager.ts makes the HOST `#board-a11y` the single stop
+  // and leaves its cells programmatic, while src/render/number-only-renderer.ts
+  // roves the stop across the CELLS of its own `#board-number-only` lattice and
+  // hides the parallel board. `querySelector` answers in document order and
+  // index.html declares `#board-number-only` first, so the surface in force is
+  // matched and the hidden one is not. Naming only `#board-a11y` restored focus
+  // to a hidden element for every number-only session. DL-FOCUS-04.
+  boardTabStop:
+    '#board-number-only [tabindex="0"], #board-a11y[tabindex="0"], ' +
+    '#board-a11y [tabindex="0"]',
   hudGroup: '#screen-hud',
   hudStage: '#hud-stage',
   relicTray: '#relic-tray',
@@ -311,6 +326,9 @@ const REPORT_SUBSYSTEM_LABEL = 'subsystem';
 
 /** Subsystem label of a report whose name carries no leading segment. */
 const UNKNOWN_SUBSYSTEM = 'unknown';
+
+/** Subsystem every record about the Web Storage adapter carries. */
+const STORAGE_SUBSYSTEM = 'storage';
 
 /**
  * Maps a render diagnostic level onto a log level.
@@ -652,12 +670,33 @@ function createEngineSink(
 }
 
 /**
+ * The composition's own reactions to two run reports, beside the logging and
+ * counting `createRunSink` does with every report.
+ *
+ * Passed in rather than reached from inside the sink: the constructs that react
+ * — the engine-tracing subscription, the HUD — are composed after the sink is
+ * built, so each arrives as a function the composition fills.
+ */
+interface RunSinkObservers {
+  /**
+   * Called once a finished run has been reported, with the outcome that ended
+   * it. The stage span is closed here: a loss and an explicit end-run both
+   * finish a run without emitting `stage:end`.
+   */
+  readonly onRunEnded?: (outcome: string) => void;
+}
+
+/**
  * Adapts the render reporter to the run folder's sink.
  *
  * @param reporter The one sink of the composition.
+ * @param observers The composition's reactions to specific reports.
  * @returns A complete `RunReporter`.
  */
-function createRunSink(reporter: RenderReporter): RunReporter {
+function createRunSink(
+  reporter: RenderReporter,
+  observers: RunSinkObservers = {},
+): RunReporter {
   return {
     onLoadCorrupted(report): void {
       reporter.onDiagnostic({
@@ -721,6 +760,38 @@ function createRunSink(reporter: RenderReporter): RunReporter {
       });
     },
 
+    // The transition, not the attempt: `onWriteFailed` above already carries
+    // one record per refused write, and this one fires only when the run
+    // crosses between persisting and not. Both directions are reported, and
+    // the crossing back to `persistent` is the recovery, so it is not an
+    // error. DL-RUNCTL-20.
+    onPersistenceStatusChanged(report): void {
+      const ephemeral = report.status === 'ephemeral';
+
+      reporter.onDiagnostic({
+        level: ephemeral ? 'warning' : 'info',
+        source: 'run/state',
+        message: ephemeral
+          ? 'The run is no longer being saved and continues in memory only.'
+          : 'The run is being saved again.',
+        detail: Object.freeze({
+          status: report.status,
+          previous: report.previous,
+          refusedWrites: report.refusedWrites,
+        }),
+      });
+
+      reporter.onCount({
+        name: 'run.persistence.changed',
+        value: 1,
+        detail: Object.freeze({
+          status: report.status,
+          previous: report.previous,
+          refusedWrites: report.refusedWrites,
+        }),
+      });
+    },
+
     onRunStarted(report): void {
       reporter.onCount({
         name: 'run.started',
@@ -737,8 +808,10 @@ function createRunSink(reporter: RenderReporter): RunReporter {
         message: report.resumed
           ? `Resumed a run at stage ${report.stageIndex}.`
           : 'Started a new run.',
+        // THE RUN IDENTIFIER IS NOT CARRIED. It keys the correlation identifier
+        // every record already carries, and a record carrying both hands a
+        // reader of an export the key as well as the value. DL-LOG-09.
         detail: Object.freeze({
-          runId: report.runId,
           stageIndex: report.stageIndex,
           resumed: report.resumed,
           seedProvided: report.seedProvided,
@@ -827,13 +900,17 @@ function createRunSink(reporter: RenderReporter): RunReporter {
           `The run ended (${report.outcome}) at stage ` +
           `${report.summary.stageIndex} with score ${report.summary.score}.`,
         detail: Object.freeze({
-          runId: report.summary.runId,
           outcome: report.outcome,
           stageIndex: report.summary.stageIndex,
           score: report.summary.score,
           relics: report.summary.relics.length,
         }),
       });
+
+      // THE STAGE THE RUN WAS PLAYING IS OVER, whether or not it resolved. A
+      // run that ends on a loss or on the player's own end-run emits no
+      // `stage:end`, so nothing else closes the stage span.
+      observers.onRunEnded?.(report.outcome);
     },
   };
 }
@@ -986,6 +1063,14 @@ interface BoardRenderer {
    * renderer keeps none.
    */
   readStats?(): { readonly contextLost: boolean };
+
+  /**
+   * The board cell this renderer's tab stop stands on, where the renderer roves
+   * one. Optional: the 2.5D renderer keeps no reading position of its own —
+   * `ParallelBoardLayer` makes its HOST the single stop — so only the
+   * number-only renderer answers. DL-FOCUS-04.
+   */
+  focusedCell?(): BoardFocus | null;
 }
 
 /**
@@ -1200,9 +1285,10 @@ export interface Application {
   readonly router: ScreenRouter;
 
   /**
-   * The relic registry: the catalogue, the relics held in pickup order, their
-   * charge budgets, and the manual activation a player's `activateRelic` press
-   * reaches. The budget it spends is the one src/engine/hook-bus.ts holds.
+   * The relic registry: the catalogue, the relics held in pickup order, and the
+   * charge budgets a player's `activateRelic` press reads out and never spends.
+   * Those budgets are the ones src/engine/hook-bus.ts withdraws from, on each
+   * relic's own hook.
    */
   readonly relics: RelicRegistry;
 
@@ -1334,7 +1420,9 @@ export function start(ownerDocument: Document): Application {
   // The one derivation of the run correlation identifier, from the seed and the
   // run instance. Every module that reports receives it; none derives one of
   // its own, and neither the seed nor the run identifier is carried into a
-  // report. No engine behaviour reads it.
+  // report — the run identifier is the KEY every segment of the identifier is
+  // derived under, so an export carries the value and not the key. No engine
+  // behaviour reads it. DL-LOG-09.
   //
   // Held in a SCOPE, not a constant. `readCorrelationId` is what every module
   // receives; `rotateCorrelation` below is its one writer — of this scope
@@ -1475,19 +1563,50 @@ export function start(ownerDocument: Document): Application {
     // own refusal record. A store that threw keeps error. DL-STORE-07.
     const refused = !('thrown' in failure);
 
+    // ONE ATTEMPT, ONE AUTHORITATIVE RECORD. A write to the run-state key is
+    // reported by the layer ABOVE this one as well: src/run/run-state-store.ts
+    // holds the envelope, its serialised size and the error, and reports that
+    // attempt through `onWriteFailed`, which the run sink logs at error. This
+    // record is the physical CAUSE of the same event, so for that one key and
+    // operation it is filed at debug rather than raising a second error record
+    // beside the authoritative one. Every other key and operation is unchanged.
+    // DL-STORE-08.
+    const supersededByRunState =
+      failure.key === RUN_STATE_KEY && failure.operation === 'write';
+
+    const detail: RenderDetail = Object.freeze({
+      operation: failure.operation,
+      key: failure.key,
+      strategy: failure.strategy,
+      quota: failure.error.quota,
+      refused,
+      reportedBy: supersededByRunState ? 'run/state' : STORAGE_SUBSYSTEM,
+    });
+
+    if (supersededByRunState) {
+      // Emitted through the logger's own channel, because the diagnostic
+      // channel of `createSink` folds every level below a warning onto `info`
+      // and this record needs a true `debug` level to sit beneath the
+      // authoritative one at the default level. The subsystem, message and
+      // fields are the ones the sink would have written.
+      logger
+        .child(STORAGE_SUBSYSTEM)
+        .failure(
+          'debug',
+          `Storage ${failure.operation} failed for ${failure.key}.`,
+          { fields: detail, thrown: failure.error },
+        );
+
+      return;
+    }
+
     reporter.onDiagnostic({
       level: refused ? 'warning' : 'error',
-      source: 'storage',
+      source: STORAGE_SUBSYSTEM,
       message: refused
         ? `Storage ${failure.operation} refused for ${failure.key}.`
         : `Storage ${failure.operation} failed for ${failure.key}.`,
-      detail: Object.freeze({
-        operation: failure.operation,
-        key: failure.key,
-        strategy: failure.strategy,
-        quota: failure.error.quota,
-        refused,
-      }),
+      detail,
       error: failure.error,
     });
   };
@@ -1499,7 +1618,6 @@ export function start(ownerDocument: Document): Application {
   earlyStorageFailures.length = 0;
 
   logger.info('Run starting.', {
-    runId: identity.runId,
     resumed: identity.resumed,
     boardSize: config.boardSize,
   });
@@ -1572,10 +1690,24 @@ export function start(ownerDocument: Document): Application {
   // Assigned below, once the run's seed and cursors are known.
   let streams: RngStreams | null = null;
 
+  /**
+   * Closes the traced stage span of a run that has ENDED, or does nothing
+   * before the tracing subscription exists.
+   *
+   * A slot, filled once `attachEngineTracing` has run: the run sink is composed
+   * before the tracer's subscription and the report it reacts to cannot arrive
+   * until a run has been played, which is after both.
+   */
+  let settleTracedStage: (outcome: string) => void = (): void => undefined;
+
   // The run: the versioned envelope's load, save and clear, the stage and relic
   // slices of every commit, and stage advancement. Composed before the
   // substreams, which are built from the seed and cursors it supplies.
-  const runSink = createRunSink(reporter);
+  const runSink = createRunSink(reporter, {
+    onRunEnded: (outcome): void => {
+      settleTracedStage(outcome);
+    },
+  });
 
   /**
    * The substreams in force. Held rather than captured: a new run REPLACES
@@ -1604,8 +1736,21 @@ export function start(ownerDocument: Document): Application {
    * the emitter, the hook bus, the relic registry, the run controller and the
    * run-state store, and `Logger.setCorrelationId` for the logger and every
    * logger sharing its state, which is where the metrics registry, the tracer
-   * and the health surface read theirs from. Records, counters, spans and
-   * reports already emitted are not relabelled. DL-MAIN-06.
+   * and the health surface read theirs from. A log record already emitted keeps
+   * the identifier it was emitted under. DL-MAIN-06.
+   *
+   * AND THE SCOPE IS A PARTITION, not a relabelling. The registry, the tracer
+   * and the health surface all read the identifier through that one getter, so
+   * an aggregate still held across a rotation would be REPORTED under the new
+   * run while describing the previous one: a series total, a span ring, the
+   * commit and anomaly counters, the frame statistics and the held health
+   * report each carried the run before. All three are therefore returned to
+   * their start here — the registry keeps its families, their kinds, their help
+   * text and their bucket layouts, the tracer keeps its configuration, and the
+   * health surface keeps its probes and its subscribers, so what is discarded
+   * is one run's readings and not any capability. `health.check()` is not
+   * called here: dropping the held report is what makes the next reader
+   * re-probe under the identifier it will carry. DL-MAIN-28.
    *
    * @param next The identifier the run now in force is keyed under.
    */
@@ -1619,10 +1764,27 @@ export function start(ownerDocument: Document): Application {
     runCorrelationId = next;
     logger.setCorrelationId(next);
 
+    metrics.reset();
+    tracer.reset();
+
+    const forgotten = health.forget();
+
+    // COUNTED AFTER THE PARTITION, so the count lands in the scope it opens
+    // rather than in the one it closes, where the reset would have wiped it.
+    // The identifier it rotated FROM travels in the detail and in the record
+    // below, which is where the trail across a page load lives: the logger's
+    // own records are not partitioned, and each keeps the identifier it was
+    // emitted under.
     reporter.onCount({
       name: 'observability.correlation.rotated',
       value: 1,
       detail: Object.freeze({ previous, correlationId: next }),
+    });
+
+    logger.debug('Telemetry partitioned at the correlation boundary.', {
+      previous,
+      correlationId: next,
+      healthReportDropped: forgotten,
     });
   };
 
@@ -1652,10 +1814,15 @@ export function start(ownerDocument: Document): Application {
     streamHolder.streams = next;
     replaceSwappableStreams?.(next);
 
+    // NEITHER THE SEED NOR THE RUN IDENTIFIER. A count's detail becomes metric
+    // LABELS, so this pair put the player's own typed seed text and the key its
+    // correlation identifier is derived from into the exported snapshot. The
+    // rotated identifier the count is recorded under identifies the scope.
+    // DL-LOG-09.
     reporter.onCount({
       name: 'run.scope.rebuilt',
       value: 1,
-      detail: Object.freeze({ runId: scope.runId, seed: scope.seed }),
+      detail: Object.freeze({ seedProvided: scope.seedProvided }),
     });
   };
 
@@ -1907,6 +2074,63 @@ export function start(ownerDocument: Document): Application {
     );
   }
 
+  // READINESS IS RESOLVED BEFORE ANYTHING IS SELECTED OR MOUNTED. The health
+  // surface owns the renderer and storage verdicts, and both inputs it derives
+  // them from are already in hand here: the WebGL probe result is in the slot
+  // above and the live storage manager's own probe ran at its construction. It
+  // was resolved after the renderer had been selected AND mounted, so the
+  // verdict that decides whether a WebGL board may be mounted at all was
+  // consulted once that decision had already been taken.
+  //
+  // This call writes the six per-check records and the six status gauges,
+  // once, in composition order, and `readiness` below reads the report it
+  // leaves. `refreshHealth` is silent until it has run, so every later
+  // renderer transition re-reports against this baseline. DL-MAIN-27.
+  const bootHealth = health.check();
+
+  logger.info('Health checked.', {
+    status: bootHealth.status,
+    passed: bootHealth.counts.pass,
+    failed: bootHealth.counts.fail,
+    notApplicable: bootHealth.counts['not-applicable'],
+  });
+
+  // The two consequential verdicts: whether a WebGL board may be mounted at
+  // all, and whether the run persists or is ephemeral. Logged once, here,
+  // before the renderer exists.
+  const readiness = health.readiness();
+
+  logger.info('Readiness resolved.', {
+    ready: readiness.ready,
+    renderer: readiness.renderer,
+    mayMountWebGLRenderer: readiness.mayMountWebGLRenderer,
+    requiresNumberOnlyFallback: readiness.requiresNumberOnlyFallback,
+    webglLevel: readiness.webglLevel,
+    webglStatus: readiness.webglStatus,
+    storage: readiness.storage,
+    storageStrategy: readiness.storageStrategy,
+    storageStatus: readiness.storageStatus,
+    healthStatus: readiness.healthStatus,
+  });
+
+  // THE VERDICT DRIVES THE SELECTION, not the probe result alone. The health
+  // check reads the probe through the slot above and then applies its own
+  // judgement, so a capability the PROBE reported and the SURFACE refused — a
+  // check that failed for a reason the probe does not express — forces the
+  // number-only board here rather than being contradicted by a mounted 2.5D
+  // one.
+  //
+  // Guarded on the probe having reported support, so the reason the store
+  // carries is the most specific one available: a probe that found no context
+  // has already forced the mode above, naming the level it found, and that
+  // reason is what the settings surface shows for refusing to turn the mode
+  // off.
+  if (support.supported && readiness.requiresNumberOnlyFallback) {
+    preferences.forceNumberOnlyMode(
+      `readiness withheld the 3D board (webgl check ${readiness.webglStatus})`,
+    );
+  }
+
   // The parallel accessibility board of index.html L70: the focusable,
   // labelled per-cell counterparts beside the canvas, which is `aria-hidden`.
   const parallelBoardHost = ownerDocument.querySelector(SELECTORS.boardA11y);
@@ -2041,6 +2265,21 @@ export function start(ownerDocument: Document): Application {
     refreshHealth('a WebGL context that could not be rebuilt');
   };
 
+  /**
+   * The cell the board was last being READ at, carried across a renderer swap.
+   *
+   * The two surfaces are separate objects with separate lattices, and a swap
+   * destroys the outgoing one, so nothing crosses between them on its own: a
+   * player reading row 3 who turned number-only mode off and on again came back
+   * to the top-left corner. Recorded from the outgoing renderer in
+   * `applyRenderMode` below, and handed to a number-only renderer as the cell
+   * its first lattice opens on. Left as it stands where the outgoing renderer
+   * keeps no position of its own, which is how a `three -> number-only` swap
+   * resumes the cell the previous number-only session ended on.
+   * DL-FOCUS-04, DL-MAIN-24.
+   */
+  let boardReadingCell: BoardFocus | null = null;
+
   const buildNumberOnly = (): BoardRenderer =>
     createNumberOnlyRenderer({
       host: ownerDocument.querySelector(SELECTORS.boardNumberOnly),
@@ -2052,6 +2291,11 @@ export function start(ownerDocument: Document): Application {
       superThreshold: config.winValue,
       reporter,
       onWork: onRendererWork,
+
+      // Where the tab stop opens, not a focus placement: a swap made from the
+      // settings dialog leaves focus in that dialog, and moving it onto the
+      // board would be a steal.
+      initialCell: boardReadingCell,
     });
 
   const buildRenderer = (mode: BoardRenderMode): BoardRenderer => {
@@ -2181,47 +2425,29 @@ export function start(ownerDocument: Document): Application {
     return selection.fallback ? FORCED_FALLBACK_FAILURE : null;
   };
 
-  // Run once at boot: the per-check log records and the six status gauges are
-  // written by this call, and `readiness` below reads the report it leaves.
-  const bootHealth = health.check();
+  // THE LIVE VERDICT NOW THAT A BOARD IS DRAWING. `readLiveWebGLFailure` above
+  // is filled, so this re-reading is the first that can tell a mounted 2.5D
+  // board from one that was selected and did not mount, and it is what the
+  // diagnostics panel and every exported snapshot answer from. Nothing is
+  // probed a second time: the WebGL result is the boot probe plus the live
+  // verdict, and the storage result is the manager's cached state.
+  refreshHealth('the renderer was selected and mounted');
 
-  logger.info('Health checked.', {
-    status: bootHealth.status,
-    passed: bootHealth.counts.pass,
-    failed: bootHealth.counts.fail,
-    notApplicable: bootHealth.counts['not-applicable'],
-  });
-
-  // The readiness verdicts the health surface derives from its own webgl and
-  // storage checks: whether a WebGL board may be mounted at all, and whether
-  // the run persists or is ephemeral. Logged once, here.
-  const readiness = health.readiness();
-
-  logger.info('Readiness resolved.', {
-    ready: readiness.ready,
-    renderer: readiness.renderer,
-    mayMountWebGLRenderer: readiness.mayMountWebGLRenderer,
-    requiresNumberOnlyFallback: readiness.requiresNumberOnlyFallback,
-    webglLevel: readiness.webglLevel,
-    webglStatus: readiness.webglStatus,
-    storage: readiness.storage,
-    storageStrategy: readiness.storageStrategy,
-    storageStatus: readiness.storageStatus,
-    healthStatus: readiness.healthStatus,
-    selected: selection.mode,
-  });
+  const mounted = health.readiness();
 
   // Counted as well as logged, so boot readiness reaches the metrics surface
-  // beside the renderer it selected.
+  // beside the renderer it selected. Read from the refreshed verdicts, so the
+  // count describes the board that is drawing rather than the one the boot
+  // probe alone predicted.
   reporter.onCount({
     name: 'health.readiness',
     value: 1,
     detail: Object.freeze({
-      ready: readiness.ready,
-      renderer: readiness.renderer,
-      mayMountWebGLRenderer: readiness.mayMountWebGLRenderer,
-      requiresNumberOnlyFallback: readiness.requiresNumberOnlyFallback,
-      storage: readiness.storage,
+      ready: mounted.ready,
+      renderer: mounted.renderer,
+      mayMountWebGLRenderer: mounted.mayMountWebGLRenderer,
+      requiresNumberOnlyFallback: mounted.requiresNumberOnlyFallback,
+      storage: mounted.storage,
       selected: selection.mode,
     }),
   });
@@ -2233,6 +2459,28 @@ export function start(ownerDocument: Document): Application {
   const stopEngineTracing: EngineTracingSubscription = attachEngineTracing(
     engine.events,
     tracer,
+  );
+
+  // The slot declared beside the run sink is filled: from here a finished run
+  // closes the span of the stage it was playing. `unwound` is the outcome of a
+  // stage that ended without resolving, which is what a loss and an explicit
+  // end-run leave behind, and the run outcome that ended it travels on the
+  // closing record. DL-MAIN-29.
+  settleTracedStage = (outcome): void => {
+    stopEngineTracing.settleStage(SPAN_OUTCOMES.unwound, {
+      [SPAN_ATTRIBUTES.action]: outcome,
+    });
+  };
+
+  // The RNG cursor fold, on the ENGINE's own emitter beside the tracing
+  // subscription: `rng_draws_total` is the one metric family fed by a READING
+  // of the run rather than by a report, and the seeded snapshot suite attaches
+  // the same helper, so the graph it proves non-interference for is this one.
+  // DL-MAIN-30.
+  const stopRngCursorMetrics = attachRngCursorMetrics(
+    engine.events,
+    metrics,
+    () => streamHolder.streams.snapshotCursors(),
   );
 
   // THE SHARED BUS BECOMES THE PEERS' CHANNEL. `attachEvents` relays the
@@ -2311,6 +2559,12 @@ export function start(ownerDocument: Document): Application {
 
     try {
       stopRendering();
+
+      // READ BEFORE THE TEARDOWN, and kept where the outgoing renderer has no
+      // position to report, so the coordinate survives a round trip through the
+      // 2.5D board. DL-FOCUS-04.
+      boardReadingCell = renderer.focusedCell?.() ?? boardReadingCell;
+
       renderer.destroy();
       selection = next;
       renderer = buildRenderer(next.mode);
@@ -2380,13 +2634,13 @@ export function start(ownerDocument: Document): Application {
     relicTrayContainer: ownerDocument.querySelector(SELECTORS.relicTray),
 
     // Focus placement opted out of: the router places focus for every state,
-    // `SCREEN_INITIAL_FOCUS.stage` names the same `#board-a11y` target, and the
-    // entry line reaches the router through this module's `announcement()`.
-    // DL-HUD-11, DL-HUD-12, DL-ROUTER-11.
+    // `SCREEN_INITIAL_FOCUS.stage` names the board's own tab stop under either
+    // renderer, and the entry line reaches the router through this module's
+    // `announcement()`. DL-HUD-11, DL-HUD-12, DL-ROUTER-11, DL-FOCUS-04.
     focusContainer: null,
 
-    // NO ACTIVATION CALLBACK IS PASSED. src/ui/screens/hud.ts hosts the
-    // relic-activation control but never binds it: `mountOnScreenControls` is
+    // NO TRAY CALLBACK IS PASSED. src/ui/screens/hud.ts hosts the read-only
+    // relic tray control but never binds it: `mountOnScreenControls` is
     // the single owner of every element-to-action binding, and `activateRelic`
     // is one of its indexed actions, so the tray press arrives through the
     // `activateRelic` subscription below rather than through the HUD. The tray
@@ -2403,6 +2657,18 @@ export function start(ownerDocument: Document): Application {
     relicRarity: (relicId): string => relicDefinition(relicId)?.rarity ?? '',
 
     relics: (): readonly ActiveRelic[] => registry.active(),
+
+    // THE TWO FAILURE STATES A PLAYABLE RUN CAN BE IN, both read per write from
+    // the module that owns them rather than pushed. `HookBus` marks a relic
+    // degraded when one of its handlers throws and then skips it for the rest of
+    // its registration, and the registry holds that marking — so without this
+    // reader the tray showed an enabled relic that no longer fires. DL-MAIN-31.
+    degradedRelics: (): readonly string[] => registry.degradedIds(),
+
+    // The run controller resolves this from each write's own outcome. A refused
+    // write leaves the run playable and unsaved, which is a state only the
+    // interface can tell the player about. DL-RUNCTL-20.
+    persistence: (): 'persistent' | 'ephemeral' => run.persistenceStatus(),
 
     // Read per write as well: a board-mutating relic changes the dimension
     // mid-run, so nothing derived from it is held.
@@ -2503,7 +2769,16 @@ export function start(ownerDocument: Document): Application {
   const rewardScreen: RewardScreen = createRewardScreen({
     document: ownerDocument,
     reporter: createPreferenceSink(reporter),
-    announcer,
+
+    // NO ANNOUNCER, AND DELIBERATELY SO. With `announceEntry` off this screen's
+    // only remaining use of one is the acquisition line, which `takeReward`
+    // below already speaks on the transaction that accepted the relic. The
+    // screen made that announcement only for a card press, so the same
+    // acquisition was spoken twice from a pointer and once from a digit key —
+    // the line a player heard depended on how they chose. The entry line is the
+    // router's, read from this screen's own `announcement(context)`.
+    // DL-REWARD-14, DL-MAIN-09.
+    announcer: null,
     preferences,
     focus: focusManager,
     trapFocus: false,
@@ -2556,6 +2831,15 @@ export function start(ownerDocument: Document): Application {
     onOpenSettings: (): void => {
       router.openSettings();
     },
+
+    // The seed the run is ACTUALLY played under, read back after the action has
+    // been delivered. `RunController.startRun` is the one normaliser — it
+    // trims, bounds and case-folds what it is given — and this port is how the
+    // screen learns what the text it emitted was reduced to. Left uncomposed,
+    // the readback answered nothing, so every reduction was invisible: the
+    // field kept the raw text and no notice was written or announced.
+    // DL-RUNSTART-03.
+    seedInForce: (): string => run.seed(),
 
     // The router places focus, holds the trap and reads the entry line.
     // DL-ROUTER-11, DL-RUNSTART-08.
@@ -2725,10 +3009,15 @@ export function start(ownerDocument: Document): Application {
     rewardRestoreFocusTo: (): Element | null =>
       ownerDocument.querySelector(SELECTORS.boardTabStop),
 
-    // The ONE path a chosen relic is applied through.
-    onRewardSelect: (relicId): void => {
-      takeReward(relicId);
-    },
+    // The ONE path a chosen relic is applied through, and the transaction's
+    // ANSWER IS RETURNED. `chooseReward` of src/ui/screen-router.ts reads
+    // anything other than `false` as acceptance, so a dropped result took the
+    // `rewardSelected` edge over a transaction that had rolled the pickup back
+    // — an exhausted quota or a refused registry seating left the model without
+    // the relic while the router dismissed Reward and exposed Stage.
+    // DL-ROUTER-13, DL-MAIN-09.
+    onRewardSelect: (relicId): boolean =>
+      takeReward(relicId).outcome === 'accepted',
 
     // Left to src/ui/screens/hud.ts, the sole writer of `.game-message`.
     terminalOverlay: null,
@@ -2853,15 +3142,18 @@ export function start(ownerDocument: Document): Application {
   }
 
   /**
-   * The offer whose cards were last read into the live region, as their joined
-   * identifiers, or the empty string while none stands.
-   */
-  let announcedOffer = '';
-
-  /**
-   * Follows the standing offer: announces it once, refreshes the reward screen
-   * where that screen is the one showing, and takes the screen down when no
-   * offer stands.
+   * Follows the standing offer: refreshes the reward screen where that screen is
+   * the one showing, and takes the flow to stage clear when an offer stands on a
+   * state that is neither.
+   *
+   * ANNOUNCES NOTHING. The offer's own line belongs to the REWARD STATE'S ENTRY,
+   * which the router reads from `announcement(context)` of
+   * src/ui/screens/reward.ts at the moment the cards go up and become
+   * operable. Announcing here as well spoke the three cards on the commit that
+   * drew them — before the state had been entered and while the board was still
+   * the surface in force — and then again on entry, so a screen-reader user
+   * heard the offer twice and heard it first for cards they could not yet
+   * choose. DL-REWARD-14, DL-ROUTER-11.
    *
    * Called after every commit rather than only on the commit that drew the
    * offer, so an offer that survived a reload is followed on the first commit
@@ -2879,27 +3171,10 @@ export function start(ownerDocument: Document): Application {
    */
   const presentPendingReward = (): boolean => {
     if (!run.isRewardPending()) {
-      announcedOffer = '';
-
       return false;
     }
 
     const cards: readonly RewardCard[] = run.currentOffer();
-
-    // Announced once per offer, and not only where the screen went up, so an
-    // offer is spoken even with the reward mount point missing. Keyed on the
-    // offer's own identifiers: this runs after EVERY commit.
-    const signature = cards.map((card): string => card.id).join(',');
-
-    if (signature !== announcedOffer) {
-      announcedOffer = signature;
-
-      announcer.announceText(
-        `Stage cleared. Choose a relic: ${cards
-          .map((card, index): string => `${index + 1}, ${card.name}`)
-          .join('; ')}.`,
-      );
-    }
 
     if (router.isRewardOpen()) {
       // Already the state in force: the cards are re-rendered in place, so an
@@ -3202,6 +3477,14 @@ export function start(ownerDocument: Document): Application {
     // only has them if something asks.
     hookCounts: (): ReturnType<typeof engine.hooks.metrics> =>
       engine.hooks.metrics(),
+
+    // The second pull integration, for the same reason and read the same way:
+    // the substreams keep their draw counts and reading one takes no draw. The
+    // per-commit fold above keeps the family current while a run is played;
+    // this keeps a read taken BETWEEN two commits current too, so the panel and
+    // every export answer from one reading. DL-MAIN-30.
+    rngCursors: (): Readonly<Record<string, number>> =>
+      streamHolder.streams.snapshotCursors(),
   });
 
   /**
@@ -3299,7 +3582,6 @@ export function start(ownerDocument: Document): Application {
     run.startRun(engine, seed === undefined ? {} : { seed });
 
     logger.info('A new run started.', {
-      runId: run.runId(),
       seedProvided: seed !== undefined,
       stageIndex: run.state().stageIndex,
     });
@@ -3366,21 +3648,31 @@ export function start(ownerDocument: Document): Application {
     }
 
     // `'failed'` until the call returns: an attempt that throws reaches only
-    // the `finally` below, and the default names the path it took.
+    // the `finally` below, and the default names the path it took. `committed`
+    // stays `false` on that path for the same reason.
     let resolution: FinalMoveResolution = 'failed';
+    let committed = false;
 
     try {
       // The structured outcome, not the boolean: `move()` returns `false` alike
       // for a turn refused on a terminated board, a turn a listener or an
       // `onBeforeMove` handler withdrew, and a turn that changed nothing.
-      resolution = engine.attemptMove(direction).resolution;
+      //
+      // BOTH MEMBERS TRAVEL. A withdrawn or idle attempt can still report
+      // `committed: true` — an `onBeforeMove` handler reseated the board and
+      // the slide then resolved to nothing — and the resolution alone cannot
+      // tell that turn from one that changed nothing at all.
+      const attempt = engine.attemptMove(direction);
+
+      resolution = attempt.resolution;
+      committed = attempt.committed;
     } finally {
       // An attempt that moved nothing emits no `move:after`, so no event
       // listener can close the turn span; the caller holding the outcome closes
       // it. Settled INSIDE the input span, which is still open for the length
       // of this listener. A committed turn has closed its own span and a
       // blocked move opened none, so both are no-ops here.
-      stopEngineTracing.settleMove({ resolution });
+      stopEngineTracing.settleMove({ resolution, committed });
     }
   });
 
@@ -3395,9 +3687,12 @@ export function start(ownerDocument: Document): Application {
   // run-summary screen's `newRun` edge and the application handle reach.
   // DL-MAIN-22, DL-ENGINE-02.
   //
-  // Gated as well as bound: the gate refuses the action before it reaches the
-  // engine, so a restart cannot fire from behind an unrelated modal and the
-  // refusal is counted on the action. DL-MAIN-17.
+  // Gated as well as bound: `ACTION_SCREENS.restart` of
+  // src/ui/screen-router.ts authorizes this action in `stage` alone, so the
+  // board is discarded only while a run is being played on it — never from
+  // behind an unrelated modal, never on a run that has ended and never before
+  // one has begun. The refusal is counted on the action. DL-MAIN-17,
+  // DL-ROUTER-39.
   const stopRestart = input.on('restart', (): void => {
     if (!authorized('restart')) {
       return;
@@ -3472,9 +3767,9 @@ export function start(ownerDocument: Document): Application {
   // The indexed slot bindings of src/input/keymap.ts, and the generated
   // on-screen control per slot.
   const stopActivateRelic = input.on('activateRelic', (index): void => {
-    // The relic tray is part of the board, so a charge is spent in `stage` alone
-    // and never from behind an overlay that is holding a different choice.
-    // DL-MAIN-17.
+    // The relic tray is part of the board, so a slot is read out in `stage`
+    // alone and never from behind an overlay holding a different choice. No
+    // charge is spent on this path at all. DL-MAIN-17, DL-KEYMAP-05.
     if (!authorized('activateRelic')) {
       return;
     }
@@ -3628,7 +3923,9 @@ export function start(ownerDocument: Document): Application {
     diagnostics.open();
   }
 
-  return Object.freeze({
+  // NAMED, so `dispose` below can compare the published inspection handle
+  // against THIS application before clearing it. DL-MAIN-25.
+  const application: Application = Object.freeze({
     engine,
     config,
     streams,
@@ -3688,6 +3985,19 @@ export function start(ownerDocument: Document): Application {
       stopRouter();
       settings?.destroy();
 
+      // THE RENDERER GOES BEFORE THE FOCUS OWNERS. Tearing the number-only
+      // renderer down HANDS THE PARALLEL BOARD BACK — it remounts
+      // `ParallelBoardLayer` and restores the attributes it hid the board
+      // behind — so destroying it after `parallelBoard.unmount()` and
+      // `focusManager.destroy()` rebuilt a subtree and its listeners with no
+      // owner left to take them down again, and a disposed application left DOM
+      // and handlers behind. Destroyed here instead, the handoff lands while its
+      // owner is alive and the unmount below is final. The loop is stopped first
+      // so no frame callback reaches a destroyed renderer. DL-MAIN-23,
+      // DL-NUMBER-07.
+      loop.stop();
+      renderer.destroy();
+
       // THE ROUTER IS THE ONE OWNER OF SCREEN TEARDOWN. Every module this root
       // constructs is registered with it, `destroy()` drains the set it mounted,
       // and `unmount` and `destroy` are the same teardown on the two modules that
@@ -3699,6 +4009,10 @@ export function start(ownerDocument: Document): Application {
       // Detaches the turn and stage listeners and closes whatever they left
       // open, so a disposed application leaves no span on the stack.
       stopEngineTracing();
+
+      // The cursor fold reads the substreams; released beside the tracing it
+      // was attached with, so a disposed application takes no further reading.
+      stopRngCursorMetrics();
       stopRendering();
       stopCommitCapture();
 
@@ -3712,13 +4026,20 @@ export function start(ownerDocument: Document): Application {
       controls.unmount();
       parallelBoard.unmount();
       input.detach();
-      loop.stop();
-
-      renderer.destroy();
       diagnostics.destroy();
       preferences.destroy();
+
+      // LAST, AND ONLY IF IT IS STILL THIS ONE. The inspection handle held the
+      // whole disposed graph — engine, renderer, registry, storage — reachable
+      // by name for as long as the page lived, so a console session that had
+      // composed a second application read a torn-down one. Cleared here, and
+      // compared first so a NEWER application that has taken the name is never
+      // clobbered by a late disposal of the one it replaced. DL-MAIN-25.
+      unpublishFromInspection(application);
     },
   });
+
+  return application;
 }
 
 /** Name the running application is published under for local inspection. */
@@ -3747,6 +4068,34 @@ function publishForInspection(application: Application): void {
   } catch {
     // A global that cannot be written is not a reason to fail the boot.
     application.logger.debug('The inspection handle could not be published.', {
+      name: APPLICATION_GLOBAL,
+    });
+  }
+}
+
+/**
+ * Clears the inspection handle, and only where it still names `application`.
+ *
+ * The comparison is the whole point: two applications composed over one page
+ * take the name in turn, and a disposal of the FIRST must not remove the
+ * second's handle. A global that cannot be deleted is contained, as publishing
+ * one is. DL-MAIN-03, DL-MAIN-25.
+ *
+ * @param application The application being disposed.
+ */
+function unpublishFromInspection(application: Application): void {
+  try {
+    const holder = globalThis as unknown as Record<string, unknown>;
+
+    if (holder[APPLICATION_GLOBAL] !== application) {
+      return;
+    }
+
+    Reflect.deleteProperty(holder, APPLICATION_GLOBAL);
+  } catch {
+    // Symmetrical with publishing: a global that cannot be cleared is not a
+    // reason to fail a disposal.
+    application.logger.debug('The inspection handle could not be cleared.', {
       name: APPLICATION_GLOBAL,
     });
   }
@@ -3798,11 +4147,20 @@ export type BootstrapOutcome =
   | 'unavailable';
 
 /**
- * One token per composition `bootstrap()` has scheduled and not yet run. A
- * token is deleted by the boot that owns it; `start()` clears the whole set.
- * DL-MAIN-09.
+ * One record per composition `bootstrap()` has begun and not yet run, whether it
+ * is waiting for the document or waiting for a frame.
+ *
+ * A record is claimed by the boot that owns it and removed as it composes;
+ * `start()` clears the whole set, which is how a caller that composes first
+ * supersedes a boot in flight. `detach` releases whatever the record is waiting
+ * on, so a cancelled boot leaves no listener behind. DL-MAIN-09, DL-MAIN-26.
  */
-const pendingBoots = new Set<object>();
+interface PendingBoot {
+  /** Releases what this boot is waiting on, where it waits on a listener. */
+  detach: (() => void) | null;
+}
+
+const pendingBoots = new Set<PendingBoot>();
 
 /** Whether the composition in progress is the automatic boot's own. */
 let booting = false;
@@ -3812,9 +4170,23 @@ let booting = false;
  * first: one document holds one application.
  */
 function cancelPendingBoot(): void {
-  if (!booting) {
-    pendingBoots.clear();
+  if (booting) {
+    return;
   }
+
+  for (const pending of pendingBoots) {
+    try {
+      pending.detach?.();
+    } catch {
+      // A record whose wait cannot be released is still cancelled: the set is
+      // cleared below either way, so the boot composes nothing. Containing it
+      // here keeps a caller's own `start()` from failing over the release of a
+      // boot it is superseding.
+      pending.detach = null;
+    }
+  }
+
+  pendingBoots.clear();
 }
 
 /**
@@ -3845,13 +4217,9 @@ export function bootstrap(options: BootstrapOptions = {}): BootstrapOutcome {
   const schedule = options.schedule ?? onNextFrame;
   const compose = options.compose ?? start;
 
-  const defer = (): void => {
-    const token = {};
-
-    pendingBoots.add(token);
-
+  const defer = (pending: PendingBoot): void => {
     schedule((): void => {
-      if (!pendingBoots.delete(token)) {
+      if (!pendingBoots.delete(pending)) {
         return;
       }
 
@@ -3865,13 +4233,49 @@ export function bootstrap(options: BootstrapOptions = {}): BootstrapOutcome {
     });
   };
 
+  // THE RECORD IS TAKEN BEFORE THE READINESS WAIT, not inside it. Registered
+  // only once the document was ready, a boot that was still waiting for
+  // `DOMContentLoaded` was invisible to `cancelPendingBoot()`: a caller that
+  // composed during parsing cleared an EMPTY set, and the event then composed a
+  // second application over the same document — two engines, two renderers and
+  // two input managers on one page. DL-MAIN-26.
+  const pending: PendingBoot = { detach: null };
+
+  pendingBoots.add(pending);
+
   if (ownerDocument.readyState === 'loading') {
-    ownerDocument.addEventListener('DOMContentLoaded', defer, { once: true });
+    const onDocumentReady = (): void => {
+      // Cancelled while the document was still parsing: the caller's own
+      // application is the one in force and nothing further is composed.
+      if (!pendingBoots.has(pending)) {
+        return;
+      }
+
+      pending.detach = null;
+      defer(pending);
+    };
+
+    ownerDocument.addEventListener('DOMContentLoaded', onDocumentReady, {
+      once: true,
+    });
+
+    // So a cancellation releases the listener as well as the record, rather
+    // than leaving an inert handler attached to the document. The member is
+    // checked before it is called: a caller may compose against a document
+    // double that implements only the subscription half, and a cancellation must
+    // not raise through it.
+    pending.detach = (): void => {
+      const target: { removeEventListener?: unknown } = ownerDocument;
+
+      if (typeof target.removeEventListener === 'function') {
+        ownerDocument.removeEventListener('DOMContentLoaded', onDocumentReady);
+      }
+    };
 
     return 'awaiting-document';
   }
 
-  defer();
+  defer(pending);
 
   return 'scheduled';
 }

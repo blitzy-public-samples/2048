@@ -1,5 +1,17 @@
 // The seeded reward draw: the offer set a reward screen presents.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-DRAW-01  js/game_manager.js L71  the weighted two-value choice,
+//                                       generalised into the rarity-weighted
+//                                       selection of a tier
+//   TR-DRAW-02  js/grid.js L37-L43      the uniform selection, generalised
+//                                       into the selection of one relic within
+//                                       the winning tier, and its
+//                                       nothing-to-select boundary
+//   TR-DRAW-03  target-only row         `drawRewardOffer`, which samples
+//                                       WITHOUT replacement
+//
 // Decisions: DL-DRAW-01, DL-DRAW-02, DL-DRAW-03 (docs/DECISION_LOG.md).
 
 import {

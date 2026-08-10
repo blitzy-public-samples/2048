@@ -70,6 +70,7 @@
     "tests/unit/quality/stylesheet-contract.test.ts",
     "tests/unit/quality/content-security-policy.test.ts",
     "tests/unit/quality/decision-log.test.ts",
-    "tests/unit/quality/decision-log-integrity.test.ts"
+    "tests/unit/quality/decision-log-integrity.test.ts",
+    "tests/unit/quality/traceability-matrix.test.ts"
   ]
 }

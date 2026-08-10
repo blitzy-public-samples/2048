@@ -10,6 +10,16 @@
 // no DOM, performs no I/O, consumes no randomness, reads no clock, memoises
 // nothing and reports nothing.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-TERM-01  js/game_manager.js L170      the win test the merge branch
+//                                            performed inline
+//   TR-TERM-02  js/game_manager.js L238-L240 movesAvailable()
+//   TR-TERM-03  js/game_manager.js L243-L268 tileMatchesAvailable()
+//   TR-TERM-04  js/game_manager.js L30-L32   isGameTerminated()
+//   TR-TERM-05  hasReachedWinValue           target-only row
+//   TR-TERM-06  highestTileValue             target-only row
+//
 // Decisions: DL-TERM-01, DL-TERM-02, DL-TERM-03, DL-TERM-04
 // (docs/DECISION_LOG.md).
 

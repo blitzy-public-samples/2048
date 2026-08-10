@@ -262,3 +262,188 @@ describe('a caller that composes first', () => {
     expect(composer.calls).toHaveLength(1);
   });
 });
+
+describe('a boot cancelled while the document is still parsing', () => {
+  /**
+   * A document double that is still parsing, recording what subscribes to it and
+   * what unsubscribes.
+   *
+   * @returns The double, the listeners it holds and the removals it saw.
+   */
+  const parsingDocument = (): {
+    ownerDocument: Document;
+    listeners: (() => void)[];
+    removed: (() => void)[];
+  } => {
+    const listeners: (() => void)[] = [];
+    const removed: (() => void)[] = [];
+
+    const ownerDocument = {
+      readyState: 'loading',
+      addEventListener: (_event: string, listener: () => void): void => {
+        listeners.push(listener);
+      },
+      removeEventListener: (_event: string, listener: () => void): void => {
+        removed.push(listener);
+      },
+    } as unknown as Document;
+
+    return { ownerDocument, listeners, removed };
+  };
+
+  it('composes nothing when the document becomes ready', () => {
+    const composer = createComposer();
+    const parsing = parsingDocument();
+    const scheduled: (() => void)[] = [];
+
+    expect(
+      bootstrap({
+        ownerDocument: parsing.ownerDocument,
+        schedule: (callback): void => {
+          scheduled.push(callback);
+        },
+        compose: composer.compose,
+      }),
+    ).toBe('awaiting-document');
+
+    // The caller composes while the document is STILL PARSING, which is the case
+    // the record has to already exist for.
+    application = start(document);
+
+    parsing.listeners[0]?.();
+
+    // Nothing was even scheduled, let alone composed: a second application over
+    // one document means two engines, two renderers and two input managers.
+    // DL-MAIN-26.
+    expect(scheduled).toHaveLength(0);
+    expect(composer.calls).toHaveLength(0);
+  });
+
+  it('releases the document listener it was waiting on', () => {
+    const composer = createComposer();
+    const parsing = parsingDocument();
+
+    bootstrap({
+      ownerDocument: parsing.ownerDocument,
+      schedule: (): void => undefined,
+      compose: composer.compose,
+    });
+
+    expect(parsing.listeners).toHaveLength(1);
+    expect(parsing.removed).toHaveLength(0);
+
+    application = start(document);
+
+    // Cancelled records release their wait, so no inert handler is left attached
+    // to the document.
+    expect(parsing.removed).toEqual(parsing.listeners);
+  });
+
+  it('is cancelled without raising through a document that cannot unsubscribe', () => {
+    const composer = createComposer();
+    const listeners: (() => void)[] = [];
+    const subscribeOnly = {
+      readyState: 'loading',
+      addEventListener: (_event: string, listener: () => void): void => {
+        listeners.push(listener);
+      },
+    } as unknown as Document;
+
+    bootstrap({
+      ownerDocument: subscribeOnly,
+      schedule: (): void => undefined,
+      compose: composer.compose,
+    });
+
+    // `start` must not fail over the release of a boot it is superseding.
+    expect(() => {
+      application = start(document);
+    }).not.toThrow();
+
+    listeners[0]?.();
+
+    expect(composer.calls).toHaveLength(0);
+  });
+});
+
+describe('the inspection handle', () => {
+  /** The published handle, read by name off the global object. */
+  const published = (): unknown =>
+    (globalThis as unknown as Record<string, unknown>)['__blitzy2048'];
+
+  afterEach(() => {
+    Reflect.deleteProperty(
+      globalThis as unknown as Record<string, unknown>,
+      '__blitzy2048',
+    );
+  });
+
+  it('is published by the boot and cleared by the disposal', () => {
+    const scheduled: (() => void)[] = [];
+
+    bootstrap({
+      ownerDocument: document,
+      schedule: (callback): void => {
+        scheduled.push(callback);
+      },
+    });
+
+    scheduled[0]?.();
+
+    const composed = published();
+
+    expect(composed).toBeDefined();
+
+    (composed as Application).dispose();
+
+    // The handle held the whole graph — engine, renderer, registry, storage —
+    // reachable by name for the life of the page. DL-MAIN-25.
+    expect(published()).toBeUndefined();
+    expect('__blitzy2048' in globalThis).toBe(false);
+  });
+
+  it('leaves a newer application s handle alone', () => {
+    const scheduled: (() => void)[] = [];
+
+    bootstrap({
+      ownerDocument: document,
+      schedule: (callback): void => {
+        scheduled.push(callback);
+      },
+    });
+
+    scheduled[0]?.();
+
+    const first = published() as Application;
+
+    // A second application takes the name, as a console session composing its
+    // own would.
+    document.body.innerHTML = MARKUP;
+    resetWebGLSupportProbe();
+
+    const second: (() => void)[] = [];
+
+    bootstrap({
+      ownerDocument: document,
+      schedule: (callback): void => {
+        second.push(callback);
+      },
+    });
+
+    second[0]?.();
+
+    const latest = published() as Application;
+
+    expect(latest).not.toBe(first);
+
+    // The LATE disposal of the superseded application must not clear the handle
+    // the live one published.
+    first.dispose();
+
+    expect(published()).toBe(latest);
+
+    latest.dispose();
+
+    expect(published()).toBeUndefined();
+  });
+});

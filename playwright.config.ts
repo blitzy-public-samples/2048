@@ -1,5 +1,11 @@
 // Playwright configuration for the recorded-gameplay proof.
 //
+// any kind. One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every
+// row of this file's area enumerated, all target-only:
+//   TR-PW-01  the `gameplay-recording` project and its single `testMatch`
+//   TR-PW-02  the recording settings and the software-GL launch arguments
+//   TR-PW-03  the preview web server and its loopback-origin assertion
+//
 // Decisions: DL-PW-01, DL-PW-02 (docs/DECISION_LOG.md).
 import { defineConfig, devices } from '@playwright/test';
 

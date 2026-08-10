@@ -175,6 +175,7 @@ import {
   redactRunSummary,
   summarizeRunState,
   type LegacyBoardSnapshot,
+  type RunPersistence,
   type PendingRewardRound,
   type PersistedRelic,
   type RunOutcome,
@@ -1219,6 +1220,21 @@ export class RunController {
 
   /** Whether the run in force has ended. Set by `finish`. */
   private ended: boolean;
+
+  /**
+   * Whether the run in force is reaching storage, as the last write left it.
+   *
+   * `'persistent'` until a write is refused. A run starts optimistic rather
+   * than unknown: nothing has failed, and the first write settles it either
+   * way.
+   */
+  private persistence: RunPersistence = 'persistent';
+
+  /**
+   * Writes refused since the run last persisted. Reset by a write that
+   * succeeds, so it measures the current outage and not the run.
+   */
+  private refusedWrites = 0;
 
   /** The last finished run, for a summary screen to read. */
   private finished: RunSummary | null;
@@ -2396,21 +2412,22 @@ export class RunController {
    * transaction.
    *
    * THE SECOND HALF OF A STAGE TRANSITION. `endStage()` resolved the stage that
-   * cleared and this controller's `stage:end` subscriber advanced the index and
-   * the goal; between the two the reward screen stands. This closes it: the
-   * selection is validated and taken on, and then the engine begins the stage
-   * the advance moved to. Nothing else starts that stage, which is why a run
-   * that only advanced its index never dispatched `onStageStart` again.
+   * cleared; between that and the next stage the reward screen stands. This
+   * closes it: the selection is validated and taken on, `resolveReward()`
+   * advances the index and derives the next goal, and then the engine begins
+   * the stage the advance moved to. Nothing else starts that stage, which is
+   * why a run that only advanced its index never dispatched `onStageStart`
+   * again.
    *
    * THE RELIC IS PERSISTED BY `resolveReward()` ITSELF, so the pickup and the
    * stage it was won in reach storage together whether or not a stage start
    * follows. Where one does, the commit `startStage()` ends with writes the
    * same envelope again from the board that stage opened on.
    *
-   * A REFUSED SELECTION STILL STARTS THE STAGE. The stage was cleared and the
-   * index already advanced, so withholding the start would strand the run
-   * between stages with no way forward; the refusal is reported instead, and
-   * the offer is left standing for a caller that wants to re-present it.
+   * A REFUSED SELECTION STARTS NOTHING AND ADVANCES NOTHING. `resolveReward()`
+   * leaves the index, the goal and the offer exactly as they were, so this
+   * returns the refusal and the run is still standing on the same stage with
+   * the same three cards owed a choice. DL-RUNCTL-16.
    *
    * @param engine The engine to begin the next stage on.
    * @param relicId Identifier of the chosen relic.
@@ -2714,6 +2731,12 @@ export class RunController {
       return;
     }
 
+    // THE RESULT IS CONSUMED, not discarded: `write()` resolves the run's
+    // persistence status from it and reports a change once per transition, and
+    // `persistenceStatus()` is what src/main.ts projects into the HUD. A
+    // refused write does not abandon the turn — the board is played from memory
+    // whether or not it was stored — so an exhausted quota degrades the run
+    // instead of ending it, and the stage below still pays out. DL-RUNCTL-20.
     this.write();
 
     if (!this.stageCleared || this.resolvingStage) {
@@ -2755,6 +2778,16 @@ export class RunController {
         this.offerReward();
 
         if (this.isRewardPending()) {
+          // REFRESHED AGAIN BEFORE THE PENDING ROUND IS WRITTEN. The draw ran
+          // AFTER the refresh at the top of this handler, so the counts carried
+          // by the envelope at this point are the pre-draw ones: writing them
+          // stored a round whose cards had already been drawn beside cursors
+          // that said they had not, and a reload of that envelope rebuilt the
+          // substreams behind their real position and spent the same draws a
+          // second time. The refresh puts the counts, the board and the relics
+          // back on one moment — the moment being written — which is the one
+          // write path's own rule. DL-RUNCTL-02, DL-RUNCTL-19.
+          this.refresh(engine, cursors);
           this.write();
 
           return;
@@ -2835,26 +2868,74 @@ export class RunController {
   }
 
   /**
-   * Writes the envelope and surfaces a refused write.
+   * Writes the envelope and resolves the run's persistence status from the
+   * outcome.
    *
-   * `RunStateStore.save` never throws: it reports through `onWriteFailed` and
-   * returns `false`. The report emitted here is the COMMIT PATH's own record
-   * of that refusal, at the decision point where the run failed to persist,
-   * and it carries no error object it did not receive.
+   * ONE ATTEMPT, ONE AUTHORITATIVE FAILURE RECORD. `RunStateStore.save` never
+   * throws: it reports the refusal through `onWriteFailed` — it alone holds the
+   * key, the serialised size and the error — and returns `false`. This method
+   * therefore emits NO second `onWriteFailed` of its own; it did, so one
+   * exhausted quota produced a record from the storage adapter, a record from
+   * the store and a third from here, three descriptions of one event.
+   *
+   * What this method adds instead is the PLAYER-FACING consequence: the run is
+   * no longer being saved, reported once per transition through
+   * `onPersistenceStatusChanged` rather than once per refused write.
+   *
+   * @returns Whether the envelope reached storage.
    */
   private write(): boolean {
     if (this.store.save(this.current)) {
+      this.markPersistence('persistent');
+
       return true;
     }
 
-    this.reporter.onWriteFailed?.({
-      correlationId: this.readRunCorrelationId(),
-      key: RUN_STATE_KEY,
-      byteLength: measureBytes(this.current),
-      error: WRITE_REFUSED_ON_COMMIT,
-    });
+    this.markPersistence('ephemeral');
 
     return false;
+  }
+
+  /**
+   * Records the run's persistence status and reports a CHANGE of it.
+   *
+   * @param status The status the last write established.
+   */
+  private markPersistence(status: RunPersistence): void {
+    if (status === 'ephemeral') {
+      this.refusedWrites += 1;
+    }
+
+    if (status === this.persistence) {
+      return;
+    }
+
+    const previous = this.persistence;
+
+    this.persistence = status;
+
+    if (status === 'persistent') {
+      this.refusedWrites = 0;
+    }
+
+    this.reporter.onPersistenceStatusChanged?.({
+      correlationId: this.readRunCorrelationId(),
+      status,
+      previous,
+      refusedWrites: this.refusedWrites,
+    });
+  }
+
+  /**
+   * Whether the run in force is reaching storage, as the last write left it.
+   *
+   * A caller projecting the status into the interface reads this rather than
+   * inferring it from a report it may have been composed too late to receive.
+   *
+   * @returns The status now in force.
+   */
+  persistenceStatus(): RunPersistence {
+    return this.persistence;
   }
 
   /** The substreams' draw counts, with every named substream present. */
@@ -3542,32 +3623,10 @@ export class RunController {
   }
 }
 
-/**
- * The `error` a commit-path write failure carries when the store refused the
- * envelope without raising.
- */
-const WRITE_REFUSED_ON_COMMIT = Object.freeze(
-  new Error('The run-state store refused the envelope on the commit path.'),
-);
-
-/**
- * Serialised size of an envelope, at two bytes per UTF-16 code unit, and `0`
- * when it cannot be measured.
- */
-function measureBytes(state: RunState): number {
-  try {
-    const encoded = JSON.stringify(state);
-
-    return typeof encoded === 'string'
-      ? encoded.length * BYTES_PER_CODE_UNIT
-      : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/** Bytes per UTF-16 code unit, matching the store's own accounting. */
-const BYTES_PER_CODE_UNIT = 2;
+// The commit path measures no serialised size and mints no error of its own:
+// src/run/run-state-store.ts holds the key, the byte length and the error of a
+// refused write and reports them once, and this module reports the run's
+// persistence STATUS instead.
 
 /** The value of a board with no tiles, as `StageProgressInput` defines it. */
 const NO_TILES = 0;

@@ -20,6 +20,30 @@
 // no randomness and performs no I/O. It interpolates numbers, and the renderer
 // applies them.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-ANIM-01  js/html_actuator.js L54, L67-L72  the `previousPosition` and
+//                                                 `position` pair, ported as
+//                                                 `createMoveTween`
+//   TR-ANIM-02  js/html_actuator.js L73-L80       the `.tile-merged` class
+//                                                 carrying `pop`, ported as
+//                                                 `createMergeTween`
+//   TR-ANIM-03  js/html_actuator.js L82           the `.tile-new` class
+//                                                 carrying `appear`, ported as
+//                                                 `createSpawnTween`
+//   TR-ANIM-04  js/html_actuator.js L114-L120     the `.score-addition` element
+//                                                 carrying `move-up`, ported as
+//                                                 `createScoreDeltaTween`
+//   TR-ANIM-05  style/main.scss `.game-message`   the terminal overlay's
+//                with `&.game-won`, `&.game-over` `fade-in`, ported as
+//                                                 `createOverlayFadeTween`
+//   TR-ANIM-06  target-only row                   `createTween`, `TweenStop`
+//                                                 and the delay that yields the
+//                                                 0% keyframe
+//   TR-ANIM-07  target-only row                   `CSS_EASING_CURVES`,
+//                                                 `createCubicBezierEasing`
+//                                                 and `easingFor`
+//
 // Decisions: DL-ANIM-01, DL-ANIM-02, DL-ANIM-03 (docs/DECISION_LOG.md).
 
 import type { Position } from '../engine/types';

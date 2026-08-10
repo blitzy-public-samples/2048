@@ -6,6 +6,18 @@
 // relic exists. Adding a relic is an edit to a family module and to nothing
 // here.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-REGISTRY-01  js/game_manager.js L9-L11    the three fixed subscriptions
+//                                                generalised into pickup-
+//                                                ordered hook subscriptions
+//   TR-REGISTRY-02  js/game_manager.js L102-L110 `serialize()`
+//   TR-REGISTRY-03  js/game_manager.js L36-L45   `restore()`, the guarded
+//                                                rehydration branch
+//   TR-REGISTRY-04  target-only row              `RELIC_CATALOGUE`,
+//                                                `findRelicById` and the
+//                                                assembled family pool
+//
 // Decisions: DL-REGISTRY-01, DL-REGISTRY-02, DL-REGISTRY-03
 // (docs/DECISION_LOG.md).
 

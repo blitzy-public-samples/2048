@@ -84,7 +84,12 @@ const playOneTurn = (app: Application): void => {
     DIRECTION_RIGHT,
     DIRECTION_DOWN,
   ]) {
-    if (app.engine.attemptMove(direction)) {
+    // THE ATTEMPT IS READ, NOT COERCED. `attemptMove` answers with a
+    // `MoveAttempt` object, which is truthy on every path including a blocked
+    // one, so testing the returned value itself stopped the loop after the
+    // first direction whether or not anything committed — and a random opening
+    // board that cannot move left then reached no commit at all.
+    if (app.engine.attemptMove(direction).committed) {
       return;
     }
   }

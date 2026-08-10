@@ -5,6 +5,13 @@
  * only as an argument, and nothing here reads, wraps or assigns to
  * `Math.random`.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, all target-only
+ * because no vanilla construct fanned a seed out:
+ *   TR-RNG-06  `STREAM_NAMES` and the four named substreams
+ *   TR-RNG-07  `createRngStreams` and the per-substream seed derivation
+ *   TR-RNG-08  `snapshotCursors` and the cursor restore walk
+ *   TR-RNG-09  `forkStreams`, the per-handler transaction's substream forks
+ *
  * Decisions: DL-RNG-04, DL-RNG-05 (docs/DECISION_LOG.md).
  */
 

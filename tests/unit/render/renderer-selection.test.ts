@@ -295,6 +295,57 @@ describe('switching modes from the preference', () => {
     expect(gridCells()).toBe(16);
   });
 
+  it('keeps the READING position across a round trip through the 2.5D board', async () => {
+    application = startWithRun(document);
+    application.preferences.setNumberOnlyMode(true);
+    await settleFrames();
+
+    const cells = (): HTMLElement[] =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '#board-number-only [role="gridcell"]',
+        ),
+      );
+    const tabStop = (): number =>
+      cells().findIndex((cell) => cell.getAttribute('tabindex') === '0');
+
+    // Row 3, column 3 of a four-wide board: an interior cell, so a reset to the
+    // corner cannot pass for a carry.
+    cells().at(2 * 4 + 2)?.focus();
+
+    expect(tabStop()).toBe(10);
+
+    // FOCUS LEAVES THE BOARD FIRST, which is the real case: the only control that
+    // changes this preference lives inside the settings dialog, so focus is never
+    // on the board when the swap is made.
+    const elsewhere = document.createElement('button');
+
+    elsewhere.type = 'button';
+    document.body.appendChild(elsewhere);
+    elsewhere.focus();
+
+    application.preferences.setNumberOnlyMode(false);
+    await settleFrames();
+
+    expect(application.renderer.mode).toBe('three');
+
+    application.preferences.setNumberOnlyMode(true);
+    await settleFrames();
+
+    // BACK ON THE CELL THE PLAYER LEFT. A swap destroys the outgoing renderer,
+    // and with focus elsewhere there is no live handoff to carry the coordinate,
+    // so the root records the cell before the teardown and hands it to the
+    // renderer taking over. DL-MAIN-24, DL-NUMBER-08.
+    expect(tabStop()).toBe(10);
+    expect(cells().at(10)?.getAttribute('aria-label')).toContain(
+      'Row 3, column 3',
+    );
+
+    // And no focus was moved for it: the swap was made from a preference, not
+    // from the board.
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
   it('keeps the score and the board across a switch', () => {
     application = start(document);
 

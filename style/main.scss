@@ -6,6 +6,27 @@
 // are namespaced (color.mix, color.adjust, list.nth), and the token block that
 // stood at the top of this file now lives in style/_tokens.scss.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of this
+// file's area enumerated:
+//   TR-SHEET-01  style/main.scss L1-L2      the two legacy `@import` rules,
+//                                           converted to `@use`
+//   TR-SHEET-02  style/main.scss L4-L22     the token block, moved to
+//                                           style/_tokens.scss
+//   TR-SHEET-03  style/main.scss L7, L357,  the six slash divisions, converted
+//                L377, L380, L381, L480     to `math.div()`
+//   TR-SHEET-04  style/main.css             the committed generated stylesheet,
+//                                           deleted and now produced by the
+//                                           build from this entry point
+//   TR-SHEET-05  index.html L7              the `<link>` to that generated file,
+//                                           replaced by the import in
+//                                           src/main.ts
+//   TR-SHEET-06  style/main.scss L299-L313  the position-generation loop, whose
+//                                           per-cell rules the renderer now owns
+//   TR-SHEET-07  style/main.scss L334-L402  the tile-value generation loop,
+//                                           retained as the ramp's authority
+//   TR-SHEET-08  target-only row            the six screen partials loaded from
+//                                           here, and the diagnostics surface
+//
 // Decisions: DL-SHEET-01, DL-SHEET-02, DL-SHEET-03 (docs/DECISION_LOG.md).
 
 // Intake for the authoritative token values. vite.config.ts renders
@@ -341,6 +362,15 @@ hr {
         margin-left: 9px;
 
         &.keep-playing-button {
+          display: none;
+        }
+
+        // The availability layer of src/input/on-screen-controls.ts writes
+        // `hidden` on a control whose action is inactive in the context in
+        // force. The `display` above outranks the user-agent rule for that
+        // attribute, so this restores it: a withdrawn control leaves the layout
+        // as well as the accessibility tree and the tab order.
+        &[hidden] {
           display: none;
         }
       }

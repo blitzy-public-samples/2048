@@ -273,14 +273,19 @@ export const DEFAULT_ON_SCREEN_HOST_SELECTOR = '#on-screen-controls';
  * Ported from js/keyboard_input_manager.js L72-L74, in the order those three
  * lines bound them: `.retry-button` and `.restart-button` both publish
  * `restart`, and `.keep-playing-button` publishes `keepPlaying`.
+ *
+ * NONE OF THE THREE DECLARES CONTEXTS OF ITS OWN, so each follows the contexts
+ * its action carries in the keymap — `['game']` for `restart`, `['overlay']` for
+ * `keepPlaying`. `.retry-button` previously declared `['game', 'overlay']` so
+ * the terminal overlay's "Try again" stayed live, but `ACTION_SCREENS.restart`
+ * of ../ui/screen-router authorizes `restart` in `stage` alone, and a control
+ * that publishes an action its state refuses is a control that does nothing.
+ * The terminal states offer their own controls instead — Keep going, End run and
+ * See run summary, rendered by ../ui/screens/game-over. DL-CONTROL-08.
  */
 export const LEGACY_CONTROL_BINDINGS: readonly MarkupControlBinding[] =
   Object.freeze([
-    Object.freeze({
-      selector: '.retry-button',
-      action: 'restart' as const,
-      contexts: Object.freeze<InputContext[]>(['game', 'overlay']),
-    }),
+    Object.freeze({ selector: '.retry-button', action: 'restart' as const }),
     Object.freeze({ selector: '.restart-button', action: 'restart' as const }),
     Object.freeze({
       selector: '.keep-playing-button',

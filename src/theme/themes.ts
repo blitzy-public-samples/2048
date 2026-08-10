@@ -13,6 +13,24 @@
  * reads no storage, queries no media feature, emits no log and performs no
  * work at import time beyond freezing its own declarations.
  *
+ * One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THEME is one area
+ * across both halves of the mirror, so these ordinals are unique across this
+ * module and style/_themes.scss:
+ *   TR-THEME-01  style/main.scss L4-L22   the existing palette, carried as the
+ *                                         default theme
+ *   TR-THEME-02  target-only row          the additive high-contrast palette
+ *   TR-THEME-03  target-only row          the additive colourblind-safe palette
+ *   TR-THEME-04  target-only row          `THEME_ATTRIBUTE`,
+ *                                         `themeAttributeValues` and
+ *                                         `applyTheme`
+ *   TR-THEME-05  target-only row          `resolveTileTheme`, the per-theme
+ *                                         resolver a renderer calls
+ *   TR-THEME-06  target-only row          `subscribeToThemeChange` and
+ *                                         `getActiveTheme`
+ *   TR-THEME-11  target-only row          `ThemePalette.neutralLight`, the
+ *                                         lighting white point each palette
+ *                                         states; decision DL-TOKEN-07
+ *
  * Decisions: DL-TOKEN-07, DL-THEME-01, DL-THEME-02, DL-THEME-03, DL-THEME-04
  * (docs/DECISION_LOG.md).
  */
@@ -142,6 +160,27 @@ export interface ThemePalette {
   readonly scoreAddition: string;
   readonly buttonSurface: string;
   readonly buttonLabel: string;
+
+  /**
+   * Surface and label of the controls THIS FEATURE's screens render — the
+   * run-start, reward, summary and game-over actions and the settings slider —
+   * as distinct from `buttonSurface` and `buttonLabel`, which the retained
+   * restart, retry and keep-playing buttons keep. Every palette states a pair
+   * clearing 4.5:1, the default one included. Decision DL-THEME-08.
+   */
+  readonly controlSurface: string;
+  readonly controlLabel: string;
+
+  /**
+   * Surface, caption and numeral of the readouts THIS FEATURE's screens render,
+   * as distinct from `scoreSurface`, `scoreLabel` and `scoreValue`, which the
+   * retained score and best-score boxes keep. Every palette states a caption
+   * and a numeral clearing 4.5:1 against the surface, the default one included,
+   * with the caption dimmer than the numeral. Decision DL-THEME-08.
+   */
+  readonly readoutSurface: string;
+  readonly readoutLabel: string;
+  readonly readoutValue: string;
   readonly overlayLoss: string;
   readonly overlayLossText: string;
   readonly overlayWin: string;
@@ -226,6 +265,15 @@ export const defaultThemePalette: ThemePalette = Object.freeze({
   scoreAddition: derivedColors.scoreAdditionColor,
   buttonSurface: derivedColors.buttonBackground,
   buttonLabel: brightTextColor,
+
+  // The accessible component pairs. Same hue as the frozen surfaces above and
+  // darker, so a screen of this feature clears WCAG 2.1 AA in this palette and
+  // not only under the two additive ones. DL-THEME-08.
+  controlSurface: derivedColors.controlSurfaceBackground,
+  controlLabel: brightTextColor,
+  readoutSurface: derivedColors.readoutSurfaceBackground,
+  readoutLabel: derivedColors.scoreLabelColor,
+  readoutValue: WHITE,
   overlayLoss: derivedColors.overlayLossBackground,
   overlayLossText: textColor,
   overlayWin: derivedColors.overlayWinBackground,
@@ -283,6 +331,11 @@ export const highContrastThemePalette: ThemePalette = Object.freeze({
   scoreAddition: '#757575',
   buttonSurface: '#00308f',
   buttonLabel: WHITE,
+  controlSurface: '#00308f',
+  controlLabel: WHITE,
+  readoutSurface: BLACK,
+  readoutLabel: WHITE,
+  readoutValue: WHITE,
   overlayLoss: rgbaLiteral('#9e9e9e', ADDITIVE_OVERLAY_ALPHA),
   overlayLossText: BLACK,
   overlayWin: rgbaLiteral('#ffe680', ADDITIVE_OVERLAY_ALPHA),
@@ -342,6 +395,11 @@ export const colorblindSafeThemePalette: ThemePalette = Object.freeze({
   scoreAddition: '#8e8e8e',
   buttonSurface: '#00355c',
   buttonLabel: WHITE,
+  controlSurface: '#00355c',
+  controlLabel: WHITE,
+  readoutSurface: '#3f3a33',
+  readoutLabel: WHITE,
+  readoutValue: WHITE,
   overlayLoss: rgbaLiteral('#9b9384', ADDITIVE_OVERLAY_ALPHA),
   overlayLossText: BLACK,
   overlayWin: rgbaLiteral('#f2d98c', ADDITIVE_OVERLAY_ALPHA),
