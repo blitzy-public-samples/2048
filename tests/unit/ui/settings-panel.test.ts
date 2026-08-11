@@ -34,10 +34,14 @@ import type {
   SettingsPanel,
 } from '../../../src/ui/components/settings-panel';
 import {
+  SETTINGS_BINDING_ROW_CLASS,
   SETTINGS_CAPTURE_STATUS_ID,
   SETTINGS_NUMBER_ONLY_HINT_ID,
+  SETTINGS_ROW_CLASS,
+  SETTINGS_SOUND_STATUS_ID,
   SETTINGS_TITLE_ID,
   SETTINGS_VOLUME_ID,
+  settingsPanelCopy,
 } from '../../../src/ui/components/settings-panel';
 import { applyTheme } from '../../../src/theme/themes';
 
@@ -330,6 +334,7 @@ const harness = (options: HarnessOptions = {}): Harness => {
       },
       flush: (): void => {},
       clear: (): void => {},
+      clearAssertive: (): void => {},
       pending: (): number => 0,
       isEnabled: (): boolean => true,
       observePreferences: () => (): void => {},
@@ -858,9 +863,17 @@ describe('rebinding a key', () => {
 
     const row = rebindControl(host, 'moveUp');
 
-    expect(row.textContent).toBe(
+    // UPDATED with DL-PANEL-05: the control PAINTS the short constant and is
+    // NAMED by the verbose per-action string, where it used to paint the
+    // verbose string. The visible text stays contained in the accessible name,
+    // so WCAG 2.5.3 still holds.
+    expect(row.textContent).toBe('Change');
+    expect(row.getAttribute('aria-label')).toBe(
       `Change key for ${describeAction('moveUp')}`,
     );
+    expect(
+      (row.getAttribute('aria-label') ?? '').toLowerCase(),
+    ).toContain((row.textContent ?? '').toLowerCase());
     expect(host.textContent).toContain(
       describeBinding(DEFAULT_KEY_BINDINGS, 'moveUp'),
     );
@@ -1477,5 +1490,167 @@ describe('the focus trap has exactly one owner', () => {
     buttonNamed(host, 'High contrast').click();
 
     expect(preferences.getTheme()).toBe('high-contrast');
+  });
+});
+
+
+/* ==========================================================================
+ * Issue 14, INFO 27 and INFO 28 of the QA report: the keyboard rows read as a
+ * ragged list, the sound status claimed sound was playing while muted, and the
+ * number-only hint carried a forced-mode claim in a document where 3D was
+ * available. DL-PANEL-05, DL-PANEL-06, DL-PANEL-07.
+ * ========================================================================== */
+
+describe('the settings body is laid out as an aligned list', () => {
+  it('marks every key-binding row, and no other row, for column layout', () => {
+    const { panel, host } = harness();
+
+    panel.open();
+
+    const bindingRows = [
+      ...host.querySelectorAll<HTMLElement>(`.${SETTINGS_BINDING_ROW_CLASS}`),
+    ];
+
+    // One per rebindable action, and every one of them also carries the base
+    // row class the stylesheet's shared rules key on.
+    expect(bindingRows.length).toBeGreaterThan(0);
+    expect(bindingRows).toHaveLength(
+      host.querySelectorAll('[data-settings-action]').length,
+    );
+
+    for (const row of bindingRows) {
+      expect(row.classList.contains(SETTINGS_ROW_CLASS)).toBe(true);
+
+      // Exactly label, binding and control, in that order — the assumption the
+      // stylesheet's positional placements rest on.
+      expect(row.children).toHaveLength(3);
+      expect(row.children[0]?.tagName).toBe('SPAN');
+      expect(row.children[1]?.tagName).toBe('SPAN');
+      expect(row.children[2]?.tagName).toBe('BUTTON');
+      expect(row.children[2]?.getAttribute('data-settings-action')).not.toBe(
+        null,
+      );
+    }
+
+    // The theme, motion, sound and capture-action rows are untouched by it.
+    const plainRows = [
+      ...host.querySelectorAll<HTMLElement>(`.${SETTINGS_ROW_CLASS}`),
+    ].filter((row) => !row.classList.contains(SETTINGS_BINDING_ROW_CLASS));
+
+    expect(plainRows.length).toBeGreaterThan(0);
+  });
+
+  it('paints one constant on every rebind control and names each verbosely', () => {
+    const { panel, host } = harness();
+
+    panel.open();
+
+    const controls = [
+      ...host.querySelectorAll<HTMLButtonElement>('[data-settings-action]'),
+    ];
+
+    expect(controls.length).toBeGreaterThan(0);
+
+    const painted = new Set(controls.map((control) => control.textContent));
+
+    // ONE painted string across every row, which is what makes the control
+    // column the same width in all of them.
+    expect([...painted]).toStrictEqual([settingsPanelCopy.rebindShortLabel]);
+
+    const names = new Set<string>();
+
+    for (const control of controls) {
+      const name = control.getAttribute('aria-label') ?? '';
+
+      // Verbose, distinct per action, and a superset of the visible label
+      // (WCAG 2.5.3).
+      expect(name).not.toBe('');
+      expect(name.toLowerCase()).toContain(
+        settingsPanelCopy.rebindShortLabel.toLowerCase(),
+      );
+      names.add(name);
+    }
+
+    expect(names.size).toBe(controls.length);
+  });
+
+  it('keeps the short label a prefix of every verbose name', () => {
+    for (const action of ['Move up', 'Close settings', 'Inspect relic']) {
+      expect(
+        settingsPanelCopy
+          .rebindLabel(action)
+          .startsWith(settingsPanelCopy.rebindShortLabel),
+      ).toBe(true);
+    }
+  });
+});
+
+describe('the sound status reports mute as well as availability', () => {
+  const soundStatus = (host: HTMLElement): string =>
+    host.querySelector<HTMLElement>(`#${SETTINGS_SOUND_STATUS_ID}`)
+      ?.textContent ?? '';
+
+  it('says sound is muted while it is muted, and playing while it is not', () => {
+    const { panel, host, preferences } = harness();
+
+    panel.open();
+
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundAvailable);
+
+    preferences.setMuted(true);
+
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundMuted);
+    expect(soundStatus(host)).not.toBe(settingsPanelCopy.soundAvailable);
+
+    preferences.setMuted(false);
+
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundAvailable);
+  });
+
+  it('leaves the two unavailable strings alone, which already name mute', () => {
+    const { panel, host, preferences } = harness({ withSound: false });
+
+    panel.open();
+    preferences.setMuted(true);
+
+    // Not the muted string: mute is moot while nothing can sound at all.
+    expect(soundStatus(host)).toBe(settingsPanelCopy.soundAbsent);
+    expect(settingsPanelCopy.soundAbsent).toContain('switched off');
+  });
+});
+
+describe('the number-only hint asserts nothing until a force holds', () => {
+  const hint = (host: HTMLElement): HTMLElement | null =>
+    host.querySelector<HTMLElement>(`#${SETTINGS_NUMBER_ONLY_HINT_ID}`);
+
+  it('is empty while 3D rendering is available', () => {
+    const { panel, host } = harness();
+
+    panel.open();
+
+    const element = hint(host);
+
+    expect(element).not.toBe(null);
+    expect(element?.hidden).toBe(true);
+
+    // EMPTY, not merely hidden: it used to carry the forced-mode claim from the
+    // moment the dialog rendered.
+    expect(element?.textContent).toBe('');
+    expect(element?.textContent ?? '').not.toContain('unavailable');
+  });
+
+  it('is written when a force applies and cleared when it is released', () => {
+    const { panel, host, preferences } = harness();
+
+    panel.open();
+    preferences.forceNumberOnlyMode('no WebGL context is available');
+
+    expect(hint(host)?.hidden).toBe(false);
+    expect(hint(host)?.textContent).toContain('no WebGL context is available');
+
+    preferences.releaseNumberOnlyForce();
+
+    expect(hint(host)?.hidden).toBe(true);
+    expect(hint(host)?.textContent).toBe('');
   });
 });

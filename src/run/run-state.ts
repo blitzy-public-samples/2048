@@ -108,6 +108,8 @@
  *   DL-RUN-06  the unresolved reward round persisted as an OPTIONAL member
  *              carrying identifiers alone, with `schemaVersion` left where it
  *              stood
+ *   DL-RUN-07  `MAX_PERSISTED_STAGE_INDEX`, the upper bound on a stored stage
+ *              index
  */
 
 import {
@@ -431,6 +433,28 @@ export const MAX_PERSISTED_RELICS = 64;
  * usefully be longer than the catalogue a run could hold.
  */
 export const MAX_REWARD_OFFER_IDS = MAX_PERSISTED_RELICS;
+
+/**
+ * ADDED: the highest `stageIndex` an envelope carries.
+ *
+ * A stage index was bounded below and not above, so a hand-edited or corrupted
+ * envelope claiming stage 99999 was accepted verbatim and presented as
+ * "Stage 100000" — a figure no run can reach, in front of a goal that stays
+ * sane because src/config/stage-config.ts caps its own target.
+ *
+ * Chosen the way `MAX_REWARD_OFFER_IDS` is: the bound a stored index is refused
+ * ABOVE, not the count a run must hold. The default curve's eight-entry ladder
+ * extends by doubling from 4096 up to its own 2^52 ceiling, which is forty
+ * further stages — so the last index carrying distinct progression is 47, and
+ * a build configured with a far longer ladder is still not refused by a value
+ * this module fixed, while a payload claiming five figures is.
+ */
+export const MAX_PERSISTED_STAGE_INDEX = 1024;
+
+/** Whether `value` is a stage index an envelope may carry. */
+function isPersistedStageIndex(value: unknown): value is number {
+  return isNonNegativeInteger(value) && value <= MAX_PERSISTED_STAGE_INDEX;
+}
 
 function isBoardSize(value: unknown): value is number {
   return isSupportedBoardSize(value);
@@ -1272,10 +1296,11 @@ function checkPendingReward(value: unknown, problems: string[]): void {
     problems
   );
 
-  if (stageIndex.readable && !isNonNegativeInteger(stageIndex.value)) {
+  if (stageIndex.readable && !isPersistedStageIndex(stageIndex.value)) {
     addProblem(
       problems,
-      'pendingReward.stageIndex is not a non-negative integer'
+      'pendingReward.stageIndex is not an integer from 0 through ' +
+        String(MAX_PERSISTED_STAGE_INDEX)
     );
   }
 
@@ -1527,8 +1552,11 @@ export function describeRunStateProblems(value: unknown): string[] {
     problems
   );
 
-  if (stageIndex.readable && !isNonNegativeInteger(stageIndex.value)) {
-    addProblem(problems, 'stageIndex is not a non-negative integer');
+  if (stageIndex.readable && !isPersistedStageIndex(stageIndex.value)) {
+    addProblem(
+      problems,
+      `stageIndex is not an integer from 0 through ${MAX_PERSISTED_STAGE_INDEX}`
+    );
   }
 
   const stageGoal = readForValidation(

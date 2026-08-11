@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_MAX_QUEUED_ANNOUNCEMENTS,
+  composeAnnouncements,
   createLiveRegionAnnouncer,
 } from '../../../src/ui/a11y/live-region';
 import type {
@@ -386,5 +387,113 @@ describe('a discarded announcement is reported, never silent', () => {
     region.destroy();
 
     expect(region.pending()).toBe(0);
+  });
+});
+
+/* ==========================================================================
+ * A relic acquisition outlives free text in its own batch (DL-LIVE-05), and
+ * the assertive region can be blanked on its own (DL-LIVE-06).
+ * ========================================================================== */
+
+/** The polite and assertive regions index.html declares, both mounted. */
+function seedBothRegions(): void {
+  document.body.innerHTML =
+    '<div class="visually-hidden live-region" id="live-region" ' +
+    'role="status" aria-live="polite" aria-atomic="true"></div>' +
+    '<div class="visually-hidden live-region" id="live-region-assertive" ' +
+    'role="alert" aria-live="assertive" aria-atomic="true"></div>';
+}
+
+describe('a relic acquisition is the line a batch is left holding', () => {
+  it('composes the pickup AFTER free text queued alongside it', () => {
+    const composition = composeAnnouncements([
+      relic('Frostbind'),
+      { kind: 'text', text: 'Stage 2.' },
+    ]);
+    const lines = composition.utterances.map((utterance) => utterance.text);
+
+    // Each utterance is written on its own tick with a clear-then-write, so the
+    // LAST line is the one the region is left holding. It must be the pickup.
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe('Stage 2.');
+    expect(lines[lines.length - 1]).toContain('Frostbind');
+  });
+
+  it('composes it last whichever order the two arrived in', () => {
+    const forwards = composeAnnouncements([
+      { kind: 'text', text: 'Stage 2.' },
+      relic('Frostbind'),
+    ]);
+    const backwards = composeAnnouncements([
+      relic('Frostbind'),
+      { kind: 'text', text: 'Stage 2.' },
+    ]);
+
+    expect(forwards.utterances.map((u) => u.text)).toEqual(
+      backwards.utterances.map((u) => u.text),
+    );
+  });
+
+  it('still lets a verdict have the final assertive word', () => {
+    const composition = composeAnnouncements([
+      relic('Frostbind'),
+      terminal(1234),
+    ]);
+    const last = composition.utterances[composition.utterances.length - 1];
+
+    expect(last?.polarity).toBe('assertive');
+    expect(last?.text).toContain('1234');
+  });
+});
+
+describe('the assertive region can be blanked on its own', () => {
+  it('clears the verdict and leaves the polite region standing', () => {
+    seedBothRegions();
+
+    // An immediate scheduler, so every clear-then-write step runs on the spot
+    // and the regions hold their final text by the time `flush()` returns.
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: (callback): { cancel(): void } => {
+        callback();
+
+        return {
+          cancel: (): void => {
+            // Already run.
+          },
+        };
+      },
+    });
+    const polite = document.querySelector('#live-region');
+    const assertive = document.querySelector('#live-region-assertive');
+
+    region.announceText('Stage 2.');
+    region.announce(terminal(1234));
+    region.flush();
+
+    expect(assertive?.textContent ?? '').toContain('1234');
+
+    const politeBefore = polite?.textContent ?? '';
+
+    region.clearAssertive();
+
+    expect(assertive?.textContent).toBe('');
+    expect(polite?.textContent ?? '').toBe(politeBefore);
+  });
+
+  it('is a safe no-op with no assertive region and after destroy', () => {
+    seedRegion();
+
+    const region = announcer();
+
+    expect(() => {
+      region.clearAssertive();
+    }).not.toThrow();
+
+    region.destroy();
+
+    expect(() => {
+      region.clearAssertive();
+    }).not.toThrow();
   });
 });

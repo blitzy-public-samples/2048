@@ -17,8 +17,10 @@
  *   TR-KEYS-06  target-only row                  `OwnedStorageKey`,
  *                                                `isOwnedStorageKey()` and
  *                                                `OWNED_STORAGE_KEYS`
+ *   TR-KEYS-07  target-only row                  `PREFERENCES_KEY`
  *
- * Decisions: DL-KEYS-01, DL-KEYS-02, DL-KEYS-03 (docs/DECISION_LOG.md).
+ * Decisions: DL-KEYS-01, DL-KEYS-02, DL-KEYS-03, DL-KEYS-04
+ * (docs/DECISION_LOG.md).
  */
 
 /**
@@ -127,6 +129,17 @@ export const RUN_STATE_KEY = namespacedKey('runState');
 /** Key the serialised keyboard binding table is persisted under. */
 export const KEYMAP_KEY = namespacedKey('keymap');
 
+/**
+ * ADDED: key the versioned accessibility and presentation preference envelope
+ * is persisted under — palette, motion setting, number-only choice, mute and
+ * volume.
+ *
+ * Namespaced like every key minted after the two frozen literals, so the
+ * `bestScore` and `gameState` contracts are untouched by its arrival.
+ * DL-KEYS-04.
+ */
+export const PREFERENCES_KEY = namespacedKey('preferences');
+
 /** Key the Web Storage writability probe writes and immediately removes. */
 export const STORAGE_PROBE_KEY = namespacedKey('probe');
 
@@ -139,4 +152,8 @@ export const OWNED_STORAGE_KEYS: readonly OwnedStorageKey[] = Object.freeze([
   GAME_STATE_KEY,
   RUN_STATE_KEY,
   KEYMAP_KEY,
+
+  // ADDED with `PREFERENCES_KEY`, so test teardown and any consumer that
+  // clears the product's storage reach it without a second edit. DL-KEYS-04.
+  PREFERENCES_KEY,
 ]);

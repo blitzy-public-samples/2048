@@ -38,8 +38,8 @@
 //   TR-PANEL-08  target-only row                       `settingsPanelCopy` and
 //                                                      the section vocabulary
 //
-// Decisions: DL-PANEL-01, DL-PANEL-02, DL-PANEL-03, DL-PANEL-04
-// (docs/DECISION_LOG.md).
+// Decisions: DL-PANEL-01, DL-PANEL-02, DL-PANEL-03, DL-PANEL-04, DL-PANEL-05,
+// DL-PANEL-06, DL-PANEL-07 (docs/DECISION_LOG.md).
 
 import type { FocusManager, FocusTrapHandle } from '../a11y/focus-manager';
 import type { LiveRegionAnnouncer } from '../a11y/live-region';
@@ -97,6 +97,14 @@ export const SETTINGS_ROW_CLASS = 'settings-row';
 
 /** The keys bound to one action, as spoken text. */
 export const SETTINGS_BINDING_CLASS = 'settings-binding';
+
+/**
+ * ADDED: carried by a key-binding row in ADDITION to `SETTINGS_ROW_CLASS`, so
+ * style/_screens.scss lays those rows out as aligned columns without reaching
+ * the theme, motion, sound and capture-action rows that share the base class.
+ * DL-PANEL-05.
+ */
+export const SETTINGS_BINDING_ROW_CLASS = 'settings-row-binding';
 
 /** Explanatory text a control references through `aria-describedby`. */
 export const SETTINGS_STATUS_CLASS = 'settings-status';
@@ -214,8 +222,24 @@ export interface SettingsPanelCopy {
   readonly soundContextUnavailable: string;
   readonly soundAvailable: string;
 
+  /**
+   * ADDED: shown while the audio layer is available and the player has muted
+   * it, so the status does not read as a live claim. DL-PANEL-06.
+   */
+  readonly soundMuted: string;
+
   /** Name of the control that rebinds one action. */
   readonly rebindLabel: (action: string) => string;
+
+  /**
+   * ADDED: the VISIBLE text of that control, constant across every row.
+   *
+   * It must be contained in `rebindLabel`'s result case-insensitively, which is
+   * what keeps the accessible name a superset of the visible label
+   * (WCAG 2.5.3) while the column stays narrow enough for label, binding and
+   * control to share one line. DL-PANEL-05.
+   */
+  readonly rebindShortLabel: string;
 
   /** Prompt shown while a capture is armed. */
   readonly capturePrompt: (action: string) => string;
@@ -316,6 +340,11 @@ export const settingsPanelCopy: SettingsPanelCopy = Object.freeze({
     'off.',
   soundAvailable: 'Sound plays through this device.',
 
+  // ADDED: the available-but-silent case. The string above reported
+  // availability only, so it claimed sound was playing while the player had
+  // muted it. DL-PANEL-06.
+  soundMuted: 'Sound is available on this device and is muted.',
+
   numberOnlyForcedHint: (reason: string | null): string =>
     reason === null
       ? 'Numbers only cannot be turned off because 3D rendering is ' +
@@ -324,6 +353,10 @@ export const settingsPanelCopy: SettingsPanelCopy = Object.freeze({
         `unavailable: ${reason}.`,
 
   rebindLabel: (action: string): string => `Change key for ${action}`,
+
+  // A prefix of every `rebindLabel` result above, so containment holds for
+  // every action without depending on the action's own name. DL-PANEL-05.
+  rebindShortLabel: 'Change',
 
   capturePrompt: (action: string): string =>
     `Press the new key for ${action}, or Escape to cancel.`,
@@ -957,10 +990,14 @@ export function createSettingsPanel(
     }
 
     const numberButton = makeButton(copy.numberOnlyLabel);
-    const hint = makeStatus(
-      SETTINGS_NUMBER_ONLY_HINT_ID,
-      copy.numberOnlyForcedHint(null),
-    );
+
+    // CHANGED: built EMPTY, where it used to be built holding the forced-hint
+    // text. The element is hidden until a force applies, but it carried a claim
+    // that 3D rendering was unavailable from the moment the dialog was
+    // rendered — text no state had asserted, one attribute away from being
+    // read. `syncNumberOnly` writes it when a force actually holds.
+    // DL-PANEL-07.
+    const hint = makeStatus(SETTINGS_NUMBER_ONLY_HINT_ID, '');
 
     if (numberButton !== null) {
       listen(numberButton, 'click', (): void => {
@@ -1099,11 +1136,20 @@ export function createSettingsPanel(
       const row = makeRow();
       const name = makeRowLabel(describeAction(action));
       const keys = make('span', SETTINGS_BINDING_CLASS);
-      const rebind = makeButton(copy.rebindLabel(describeAction(action)));
+
+      // CHANGED: the control paints the short constant and is NAMED by the
+      // verbose per-action string, where it used to paint the verbose string.
+      // Fourteen rows of "Change key for <action>" could not share a line with
+      // their label and binding inside the panel's measure, and each row sized
+      // its own columns, so the list read ragged. DL-PANEL-05.
+      const rebind = makeButton(copy.rebindShortLabel);
 
       if (row === null || name === null || keys === null || rebind === null) {
         continue;
       }
+
+      row.classList.add(SETTINGS_BINDING_ROW_CLASS);
+      rebind.setAttribute('aria-label', copy.rebindLabel(describeAction(action)));
 
       keys.id = `${SETTINGS_CAPTURE_STATUS_ID}-${action}`;
       keys.textContent = describeBinding(keymap, action);
@@ -1254,6 +1300,9 @@ export function createSettingsPanel(
       hint.hidden = false;
       describeBy(button, SETTINGS_NUMBER_ONLY_HINT_ID);
     } else {
+      // CHANGED: cleared as well as hidden, so a force that is released leaves
+      // no stale claim behind it. DL-PANEL-07.
+      hint.textContent = '';
       hint.hidden = true;
       undescribeBy(button, SETTINGS_NUMBER_ONLY_HINT_ID);
     }
@@ -1322,10 +1371,16 @@ export function createSettingsPanel(
    */
   const soundStatusText = (
     availability: 'available' | 'absent' | 'no-context',
+
+    // ADDED: the mute state, so the available branch distinguishes sound that
+    // is playing from sound that is merely able to. The two unavailable
+    // branches already say mute is switched off and are unaffected by it.
+    // DL-PANEL-06.
+    muted: boolean,
   ): string => {
     switch (availability) {
       case 'available':
-        return copy.soundAvailable;
+        return muted ? copy.soundMuted : copy.soundAvailable;
       case 'absent':
         return copy.soundAbsent;
       case 'no-context':
@@ -1387,7 +1442,7 @@ export function createSettingsPanel(
     }
 
     if (soundStatus !== null) {
-      soundStatus.textContent = soundStatusText(availability);
+      soundStatus.textContent = soundStatusText(availability, muted);
     }
 
     // Nothing is pushed into the audio layer from here.

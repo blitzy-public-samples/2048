@@ -39,7 +39,7 @@ import {
   createBoundaryTracing,
   createTracer,
 } from '../../../src/observability/tracer';
-import { monospaceStack, zIndex } from '../../../src/theme/tokens';
+import { fieldWidth, monospaceStack, zIndex } from '../../../src/theme/tokens';
 import { METRIC_PREFIX, createMetricsRegistry } from '../../../src/observability/metrics';
 import type { MetricsRegistry } from '../../../src/observability/metrics';
 import { createLogger, deriveCorrelationId } from '../../../src/observability/logger';
@@ -799,6 +799,82 @@ describe('the surface styling', () => {
     harness.overlay.close();
 
     expect(harness.host.style.getPropertyValue('display')).toBe('none');
+  });
+
+  // DL-DIAG-08. The width the module INLINES is what the surface actually gets,
+  // because an inline declaration outranks the stylesheet — so this is the half
+  // that decides the rendered width, and it is asserted here as a number rather
+  // than as a mirror (the mirror itself is pinned in
+  // tests/unit/quality/stylesheet-contract.test.ts).
+  it('inlines four fifths of the reading measure as its width', () => {
+    const harness = setup();
+
+    harness.overlay.mount();
+
+    expect(harness.host.style.getPropertyValue('inline-size')).toBe(
+      `${String((fieldWidth * 4) / 5)}px`,
+    );
+    expect(harness.host.style.getPropertyValue('inline-size')).toBe('400px');
+
+    // Still bounded against the viewport, so the wider surface cannot escape a
+    // screen narrower than it.
+    expect(harness.host.style.getPropertyValue('max-inline-size')).toContain(
+      '100%',
+    );
+  });
+
+  // DL-DIAG-08. `anywhere` broke a string at whatever character reached the
+  // cell edge, which rendered a health detail as "Function .protoy pe.bind is
+  // present." — so the readout wrapped mid-word by declaration, not by width.
+  it('wraps a cell at its words rather than at any character', () => {
+    const harness = setup();
+
+    harness.overlay.mount();
+    harness.overlay.open();
+
+    const cells = Array.from(harness.host.querySelectorAll('td'));
+
+    expect(cells.length).toBeGreaterThan(0);
+
+    for (const cell of cells) {
+      expect(cell.style.getPropertyValue('overflow-wrap')).toBe('break-word');
+      expect(cell.style.getPropertyValue('overflow-wrap')).not.toBe('anywhere');
+    }
+  });
+
+  // The even split gave the column holding one short status word the same room
+  // as the column holding a sentence. Stating the first two hands the whole
+  // remainder to the third, which is the one carrying prose.
+  it('states the first two column widths and leaves the third the remainder', () => {
+    const harness = setup();
+
+    harness.overlay.mount();
+    harness.overlay.open();
+
+    const rows = Array.from(harness.host.querySelectorAll('tr')).filter(
+      (row) => row.querySelectorAll('td').length >= 3,
+    );
+
+    expect(rows.length).toBeGreaterThan(0);
+
+    for (const row of rows) {
+      const cells = Array.from(row.querySelectorAll('td'));
+
+      expect(cells[0]?.style.getPropertyValue('inline-size')).toBe('34%');
+      expect(cells[1]?.style.getPropertyValue('inline-size')).toBe('20%');
+
+      // Unstated, so it takes what the first two left rather than an even share.
+      expect(cells[2]?.style.getPropertyValue('inline-size')).toBe('');
+
+      // The two stated widths must leave the majority to the prose column.
+      expect(34 + 20).toBeLessThan(100 - 34);
+    }
+
+    // `table-layout: fixed` is what makes a stated width govern at all, and is
+    // also why reducing the min-content contribution was never needed.
+    const table = harness.host.querySelector('table');
+
+    expect(table?.style.getPropertyValue('table-layout')).toBe('fixed');
   });
 });
 

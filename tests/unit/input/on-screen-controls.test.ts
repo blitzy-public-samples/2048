@@ -10,8 +10,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_KEY_BINDINGS,
+  MOVE_ACTIONS,
   RELIC_SLOT_COUNT,
   REWARD_SLOT_COUNT,
+  describeAction,
+  describeMoveDirection,
   type Direction,
   type InputContext,
   type Keymap,
@@ -705,5 +708,179 @@ describe('availability narrows by the caller as well as the context', () => {
       { index: 1, suppressed: false },
       { index: 2, suppressed: true },
     ]);
+  });
+});
+
+describe('the movement controls paint the direction word alone', () => {
+  /** The generated control for one movement action. */
+  const padControl = (
+    handle: OnScreenControlsHandle,
+    action: 'moveUp' | 'moveRight' | 'moveDown' | 'moveLeft',
+  ): Element => {
+    const entry = handle.controls.find(
+      (candidate) =>
+        candidate.action === action &&
+        candidate.element.classList.contains('on-screen-control'),
+    );
+
+    if (entry === undefined) {
+      throw new Error(`no generated control for ${action}`);
+    }
+
+    return entry.element;
+  };
+
+  it('paints the word and keeps the verbose accessible name', () => {
+    seedMarkup();
+
+    const handle = mount(createHost());
+
+    for (const action of MOVE_ACTIONS) {
+      const element = padControl(handle, action);
+      const painted = element.textContent ?? '';
+      const name = element.getAttribute('aria-label') ?? '';
+
+      // The pad's position states the direction, so repeating "Move" four times
+      // is what forced the group to wrap. DL-CONTROL-09.
+      expect(painted).toBe(describeMoveDirection(action));
+      expect(name).toContain(describeAction(action));
+      expect(name.length).toBeGreaterThan(painted.length);
+    }
+  });
+
+  it('keeps the painted text inside the accessible name', () => {
+    seedMarkup();
+
+    const handle = mount(createHost());
+
+    // WCAG 2.5.3 label-in-name, asserted on the rendered attributes rather than
+    // on the vocabulary that produced them.
+    for (const action of MOVE_ACTIONS) {
+      const element = padControl(handle, action);
+
+      expect(
+        (element.getAttribute('aria-label') ?? '').toLowerCase(),
+      ).toContain((element.textContent ?? '').toLowerCase());
+    }
+  });
+
+  it('leaves every other generated control painting its full label', () => {
+    seedMarkup();
+
+    const handle = mount(createHost());
+    const restart = handle.controls.find(
+      (candidate) =>
+        candidate.action === 'restart' &&
+        candidate.element.classList.contains('on-screen-control'),
+    );
+
+    expect(restart?.element.textContent).toBe(describeAction('restart'));
+  });
+
+  it('carries the direction attribute the pad layout places it by', () => {
+    seedMarkup();
+
+    const handle = mount(createHost());
+    const placed = MOVE_ACTIONS.map((action) =>
+      padControl(handle, action).getAttribute('data-direction'),
+    );
+
+    // 0 up, 1 right, 2 down, 3 left — the encoding style/main.scss keys the
+    // three-column pad on.
+    expect(placed).toEqual(['0', '1', '2', '3']);
+  });
+
+  it('paints a slotted control with its own label, never a direction word', () => {
+    seedMarkup();
+
+    const handle = mount(createHost());
+    const slotted = handle.controls.filter(
+      (candidate) => candidate.action === 'selectReward',
+    );
+
+    expect(slotted.length).toBeGreaterThan(0);
+
+    // Only a movement control's painted text is shortened. Every other control
+    // paints its own label, which for a slotted control is that label optionally
+    // followed by a slot number — never a bare direction word.
+    for (const entry of slotted) {
+      const painted = entry.element.textContent ?? '';
+
+      expect(painted.startsWith(describeAction('selectReward'))).toBe(true);
+      expect(painted).toMatch(
+        new RegExp(`^${describeAction('selectReward')}( \\d+)?$`, 'u'),
+      );
+    }
+  });
+});
+
+describe('the mount log distinguishes the host from the whole layer', () => {
+  it('states the generated count and the adopted count separately', () => {
+    seedMarkup();
+
+    const logged: { message: string; fields?: Record<string, unknown> }[] = [];
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'game',
+      reporter: {
+        log(_level: string, message: string, fields?: unknown): void {
+          logged.push({
+            message,
+            fields: fields as Record<string, unknown> | undefined,
+          });
+        },
+
+        count(): void {
+          return;
+        },
+      },
+    });
+
+    mounted.push(handle);
+
+    const entry = logged.find(
+      (candidate) =>
+        candidate.message === 'The on-screen controls are mounted.',
+    );
+
+    // A reader of that sentence counts the buttons in the host, and the single
+    // figure counted the adopted markup controls too. DL-CONTROL-10.
+    const inHost = entry?.fields?.['inHost'];
+    const adopted = entry?.fields?.['adopted'];
+    const controls = entry?.fields?.['controls'];
+
+    expect(typeof inHost).toBe('number');
+    expect(typeof adopted).toBe('number');
+    expect(adopted).toBe(LEGACY_CONTROL_BINDINGS.length);
+    expect((inHost as number) + (adopted as number)).toBe(controls);
+  });
+
+  it('counts exactly the controls rendered into the host', () => {
+    seedMarkup();
+
+    const logged: Record<string, unknown>[] = [];
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'game',
+      reporter: {
+        log(_level: string, message: string, fields?: unknown): void {
+          if (message === 'The on-screen controls are mounted.') {
+            logged.push((fields ?? {}) as Record<string, unknown>);
+          }
+        },
+
+        count(): void {
+          return;
+        },
+      },
+    });
+
+    mounted.push(handle);
+
+    const rendered = document.querySelectorAll(
+      '#on-screen-controls button',
+    ).length;
+
+    expect(logged[0]?.['inHost']).toBe(rendered);
   });
 });

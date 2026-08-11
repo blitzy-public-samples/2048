@@ -222,7 +222,13 @@ hr {
   z-index: $z-index-diagnostics;
 
   box-sizing: border-box;
-  inline-size: math.div($field-width * 3, 5);
+
+  // CHANGED from three fifths. At 300px the three-column readout left its
+  // widest column narrower than the identifiers it holds, so a health detail
+  // wrapped every second or third character. Four fifths is still bounded by
+  // the `max-inline-size` below, so the surface is unchanged on a viewport
+  // narrower than it. DL-DIAG-08.
+  inline-size: math.div($field-width * 4, 5);
 
   // Bounded on both axes against the viewport, which is the containing block
   // of a fixed element, leaving the corner inset clear on the opposite side.
@@ -389,6 +395,31 @@ hr {
 
       &.game-won, &.game-over {
         display: block;
+      }
+
+      // The overlay withdraws while a router-owned screen presents the same
+      // verdict.
+      //
+      // AAP §0.4.1.1 retains this layer but subsumes it into the screen
+      // router's terminal states, so `won`, continued-win and `gameOver`
+      // resolve through one treatment rather than two: the presented one is
+      // `.screen[data-screen="game-over"]` of src/ui/screens/game-over.ts,
+      // which style/_screens.scss builds from this very pattern's tint and
+      // cadence tokens. `SCREEN_INERTS_BACKGROUND` of
+      // src/ui/screen-router.ts marks the board's ancestor `inert` for exactly
+      // the screens that present over the board, and `applyTerminalOverlay`
+      // writes the two classes below for exactly `won` and `gameOver` — so the
+      // attribute is the router's own statement that it owns the presentation,
+      // and keying on it needs no new marker and no script change. Whichever
+      // hid it, the verdict paragraph is then painted once and the retained
+      // `.keep-playing-button` and `.retry-button` leave the layout, the
+      // accessibility tree and the tab order with the layer that holds them.
+      // If the screen layer is absent the attribute is never written and this
+      // layer still presents, so the ported `message()` treatment stands as
+      // the fallback it has always been. DL-SHEET-07.
+      [inert] &.game-won,
+      [inert] &.game-over {
+        display: none;
       }
     }
   }
@@ -717,6 +748,51 @@ hr {
   align-items: center;
   justify-content: center;
   gap: $control-gap;
+}
+
+// ADDED: the four movement controls as a real directional pad.
+//
+// As a wrapping flex row they never fitted one line and never could: the four
+// labels needed 514px inside the 500px field measure at the desktop scale and
+// 460px inside 280px at the mobile one, so the row wrapped 3+1 on desktop with
+// "Move left" alone beneath Up, Right and Down, and 2+2 below the breakpoint. A
+// directional control whose reading order contradicts the directions it moves is
+// misleading however clickable it is, and no viewport could fix it because the
+// group is capped by the container.
+//
+// A three-column track solves the measure and the meaning at once: each control
+// sits where its direction points, the centre cell stays empty, and the columns
+// are fractions of whatever the container gives so the same rule serves both
+// scales with no restatement at the breakpoint. The direction attribute
+// src/input/on-screen-controls.ts already writes is the placement key —
+// 0 up, 1 right, 2 down, 3 left, the encoding of `MOVE_ACTION_DIRECTIONS` — so
+// nothing new had to be emitted. The controls also paint the direction word
+// alone now, which is what lets a third of 280px hold one. DL-CONTROL-09.
+.on-screen-controls-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, auto);
+  justify-items: stretch;
+  align-items: center;
+
+  // `flex-wrap` and `justify-content` above do not apply to a grid container;
+  // `gap` does, and is inherited from the rule above.
+
+  > [data-direction="0"] {
+    grid-area: 1 / 2;
+  }
+
+  > [data-direction="1"] {
+    grid-area: 2 / 3;
+  }
+
+  > [data-direction="2"] {
+    grid-area: 3 / 2;
+  }
+
+  > [data-direction="3"] {
+    grid-area: 2 / 1;
+  }
 }
 
 .game-explanation {

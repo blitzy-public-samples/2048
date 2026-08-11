@@ -19,7 +19,11 @@ import {
   createTileMeshFactory,
   resolveBoardGeometry,
 } from '../../../src/render/tile-mesh-factory';
-import { applyTheme, getActiveTheme } from '../../../src/theme/themes';
+import {
+  applyTheme,
+  getActiveTheme,
+  getTheme,
+} from '../../../src/theme/themes';
 import { rampValue, tileRampConstants } from '../../../src/theme/tile-ramp';
 
 /** The first tile value strictly above the ramp, which is the super band. */
@@ -351,5 +355,53 @@ describe('the mesh factory measures a board size against the product ceiling', (
 
     factory.dispose();
     materials.destroy();
+  });
+});
+
+describe('the accessibility palettes withhold the glow from every value', () => {
+  it('declares the withholding on the palette, not on the theme id', () => {
+    // The renderer reads the flag; it knows nothing about which palettes exist.
+    expect(getTheme('default').palette.tileGlowSuppressed).toBe(false);
+    expect(getTheme('high-contrast').palette.tileGlowSuppressed).toBe(true);
+    expect(getTheme('colorblind-safe').palette.tileGlowSuppressed).toBe(true);
+  });
+
+  it.each(['high-contrast', 'colorblind-safe'] as const)(
+    'leaves the emissive term off for every ramp value under %s',
+    (themeId) => {
+      const cache = createTileMaterialCache({ theme: themeId });
+
+      for (
+        let exponent = tileRampConstants.exponentStart;
+        exponent <= tileRampConstants.limit;
+        exponent += 1
+      ) {
+        const material = cache.getTileMaterial(rampValue(exponent));
+
+        // An emissive term is ADDITIVE over the fill, and these palettes state
+        // their fills to carry a numeral at a ratio. Nothing may be added.
+        expect(material.emissiveIntensity).toBe(0);
+        expect(material.emissive.getHex()).toBe(0);
+      }
+
+      cache.destroy();
+    },
+  );
+
+  it('keeps the identity palette\u2019s glow on the values that carry one', () => {
+    const cache = createTileMaterialCache({ theme: 'default' });
+
+    // The band the stylesheet emits a shadow for: above the accent band, up to
+    // and including the ramp's last value.
+    for (const value of [128, 256, 512, 1024, 2048]) {
+      expect(cache.getTileMaterial(value).emissiveIntensity).toBeGreaterThan(0);
+    }
+
+    // And the accent band it does not, which `glowSuppressed` already gated.
+    for (const value of [8, 16, 32, 64]) {
+      expect(cache.getTileMaterial(value).emissiveIntensity).toBe(0);
+    }
+
+    cache.destroy();
   });
 });

@@ -78,6 +78,8 @@
 //   DL-SUMMARY-11  focus placement and the entry announcement delegated to the
 //                  router through the two switches and `announcement()`
 //   DL-SUMMARY-12  `lastSummary()` outranking `summary()` on this screen
+//   DL-SUMMARY-14  the error severity moved from the clipboard refusal to the
+//                  failure of both copy tiers
 //   DL-A11Y-06     the seed value's monospace treatment
 //   DL-A11Y-07     the copy confirmation delivered as text
 
@@ -241,6 +243,31 @@ const SEED_MISSING_METRIC = 'ui.runSummary.seed_missing';
 
 /** Counter raised per copy attempt, carrying the outcome and the path. */
 const COPY_METRIC = 'ui.runSummary.seed_copy';
+
+/**
+ * ADDED: renders a caught value as one reportable string.
+ *
+ * The clipboard refusal is reported at `warn`, and `warn` carries no error
+ * object, so the value's own message has to travel as a field or be lost — and
+ * losing it is what makes a recovered failure undiagnosable. Total: it throws
+ * for no input and answers for a value carrying no message at all.
+ * DL-SUMMARY-14.
+ */
+const describeThrown = (value: unknown): string => {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (value instanceof Error && value.message.length > 0) {
+    return `${value.name}: ${value.message}`;
+  }
+
+  try {
+    return String(value);
+  } catch {
+    return 'unreadable thrown value';
+  }
+};
 
 /** Counter raised per relic identifier the catalogue does not carry. */
 const RELIC_UNKNOWN_METRIC = 'ui.runSummary.relic_unknown';
@@ -1664,8 +1691,18 @@ export function createRunSummaryScreen(
         } catch (error) {
           // The refusal is reported and the selection path below is taken.
           // Decision DL-SUMMARY-05.
-          reporter.error('the clipboard refused the seed', error, {
+          //
+          // CHANGED: reported at `warn`, where it used to be reported at
+          // `error`. A clipboard refusal is the ORDINARY outcome outside a
+          // secure context or without the permission, and it is recovered from
+          // by the selection path immediately below — so an error severity
+          // claimed a failure the feature had already survived. The error's own
+          // message is carried in a field, because `warn` takes no error object;
+          // the tier-2 failure below is where the error severity now belongs.
+          // DL-SUMMARY-14.
+          reporter.log('warn', 'the clipboard refused the seed', {
             context: REPORT_CONTEXT,
+            reason: describeThrown(error),
           });
 
           if (stale()) {
@@ -1698,6 +1735,18 @@ export function createRunSummaryScreen(
       // instructs. Decision DL-SUMMARY-05.
       setCopyState('failed');
       announce(copy.copyFailed);
+
+      // ADDED: the error severity, moved here from the clipboard refusal above.
+      // BOTH tiers have now failed, so the seed genuinely did not reach the
+      // player — which is the outcome that warrants it. DL-SUMMARY-14.
+      reporter.log(
+        'error',
+        'the seed reached neither the clipboard nor a selection',
+        {
+          context: REPORT_CONTEXT,
+          selected,
+        },
+      );
       reporter.count(COPY_METRIC, {
         context: REPORT_CONTEXT,
         outcome: 'failed',

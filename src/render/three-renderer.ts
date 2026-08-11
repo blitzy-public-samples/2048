@@ -59,7 +59,7 @@
 //                                             src/render/number-only-renderer.ts
 //                                             carries
 //
-// Decisions: DL-THREE-01, DL-THREE-02, DL-THREE-03, DL-THREE-04
+// Decisions: DL-THREE-01, DL-THREE-02, DL-THREE-03, DL-THREE-04, DL-THREE-05
 // (docs/DECISION_LOG.md).
 
 import { Color, SRGBColorSpace, WebGLRenderer } from 'three';
@@ -960,6 +960,88 @@ export function createThreeRenderer(
     renderer.shadowMap.enabled = false;
 
     return renderer;
+  };
+
+  /**
+   * ADDED: returns the pixel-store unpack state to its initial values before
+   * the renderer that changed it lets go of the context.
+   *
+   * A `WebGLRenderer` releases its resources on `dispose()` but the CONTEXT
+   * belongs to the canvas and outlives it, carrying whatever unpack state was
+   * last written. Every numeral texture is a `CanvasTexture`, whose `flipY` is
+   * `true`, so uploading one leaves `UNPACK_FLIP_Y_WEBGL` set — and a
+   * replacement renderer built on the same canvas begins by uploading the two
+   * placeholder textures its state cache needs for `TEXTURE_2D_ARRAY` and
+   * `TEXTURE_3D`, for which the specification forbids both flips. That is two
+   * `INVALID_OPERATION: texImage3D` warnings on every re-mount, with no visual
+   * consequence and no deduplication.
+   *
+   * Restoring the state here rather than before the next construction keeps the
+   * fix with the instance that caused it: this renderer leaves the context as it
+   * found it, so any later consumer — this one re-mounting, or another entirely
+   * — starts from the initial state the specification promises.
+   *
+   * `forceContextLoss()` was rejected: it makes the canvas permanently unable to
+   * take another context, and this canvas is re-used for the life of the page.
+   * DL-THREE-05.
+   *
+   * @param renderer Renderer about to be disposed, or `null`.
+   */
+  const restoreUnpackState = (renderer: WebGLRenderer | null): void => {
+    if (renderer === null) {
+      return;
+    }
+
+    try {
+      // Guarded because a renderer double may implement no accessor, and a
+      // context taken away by the browser answers no constants.
+      const gl: unknown =
+        typeof renderer.getContext === 'function'
+          ? renderer.getContext()
+          : null;
+
+      if (gl === null || typeof gl !== 'object') {
+        return;
+      }
+
+      const state = gl as {
+        readonly UNPACK_FLIP_Y_WEBGL?: unknown;
+        readonly UNPACK_PREMULTIPLY_ALPHA_WEBGL?: unknown;
+        readonly pixelStorei?: unknown;
+      };
+
+      if (typeof state.pixelStorei !== 'function') {
+        return;
+      }
+
+      const pixelStorei = state.pixelStorei.bind(gl) as (
+        parameter: number,
+        value: boolean,
+      ) => void;
+
+      // A call on a context the browser has already taken away is a defined
+      // no-op, so the loss path needs no separate branch.
+      if (typeof state.UNPACK_FLIP_Y_WEBGL === 'number') {
+        pixelStorei(state.UNPACK_FLIP_Y_WEBGL, false);
+      }
+
+      if (typeof state.UNPACK_PREMULTIPLY_ALPHA_WEBGL === 'number') {
+        pixelStorei(state.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      }
+    } catch (error: unknown) {
+      // Never fatal: the reset is hygiene, and a renderer that cannot be asked
+      // for its context still has to be disposed.
+      reporter.onDiagnostic({
+        level: 'warning',
+        source: DIAGNOSTIC_SOURCE,
+        message:
+          'The pixel-store unpack state could not be reset before the ' +
+          'renderer was released; a later re-mount may warn about a ' +
+          'placeholder texture upload.',
+        error: describeRenderError(error),
+        thrown: error,
+      });
+    }
   };
 
   /** Writes one theme's page background into the clear colour. */
@@ -1952,6 +2034,10 @@ export function createThreeRenderer(
     materials = null;
     scene?.dispose();
     scene = null;
+
+    // ADDED: before the release, while this renderer still holds the context it
+    // wrote unpack state into. DL-THREE-05.
+    restoreUnpackState(webgl);
     webgl?.dispose();
     webgl = null;
     board = null;
@@ -2290,6 +2376,11 @@ export function createThreeRenderer(
     contextLosses = 0;
     contextRestores = 0;
     orphanedTriggers = 0;
+
+    // ADDED: as in `releaseGpuResources`, so a canvas this renderer is handing
+    // back carries the initial unpack state whichever teardown released it.
+    // DL-THREE-05.
+    restoreUnpackState(webgl);
     webgl?.dispose();
     webgl = null;
     board = null;

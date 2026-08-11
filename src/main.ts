@@ -153,14 +153,21 @@ import type {
 } from './run/run-state';
 import { RunStateStore } from './run/run-state-store';
 import type { StorageFailure } from './storage/local-storage-manager';
-import { LocalStorageManager } from './storage/local-storage-manager';
-import { KEYMAP_KEY, RUN_STATE_KEY } from './storage/storage-keys';
+import {
+  LocalStorageManager,
+  PARSE_ERROR_NAME,
+} from './storage/local-storage-manager';
+import {
+  KEYMAP_KEY,
+  PREFERENCES_KEY,
+  RUN_STATE_KEY,
+} from './storage/storage-keys';
 import {
   LEGACY_CONTROL_BINDINGS,
   mountOnScreenControls,
 } from './input/on-screen-controls';
 import type { MarkupControlBinding } from './input/on-screen-controls';
-import { getTheme, isThemeId } from './theme/themes';
+import { getTheme, isThemeId, setActiveTheme } from './theme/themes';
 import { motion } from './theme/tokens';
 import {
   createFocusManager,
@@ -211,10 +218,16 @@ import { createRunSummaryScreen } from './ui/screens/run-summary';
 import type { RunSummaryScreen } from './ui/screens/run-summary';
 import { createStageProgressScreen } from './ui/screens/stage-progress';
 import type { StageProgressScreen } from './ui/screens/stage-progress';
-import type { PreferenceStore, UiReporter } from './ui/a11y/settings';
+import type {
+  InitialUiPreferences,
+  PreferenceStore,
+  UiReporter,
+} from './ui/a11y/settings';
 import {
   createPreferenceStore,
+  deserializePreferences,
   reflectReducedMotion,
+  serializePreferences,
 } from './ui/a11y/settings';
 
 /**
@@ -1010,6 +1023,20 @@ export type BoardRenderMode = 'three' | 'number-only';
 const CONTEXT_LOST_FAILURE = 'context-lost';
 
 /**
+ * ADDED: the reason the number-only board is forced in place of a 2.5D board
+ * whose context was taken away.
+ *
+ * A NAMED CONSTANT rather than the literal it was, because it is now read as
+ * well as written: the reclaim below releases the force only when THIS is the
+ * force in force, so a number-only board standing in for a renderer that could
+ * not be constructed or could not be mounted is left exactly where it is. Those
+ * two are properties of the document and the build, and a context coming back
+ * says nothing about either. DL-MAIN-33.
+ */
+const CONTEXT_LOST_FORCE_REASON =
+  'the WebGL context was lost and not restored';
+
+/**
  * The WebGL failure the health check reports while a restored context's
  * resources could not be rebuilt.
  */
@@ -1563,6 +1590,16 @@ export function start(ownerDocument: Document): Application {
     // own refusal record. A store that threw keeps error. DL-STORE-07.
     const refused = !('thrown' in failure);
 
+    // ADDED: a stored value that did not PARSE belongs on the same tier as a
+    // refusal, for the same reason. The store handed the text over without
+    // complaint and the read recovered — `readJson` answered `null` and the
+    // reading module fell back — so nothing the product owned was lost and no
+    // storage fault occurred. Reporting it at `error` claimed one, once per
+    // corrupt value, on a path whose whole design is to survive corruption.
+    // The caught `SyntaxError` still travels as `thrown`. DL-STORE-09.
+    const unreadable = failure.error.name === PARSE_ERROR_NAME;
+    const recovered = refused || unreadable;
+
     // ONE ATTEMPT, ONE AUTHORITATIVE RECORD. A write to the run-state key is
     // reported by the layer ABOVE this one as well: src/run/run-state-store.ts
     // holds the envelope, its serialised size and the error, and reports that
@@ -1580,6 +1617,7 @@ export function start(ownerDocument: Document): Application {
       strategy: failure.strategy,
       quota: failure.error.quota,
       refused,
+      unreadable,
       reportedBy: supersededByRunState ? 'run/state' : STORAGE_SUBSYSTEM,
     });
 
@@ -1601,11 +1639,14 @@ export function start(ownerDocument: Document): Application {
     }
 
     reporter.onDiagnostic({
-      level: refused ? 'warning' : 'error',
+      level: recovered ? 'warning' : 'error',
       source: STORAGE_SUBSYSTEM,
-      message: refused
-        ? `Storage ${failure.operation} refused for ${failure.key}.`
-        : `Storage ${failure.operation} failed for ${failure.key}.`,
+      message: unreadable
+        ? `Storage ${failure.operation} found an unreadable value at ` +
+          `${failure.key}.`
+        : refused
+          ? `Storage ${failure.operation} refused for ${failure.key}.`
+          : `Storage ${failure.operation} failed for ${failure.key}.`,
       detail,
       error: failure.error,
     });
@@ -2030,12 +2071,58 @@ export function start(ownerDocument: Document): Application {
     onFrameEnd: frameLifecycle.onFrameEnd,
   });
 
+  /**
+   * ADDED: reads the persisted preference envelope, or nothing where none is
+   * stored.
+   *
+   * Guarded the way `readStoredKeymap` is: an ABSENT key is the first run and
+   * reaches no guard, while a payload that cannot be read yields the defaults
+   * for whatever could not be read and never throws. `deserializePreferences`
+   * omits a field it cannot read, so the store below validates and clamps only
+   * values that survived. DL-MAIN-34.
+   *
+   * @returns The starting values this session opens on.
+   */
+  const readStoredPreferences = (): InitialUiPreferences => {
+    const stored = storage.readJson(PREFERENCES_KEY);
+
+    if (stored === null || stored === undefined) {
+      return {};
+    }
+
+    return deserializePreferences(stored, createPreferenceSink(reporter));
+  };
+
   // The preference store, composed BEFORE the renderer, whose selection reads
   // the one effective number-only value it combines the choice and the force
   // into.
   const preferences = createPreferenceStore({
     reporter: createPreferenceSink(reporter),
+
+    // ADDED: the palette, motion setting, number-only choice, mute and volume
+    // an earlier session left behind, so a player who needs high contrast,
+    // reduced motion or the number-only board does not re-apply it on every
+    // load. DL-MAIN-34.
+    initial: readStoredPreferences(),
   });
+
+  /**
+   * ADDED: writes the envelope every time a persisted preference changes.
+   *
+   * DL-MAIN-34.
+   */
+  const persistPreferences = (): void => {
+    const written = storage.writeJson(
+      PREFERENCES_KEY,
+      serializePreferences(preferences.getPreferences()),
+    );
+
+    reporter.onCount({
+      name: 'ui.preferences.persist',
+      value: 1,
+      detail: Object.freeze({ written }),
+    });
+  };
 
   const reflectMotion = (reduced: boolean): void => {
     const written = reflectReducedMotion(
@@ -2055,6 +2142,13 @@ export function start(ownerDocument: Document): Application {
   // it.
   setReducedMotionOverride(preferences.reducedMotionOverride());
   reflectMotion(queryReducedMotion());
+
+  // ADDED: and so is the palette. The store holds the restored theme but
+  // activates nothing at construction, so without this the persisted palette
+  // would be reported by the settings dialog while the document carried the
+  // default one. Written here rather than inside the store so its constructor
+  // keeps performing no side effect. DL-MAIN-34.
+  setActiveTheme(preferences.getTheme());
 
   // The WebGL capability probe (implicit requirement I6). Consulted once,
   // before any renderer is built, and its result pushed into the store as a
@@ -2188,9 +2282,9 @@ export function start(ownerDocument: Document): Application {
       }),
     });
 
-    preferences.forceNumberOnlyMode(
-      'the WebGL context was lost and not restored',
-    );
+    // CHANGED: the literal moved to `CONTEXT_LOST_FORCE_REASON`, which the
+    // reclaim below matches against. DL-MAIN-33.
+    preferences.forceNumberOnlyMode(CONTEXT_LOST_FORCE_REASON);
 
     // Announced assertively: the board the player is reading has been replaced
     // by a different one.
@@ -2719,6 +2813,11 @@ export function start(ownerDocument: Document): Application {
   });
 
   const stopPreferences = preferences.subscribe((_snapshot, changed): void => {
+    // ADDED: every preference key is persisted, so the write is unconditional
+    // on WHICH one changed. The store notifies only on a real change, so this
+    // is one write per change and none per read. DL-MAIN-34.
+    persistPreferences();
+
     if (changed.includes('numberOnlyMode')) {
       // The board renderer follows the effective value, so number-only mode is
       // reached and left without a reload.
@@ -2736,6 +2835,101 @@ export function start(ownerDocument: Document): Application {
     setReducedMotionOverride(preferences.reducedMotionOverride());
     reflectMotion(preferences.isReducedMotion());
   });
+
+  /**
+   * ADDED: reclaims the 2.5D board when a context the browser took away
+   * genuinely comes back.
+   *
+   * The renderer installs its own `webglcontextrestored` handler and rebuilds
+   * from it, and for a context that returns inside the bounded wait that handler
+   * is the whole story. But `resolveLostContext` above ends the wait by swapping
+   * the renderer, and the swap DESTROYS the renderer and with it the listener it
+   * had installed — so a restoration arriving after the wait reached nobody,
+   * while the renderer's own parting message says drawing resumes when the
+   * context comes back. This listener is the one that is still there: it belongs
+   * to the composition root, is attached to the canvas rather than to a
+   * renderer, and outlives every swap.
+   *
+   * It acts ONLY on the context-loss force, so a number-only board serving a
+   * renderer that could not be constructed or mounted, or one the PLAYER chose,
+   * is left alone. Releasing the force is all it does: the preference commit
+   * reaches `applyRenderMode`, which mounts the 2.5D board, subscribes it and
+   * replays the last commit — the same path the settings toggle takes.
+   * DL-MAIN-33.
+   */
+  const stopContextReclaim = ((): (() => void) => {
+    const surface = ownerDocument.querySelector<HTMLCanvasElement>(
+      SELECTORS.boardCanvas,
+    );
+
+    // GUARDED, like every other lookup this root makes: a document that
+    // declares no canvas has no context to lose and none to reclaim.
+    if (surface === null || typeof surface.addEventListener !== 'function') {
+      return (): void => {
+        return;
+      };
+    }
+
+    const onRestored = (): void => {
+      if (preferences.getNumberOnlyForce().reason !== CONTEXT_LOST_FORCE_REASON) {
+        return;
+      }
+
+      // A wait can still be running where the restoration and the expiry raced;
+      // its verdict is now moot either way.
+      cancelContextRestoreWait();
+
+      // Cleared BEFORE the release, so the health refresh the swap performs
+      // reads a renderer with no failure standing against it.
+      contextRebuildFailed = false;
+
+      reporter.onCount({
+        name: 'render.context.reclaimed',
+        value: 1,
+        detail: Object.freeze({ webglLevel: support.level }),
+      });
+
+      reporter.onDiagnostic({
+        level: 'info',
+        source: 'main',
+        message:
+          'The WebGL context came back after the number-only board had taken ' +
+          'over, so the 2.5D board is being reclaimed.',
+        detail: Object.freeze({
+          graceMs: CONTEXT_RESTORE_GRACE_MS,
+          webglLevel: support.level,
+          correlationId: readCorrelationId(),
+        }),
+      });
+
+      preferences.releaseNumberOnlyForce();
+
+      // Reported only for a release that actually put the 2.5D board back: the
+      // mount can still fail, and `fallBackToNumberOnly` inside
+      // `applyRenderMode` re-forces the number-only board when it does.
+      if (selection.mode === 'three') {
+        // Assertive for the same reason the takeover was: the board the player
+        // is reading has been replaced by a different one.
+        announcer.announceText(
+          'The 3D board is available again and is now in use.',
+          ASSERTIVE_POLARITY,
+        );
+      }
+
+      refreshHealth('a WebGL context reclaimed after the fallback');
+    };
+
+    surface.addEventListener('webglcontextrestored', onRestored);
+
+    return (): void => {
+      if (typeof surface.removeEventListener !== 'function') {
+        return;
+      }
+
+      surface.removeEventListener('webglcontextrestored', onRestored);
+    };
+  })();
+
 
   // The screen router: the ONE owner of the effective input context, of the
   // screen state machine and of the settings dialog's shown state. Built
@@ -3136,7 +3330,13 @@ export function start(ownerDocument: Document): Application {
       charges: taken?.charges,
     });
 
-    announcer.announceText(`Stage ${selection.stageIndex + 1}.`);
+    // NO STAGE LINE IS ANNOUNCED HERE. `run.selectReward` above advances the
+    // run, which drives `stage:start`, and the router announces the incoming
+    // stage from `announcement(context)` — a fuller line than the bare
+    // `Stage N.` this used to add. That bare line was queued in the same batch
+    // as the pickup above and, one tick later, replaced it on the region: the
+    // acquisition AAP §0.6.4 requires to be announced was readable for about
+    // two milliseconds. DL-LIVE-05.
 
     return selection;
   }
@@ -3839,6 +4039,21 @@ export function start(ownerDocument: Document): Application {
 
   loop.start();
 
+  // ADDED: the persisted best score is painted BEFORE the first screen is
+  // presented.
+  //
+  // The two score outlets live in the page heading and are visible on every
+  // screen, but the HUD writes them only on a commit or a context refresh — and
+  // the run-start state precedes both, so a returning player was shown `BEST 0`
+  // over a best score that was on disk the whole time.
+  //
+  // `updateBestScore` is used rather than a full `update`, because a full write
+  // would also write the score and so compute a delta against it. The value is
+  // handed over exactly as `getBestScore()` answers — the raw stored STRING when
+  // a value is present and the number `0` when none is — so the frozen accessor
+  // contract is read, not reinterpreted. DL-MAIN-32.
+  hud.scorePanel.updateBestScore(storage.getBestScore());
+
   // The state machine of AAP Figure 6, entered at `INITIAL_SCREEN` before the
   // board opens below.
   const entered = router.start();
@@ -4023,6 +4238,10 @@ export function start(ownerDocument: Document): Application {
       frameSubscription.remove();
       stopMotion();
       stopPreferences();
+
+      // ADDED: released with the other root-owned subscriptions, so a disposed
+      // application leaves no canvas listener behind. DL-MAIN-33.
+      stopContextReclaim();
       controls.unmount();
       parallelBoard.unmount();
       input.detach();

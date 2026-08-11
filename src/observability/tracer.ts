@@ -33,7 +33,7 @@
 //
 // Decisions: DL-TRACE-01, DL-TRACE-02, DL-TRACE-03, DL-TRACE-04, DL-TRACE-05,
 // DL-TRACE-06, DL-TRACE-07, DL-TRACE-08, DL-TRACE-09, DL-TRACE-10,
-// DL-TRACE-11, DL-TRACE-12 (docs/DECISION_LOG.md).
+// DL-TRACE-11, DL-TRACE-12, DL-TRACE-13 (docs/DECISION_LOG.md).
 
 import type {
   EngineEventListener,
@@ -1783,10 +1783,14 @@ export class Tracer {
   }
 
   /**
-   * Reports a caller anomaly: a rejected argument, a span ended twice or after
-   * a reset, a span ended while a child was open, a frame ended with no frame
-   * span open, a stage end with no stage span open, and a commit with no turn
-   * span open that no lifecycle path accounts for.
+   * Reports a caller anomaly: a rejected argument, a span ended twice, a span
+   * ended while a child was open, a frame ended with no frame span open, a
+   * stage end with no stage span open, and a commit with no turn span open that
+   * no lifecycle path accounts for.
+   *
+   * CHANGED: a span ended after a reset is no longer among them; it reaches
+   * `reportExpected` instead, because `Tracer.reset` is what invalidated it.
+   * DL-TRACE-13.
    *
    * @param message What was observed.
    * @param fields Structured fields describing it.
@@ -2220,7 +2224,16 @@ export class Tracer {
       // Read BEFORE `ended`: a discarded span is also closed, and the two
       // states are reported differently.
       if (span.invalidated) {
-        this.reportAnomaly('span discarded by reset was ended', {
+        // CHANGED: reported as EXPECTED, where it used to be reported as an
+        // anomaly. A span is invalidated by `Tracer.reset` and by nothing else,
+        // so its later end is the guaranteed consequence of this tracer's own
+        // reset rather than a condition the caller produced — and a reset taken
+        // from inside an open span is ordinary: starting a run rotates the
+        // correlation identifier from within the `input.dispatch` span that
+        // requested it, so every run start raised a warning and lifted the
+        // anomaly count by one. This is the same distinction the `continue`
+        // commit already draws. DL-TRACE-13.
+        this.reportExpected('span discarded by reset was ended', {
           span: span.name,
           spanId: span.id,
         });

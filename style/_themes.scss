@@ -292,6 +292,25 @@ $themes: (
   );
 }
 
+// ADDED: the same tier accent, composited over the palette's dark tile surface.
+//
+// The pure accent sits on the reward card, whose surface IS that dark colour, so
+// it reads there at 6.7:1 or better. The relic tray sits on the page instead,
+// where the identical colour reads at 1.18:1 — visible only as an absence. This
+// variant is the accent seen against the surface it was designed against, so one
+// rarity vocabulary serves both surfaces: the hue order is preserved and every
+// tier clears the 3:1 asked of information-bearing non-text (WCAG 1.4.11).
+// DL-THEME-10.
+$rarity-plate-weight: 55% !default;
+
+@function ramp-rarity-plate($palette, $ordinal) {
+  @return color.mix(
+    palette-value($palette, tile-super),
+    ramp-rarity($palette, $ordinal),
+    $rarity-plate-weight
+  );
+}
+
 // The accent for one exponent, or `false` where the palette declares none.
 @function ramp-accent($palette, $exponent) {
   $accents: palette-value($palette, tile-accents);
@@ -425,9 +444,14 @@ $themes: (
     $exponent: $exponent + 1;
   }
 
-  // One accent per rarity tier, from `ramp-rarity`.
+  // One accent per rarity tier, from `ramp-rarity`, plus the plated variant a
+  // light surface reads. DL-THEME-10.
   @each $tier in $rarity-tiers {
     --theme-rarity-#{"" + $tier}: #{ramp-rarity(
+        $palette,
+        list.index($rarity-tiers, $tier)
+      )};
+    --theme-rarity-#{"" + $tier}-plate: #{ramp-rarity-plate(
         $palette,
         list.index($rarity-tiers, $tier)
       )};

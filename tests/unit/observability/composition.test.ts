@@ -2477,21 +2477,63 @@ describe('the storage sink separates a refusal from a failure', () => {
     ).toEqual([]);
   });
 
-  it('still reports a genuine parse failure at error, worded as a failure', () => {
+  it('reports a recovered parse failure at warn, as an unreadable value', () => {
     // Well under the ceiling, so the size gate cannot fire and the value
-    // reaches `JSON.parse`, which throws. That IS a failure.
+    // reaches `JSON.parse`, which throws.
+    //
+    // UPDATED with DL-STORE-09, which names this a THIRD category the original
+    // two did not cover: the store neither refused nor failed — it handed the
+    // text over without complaint and the READ recovered, because `readJson`
+    // answers `null` and every caller has a documented fallback. It was
+    // reported at `error`, claiming a failure on the one path whose whole
+    // design is to survive corruption. A store that genuinely throws still
+    // reports at `error`, which the case below holds.
     window.localStorage.setItem('gameState', '{"grid":');
 
     application = start(document);
 
-    const failures = storageRecords().filter((record) =>
-      record.message.includes('failed'),
+    // Not worded as a failure, and not worded as a refusal either.
+    expect(
+      storageRecords().filter((record) => record.message.includes('failed')),
+    ).toEqual([]);
+
+    const unreadable = storageRecords().filter((record) =>
+      record.message.includes('unreadable'),
     );
 
-    expect(failures).toHaveLength(1);
-    expect(failures[0]?.level).toBe('error');
-    expect(failures[0]?.message).toBe('Storage read failed for gameState.');
-    expect(failures[0]?.fields?.refused).toBe(false);
+    expect(unreadable).toHaveLength(1);
+    expect(unreadable[0]?.level).toBe('warn');
+    expect(unreadable[0]?.message).toBe(
+      'Storage read found an unreadable value at gameState.',
+    );
+    expect(unreadable[0]?.fields?.refused).toBe(false);
+    expect(unreadable[0]?.fields?.unreadable).toBe(true);
+
+    // The cause survives in the bounded description, where it used to be
+    // flattened onto "Unknown storage error."
+    expect(unreadable[0]?.error?.name).toBe('SyntaxError');
+    expect(unreadable[0]?.error?.message).toContain('not valid JSON');
+  });
+
+  it('reports one record for one unreadable value, however often it is read', () => {
+    // Two consumers read the run-state key at boot — the identity resolver and
+    // the loader — and the failed parse used to drop its memo, so one corrupt
+    // value produced one record per read. DL-STORE-09.
+    window.localStorage.setItem(namespacedKey('runState'), '{"schemaVersion":');
+
+    application = start(document);
+
+    const unreadable = storageRecords().filter(
+      (record) =>
+        record.message.includes('unreadable') &&
+        String(record.fields?.key).includes('runState'),
+    );
+
+    expect(unreadable).toHaveLength(1);
+
+    // The boot itself performs the two reads, so one record for the pair is
+    // already the proof: before the memo remembered the failure it produced
+    // two.
   });
 
   it('fabricates no error for a run refused on its size', () => {

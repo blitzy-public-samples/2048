@@ -5,6 +5,13 @@
 // the 0% keyframe, peaks at the offset the overshoot sits on, and is back at
 // rest at 100%.
 //
+// The punch is drawn on the camera's PROJECTION — a transient widening of the
+// frustum through `zoom` — wherever the camera carries one, and on a view-axis
+// displacement only where it does not. src/render/scene.ts builds an
+// `OrthographicCamera`, whose projection has no perspective divide, so a
+// displacement along that camera's own view axis leaves the projected image
+// identical and reached the screen as nothing at all. Decision DL-CAMERA-04.
+//
 // Punch magnitude is linear in the tile-ramp exponent — the normalisation the
 // stylesheet interpolates the tile fill along, which src/theme/tile-ramp.ts
 // computes as `goldPercent`. A 2048 merge displaces the camera further than a
@@ -35,7 +42,7 @@ import type {
 import { Vector3 } from 'three';
 
 import { rampExponent, tileRampConstants } from '../theme/tile-ramp';
-import { depthScale, motion } from '../theme/tokens';
+import { depthScale, fieldWidth, motion } from '../theme/tokens';
 import type { Tween, TweenInterpolator, TweenStop } from './animations';
 import { createTween, easingFor, mix } from './animations';
 import type { RenderDetail, RenderReporter } from './webgl-support';
@@ -82,6 +89,8 @@ const INVALID_OPTION_METRIC = 'render.camera.option.invalid';
 
 const PREFERENCE_CLEARED_METRIC = 'render.camera.preference.cleared';
 
+const ZOOM_CLAMPED_METRIC = 'render.camera.zoom.clamped';
+
 const PUNCH_TWEEN_NAME = 'camera-punch';
 
 const SHAKE_TWEEN_NAME = 'camera-shake';
@@ -112,6 +121,26 @@ const DEFAULT_MAX_CONCURRENT_EFFECTS = 8;
 
 const DEFAULT_MAX_OFFSET_FACTOR = 4;
 
+/**
+ * Peak share of the rest zoom a full-intensity punch adds to the frustum, as
+ * arithmetic on the geometry and depth tokens of src/theme/tokens.ts: the
+ * board's own extrusion depth over the board measure.
+ *
+ * src/render/scene.ts frames the drawn board with `sceneOptics.margin` of
+ * clearance and the field mesh it draws is `fieldWidth` across, so widening the
+ * frustum by this share reveals more of the same field and narrowing it by any
+ * perceptible share would crop the outer tile row. The punch therefore widens.
+ */
+const DEFAULT_PUNCH_ZOOM = depthScale.board / fieldWidth;
+
+/** Multiple of the punch's own peak the composed zoom share is confined to. */
+const DEFAULT_MAX_ZOOM_FACTOR = 2;
+
+const NO_ZOOM_SHARE = 0;
+
+/** The rest zoom assumed for a camera whose projection carries none. */
+const UNIT_ZOOM = 1;
+
 const LOCAL_RIGHT: Vector3Like = Object.freeze({ x: 1, y: 0, z: 0 });
 
 const LOCAL_UP: Vector3Like = Object.freeze({ x: 0, y: 1, z: 0 });
@@ -136,6 +165,34 @@ function clampIntensity(intensity: number): number {
   }
 
   return Math.min(Math.max(intensity, MIN_INTENSITY), MAX_INTENSITY);
+}
+
+/**
+ * The projection members a camera exposes where it carries a zoom.
+ *
+ * `OrthographicCamera` and `PerspectiveCamera` both satisfy it; the `Camera`
+ * base class does not.
+ */
+interface ZoomableProjection {
+  zoom: number;
+  updateProjectionMatrix(): void;
+}
+
+/**
+ * Reads a camera's zoom-bearing projection.
+ *
+ * @param camera Camera to read.
+ * @returns The projection, or `null` for a camera carrying no usable zoom.
+ */
+function readZoomableProjection(camera: Camera): ZoomableProjection | null {
+  const candidate = camera as unknown as Partial<ZoomableProjection>;
+
+  return typeof candidate.zoom === 'number' &&
+    Number.isFinite(candidate.zoom) &&
+    candidate.zoom > NO_ZOOM_SHARE &&
+    typeof candidate.updateProjectionMatrix === 'function'
+    ? (candidate as ZoomableProjection)
+    : null;
 }
 
 function resolveExponent(value: number): number {
@@ -189,7 +246,20 @@ export interface CameraRestTransform {
  * defaults to a value derived from `depthScale` of src/theme/tokens.ts.
  */
 export interface CameraEffectsOptions {
+  /**
+   * Displacement a full-intensity punch applies along the camera's view axis,
+   * which reaches the image only under a camera carrying no zoom. It also
+   * derives the default `maxOffsetDistance` the composed displacement — the
+   * shake's included — is confined to.
+   */
   readonly punchDistance?: number;
+
+  /**
+   * Share of the rest zoom a full-intensity punch adds to the frustum, which is
+   * what a punch is drawn with wherever the camera's projection carries a zoom.
+   * Defaults to `DEFAULT_PUNCH_ZOOM`.
+   */
+  readonly punchZoom?: number;
   readonly shakeDistance?: number;
 
   /**
@@ -232,9 +302,18 @@ export interface CameraEffectStats {
   readonly evictedEffects: number;
   readonly clampedOffsets: number;
 
+  /** Composed zoom shares that were confined to `maxZoomShare`. */
+  readonly clampedZooms: number;
+
   /** Steps whose delta was rejected and treated as zero. */
   readonly invalidDeltas: number;
   readonly offsetDistance: number;
+
+  /**
+   * Share of the rest zoom written into the projection by the last step, and
+   * zero for a camera carrying no zoom.
+   */
+  readonly zoomShare: number;
 }
 
 /**
@@ -277,6 +356,12 @@ interface ActiveEffect {
   readonly kind: CameraEffectKind;
   readonly tween: Tween<CameraOffsetValue>;
   readonly contribute: (target: Vector3) => void;
+
+  /**
+   * This effect's share of the composed zoom widening, omitted by an effect
+   * that displaces the camera alone.
+   */
+  readonly contributeZoom?: () => number;
 }
 
 function reportRejectedOption(
@@ -345,6 +430,15 @@ export function createCameraEffects(
     reporter,
   );
 
+  const punchZoom = resolveOption(
+    options.punchZoom,
+    DEFAULT_PUNCH_ZOOM,
+    'punchZoom',
+    reporter,
+  );
+
+  const maxZoomShare = punchZoom * DEFAULT_MAX_ZOOM_FACTOR;
+
   const shakeDistance = resolveOption(
     options.shakeDistance,
     depthScale.bevel,
@@ -401,6 +495,10 @@ export function createCameraEffects(
   const restPosition = camera.position.clone();
   const restQuaternion = camera.quaternion.clone();
 
+  // The projection the punch is drawn through, and `null` for a camera carrying
+  // no zoom, which leaves the punch on the view-axis displacement below.
+  const projection = readZoomableProjection(camera);
+
   const forwardAxis = new Vector3();
   const rightAxis = new Vector3();
   const upAxis = new Vector3();
@@ -409,6 +507,13 @@ export function createCameraEffects(
   const appliedOffset = new Vector3();
 
   const composed = new Vector3();
+
+  let restZoom = projection === null ? UNIT_ZOOM : projection.zoom;
+
+  // Zoom share written into the projection by the last step.
+  let appliedZoomShare = NO_ZOOM_SHARE;
+
+  let composedZoomShare = NO_ZOOM_SHARE;
 
   const effects: ActiveEffect[] = [];
 
@@ -424,6 +529,7 @@ export function createCameraEffects(
   let clampedDurations = 0;
   let evictedEffects = 0;
   let clampedOffsets = 0;
+  let clampedZooms = 0;
   let invalidDeltas = 0;
   let deltaAnnounced = false;
 
@@ -433,11 +539,38 @@ export function createCameraEffects(
     upAxis.copy(LOCAL_UP).applyQuaternion(restQuaternion);
   };
 
+  /**
+   * Writes `restZoom` widened by `composedZoomShare` into the projection, and
+   * only where the value it resolves to differs from the one standing.
+   *
+   * The share WIDENS the frustum: `zoom` divides the frustum's extents, so a
+   * share below one enlarges the view and holds the drawn board inside the
+   * field src/render/scene.ts frames.
+   */
+  const writeZoom = (): void => {
+    if (projection === null) {
+      return;
+    }
+
+    const next = restZoom / (UNIT_ZOOM + composedZoomShare);
+
+    appliedZoomShare = composedZoomShare;
+
+    if (projection.zoom === next || !Number.isFinite(next)) {
+      return;
+    }
+
+    projection.zoom = next;
+    projection.updateProjectionMatrix();
+  };
+
   const applyRest = (): void => {
     camera.position.copy(restPosition);
     camera.quaternion.copy(restQuaternion);
     composed.set(NO_DISPLACEMENT, NO_DISPLACEMENT, NO_DISPLACEMENT);
     appliedOffset.set(NO_DISPLACEMENT, NO_DISPLACEMENT, NO_DISPLACEMENT);
+    composedZoomShare = NO_ZOOM_SHARE;
+    writeZoom();
   };
 
   /** Writes `rest + composed` onto the camera. */
@@ -445,7 +578,8 @@ export function createCameraEffects(
     if (
       composed.x === NO_DISPLACEMENT &&
       composed.y === NO_DISPLACEMENT &&
-      composed.z === NO_DISPLACEMENT
+      composed.z === NO_DISPLACEMENT &&
+      composedZoomShare === NO_ZOOM_SHARE
     ) {
       applyRest();
 
@@ -455,6 +589,7 @@ export function createCameraEffects(
     camera.position.copy(restPosition).add(composed);
     camera.quaternion.copy(restQuaternion);
     appliedOffset.copy(composed);
+    writeZoom();
   };
 
   const clampComposed = (): void => {
@@ -476,14 +611,34 @@ export function createCameraEffects(
     });
   };
 
+  /** Confines the composed zoom share to `maxZoomShare`. */
+  const clampComposedZoom = (): void => {
+    if (composedZoomShare <= maxZoomShare) {
+      return;
+    }
+
+    const requested = composedZoomShare;
+
+    composedZoomShare = maxZoomShare;
+    clampedZooms += 1;
+    reporter.onCount({
+      name: ZOOM_CLAMPED_METRIC,
+      value: 1,
+      detail: Object.freeze({ requested, applied: maxZoomShare }),
+    });
+  };
+
   const applyComposed = (): void => {
     composed.set(NO_DISPLACEMENT, NO_DISPLACEMENT, NO_DISPLACEMENT);
+    composedZoomShare = NO_ZOOM_SHARE;
 
     for (const effect of effects) {
       effect.contribute(composed);
+      composedZoomShare += effect.contributeZoom?.() ?? NO_ZOOM_SHARE;
     }
 
     clampComposed();
+    clampComposedZoom();
     writeTransform();
   };
 
@@ -647,19 +802,41 @@ export function createCameraEffects(
       { reducedMotion: false, reporter },
     );
 
+    // The impulse reaches the image through the PROJECTION where the camera
+    // carries a zoom, and through the view axis where it does not. Displacing
+    // an orthographic camera along its own view axis moves nothing on screen:
+    // that projection has no perspective divide, so the offset leaves the
+    // projected image identical. The tween is shared by both paths, so the
+    // impulse shape, the intensity scale and the reduced-motion gate are the
+    // same either way.
     admit({
       kind: 'punch',
       tween,
+
       contribute: (target: Vector3): void => {
+        if (projection !== null) {
+          return;
+        }
+
         target.addScaledVector(forwardAxis, tween.value().displacement);
       },
+
+      contributeZoom:
+        projection === null
+          ? undefined
+          : (): number => (tween.value().displacement / punchDistance) *
+              punchZoom,
     });
 
     punches += 1;
     reporter.onCount({
       name: PUNCH_METRIC,
       value: 1,
-      detail: Object.freeze({ intensity: applied, peak }),
+      detail: Object.freeze({
+        intensity: applied,
+        peak,
+        peakZoomShare: projection === null ? NO_ZOOM_SHARE : punchZoom * applied,
+      }),
     });
 
     return true;
@@ -787,6 +964,14 @@ export function createCameraEffects(
       restQuaternion.copy(input.quaternion);
     }
 
+    // The rest zoom is re-read the way the rest position is: from the live
+    // value, less whatever the last step widened it by. src/render/scene.ts
+    // rewrites the frustum on a resize and a reframe, so the value standing
+    // here is the one the scene now wants.
+    if (projection !== null) {
+      restZoom = projection.zoom * (UNIT_ZOOM + appliedZoomShare);
+    }
+
     refreshAxes();
     applyComposed();
   };
@@ -827,8 +1012,10 @@ export function createCameraEffects(
         clampedDurations,
         evictedEffects,
         clampedOffsets,
+        clampedZooms,
         invalidDeltas,
         offsetDistance: appliedOffset.length(),
+        zoomShare: appliedZoomShare,
       }),
 
     resetStats: (): void => {
@@ -839,6 +1026,7 @@ export function createCameraEffects(
       clampedDurations = 0;
       evictedEffects = 0;
       clampedOffsets = 0;
+      clampedZooms = 0;
       invalidDeltas = 0;
       deltaAnnounced = false;
     },

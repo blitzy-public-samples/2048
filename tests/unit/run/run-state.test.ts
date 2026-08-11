@@ -59,6 +59,7 @@ import { deriveCorrelationId } from '../../../src/observability/logger';
 import * as runStateModule from '../../../src/run/run-state';
 import {
   MAX_PERSISTED_RELICS,
+  MAX_PERSISTED_STAGE_INDEX,
   MAX_SUPPORTED_BOARD_SIZE,
   NOOP_RUN_REPORTER,
   RUN_STATE_SCHEMA_VERSION,
@@ -1149,8 +1150,50 @@ describe('describeRunStateProblems names the offending field', () => {
     payload.stageIndex = '0';
 
     expect(describeRunStateProblems(payload)).toContain(
-      'stageIndex is not a non-negative integer'
+      `stageIndex is not an integer from 0 through ${MAX_PERSISTED_STAGE_INDEX}`
     );
+  });
+
+  // DL-RUN-07. A stage index far above the ladder is a corrupt payload, and
+  // DL-RUN-04 governs what happens to one: a payload breaking a declared bound
+  // is refused whole, never clamped to fit. The bound is inclusive, so the
+  // last accepted value and the first refused one are pinned as a pair —
+  // asserting only the refusal would pass an off-by-one bound just as happily.
+  it('refuses a stage index above the declared bound and accepts the bound', () => {
+    const atBound = loosenEnvelope();
+
+    atBound.stageIndex = MAX_PERSISTED_STAGE_INDEX;
+
+    expect(describeRunStateProblems(atBound)).toEqual([]);
+    expect(isRunStateShape(atBound)).toBe(true);
+
+    const pastBound = loosenEnvelope();
+
+    pastBound.stageIndex = MAX_PERSISTED_STAGE_INDEX + 1;
+
+    expect(describeRunStateProblems(pastBound)).toContain(
+      `stageIndex is not an integer from 0 through ${MAX_PERSISTED_STAGE_INDEX}`
+    );
+    expect(isRunStateShape(pastBound)).toBe(false);
+  });
+
+  // The same bound on the round's own copy of the index. QA reached a rendered
+  // "Stage 100000" through the envelope, so both carriers of the field are
+  // pinned rather than only the one the report happened to travel through.
+  it('refuses a round whose stage index is above the declared bound', () => {
+    const payload = {
+      ...loosenEnvelope(),
+      pendingReward: {
+        stageIndex: MAX_PERSISTED_STAGE_INDEX + 1,
+        offeredRelicIds: ['a'],
+      },
+    };
+
+    expect(describeRunStateProblems(payload)).toContain(
+      'pendingReward.stageIndex is not an integer from 0 through ' +
+        String(MAX_PERSISTED_STAGE_INDEX)
+    );
+    expect(isRunStateShape(payload)).toBe(false);
   });
 
   it('names stageGoal.kind when the kind is not a declared one', () => {

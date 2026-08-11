@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   LocalStorageManager,
+  PARSE_ERROR_NAME,
   probeWebStorage,
 } from '../../../src/storage/local-storage-manager';
 import type {
@@ -764,11 +765,19 @@ describe('getGameState() — guarded parse (L52-L55)', () => {
     expect(failure.key).toBe(GAME_STATE_KEY);
     expect(failure.strategy).toBe('injected');
 
-    // `SyntaxError` is not one of the names this module reports, so the
-    // allowlist substitutes its own and the parser's text — which can quote
-    // the stored value — never reaches the description.
-    expect(failure.error.name).toBe('StorageError');
-    expect(failure.error.message).toBe('Unknown storage error.');
+    // DL-STORE-09. The name is now reported rather than flattened: a value
+    // that did not parse is the one storage fault a corrupted origin actually
+    // produces, and "StorageError: Unknown storage error." named neither its
+    // cause nor its consequence.
+    expect(failure.error.name).toBe(PARSE_ERROR_NAME);
+    expect(failure.error.name).toBe('SyntaxError');
+    expect(failure.error.message).toBe(
+      'The stored value is not valid JSON; it was ignored.'
+    );
+
+    // Unchanged and the reason the description is a substitution at all: the
+    // parser's own text can quote the stored value, so the bounded message
+    // stands in for it. Reporting the name does not relax this.
     expect(failure.error.message).not.toContain(corrupt.text);
     expect(failure.error.quota).toBe(false);
 
@@ -1100,10 +1109,43 @@ describe('generic namespaced API — the run-state persistence port', () => {
     expect(collector.failures).toHaveLength(1);
     expect(collector.failures[0].operation).toBe('read');
     expect(collector.failures[0].key).toBe(RUN_STATE_KEY);
-    expect(collector.failures[0].error.name).toBe('StorageError');
+    // DL-STORE-09: the parse failure keeps its own name here too.
+    expect(collector.failures[0].error.name).toBe(PARSE_ERROR_NAME);
     expect(collector.failures[0].error.message).not.toContain(corrupt.text);
     expect(collector.failures[0].thrown).toBeInstanceOf(SyntaxError);
     expect(readEntry(store, RUN_STATE_KEY)).toBe(corrupt.text);
+  });
+
+  // DL-STORE-09. The parse memo is keyed on the raw text, and a failure is now
+  // memoised against it rather than dropped — so two consumers reading one
+  // unreadable key file one report between them instead of one report each.
+  // QA saw the boot's own two reads of the run-state key produce the message
+  // twice; this is that behaviour at the module that owns the memo.
+  it('reports one failure however often an unreadable value is read', () => {
+    const store = new MemoryStorage();
+    const corrupt = CORRUPT_TEXTS[2];
+
+    store.setItem(RUN_STATE_KEY, corrupt.text);
+
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: store,
+      reporter: collector,
+    });
+
+    expect(manager.readJson(RUN_STATE_KEY)).toBeNull();
+    expect(manager.readJson(RUN_STATE_KEY)).toBeNull();
+    expect(manager.readJson(RUN_STATE_KEY)).toBeNull();
+
+    expect(collector.failures).toHaveLength(1);
+    expect(collector.failures[0].error.name).toBe(PARSE_ERROR_NAME);
+
+    // A different unreadable value is a different failure: the memo must not
+    // silence the next corruption, only repeat readings of the same one.
+    store.setItem(RUN_STATE_KEY, CORRUPT_TEXTS[0].text);
+
+    expect(manager.readJson(RUN_STATE_KEY)).toBeNull();
+    expect(collector.failures).toHaveLength(2);
   });
 
   it('writeJson to RUN_STATE_KEY leaves both frozen keys intact', () => {

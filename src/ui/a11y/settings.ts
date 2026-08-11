@@ -7,8 +7,11 @@
  * appended callback list iterated synchronously — with per-listener error
  * isolation added.
  *
- * Preferences are held in memory for the session: this module reads and writes
- * no storage and declares no storage key.
+ * This module reads and writes no storage and declares no storage key. It
+ * declares the SHAPE preferences are persisted in — `PreferencesPayload`, with
+ * `serializePreferences` and `deserializePreferences` as the pure pair either
+ * side of it — and the composition root performs the I/O under the key
+ * src/storage/storage-keys.ts mints.
  *
  * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
  * this module's area enumerated:
@@ -40,9 +43,13 @@
  *   TR-SETTINGS-08  target-only row               `isValidVolume`,
  *                                                 `clampVolume` and
  *                                                 `NumberOnlyForce`
+ *   TR-SETTINGS-09  target-only row               `PreferencesPayload`,
+ *                                                 `serializePreferences` and
+ *                                                 `deserializePreferences`
  *
  * Decisions: DL-SETTINGS-01, DL-SETTINGS-02, DL-SETTINGS-03, DL-SETTINGS-04,
- * DL-SETTINGS-05, DL-THEME-01, DL-THEME-02 (docs/DECISION_LOG.md).
+ * DL-SETTINGS-05, DL-SETTINGS-06, DL-THEME-01, DL-THEME-02
+ * (docs/DECISION_LOG.md).
  */
 
 import {
@@ -916,6 +923,178 @@ export interface InitialUiPreferences {
   readonly numberOnlyMode?: boolean;
   readonly muted?: boolean;
   readonly volume?: number;
+}
+
+/**
+ * ADDED: schema version carried by the persisted preference envelope.
+ *
+ * Present from the envelope's first version, so a later shape change is
+ * DETECTABLE at load instead of inferred — the gap implicit requirement I5
+ * names for the board snapshot, closed here on the day this envelope is
+ * minted. DL-SETTINGS-06.
+ */
+export const PREFERENCES_SCHEMA_VERSION = 1;
+
+/**
+ * ADDED: the persisted shape. `serializePreferences` produces it and
+ * `deserializePreferences` reads it; neither touches storage, so this module
+ * still declares no storage key and performs no I/O — the composition root
+ * owns both. DL-SETTINGS-06.
+ */
+export interface PreferencesPayload {
+  readonly schemaVersion: number;
+  readonly motionSetting: MotionSetting;
+  readonly theme: ThemeId;
+
+  /**
+   * The player's number-only CHOICE, never the effective value. A session that
+   * fell back to the number-only board because WebGL was unavailable must not
+   * record that fallback as a preference, or a later session with a working
+   * context would open in number-only mode with nothing explaining why and no
+   * force to release.
+   */
+  readonly numberOnlyMode: boolean;
+  readonly muted: boolean;
+  readonly volume: number;
+}
+
+/**
+ * ADDED: projects the live snapshot onto the persisted envelope.
+ *
+ * @param preferences Snapshot to project, as `getPreferences()` returns it.
+ * @returns The frozen envelope to persist.
+ */
+export function serializePreferences(
+  preferences: UiPreferences,
+): PreferencesPayload {
+  return Object.freeze({
+    schemaVersion: PREFERENCES_SCHEMA_VERSION,
+    motionSetting: preferences.motionSetting,
+    theme: preferences.theme,
+
+    // The CHOICE, not the effective value — see `PreferencesPayload`.
+    numberOnlyMode: preferences.numberOnlyChosen,
+    muted: preferences.muted,
+    volume: preferences.volume,
+  });
+}
+
+/**
+ * ADDED: reads a persisted envelope into starting values.
+ *
+ * Tolerant by construction, in the manner the run-state loader is: a payload
+ * of the wrong shape, one carrying a version this build cannot read, or one
+ * holding a field of the wrong type yields the defaults for whatever it could
+ * not read and NEVER throws. A field that survives is handed to
+ * `createPreferenceStore`, which validates and clamps it a second time and
+ * reports what it repairs — so this function omits rather than substitutes.
+ *
+ * @param payload Parsed value read from storage, of unknown shape.
+ * @param reporter Sink every rejection is reported through.
+ * @returns Starting values for `createPreferenceStore`, empty where nothing
+ *   could be read.
+ */
+export function deserializePreferences(
+  payload: unknown,
+  reporter: UiReporter = NOOP_UI_REPORTER,
+): InitialUiPreferences {
+  const sink = createSafeUiReporter(reporter);
+
+  if (
+    typeof payload !== 'object' ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    sink.log('warn', 'stored preferences were not an object; defaults used', {
+      received: payload === null ? 'null' : typeof payload,
+    });
+    sink.count('ui.preferences.payload_rejected', { cause: 'shape' });
+
+    return {};
+  }
+
+  const record = payload as Record<string, unknown>;
+  const version: unknown = record['schemaVersion'];
+
+  // An UNKNOWN version is refused whole rather than read field by field: a
+  // payload written by a build this one does not know may spell a field the
+  // same way and mean something else by it.
+  if (version !== PREFERENCES_SCHEMA_VERSION) {
+    sink.log('warn', 'stored preferences carried an unreadable version', {
+      expected: PREFERENCES_SCHEMA_VERSION,
+      received: typeof version === 'number' ? version : String(version),
+    });
+    sink.count('ui.preferences.payload_rejected', { cause: 'version' });
+
+    return {};
+  }
+
+  const initial: {
+    -readonly [K in keyof InitialUiPreferences]: InitialUiPreferences[K];
+  } = {};
+
+  const reject = (preference: string, expected: string): void => {
+    sink.log('warn', 'stored preference of the wrong type ignored', {
+      preference,
+      expected,
+    });
+    sink.count('ui.preferences.payload_field_rejected', { preference });
+  };
+
+  const motionSetting: unknown = record['motionSetting'];
+
+  if (motionSetting !== undefined) {
+    if (isMotionSetting(motionSetting)) {
+      initial.motionSetting = motionSetting;
+    } else {
+      reject('motionSetting', 'system, reduce or allow');
+    }
+  }
+
+  const theme: unknown = record['theme'];
+
+  if (theme !== undefined) {
+    if (isThemeId(theme)) {
+      initial.theme = theme;
+    } else {
+      reject('theme', 'a theme id');
+    }
+  }
+
+  const numberOnlyMode: unknown = record['numberOnlyMode'];
+
+  if (numberOnlyMode !== undefined) {
+    if (typeof numberOnlyMode === 'boolean') {
+      initial.numberOnlyMode = numberOnlyMode;
+    } else {
+      reject('numberOnlyMode', 'boolean');
+    }
+  }
+
+  const muted: unknown = record['muted'];
+
+  if (muted !== undefined) {
+    if (typeof muted === 'boolean') {
+      initial.muted = muted;
+    } else {
+      reject('muted', 'boolean');
+    }
+  }
+
+  const volume: unknown = record['volume'];
+
+  if (volume !== undefined) {
+    // FINITE, not in-range: an out-of-range figure is handed through so the
+    // store's own clamp repairs and reports it, rather than being dropped for
+    // the default.
+    if (typeof volume === 'number' && Number.isFinite(volume)) {
+      initial.volume = volume;
+    } else {
+      reject('volume', 'a finite number');
+    }
+  }
+
+  return Object.freeze(initial);
 }
 
 /** Options accepted by `createPreferenceStore`. */

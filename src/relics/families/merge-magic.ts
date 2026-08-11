@@ -126,9 +126,13 @@ function readFrostedCells(state: unknown): Position[] {
 }
 
 /**
- * Projects a face value onto the operand shape the merge rules read, as
- * `probeView` of src/engine/terminal-state.ts projects a probed value: the
- * value alone, with no merge recorded against it.
+ * Projects a face value onto the operand shape the merge rules read: the value
+ * alone, with no merge recorded against it.
+ *
+ * NO CELL is carried, and none is needed: every caller hands the operand to the
+ * merge PRODUCER, which is a function of the two face values, and never to the
+ * position-aware predicate. `probeView` of src/engine/terminal-state.ts does
+ * carry a cell, because it feeds the predicate.
  *
  * @param value Face value to project.
  * @returns A frozen operand carrying `value` and no merge history.

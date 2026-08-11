@@ -758,3 +758,174 @@ describe('when the context is lost after mounting', () => {
     expect(document.querySelector('#board-canvas')).not.toBeNull();
   });
 });
+
+describe('when the context comes back after the fallback committed', () => {
+  beforeEach(() => {
+    installWebGL();
+    resetWebGLSupportProbe();
+  });
+
+  /** Loses the context and waits out the grace, so the fallback commits. */
+  const commitTheFallback = async (): Promise<void> => {
+    fireContextEvent('webglcontextlost');
+    await waitOutGrace();
+    await settleFrames();
+  };
+
+  it('reclaims the 2.5D board', async () => {
+    application = startWithRun(document);
+    await settleFrames();
+
+    expect(application.renderer.mode).toBe('three');
+
+    await commitTheFallback();
+
+    expect(application.renderer.mode).toBe('number-only');
+    expect(application.preferences.isNumberOnlyForced()).toBe(true);
+
+    // The defect this closes: the swap destroyed the renderer AND the
+    // `webglcontextrestored` listener it had installed, so a restoration
+    // arriving after the wait reached nobody — while the renderer's own parting
+    // message promised drawing resumes when the context comes back. The root's
+    // listener is on the canvas, which outlives every swap. DL-MAIN-33.
+    fireContextEvent('webglcontextrestored');
+    await settleFrames();
+
+    expect(application.renderer.mode).toBe('three');
+    expect(application.preferences.isNumberOnlyForced()).toBe(false);
+    expect(application.renderer.fallback).toBe(false);
+  });
+
+  it('replays the last commit into the reclaimed board', async () => {
+    application = startWithRun(document);
+    await settleFrames();
+
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        code: 'ArrowDown',
+        bubbles: true,
+      }),
+    );
+    await settleFrames();
+    await commitTheFallback();
+
+    expect(numberOnlyTiles()).toBeGreaterThan(0);
+
+    fireContextEvent('webglcontextrestored');
+    await settleFrames();
+
+    // The reclaim goes through the preference store, so it takes the same
+    // destroy-mount-subscribe-replay path the settings toggle takes: the board
+    // comes back populated rather than empty.
+    expect(gridCells()).toBeGreaterThan(0);
+    expect(numberOnlyTiles()).toBe(0);
+  });
+
+  it('reports the WebGL check healthy again', async () => {
+    application = start(document);
+    await settleFrames();
+    await commitTheFallback();
+
+    const during = application.health
+      .report({ refresh: true })
+      .checks.find((check) => check.id === 'webgl');
+
+    expect(during?.status).toBe('fail');
+
+    fireContextEvent('webglcontextrestored');
+    await settleFrames();
+
+    const after = application.health
+      .report({ refresh: true })
+      .checks.find((check) => check.id === 'webgl');
+
+    // The settings control is unlocked by the same release, so the promise the
+    // renderer made and the state the surfaces report now agree.
+    expect(after?.status).toBe('pass');
+    expect(application.health.readiness().requiresNumberOnlyFallback).toBe(
+      false,
+    );
+    expect(application.preferences.isNumberOnlyForced()).toBe(false);
+  });
+
+  it('announces the reclaim through the live region', async () => {
+    application = start(document);
+    await settleFrames();
+    await commitTheFallback();
+
+    fireContextEvent('webglcontextrestored');
+    await settleFrames();
+
+    for (let turn = 0; turn < 6; turn += 1) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    }
+
+    const announced = Array.from(document.querySelectorAll('[aria-live]'))
+      .map((region) => region.textContent ?? '')
+      .join(' ')
+      .toLowerCase();
+
+    // Assertive for the same reason the takeover was: the board the player is
+    // reading has been replaced by a different one.
+    expect(announced).toContain('3d board is available again');
+  });
+
+  it('leaves a number-only board the PLAYER chose exactly where it is',
+    async () => {
+      application = start(document);
+      await settleFrames();
+
+      application.preferences.setNumberOnlyMode(true);
+      await settleFrames();
+
+      expect(application.renderer.mode).toBe('number-only');
+      expect(application.preferences.isNumberOnlyForced()).toBe(false);
+
+      fireContextEvent('webglcontextrestored');
+      await settleFrames();
+
+      // The reclaim matches on the context-loss reason, so a choice is not a
+      // force and nothing here is a force to release. R9's accessible rendering
+      // mode is not a capability gap to be recovered from.
+      expect(application.renderer.mode).toBe('number-only');
+      expect(application.preferences.isNumberOnlyForced()).toBe(false);
+    });
+
+  it('leaves a fallback imposed for an unmountable renderer alone', async () => {
+    application = start(document);
+    await settleFrames();
+
+    // A different force entirely: the reason names the document and the build,
+    // and a context returning says nothing about either.
+    application.preferences.forceNumberOnlyMode(
+      'the WebGL board could not be mounted',
+    );
+    await settleFrames();
+
+    expect(application.renderer.mode).toBe('number-only');
+
+    fireContextEvent('webglcontextrestored');
+    await settleFrames();
+
+    expect(application.renderer.mode).toBe('number-only');
+    expect(application.preferences.isNumberOnlyForced()).toBe(true);
+  });
+
+  it('reclaims nothing after the application is disposed', async () => {
+    application = start(document);
+    await settleFrames();
+    await commitTheFallback();
+
+    application.dispose();
+    application = null;
+
+    // The listener is released with the other root-owned subscriptions, so this
+    // reaches nothing and raises nothing.
+    expect(() => {
+      fireContextEvent('webglcontextrestored');
+    }).not.toThrow();
+  });
+});

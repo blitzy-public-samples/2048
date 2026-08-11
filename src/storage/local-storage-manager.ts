@@ -15,7 +15,7 @@
  *   TR-STORE-08  L61-L63  clearGameState()
  * TR-STORE-09 is the in-memory double, in ./memory-storage.
  *
- * Decisions: DL-STORE-01, DL-STORE-02, DL-STORE-03, DL-STORE-04
+ * Decisions: DL-STORE-01, DL-STORE-02, DL-STORE-03, DL-STORE-04, DL-STORE-09
  * (docs/DECISION_LOG.md).
  */
 
@@ -164,6 +164,29 @@ const UNKNOWN_ERROR_NAME = 'StorageError';
 
 const UNKNOWN_ERROR_MESSAGE = 'Unknown storage error.';
 
+/**
+ * ADDED: the name a stored value that is not valid JSON is reported under.
+ *
+ * `JSON.parse` is the ONLY thing in this module that raises a `SyntaxError` —
+ * `JSON.stringify` answers a circular structure with a `TypeError`, and no
+ * Web Storage member raises one — so the name identifies the cause exactly.
+ * Exported because the composition root tiers its report on it: a value that
+ * did not parse is a recovered read, not a store that failed.
+ */
+export const PARSE_ERROR_NAME = 'SyntaxError';
+
+/**
+ * ADDED: public message for a stored value that is not valid JSON.
+ *
+ * The parse failure used to fall through to `UNKNOWN_ERROR_NAME` and be
+ * reported as "Unknown storage error." — a description that named neither the
+ * cause nor the consequence for the one storage fault a corrupted origin
+ * actually produces. The caught `SyntaxError` still travels unconverted as
+ * `thrown`; this is the bounded description beside it.
+ */
+const PARSE_ERROR_MESSAGE =
+  'The stored value is not valid JSON; it was ignored.';
+
 /** Public message for an operation that ran out of room. */
 const QUOTA_ERROR_MESSAGE = 'Storage is full; the operation was refused.';
 
@@ -184,6 +207,10 @@ const REPORTABLE_ERROR_NAMES: readonly string[] = Object.freeze([
   'SecurityError',
   'InvalidStateError',
   'TypeError',
+
+  // ADDED, so a stored value that did not parse keeps its own name instead of
+  // being flattened onto `UNKNOWN_ERROR_NAME`.
+  PARSE_ERROR_NAME,
   REJECTED_KEY_ERROR_NAME,
   OVERSIZE_ERROR_NAME,
 ]);
@@ -342,8 +369,20 @@ interface ParsedEntry {
   /** The exact stored text the result was parsed from. */
   readonly raw: string;
 
-  /** The frozen parse result. */
+  /** The frozen parse result, and `null` where `raw` did not parse. */
   readonly parsed: unknown;
+
+  /**
+   * ADDED: whether `raw` FAILED to parse.
+   *
+   * A failed parse used to drop the memo, so the same unreadable text was
+   * re-parsed and re-reported on every read — and two consumers reading one key
+   * at boot produced two records of a single corrupt value. Remembering the
+   * failure makes the record authoritative: one per distinct stored text, with
+   * the re-parse cost paid once. `raw` still gates it, so a value replaced by
+   * another tab is read afresh.
+   */
+  readonly failed: boolean;
 }
 
 const EMPTY_REPORTER: StorageReporter = Object.freeze({});
@@ -432,6 +471,14 @@ function errorName(error: unknown): string {
 function errorMessage(name: string, quota: boolean): string {
   if (quota) {
     return QUOTA_ERROR_MESSAGE;
+  }
+
+  // ADDED: the parse failure has its own description. It reached
+  // `DENIED_ERROR_MESSAGE` under neither of the two conditions below, and
+  // "Storage refused the operation." is wrong for a store that handed the text
+  // over without complaint.
+  if (name === PARSE_ERROR_NAME) {
+    return PARSE_ERROR_MESSAGE;
   }
 
   return name === UNKNOWN_ERROR_NAME
@@ -831,17 +878,21 @@ export class LocalStorageManager {
     const memo = this.parsed.get(key);
 
     if (memo !== undefined && memo.raw === raw) {
-      return memo.parsed;
+      // A remembered FAILURE answers `null` without re-parsing and without a
+      // second report of the same stored text.
+      return memo.failed ? null : memo.parsed;
     }
 
     try {
       const parsed: unknown = freezeParsed(JSON.parse(raw));
 
-      this.parsed.set(key, { raw, parsed });
+      this.parsed.set(key, { raw, parsed, failed: false });
 
       return parsed;
     } catch (error) {
-      this.parsed.delete(key);
+      // CHANGED: the failure is REMEMBERED against the text that produced it,
+      // where the memo used to be dropped.
+      this.parsed.set(key, { raw, parsed: null, failed: true });
       this.reportFailure('read', key, error);
 
       return null;

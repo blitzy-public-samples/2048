@@ -20,7 +20,7 @@
 //   TR-TERM-05  hasReachedWinValue           target-only row
 //   TR-TERM-06  highestTileValue             target-only row
 //
-// Decisions: DL-TERM-01, DL-TERM-02, DL-TERM-03, DL-TERM-04
+// Decisions: DL-TERM-01, DL-TERM-02, DL-TERM-03, DL-TERM-04, DL-TERM-05
 // (docs/DECISION_LOG.md).
 
 import type { MergeTileView, RulesConfig } from '../config/rules-config';
@@ -35,13 +35,37 @@ import type { Direction, Position } from './types';
 const PROBE_DIRECTIONS: readonly Direction[] = Object.freeze([0, 1, 2, 3]);
 
 /**
- * Presents a face value to the merge predicate with no merge history.
+ * A probed operand: the face value the merge predicate reads, with no merge
+ * history, AND the cell the probed tile stands in.
+ *
+ * The cell is what a POSITION-AWARE merge predicate reads. `resolveMove` of
+ * ./move-resolver.ts hands the predicate live `Tile` instances, which carry
+ * `x` and `y`, so a probe that omits them presents a shape the resolved move
+ * never presents.
+ */
+interface ProbeTileView extends MergeTileView {
+  /** Column the probed tile stands in. */
+  readonly x: number;
+
+  /** Row the probed tile stands in. */
+  readonly y: number;
+}
+
+/**
+ * Presents a face value and its cell to the merge predicate with no merge
+ * history.
+ *
+ * The cell was ADDED: the probe previously presented `{ value, mergedFrom }`
+ * alone, which is not the operand shape `resolveMove` presents, so a predicate
+ * keyed on position answered the probe from its no-position fall-through rather
+ * than from its rule. DL-TERM-05.
  *
  * @param value Face value to present.
- * @returns A frozen view carrying that value and no merge history.
+ * @param cell Cell the probed tile stands in.
+ * @returns A frozen view carrying that value, that cell and no merge history.
  */
-function probeView(value: number): MergeTileView {
-  return Object.freeze({ value, mergedFrom: null });
+function probeView(value: number, cell: Position): ProbeTileView {
+  return Object.freeze({ value, mergedFrom: null, x: cell.x, y: cell.y });
 }
 
 /** The value `highestTileValue` reports for a board holding no tiles. */
@@ -104,6 +128,8 @@ export function tileMatchesAvailable(
       const tile = grid.cellContent({ x, y });
 
       if (tile) {
+        const origin: Position = { x, y };
+
         for (const direction of PROBE_DIRECTIONS) {
           const vector = vectorForDirection(direction);
           const cell: Position = { x: x + vector.x, y: y + vector.y };
@@ -111,7 +137,15 @@ export function tileMatchesAvailable(
 
           if (
             other &&
-            config.merge.canMerge(probeView(tile.value), probeView(other.value))
+            // Operand ORDER is the resolved move's own: the probed tile is the
+            // one that would move and the neighbour is the one it would run
+            // into, so a predicate that distinguishes the two — one keyed on
+            // the DESTINATION cell does — is asked the same question the walk
+            // would ask. Each operand carries its own cell. DL-TERM-05.
+            config.merge.canMerge(
+              probeView(tile.value, origin),
+              probeView(other.value, cell),
+            )
           ) {
             return true;
           }

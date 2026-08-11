@@ -712,9 +712,59 @@ describe('Tracer span lifecycle and the bounded record buffer', () => {
 
     expect(snapshot.ended).toBe(1);
 
-    expect(snapshot.anomalies).toBe(1);
+    // DL-TRACE-13. Not an anomaly: a span is invalidated by `Tracer.reset` and
+    // by nothing else, so the later end is the guaranteed consequence of this
+    // tracer's own reset rather than a condition the caller produced. What the
+    // test above pins is the part that does matter — that no second record and
+    // no duplicate identifier is filed.
+    expect(snapshot.anomalies).toBe(0);
     expect(snapshot.doubleEnds).toBe(0);
     expect(snapshot.faults).toBe(0);
+  });
+
+  // The pair below mirrors the two the accounted commit already carries: the
+  // expected channel is asserted at debug, and its silence is asserted at the
+  // default level. Together they separate "reported as expected" from
+  // "reported not at all", which the anomaly count alone cannot distinguish.
+  it('names the discarded span it saw ended, at debug level', () => {
+    const records: { message: string; fields?: Record<string, unknown> }[] = [];
+
+    logger.setLevel('debug');
+    logger.subscribe((record) => {
+      records.push({ message: record.message, fields: record.fields });
+    });
+
+    const retained = tracer.startSpan(SPAN_NAMES.engineTurn);
+    const retainedId = retained.id;
+
+    tracer.reset();
+    retained.end();
+
+    const accounted = records.filter(
+      (record) => record.message === 'span discarded by reset was ended',
+    );
+
+    expect(accounted).toHaveLength(1);
+    expect(accounted[0].fields?.span).toBe(SPAN_NAMES.engineTurn);
+    expect(accounted[0].fields?.spanId).toBe(retainedId);
+    expect(tracer.snapshot().anomalies).toBe(0);
+  });
+
+  it('emits nothing for a discarded span ended at the default level', () => {
+    const records: string[] = [];
+
+    logger.subscribe((record) => {
+      records.push(record.message);
+    });
+
+    const retained = tracer.startSpan(SPAN_NAMES.engineTurn);
+
+    tracer.reset();
+    retained.end();
+
+    expect(records).not.toContain('span discarded by reset was ended');
+    expect(records).toHaveLength(0);
+    expect(tracer.snapshot().anomalies).toBe(0);
   });
 
   it('records no duration for a span handle ended after a reset', () => {

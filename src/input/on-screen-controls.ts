@@ -47,6 +47,7 @@ import {
   createSafeInputReporter,
   describeAction,
   describeBinding,
+  describeMoveDirection,
   directionForAction,
   isMoveAction,
   listBindings,
@@ -767,6 +768,35 @@ function labelFor(action: InputAction, ordinal: number): string {
   return ordinal > 0 ? `${label} ${ordinal}` : label;
 }
 
+/**
+ * ADDED: the text a control PAINTS, which is not always the text it is NAMED.
+ *
+ * The four movement controls paint the direction word alone and keep the verbose
+ * accessible name: laid out as the 3x3 pad style/main.scss now gives them, their
+ * position states the direction and repeating "Move" four times is what made the
+ * widest of them 155px and forced the group to wrap — 514px of labels in a 500px
+ * measure at the desktop scale and 460px in 280px at the mobile one, which is
+ * what left "Move left" orphaned on a row of its own.
+ *
+ * WCAG 2.5.3 label-in-name still holds, and structurally rather than by
+ * coincidence: `describeMoveDirection` derives the word from the same
+ * `ACTION_LABELS` entry the accessible name is built from, so the painted text is
+ * a substring of the name — "Up" inside "Move up, Arrow Up or K or W".
+ *
+ * Every other control paints what it is named, exactly as before. DL-CONTROL-09.
+ *
+ * @param action Action the control publishes.
+ * @param ordinal 1-based slot number, or 0 for a control with no slot.
+ * @returns The text to paint.
+ */
+function paintedLabelFor(action: InputAction, ordinal: number): string {
+  if (ordinal === 0 && isMoveAction(action)) {
+    return describeMoveDirection(action);
+  }
+
+  return labelFor(action, ordinal);
+}
+
 function nameFor(
   keymap: Keymap,
   action: InputAction,
@@ -790,7 +820,9 @@ function applyGeneratedName(
   action: InputAction,
   ordinal: number,
 ): void {
-  element.textContent = labelFor(action, ordinal);
+  // CHANGED: the painted text and the accessible name are resolved separately.
+  // DL-CONTROL-09.
+  element.textContent = paintedLabelFor(action, ordinal);
   element.setAttribute('aria-label', nameFor(keymap, action, ordinal));
 
   if (hasKey(keymap[action])) {
@@ -1747,14 +1779,31 @@ export function mountOnScreenControls(
 
   const controls = Object.freeze(records.map(projectControl));
 
+  // CHANGED: the count is broken out, because `controls` counts everything this
+  // layer manages and a reader of "the on-screen controls are mounted" counts
+  // what is inside the host. The two differ by the markup controls the layer
+  // ADOPTS from elsewhere in the page — `.retry-button`, `.restart-button`,
+  // `.keep-playing-button` and the settings control — so a single figure of 28
+  // stood against 24 buttons in `#on-screen-controls`. Both are now stated.
+  // DL-CONTROL-10.
+  const inHost = records.reduce(
+    (total, record): number => (record.generated ? total + 1 : total),
+    0,
+  );
+  const adopted = records.length - inHost;
+
   reporter.log('info', 'The on-screen controls are mounted.', {
     controls: controls.length,
+    inHost,
+    adopted,
     generated: generatedRoots.length > 0,
     remediated,
     context: activeContext,
   });
   reporter.count(MOUNTED_METRIC, {
     controls: controls.length,
+    inHost,
+    adopted,
     remediated,
   });
   span.end();

@@ -35,7 +35,7 @@
 //                                               `createSafeInputReporter`
 //
 // Decisions: DL-KEYMAP-01, DL-KEYMAP-02, DL-KEYMAP-03, DL-KEYMAP-04,
-// DL-KEYMAP-05 (docs/DECISION_LOG.md).
+// DL-KEYMAP-05, DL-KEYMAP-06, DL-KEYMAP-07 (docs/DECISION_LOG.md).
 
 /** A board direction, carried as the bare number the engine consumes. */
 export type Direction = 0 | 1 | 2 | 3;
@@ -1258,6 +1258,40 @@ export function describeAction(action: InputAction): string {
 }
 
 /**
+ * Prefix every movement action's spoken label carries.
+ *
+ * Read rather than assumed: `describeMoveDirection` below falls back to the
+ * whole label where a label does not carry it.
+ */
+const MOVE_LABEL_PREFIX = 'Move ';
+
+/**
+ * ADDED: renders a movement action as the direction word alone, for a surface
+ * that shows the four movements as a spatial pad rather than as a list.
+ *
+ * DERIVED FROM `ACTION_LABELS`, not declared as a second table, so the short
+ * form cannot drift from the spoken one — and so the containment WCAG 2.5.3
+ * requires is structural: the word this returns is by construction a substring
+ * of the label the accessible name is built from. A label that does not carry
+ * the prefix is returned whole, so a future relabelling degrades to the verbose
+ * word rather than to a wrong slice. DL-KEYMAP-07.
+ *
+ * @param action Movement action to label.
+ * @returns The direction word, for example `'Up'` for `'moveUp'`.
+ */
+export function describeMoveDirection(action: MoveAction): string {
+  const label = ACTION_LABELS[action];
+
+  if (!label.startsWith(MOVE_LABEL_PREFIX)) {
+    return label;
+  }
+
+  const word = label.slice(MOVE_LABEL_PREFIX.length);
+
+  return `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
+}
+
+/**
  * Renders the keys bound to an action as spoken text.
  *
  * @param keymap Table to read from.
@@ -1795,8 +1829,52 @@ function readBinding(
     return null;
   }
 
-  const keys = readStringList(entry, 'keys', action, reporter);
-  const codes = readStringList(entry, 'codes', action, reporter);
+  const readKeys = readStringList(entry, 'keys', action, reporter);
+  const readCodes = readStringList(entry, 'codes', action, reporter);
+
+  /**
+   * CHANGED: an entry that names NO trigger at all falls back to the default's
+   * triggers instead of being kept as the empty lists it is.
+   *
+   * `readStringList` returns an explicitly empty array as such — that is its
+   * documented contract and the right one, because it distinguishes "the field
+   * was absent" from "the field was present and held nothing". But `??` only
+   * substitutes for `null`, so `{"keys":[],"codes":[]}` survived as an entry
+   * with no key and no code: the action was permanently unbound while
+   * `readContextList` had already reported "using default" for the empty
+   * `contexts` beside it. Every other modality still reached the action — swipe,
+   * the on-screen control, restore-defaults — so the state was honest but the
+   * key was dead.
+   *
+   * BOTH lists must be empty, because either one alone still reaches the action:
+   * a binding with a key and no code, or a code and no key, is a legitimate
+   * binding and is left exactly as it is.
+   *
+   * The default must ALSO name a trigger. Six actions — `startRun`,
+   * `continueStage`, `endRun`, `activateRelic`, `openSettings` and
+   * `closeSettings` — declare empty `keys` and `codes` by design, being reached
+   * through their own screen's control; for those the fallback is the same empty
+   * pair, so the guard keeps them out of the report rather than substituting a
+   * value for an identical one. DL-KEYMAP-06.
+   */
+  const namesNoTrigger =
+    readKeys !== null &&
+    readCodes !== null &&
+    readKeys.length === 0 &&
+    readCodes.length === 0 &&
+    (fallback.keys.length > 0 || fallback.codes.length > 0);
+
+  if (namesNoTrigger) {
+    reporter.log('warn', 'Keymap left no usable key; using default.', {
+      action,
+      defaultKeys: fallback.keys.length,
+      defaultCodes: fallback.codes.length,
+    });
+    reporter.count('input.keymap.deserialize.emptyTriggers', { action });
+  }
+
+  const keys = namesNoTrigger ? null : readKeys;
+  const codes = namesNoTrigger ? null : readCodes;
   const contexts = readContextList(entry, action, reporter);
   const preventDefault = readBoolean(
     entry,

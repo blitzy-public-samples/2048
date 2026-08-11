@@ -326,12 +326,23 @@ $reward-rarities: $rarity-tiers !default;
   min-inline-size: 0;
 }
 
-// The rarity chip. It carries no colour of its own, so its label and its
-// hairline pill both take the card's own text colour, which resolves through
-// `--theme-tile-super-numeral` and is therefore the highest-contrast colour
-// the active palette has against the card surface.
+// The rarity chip. It carries its TIER'S accent on both its label and its
+// hairline pill, set as `color` so the `currentColor` edge of `reward-chip`
+// follows it, with the per-tier rules below supplying the value.
+//
+// CHANGED from the card's own text colour, which every chip took and which made
+// the rarity chip identical for all four tiers: the tier was encoded on the
+// card's block-start edge alone, so the one chip whose whole purpose is to name
+// the tier said nothing about it in colour. The accent is the colour of this
+// surface plus the tier and clears 6.7:1 against it at every tier, so the label
+// stays above the 4.5:1 asked of text. DL-REWARD-15.
 .reward-offer .relic-card-rarity {
   @include reward-chip;
+
+  color: var(
+    --theme-rarity-#{"" + list.nth($reward-rarities, 1)},
+    #{reward-rarity-color(list.nth($reward-rarities, 1))}
+  );
 }
 
 .reward-offer .relic-card-charges {
@@ -373,6 +384,12 @@ $reward-rarities: $rarity-tiers !default;
 @each $rarity in $reward-rarities {
   .reward-offer .relic-card[data-rarity="#{$rarity}"] {
     border-block-start-color: reward-rarity-accent($rarity);
+
+    // ADDED: the same accent on the rarity chip, so the edge and the chip that
+    // names the tier carry one colour. DL-REWARD-15.
+    .relic-card-rarity {
+      color: reward-rarity-accent($rarity);
+    }
   }
 }
 
@@ -422,6 +439,13 @@ $reward-rarities: $rarity-tiers !default;
     cursor: default;
     pointer-events: none;
     border-block-start-style: dashed;
+
+    // ADDED: the alpha every other disabled control carries, from
+    // style/_a11y.scss's own token, so a card that cannot be chosen reads as
+    // unavailable at a glance rather than only on close inspection of four
+    // outlines. It is the shared value and not a local one, so the card cannot
+    // drift from the buttons beside it. DL-REWARD-15.
+    opacity: $a11y-disabled-alpha;
 
     // The card's chips restate the dashed edge, which puts the state on four
     // outlines.

@@ -53,6 +53,25 @@ $a11y-mobile-board-extent:
 
 $a11y-instant: math.div($transition-speed, 10000) !default;
 
+// ADDED: target size.
+//
+// `$a11y-control-height` restates the derivation style/_screens.scss uses for
+// `$screen-control-height` — the height every generated control paints, and the
+// same 40px the retained `.restart-button` carries. It is read here, not chosen:
+// the extension below has to know the painted height to work out how much is
+// missing.
+//
+// `$a11y-target-size` is the only length in this file that is NOT derived from a
+// design token, and deliberately so: it is the 44px floor named by WCAG 2.5.5,
+// an external requirement rather than a property of the product's scale. It is
+// stated once, here, so the number appears in exactly one place.
+$a11y-control-height: math.div($grid-spacing * 8, 3) !default;
+$a11y-target-size: 44px !default;
+
+// Half the shortfall, applied to each block edge, so the hit area reaches the
+// floor while the painted box keeps the height its token gives it.
+$a11y-target-inset: math.div($a11y-target-size - $a11y-control-height, 2) !default;
+
 // Clip inset that collapses an element's paint region while keeping its box.
 $a11y-clip-away: 50% !default;
 
@@ -111,11 +130,33 @@ $a11y-motion-attribute: "data-reduced-motion" !default;
   }
 }
 
+// The value each shadow slot below falls back to when its state is not in
+// force. A shadow of no offset, no blur and no spread in `transparent` paints
+// nothing, and a list of two of them paints nothing at all. An EMPTY fallback
+// would be valid CSS on its own but would leave `box-shadow` holding a leading
+// or trailing comma, which is not.
+$a11y-shadow-none: 0 0 transparent;
+
+// The composed ring. Two slots on one property, so the focus ring and the
+// selected ring stack instead of overwriting one another: the state slot is
+// listed first because it is INSET and belongs under the outer band.
+@mixin composed-rings {
+  box-shadow:
+    var(--a11y-state-shadow, #{$a11y-shadow-none}),
+    var(--a11y-focus-shadow, #{$a11y-shadow-none});
+}
+
 @mixin focus-ring {
   outline: $a11y-ring-width solid
     var(--theme-focus-ring-contrast, #{$bright-text-color});
   outline-offset: 0;
-  box-shadow: 0 0 0 $a11y-ring-extent
+
+  // Written into the focus SLOT rather than onto `box-shadow` directly. The
+  // outer band and the selected state used to be two declarations of the same
+  // property, so whichever won erased the other — which is why the selected
+  // rules below had to be written `:not(:focus-visible)`, and why a focused
+  // control showed no selected and no pressed feedback at all. DL-A11Y-10.
+  --a11y-focus-shadow: 0 0 0 #{$a11y-ring-extent}
     var(--theme-focus-ring, #{$a11y-focus-ring-fallback});
 }
 
@@ -138,13 +179,18 @@ $a11y-motion-attribute: "data-reduced-motion" !default;
 @mixin interactive-states {
   @media (hover: hover) {
     &:hover:not(:focus-visible):not(:disabled):not([aria-disabled="true"]) {
-      box-shadow: inset 0 0 0 $a11y-hairline currentColor;
+      --a11y-state-shadow: inset 0 0 0 #{$a11y-hairline} currentColor;
     }
   }
 
-  &:active:not(:focus-visible):not(:disabled):not([aria-disabled="true"]),
-  &[aria-pressed="true"]:not(:focus-visible) {
-    box-shadow: inset 0 0 0 $a11y-ring-width currentColor;
+  // `:not(:focus-visible)` REMOVED from both. Each writes the state slot now,
+  // so a control that is focused and selected carries the outer focus band and
+  // the inset selected ring together instead of one erasing the other, and a
+  // focused control gives press feedback where it previously gave none.
+  // DL-A11Y-10.
+  &:active:not(:disabled):not([aria-disabled="true"]),
+  &[aria-pressed="true"] {
+    --a11y-state-shadow: inset 0 0 0 #{$a11y-ring-width} currentColor;
   }
 
   &:disabled,
@@ -174,6 +220,57 @@ $a11y-motion-attribute: "data-reduced-motion" !default;
   select,
   [tabindex]:not([tabindex="-1"]) {
     @include focusable;
+
+    // The one declaration that lays both ring slots down, placed on the same
+    // broad selector that gives every control its focus ring — `focusable` is
+    // included at sites that do not also include `interactive-states`, so the
+    // slots have to be consumed here or those controls would set a focus slot
+    // nothing reads. Declaring it unconditionally is what lets the state rules
+    // stop fighting the focus rule for the property. DL-A11Y-10.
+    @include composed-rings;
+  }
+}
+
+// ADDED: the generated on-screen controls reach the WCAG 2.5.5 target floor
+// without their painted box moving.
+//
+// A CONFLICT RESOLVED RATHER THAN A TOKEN BROKEN. 40px is the height the design
+// token gives every control, and `.restart-button` — part of the frozen classic
+// identity — carries the same one, so raising the height would change the
+// appearance of the one control the pre-migration game had. The floor is 44px.
+// The two are reconciled by growing the HIT AREA and not the box: a transparent
+// pseudo-element extends the control by half the shortfall on each block edge,
+// which hit-tests as part of the control that generates it. The painted height,
+// the background, the radius and every neighbour's position are untouched, and
+// the $control-gap of 9px between controls is more than the 4px the extension
+// takes, so no two extensions overlap.
+//
+// SCOPED TO THE GENERATED CONTROLS ALONE — `.restart-button`, `.settings-button`
+// and the retained overlay controls are not selected, so the frozen identity is
+// not touched by this rule at all.
+//
+// `min-inline-size` covers the other axis, which matters now that the four
+// movement controls paint the direction word alone: their widest label no longer
+// guarantees the floor on its own. DL-A11Y-11.
+.on-screen-control {
+  position: relative;
+  min-inline-size: $a11y-target-size;
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset-block: -$a11y-target-inset;
+    inset-inline: 0;
+
+    // Nothing is painted; the box exists only to be hit.
+    background: transparent;
+    border-radius: inherit;
+  }
+
+  // A control the availability layer has withdrawn has no hit area to offer.
+  &[hidden]::after,
+  &[disabled]::after {
+    content: none;
   }
 }
 

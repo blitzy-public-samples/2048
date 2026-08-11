@@ -860,7 +860,15 @@ export function composeAnnouncements(
   const merges: MergeAnnouncement[] = [];
   const spawns: SpawnAnnouncement[] = [];
   const stages: StageClearAnnouncement[] = [];
-  const others: (RelicAcquiredAnnouncement | TextAnnouncement)[] = [];
+  // SPLIT, where one `others` list held both in arrival order: a
+  // `relicAcquired` is composed AFTER free text, so it is the line the region
+  // is left holding. `GAMEPLAY_ANNOUNCEMENT_KINDS` above already records
+  // `relicAcquired` as outranking `text` when the queue bound discards, and
+  // each utterance is written on its own tick — so composing a pickup before a
+  // text line left the pickup on the region for one tick and then replaced it.
+  // DL-LIVE-05.
+  const texts: TextAnnouncement[] = [];
+  const relics: RelicAcquiredAnnouncement[] = [];
   let terminal: TerminalAnnouncement | null = null;
   let unchangedMoves = 0;
 
@@ -889,10 +897,10 @@ export function composeAnnouncements(
         stages.push(item);
         break;
       case 'relicAcquired':
-        others.push(item);
+        relics.push(item);
         break;
       case 'text':
-        others.push(item);
+        texts.push(item);
         break;
       case 'terminal':
         terminal = item;
@@ -923,18 +931,19 @@ export function composeAnnouncements(
       moves.length + merges.length + spawns.length + stages.length;
   }
 
-  for (const item of others) {
-    if (item.kind === 'relicAcquired') {
-      composed.push({
-        text: describeRelic(item),
-        polarity: DEFAULT_POLARITY,
-      });
-    } else {
-      composed.push({
-        text: item.text,
-        polarity: item.polarity ?? DEFAULT_POLARITY,
-      });
-    }
+  for (const item of texts) {
+    composed.push({
+      text: item.text,
+      polarity: item.polarity ?? DEFAULT_POLARITY,
+    });
+  }
+
+  // After the free text, so a pickup outlives it on the region. DL-LIVE-05.
+  for (const item of relics) {
+    composed.push({
+      text: describeRelic(item),
+      polarity: DEFAULT_POLARITY,
+    });
   }
 
   if (terminal !== null) {
@@ -1123,6 +1132,18 @@ export interface LiveRegionAnnouncer {
   announceText(text: string, polarity?: AnnouncementPolarity): void;
   flush(): void;
   clear(): void;
+
+  /**
+   * Blanks the ASSERTIVE region alone, leaving the polite region, the queue and
+   * anything already composed untouched.
+   *
+   * For the caller navigating away from the state that raised an assertive
+   * line: an `alert` region holds its text until something replaces it, and
+   * only an assertive line is ever written there, so a run verdict stayed
+   * readable on a screen that had nothing to do with it. `clear()` is too broad
+   * for that — it would also discard a polite batch mid-flight. DL-LIVE-06.
+   */
+  clearAssertive(): void;
 
   /** Announcements queued plus lines composed and not yet written. */
   pending(): number;
@@ -1921,6 +1942,12 @@ export function createLiveRegionAnnouncer(
     }
   }
 
+  function clearAssertive(): void {
+    if (assertiveRegion !== null) {
+      writeText('assertive', '');
+    }
+  }
+
   function pending(): number {
     return queue.length + outbox.length;
   }
@@ -2057,6 +2084,7 @@ export function createLiveRegionAnnouncer(
     announceText,
     flush,
     clear,
+    clearAssertive,
     pending,
     isEnabled,
     observePreferences,

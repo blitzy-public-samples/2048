@@ -88,13 +88,16 @@ exports[`a run played through the production reward path > reproduces its record
 
 relics held, in pickup order: frostbind, loaded-dice, twin-seed
 stage reached: 4
-moves played: 160
+moves played: 60
 
 run summary
-  none: the run was still in progress
+  seed reward-seed-alpha
+  score 436
+  stage 4
+  relics frostbind (0 left), loaded-dice, twin-seed
 
 board as played
-size 4  score 436  over false  won false  keepPlaying false
+size 4  score 436  over true  won false  keepPlaying false
      4     4     4     4
     16     2    16     4
      2    64     8     4
@@ -154,13 +157,16 @@ exports[`a run played through the production reward path > reproduces its record
 
 relics held, in pickup order: frostbind, collapsing-vault
 stage reached: 3
-moves played: 160
+moves played: 56
 
 run summary
-  none: the run was still in progress
+  seed reward-seed-charlie
+  score 324
+  stage 3
+  relics frostbind (0 left), collapsing-vault
 
 board as played
-size 4  score 324  over false  won false  keepPlaying false
+size 4  score 324  over true  won false  keepPlaying false
      8     2     4     2
     16     4    32     4
      2    32     4     2

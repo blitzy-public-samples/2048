@@ -576,10 +576,75 @@ describe('copying the seed', () => {
       'failed',
     );
     expect(harness.panel.textContent).toContain(runSummaryCopy.copyFailed);
-    expect(harness.reporter.errors()[0]?.name).toBe(
-      'the clipboard refused the seed',
+
+    // DL-SUMMARY-14. Both rungs are pinned, because the severity now depends on
+    // which one was reached. The clipboard's own refusal is recoverable and
+    // reports at `warn`, carrying the rejected reason in a field; the error
+    // severity belongs to the conclusion below it, where the selection failed
+    // too and the seed genuinely did not reach the player. This test is the
+    // case that reaches both, so it is where the pair is separated.
+    const refusals = harness.reporter.reports.filter(
+      (report) => report.name === 'warn:the clipboard refused the seed',
     );
+
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]?.fields?.reason).toContain('permission denied');
+
+    const failures = harness.reporter.reports.filter(
+      (report) =>
+        report.name ===
+        'error:the seed reached neither the clipboard nor a selection',
+    );
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.fields?.selected).toBe(true);
+
+    // Nothing reached the error-with-a-thrown-value channel: no call raised.
+    expect(harness.reporter.errors()).toEqual([]);
     expect(document.getSelection()?.toString()).toBe('  Player Seed  ');
+  });
+
+  // DL-SUMMARY-14's other half: where the clipboard refuses but the selection
+  // carries the seed, the feature recovered and nothing reports at `error`.
+  // jsdom implements no `execCommand`, so the performed copy is stubbed in.
+  it('reports no error where the clipboard refuses and the selection carries it', async () => {
+    (document as unknown as Record<string, unknown>).execCommand = (): boolean =>
+      true;
+
+    try {
+      const harness = mounted({
+        clipboard: {
+          writeText: (): Promise<void> =>
+            Promise.reject(new Error('permission denied')),
+        },
+      });
+
+      await expect(harness.screen.copySeed()).resolves.toBe(true);
+
+      expect(harness.panel.getAttribute(runSummaryAttributes.copyState)).toBe(
+        'copied',
+      );
+
+      expect(
+        harness.reporter.reports.filter(
+          (report) => report.name === 'warn:the clipboard refused the seed',
+        ),
+      ).toHaveLength(1);
+
+      // The recovered path files nothing at error severity, by either channel.
+      expect(harness.reporter.errors()).toEqual([]);
+      expect(
+        harness.reporter.reports.filter((report) =>
+          report.name.startsWith('error:'),
+        ),
+      ).toEqual([]);
+
+      expect(
+        harness.reporter.counts('ui.runSummary.seed_copy')[0]?.fields?.outcome,
+      ).toBe('copied');
+    } finally {
+      delete (document as unknown as Record<string, unknown>).execCommand;
+    }
   });
 
   it('says there is nothing to copy where no seed resolved', async () => {

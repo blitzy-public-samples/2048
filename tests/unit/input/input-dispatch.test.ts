@@ -8,10 +8,13 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_KEY_BINDINGS,
   MAX_KEYMAP_SLOTS,
+  MOVE_ACTIONS,
   RELIC_SLOT_COUNT,
   REWARD_SLOT_COUNT,
   createKeymap,
   describeAction,
+  describeBinding,
+  describeMoveDirection,
   deserializeKeymap,
   remapAction,
   resolveInput,
@@ -992,5 +995,147 @@ describe('remap is the one api a rebind goes through', () => {
     );
 
     second.destroy();
+  });
+});
+
+describe('a persisted binding that names no key at all', () => {
+  it('falls back to the default keys and codes', () => {
+    const restored = deserializeKeymap({
+      moveUp: {
+        keys: [],
+        codes: [],
+        contexts: [],
+        preventDefault: true,
+        modifierSuppressed: true,
+        slots: [],
+      },
+    });
+
+    // The empty pair left the action permanently unbound while the empty
+    // `contexts` beside it had already reported "using default", so the record
+    // and the behaviour disagreed. DL-KEYMAP-06.
+    expect(restored.moveUp.keys).toEqual(DEFAULT_KEY_BINDINGS.moveUp.keys);
+    expect(restored.moveUp.codes).toEqual(DEFAULT_KEY_BINDINGS.moveUp.codes);
+    expect(restored.moveUp.contexts).toEqual(
+      DEFAULT_KEY_BINDINGS.moveUp.contexts,
+    );
+  });
+
+  it('reports the substitution it made', () => {
+    const recorder = recordingReporter();
+
+    deserializeKeymap(
+      {
+        moveUp: { keys: [], codes: [], contexts: ['game'] },
+      },
+      recorder.reporter,
+    );
+
+    expect(
+      recorder.logs.some(
+        (entry) =>
+          entry.level === 'warn' &&
+          entry.message === 'Keymap left no usable key; using default.' &&
+          entry.fields?.['action'] === 'moveUp',
+      ),
+    ).toBe(true);
+    expect(
+      recorder.counts.some(
+        (entry) => entry.name === 'input.keymap.deserialize.emptyTriggers',
+      ),
+    ).toBe(true);
+  });
+
+  it('leaves a key-only binding exactly as persisted', () => {
+    const restored = deserializeKeymap({
+      moveUp: { keys: ['t'], codes: [], contexts: ['game'] },
+    });
+
+    // Either list alone still reaches the action, so neither is degenerate.
+    expect(restored.moveUp.keys).toEqual(['t']);
+    expect(restored.moveUp.codes).toEqual([]);
+  });
+
+  it('leaves a code-only binding exactly as persisted', () => {
+    const restored = deserializeKeymap({
+      moveUp: { keys: [], codes: ['KeyT'], contexts: ['game'] },
+    });
+
+    expect(restored.moveUp.keys).toEqual([]);
+    expect(restored.moveUp.codes).toEqual(['KeyT']);
+  });
+
+  it('says nothing for the six actions whose default names no key', () => {
+    const recorder = recordingReporter();
+
+    // `openSettings` is reached through its own control and declares empty
+    // `keys` and `codes` by design, so there is no substitution to report.
+    expect(DEFAULT_KEY_BINDINGS.openSettings.keys).toEqual([]);
+    expect(DEFAULT_KEY_BINDINGS.openSettings.codes).toEqual([]);
+
+    const restored = deserializeKeymap(
+      {
+        openSettings: { keys: [], codes: [], contexts: ['game'] },
+      },
+      recorder.reporter,
+    );
+
+    expect(restored.openSettings.keys).toEqual([]);
+    expect(restored.openSettings.codes).toEqual([]);
+    expect(
+      recorder.counts.some(
+        (entry) => entry.name === 'input.keymap.deserialize.emptyTriggers',
+      ),
+    ).toBe(false);
+  });
+
+  it('repairs every movement action the same way', () => {
+    const restored = deserializeKeymap({
+      moveUp: { keys: [], codes: [] },
+      moveRight: { keys: [], codes: [] },
+      moveDown: { keys: [], codes: [] },
+      moveLeft: { keys: [], codes: [] },
+    });
+
+    for (const action of MOVE_ACTIONS) {
+      expect(restored[action].keys).toEqual(
+        DEFAULT_KEY_BINDINGS[action].keys,
+      );
+      expect(restored[action].codes).toEqual(
+        DEFAULT_KEY_BINDINGS[action].codes,
+      );
+    }
+  });
+});
+
+describe('the short direction word a pad control paints', () => {
+  it('is the label with its movement prefix removed', () => {
+    expect(describeMoveDirection('moveUp')).toBe('Up');
+    expect(describeMoveDirection('moveRight')).toBe('Right');
+    expect(describeMoveDirection('moveDown')).toBe('Down');
+    expect(describeMoveDirection('moveLeft')).toBe('Left');
+  });
+
+  it('is contained in the spoken label, which is what WCAG 2.5.3 needs', () => {
+    // Structural rather than coincidental: both come from one table entry, so a
+    // relabelling cannot move one without moving the other. DL-KEYMAP-07.
+    for (const action of MOVE_ACTIONS) {
+      expect(describeAction(action)).toContain(
+        describeMoveDirection(action).toLowerCase(),
+      );
+    }
+  });
+
+  it('is contained in the accessible name the control is given', () => {
+    for (const action of MOVE_ACTIONS) {
+      const name = `${describeAction(action)}, ${describeBinding(
+        DEFAULT_KEY_BINDINGS,
+        action,
+      )}`;
+
+      expect(name.toLowerCase()).toContain(
+        describeMoveDirection(action).toLowerCase(),
+      );
+    }
   });
 });

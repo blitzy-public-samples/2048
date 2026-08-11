@@ -19,7 +19,7 @@ the code drifts from it, and the drift is undetectable. The declaration in the
 file is authoritative; if the two ever disagree, the file is right and this
 document is stale.
 
-There are **554 rows across 71 areas**. 260 of them carry a pre-migration
+There are **557 rows across 71 areas**. 260 of them carry a pre-migration
 construct; 294 are **target-only**, meaning the retired tree contained nothing
 that became them — the relic system, the seeded RNG, the run envelope, the
 screen flow, the 2.5D renderer, the accessibility layer, the observability
@@ -1062,7 +1062,7 @@ a construct this document does not account for.
 | `TR-STORE-09` | the `window.fakeStorage` object literal that file already shipped, ported as this class | js/local_storage_manager.js L1-L19 |
 | `TR-STORE-10` | `StorageLike`, the structural surface both stores satisfy | **target-only** — no pre-migration construct |
 
-### `src/storage/storage-keys.ts` — 6 rows, 3 target-only
+### `src/storage/storage-keys.ts` — 7 rows, 4 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -1072,6 +1072,7 @@ a construct this document does not account for.
 | `TR-KEYS-04` | `STORAGE_NAMESPACE` and `namespacedKey()` | **target-only** — no pre-migration construct |
 | `TR-KEYS-05` | `RUN_STATE_KEY` | **target-only** — no pre-migration construct |
 | `TR-KEYS-06` | `OwnedStorageKey`, `isOwnedStorageKey()` and `OWNED_STORAGE_KEYS` | **target-only** — no pre-migration construct |
+| `TR-KEYS-07` | `PREFERENCES_KEY` | **target-only** — no pre-migration construct |
 
 ### `src/theme/themes.ts` — 7 rows, 6 target-only
 
@@ -1147,7 +1148,7 @@ a construct this document does not account for.
 | `TR-LIVE-08` | `TerminalVerdict` and its labels | **target-only** — no pre-migration construct |
 | `TR-LIVE-09` | the injected report sink and the per-listener error isolation | **target-only** — no pre-migration construct |
 
-### `src/ui/a11y/settings.ts` — 8 rows, 4 target-only
+### `src/ui/a11y/settings.ts` — 9 rows, 5 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -1159,6 +1160,7 @@ a construct this document does not account for.
 | `TR-SETTINGS-06` | `UiPreferences`, `PREFERENCE_KEYS` and `createPreferenceStore` | **target-only** — no pre-migration construct |
 | `TR-SETTINGS-07` | `reflectReducedMotion` and `readReflectedReducedMotion` | **target-only** — no pre-migration construct |
 | `TR-SETTINGS-08` | `isValidVolume`, `clampVolume` and `NumberOnlyForce` | **target-only** — no pre-migration construct |
+| `TR-SETTINGS-09` | `PreferencesPayload`, `serializePreferences` and `deserializePreferences` | **target-only** — no pre-migration construct |
 
 ### `src/ui/components/relic-card.ts` — 11 rows, 5 target-only
 
@@ -1320,7 +1322,7 @@ a construct this document does not account for.
 | `TR-REWARD-06` | the clamped description | **target-only** — no pre-migration construct |
 | `TR-REWARD-07` | the narrow-layout restatement at the mobile threshold | **target-only** — no pre-migration construct |
 
-### `style/_screens.scss` — 7 rows, 4 target-only
+### `style/_screens.scss` — 8 rows, 5 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -1331,6 +1333,7 @@ a construct this document does not account for.
 | `TR-SCREEN-05` | `@mixin screen-text-field` and the seed entry field | **target-only** — no pre-migration construct |
 | `TR-SCREEN-06` | `.settings-slider` and the settings rows | **target-only** — no pre-migration construct |
 | `TR-SCREEN-07` | `@mixin screen-panel-surface` and `@mixin screen-modal-surface` | **target-only** — no pre-migration construct |
+| `TR-SCREEN-08` | `.settings-row-binding`, the aligned key-binding row | **target-only** — no pre-migration construct |
 
 ### `style/_summary.scss` — 7 rows, 7 target-only
 
@@ -1436,14 +1439,14 @@ decision rather than by a ported construct, and the decision is named.
 Both directions are complete, and the completeness is arithmetic rather than
 assertion:
 
-- **554 rows** across **71 areas**, enumerated from the
+- **557 rows** across **71 areas**, enumerated from the
 declarations in the tree rather than counted by hand.
 - **Direction A** accounts for the **260 rows** that carry a pre-migration
 construct, distributed across the 16 artifacts listed in §2. Every retired
 source file appears there.
-- **Direction B** accounts for **all 554 rows**, distributed across the
+- **Direction B** accounts for **all 557 rows**, distributed across the
 78 modules that declare them, so every row has exactly one owning module.
-- **294 rows are target-only.** Each is declared as such by its owning
+- **297 rows are target-only.** Each is declared as such by its owning
 module, so the reverse walk ends in a positive statement rather than in a gap.
 - The one retired artifact with no row, `.jshintrc`, is accounted for in the
 ledger above by decision `DL-BUILD-10`.

@@ -188,10 +188,16 @@ const TEXT_PROPERTY = '--theme-diagnostics-text';
 const ACCENT_PROPERTY = '--theme-diagnostics-accent';
 
 /**
- * Numerator and denominator of `math.div($field-width * 3, 5)`, the inline
- * size style/main.scss L245 declares for the surface.
+ * Numerator and denominator of `math.div($field-width * 4, 5)`, the inline
+ * size style/main.scss declares for the surface.
+ *
+ * CHANGED from three fifths, in step with that declaration. This pair is a
+ * MIRROR of the stylesheet and the inline style it builds OUTRANKS the sheet,
+ * so widening the sheet alone left the surface at its old width and the change
+ * entirely dead. tests/unit/quality/stylesheet-contract.test.ts now pins the
+ * two halves equal so the mirror cannot drift again. DL-DIAG-08.
  */
-const HOST_WIDTH_NUMERATOR = 3;
+const HOST_WIDTH_NUMERATOR = 4;
 
 const HOST_WIDTH_DENOMINATOR = 5;
 
@@ -282,8 +288,27 @@ const TABLE_STYLE: Readonly<Record<string, string>> = Object.freeze({
 const CELL_STYLE: Readonly<Record<string, string>> = Object.freeze({
   padding: `0 ${HALF_GRID_SPACING}px 0 0`,
   'vertical-align': 'top',
-  'overflow-wrap': 'anywhere',
+
+  // CHANGED from `anywhere`, which broke every string at whatever character
+  // reached the cell edge — so a health detail read "Function .protoy pe.bind
+  // is present." `break-word` wraps an ordinary word whole at its spaces and
+  // breaks only a token longer than its own line. The min-content contribution
+  // `anywhere` was reducing is irrelevant under the `table-layout: fixed` this
+  // table already sets. DL-DIAG-08.
+  'overflow-wrap': 'break-word',
 });
+
+/**
+ * ADDED: inline size of each stated column, narrowest first.
+ *
+ * Under `table-layout: fixed` the columns divide the table evenly unless a
+ * width is stated, which gave the column holding one short status word the same
+ * room as the column holding a sentence. Stating the first two hands the whole
+ * remainder to the third: the prose column's usable width goes from roughly
+ * 64px to roughly 160px. A column past the end of this list is unstated and
+ * takes an equal share of what is left. DL-DIAG-08.
+ */
+const COLUMN_INLINE_SIZES: readonly string[] = Object.freeze(['34%', '20%']);
 
 /** Inline declarations the inline error line of a failed panel carries. */
 const PANEL_ERROR_STYLE: Readonly<Record<string, string>> = Object.freeze({
@@ -1542,8 +1567,14 @@ export function createDiagnosticsOverlay(
    *
    * @param line Row the cell is appended to.
    * @param value Cell text, or the cell.
+   * @param column Zero-based position of the cell in its row, which selects the
+   *   stated inline size. ADDED for DL-DIAG-08.
    */
-  const appendCell = (line: Node, value: string | Cell): void => {
+  const appendCell = (
+    line: Node,
+    value: string | Cell,
+    column: number,
+  ): void => {
     const cell: Cell = typeof value === 'string' ? { text: value } : value;
     const node = make('td', cell.className ?? '');
 
@@ -1553,6 +1584,16 @@ export function createDiagnosticsOverlay(
 
     node.textContent = cell.text === '' ? MISSING_VALUE : cell.text;
     applyStyle(node, CELL_STYLE);
+
+    // ADDED. Written on every row's cell rather than the first row's alone:
+    // under `table-layout: fixed` the first row governs, so the later ones are
+    // inert, and a panel whose first row failed to build still states its
+    // columns. A cell's own `style` below still overrides this. DL-DIAG-08.
+    const stated = COLUMN_INLINE_SIZES[column];
+
+    if (stated !== undefined) {
+      applyStyle(node, { 'inline-size': stated });
+    }
 
     if (cell.style !== undefined) {
       applyStyle(node, cell.style);
@@ -1606,8 +1647,8 @@ export function createDiagnosticsOverlay(
         continue;
       }
 
-      for (const value of row) {
-        appendCell(line, value);
+      for (const [column, value] of row.entries()) {
+        appendCell(line, value, column);
       }
 
       body.appendChild(line);

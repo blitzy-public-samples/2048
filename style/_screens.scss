@@ -22,9 +22,11 @@
 //                                            rows
 //   TR-SCREEN-07  target-only row            `@mixin screen-panel-surface` and
 //                                            `@mixin screen-modal-surface`
+//   TR-SCREEN-08  target-only row            `.settings-row-binding`, the
+//                                            aligned key-binding row
 //
-// Decisions: DL-SCREEN-01, DL-SCREEN-02, DL-SCREEN-03, DL-SCREEN-04
-// (docs/DECISION_LOG.md).
+// Decisions: DL-SCREEN-01, DL-SCREEN-02, DL-SCREEN-03, DL-SCREEN-04,
+// DL-SCREEN-05 (docs/DECISION_LOG.md).
 
 @use "sass:color";
 @use "sass:math";
@@ -61,6 +63,16 @@ $screen-surface-radius: $tile-border-radius * 2 !default;
 
 $screen-panel-measure: $field-width !default;
 $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
+
+// ADDED: the name column of a key-binding row. A FIXED length, because that is
+// what puts the binding text at the same x in every row; one third of the
+// reading measure holds the longest name ("Close settings") at either type
+// scale. DL-SCREEN-05.
+$settings-binding-label-measure: math.div($screen-panel-measure, 3) !default;
+$settings-binding-label-measure-mobile: math.div(
+  $screen-panel-measure-mobile,
+  3
+) !default;
 
 // The shared overlay container: a viewport-fixed box that centres its content
 // on both axes at $z-index-screen-overlay, with no background of its own —
@@ -360,6 +372,20 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
   > section {
     @include screen-panel-surface;
   }
+
+  // ADDED: the dialog body reads as a settings LIST, so its text starts at the
+  // same edge its rows do. `screen-surface` centres the whole overlay's text,
+  // which left every legend and every explanatory paragraph centred above
+  // left-packed control rows. The heading keeps the centred treatment, and the
+  // control rows are flex or grid and take their alignment from the layout
+  // rather than from this property. DL-SCREEN-05.
+  .settings-body {
+    text-align: start;
+
+    > h2 {
+      text-align: center;
+    }
+  }
 }
 
 .settings-group {
@@ -398,10 +424,54 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
   gap: $screen-control-gap;
 }
 
+// ADDED: a key-binding row, laid out as three aligned columns rather than as a
+// wrapping flex line.
+//
+// Each row declares the SAME first column length and the same auto-sized third
+// column, and every rebind control paints the same constant string, so the
+// three columns land at the same x in all fourteen rows without a shared grid,
+// a subgrid or a wrapper element. The binding column takes the slack and is
+// allowed to shrink to nothing, so long spoken text wraps inside its own
+// column instead of pushing the control onto a second line. DL-SCREEN-05.
+.settings-row-binding {
+  display: grid;
+  grid-template-columns:
+    $settings-binding-label-measure
+    minmax(0, 1fr)
+    max-content;
+  align-items: center;
+
+  // Explicit, so the three children of a row cannot be re-flowed onto a
+  // neighbouring row's line by auto-placement.
+  > :nth-child(1) {
+    grid-column: 1;
+  }
+
+  > :nth-child(2) {
+    grid-column: 2;
+  }
+
+  > :nth-child(3) {
+    grid-column: 3;
+  }
+
+  @include smaller($mobile-threshold) {
+    grid-template-columns:
+      $settings-binding-label-measure-mobile
+      minmax(0, 1fr)
+      max-content;
+  }
+}
+
 // The keys bound to one action, as spoken text.
 .settings-binding {
   flex: 1 1 auto;
   overflow-wrap: break-word;
+
+  // ADDED: `flex-basis` governs it in the theme, motion and sound rows, which
+  // are still flex; in a binding row the grid column governs it and the item's
+  // automatic minimum has to be released for `minmax(0, 1fr)` to hold.
+  min-inline-size: 0;
 }
 
 .diagnostics-overlay {
@@ -428,12 +498,27 @@ $screen-panel-measure-mobile: $a11y-mobile-field-width !default;
     td {
       padding: 0 $screen-field-padding-inline 0 0;
 
-      overflow-wrap: anywhere;
+      // CHANGED from `anywhere`, which broke every string at whatever character
+      // reached the cell edge — a health detail read "Function .protoy pe.bind
+      // is present." `anywhere` was chosen because it also reduces a cell's
+      // min-content contribution, but `table-layout: fixed` above already makes
+      // that irrelevant, so the weaker value costs nothing: ordinary words now
+      // wrap whole at their spaces, and only a token longer than its own line
+      // breaks. DL-DIAG-08.
+      overflow-wrap: break-word;
       vertical-align: top;
     }
 
+    // The three columns explicitly, so the fixed layout hands the SURPLUS to
+    // the widest content rather than splitting it evenly. Health details are
+    // prose and the status column holds one short word, so an even split gave
+    // the prose the same room as "pass". DL-DIAG-08.
     td:first-child {
-      inline-size: 45%;
+      inline-size: 34%;
+    }
+
+    td:nth-child(2) {
+      inline-size: 20%;
     }
 
     // The value columns read as figures, so they align right.

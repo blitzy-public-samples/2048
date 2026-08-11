@@ -79,6 +79,20 @@ $hud-mobile-item-max-inline:
 // The ordered rarity list the accent loop below generates one rule per.
 $hud-rarity-tiers: $rarity-tiers !default;
 
+// ADDED: the dark anchor the FALLBACK accent is composited over, and its share.
+//
+// The published `--theme-rarity-<tier>-plate` carries each palette's own dark
+// tile surface, which style/_themes.scss owns; this file does not import that
+// module, so its fallback derives an equivalent anchor the way `$hud-rule-color`
+// above derives its own — by moving $text-color along one axis, here darker
+// rather than lighter. The weight matches `$rarity-plate-weight` there, so the
+// fallback and the custom property agree. DL-THEME-10.
+$hud-rarity-plate-anchor: color.adjust(
+  $text-color,
+  $lightness: -40%
+) !default;
+$hud-rarity-plate-weight: 55% !default;
+
 // HUD root.
 
 .hud {
@@ -380,12 +394,24 @@ $hud-rarity-tier-count: list.length($hud-rarity-tiers);
   .relic-tray-item[data-rarity="#{"" + $tier}"] {
     border-inline-start-width: $hud-hairline * ($ordinal + 1);
 
-    // The tier's accent, resolved through the `--theme-rarity-<tier>` custom
-    // property style/_themes.scss publishes for every palette, with this
-    // file's own mix as the fallback.
+    // CHANGED: the PLATED accent, `--theme-rarity-<tier>-plate`, where this
+    // read the pure `--theme-rarity-<tier>`.
+    //
+    // The pure accent is the colour of the reward card's own dark surface plus
+    // the tier, and it reads there at 6.7:1 or better — but the tray sits on the
+    // page, where the same colour measured 1.18:1 and the stripe was visible
+    // only as an absence. The plated variant is the identical tier hue composited
+    // over that dark surface, so one rarity vocabulary serves both surfaces and
+    // every tier clears the 3:1 asked of information-bearing non-text. The width
+    // channel below is unchanged and still carries the tier on its own.
+    // DL-THEME-10.
     border-inline-start-color: var(
-      --theme-rarity-#{"" + $tier},
-      #{color.mix($tile-gold-color, $tile-color, $anchor-weight)}
+      --theme-rarity-#{"" + $tier}-plate,
+      #{color.mix(
+        $hud-rarity-plate-anchor,
+        color.mix($tile-gold-color, $tile-color, $anchor-weight),
+        $hud-rarity-plate-weight
+      )}
     );
   }
 }

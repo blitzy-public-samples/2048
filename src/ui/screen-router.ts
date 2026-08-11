@@ -1058,6 +1058,13 @@ export interface RouterRunPort {
 export interface RouterAnnouncerPort {
   announce?(input: Announcement): void;
   announceText?(text: string, polarity?: AnnouncementPolarity): void;
+
+  /**
+   * Blanks the assertive region. Called on entering a state that is not
+   * terminal, so a run verdict does not stay readable on a screen that has
+   * nothing to do with it. Optional, like the other two. DL-LIVE-06.
+   */
+  clearAssertive?(): void;
 }
 
 /**
@@ -2370,7 +2377,15 @@ export function createScreenRouter(
     const engaged = screenTrap;
 
     screenTrap = null;
-    engaged?.release();
+
+    // WITHOUT the restore. Both callers make it meaningless: `leaveScreen` is
+    // followed immediately by `enterScreen`, which opens a trap on the incoming
+    // container and places focus itself, and `destroy()` is tearing the router
+    // down. Restoring in between could only move focus through an element the
+    // user never sees, or fail on a control the outgoing screen has just
+    // hidden and report a failure that describes nothing wrong — which is what
+    // it did. DL-FOCUS-05.
+    engaged?.release({ restoreFocus: false });
   };
 
   /**
@@ -2599,6 +2614,26 @@ export function createScreenRouter(
   const announceScreen = (screen: ScreenName, context: ScreenContext): void => {
     if (announcer === null) {
       return;
+    }
+
+    // A terminal verdict is the only line written to the assertive region, and
+    // an `alert` region holds its text until something replaces it — so the
+    // verdict outlived its own state and was still readable on run start.
+    // Blanked on entering any NON-terminal state, before this state's own line
+    // is read. DL-LIVE-06.
+    if (!(screen in TERMINAL_VERDICTS_BY_SCREEN)) {
+      const blank = announcer.clearAssertive?.bind(announcer);
+
+      if (blank !== undefined) {
+        try {
+          blank();
+        } catch (error) {
+          reporter.error('clearing the assertive region raised', error, {
+            context: REPORT_CONTEXT,
+            screen,
+          });
+        }
+      }
     }
 
     const speak = announcer.announceText?.bind(announcer);
@@ -3505,6 +3540,21 @@ export function createScreenRouter(
     }
 
     settingsOpen = false;
+
+    // Re-applied HERE, before the release below, and not left to the `settle()`
+    // at the end of this function.
+    //
+    // The control layer disables every control whose action the CURRENT screen
+    // does not authorize, and `#settings-button` publishes `openSettings`,
+    // which `ACTION_SCREENS` does not authorize in `'settings'`. So for as long
+    // as `screen()` answers `'settings'` that button is `disabled` — and it is
+    // the element this trap recorded to restore focus to. Releasing first
+    // restored focus onto a disabled button, which cannot take it: focus fell
+    // to the body and two restore failures were reported for a button that was
+    // about to be perfectly focusable. `settingsOpen` is already `false` above,
+    // so this refresh re-enables it first. `settle()` still refreshes, which
+    // raises the refresh counter twice per close. DL-ROUTER-40.
+    refreshControls();
 
     // Released BEFORE the panel is hidden: a trap restores focus to the
     // element it recorded, and restoring into a subtree that has just become

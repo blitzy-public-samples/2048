@@ -6,7 +6,8 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { compile } from 'sass';
 
-import { defaultTheme } from '../../../src/theme/themes';
+import { fieldWidth } from '../../../src/theme/tokens';
+import { defaultTheme, rarityTiers } from '../../../src/theme/themes';
 
 const ROOT = resolve(import.meta.dirname, '..', '..', '..');
 
@@ -16,6 +17,53 @@ const read = (relativePath: string): string =>
 
 /** The compiled stylesheet, compiled once for the whole file. */
 const compiled = ((): string => compile(resolve(ROOT, 'style/main.scss')).css)();
+
+/**
+ * Reads one `--theme-*` declaration out of the compiled sheet and renders it
+ * as a browser would: `rgb()` channels stated as percentages are rounded to
+ * the nearest 8-bit value, which is what the pixel ends up being.
+ *
+ * MOVED to module scope, from the describe below, so the rarity-plate group
+ * reads the same renderer rather than a second copy of it.
+ *
+ * @param property Custom property to read, without its leading dashes.
+ * @param from Text to read it out of. Defaults to the whole sheet, which finds
+ *   the first — that is, the default palette's — declaration.
+ * @returns The colour as 6-digit lowercase hex.
+ */
+const compiledColor = (property: string, from: string = compiled): string => {
+  const declaration = new RegExp(`--${property}:\\s*([^;]+);`, 'u').exec(
+    from,
+  )?.[1];
+
+  if (declaration === undefined) {
+    throw new Error(`the compiled sheet declares no --${property}`);
+  }
+
+  const text = declaration.trim();
+
+  if (text.startsWith('#')) {
+    return text.length === 4
+      ? `#${text[1]}${text[1]}${text[2]}${text[2]}${text[3]}${text[3]}`.toLowerCase()
+      : text.toLowerCase();
+  }
+
+  const channels = /rgba?\(([^)]*)\)/u.exec(text)?.[1] ?? '';
+  const rendered = channels
+    .split(',')
+    .slice(0, 3)
+    .map((channel): number => {
+      const value = channel.trim();
+
+      return value.endsWith('%')
+        ? (Number.parseFloat(value) / 100) * 255
+        : Number.parseFloat(value);
+    })
+    .map((value): string => Math.round(value).toString(16).padStart(2, '0'))
+    .join('');
+
+  return `#${rendered}`;
+};
 
 describe('style/_tokens.scss declares each function once', () => {
   it('declares `quantised` exactly once', () => {
@@ -45,46 +93,6 @@ describe('style/_tokens.scss declares each function once', () => {
 });
 
 describe('the accessible component surfaces match the token module', () => {
-  /**
-   * Reads one `--theme-*` declaration out of the compiled sheet and renders it
-   * as a browser would: `rgb()` channels stated as percentages are rounded to
-   * the nearest 8-bit value, which is what the pixel ends up being.
-   *
-   * @param property Custom property to read, without its leading dashes.
-   * @returns The colour as 6-digit lowercase hex.
-   */
-  const compiledColor = (property: string): string => {
-    const declaration = new RegExp(
-      `--${property}:\\s*([^;]+);`,
-      'u',
-    ).exec(compiled)?.[1];
-
-    if (declaration === undefined) {
-      throw new Error(`the compiled sheet declares no --${property}`);
-    }
-
-    const text = declaration.trim();
-
-    if (text.startsWith('#')) {
-      return text.toLowerCase();
-    }
-
-    const channels = /rgb\(([^)]*)\)/u.exec(text)?.[1] ?? '';
-    const rendered = channels
-      .split(',')
-      .map((channel): number => {
-        const value = channel.trim();
-
-        return value.endsWith('%')
-          ? (Number.parseFloat(value) / 100) * 255
-          : Number.parseFloat(value);
-      })
-      .map((value): string => Math.round(value).toString(16).padStart(2, '0'))
-      .join('');
-
-    return `#${rendered}`;
-  };
-
   it('renders the control surface the token module declares', () => {
     // src/theme/tokens.ts states the quantised form of
     // `color.adjust($game-container-background, $lightness: -26%)`; this is the
@@ -123,10 +131,37 @@ describe('the settings slider carries the shared control treatment', () => {
   });
 
   it('takes the hover, activation and disabled states', () => {
+    // Hover still yields to keyboard focus, which is a presentation choice.
     expect(compiled).toMatch(/\.settings-slider:hover:not\(:focus-visible\)/u);
-    expect(compiled).toMatch(/\.settings-slider:active:not\(:focus-visible\)/u);
+
+    // ACTIVATION DOES NOT. It was written `:active:not(:focus-visible)` while
+    // it and the focus ring both declared `box-shadow`, so a focused control
+    // could show only one of the two and press feedback vanished under
+    // keyboard focus. The two now occupy separate slots of one composed
+    // `box-shadow`, so the guard is gone and both are visible together.
+    // DL-A11Y-10.
+    expect(compiled).toMatch(/\.settings-slider:active:not\(:disabled\)/u);
+    expect(compiled).not.toMatch(
+      /\.settings-slider:active:not\(:focus-visible\)/u,
+    );
+
     expect(compiled).toMatch(
       /\.settings-slider:disabled[^{]*\{[^}]*pointer-events: none/u,
+    );
+  });
+
+  it('composes the focus band and the state ring on one property', () => {
+    // The focus rule writes the focus slot and the activation rule the state
+    // slot; one declaration lays both down, so neither can erase the other.
+    // DL-A11Y-10.
+    expect(compiled).toMatch(
+      /\.settings-slider:focus-visible\s*\{[^}]*--a11y-focus-shadow:/u,
+    );
+    expect(compiled).toMatch(
+      /\.settings-slider:active:not\(:disabled\)[^{]*\{[^}]*--a11y-state-shadow:\s*inset/u,
+    );
+    expect(compiled).toMatch(
+      /box-shadow:\s*var\(--a11y-state-shadow[^)]*\),\s*var\(--a11y-focus-shadow/u,
     );
   });
 
@@ -175,5 +210,436 @@ describe('the relic tray is styled as the reading it is', () => {
     expect(rule).toContain('padding: 0');
     expect(rule).toContain('background: transparent');
     expect(rule).toContain('font: inherit');
+  });
+});
+
+describe('the retained terminal overlay withdraws for the router', () => {
+  /** The withdrawal rule, as the compiler emits it. */
+  const withdrawal =
+    '[inert] .game-container .game-message.game-won, ' +
+    '[inert] .game-container .game-message.game-over';
+
+  /** The promotion the withdrawal has to outrank. */
+  const promotion =
+    '.game-container .game-message.game-won, ' +
+    '.game-container .game-message.game-over';
+
+  it('withdraws the layer wherever an ancestor is inert', () => {
+    // AAP §0.4.1.1 subsumes `.game-message` into the router's terminal states,
+    // and `SCREEN_INERTS_BACKGROUND` of src/ui/screen-router.ts is where the
+    // router says it owns the presentation. Both terminal classes are covered,
+    // so the win and the loss each resolve through one treatment. DL-SHEET-07.
+    expect(compiled).toMatch(
+      new RegExp(
+        `${withdrawal.replace(/[[\].]/gu, '\\$&')}\\s*\\{[^}]*display: none`,
+        'u',
+      ),
+    );
+  });
+
+  it('withdraws it at the mobile scale too', () => {
+    // `game-field` is included twice — once at the desktop measure and once
+    // inside the single breakpoint — so a rule that reached only the first
+    // emission would leave the duplicate treatment standing under 520px.
+    const occurrences = compiled.split(withdrawal).length - 1;
+
+    expect(occurrences).toBe(2);
+  });
+
+  it('outranks the promotion it has to beat, in both emissions', () => {
+    // Four class-level components against three settles the cascade on
+    // specificity; following the promotion in source order settles it again if
+    // a future edit ever levels them.
+    const promotions = [...compiled.matchAll(
+      new RegExp(promotion.replace(/[[\].]/gu, '\\$&'), 'gu'),
+    )].map((match) => match.index);
+    const withdrawals = [...compiled.matchAll(
+      new RegExp(withdrawal.replace(/[[\].]/gu, '\\$&'), 'gu'),
+    )].map((match) => match.index);
+
+    // `[inert] ` prefixes BOTH selectors in the withdrawal's list, so the
+    // promotion's own text is not a substring of it: the two counts are the two
+    // emissions, and each withdrawal follows the promotion it outranks.
+    expect(promotions).toHaveLength(2);
+    expect(withdrawals).toHaveLength(2);
+    expect(withdrawals[0]).toBeGreaterThan(promotions[0] as number);
+    expect(withdrawals[1]).toBeGreaterThan(promotions[1] as number);
+  });
+
+  it('leaves the layer presenting when nothing is inert', () => {
+    // The withdrawal is conditional on the router's own marker, so a document
+    // whose screen layer never took over still gets the ported `message()`
+    // treatment. Removing the promotion would delete that fallback.
+    expect(compiled).toMatch(
+      new RegExp(
+        `(?<!\\[inert\\] )${promotion.replace(/[[\].]/gu, '\\$&')}\\s*\\{` +
+          '[^}]*display: block',
+        'u',
+      ),
+    );
+  });
+
+  it('takes the whole layer, not the paragraph and the controls apart', () => {
+    // Hiding the ancestor is what removes the two retained buttons from the
+    // layout, the accessibility tree and the tab order at once — the treatment
+    // the availability layer gives `.retry-button`, applied to both by
+    // containment rather than restated per control.
+    expect(compiled).not.toMatch(/\[inert\][^{]*\.game-message\s+p\s*\{/u);
+    expect(compiled).not.toMatch(/\[inert\][^{]*\.game-message\s+\.lower\s*\{/u);
+  });
+});
+
+describe('the on-screen controls are a pad that clears the target floor', () => {
+  it('lays the four movement controls out on a three-column track', () => {
+    expect(compiled).toMatch(
+      /\.on-screen-controls-pad\s*\{[^}]*display: grid/u,
+    );
+    expect(compiled).toMatch(
+      /\.on-screen-controls-pad\s*\{[^}]*grid-template-columns: repeat\(3, 1fr\)/u,
+    );
+  });
+
+  it('places each control where its direction points', () => {
+    // 0 up, 1 right, 2 down, 3 left — the `MOVE_ACTION_DIRECTIONS` encoding
+    // src/input/on-screen-controls.ts already writes as `data-direction`.
+    // DL-CONTROL-09.
+    const placements: readonly [string, string][] = [
+      ['0', '1/2'],
+      ['1', '2/3'],
+      ['2', '3/2'],
+      ['3', '2/1'],
+    ];
+
+    for (const [direction, area] of placements) {
+      expect(compiled).toMatch(
+        new RegExp(
+          `\\.on-screen-controls-pad > \\[data-direction="${direction}"\\]\\s*\\{` +
+            `[^}]*grid-area: ${area.replace('/', '\\/')}`,
+          'u',
+        ),
+      );
+    }
+  });
+
+  it('leaves the sibling action group a wrapping flex row', () => {
+    // The grid rule is scoped to the pad; the actions group keeps the layout it
+    // had, so this change reaches four controls and no others.
+    expect(compiled).toMatch(
+      /\.on-screen-controls-group\s*\{[^}]*display: flex/u,
+    );
+    expect(compiled).not.toMatch(
+      /\.on-screen-controls-actions\s*\{[^}]*display: grid/u,
+    );
+  });
+
+  it('extends the hit area to the 44px floor without moving the box', () => {
+    const rule =
+      /\.on-screen-control\s*\{([^}]*)\}/u.exec(compiled)?.[1] ?? '';
+
+    // The painted height stays the token's 40px; the shortfall is made up by a
+    // transparent pseudo-element, so `.restart-button` and the frozen classic
+    // identity are untouched. DL-A11Y-11.
+    expect(rule).toContain('position: relative');
+    expect(rule).toContain('min-inline-size: 44px');
+    expect(rule).not.toContain('block-size');
+
+    expect(compiled).toMatch(
+      /\.on-screen-control::after\s*\{[^}]*inset-block: -2px/u,
+    );
+    expect(compiled).toMatch(
+      /\.on-screen-control::after\s*\{[^}]*background: transparent/u,
+    );
+  });
+
+  it('gives the extension to no control the availability layer withdrew', () => {
+    expect(compiled).toMatch(
+      /\.on-screen-control\[hidden\]::after[^{]*\{[^}]*content: none/u,
+    );
+  });
+
+  it('leaves the retained classic controls out of the extension', () => {
+    // Named selectors, so a reader can see the scope: neither the frozen
+    // `.restart-button` nor its companion gains a pseudo-element.
+    expect(compiled).not.toMatch(/\.restart-button::after/u);
+    expect(compiled).not.toMatch(/\.settings-button::after/u);
+  });
+});
+
+
+describe('a key-binding row is laid out as aligned columns', () => {
+  /** The first column's length, as the compiled sheet states it. */
+  const labelColumn = (source: string): string | undefined =>
+    /grid-template-columns:\s*([\d.]+)px minmax\(0, 1fr\) max-content/u.exec(
+      source,
+    )?.[1];
+
+  it('is a three-column grid with a fixed first column', () => {
+    // A FIXED length is what puts the binding text at the same x in every row;
+    // an `auto` or `max-content` column would be sized per row. DL-SCREEN-05.
+    expect(compiled).toMatch(
+      /\.settings-row-binding\s*\{[^}]*display: grid/u,
+    );
+
+    const rule = /\.settings-row-binding\s*\{([^}]*)\}/u.exec(compiled)?.[1];
+
+    expect(rule).toBeDefined();
+    expect(labelColumn(rule ?? '')).toBe('166.6666666667');
+    expect(rule).toContain('minmax(0, 1fr) max-content');
+    expect(rule).toContain('align-items: center');
+  });
+
+  it('places the three children of a row by position', () => {
+    for (const [child, column] of [
+      ['1', '1'],
+      ['2', '2'],
+      ['3', '3'],
+    ] as const) {
+      expect(compiled).toMatch(
+        new RegExp(
+          `\\.settings-row-binding > :nth-child\\(${child}\\)\\s*\\{` +
+            `[^}]*grid-column: ${column}`,
+          'u',
+        ),
+      );
+    }
+  });
+
+  it('rescales the first column at the mobile measure', () => {
+    // 280px / 3, the mobile reading measure, from the same derivation.
+    const declaration =
+      'grid-template-columns: 93.3333333333px minmax(0, 1fr) max-content;';
+
+    expect(compiled).toContain(declaration);
+
+    // And it is inside the ONE breakpoint this stylesheet declares: the
+    // nearest `@media` above it is the 520px query.
+    const at = compiled.indexOf(declaration);
+    const query = compiled.lastIndexOf('@media', at);
+
+    expect(query).toBeGreaterThan(-1);
+    expect(compiled.slice(query, at)).toContain('(max-width: 520px)');
+
+    // The desktop rule is the one outside any query.
+    const desktop = compiled.indexOf(
+      'grid-template-columns: 166.6666666667px minmax(0, 1fr) max-content;',
+    );
+
+    expect(desktop).toBeGreaterThan(-1);
+    expect(desktop).toBeLessThan(at);
+  });
+
+  it('releases the binding cell so the middle column can shrink', () => {
+    // `minmax(0, 1fr)` cannot hold while the item keeps its automatic minimum,
+    // which is what pushed the control onto a second line.
+    expect(compiled).toMatch(
+      /\.settings-binding\s*\{[^}]*min-inline-size: 0/u,
+    );
+    expect(compiled).toMatch(
+      /\.settings-binding\s*\{[^}]*overflow-wrap: break-word/u,
+    );
+  });
+
+  it('starts the dialog body text at the inline edge, heading excepted', () => {
+    expect(compiled).toMatch(
+      /\.settings-panel:not\(\[hidden\]\) \.settings-body\s*\{[^}]*text-align: start/u,
+    );
+    expect(compiled).toMatch(
+      /\.settings-panel:not\(\[hidden\]\) \.settings-body > h2\s*\{[^}]*text-align: center/u,
+    );
+
+    // The overlay itself still centres, which every other screen depends on.
+    expect(compiled).toMatch(/\.screen\s*\{[^}]*text-align: center/u);
+  });
+});
+
+describe('a rarity reads against the surface it is painted on', () => {
+  /** The WCAG 2.1 AA minimum for a non-text graphical distinction. */
+  const GRAPHICAL_MINIMUM = 3;
+
+  /**
+   * Relative luminance of a 6-digit hex colour, by WCAG 2.1's own formula. The
+   * canonical statement of it lives in tests/unit/theme/palette-contrast.test.ts,
+   * which reads no filesystem; this file compiles the sheet, so the two cannot
+   * share one module without giving that suite a compile step it declares it
+   * does not take.
+   *
+   * @param hex Colour as `#rrggbb`.
+   * @returns Its relative luminance.
+   */
+  const luminance = (hex: string): number => {
+    const channels = [1, 3, 5].map(
+      (at): number => Number.parseInt(hex.slice(at, at + 2), 16) / 255,
+    );
+
+    const linear = channels.map((channel): number =>
+      channel <= 0.03928
+        ? channel / 12.92
+        : Math.pow((channel + 0.055) / 1.055, 2.4),
+    );
+
+    return (
+      0.2126 * (linear[0] ?? 0) +
+      0.7152 * (linear[1] ?? 0) +
+      0.0722 * (linear[2] ?? 0)
+    );
+  };
+
+  /**
+   * Contrast ratio between two colours.
+   *
+   * @param front Foreground as `#rrggbb`.
+   * @param back Background as `#rrggbb`.
+   * @returns The ratio, at least 1.
+   */
+  const contrast = (front: string, back: string): number => {
+    const a = luminance(front) + 0.05;
+    const b = luminance(back) + 0.05;
+
+    return a > b ? a / b : b / a;
+  };
+
+  it('computes a ratio the formula endpoints agree with', () => {
+    expect(contrast('#000000', '#ffffff')).toBeCloseTo(21, 5);
+    expect(contrast('#bbada0', '#bbada0')).toBeCloseTo(1, 5);
+  });
+
+  it('publishes an accent and a plated variant per tier, in every palette', () => {
+    // Four tiers across three palettes, for each of the two vocabularies.
+    expect(compiled.match(/--theme-rarity-[a-z]+:/gu) ?? []).toHaveLength(12);
+    expect(
+      compiled.match(/--theme-rarity-[a-z]+-plate:/gu) ?? [],
+    ).toHaveLength(12);
+
+    for (const tier of rarityTiers) {
+      expect(compiled).toContain(`--theme-rarity-${tier}:`);
+      expect(compiled).toContain(`--theme-rarity-${tier}-plate:`);
+    }
+  });
+
+  it('clears the graphical floor on the page, which the bare accent did not', () => {
+    // DL-THEME-10. The accents are built to read on the dark card surface and
+    // measure 6.70:1 to 9.08:1 there. On the page they measured 1.18:1 to
+    // 1.60:1 — which is what the review reported against the tray stripe, a
+    // surface the page shows through. The plated variant composites each accent
+    // over the card anchor so the stripe carries a colour built for where it is
+    // actually painted.
+    const page = compiledColor('theme-page-background');
+
+    for (const tier of rarityTiers) {
+      const accent = compiledColor(`theme-rarity-${tier}`);
+      const plate = compiledColor(`theme-rarity-${tier}-plate`);
+
+      // The premise: the bare accent does not clear the floor on the page.
+      expect(contrast(accent, page)).toBeLessThan(GRAPHICAL_MINIMUM);
+
+      // The fix: the plated one does.
+      expect(contrast(plate, page)).toBeGreaterThanOrEqual(GRAPHICAL_MINIMUM);
+    }
+  });
+
+  it('keeps the tiers distinguishable from each other, in hue order', () => {
+    // A plate that cleared the floor by collapsing the four tiers onto one
+    // another would destroy the distinction it exists to carry, so the ladder
+    // is asserted as an ordering rather than four independent ratios.
+    const page = compiledColor('theme-page-background');
+    const ratios = rarityTiers.map((tier): number =>
+      contrast(compiledColor(`theme-rarity-${tier}-plate`), page),
+    );
+
+    expect(new Set(ratios).size).toBe(rarityTiers.length);
+
+    for (let at = 1; at < ratios.length; at += 1) {
+      expect(ratios[at]).toBeGreaterThan(ratios[at - 1] ?? 0);
+    }
+  });
+
+  it('reads the plated variant on the tray stripe and the accent on the chip', () => {
+    // The two surfaces differ, so they read different properties: the stripe
+    // sits on the page and the chip sits on the card.
+    expect(compiled).toMatch(/--theme-rarity-[^;)]*-plate/u);
+
+    const stripe = /\.relic-tray-item\[data-rarity[^{]*\{[^}]*\}/gu;
+    const stripes = compiled.match(stripe) ?? [];
+
+    expect(stripes.length).toBeGreaterThan(0);
+    expect(stripes.some((rule) => rule.includes('-plate'))).toBe(true);
+  });
+});
+
+describe('a disabled relic card is dimmed like every other disabled control', () => {
+  it('carries the shared disabled alpha rather than a treatment of its own', () => {
+    // DL-REWARD-15. The card stated only a dashed edge, so the one control the
+    // reward screen disables read as available. `$a11y-disabled-alpha` is the
+    // value style/_a11y.scss dims every other disabled control by.
+    const rule =
+      /\.reward-offer \.relic-card\[disabled\][^{]*\{([^}]*)\}/u.exec(
+        compiled,
+      )?.[1];
+
+    expect(rule).toBeDefined();
+    expect(rule).toContain('opacity: 0.5');
+
+    // And the affordances that were already right are untouched.
+    expect(rule).toContain('pointer-events: none');
+    expect(rule).toContain('cursor: default');
+  });
+
+  it('uses the same alpha the accessibility layer states for a control', () => {
+    const shared = /\$a11y-disabled-alpha:\s*([0-9.]+)/u.exec(
+      read('style/_a11y.scss'),
+    )?.[1];
+
+    expect(shared).toBe('0.5');
+
+    const rule =
+      /\.reward-offer \.relic-card\[disabled\][^{]*\{([^}]*)\}/u.exec(
+        compiled,
+      )?.[1];
+
+    expect(rule).toContain(`opacity: ${String(shared)}`);
+  });
+});
+
+describe('the diagnostics surface width is one number in two places', () => {
+  // DL-DIAG-08. The surface's inline size is declared in style/main.scss AND
+  // mirrored in src/observability/diagnostics-overlay.ts, which applies it as an
+  // INLINE style — and an inline declaration outranks the stylesheet. Widening
+  // the sheet alone therefore left the surface at its old width with the change
+  // entirely dead and no test failing. Only a source read can catch that, so
+  // this pins the two halves to one another.
+  const OVERLAY_WIDTH_DENOMINATOR = 5;
+  const OVERLAY_WIDTH_NUMERATOR = 4;
+
+  it('declares the same fraction of the reading measure in the stylesheet', () => {
+    expect(read('style/main.scss')).toContain(
+      `inline-size: math.div($field-width * ${OVERLAY_WIDTH_NUMERATOR}, ` +
+        `${OVERLAY_WIDTH_DENOMINATOR});`,
+    );
+  });
+
+  it('mirrors that same fraction in the module that inlines it', () => {
+    const source = read('src/observability/diagnostics-overlay.ts');
+
+    expect(source).toContain(
+      `const HOST_WIDTH_NUMERATOR = ${OVERLAY_WIDTH_NUMERATOR};`,
+    );
+    expect(source).toContain(
+      `const HOST_WIDTH_DENOMINATOR = ${OVERLAY_WIDTH_DENOMINATOR};`,
+    );
+
+    // And the module cites the stylesheet's own expression, so a reader of
+    // either half is pointed at the other.
+    expect(source).toContain(
+      `math.div($field-width * ${OVERLAY_WIDTH_NUMERATOR}, ` +
+        `${OVERLAY_WIDTH_DENOMINATOR})`,
+    );
+  });
+
+  it('compiles to the pixel width both halves compute', () => {
+    const expected =
+      (fieldWidth * OVERLAY_WIDTH_NUMERATOR) / OVERLAY_WIDTH_DENOMINATOR;
+
+    expect(expected).toBe(400);
+    expect(compiled).toContain(`inline-size: ${String(expected)}px`);
   });
 });

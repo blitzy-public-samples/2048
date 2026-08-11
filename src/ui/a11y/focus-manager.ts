@@ -1107,8 +1107,29 @@ export interface FocusTrapHandle {
   /**
    * Releases the trap, restores focus and lifts every inertness it applied.
    * Calling it more than once is harmless.
+   *
+   * @param options Whether to restore focus. Omitted, focus is restored.
    */
-  release(): void;
+  release(options?: FocusTrapReleaseOptions): void;
+}
+
+/**
+ * How one release behaves.
+ *
+ * ADDED so a caller that places focus itself immediately afterwards can decline
+ * the restore. DL-FOCUS-05.
+ */
+export interface FocusTrapReleaseOptions {
+  /**
+   * Whether to move focus back to the element the trap recorded, or to the
+   * configured fallback. Defaults to `true`.
+   *
+   * `false` is for the caller that is ABOUT TO place focus itself: a restore it
+   * is going to supersede one tick later can only either flicker focus through
+   * an element the user never sees, or fail and report a failure that describes
+   * nothing wrong.
+   */
+  readonly restoreFocus?: boolean;
 }
 
 /** What the enclosing manager supplies to a trap it owns. */
@@ -1483,7 +1504,7 @@ function engageTrap(
     }
   };
 
-  const release = (): void => {
+  const release = (releaseOptions: FocusTrapReleaseOptions = {}): void => {
     if (released) {
       return;
     }
@@ -1496,7 +1517,14 @@ function engageTrap(
     }
 
     liftInertBackground(inerted, reporter, fields);
-    restore();
+
+    // `restoreFocus: false` is the caller declaring it places focus itself.
+    // The restore is skipped outright rather than attempted and forgiven, so
+    // no failure is reported for a restore nobody wanted. DL-FOCUS-05.
+    if (releaseOptions.restoreFocus !== false) {
+      restore();
+    }
+
     reporter.count(METRIC_TRAP_RELEASED, fields);
     host.onReleased();
   };
@@ -2167,6 +2195,14 @@ function isBoardSize(value: unknown): value is number {
 /**
  * The accessible name of one cell.
  *
+ * ROW FIRST, then column. This read `Column x, row y` while
+ * `numberOnlyRendererCopy` of ../../render/number-only-renderer.ts read
+ * `Row r, column c`, so the two board layers named the same cell in opposite
+ * axis order and a user who switched rendering mode had to re-learn the
+ * reading. Row-first is the order kept: it is the reading order of the grid,
+ * it matches the `role="row"` structure the layer is built from, and it is the
+ * order the number-only layer already used. DL-FOCUS-06.
+ *
  * @param x Zero-based column.
  * @param y Zero-based row.
  * @param value Tile value, or `null` for an empty cell.
@@ -2181,7 +2217,7 @@ function cellLabel(
 ): string {
   const content = value === null ? emptyLabel : String(value);
 
-  return `Column ${x + 1}, row ${y + 1}, ${content}`;
+  return `Row ${y + 1}, column ${x + 1}, ${content}`;
 }
 
 /**

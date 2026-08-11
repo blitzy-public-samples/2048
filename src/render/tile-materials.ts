@@ -611,11 +611,27 @@ export function resolveTileNumeralColor(
   return resolveTileTheme(value, theme).numeralColor;
 }
 
+/**
+ * Whether this value's glow is withheld: because the ramp withholds it for the
+ * value, or because the palette withholds it for every value.
+ *
+ * @param tileTheme Resolved tile theme.
+ * @param palette Palette it was resolved against.
+ * @returns Whether both glow terms are to be left off.
+ */
+function isGlowWithheld(
+  tileTheme: TileTheme,
+  palette: ThemePalette,
+): boolean {
+  return tileTheme.glowSuppressed || palette.tileGlowSuppressed;
+}
+
 function readTileRoughness(
   tileTheme: TileTheme,
+  palette: ThemePalette,
   response: SurfaceResponse,
 ): number {
-  const inset = tileTheme.glowSuppressed
+  const inset = isGlowWithheld(tileTheme, palette)
     ? ALPHA_CLEAR
     : confineAlpha(tileTheme.insetAlpha);
   const span = response.roughness - response.minRoughness;
@@ -642,10 +658,10 @@ function applyTileMaterial(
   readPalette: PaletteReader,
 ): MeshStandardMaterial {
   toThreeColor(readTileFill(tileTheme, precision), material.color);
-  material.roughness = readTileRoughness(tileTheme, response);
+  material.roughness = readTileRoughness(tileTheme, palette, response);
   material.metalness = response.metalness;
 
-  if (tileTheme.glowSuppressed) {
+  if (isGlowWithheld(tileTheme, palette)) {
     material.emissive.setRGB(ALPHA_CLEAR, ALPHA_CLEAR, ALPHA_CLEAR);
     material.emissiveIntensity = ALPHA_CLEAR;
     material.needsUpdate = true;

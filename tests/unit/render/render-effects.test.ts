@@ -7,7 +7,7 @@
 // below draws a frame.
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { OrthographicCamera, Vector3 } from 'three';
+import { Camera, OrthographicCamera, Vector3 } from 'three';
 import type { BufferAttribute } from 'three';
 
 import { createDefaultRulesConfig } from '../../../src/config/default-config';
@@ -37,6 +37,9 @@ const SECOND_ORIGIN = Object.freeze({ x: -2.5, y: 1.5, z: 0.5 });
  * The delay the `pop` cadence holds a burst's first keyframe across, in ms.
  */
 const POP_DELAY_MS = 100;
+
+/** The duration the `pop` cadence runs for, in ms. */
+const POP_DURATION_MS = 200;
 
 /** A tile value the ramp resolves, so the tint is a ramp fill. */
 const MERGED_VALUE = 8;
@@ -283,6 +286,7 @@ describe('with motion reduced', () => {
   it('never writes the camera', () => {
     const camera = createCamera();
     const rest = camera.position.clone();
+    const restZoom = camera.zoom;
     const effects = createCameraEffects(camera, { reducedMotion: true });
 
     expect(effects.punch()).toBe(false);
@@ -292,8 +296,11 @@ describe('with motion reduced', () => {
     effects.advance({ delta: 16 });
 
     // The camera punch and the shake are exactly the effects the AAP gates
-    // behind the reduced-motion preference, and the proof is the transform.
+    // behind the reduced-motion preference, and the proof is the transform —
+    // the projection the punch is drawn on included.
     expect(displacement(camera, rest)).toBe(0);
+    expect(camera.zoom).toBe(restZoom);
+    expect(effects.readStats().zoomShare).toBe(0);
     expect(effects.isActive()).toBe(false);
     expect(effects.readStats().suppressed).toBe(3);
 
@@ -302,9 +309,10 @@ describe('with motion reduced', () => {
 });
 
 describe('the camera punch', () => {
-  it('starts, displaces the camera and returns it to rest', () => {
+  it('starts, widens the projection and returns it to rest', () => {
     const camera = createCamera();
     const rest = camera.position.clone();
+    const restZoom = camera.zoom;
     const effects = createCameraEffects(camera, { reducedMotion: false });
 
     expect(effects.punch()).toBe(true);
@@ -312,16 +320,93 @@ describe('the camera punch', () => {
     expect(effects.readStats().punches).toBe(1);
 
     // Past the delay: the punch is `pop 200ms ease $transition-speed`, so its
-    // first keyframe carries no displacement and holds for 100 ms.
+    // first keyframe carries no impulse and holds for 100 ms.
     effects.advance({ delta: POP_DELAY_MS + 50 });
 
-    expect(displacement(camera, rest)).toBeGreaterThan(0);
-    expect(effects.readStats().offsetDistance).toBeGreaterThan(0);
+    // THE PROJECTION, not the position. This camera is orthographic, which has
+    // no perspective divide, so a displacement along its view axis leaves the
+    // projected image identical — the punch AAP R7 requires has to reach the
+    // frustum to reach the screen at all.
+    expect(camera.zoom).toBeLessThan(restZoom);
+    expect(effects.readStats().zoomShare).toBeGreaterThan(0);
+    expect(displacement(camera, rest)).toBe(0);
 
     effects.advance({ delta: 10_000 });
 
     expect(effects.isActive()).toBe(false);
+    expect(camera.zoom).toBe(restZoom);
+    expect(effects.readStats().zoomShare).toBe(0);
     expect(displacement(camera, rest)).toBe(0);
+
+    effects.destroy();
+  });
+
+  it('widens the projection by a share a viewer can see', () => {
+    const camera = createCamera();
+    const restZoom = camera.zoom;
+    const effects = createCameraEffects(camera, { reducedMotion: false });
+
+    expect(effects.punch(1)).toBe(true);
+
+    // Stepped to the overshoot the `pop` keyframes carry the peak on.
+    effects.advance({ delta: POP_DELAY_MS + POP_DURATION_MS / 2 });
+
+    const share = effects.readStats().zoomShare;
+
+    // The board is drawn ACROSS the frustum, so the share is the fraction of
+    // the board's own measure the impulse moves its edges by. A share this size
+    // is two orders of magnitude above the floor a frame comparison resolves.
+    expect(share).toBeGreaterThan(0.02);
+    expect(camera.zoom).toBeCloseTo(restZoom / (1 + share), 10);
+
+    effects.destroy();
+  });
+
+  it('displaces a camera whose projection carries no zoom', () => {
+    // A bare camera: the fallback path, and the only path a view-axis
+    // displacement is the punch on.
+    const camera = new Camera();
+
+    camera.position.set(0, 6, 8);
+    camera.lookAt(0, 0, 0);
+
+    const rest = camera.position.clone();
+    const effects = createCameraEffects(camera, { reducedMotion: false });
+
+    expect(effects.punch()).toBe(true);
+
+    effects.advance({ delta: POP_DELAY_MS + 50 });
+
+    expect(camera.position.distanceTo(rest)).toBeGreaterThan(0);
+    expect(effects.readStats().offsetDistance).toBeGreaterThan(0);
+    expect(effects.readStats().zoomShare).toBe(0);
+
+    effects.advance({ delta: 10_000 });
+
+    expect(camera.position.distanceTo(rest)).toBe(0);
+
+    effects.destroy();
+  });
+
+  it('confines the composed share of several punches at once', () => {
+    const camera = createCamera();
+    const restZoom = camera.zoom;
+    const effects = createCameraEffects(camera, {
+      reducedMotion: false,
+      punchZoom: 0.03,
+    });
+
+    // A move can carry one merge per row, and each merge asks for its own
+    // punch, so the composed share has to be bounded.
+    for (let index = 0; index < 8; index += 1) {
+      expect(effects.punch(1)).toBe(true);
+    }
+
+    effects.advance({ delta: POP_DELAY_MS + POP_DURATION_MS / 2 });
+
+    expect(effects.readStats().zoomShare).toBeLessThanOrEqual(0.06);
+    expect(effects.readStats().clampedZooms).toBeGreaterThan(0);
+    expect(camera.zoom).toBeGreaterThan(restZoom / 1.07);
 
     effects.destroy();
   });

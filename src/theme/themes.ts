@@ -144,6 +144,19 @@ export interface ThemePalette {
   readonly tileGlowInset: string;
 
   /**
+   * Whether the glow this palette states is withheld from the 2.5D materials
+   * for EVERY tile value, rather than only for the values the ramp's own
+   * `glowSuppressed` withholds it from.
+   *
+   * The glow is an ADDITIVE term over the tile's fill, so a palette whose fills
+   * were chosen to carry a numeral at a stated contrast ratio has that ratio
+   * lightened away by it. A palette that states its contrast states this too.
+   * Read by src/render/tile-materials.ts; the flat surfaces read the fill
+   * alone and are unaffected either way. Decision DL-THEME-09.
+   */
+  readonly tileGlowSuppressed: boolean;
+
+  /**
    * The neutral white point of the 2.5D lighting rig, read by
    * src/render/scene.ts for the key light's origin and the fill light's sky
    * half. Every palette states `#ffffff`, so a palette becomes able to state a
@@ -256,6 +269,11 @@ export const defaultThemePalette: ThemePalette = Object.freeze({
   tileAccentWeight: defaultTileRampPalette.accentWeight,
   tileGlow: tileGoldGlowColor,
   tileGlowInset: WHITE,
+
+  // The identity palette KEEPS its glow: the emissive term of AAP contract 7 is
+  // the 2.5D translation of this palette's own box-shadow, and the deliberately
+  // low contrast it carries is a stated property of the design.
+  tileGlowSuppressed: false,
   neutralLight: WHITE,
   tileSuperTint: defaultTileRampPalette.superTint,
   tileSuperWeight: defaultTileRampPalette.superWeight,
@@ -320,6 +338,12 @@ export const highContrastThemePalette: ThemePalette = Object.freeze({
   tileAccentWeight: 1,
   tileGlow: '#c8c8c8',
   tileGlowInset: WHITE,
+
+  // WITHHELD. This palette exists to raise the numeral contrast of every tile,
+  // and an additive glow over a dark fill lightens the fill until that contrast
+  // is gone: the five highest values fell to 4.12:1, 3.69:1, 3.32:1, 3.00:1 and
+  // 2.71:1 in the 2.5D board while reading 9.00:1 to 16.29:1 on the flat one.
+  tileGlowSuppressed: true,
   neutralLight: WHITE,
 
   // Mixed at full weight, so the tile above the ramp is the tint itself.
@@ -384,6 +408,11 @@ export const colorblindSafeThemePalette: ThemePalette = Object.freeze({
   tileAccentWeight: 1,
   tileGlow: '#8ecae6',
   tileGlowInset: WHITE,
+
+  // WITHHELD, for the reason the high-contrast palette withholds it: this
+  // palette's fills carry their numerals at a stated ratio, and an additive
+  // glow over them removes it.
+  tileGlowSuppressed: true,
   neutralLight: WHITE,
 
   // Mixed at full weight, so the tile above the ramp is the tint itself.

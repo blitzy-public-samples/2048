@@ -8,8 +8,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import { createNumberOnlyRenderer } from '../../../src/render/number-only-renderer';
 import type {
+  InitialUiPreferences,
   UiReportFields,
   UiReporter,
+} from '../../../src/ui/a11y/settings';
+import {
+  PREFERENCES_SCHEMA_VERSION,
+  createPreferenceStore,
+  deserializePreferences,
+  serializePreferences,
 } from '../../../src/ui/a11y/settings';
 import {
   SCREEN_INITIAL_FOCUS,
@@ -930,5 +937,341 @@ describe('F-05 stage focus resolves the board surface in force', () => {
     expect(placement.source).toBe('screen-selector');
     expect(placement.element).toBe(parallel);
     expect(document.activeElement).toBe(parallel);
+  });
+});
+
+/* ==========================================================================
+ * `release({ restoreFocus: false })` — for the caller that places focus
+ * itself immediately afterwards. DL-FOCUS-05.
+ * ========================================================================== */
+
+describe('a trap release can decline the focus restore', () => {
+  it('leaves focus where it is and reports no restore failure', () => {
+    document.body.innerHTML = `
+      <div id="board" tabindex="0">board</div>
+      <div id="dialog"><button type="button" id="inside">choose</button></div>
+    `;
+
+    const board = document.getElementById('board')!;
+    const dialog = document.getElementById('dialog')!;
+    const inside = document.getElementById('inside')!;
+    const recorded = recorder();
+    const manager = createFocusManager({ reporter: recorded.reporter });
+
+    const trap = manager.trap(dialog, {
+      label: 'screen',
+      restoreFocusTo: board,
+      reporter: recorded.reporter,
+    });
+
+    expect(trap).not.toBeNull();
+
+    // The trap opened on the dialog's own control.
+    expect(document.activeElement).toBe(inside);
+
+    trap?.release({ restoreFocus: false });
+
+    // Focus was NOT pulled back to the recorded target: the caller declared it
+    // places focus itself.
+    expect(document.activeElement).not.toBe(board);
+
+    const warnings = recorded.logs
+      .filter((entry) => entry.level === 'warn')
+      .map((entry) => entry.message);
+
+    expect(warnings).not.toContain(
+      'focus trap restore target did not take focus',
+    );
+    expect(warnings).not.toContain(
+      'focus trap restore fallback did not take focus',
+    );
+
+    manager.destroy();
+  });
+
+  it('still restores when the option is omitted or true', () => {
+    for (const options of [undefined, { restoreFocus: true }]) {
+      document.body.innerHTML = `
+        <div id="board" tabindex="0">board</div>
+        <div id="dialog"><button type="button" id="inside">choose</button></div>
+      `;
+
+      const board = document.getElementById('board')!;
+      const dialog = document.getElementById('dialog')!;
+      const recorded = recorder();
+      const manager = createFocusManager({ reporter: recorded.reporter });
+      const trap = manager.trap(dialog, {
+        label: 'screen',
+        restoreFocusTo: board,
+        reporter: recorded.reporter,
+      });
+
+      trap?.release(options);
+
+      expect(document.activeElement).toBe(board);
+
+      manager.destroy();
+    }
+  });
+
+  it('still lifts every inertness it applied', () => {
+    document.body.innerHTML = `
+      <div id="background">behind</div>
+      <div id="dialog"><button type="button" id="inside">choose</button></div>
+    `;
+
+    const background = document.getElementById('background')!;
+    const dialog = document.getElementById('dialog')!;
+    const recorded = recorder();
+    const manager = createFocusManager({ reporter: recorded.reporter });
+    const trap = manager.trap(dialog, {
+      label: 'screen',
+      inertBackground: [background],
+      reporter: recorded.reporter,
+    });
+
+    expect(background.hasAttribute('inert')).toBe(true);
+
+    trap?.release({ restoreFocus: false });
+
+    // Declining the restore does not decline the cleanup.
+    expect(background.hasAttribute('inert')).toBe(false);
+
+    manager.destroy();
+  });
+});
+
+/* ==========================================================================
+ * Both board layers name a cell row first. DL-FOCUS-06.
+ * ========================================================================== */
+
+describe('the two board layers agree on axis order', () => {
+  it('names a parallel-board cell row first, then column', () => {
+    const host = boardHost('board-axis-order');
+    const layer = createParallelBoardLayer({ document });
+
+    expect(layer.mount(host, 4)).toBe(true);
+
+    layer.update([{ x: 0, y: 0, value: 2 }]);
+
+    const labels = [...host.querySelectorAll('[role="gridcell"]')].map(
+      (cell) => cell.getAttribute('aria-label') ?? '',
+    );
+
+    // Sixteen cells, every one named row first — the order
+    // `numberOnlyRendererCopy` already used. DL-FOCUS-06.
+    expect(labels).toHaveLength(16);
+
+    for (const label of labels) {
+      expect(label).toMatch(/^Row \d+, column \d+, /u);
+      expect(label.startsWith('Column ')).toBe(false);
+    }
+
+    // And the cell holding the 2 is named as row 1, column 1.
+    expect(labels[0]).toBe('Row 1, column 1, 2');
+
+    layer.unmount();
+  });
+});
+
+
+/* ==========================================================================
+ * Preference persistence — Issue 15 of the QA report: none of the five
+ * accessibility and presentation preferences survived a reload, because no
+ * storage key existed for them. The pure pair either side of the envelope is
+ * what the composition root reads and writes. DL-SETTINGS-06, DL-KEYS-04.
+ * ========================================================================== */
+
+describe('the persisted preference envelope', () => {
+  /** A store with no platform motion query, so the setting alone governs. */
+  const store = (
+    initial?: InitialUiPreferences,
+  ): ReturnType<typeof createPreferenceStore> =>
+    createPreferenceStore({
+      motionSource: null,
+      // The palette must not be written onto this document by a unit test.
+      activateTheme: (): void => {
+        return;
+      },
+      ...(initial === undefined ? {} : { initial }),
+    });
+
+  it('carries a version, so a later shape change is detectable at load', () => {
+    const payload = serializePreferences(store().getPreferences());
+
+    expect(payload.schemaVersion).toBe(PREFERENCES_SCHEMA_VERSION);
+    expect(PREFERENCES_SCHEMA_VERSION).toBe(1);
+  });
+
+  it('round-trips all five preferences through JSON', () => {
+    const written = store({
+      motionSetting: 'reduce',
+      theme: 'high-contrast',
+      numberOnlyMode: true,
+      muted: true,
+      volume: 0.5,
+    });
+
+    const restored = store(
+      deserializePreferences(
+        JSON.parse(JSON.stringify(serializePreferences(written.getPreferences()))),
+      ),
+    );
+
+    expect(restored.getMotionSetting()).toBe('reduce');
+    expect(restored.getTheme()).toBe('high-contrast');
+    expect(restored.isNumberOnlyMode()).toBe(true);
+    expect(restored.isMuted()).toBe(true);
+    expect(restored.getVolume()).toBe(0.5);
+  });
+
+  it('records the number-only CHOICE, never a platform-imposed force', () => {
+    const chosen = store();
+
+    // No choice made; the platform imposes the mode.
+    chosen.forceNumberOnlyMode('WebGL is unavailable');
+
+    expect(chosen.isNumberOnlyMode()).toBe(true);
+    expect(chosen.isNumberOnlyForced()).toBe(true);
+
+    // The envelope records what the PLAYER expressed, which is nothing — so a
+    // later session on a working machine does not open in number-only mode.
+    expect(serializePreferences(chosen.getPreferences()).numberOnlyMode).toBe(
+      false,
+    );
+
+    const next = store(
+      deserializePreferences(serializePreferences(chosen.getPreferences())),
+    );
+
+    expect(next.isNumberOnlyMode()).toBe(false);
+    expect(next.isNumberOnlyForced()).toBe(false);
+  });
+
+  it('records a deliberate number-only choice', () => {
+    const chosen = store();
+
+    chosen.setNumberOnlyMode(true);
+
+    expect(serializePreferences(chosen.getPreferences()).numberOnlyMode).toBe(
+      true,
+    );
+  });
+
+  it('yields the defaults for a payload of the wrong shape, without throwing', () => {
+    for (const hostile of [
+      null,
+      undefined,
+      42,
+      'high-contrast',
+      true,
+      [],
+      [{ theme: 'high-contrast' }],
+    ] as const) {
+      expect(() => deserializePreferences(hostile)).not.toThrow();
+      expect(deserializePreferences(hostile)).toStrictEqual({});
+    }
+  });
+
+  it('refuses a version it cannot read, whole', () => {
+    for (const version of [0, 2, '1', null, undefined, Number.NaN]) {
+      const payload = {
+        ...serializePreferences(
+          store({ theme: 'colorblind-safe', muted: true }).getPreferences(),
+        ),
+        schemaVersion: version,
+      };
+
+      // Every field is readable in isolation; the version alone refuses it.
+      expect(deserializePreferences(payload)).toStrictEqual({});
+    }
+  });
+
+  it('omits a field of the wrong type and keeps the rest', () => {
+    const restored = deserializePreferences({
+      schemaVersion: PREFERENCES_SCHEMA_VERSION,
+      motionSetting: 'sideways',
+      theme: 'high-contrast',
+      numberOnlyMode: 'yes',
+      muted: 1,
+      volume: 'loud',
+    });
+
+    expect(restored).toStrictEqual({ theme: 'high-contrast' });
+    expect(store(restored).getTheme()).toBe('high-contrast');
+    expect(store(restored).getMotionSetting()).toBe('system');
+  });
+
+  it('hands an out-of-range volume through so the store clamps it', () => {
+    const restored = deserializePreferences({
+      schemaVersion: PREFERENCES_SCHEMA_VERSION,
+      volume: 4,
+    });
+
+    // Not dropped for the default — handed through and repaired.
+    expect(restored).toStrictEqual({ volume: 4 });
+    expect(store(restored).getVolume()).toBe(1);
+
+    // A non-finite figure is not a volume at all and is omitted.
+    expect(
+      deserializePreferences({
+        schemaVersion: PREFERENCES_SCHEMA_VERSION,
+        volume: Number.POSITIVE_INFINITY,
+      }),
+    ).toStrictEqual({});
+  });
+
+  it('reports what it refused through the injected sink', () => {
+    const levels: string[] = [];
+    const counters: string[] = [];
+    const sink: UiReporter = {
+      log: (level: string): void => {
+        levels.push(level);
+      },
+      count: (name: string): void => {
+        counters.push(name);
+      },
+      error: (): void => {
+        return;
+      },
+    };
+
+    deserializePreferences('not an object', sink);
+    deserializePreferences({ schemaVersion: 99 }, sink);
+    deserializePreferences(
+      { schemaVersion: PREFERENCES_SCHEMA_VERSION, theme: 'neon' },
+      sink,
+    );
+
+    expect(levels).toStrictEqual(['warn', 'warn', 'warn']);
+    expect(counters).toStrictEqual([
+      'ui.preferences.payload_rejected',
+      'ui.preferences.payload_rejected',
+      'ui.preferences.payload_field_rejected',
+    ]);
+  });
+
+  it('says nothing for a payload it read completely', () => {
+    const levels: string[] = [];
+    const sink: UiReporter = {
+      log: (level: string): void => {
+        levels.push(level);
+      },
+      count: (): void => {
+        return;
+      },
+      error: (): void => {
+        return;
+      },
+    };
+
+    deserializePreferences(
+      serializePreferences(
+        store({ theme: 'colorblind-safe', motionSetting: 'allow' }).getPreferences(),
+      ),
+      sink,
+    );
+
+    expect(levels).toStrictEqual([]);
   });
 });

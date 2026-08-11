@@ -37,7 +37,13 @@ import {
 
 import type { Theme, ThemeId } from '../theme/themes';
 import { getActiveTheme, getTheme } from '../theme/themes';
-import { depthScale, motion, tileGoldGlowColor } from '../theme/tokens';
+import {
+  depthScale,
+  gridSpacing,
+  motion,
+  tileGoldGlowColor,
+  tileSize,
+} from '../theme/tokens';
 import type { Tween, TweenInterpolator, TweenStop } from './animations';
 import { createTween, easingFor, mix } from './animations';
 import {
@@ -144,8 +150,21 @@ const BAND_CENTRE = 0.5;
 export const particleDefaults = Object.freeze({
   particlesPerBurst: 12,
   maxConcurrentBursts: 6,
-  spread: depthScale.tile,
-  lift: depthScale.board,
+
+  // CHANGED from `depthScale.tile`: ONE CELL PITCH of planar travel, not one
+  // extrusion depth. A mote's planar component is at most one, so a spread below
+  // the tile's own half-extent confines the whole spray inside the footprint of
+  // the tile it leaves; the pitch carries the outermost motes a full cell clear
+  // of it. DL-PARTICLE-06.
+  spread: tileSize + gridSpacing,
+
+  // CHANGED from `depthScale.board`: TWICE THE BLOCK'S OWN DEPTH, so a mote
+  // rises clear of the block it leaves rather than through it. A burst
+  // originates at `boardLayers.tileBase` and the block extrudes
+  // `depthScale.tile` above that, so a lift below the depth left every mote
+  // inside the geometry and the depth test drew none of them. DL-PARTICLE-06.
+  lift: depthScale.tile * 2,
+
   size: depthScale.board,
   glowBlend: ALPHA_OPAQUE / HALO_ATTENUATION,
   maskResolution: 32,

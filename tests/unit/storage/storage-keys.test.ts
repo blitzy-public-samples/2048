@@ -19,6 +19,7 @@ import {
   KEYMAP_KEY,
   namespacedKey,
   OWNED_STORAGE_KEYS,
+  PREFERENCES_KEY,
   RUN_STATE_KEY,
   STORAGE_NAMESPACE,
   STORAGE_PROBE_KEY,
@@ -186,6 +187,10 @@ const EXPECTED_OWNED_KEYS: readonly OwnedStorageKey[] = [
   GAME_STATE_KEY,
   RUN_STATE_KEY,
   KEYMAP_KEY,
+
+  // The preference envelope, minted with the persisted accessibility and
+  // presentation settings. Durable, so teardown reaches it. DL-KEYS-04.
+  PREFERENCES_KEY,
 ];
 
 const DECLARED_KEYS: readonly OwnedStorageKey[] = [

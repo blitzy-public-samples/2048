@@ -1686,3 +1686,128 @@ describe('unmount and remount', () => {
     }).not.toThrow();
   });
 });
+
+describe('the pixel-store unpack state is left as it was found', () => {
+  /** A mock context whose `pixelStorei` writes are recorded in order. */
+  const recordingContext = (): {
+    readonly gl: Record<string, unknown>;
+    readonly writes: { readonly parameter: string | undefined;
+      readonly value: unknown }[];
+  } => {
+    const mock = createMockWebGLContext();
+    const writes: { parameter: string | undefined; value: unknown }[] = [];
+
+    // The fixture's context is a Proxy with no `set` trap, so a direct
+    // assignment lands on its target and its `get` returns this in preference
+    // to the generated stub.
+    (mock.gl as Record<string, unknown>)['pixelStorei'] = (
+      parameter: number,
+      value: unknown,
+    ): void => {
+      writes.push({ parameter: mock.nameOf(parameter), value });
+    };
+
+    return { gl: mock.gl, writes };
+  };
+
+  /** The two flags the specification forbids for a 3D texture upload. */
+  const FORBIDDEN_FOR_3D = [
+    'UNPACK_FLIP_Y_WEBGL',
+    'UNPACK_PREMULTIPLY_ALPHA_WEBGL',
+  ] as const;
+
+  it('resets both forbidden flags when the renderer is destroyed', () => {
+    const context = recordingContext();
+    const fixture = harness({ context: context.gl });
+
+    expect(fixture.renderer.mount()).toBe(true);
+
+    const beforeTeardown = context.writes.length;
+
+    fixture.renderer.destroy();
+
+    // Every numeral is a `CanvasTexture`, whose `flipY` is true, so this
+    // renderer left `UNPACK_FLIP_Y_WEBGL` set on a context that outlives it —
+    // and the next renderer built on the same canvas begins with the two
+    // placeholder 3D uploads for which both flips are forbidden. DL-THREE-05.
+    const reset = context.writes.slice(beforeTeardown);
+
+    for (const flag of FORBIDDEN_FOR_3D) {
+      expect(reset).toContainEqual({ parameter: flag, value: false });
+    }
+  });
+
+  it('resets them on the context-loss release path as well', () => {
+    const context = recordingContext();
+    const fixture = harness({ context: context.gl });
+
+    expect(fixture.renderer.mount()).toBe(true);
+
+    const beforeLoss = context.writes.length;
+
+    // `parkForContextLoss` releases every GPU resource through the same helper
+    // a rebuild uses, so both teardowns hand the canvas back the same way.
+    fixture.emit('webglcontextlost');
+
+    const reset = context.writes.slice(beforeLoss);
+
+    for (const flag of FORBIDDEN_FOR_3D) {
+      expect(reset).toContainEqual({ parameter: flag, value: false });
+    }
+
+    fixture.renderer.destroy();
+  });
+
+  it('resets them once per release, not once per numeral', () => {
+    const context = recordingContext();
+    const fixture = harness({ context: context.gl });
+
+    expect(fixture.renderer.mount()).toBe(true);
+
+    const beforeTeardown = context.writes.length;
+
+    fixture.renderer.destroy();
+
+    const reset = context.writes.slice(beforeTeardown);
+    const flips = reset.filter(
+      (write) => write.parameter === 'UNPACK_FLIP_Y_WEBGL',
+    );
+
+    // One write per flag: the reset belongs to the release, not to the twelve
+    // numeral textures whose uploads set the flag in the first place.
+    expect(flips).toHaveLength(1);
+  });
+
+  it('writes false, never true, so the initial state is what is restored', () => {
+    const context = recordingContext();
+    const fixture = harness({ context: context.gl });
+
+    expect(fixture.renderer.mount()).toBe(true);
+
+    const beforeTeardown = context.writes.length;
+
+    fixture.renderer.destroy();
+
+    const reset = context.writes.slice(beforeTeardown);
+
+    // The specification's initial value for both is false, and restoring means
+    // exactly that — anything else would trade one surviving flag for another.
+    expect(reset.every((write) => write.value === false)).toBe(true);
+    expect(reset).not.toHaveLength(0);
+  });
+
+  it('does not raise where the renderer exposes no context accessor', () => {
+    // The guard exists for a double that implements no accessor, and for a
+    // context the browser has already taken away.
+    const mock = createMockWebGLContext();
+
+    (mock.gl as Record<string, unknown>)['pixelStorei'] = undefined;
+
+    const fixture = harness({ context: mock.gl });
+
+    expect(fixture.renderer.mount()).toBe(true);
+    expect(() => {
+      fixture.renderer.destroy();
+    }).not.toThrow();
+  });
+});
