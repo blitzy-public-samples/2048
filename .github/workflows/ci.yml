@@ -1,0 +1,125 @@
+# Continuous integration for the static bundle: one job whose every stage runs
+# one script declared in package.json, under the Node version .nvmrc pins.
+#
+# Configuration is not restated or overridden here. Each stage's settings
+# belong to the file that owns them: package.json holds the script surface,
+# tsconfig.json and tsconfig.node.json the two type-check projects,
+# vitest.config.ts and vitest.snapshot.config.ts the two test gates,
+# vite.config.ts the bundle, and playwright.config.ts the recording together
+# with its browser launch arguments, its viewport, its worker count and the
+# preview server it starts for itself.
+#
+# The recorded gameplay video is never committed: .gitignore excludes
+# test-results/ from the tree, so the upload step below is where that artifact
+# is retained.
+#
+# Decisions behind this file are recorded in docs/DECISION_LOG.md.
+
+name: CI
+
+# master is the branch CONTRIBUTING.md names as the base for a change and the
+# target of every Pull Request.
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+# Read the checkout; write nothing back to the repository.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    # Generous against playwright.config.ts's 15-minute globalTimeout: a
+    # browser context that is cut short never writes its video.
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v5
+
+      - name: Select the pinned Node.js
+        # .nvmrc is the single home of the pinned version; this step reads it.
+        # The npm cache is keyed on the committed lockfile.
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install the locked dependencies
+        # Installs package-lock.json exactly, and fails when the lockfile and
+        # package.json disagree. npm 11 reports an install-script warning for
+        # the transitive @parcel/watcher package; it is left as it is.
+        run: npm ci
+
+      - name: Restore the Playwright browser cache
+        uses: actions/cache@v5
+        with:
+          # Where `playwright install` unpacks the browser build and ffmpeg.
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install the recording browser
+        # Around 115 MB of download on a cache miss. On a restored cache the
+        # install finds the build the pinned @playwright/test asks for and
+        # short-circuits.
+        run: npm run e2e:install
+
+      - name: Type-check
+        # One script, two projects: package.json runs tsconfig.json for the
+        # sources and the suites, then tsconfig.node.json for the four root
+        # tooling configs, so neither set falls through the gap.
+        run: npm run typecheck
+
+      - name: Unit suite
+        run: npm test
+
+      - name: Seeded snapshot gate
+        # A gate of its own, with its own configuration and its own recorded
+        # snapshots. No update flag is passed, so a mismatch fails here.
+        run: npm run test:snapshot
+
+      - name: Static build
+        run: npm run build
+
+      - name: Recorded gameplay proof
+        # Both cases of tests/e2e/gameplay-recording.spec.ts run under this one
+        # script, on a workstation exactly as they run here.
+        run: npm run test:e2e
+
+      - name: Upload the recorded gameplay video
+        uses: actions/upload-artifact@v6
+        with:
+          name: recorded-gameplay
+          # playwright.config.ts writes one directory per test under its
+          # outputDir, each holding that test's video.webm.
+          path: test-results/**/*.webm
+          # A run that reaches this step without a recording fails: the video
+          # is the evidence the gate asks for.
+          if-no-files-found: error
+
+      - name: Upload the static bundle
+        uses: actions/upload-artifact@v6
+        with:
+          name: static-bundle
+          # vite.config.ts's build.outDir: the folder a static host serves.
+          path: dist
+          if-no-files-found: error
+
+      - name: Upload the Playwright report
+        # Kept for a failing run as well as a passing one.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-report
+          # playwright.config.ts's html reporter outputFolder.
+          path: playwright-report
+          if-no-files-found: warn

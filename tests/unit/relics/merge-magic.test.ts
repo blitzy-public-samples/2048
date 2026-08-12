@@ -1,25 +1,11 @@
-// Compounding, charge and reload suite for the `merge-magic` family, AAP R3 and
-// Contract 2.
+// Compounding, charge and reload suite for the `merge-magic` family, AAP R3
+// and Contract 2.
 //
 // `frostbind` and `chain-catalyst` install a merge rule and are covered by
 // tests/unit/relics/relic-effects.test.ts. What had no test at all is the
-// family property the prompt states as an edge case outright:
+// family property the prompt states as an edge case outright.
 //
-//   BOTH FIRE, IN PICKUP ORDER, AND COMPOUND. Two relics on `onMerge` are not
-//   alternatives. Each receives the payload the one before it returned, so the
-//   second reads a raised `resultValue` and a raised `scoreDelta` — and
-//   reversing the pickup order therefore changes the result, which is exactly
-//   why the order is a contract rather than an accident of registration.
-//
-// And the two conditions under which a handler must NOT fire:
-//
-//   zero charges  a charge-limited relic stops firing once its budget is spent,
-//                 and an invocation at zero must neither throw nor corrupt the
-//                 relic's own state. The guard is the bus's, so one
-//                 implementation covers all sixteen relics.
-//   reload        a stage that begins over a FRESH `RulesConfig` — which is
-//                 what a resumed run hands the engine — must reinstall the
-//                 merge rule rather than stack a wrapper over the first.
+// And the two conditions under which a handler must NOT fire.
 
 import { describe, expect, it } from 'vitest';
 
@@ -40,10 +26,6 @@ import {
 } from '../../fixtures/relics';
 import type { RelicBench } from '../../fixtures/relics';
 
-/* ==========================================================================
- * Harness
- * ========================================================================== */
-
 /** The score and value one merge resolves to through a bench. */
 function resolveMerge(
   target: RelicBench,
@@ -62,10 +44,6 @@ function resolveMerge(
     invoked: outcome.invoked,
   };
 }
-
-/* ==========================================================================
- * 1. echo-chamber
- * ========================================================================== */
 
 describe('echo-chamber (merge-magic)', () => {
   it('binds onMerge and nothing else', () => {
@@ -111,10 +89,6 @@ describe('echo-chamber (merge-magic)', () => {
   });
 });
 
-/* ==========================================================================
- * 2. alloy-forge
- * ========================================================================== */
-
 describe('alloy-forge (merge-magic)', () => {
   it('binds onMerge and nothing else', () => {
     expect(Object.keys(relicById('alloy-forge').hooks)).toEqual(['onMerge']);
@@ -131,8 +105,6 @@ describe('alloy-forge (merge-magic)', () => {
   it('applies the producer in force, not a doubling of its own', () => {
     const target = relicBench(['alloy-forge']);
 
-    // A producer that adds a step rather than doubling: a handler carrying its
-    // own arithmetic would yield 8 here.
     target.config.merge.produce = (moving): number => moving.value + 10;
 
     const resolved = resolveMerge(target, 4, 4);
@@ -170,20 +142,14 @@ describe('alloy-forge (merge-magic)', () => {
   });
 });
 
-/* ==========================================================================
- * 3. Compounding, in pickup order
- * ========================================================================== */
-
 describe('two relics on one hook', () => {
   it('fires both, compounding what the first returned into the second', () => {
     const target = relicBench(['echo-chamber', 'alloy-forge']);
     const resolved = resolveMerge(target, 4, 4);
 
-    // Neither is an alternative to the other: BOTH fired.
     expect(resolved.invoked).toBe(2);
 
-    // `echo-chamber` first, reading value 4: score 4 + 1 = 5. Then
-    // `alloy-forge`, raising the value to 8 and the score by 4: 5 + 4 = 9.
+    // `echo-chamber` first, reading value 4: score 4 + 1 = 5.
     expect(resolved.resultValue).toBe(8);
     expect(resolved.scoreDelta).toBe(9);
   });
@@ -194,8 +160,7 @@ describe('two relics on one hook', () => {
 
     expect(resolved.invoked).toBe(2);
 
-    // `alloy-forge` first: value 8, score 8. Then `echo-chamber`, whose quarter
-    // is now taken from 8 rather than 4: 8 + 2 = 10.
+    // `alloy-forge` first: value 8, score 8.
     expect(resolved.resultValue).toBe(8);
     expect(resolved.scoreDelta).toBe(10);
   });
@@ -229,10 +194,6 @@ describe('two relics on one hook', () => {
     expect(resolved.scoreDelta).toBe(9);
   });
 });
-
-/* ==========================================================================
- * 4. Charges
- * ========================================================================== */
 
 describe('a spent charge budget', () => {
   it('declares eight charges for frostbind', () => {
@@ -349,10 +310,6 @@ describe('a spent charge budget', () => {
   });
 });
 
-/* ==========================================================================
- * 5. Reload
- * ========================================================================== */
-
 describe('two relics that both install a merge rule', () => {
   it('composes them into one chain, one layer per relic', () => {
     const target = relicBench(['frostbind', 'chain-catalyst']);
@@ -365,8 +322,7 @@ describe('two relics that both install a merge rule', () => {
 
     // `frostbind` installed first, so `chain-catalyst` wrapped ITS wrapper:
     // unwrapping the ladder tag reaches the frost rule, and unwrapping the
-    // frost tag from there reaches the untagged default. Two relics, two
-    // layers, and the default still at the bottom.
+    // frost tag from there reaches the untagged default.
     const ladder: unknown = (composed as unknown as Record<string, unknown>)[
       '__chainCatalystLadder'
     ];
@@ -387,8 +343,8 @@ describe('two relics that both install a merge rule', () => {
 
     const composed = target.config.merge.canMerge;
 
-    // The base rule's own verdict, the ladder pair `chain-catalyst` admits, and
-    // a pair neither admits.
+    // The base rule's own verdict, the ladder pair `chain-catalyst` admits,
+    // and a pair neither admits.
     expect(
       composed({ value: 4, mergedFrom: null }, { value: 4, mergedFrom: null }),
     ).toBe(true);

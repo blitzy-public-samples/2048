@@ -371,6 +371,21 @@ function frostbindOnStageStart(
  * for which the producer in force, applied to the smaller operand, yields the
  * larger operand's value.
  *
+ * The delegate's verdict is preserved as an OR and never replaced, so every
+ * merge the rules already accept is still accepted.
+ *
+ * THE ONE-MERGER-PER-TRAVERSAL GUARD IS PRESERVED. js/game_manager.js L156 held
+ * `!next.mergedFrom` beside its equality test, and src/engine/move-resolver.ts
+ * L313 assigns `mergedFrom` to the tile a merge produced, so a target carrying
+ * it has already merged during the traversal in progress. The ladder branch
+ * refuses such a target: this relic widens WHICH VALUES may merge and nothing
+ * else. Without the refusal a produced tile merged a second time in one move.
+ *
+ * The two operands arrive already existing — js/game_manager.js L156 kept the
+ * `next &&` guard outside the equality test and src/engine/move-resolver.ts
+ * keeps it outside `config.merge.canMerge` — so no operand-presence check is
+ * made here.
+ *
  * @param delegate Predicate in force, whose acceptance is preserved.
  * @param produce Producer the ladder step is measured with.
  * @returns The tagged predicate to install.

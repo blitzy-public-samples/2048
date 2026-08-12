@@ -147,6 +147,34 @@ merged.
    Every one of those codes is registered and resolves to the module named
    beside it, and ordinals are unique within each code.
 
+ - Two identifier namespaces join the code to those documents, and a comment
+   cites an identifier rather than repeating what it stands for.
+   `DL-<AREA>-<NN>` names one decision in `docs/DECISION_LOG.md` — for example
+   `DL-TERM-04` or `DL-RNG-01`. A comment states *what* was decided and cites
+   the identifier; the alternatives, the reasoning and the risks belong to the
+   log row alone. `TR-<AREA>-<NN>` names one row of
+   `docs/TRACEABILITY_MATRIX.md`, pairing a construct of the retired `js/`
+   sources with the module that carries it now, with a row that has no `js/`
+   source marked target-only. Both documents have landed, so a citation of
+   either kind must resolve to a row that exists — a suite under
+   `tests/unit/quality/` fails the build when one does not. `<NN>` is a
+   two-digit ordinal, unique within its area and never reused once assigned; a
+   new decision or row takes the next free ordinal in its area.
+
+   `<AREA>` names one CONCERN, and the table below is the complete registry of
+   them: every `DL-*` and every `TR-*` identifier in the tree resolves to one of
+   these, and a new area is added here in the same change that first uses it. A
+   concern that spans a TypeScript module and the stylesheet mirroring it —
+   accessibility, the HUD, the tokens, the themes — is ONE area, so its
+   ordinals are unique across both files.
+
+   One file is reached by two codes: `src/ui/screens/reward.ts` carries its
+   decisions under `REWARD`, beside the stylesheet that concern spans, and its
+   traceability rows under `REWARDSCREEN`. Both are registered and both resolve
+   to that module; ordinals are unique within each code. It is the one exception
+   to the paragraph above and it is not a pattern to follow — a new concern
+   takes one code for both namespaces.
+
    | Area | Owner |
    |---|---|
    | `ENGINE` | `src/engine/engine.ts` |
@@ -225,6 +253,11 @@ merged.
    | `DOC` | `docs/**`, `README.md`, `CONTRIBUTING.md`, `blitzy-deck/**` |
 
 ### Changes that might not be accepted
+The five categories this section used to name — undo/redo features,
+save/reload features, changes to how the tiles look or their contents, changes
+to the layout, and changes to the grid size — are superseded, because the
+run-based roguelike feature set deliberately does all five. That list no
+longer describes what will be declined. Decision `DL-DOC-02`.
 
 The five categories this section used to name — undo/redo features,
 save/reload features, changes to how the tiles look or their contents, changes

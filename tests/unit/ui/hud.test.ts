@@ -768,6 +768,9 @@ describe('the relic tray', () => {
       ]),
     );
 
+    // src/input/on-screen-controls.ts owns EVERY element-to-action binding,
+    // including the relic-activation control, so the tray is a readout: a
+    // focusable button here would be a second control for the same action.
     expect(outlets.tray.querySelector('button')).toBeNull();
     expect(
       outlets.tray.querySelectorAll('.relic-tray-control'),
@@ -863,6 +866,9 @@ describe('the relic tray', () => {
       outlets.tray.querySelectorAll('.relic-tray-item'),
     );
 
+    // A third relic is taken: the two rows standing are reused and one is
+    // created, and the newcomer takes the last slot because pickup order is the
+    // order it arrived in.
     hud.render(
       runCommit(0, stage, [
         { id: 'twin-seed' },
@@ -973,6 +979,10 @@ describe('the unconfirmed-status notice', () => {
   });
 });
 
+/* ==========================================================================
+ * The live board dimension
+ * ========================================================================== */
+
 describe('the board dimension is read live, never cached', () => {
   it('reads it off the board each payload carries', () => {
     const outlets = runFixture();
@@ -1006,6 +1016,8 @@ describe('the board dimension is read live, never cached', () => {
     });
     const stage = stageSlice(0, 'highest-tile', 16, 0);
 
+    // A payload with no readable board: the reader answers instead, and is
+    // consulted again on the next write rather than remembered.
     const withoutBoard = {
       ...runCommit(0, stage, []),
       board: undefined,
@@ -1081,6 +1093,8 @@ describe('the tray renders the held relics in pickup order', () => {
       document,
       relics: (): readonly ActiveRelic[] => active,
 
+      // Deliberately wrong, so a row taking its name from the resolver instead
+      // of from the held declaration would be visible.
       relicName: (): string => 'RESOLVER',
     });
     const stage = stageSlice(0, 'score-threshold', 200, 0.5);
@@ -1094,6 +1108,8 @@ describe('the tray renders the held relics in pickup order', () => {
     ).toEqual(['Twin Seed', 'Frostbind']);
     expect(hud.readRendered()?.relics).toEqual(['twin-seed', 'frostbind']);
 
+    // The registry holds the live budget, so the count comes from the record
+    // read at the moment of the write rather than from anything snapshotted.
     active = [
       active[0]!,
       { ...held('frostbind', 'Frostbind', 'legendary', 0), pickupOrder: 1 },
@@ -1246,6 +1262,8 @@ describe('the tray is readable through the live region', () => {
     });
     const stage = stageSlice(0, 'highest-tile', 16, 0);
 
+    // The loadout standing at the first write is the restored one, so it is
+    // recorded silently rather than narrated as a change.
     hud.render(runCommit(0, stage, [{ id: 'frostbind', charges: 5 }]));
 
     expect(sink.lines).toEqual([]);
@@ -1362,6 +1380,10 @@ describe('the tray is readable through the live region', () => {
   });
 });
 
+/* ==========================================================================
+ * The router lifecycle
+ * ========================================================================== */
+
 /** One stage context, as src/ui/screen-router.ts builds it. */
 const stageContext = (
   overrides: Partial<StageScreenContext> = {},
@@ -1427,6 +1449,8 @@ describe('the HUD is the stage screen of the router', () => {
   it('resolves its outlets inside the container the router injects', () => {
     const outlets = routedFixture();
 
+    // Nothing injected and no document: every outlet is a miss at construction,
+    // which is reported rather than raised, and `mount` supplies the container.
     const hud = createHud({
       hudContainer: null,
       stageContainer: null,
@@ -1524,6 +1548,9 @@ describe('the HUD is the stage screen of the router', () => {
       stageContext({
         goal: { kind: 'score-threshold', target: 500 },
 
+        // `evaluateStageGoal` already clamped this fraction and stated the
+        // quantity beside it, so neither is re-derived here: a rescale would
+        // show 150 rather than the 137 the run measured.
         goalProgress: { achieved: 137, progress: 0.274, cleared: false },
         score: 137,
       }),
@@ -1668,6 +1695,7 @@ describe('the HUD is the stage screen of the router', () => {
     expect(outlets.tray.querySelector('.relic-tray-item')).toBeNull();
     expect(outlets.hudGroup.querySelector('.hud-degraded')).toBeNull();
 
+    // Every later call is a reported no-op rather than a throw.
     expect(() => {
       hud.mount(outlets.hudGroup);
       hud.enter(stageContext());

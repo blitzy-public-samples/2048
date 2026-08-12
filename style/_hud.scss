@@ -60,7 +60,9 @@ $hud-fraction-full: 100% !default;
 
 // A tray item's widest measure: TWO tile footprints plus the gutter that would
 // sit between them, which is the same derivation style/_reward.scss uses for a
-// relic card.
+// relic card. The measure has to hold the slot badge, the name and the charge
+// chip on one line, so a charge-bearing relic's name reaches this width before
+// it truncates to an ellipsis.
 $hud-item-max-inline: $tile-size * 2 + $grid-spacing !default;
 
 // A degraded tray row's opacity. Derived from the alpha style/_a11y.scss dims a
@@ -357,8 +359,9 @@ $hud-caution-bar: $hud-hairline * 3 !default;
 .relic-tray-name {
   flex: 1 1 auto;
 
-  // Zero, which is what lets a flex child shrink far enough for
-  // `text-overflow` to engage at all.
+  // Zero, which is what lets a flex child shrink far enough for `text-overflow`
+  // to engage at all. The width the name truncates at is bounded by the item's
+  // own cap, $hud-item-max-inline above, and not by this line.
   min-inline-size: 0;
 
   // A line box two hairlines taller than the item's own, matching the charge
@@ -404,6 +407,10 @@ $hud-rarity-tier-count: list.length($hud-rarity-tiers);
     + "between the ramp's anchors, received #{$hud-rarity-tier-count}.";
 }
 
+// Iterated by position: an entry repeated in the list receives the ordinal of
+// the position it occupies. `"" + $tier` coerces the entry to a string before
+// it reaches the selector, so an entry named after a CSS colour keyword is not
+// interpolated as a colour value.
 @for $ordinal from 1 through $hud-rarity-tier-count {
   $tier: list.nth($hud-rarity-tiers, $ordinal);
   $anchor-weight: math.div($ordinal - 1, $hud-rarity-tier-count - 1) * 100%;

@@ -693,6 +693,18 @@ hr {
 
 // The row seats three items - the intro copy plus `.restart-button` and
 // `.settings-button` - so it is an explicit flex row at both scales.
+// `.game-intro` bases on the whole line (`flex: 1 1 100%`), which is what holds
+// the two controls together on the second line, hugged to the inline end: flex
+// breaks lines against each item's hypothetical main size and applies
+// `flex-grow` only afterwards, per line, so a flexible basis would leave free
+// space on the first line for one control to join.
+//
+// `gap` is the single declaration of the space between the controls -
+// $control-gap from style/_tokens.scss at both scales, the same token
+// separating the two `.game-message` controls - so the row carries no length of
+// its own, and no clearfix is declared because a `:after` would become a flex
+// item and consume one `gap`. Visual order follows DOM order, so `New Game`
+// paints to the left of `Settings`.
 .above-game {
   display: flex;
   flex-wrap: wrap;

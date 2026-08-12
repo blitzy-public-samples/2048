@@ -955,6 +955,8 @@ describe('driven by the real router', () => {
       reporter,
       screens: { runStart: screen },
 
+      // The same announcer the screen holds, so the duplicate line the two
+      // would otherwise read is proved to compose into one.
       announcer: voice,
     });
 

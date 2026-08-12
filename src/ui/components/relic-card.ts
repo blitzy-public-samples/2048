@@ -1184,6 +1184,8 @@ export function createRelicCard(options: RelicCardOptions): RelicCard {
   let disabled = options.disabled === true;
   let destroyed = false;
 
+  /** Whether the activation for the key now held has already been served. */
+
   const teardown: (() => void)[] = [];
 
   if (doc === null) {

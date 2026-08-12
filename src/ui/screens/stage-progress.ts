@@ -2,6 +2,9 @@
 // entered when a stage is resolved and left when the player continues into the
 // reward screen.
 //
+// NO VANILLA ANALOGUE. The retired sources carried exactly one screen, no
+// router, no hash handling and no History API use, and no construct in
+// js/game_manager.js, js/grid.js or js/tile.js resolved a stage. Every row this
 // module owns in docs/TRACEABILITY_MATRIX.md is therefore a target-only row,
 // declared as having no source construct so the reverse direction of that
 // matrix carries no gap.
@@ -153,6 +156,10 @@ export const STAGE_PROGRESS_CADENCE = Object.freeze({
   total: motion.fadeIn.delay + motion.fadeIn.duration,
 } as const);
 
+/* ==========================================================================
+ * 2. Copy
+ * ========================================================================== */
+
 /** Lower bound of a valid goal fraction. */
 const FRACTION_FLOOR = 0;
 
@@ -244,6 +251,10 @@ export const stageProgressCopy = Object.freeze({
 /** The copy set, as a type a caller can partially override. */
 export type StageProgressCopy = typeof stageProgressCopy;
 
+/* ==========================================================================
+ * 3. Report names
+ * ========================================================================== */
+
 /** Counter raised once per completed mount. */
 const MOUNTED_METRIC = 'ui.stageProgress.mounted';
 
@@ -288,6 +299,10 @@ const CONTINUE_FAULT_METRIC = 'ui.stageProgress.continue_faulted';
 /** Counter raised once per `unmount`. */
 const UNMOUNTED_METRIC = 'ui.stageProgress.unmounted';
 
+/* ==========================================================================
+ * 4. Injected ports
+ * ========================================================================== */
+
 /**
  * The run accessors this screen reads.
  *
@@ -326,6 +341,12 @@ export interface StageProgressMeasurementPort {
  *
  * Structurally the `RouterAnnouncerPort` of ../screen-router, and the
  * `LiveRegionAnnouncer` of ../a11y/live-region satisfies it as it stands.
+ *
+ * ABSENT BY DEFAULT, AND SILENT WHEN ABSENT. ../a11y/engine-announcer.ts
+ * announces the structured `stageClear` line on `stage:end`, and the router
+ * announces its own transition line on entering this state, so a composition
+ * that has either of those attached leaves this port unset. Decision
+ * DL-STAGECLEAR-02.
  */
 export interface StageProgressAnnouncerPort {
   announce?(input: Announcement): void;
@@ -338,6 +359,10 @@ export interface StageProgressAnnouncerPort {
 export type StageProgressPreferencePort = Partial<
   Pick<PreferenceStore, 'isReducedMotion'>
 >;
+
+/* ==========================================================================
+ * 5. Construction parameters and the rendered state
+ * ========================================================================== */
 
 /** Everything the factory accepts. Every member is optional. */
 export interface StageProgressOptions {
@@ -469,6 +494,10 @@ export interface StageProgressScreen extends Screen {
 }
 
 
+/* ==========================================================================
+ * 6. Pure helpers
+ * ========================================================================== */
+
 /**
  * The ambient document, where there is one.
  *
@@ -536,6 +565,11 @@ function isFiniteNumber(value: unknown): value is number {
 /**
  * Whether a value is a goal fraction this screen will render.
  *
+ * VALIDATION, NOT CLAMPING. `StageGoalProgress.progress` is documented as
+ * finite and within the closed interval [0, 1]. A value outside that interval
+ * is outside its own contract: it is rejected, it is reported, and the progress
+ * line stays down. No bound is applied to a value that is inside it.
+ *
  * @param value Candidate fraction.
  * @returns Whether it is finite and within [0, 1].
  */
@@ -569,6 +603,10 @@ function isStageGoalProgress(value: unknown): value is StageGoalProgress {
 
 /**
  * Calls one injected accessor, contained.
+ *
+ * A port is optional at every member, so an absent accessor yields `null`
+ * without being called, and one that raises is reported and yields `null`, so
+ * the screen renders what it has rather than failing the transition.
  *
  * @param member Name carried into the report.
  * @param read The accessor, already bound to its owner.
@@ -635,6 +673,8 @@ export function describeStageGoal(
     }
 
     default: {
+      // Exhaustive over `StageGoal`: a kind added to that union lands here as
+      // `never` and fails this file's type check rather than rendering blank.
       const unhandledGoal: never = goal;
 
       void unhandledGoal;
@@ -742,6 +782,9 @@ export function measureStageProgress(
 
 /**
  * States a goal fraction as a whole percentage.
+ *
+ * A display format of the fraction and nothing more: no bound is applied here,
+ * the fraction having already been validated as finite and within [0, 1].
  *
  * @param fraction The validated fraction.
  * @returns The percentage, as a whole number.
@@ -941,6 +984,11 @@ export function createStageProgressScreen(
   /**
    * Builds the whole content once.
    *
+   * The children are appended to the container directly, not wrapped:
+   * style/_screens.scss lays the container out as a centred flex column with a
+   * `gap`, and that layout reaches its direct children only. Decision
+   * DL-STAGECLEAR-04.
+   *
    * @param doc Document the nodes are created in.
    * @returns Every node this module owns.
    */
@@ -982,6 +1030,9 @@ export function createStageProgressScreen(
     // visible label, which is what WCAG 2.5.3 requires of an extended name.
     control.setAttribute('aria-label', copy.continueName);
 
+    // The marker ../a11y/focus-manager resolves initial focus through: the
+    // `stageClear` entry of its `SCREEN_INITIAL_FOCUS` table is empty, so the
+    // marker is what makes the placement deterministic.
     control.setAttribute(FOCUS_INITIAL_ATTRIBUTE, '');
 
     actions.append(control);
@@ -1355,6 +1406,9 @@ export function createStageProgressScreen(
   /**
    * Writes the stage clear to the live region, through the injected announcer.
    *
+   * PRIMITIVES ONLY, as ../a11y/live-region declares `StageClearAnnouncement`:
+   * the zero-based index and the cleared flag, never a `StageGoal`.
+   *
    * @param snapshot The render being announced.
    * @returns Whether a line was written.
    */
@@ -1427,6 +1481,10 @@ export function createStageProgressScreen(
 
     return false;
   };
+
+  /* ------------------------------------------------------------------------
+   * The returned screen
+   * ---------------------------------------------------------------------- */
 
   return Object.freeze({
     mount(hostElement: Element): void {

@@ -4,29 +4,15 @@
 // (0.6.1.5), requirement R6, and the schema-versioning half of implicit
 // requirement I5.
 //
-// `runCorrelationId()` is pinned byte-equal to `deriveCorrelationId()` of
+// `runCorrelationId` is pinned byte-equal to `deriveCorrelationId` of
 // src/observability/logger.ts here, which is the only place the two separate
 // implementations of that one algorithm are compared. src/run/ reaches no
 // observability module, so nothing else can hold them together.
 //
-// Superseded constructs this suite is the named verification target for:
-//   Tile.prototype.serialize         js/tile.js         L19-L27
-//   Grid.prototype.serialize         js/grid.js         L102-L117
-//   GameManager.prototype.serialize  js/game_manager.js L102-L110
-//   keepPlaying                      js/game_manager.js L24-L27 assignment,
-//                                    L31 read, L45 restore, L108 persist
-//   fakeStorage                      js/local_storage_manager.js L1-L19
-//
 // Collected by the unit:dom-free project of vitest.config.ts, environment
 // 'node'. Nothing here reads a document, a Web Storage global, a clock or
-// randomness; nothing installs a mock, replaces a global or writes a
-// snapshot artifact.
-//
-// Coverage boundaries this suite stays inside: end-to-end cursor resume is
-// tests/unit/run/rng-cursor-persistence.test.ts, store behaviour is
-// tests/unit/run/run-state-store.test.ts, the deep copy is
-// tests/unit/run/run-state-cloning.test.ts, and the frozen best-score
-// contract is tests/unit/storage/best-score.test.ts.
+// randomness; nothing installs a mock, replaces a global or writes a snapshot
+// artifact.
 //
 // Figures these assertions define the schema for: Figure 4 (Turn Data Flow)
 // and Figure 7 (Seeded Determinism) of docs/architecture/data-flow.md.
@@ -96,8 +82,6 @@ import {
 } from '../../../src/storage/storage-keys';
 import { MERGE_PAIR_BOARD, copyBoard } from '../../fixtures/boards';
 
-/* ===== Type-level assertion helpers ===== */
-
 type Equal<X, Y> =
   (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
     ? true
@@ -123,7 +107,7 @@ const versionVerdictUnionIsExhaustive: Expect<
 
 /**
  * The persisted relic triple is declared in src/run/run-state.ts and again in
- * src/relics/relic-types.ts. Divergence between the two is a type error here.
+ * src/relics/relic-types.ts.
  */
 const relicTripleIsIdentical: Expect<
   Equal<PersistedRelic, RelicsPersistedRelic>
@@ -134,8 +118,6 @@ const runAcceptsRelicsTriple: PersistedRelic = {} as RelicsPersistedRelic;
 
 /** Assignability of the run-side declaration to the relics-side one. */
 const relicsAcceptsRunTriple: RelicsPersistedRelic = {} as PersistedRelic;
-
-/* ===== Fixtures ===== */
 
 /** The nine members Contract 5 fixes the envelope at. */
 const ENVELOPE_MEMBERS: readonly string[] = [
@@ -200,7 +182,7 @@ const FIXTURE_SCORE = 24;
 
 const ADDED_TILE_VALUE = 8;
 
-/** Every verdict `classifyRunStateVersion()` reduces a payload to. */
+/** Every verdict `classifyRunStateVersion` reduces a payload to. */
 const VERSION_VERDICTS: readonly RunStateVersionVerdict[] = [
   'current',
   'older',
@@ -237,10 +219,7 @@ function buildBoardSnapshot(
   };
 }
 
-/**
- * Builds the argument `createFreshRunState()` takes. The stage goal is read
- * from src/config/stage-config.ts.
- */
+/** Builds the argument `createFreshRunState` takes. */
 function buildInput(): FreshRunStateInput {
   return {
     runId: 'run-0001',
@@ -256,10 +235,7 @@ function buildEnvelope(): RunState {
   return createFreshRunState(buildInput());
 }
 
-/**
- * Builds an envelope holding `relics` in pickup order. `createFreshRunState()`
- * always returns an empty relic list; this replaces that member.
- */
+/** Builds an envelope holding `relics` in pickup order. */
 function buildEnvelopeWithRelics(
   relics: readonly PersistedRelic[]
 ): RunState {
@@ -290,8 +266,6 @@ const HOSTILE_INPUTS: readonly unknown[] = [
   Number.NaN,
 ];
 
-/* ===== Storage teardown hygiene ===== */
-
 /**
  * The store this suite owns and injects. The unit:dom-free project runs with
  * environment 'node' and exposes no Web Storage global.
@@ -305,12 +279,7 @@ const storage = new MemoryStorage();
  */
 let bestScoreAtEntry: string | null | undefined = 'unread';
 
-/**
- * Removes every key the product owns, then the best-score key by name.
- * Idempotent and tolerant of an already-clean store: `MemoryStorage`
- * `removeItem` of an absent key is a no-op. vitest.config.ts's setup file
- * registers an `afterEach` of its own.
- */
+/** Removes every key the product owns, then the best-score key by name. */
 function clearOwnedKeys(): void {
   for (const key of OWNED_STORAGE_KEYS) {
     storage.removeItem(key);
@@ -324,8 +293,6 @@ beforeEach(() => {
 });
 
 afterEach(clearOwnedKeys);
-
-/* ===== 1. The nine-member envelope, and nothing more ===== */
 
 describe('the envelope carries exactly the nine Contract 5 members', () => {
   it('carries all nine member names', () => {
@@ -544,8 +511,6 @@ describe('the schema version history makes older decidable', () => {
   });
 });
 
-/* ===== 3. The JSON round trip of the whole envelope ===== */
-
 describe('the whole envelope survives a JSON round trip', () => {
   it('parses back deep-equal to the original', () => {
     const state = buildEnvelope();
@@ -613,8 +578,6 @@ describe('the whole envelope survives a JSON round trip', () => {
   });
 });
 
-/* ===== 4. The relics member as persisted triples ===== */
-
 describe('the relics member is a list of persisted relic triples', () => {
   it('is empty on a fresh envelope', () => {
     expect(buildEnvelope().relics).toEqual([]);
@@ -681,8 +644,6 @@ describe('the relics member is a list of persisted relic triples', () => {
   });
 });
 
-/* ===== 5. The board member wraps the snapshot verbatim ===== */
-
 /**
  * Collects every serialised tile of a snapshot, column by column.
  *
@@ -740,9 +701,6 @@ describe('the board member wraps the pre-migration snapshot verbatim', () => {
       .toBe(true);
   });
 });
-
-
-/* ===== 6. The three stages of the wrapped projection ===== */
 
 describe('the tile stage of the wrapped snapshot', () => {
   // js/tile.js L19-L27
@@ -884,8 +842,6 @@ describe('the manager stage of the wrapped snapshot', () => {
     });
 });
 
-/* ===== 7. The frozen persisted member name keepPlaying ===== */
-
 /** Names the persisted flag must not have moved to. */
 const RENAMED_FLAG_VARIANTS: readonly string[] = [
   'continuedPlay',
@@ -945,9 +901,6 @@ describe('the persisted member name keepPlaying is frozen', () => {
     expect(Object.keys(state.board)).toContain('keepPlaying');
   });
 });
-
-
-/* ===== 8. isRunStateShape ===== */
 
 describe('isRunStateShape accepts a structurally complete envelope', () => {
   it('accepts a fresh envelope', () => {
@@ -1044,8 +997,6 @@ describe('isRunStateShape refuses a broken payload without throwing', () => {
     }
   });
 });
-
-/* ===== 9. describeRunStateProblems ===== */
 
 describe('describeRunStateProblems reports nothing for a valid envelope',
   () => {
@@ -1340,9 +1291,6 @@ describe('describeRunStateProblems never throws', () => {
     });
 });
 
-
-/* ===== 10. classifyRunStateVersion ===== */
-
 describe('classifyRunStateVersion reports current for this build', () => {
   it('reports current for a fresh envelope', () => {
     expect(classifyRunStateVersion(buildEnvelope())).toBe('current');
@@ -1362,10 +1310,6 @@ describe('classifyRunStateVersion separates older from unknown', () => {
         (version) => version < RUN_STATE_SCHEMA_VERSION
       );
 
-      // Stated as an EQUALITY rather than driven as a loop. The shipped history
-      // holds one entry, so a loop over this set would iterate zero times and
-      // assert nothing while reading as coverage of the 'older' branch. The
-      // branch is exercised for real against an injected policy in section 23.
       expect(recordedOlder).toEqual([]);
 
       for (const version of recordedOlder) {
@@ -1528,8 +1472,6 @@ describe('classifyRunStateVersion is total over the five-way union', () => {
     expect([...reached].sort()).toEqual([...expected].sort());
   });
 });
-
-/* ===== 11. normalizeRngCursor, the pure-validator input matrix ===== */
 
 /** Every value the cursor normaliser must reduce to a total map. */
 const CURSOR_INPUTS: readonly unknown[] = [
@@ -1702,9 +1644,6 @@ describe('normalizeRngCursor rejects an unusable count to zero', () => {
   });
 });
 
-
-/* ===== 12. createFreshRunState ===== */
-
 describe('createFreshRunState returns a distinct envelope per call', () => {
   it('returns a new object on every call', () => {
     const first = buildEnvelope();
@@ -1810,8 +1749,6 @@ describe('a fresh envelope starts a run at its initial values', () => {
   });
 });
 
-/* ===== 13. RunSummary ===== */
-
 describe('a run summary is producible from an envelope', () => {
   it('projects exactly the five summary members', () => {
     const summary: RunSummary = summarizeRunState(buildEnvelope());
@@ -1869,8 +1806,6 @@ describe('a run summary is producible from an envelope', () => {
   });
 });
 
-/* ===== 14. Correlation identity and the injected report sink ===== */
-
 describe('the run layer derives correlation identity from what it persists',
   () => {
     it('exports the derivation its own contract requires', () => {
@@ -1883,8 +1818,7 @@ describe('the run layer derives correlation identity from what it persists',
     it('does not re-export the observability derivation under its own name',
       () => {
         // The two are separate implementations of one algorithm, pinned equal
-        // below. A re-export would put an import from src/observability/ in
-        // src/run/, which this module's constraints forbid.
+        // below.
         expect(Object.keys(runStateModule)).not.toContain(
           'deriveCorrelationId'
         );
@@ -2015,8 +1949,6 @@ describe('NOOP_RUN_REPORTER satisfies the injected report sink', () => {
   });
 });
 
-/* ===== 15. The persisted relic triple, and teardown hygiene ===== */
-
 describe('the persisted relic triple matches the relics declaration', () => {
   it('is identical in both directions, checked at compile time', () => {
     expect(relicTripleIsIdentical).toBe(true);
@@ -2069,9 +2001,6 @@ describe('storage teardown removes the key the product never removed', () => {
     expect(storage.getItem(BEST_SCORE_KEY)).toBeUndefined();
   });
 });
-
-
-/* ===== 16. isPersistedRelicState, the wire vocabulary ===== */
 
 describe('isPersistedRelicState accepts the persistable vocabulary', () => {
   it('accepts each primitive the vocabulary names', () => {
@@ -2244,8 +2173,6 @@ describe('isPersistedRelicState refuses what persistence cannot carry', () => {
   });
 });
 
-/* ===== 17. A relic's own state, diagnosed field-scoped ===== */
-
 /**
  * Builds a loose payload whose single relic carries `state`.
  *
@@ -2380,7 +2307,9 @@ describe('a relic state member is diagnosed by its own path', () => {
   });
 });
 
-/* ===== 18. The run seed is bounded by what the RNG layer derives from ===== */
+/*
+ * ===== 18. The run seed is bounded by what the RNG layer derives from =====
+ */
 
 describe('the persisted run seed is bounded, not merely typed', () => {
   it('accepts a seed at the length the RNG layer can derive from', () => {
@@ -2413,8 +2342,6 @@ describe('the persisted run seed is bounded, not merely typed', () => {
     expect(isRunStateShape(payload)).toBe(true);
   });
 });
-
-/* ===== 19. isCurrentRunState ===== */
 
 describe('isCurrentRunState decides shape and version together', () => {
   it('accepts a fresh envelope', () => {
@@ -2456,8 +2383,6 @@ describe('isCurrentRunState decides shape and version together', () => {
     }
   });
 });
-
-/* ===== 20. projectCurrentRunState ===== */
 
 describe('projectCurrentRunState writes the version this build reads', () => {
   it('stamps the current version over any other', () => {
@@ -2518,8 +2443,6 @@ describe('projectCurrentRunState writes the version this build reads', () => {
   });
 });
 
-/* ===== 21. The redacted summary a report carries ===== */
-
 describe('a report summary carries every member except the seed', () => {
   it('removes the seed and keeps the other four members', () => {
     const summary = summarizeRunState(buildEnvelope());
@@ -2578,9 +2501,6 @@ describe('a report summary carries every member except the seed', () => {
     expect(redacted.relics[0].state).not.toBe(summary.relics[0].state);
   });
 });
-
-
-/* ===== 22. runCorrelationId, and its equality with the logger's ===== */
 
 // Every pair the two derivations are compared over: ordinary values, the
 // boundaries, and the inputs a hand-rolled hash is most likely to disagree on
@@ -2782,11 +2702,7 @@ describe('runCorrelationId is byte-equal to the logger derivation', () => {
   });
 });
 
-/* ===== 23. The injectable version policy ===== */
-
-// A policy naming a genuine prior version. `RUN_STATE_SCHEMA_VERSION_HISTORY`
-// holds one entry in this build, so without an injected policy the 'older'
-// verdict is unreachable and every assertion over it is vacuous.
+// A policy naming a genuine prior version.
 const PRIOR_VERSION = RUN_STATE_SCHEMA_VERSION;
 
 const NEXT_VERSION = RUN_STATE_SCHEMA_VERSION + 1;

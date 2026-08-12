@@ -4,19 +4,10 @@
 // `fertile-ground` writes the board and is covered by
 // tests/unit/relics/relic-effects.test.ts. The other three transform the
 // payload the engine resolves, and none of them had a test: the family's rules
-// were asserted nowhere, and nor was the discipline that makes them replayable.
+// were asserted nowhere, and nor was the discipline that makes them
+// replayable.
 //
-// Four properties per handler:
-//
-//   the rule       what the handler does to the spawn, read from the rules in
-//                  force rather than from a literal.
-//   determinism    the same seed yields the same spawn, and a handler that
-//                  cannot act takes NO draw — so a spawn it declines cannot
-//                  shift the sequence for the spawn after it.
-//   no mutation    the board and the rules are left exactly as they arrived. A
-//                  spawn handler owns its payload and nothing else.
-//   binding        the handler fires on the hooks its definition declares,
-//                  and on no others.
+// Four properties per handler.
 
 import { describe, expect, it } from 'vitest';
 
@@ -39,10 +30,6 @@ import {
 } from '../../fixtures/relics';
 import { cursorOf } from '../../fixtures/relics';
 import type { RelicBench } from '../../fixtures/relics';
-
-/* ==========================================================================
- * Harness
- * ========================================================================== */
 
 /** The relic-draw cursor, which is the only substream the family reads. */
 function draws(target: RelicBench): number {
@@ -70,10 +57,6 @@ function spawn(
     spawnPayload(x === undefined ? undefined : { x, y }, value),
   );
 }
-
-/* ==========================================================================
- * 1. twin-seed
- * ========================================================================== */
 
 describe('twin-seed (spawn-control)', () => {
   it('binds onSpawn and nothing else', () => {
@@ -121,8 +104,6 @@ describe('twin-seed (spawn-control)', () => {
   it('promotes to the next configured value, not to double', () => {
     const target = relicBench(['twin-seed'], { seed: 'twin-ladder' });
 
-    // A distribution whose step is not a doubling: a handler reading a literal
-    // rather than the rules would produce 6 here.
     target.config.spawn.values = [3, 7, 11];
     target.config.spawn.weights = [0.8, 0.15, 0.05];
 
@@ -192,10 +173,6 @@ describe('twin-seed (spawn-control)', () => {
   });
 });
 
-/* ==========================================================================
- * 2. prospectors-eye
- * ========================================================================== */
-
 describe('prospectors-eye (spawn-control)', () => {
   it('binds onSpawn alone', () => {
     expect(Object.keys(relicById('prospectors-eye').hooks).sort()).toEqual([
@@ -207,8 +184,8 @@ describe('prospectors-eye (spawn-control)', () => {
     for (let index = 0; index < 40; index += 1) {
       const target = relicBench(['prospectors-eye'], { seed: `ring-${index}` });
 
-      // The centre of a 4x4: whatever the engine resolved, the relic must place
-      // the tile on the ring.
+      // The centre of a 4x4: whatever the engine resolved, the relic must
+      // place the tile on the ring.
       const resolved = spawn(target, 1, 1, 2);
       const cell = resolved.position;
 
@@ -226,7 +203,8 @@ describe('prospectors-eye (spawn-control)', () => {
     for (let index = 0; index < 40; index += 1) {
       const target = relicBench(['prospectors-eye'], { seed: `busy-${index}` });
 
-      // The whole ring but one cell is taken, so only that cell is a candidate.
+      // The whole ring but one cell is taken, so only that cell is a
+      // candidate.
       for (let x = 0; x < 4; x += 1) {
         for (let y = 0; y < 4; y += 1) {
           const isRing = x === 0 || y === 0 || x === 3 || y === 3;
@@ -320,10 +298,6 @@ describe('prospectors-eye (spawn-control)', () => {
   });
 });
 
-/* ==========================================================================
- * 3. loaded-dice
- * ========================================================================== */
-
 describe('loaded-dice (spawn-control)', () => {
   it('binds onSpawn and nothing else', () => {
     expect(Object.keys(relicById('loaded-dice').hooks)).toEqual(['onSpawn']);
@@ -350,8 +324,7 @@ describe('loaded-dice (spawn-control)', () => {
       }
     }
 
-    // The default distribution weights 4 at a tenth. Inverted it is nine
-    // tenths, so a clear majority is the assertion, not an exact count.
+    // The default distribution weights 4 at a tenth.
     expect(highest).toBeGreaterThan(120);
   });
 
@@ -396,16 +369,10 @@ describe('loaded-dice (spawn-control)', () => {
 
     spawn(target, 0, 0, 2);
 
-    // The inversion is taken on a copy: a relic that reversed the live array
-    // would leave the rules skewed for the rest of the run.
     expect(target.config.spawn.values).toEqual(values);
     expect(target.config.spawn.weights).toEqual(weights);
   });
 });
-
-/* ==========================================================================
- * 4. The family as a whole
- * ========================================================================== */
 
 describe('the spawn-control family', () => {
   it('reads only the relic-draw substream', () => {
@@ -460,10 +427,6 @@ describe('the spawn-control family', () => {
     expect(first.payload.value).toBe(4);
     expect(second.payload.value).toBe(4);
 
-    // The RANDOMNESS CONSUMED differs, and that is why pickup order is part of
-    // the determinism contract rather than a presentation detail. Reversed,
-    // `loaded-dice` raises the value first and `twin-seed` then declines a
-    // spawn that is no longer the lowest, so it takes no draw at all.
     expect(draws(forwards)).toBe(2);
     expect(draws(backwards)).toBe(1);
   });

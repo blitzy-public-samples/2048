@@ -1,6 +1,78 @@
 // Board-size reconciliation: the policy arithmetic, the shrink and the grow
 // rehydration, and the terminal-state reads over the reconciled lattice.
 //
+// AAP 0.4.1.3 names board-size rehydration as the corruption risk of the
+// persistence boundary. Gate V6 requires tile positions and the win/lose check
+// to survive a board-mutating cursed relic INCLUDING ACROSS A RELOAD, and
+// Contract 5 places the reconciliation on the load path, ahead of any lattice
+// construction. The prompt's edge case this discharges: a board-size-altering
+// cursed relic must not corrupt existing tile positions or the win/lose check.
+//
+// THE DEFECT THIS SUITE MEASURES
+//   js/game_manager.js L40-L41 rebuilt the lattice from the size the SNAPSHOT
+//   recorded, `new Grid(previousState.grid.size, previousState.grid.cells)`,
+//   and left L2's `this.size` — the constructor argument, which
+//   js/application.js L3 supplied as the literal 4 — untouched. L248-L249 then
+//   bounded the neighbour probe by that captured size rather than by
+//   `this.grid.size`, while every method of js/grid.js read the live one:
+//   L10/L13, L59-L60, L98-L99 and L105/L108. A board grown past the captured
+//   size therefore had its outer row and column skipped by the probe, which is
+//   a game over declared while a legal merge remained; a board shrunk below it
+//   had cells outside the lattice probed, which js/grid.js L80-L86 answers with
+//   `null` and no throw. src/engine/terminal-state.ts reads the edge length off
+//   its argument at every call, and that is what the sections below measure.
+//
+// Superseded constructs this suite is the named verification target for, in the
+// order docs/TRACEABILITY_MATRIX.md will list them. THAT DOCUMENT HAS NOT
+// LANDED, so the ordering below is the one this file declares rather than one
+// it reads from elsewhere:
+//   GameManager.prototype.setup            js/game_manager.js L36-L45, the
+//                                          saved-size rebuild at L40-L41
+//   GameManager.prototype.movesAvailable   js/game_manager.js L238-L240
+//   GameManager.prototype.tileMatchesAvailable
+//                                          js/game_manager.js L243-L268, the
+//                                          captured-size loop at L248-L249
+//   GameManager.prototype.getVector        js/game_manager.js L194-L204
+//   GameManager.prototype.positionsEqual   js/game_manager.js L270-L272
+//   Grid.prototype.fromState               js/grid.js L21-L34, read as
+//                                          state[x][y]
+//   Grid.prototype.cellContent             js/grid.js L80-L86, the
+//                                          out-of-bounds `null` valve
+//   Grid.prototype.withinBounds            js/grid.js L97-L100
+//   Grid.prototype.serialize               js/grid.js L102-L117, `null` in an
+//                                          empty cell at L109
+//   Tile.prototype.serialize               js/tile.js L19-L27
+//   LocalStorageManager, the probe run once at construction and the single
+//   snapshot read                          js/local_storage_manager.js
+//                                          L25-L26, L52-L55
+//
+// Figure this suite will be the mechanical proof of: Figure 4 (Turn Data Flow),
+// PLANNED for docs/architecture/data-flow.md AND NOT LANDED. Its win check is
+// to read `config.winValue` and its loss check to be the `Moves available?`
+// decision; both reads are asserted here over the reconciled edge length, which
+// is the size that figure's COMMIT stage will persist. The assertions rest on
+// src/engine/terminal-state.ts and src/run/run-state-store.ts, not on the
+// figure.
+//
+// Collected by the unit:dom-free project of vitest.config.ts, environment
+// 'node'. Nothing here reads a document, a Web Storage global or a clock;
+// `Math.random` is read for reference identity and never called, wrapped,
+// stubbed or written. No mocking api, no replaced global, no snapshot
+// artifact, and every store and sink is injected.
+//
+// Coverage boundaries this suite stays inside. The loader's five verdicts are
+// tests/unit/run/run-state-store.test.ts, which is also where the surfacing of
+// the reconciled discriminant is asserted; section 15 reads that discriminant
+// only as the entry to the board-integrity assertions it owns. Further out:
+// the registry and controller wiring that supplies a relic-implied size is
+// tests/unit/run/run-relic-board-size.test.ts; cursor resume is
+// tests/unit/run/rng-cursor-persistence.test.ts; relic behaviour, charges and
+// hook dispatch are tests/unit/relics/; the frozen best-score accessor is
+// tests/unit/storage/best-score.test.ts. This file owns the reconciliation
+// policy arithmetic, the rehydrated lattice, and the terminal-state reads over
+// it. Classic dimensionality is frozen: a reconciled edge length is a per-run
+// value, and nothing here assumes a third axis.
+//
 // Decisions behind this file: docs/DECISION_LOG.md.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';

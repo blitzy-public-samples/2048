@@ -176,6 +176,12 @@ export interface InputManagerOptions {
    * Called ONCE per accepted change to the binding table, with the table in
    * force afterwards and why it changed.
    *
+   * THE SINGLE NOTIFICATION of a rebind: `remap()` is the only path that
+   * changes the table, this manager is the only validator of a change to it,
+   * and every follower — the generated controls, the persisted copy — hangs off
+   * this one callback rather than being told separately. Decisions DL-INPUT-05
+   * and DL-PANEL-04.
+   *
    * A throw is reported and contained: a follower that fails cannot leave the
    * manager holding a table its own listeners are not using.
    */
@@ -324,6 +330,12 @@ function readAmbientDocument(): Document | null {
 
 /** The payload index published when no slot names one. */
 const DEFAULT_PAYLOAD_INDEX = 0;
+
+// NO REDUCTION OF A CAUGHT VALUE HAPPENS IN THIS MODULE. Every caught value
+// leaves it through `InputReporter.failure` unconverted, and the ONE reduction
+// the input layer performs — for a sink that implements no `failure` member —
+// is `describeThrownForFields` in src/input/keymap.ts, which is where
+// `createSafeInputReporter` applies it.
 
 function describePointerFamily(
   family: PointerEventFamily,
@@ -525,6 +537,19 @@ export class InputManager implements InputEmitter {
 
   /**
    * Reports one callback that threw.
+   *
+   * The count is raised first and separately, then the throw is delivered
+   * through `InputReporter.failure`, which takes the caught value UNCONVERTED:
+   * the name, the message, the stack and the cause chain of an `Error` all
+   * survive to the sink, as does the structure of a non-`Error` — a plain
+   * object, an array, `null` or `undefined` — that some code throws instead.
+   *
+   * `failure` is always present here, because `createSafeInputReporter` in
+   * src/input/keymap.ts fills it in: for a sink that implements it the value is
+   * passed through, and for a sink that does not the wrapper falls back to
+   * `log` with `describeThrownForFields`, which that module documents as the
+   * input layer's one and only such reduction. The choice therefore belongs to
+   * the wrapper, and this method never converts a caught value itself.
    *
    * Contained itself, so a sink that throws while reporting cannot do what the
    * containment above exists to prevent.
@@ -802,6 +827,23 @@ export class InputManager implements InputEmitter {
 
   /**
    * Binds one action to one key, validating, persisting and announcing it.
+   *
+   * THE SINGLE ENTRY POINT FOR A REBIND, performing all four steps in order so
+   * no caller performs any of them itself:
+   *
+   *   1. VALIDATES. Every requested key AND every requested code is checked
+   *      against every context the action is active in, so a key already bound
+   *      to another action in a shared context is refused rather than shadowed —
+   *      including one that collides only by physical code, which the logical
+   *      key cannot see. The occupying binding and the dimension it collided in
+   *      are returned so the caller can name both.
+   *   2. APPLIES. The table this manager's own keydown listener reads is
+   *      replaced, so the new binding is live for the next keystroke with no
+   *      second write.
+   *   3. PERSISTS, through `persistKeymap`.
+   *   4. ANNOUNCES, exactly once, through `onKeymapChange`.
+   *
+   * A refusal does none of 2, 3 or 4 (N2).
    *
    * @param action Action to rebind.
    * @param binding Keys and codes to bind it to.

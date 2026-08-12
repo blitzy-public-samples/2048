@@ -1,42 +1,14 @@
 /**
  * The run lifecycle, composed.
  *
- * WHAT IS UNDER TEST
- *   `RunController` of src/run/run-controller.ts, from two directions.
+ * What is under test `RunController` of src/run/run-controller.ts, from two
+ * directions.
  *
- *   Sections 1 to 20 exercise the COMPOSITION of the run layer: a real `Engine`
- *   against a real `RunStateStore` over an injected store.
+ * Sections 1 to 20 exercise the COMPOSITION of the run layer: a real `Engine`
+ * against a real `RunStateStore` over an injected store.
  *
- *   Sections 21 to 31 exercise the controller against its OWN declared ports —
- *   `EnginePort`, `EngineEventSource` and `RelicRegistryPort` — with plain
- *   recording objects, and cover the units the composition reaches only
- *   indirectly: seed origination and entry, the stage-goal authority, the
- *   reward triple, the run summary, the correlation identifier and the commit
- *   context providers. NO MOCKING LIBRARY is used anywhere in this file: every
- *   collaborator arrives by constructor injection.
- *
- *   Decisions of docs/DECISION_LOG.md this file is the evidence for, one
- *   apiece: DL-RUNCTL-01, DL-RUNCTL-02, DL-RUNCTL-03, DL-RUNCTL-04,
- *   DL-STAGE-02, DL-TEST-01. Rows of docs/TRACEABILITY_MATRIX.md it covers, one
- *   apiece: TR-RUNCTL-01, TR-RUNCTL-02, TR-RUNCTL-03, TR-RUNCTL-04,
- *   TR-RUNCTL-05, TR-RUNCTL-06, TR-RUNCTL-07, TR-RUNCTL-08.
- *
- * THE STORE IS INJECTED
- *   `tests/unit/run/` runs in both the `unit:dom-free` project, which has no
- *   Web Storage at all, and the `unit:dom` project, which has jsdom's. A
- *   `MemoryStorage` handed to `LocalStorageManager` makes every case below
- *   behave identically in both, and keeps one test's storage out of the next
- *   test's reach without depending on teardown. Decision DL-TEST-01. Section 21
- *   adds the `afterEach` that empties every store this file tracked, of every
- *   key `OWNED_STORAGE_KEYS` and `BEST_SCORE_KEY` name.
- *
- * WHAT THIS FILE DOES NOT OWN
- *   The loader's verdict matrix (tests/unit/run/run-state-store.test.ts), the
- *   envelope's nine-member shape (tests/unit/run/run-state.test.ts), board-size
- *   reconciliation (tests/unit/run/run-relic-board-size.test.ts), the RNG cursor
- *   mechanism (tests/unit/run/rng-cursor-persistence.test.ts), the frozen
- *   best-score contract (tests/unit/storage/best-score.test.ts) and the seeded
- *   relic draw (tests/unit/relics/relic-draw.test.ts).
+ * Decisions: DL-RUNCTL-01, DL-RUNCTL-02, DL-RUNCTL-03, DL-RUNCTL-04,
+ * DL-STAGE-02, DL-TEST-01 (docs/DECISION_LOG.md).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -135,6 +107,22 @@ import {
  * Harness
  * ========================================================================== */
 
+/**
+ * One `onRewardDrawn` report, as the recorder keeps it.
+ *
+ * Every declared member is captured VERBATIM, absences included: the point of
+ * the reward-outcome suite is that a report says which relic, at which stage,
+ * accepted or not, and refused by what — and the members were previously
+ * omitted or mangled while the report still type-checked.
+ */
+interface RecordedRewardDraw {
+  readonly stageIndex: number;
+  readonly offeredRelicIds: readonly string[];
+  readonly selectedRelicId: string | undefined;
+  readonly accepted: boolean;
+  readonly refusal: string | undefined;
+}
+
 /** Every report the controller and the store made, in order. */
 interface RecordedReports {
   readonly started: { runId: string; stageIndex: number; resumed: boolean; seedProvided: boolean }[];
@@ -152,6 +140,8 @@ interface RecordedReports {
     previous: string;
     refusedWrites: number;
   }[];
+  readonly offered: { stageIndex: number; offeredRelicIds: readonly string[] }[];
+  readonly drawn: RecordedRewardDraw[];
 }
 
 function createRecorder(): { reports: RecordedReports; reporter: RunReporter } {
@@ -163,6 +153,8 @@ function createRecorder(): { reports: RecordedReports; reporter: RunReporter } {
     reconciled: [],
     writeFailures: [],
     persistence: [],
+    offered: [],
+    drawn: [],
   };
 
   const reporter: RunReporter = {
@@ -207,6 +199,21 @@ function createRecorder(): { reports: RecordedReports; reporter: RunReporter } {
         refusedWrites: report.refusedWrites,
       });
     },
+    onRewardOffered(report): void {
+      reports.offered.push({
+        stageIndex: report.stageIndex,
+        offeredRelicIds: [...report.offeredRelicIds],
+      });
+    },
+    onRewardDrawn(report): void {
+      reports.drawn.push({
+        stageIndex: report.stageIndex,
+        offeredRelicIds: [...report.offeredRelicIds],
+        selectedRelicId: report.selectedRelicId,
+        accepted: report.accepted,
+        refusal: report.refusal,
+      });
+    },
   };
 
   return { reports, reporter };
@@ -235,9 +242,6 @@ interface ComposeOptions {
 /**
  * Composes storage, identity, store, controller, substreams and engine in the
  * root's order, and attaches the controller to the engine.
- *
- * `setup()` is called unless suppressed, because the first commit is what the
- * envelope's board comes from and several cases below assert on it.
  */
 function compose(options: ComposeOptions = {}): Composed {
   const backing = options.backing ?? new MemoryStorage();
@@ -306,10 +310,6 @@ function compose(options: ComposeOptions = {}): Composed {
 
 /**
  * One stored value, with `MemoryStorage`'s absent form normalised to `null`.
- *
- * `MemoryStorage.getItem` yields `undefined` for an absent key while the DOM
- * contract yields `null`; every assertion below reads through this so it does
- * not depend on which of the two is under it.
  */
 function read(backing: MemoryStorage, key: string): string | null {
   return backing.getItem(key) ?? null;
@@ -365,10 +365,6 @@ function boardWith(value: number, size = 4): SerializedGameState {
     keepPlaying: false,
   };
 }
-
-/* ==========================================================================
- * 1. Identity resolution
- * ========================================================================== */
 
 describe('resolveRunIdentity', () => {
   it('originates a seed and a run identifier when nothing is stored', () => {
@@ -481,8 +477,8 @@ describe('resolveRunIdentity', () => {
       seed: 'player-typed-this',
     });
 
-    // A seed the player chose starts a fresh run: it cannot continue a run that
-    // was played under a different sequence.
+    // A seed the player chose starts a fresh run: it cannot continue a run
+    // that was played under a different sequence.
     expect(identity.seed).toBe('player-typed-this');
     expect(identity.runId).toBe('minted-run');
     expect(identity.resumed).toBe(false);
@@ -519,10 +515,6 @@ describe('resolveRunIdentity', () => {
     expect(identity.resumed).toBe(true);
   });
 });
-
-/* ==========================================================================
- * 2. begin(): the authoritative load
- * ========================================================================== */
 
 describe('RunController.begin', () => {
   it('assembles a fresh envelope at stage 0 when nothing is stored', () => {
@@ -606,8 +598,6 @@ describe('RunController.begin', () => {
       setup: false,
     });
 
-    // Adopting another run's stage and relics onto a board playing a different
-    // sequence would be a different run wearing this one's progress.
     expect(controller.seed()).toBe('the-seed-i-typed');
     expect(controller.state().stageIndex).toBe(0);
     expect(controller.relicContext()).toEqual([]);
@@ -646,10 +636,6 @@ describe('RunController.begin', () => {
     expect(controller.state().stageIndex).toBe(0);
   });
 });
-
-/* ==========================================================================
- * 3. The commit contexts
- * ========================================================================== */
 
 describe('the stage and relic slices of a commit', () => {
   it('replaces the neutral contexts the engine defaulted to', () => {
@@ -737,9 +723,6 @@ describe('the stage and relic slices of a commit', () => {
     const goal = controller.stageContext().goal;
     const expected = Math.min(goalTile / goal.target, 1);
 
-    // The commit the rewind made carries progress measured from the RESTORED
-    // board, not from the board the run stood on before the rewind — which
-    // held a single tile of 2 and would have reported an eighth of this.
     expect(progress).toHaveLength(1);
     expect(progress[0]).toBeCloseTo(expected, 10);
 
@@ -779,8 +762,6 @@ describe('the stage and relic slices of a commit', () => {
     engine.move(DIRECTION_LEFT);
 
     // The charge the handler spent DURING this turn is on this turn's commit.
-    // Projected from the envelope instead, the count reached a consumer one
-    // commit late: the tray showed the old budget and a reload restored it.
     expect(charges).toEqual([1]);
 
     stop();
@@ -791,9 +772,9 @@ describe('the stage and relic slices of a commit', () => {
     const target = stages.ladder[0].target;
     const projected = controller.stageContext().goal;
 
-    // `readonly` in `StageCommitContext` binds the reference, not the object, so
-    // the projection is frozen as well: a listener cannot retarget the goal the
-    // run is measured against and the goal that reaches storage.
+    // `readonly` in `StageCommitContext` binds the reference, not the object,
+    // so the projection is frozen as well: a listener cannot retarget the goal
+    // the run is measured against and the goal that reaches storage.
     expect(Object.isFrozen(projected)).toBe(true);
     expect(() => {
       (projected as { target: number }).target = 1;
@@ -811,8 +792,7 @@ describe('the stage and relic slices of a commit', () => {
     const manager = new LocalStorageManager({ storage: backing });
     const config = createDefaultRulesConfig();
 
-    // A relic whose state slot cannot be read: `cloneRunState()` raises while
-    // copying it, which is the one path `state()` falls back on.
+    // A relic whose state slot cannot be read.
     const hostile: PersistedRelic = {
       id: 'hostile',
 
@@ -847,8 +827,8 @@ describe('the stage and relic slices of a commit', () => {
       'rarity-weight': 0,
     }));
 
-    // The commit is what puts the hostile relic and the engine's board into the
-    // envelope.
+    // The commit is what puts the hostile relic and the engine's board into
+    // the envelope.
     engine.setup(boardWith(2));
 
     const projected = controller.state();
@@ -905,7 +885,6 @@ describe('the stage and relic slices of a commit', () => {
     // and a HUD has to be able to show that it is spent.
     expect(carried[2]).toEqual({ id: 'picked-third', charges: 0 });
 
-    // Absent rather than `undefined`, so the projection round-trips through JSON.
     expect('charges' in (carried[1] ?? {})).toBe(false);
 
     for (const entry of carried) {
@@ -913,10 +892,6 @@ describe('the stage and relic slices of a commit', () => {
     }
   });
 });
-
-/* ==========================================================================
- * 4. Persistence
- * ========================================================================== */
 
 describe('run-state persistence', () => {
   it('writes the nine-member envelope on the first commit', () => {
@@ -947,8 +922,7 @@ describe('run-state persistence', () => {
     const stored = readStored(backing);
     const legacy = read(backing, GAME_STATE_KEY);
 
-    // The two describe one board. The envelope wraps a copy; `gameState`
-    // remains the board's home, written by the engine exactly as before.
+    // The two describe one board. The envelope wraps a copy.
     expect(legacy).not.toBeNull();
     expect(stored?.board).toEqual(JSON.parse(legacy ?? 'null'));
     expect(stored?.board.grid.size).toBe(4);
@@ -976,8 +950,6 @@ describe('run-state persistence', () => {
 
     play(engine, MOVES);
 
-    // The best score is stored as the raw decimal string the pre-migration
-    // manager wrote, and reads back as that string rather than a number.
     const best = read(backing, BEST_SCORE_KEY);
 
     if (best !== null) {
@@ -1185,7 +1157,8 @@ describe('resuming a run', () => {
 
     straight.stop();
 
-    // The same seed, interrupted after half the moves and resumed from storage.
+    // The same seed, interrupted after half the moves and resumed from
+    // storage.
     const interrupted = compose({ seed });
 
     play(interrupted.engine, MOVES.slice(0, 3));
@@ -1215,17 +1188,11 @@ describe('resuming a run', () => {
 
     const second = compose({ backing: first.backing });
 
-    // `setup()` restored the board rather than seeding it, so the resumed
-    // composition's first commit records the cursor it inherited.
     expect(readStored(second.backing)?.rngCursor['spawn-value']).toBe(
       beforeReload,
     );
   });
 });
-
-/* ==========================================================================
- * 6. Stage advancement
- * ========================================================================== */
 
 describe('stage advancement', () => {
   it('measures progress toward the stage goal as moves resolve', () => {
@@ -1258,8 +1225,9 @@ describe('stage advancement', () => {
     // A 16 already on the board meets stage 0's default target.
     backing.setItem(GAME_STATE_KEY, JSON.stringify(boardWith(16)));
 
-    // `setup()` is deferred so the assertions can watch the emission it makes:
-    // its first commit already meets the goal, so the resolution happens there.
+    // `setup` is deferred so the assertions can watch the emission it makes:
+    // its first commit already meets the goal, so the resolution happens
+    // there.
     const { controller, reports, engine, stages } = compose({
       backing,
       setup: false,
@@ -1280,9 +1248,6 @@ describe('stage advancement', () => {
     expect(ends[0]?.cleared).toBe(true);
     expect(controller.state().stageIndex).toBe(1);
 
-    // A stage transition CARRIES the board, so the stage now in force opens
-    // measured against the tiles still in play rather than at zero: the 16 that
-    // cleared stage 0 is already part of the way to stage 1's target.
     expect(controller.state().goalProgress).toBe(
       16 / (stages.ladder[1]?.target ?? 1),
     );
@@ -1325,23 +1290,13 @@ describe('stage advancement', () => {
 
     engine.setup();
 
-    // A commit reports the stage now in force. The advance happens during the
-    // `stage:end` emission, and the commit `endStage()` ends with assembles its
-    // payload after that emission completes.
+    // A commit reports the stage now in force.
     expect(commits).toContainEqual({
       stageIndex: 1,
       target: stages.ladder[1]?.target,
     });
 
-    // NEVER a mismatched pair. The engine adopts the goal an `onStageStart`
-    // handler returns and prefers it over the provider's thereafter; an
-    // adopted goal left in place across a stage transition would make a commit
-    // report the new stage index beside the OLD stage's target.
-    //
-    // Order is not asserted: the controller is registered before this listener
-    // here, so this listener receives the re-entrant stage-end commit before
-    // the commit that triggered it. src/main.ts registers the controller LAST
-    // for exactly that reason.
+    // NEVER a mismatched pair.
     for (const commit of commits) {
       expect(commit.target).toBe(stages.ladder[commit.stageIndex]?.target);
     }
@@ -1361,9 +1316,6 @@ describe('stage advancement', () => {
     expect(reports.advanced).toHaveLength(1);
     expect(controller.state().stageIndex).toBe(1);
 
-    // One further stage per move, because a move is what measures the board
-    // against the stage now in force. RIGHT, not UP: the tile sits in the
-    // top-left cell, and a move that changes nothing never reaches a commit.
     play(engine, [DIRECTION_RIGHT]);
 
     expect(reports.advanced).toHaveLength(2);
@@ -1400,10 +1352,6 @@ describe('stage advancement', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Run end
- * ========================================================================== */
-
 describe('ending a run', () => {
   it('clears the envelope alongside the board the engine clears', () => {
     const backing = new MemoryStorage();
@@ -1438,9 +1386,6 @@ describe('ending a run', () => {
 
     const { backing: store, controller, reports } = compose({ backing });
 
-    // The engine clears `gameState` on a loss; the envelope goes with it, so a
-    // reload opens a fresh run rather than a fresh board wearing a lost run's
-    // stage and relics.
     expect(read(store, GAME_STATE_KEY)).toBeNull();
     expect(readStored(store)).toBeNull();
     expect(reports.ended[0]?.outcome).toBe('lost');
@@ -1487,10 +1432,6 @@ describe('ending a run', () => {
   });
 });
 
-/* ==========================================================================
- * 8. Detachment
- * ========================================================================== */
-
 describe('detaching the controller', () => {
   it('stops persisting once its subscriptions are released', () => {
     const { backing, engine, stop } = compose();
@@ -1506,28 +1447,14 @@ describe('detaching the controller', () => {
   });
 });
 
-/* ==========================================================================
- * 9. The relic registry, bound
- *
- * The port and the registry shipped with DIFFERENT MEMBER NAMES, so nothing
- * could satisfy the port and no production wiring existed. Every case below
- * binds the REAL `RelicRegistry` as the port, which is what makes the naming
- * assertion mechanical rather than a matter of reading two files: if the names
- * disagreed again this section would not compile.
- * ========================================================================== */
-
 /** One composed run with a real registry over the engine's own hook bus. */
 interface ComposedWithRelics extends Composed {
   readonly registry: RelicRegistry;
 }
 
 /**
- * Composes as `compose()` does, and additionally builds a real registry over
- * the engine's hook bus and binds it to the controller.
- *
- * The engine is constructed FIRST so the registry can attach to its live bus,
- * then the controller's registry member is supplied — which is the order
- * src/main.ts must use for the same reason.
+ * Composes as `compose` does, and additionally builds a real registry over the
+ * engine's hook bus and binds it to the controller.
  */
 function composeWithRelics(
   options: ComposeOptions & { readonly catalogue?: readonly Relic[] } = {},
@@ -1555,8 +1482,6 @@ function composeWithRelics(
     seed: options.seed,
   });
 
-  // A holder, because the engine needs the controller's providers and the
-  // registry needs the engine's bus.
   const holder: { controller: RunController | null } = { controller: null };
 
   const engine = new Engine({
@@ -1586,7 +1511,7 @@ function composeWithRelics(
     createToken,
     reporter,
 
-    // THE BINDING UNDER TEST. The real registry, passed as the port.
+    // The binding under test. The real registry, passed as the port.
     relics: registry,
   });
 
@@ -1637,9 +1562,6 @@ describe('the relic registry port', () => {
     const { controller, engine, registry } = composeWithRelics();
 
     // `RelicRegistry` supplies these as CLASS METHODS reading private fields.
-    // A member extracted into a local and invoked bare would enter with `this`
-    // undefined and raise on the first field read, so every one of these
-    // completing is the assertion.
     controller.recordRewardOffer([FIRST_RELIC]);
 
     expect(controller.resolveReward(FIRST_RELIC).accepted).toBe(true);
@@ -1656,7 +1578,7 @@ describe('the relic registry port', () => {
     controller.recordRewardOffer([FIRST_RELIC]);
     controller.resolveReward(FIRST_RELIC);
 
-    // THE POINT OF THE PICKUP. A relic recorded in the envelope but never
+    // The point of the pickup. A relic recorded in the envelope but never
     // registered was displayed and never fired.
     expect(
       engine.hooks.subscribers().map((subscriber) => subscriber.id),
@@ -1683,10 +1605,6 @@ describe('the relic registry port', () => {
     ).toEqual([FIRST_RELIC, SECOND_RELIC]);
   });
 });
-
-/* ==========================================================================
- * 10. Reward selection is validated
- * ========================================================================== */
 
 describe('resolving a reward', () => {
   it('accepts a relic that was offered and is known', () => {
@@ -1726,10 +1644,6 @@ describe('resolving a reward', () => {
   it('refuses an identifier the catalogue does not carry', () => {
     const { controller } = composeWithRelics();
 
-    // REFUSED AT THE OFFER, which is the earlier of the two gates that measure
-    // catalogue membership: an identifier no catalogue carries is one no seeded
-    // draw could have produced, so the whole offer is refused rather than
-    // recorded and then declined a step later.
     expect(controller.recordRewardOffer(['no-such-relic'])).toBe(false);
 
     // Nothing stands, so the selection is refused with it.
@@ -1798,7 +1712,7 @@ describe('resolving a reward', () => {
     controller.recordRewardOffer(offer);
     controller.resolveReward('no-such-relic');
 
-    // THE OFFER STANDS. Clearing it either way stranded the reward screen with
+    // The offer stands. Clearing it either way stranded the reward screen with
     // nothing left to present, so a refused pick could not be retried.
     expect(controller.resolveReward(FIRST_RELIC).accepted).toBe(true);
   });
@@ -1810,7 +1724,6 @@ describe('resolving a reward', () => {
 
     expect(controller.resolveReward(FIRST_RELIC).accepted).toBe(true);
 
-    // The set is spent; a second pick from it is no longer on offer.
     expect(controller.resolveReward(SECOND_RELIC).refusal).toBe(
       'not-offered',
     );
@@ -1902,10 +1815,6 @@ describe('resolving a reward', () => {
   });
 });
 
-/* ==========================================================================
- * 11. The stage transition completes
- * ========================================================================== */
-
 describe('completing a reward', () => {
   it('starts the stage the advance moved to', () => {
     const { controller, engine } = composeWithRelics();
@@ -1919,7 +1828,7 @@ describe('completing a reward', () => {
     controller.recordRewardOffer([FIRST_RELIC]);
     controller.completeReward(engine, FIRST_RELIC);
 
-    // NOTHING ELSE STARTS THAT STAGE. A run that only advanced its index never
+    // Nothing else starts that stage. A run that only advanced its index never
     // dispatched `onStageStart` again.
     expect(started).toEqual([1]);
     expect(controller.stageIndex()).toBe(1);
@@ -2008,10 +1917,6 @@ describe('completing a reward', () => {
   });
 });
 
-/* ==========================================================================
- * 12. One goal authority
- * ========================================================================== */
-
 describe('the stage goal authority', () => {
   it('adopts the goal a stage:start carried', () => {
     const { controller, engine } = composeWithRelics();
@@ -2028,9 +1933,7 @@ describe('the stage goal authority', () => {
 
     engine.setup(null);
 
-    // THE ENGINE'S GOAL, NOT THE CONTROLLER'S OWN. Measuring against a
-    // separately recorded goal left two authorities that disagreed the moment a
-    // relic replaced one of them.
+    // THE ENGINE'S goal, not the CONTROLLER'S OWN.
     expect(controller.stageGoal()).toEqual({
       kind: 'score-threshold',
       target: 7777,
@@ -2079,10 +1982,6 @@ describe('the stage goal authority', () => {
   });
 });
 
-/* ==========================================================================
- * 13. A new run replaces everything scoped to it
- * ========================================================================== */
-
 describe('run-scoped rebuild', () => {
   it('publishes the scope of the run begin() adopted', () => {
     const scopes: RunScope[] = [];
@@ -2127,7 +2026,7 @@ describe('run-scoped rebuild', () => {
 
     controller.begin();
 
-    // THE ORDER IS THE POINT. A root rebuilds the run's correlation scope from
+    // The order is the point. A root rebuilds the run's correlation scope from
     // this publication, so reporting first attributed the run's own opening
     // report to whatever run the root was reporting under before it.
     expect(order).toEqual(['scope', 'reported']);
@@ -2188,7 +2087,7 @@ describe('run-scoped rebuild', () => {
       { seed: 'brand-new-seed' },
     );
 
-    // THE ORDER IS THE POINT. Rebuilding after `setup()` would draw the opening
+    // The order is the point. Rebuilding after `setup` would draw the opening
     // spawns from the previous run's substreams.
     expect(order).toEqual(['scope', 'setup']);
   });
@@ -2257,17 +2156,12 @@ describe('run-scoped rebuild', () => {
   });
 });
 
-/* ==========================================================================
- * 14. The board a run opens on
- * ========================================================================== */
-
 describe('the opening board', () => {
   it('is null for a fresh run, so start tiles are inserted', () => {
     const { controller, engine } = composeWithRelics();
 
     expect(controller.openingBoard()).toBeNull();
 
-    // Two start tiles, which an empty supplied snapshot would have suppressed.
     expect(
       engine.serialize().grid.cells.flat().filter((cell) => cell !== null),
     ).toHaveLength(2);
@@ -2295,8 +2189,8 @@ describe('the opening board', () => {
 
     const { controller, engine } = composeWithRelics({ backing });
 
-    // `store.exists()` reported SUCCESS for this key, and the run then opened
-    // on the envelope's own empty board — which suppressed the start tiles and
+    // `store.exists` reported SUCCESS for this key, and the run then opened on
+    // the envelope's own empty board — which suppressed the start tiles and
     // left an unplayable board.
     expect(controller.openingBoard()).toBeNull();
     expect(
@@ -2333,10 +2227,8 @@ describe('the opening board', () => {
 
     controller.resumeRun(engine);
 
-    // `store.exists()` reports SUCCESS for a key that is present and
-    // unreadable, and `resumeRun` then handed the engine the envelope's own
-    // EMPTY board. A supplied snapshot tells the engine the board was restored,
-    // so no start tiles were inserted and the run opened unplayable.
+    // `store.exists` reports SUCCESS for a key that is present and unreadable,
+    // and `resumeRun` then handed the engine the envelope's own EMPTY board.
     expect(
       engine.serialize().grid.cells.flat().filter((cell) => cell !== null),
     ).toHaveLength(2);
@@ -2360,7 +2252,7 @@ describe('the opening board', () => {
     second.controller.resumeRun(second.engine);
 
     // The envelope is present and READABLE but belongs to another seed, so it
-    // is not adopted; `exists()` reported success for it all the same.
+    // is not adopted.
     expect(
       second.engine.serialize().grid.cells.flat()
         .filter((cell) => cell !== null),
@@ -2387,10 +2279,6 @@ describe('the opening board', () => {
     expect(second.engine.score).toBe(stored?.board.score);
   });
 });
-
-/* ==========================================================================
- * 15. Projections are detached
- * ========================================================================== */
 
 describe('state ownership', () => {
   it('freezes the goal it hands back', () => {
@@ -2696,6 +2584,7 @@ function seedRewardFixture(
   );
 }
 
+
 /**
  * Composes storage, store, controller, registry, substreams and engine with a
  * seeded draw port bound, in the order src/main.ts uses: the hook bus first,
@@ -2765,11 +2654,9 @@ function composeWithRewards(
     createToken,
     reporter,
 
-    // THE DOCUMENTED ROUTE between the two folders, not the instance.
+    // The documented route between the two folders, not the instance.
     relics: registry.runPort(),
 
-    // The seeded draw, which is what makes the cleared stage offer a reward of
-    // its own instead of waiting for a caller to record one.
     rewards: {
       draw: ({ count, ownedIds }): readonly RewardOffer[] =>
         streams === null
@@ -2842,8 +2729,8 @@ function composeWithRewards(
 }
 
 /**
- * A board whose first move LEFT merges 8 + 8 into 16, which is the first ladder
- * goal — so one move clears stage 0 and the reward round opens.
+ * A board whose first move LEFT merges 8 + 8 into 16, which is the first
+ * ladder goal — so one move clears stage 0 and the reward round opens.
  */
 function mergeReadyBoard(): SerializedGameState {
   const size = 4;
@@ -2900,10 +2787,7 @@ describe('a reward drawn by the run and taken through selectReward', () => {
 
     expect(selection.outcome).toBe('accepted');
 
-    // THE LIVE REGISTRY AND THE LIVE BUS, not only the returned outcome. A
-    // selection that reported `'accepted'` while these were empty is exactly
-    // the defect this case exists for: the relic was displayed, dispatched to
-    // nothing, and erased by the next commit's projection.
+    // The live registry and the live bus, not only the returned outcome.
     expect(registry.ownedIds()).toEqual([chosen.id]);
     expect(busSubscriberIds()).toContain(chosen.id);
     expect(controller.relics().map((relic) => relic.id)).toEqual([chosen.id]);
@@ -2911,7 +2795,6 @@ describe('a reward drawn by the run and taken through selectReward', () => {
       chosen.id,
     ]);
 
-    // EXACTLY ONE ADVANCE, and the reward is no longer pending.
     expect(controller.stageIndex()).toBe(1);
     expect(readStored(backing)?.stageIndex).toBe(1);
     expect(controller.isRewardPending()).toBe(false);
@@ -2935,9 +2818,8 @@ describe('a reward drawn by the run and taken through selectReward', () => {
 
     play(engine, MOVES);
 
-    // ITS OWN HANDLERS RAN, on the moves that followed the pickup — which is
-    // AAP user key flow 1: "chosen relic effects immediately fire on subsequent
-    // moves/merges/spawns for rest of run".
+    // Its own handlers ran, on the moves that followed the pickup — which is
+    // AAP user key flow 1.
     expect(registry.ownedIds()).toEqual([chosen?.id]);
     expect(invocationsOf(chosen?.id ?? '')).toBeGreaterThan(before);
     expect(engine.hooks.degraded()).toEqual([]);
@@ -2957,7 +2839,7 @@ describe('a reward drawn by the run and taken through selectReward', () => {
 
     const resolution = controller.completeReward(engine, chosen.id);
 
-    // BOTH HALVES, on the other public method as well: neither may keep the
+    // Both halves, on the other public method as well: neither may keep the
     // relic without advancing nor advance without keeping the relic.
     expect(resolution.accepted).toBe(true);
     expect(registry.ownedIds()).toEqual([chosen.id]);
@@ -2990,8 +2872,8 @@ describe('a reward drawn by the run and taken through selectReward', () => {
     engine.move(DIRECTION_LEFT);
     controller.selectReward(controller.currentOffer()[0]?.id ?? '', engine);
 
-    // One entry for the stage the selection opened, and no repeat of it: a stage
-    // opened twice applied every per-stage relic effect twice.
+    // One entry for the stage the selection opened, and no repeat of it: a
+    // stage opened twice applied every per-stage relic effect twice.
     expect(dispatched).toEqual([1]);
   });
 
@@ -3476,8 +3358,8 @@ describe('the reward selection outcome codes', () => {
 
     controller.recordRewardOffer([FIRST_RELIC]);
 
-    // Nothing was resolved, so nothing is `'already-resolved'`; no offer object
-    // stands, so a selection has nothing to be made from.
+    // Nothing was resolved, so nothing is `'already-resolved'`; no offer
+    // object stands, so a selection has nothing to be made from.
     expect(controller.selectReward(FIRST_RELIC).outcome).toBe('no-offer');
   });
 
@@ -3517,6 +3399,317 @@ describe('the reward selection outcome codes', () => {
 });
 
 /* ==========================================================================
+ * 18a. Every reward outcome is REPORTED, completely and unmangled
+ * ========================================================================== */
+
+/**
+ * WHAT WAS WRONG
+ *   `selectReward()` and `refuseSelection()` each assembled an `onRewardDrawn`
+ *   payload of their own instead of going through `reportReward`. Both omitted
+ *   the declared `accepted` member — which was optional, so the payloads
+ *   type-checked — the refusal path encoded the outcome INTO the identifier as
+ *   `` `${relicId} (${outcome})` `` and left `refusal` absent, and the accepted
+ *   path read `current.stageIndex` after `closeRewardRound()` had already
+ *   advanced the stage, so every accepted report named the stage the run had
+ *   moved ON TO rather than the stage the offer was made at.
+ *
+ * WHAT THIS SUITE PINS
+ *   The report, not the return value. Section 18 above asserts
+ *   `RewardSelection.outcome` and could not see any of the four defects; these
+ *   cases read `RunReporter.onRewardDrawn` directly and assert the offer stage,
+ *   the raw identifier, `accepted` and `refusal` for every outcome the two
+ *   public methods produce — accepted, no-offer, already-resolved, not-offered,
+ *   unknown-relic and refused — and for a refused OFFER.
+ */
+/**
+ * Composes a controller whose draw port always offers `FIRST_RELIC` and whose
+ * relic port is stubbed, so the two gates a real registry never fails —
+ * `'unknown-relic'` and `'refused'` — are reachable.
+ *
+ * @param stub The pickup and the holding answer to give.
+ * @returns The controller and the reports it made.
+ */
+function composeWithStubbedPickup(stub: {
+  readonly pickUp: (relicId: string) => PersistedRelic | null;
+  readonly holds?: (relicId: string) => boolean;
+}): { controller: RunController; reports: RecordedReports } {
+  const manager = new LocalStorageManager({ storage: new MemoryStorage() });
+  const config = createDefaultRulesConfig();
+  const { reports, reporter } = createRecorder();
+  const controller = new RunController({
+    store: new RunStateStore({ storage: manager, config, reporter }),
+    identity: resolveRunIdentity({ storage: manager, seed: 'stubbed-pickup' }),
+    config,
+    stages: createDefaultStageConfig(),
+    reporter,
+    relics: {
+      knowsRelic: (): boolean => true,
+      pickUpRelic: stub.pickUp,
+      holdsRelic: stub.holds ?? ((): boolean => true),
+      ownedRelicIds: (): readonly string[] => [],
+    },
+    rewards: {
+      draw: (): readonly RewardOffer[] => [
+        {
+          id: FIRST_RELIC,
+          name: 'First',
+          rarity: 'common',
+          description: 'The catalogue head.',
+          hooks: [],
+        },
+      ],
+    },
+  });
+
+  controller.begin();
+
+  return { controller, reports };
+}
+
+describe('the reward outcome reports', () => {
+  it('reports an accepted selection at the OFFER stage, with accepted true', () => {
+    const { controller, engine, reports } = composeWithRewards({
+      seed: 'reward-report-accepted',
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    const offered = controller.currentOffer().map((card) => card.id);
+    const chosen = offered[0] ?? '';
+    const offerStage = controller.stageIndex();
+
+    expect(offered).toHaveLength(3);
+    expect(controller.selectReward(chosen, engine).outcome).toBe('accepted');
+
+    // The stage ADVANCED, so a report reading `current.stageIndex` would name
+    // the stage after the offer rather than the offer's own.
+    expect(controller.stageIndex()).toBe(offerStage + 1);
+
+    const drawn = reports.drawn.at(-1);
+
+    expect(drawn).toEqual({
+      stageIndex: offerStage,
+      offeredRelicIds: offered,
+      selectedRelicId: chosen,
+      accepted: true,
+      refusal: undefined,
+    });
+
+    // And the offer report it answers named the same stage and the same set.
+    expect(reports.offered.at(-1)).toEqual({
+      stageIndex: offerStage,
+      offeredRelicIds: offered,
+    });
+  });
+
+  it('reports a no-offer refusal with the raw identifier and the refusal', () => {
+    const { controller, reports } = composeWithRewards({
+      seed: 'reward-report-no-offer',
+    });
+
+    expect(controller.selectReward(FIRST_RELIC).outcome).toBe('no-offer');
+    expect(reports.drawn).toEqual([
+      {
+        stageIndex: 0,
+        offeredRelicIds: [],
+        selectedRelicId: FIRST_RELIC,
+        accepted: false,
+        refusal: 'no-offer',
+      },
+    ]);
+  });
+
+  it('reports an already-resolved refusal against the round it resolved', () => {
+    const { controller, engine, reports } = composeWithRewards({
+      seed: 'reward-report-resolved',
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    const offered = controller.currentOffer().map((card) => card.id);
+    const chosen = offered[0] ?? '';
+    const offerStage = controller.stageIndex();
+
+    controller.selectReward(chosen, engine);
+
+    // The DOUBLE-CLICKED CARD. The round it names is the one at `offerStage`,
+    // not the stage the accepted selection advanced the run to.
+    expect(controller.selectReward(chosen, engine).outcome).toBe(
+      'already-resolved',
+    );
+
+    expect(reports.drawn.at(-1)).toEqual({
+      stageIndex: offerStage,
+      offeredRelicIds: [],
+      selectedRelicId: chosen,
+      accepted: false,
+      refusal: 'already-resolved',
+    });
+  });
+
+  it('reports a not-offered refusal with the identifier that was pressed', () => {
+    const { controller, engine, reports } = composeWithRewards({
+      seed: 'reward-report-not-offered',
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    const offered = controller.currentOffer().map((card) => card.id);
+    const unoffered =
+      RELIC_CATALOGUE.map((relic) => relic.id).find(
+        (id) => !offered.includes(id),
+      ) ?? '';
+
+    expect(controller.selectReward(unoffered, engine).outcome).toBe(
+      'not-offered',
+    );
+
+    // The offer is retained, so the report names the standing offer AND the
+    // identifier that was refused — the two are different, which is the whole
+    // point of carrying the identifier verbatim.
+    expect(reports.drawn.at(-1)).toEqual({
+      stageIndex: controller.stageIndex(),
+      offeredRelicIds: offered,
+      selectedRelicId: unoffered,
+      accepted: false,
+      refusal: 'not-offered',
+    });
+  });
+
+  it('reports an unknown-relic refusal when the registry refuses the pickup', () => {
+    const { controller, reports } = composeWithStubbedPickup({
+      pickUp: (): null => null,
+    });
+
+    // A DRAWN offer, which is what `selectReward()` validates against, and it
+    // reaches the pickup gate on a port that refuses to register.
+    expect(controller.offerReward()).toHaveLength(1);
+    expect(controller.selectReward(FIRST_RELIC).outcome).toBe('unknown-relic');
+    expect(reports.drawn.at(-1)).toEqual({
+      stageIndex: 0,
+      offeredRelicIds: [FIRST_RELIC],
+      selectedRelicId: FIRST_RELIC,
+      accepted: false,
+      refusal: 'unknown-relic',
+    });
+  });
+
+  it('reports a refused selection when the live registry disagrees', () => {
+    const { controller, reports } = composeWithStubbedPickup({
+      // Registered, and then not held: the append is WITHDRAWN and the
+      // selection is refused as `'refused'`.
+      pickUp: (relicId: string): PersistedRelic => ({ id: relicId }),
+      holds: (): boolean => false,
+    });
+
+    expect(controller.offerReward()).toHaveLength(1);
+    expect(controller.selectReward(FIRST_RELIC).outcome).toBe('refused');
+    expect(reports.drawn.at(-1)).toEqual({
+      stageIndex: 0,
+      offeredRelicIds: [FIRST_RELIC],
+      selectedRelicId: FIRST_RELIC,
+      accepted: false,
+      refusal: 'refused',
+    });
+  });
+
+  it('reports a refused OFFER with no identifier at all', () => {
+    const { controller, reports } = composeWithRelics();
+
+    // An offer the admission gate refuses: an identifier the catalogue does
+    // not carry. Nothing was selected, so nothing is named.
+    expect(controller.recordRewardOffer(['no-such-relic'])).toBe(false);
+    expect(reports.drawn).toEqual([
+      {
+        stageIndex: 0,
+        offeredRelicIds: [],
+        selectedRelicId: undefined,
+        accepted: false,
+        refusal: 'offer',
+      },
+    ]);
+  });
+
+  it('reports every resolveReward outcome at the offer stage', () => {
+    const { controller, reports } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    // Accepted through the other public method, which closes the same round.
+    expect(controller.resolveReward(FIRST_RELIC).accepted).toBe(true);
+    expect(reports.drawn.at(-1)).toEqual({
+      stageIndex: 0,
+      offeredRelicIds: [FIRST_RELIC],
+      selectedRelicId: FIRST_RELIC,
+      accepted: true,
+      refusal: undefined,
+    });
+
+    // And a second resolution is refused in `resolveReward`'s OWN vocabulary
+    // rather than a selection outcome: the accepted resolution cleared the
+    // offered identifiers, so the first of the four gates answers first.
+    expect(controller.resolveReward(FIRST_RELIC).refusal).toBe('not-offered');
+    expect(reports.drawn.at(-1)).toEqual({
+      stageIndex: 0,
+      offeredRelicIds: [],
+      selectedRelicId: FIRST_RELIC,
+      accepted: false,
+      refusal: 'not-offered',
+    });
+  });
+
+  it('reports the held gate in resolveReward vocabulary', () => {
+    const { controller, reports } = composeWithRelics();
+
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    expect(controller.resolveReward(FIRST_RELIC).accepted).toBe(true);
+
+    // The relic is HELD, and it is offered again, so the gate that answers is
+    // the held one — a refusal name `RewardSelectionOutcome` does not carry,
+    // which is why the report's `refusal` is typed over both vocabularies.
+    controller.recordRewardOffer([FIRST_RELIC]);
+
+    expect(controller.resolveReward(FIRST_RELIC).refusal).toBe('held');
+    expect(reports.drawn.at(-1)).toEqual({
+      stageIndex: 0,
+      offeredRelicIds: [FIRST_RELIC],
+      selectedRelicId: FIRST_RELIC,
+      accepted: false,
+      refusal: 'held',
+    });
+  });
+
+  it('never decorates the reported identifier with the outcome', () => {
+    const { controller, engine, reports } = composeWithRewards({
+      seed: 'reward-report-verbatim',
+    });
+
+    engine.move(DIRECTION_LEFT);
+
+    const offered = controller.currentOffer().map((card) => card.id);
+
+    controller.selectReward('not-in-the-offer', engine);
+    controller.selectReward(offered[0] ?? '', engine);
+    controller.selectReward(offered[0] ?? '', engine);
+
+    for (const report of reports.drawn) {
+      const identifier = report.selectedRelicId ?? '';
+
+      expect(identifier).not.toContain('(');
+      expect(identifier).not.toContain(' ');
+    }
+
+    // Three reports, and every one carries `accepted` as a boolean.
+    expect(reports.drawn).toHaveLength(3);
+
+    for (const report of reports.drawn) {
+      expect(typeof report.accepted).toBe('boolean');
+    }
+  });
+});
+
+/* ==========================================================================
  * 19. The registry's run port satisfies the consumer
  * ========================================================================== */
 
@@ -3525,7 +3718,7 @@ describe('the registry run port', () => {
     const { registry } = composeWithRelics();
     const port = registry.runPort();
 
-    // BOTH SPELLINGS. The consumer accepts either, and a port publishing
+    // Both spellings. The consumer accepts either, and a port publishing
     // neither records a reward it never registers.
     expect(port.pickUpRelic).toBeTypeOf('function');
     expect(port.activateRelic).toBeTypeOf('function');
@@ -3557,18 +3750,6 @@ describe('the registry run port', () => {
   });
 });
 
-/* ==========================================================================
- * 20. The envelope is the authority for the relics a run holds
- *
- * `begin()` and `restoreHeldRelics()` make the LIVE registry agree with the
- * envelope, which means a relic picked up on the registry before a run began
- * belongs to no run and does not survive it. That is the reason a relic must be
- * taken on through the reward transaction, which records it as it registers it,
- * or restored from an envelope after `begin()` — the order src/main.ts composes
- * in. The cases below pin both halves, so a composition that gets the order
- * wrong fails here rather than losing a player's relics silently.
- * ========================================================================== */
-
 describe('the relics a run holds', () => {
   it('discards a pickup made before begin(), with no half state left', () => {
     const backing = new MemoryStorage();
@@ -3589,7 +3770,7 @@ describe('the relics a run holds', () => {
       relics: registry.runPort(),
     });
 
-    // TOO EARLY: no run has been begun, so this relic belongs to none.
+    // Too early: no run has been begun, so this relic belongs to none.
     registry.pickUp(FIRST_RELIC);
 
     controller.begin();
@@ -3642,27 +3823,8 @@ describe('the relics a run holds', () => {
   });
 });
 
-/* ==========================================================================
- * 21. Storage hygiene, and the ports the sections below drive
- *
- * Sections 22 to 28 drive the controller through the THREE STRUCTURAL PORTS it
- * declares for itself — `EnginePort`, `EngineEventSource` and
- * `RelicRegistryPort` of src/run/run-controller.ts — using plain objects that
- * record their calls. No mocking library is imported and no module is replaced:
- * the collaborators arrive by constructor injection, ported from
- * js/application.js L3 and covered by row TR-RUNCTL-01 of
- * docs/TRACEABILITY_MATRIX.md.
- *
- * Every judgement the sections below pin is argued in docs/DECISION_LOG.md,
- * under DL-RUNCTL-01 to DL-RUNCTL-04, DL-STAGE-01 to DL-STAGE-03 and DL-TEST-01.
- * ========================================================================== */
-
 /**
  * Stores the cases below construct, so the teardown can empty each of them.
- *
- * `tests/unit/run/` runs in the `unit:dom-free` project, which offers no Web
- * Storage, so the store every case injects is the only one holding what a case
- * wrote. Registered here, cleared in `afterEach`.
  */
 const trackedStores: MemoryStorage[] = [];
 
@@ -3680,8 +3842,7 @@ function trackStorage(backing: MemoryStorage): MemoryStorage {
 
 /**
  * Every key this suite removes: `OWNED_STORAGE_KEYS` and the frozen best-score
- * literal, de-duplicated. Imported constants throughout; no key is spelled as a
- * literal here.
+ * literal, de-duplicated.
  */
 const CLEARED_KEYS: readonly OwnedStorageKey[] = Object.freeze([
   ...new Set<OwnedStorageKey>([...OWNED_STORAGE_KEYS, BEST_SCORE_KEY]),
@@ -3689,9 +3850,6 @@ const CLEARED_KEYS: readonly OwnedStorageKey[] = Object.freeze([
 
 /**
  * Removes one key from the environment's Web Storage where it offers one.
- *
- * Total in every environment: the `unit:dom-free` project offers none, and
- * every case below injects `MemoryStorage`.
  *
  * @param key Key to remove.
  */
@@ -3712,11 +3870,6 @@ function removeFromWebStorage(key: OwnedStorageKey): void {
 /**
  * Empties every tracked store, and any Web Storage, of every key the product
  * owns.
- *
- * IDEMPOTENT, so it composes with the `afterEach(clearOwnedStorage)` that
- * tests/fixtures/storage.ts registers as a setup file for both unit projects.
- * js/local_storage_manager.js L61-L63 removed the board snapshot and never the
- * best score, which is the key this suite is careful to remove.
  */
 function clearTrackedStorage(): void {
   for (const key of CLEARED_KEYS) {
@@ -3729,8 +3882,6 @@ function clearTrackedStorage(): void {
 }
 
 beforeEach(() => {
-  // The invariant the teardown leaves behind, asserted before every case rather
-  // than in one of them: no tracked store carries a key an earlier case wrote.
   for (const backing of trackedStores) {
     for (const key of CLEARED_KEYS) {
       expect(backing.getItem(key)).toBeUndefined();
@@ -3742,11 +3893,6 @@ afterEach(clearTrackedStorage);
 
 /**
  * A tracked store carrying its fixture BEFORE anything reads it.
- *
- * The writability probe and the single snapshot read both happen while
- * `LocalStorageManager`, `RunStateStore` and `RunController` are constructed —
- * js/local_storage_manager.js L25-L26 and js/game_manager.js L36 — so a fixture
- * written afterwards is invisible to them.
  *
  * @param seed Raw stored strings, keyed by the key each is stored under.
  * @returns The seeded store.
@@ -3768,7 +3914,9 @@ function storageHolding(
 /** A listener held without its payload type, as the real emitter holds one. */
 type StoredListener = (payload: never) => void;
 
-/** The `EngineEventSource` fake, plus the emission helper a case drives it by. */
+/**
+ * The `EngineEventSource` fake, plus the emission helper a case drives it by.
+ */
 interface RecordingEvents {
   /** The subscription surface handed to the controller. */
   readonly source: EngineEventSource;
@@ -3785,13 +3933,6 @@ interface RecordingEvents {
 
 /**
  * An emitter with `EngineEvents.on`'s semantics and nothing else.
- *
- * `on()` APPENDS and returns a handle that removes exactly its own listener;
- * `emit()` walks a copy of the list synchronously, in registration order, with
- * the payload as the single argument — ported from js/keyboard_input_manager.js
- * L18-L32. Listener containment is src/engine/engine-events.ts's own and is not
- * reproduced here, so a controller listener that throws fails the case that
- * emitted to it.
  *
  * @returns A fresh emitter holding no listener.
  */
@@ -3856,33 +3997,33 @@ interface RecordingEngine {
   /** Every port call, in order, by member name. */
   readonly calls: string[];
 
-  /** Every argument `setup()` received, in order. */
+  /** Every argument `setup` received, in order. */
   readonly setups: (SerializedGameState | null | undefined)[];
 
-  /** Every `cleared` argument `endStage()` received, in order. */
+  /** Every `cleared` argument `endStage` received, in order. */
   readonly endStages: boolean[];
 
-  /** Every argument `startStage()` received, in order. */
+  /** Every argument `startStage` received, in order. */
   readonly startStages: (SerializedGameState | null | undefined)[];
 
-  /** Every direction `move()` received, in order. */
+  /** Every direction `move` received, in order. */
   readonly moves: MoveDirection[];
 
-  /** Replaces the board `serialize()` projects. */
+  /** Replaces the board `serialize` projects. */
   readonly hold: (board: SerializedGameState) => void;
 
-  /** The board `serialize()` projects, as a fresh copy. */
+  /** The board `serialize` projects, as a fresh copy. */
   readonly board: () => SerializedGameState;
 }
 
 /** How a recording engine is built. */
 interface RecordingEngineOptions {
-  /** The board `serialize()` opens on. Defaults to an empty one. */
+  /** The board `serialize` opens on. Defaults to an empty one. */
   readonly board?: SerializedGameState;
 
   /**
    * Whether the port publishes `startStage`. `false` yields a port that only
-   * observes, which `RunEnginePort` admits and `openNextStage()` reads as an
+   * observes, which `RunEnginePort` admits and `openNextStage` reads as an
    * engine implementing no stage transition.
    */
   readonly startStage?: boolean;
@@ -3890,10 +4031,6 @@ interface RecordingEngineOptions {
 
 /**
  * An `EnginePort` that records every call and returns controllable values.
- *
- * `serialize()` returns a FRESH DEEP COPY of the board held, as
- * `Engine.serialize()` does, so the controller needs no defensive clone and a
- * case can compare what it stored against what it held.
  *
  * @param options Opening board, and whether `startStage` is published.
  * @returns The port and its recorders.
@@ -3949,7 +4086,6 @@ function createRecordingEngine(
       return held.over || (held.won && !held.keepPlaying);
     },
 
-    // js/game_manager.js L24-L27, under the name that no longer shadows it.
     continuePlaying(): void {
       calls.push('continuePlaying');
     },
@@ -3981,14 +4117,8 @@ function createRecordingEngine(
 
 
 /**
- * The relics the recording registry's catalogue carries, freshly built per call.
- *
- * Three shapes, one apiece: an identifier alone, an identifier with a budget,
- * and one with a budget and an opaque state slot. `PersistedRelic` fixes the
- * triple to `id`, optional `charges` and optional `state`.
- *
- * These identifiers exist ONLY here. Nothing in src/run reads one, which is what
- * a case asserting the absence of per-relic branching relies on.
+ * The relics the recording registry's catalogue carries, freshly built per
+ * call.
  *
  * @returns A fresh catalogue.
  */
@@ -4006,7 +4136,7 @@ interface RecordingRegistry {
   /** The port handed to the controller. */
   readonly port: RelicRegistryPort;
 
-  /** Identifiers taken on, IN PICKUP ORDER. */
+  /** Identifiers taken on, in pickup order. */
   readonly picked: () => readonly string[];
 
   /** Entries held, in pickup order, as the registry would persist them. */
@@ -4185,13 +4315,6 @@ interface ReportSink {
 }
 
 /**
- * A reporter that COLLECTS rather than discards.
- *
- * Every member `RunReporter` declares is captured with its correlation
- * identifier, so a case asserts on what was reported rather than on the fact
- * that reporting happened. Nothing here reaches `console`, and nothing here is a
- * no-op stub.
- *
  * @returns The sink and its readers.
  */
 function createReportSink(): ReportSink {
@@ -4296,13 +4419,7 @@ function createReportSink(): ReportSink {
   };
 }
 
-/**
- * Distinguishes the run identifiers of two runs composed in one file run.
- *
- * `originateRunId()` mints a fresh identifier per run; this counter is the
- * deterministic stand-in a case injects through `createToken`, so two runs never
- * share an identifier and no case asserts an originated value.
- */
+/** Distinguishes the run identifiers of two runs composed in one file run. */
 let tokenSerial = 0;
 
 /** How one port-driven run is composed. */
@@ -4345,23 +4462,19 @@ interface Driven {
   readonly sink: ReportSink;
   readonly streams: RngStreams;
 
-  /** The substream draw counts, as `observe()` and `persist()` read them. */
+  /** The substream draw counts, as `observe` and `persist` read them. */
   readonly cursors: () => RngCursorMap;
 
   /** Releases the controller's subscriptions. */
   readonly stop: () => void;
 
-  /** What `begin()` reported. */
+  /** What `begin` reported. */
   readonly outcome: RunStateLoadOutcome;
 }
 
 /**
  * Composes storage, store, controller, registry and engine port in the order
  * src/main.ts composes them, and attaches the controller to the engine.
- *
- * The correlation identifier is injected as a READER, which is the form
- * `RunControllerOptions.correlationId` accepts, and it is derived by
- * `runCorrelationId()` from the seed and run identifier in force. DL-RUNCTL-04.
  *
  * @param options Store, seed, board, and which optional ports to publish.
  * @returns Everything a case reads or drives.
@@ -4479,11 +4592,11 @@ function startStage(run: Driven, board: SerializedGameState): void {
 
 /**
  * Emits `move:after` for one resolved turn, which is where the stage goal is
- * MEASURED. DL-STAGE-02.
+ * MEASURED.
  *
  * @param run The composed run.
- * @param board The board the move left, held by the engine as well so the two
- *   agree on the moment being described.
+ * @param board The board the move left, held by the engine as well so the
+ *   two agree on the moment being described.
  * @param score The score the move left.
  */
 function resolveMove(
@@ -4504,7 +4617,7 @@ function resolveMove(
 }
 
 /**
- * Emits `stage:end`, which is where a met goal is RESOLVED. DL-STAGE-02.
+ * Emits `stage:end`, which is where a met goal is RESOLVED.
  *
  * @param run The composed run.
  * @param cleared Whether the stage cleared.
@@ -4599,7 +4712,9 @@ function draws(streams: RngStreams, count = 4): number[] {
   return taken;
 }
 
-/** A board whose highest tile is `value`, built through the shared fixtures. */
+/**
+ * A board whose highest tile is `value`, built through the shared fixtures.
+ */
 function boardWithHighest(value: number): SerializedGameState {
   // `createNearWinBoard(size, winValue)` lays two tiles of half the win value,
   // so a win value of twice `value` yields a board whose highest tile is
@@ -4608,15 +4723,12 @@ function boardWithHighest(value: number): SerializedGameState {
 }
 
 /**
- * Takes one relic on through the reward transaction, which is the only route by
- * which a relic joins a run.
- *
- * `resolveReward()` measures a selection against the offer standing, so the
- * identifier is recorded as that offer first.
+ * Takes one relic on through the reward transaction, which is the only route
+ * by which a relic joins a run.
  *
  * @param run The composed run.
  * @param relicId Identifier to offer and then select.
- * @returns What `resolveReward()` reported.
+ * @returns What `resolveReward` reported.
  */
 function takeReward(run: Driven, relicId: string): RewardResolution {
   run.controller.recordRewardOffer([relicId]);
@@ -4624,14 +4736,6 @@ function takeReward(run: Driven, relicId: string): RewardResolution {
   return run.controller.resolveReward(relicId);
 }
 
-
-/* ==========================================================================
- * 22. The seed a run is played under
- *
- * Row TR-RUNCTL-07 of docs/TRACEABILITY_MATRIX.md: `originateRunSeed()` is the
- * ONE unseeded randomness source in the product, and it lives here rather than
- * in src/rng. Decision DL-RUNCTL-01.
- * ========================================================================== */
 
 /** Names any seed-originating export would plausibly carry. */
 const ORIGINATOR_NAMES: readonly string[] = Object.freeze([
@@ -4795,6 +4899,7 @@ describe('normalizeEnteredSeed', () => {
 
     expect(normalizeEnteredSeed(entered)).toBe(entered);
   });
+
   /* ---- The raw ceiling, applied before any whole-string work ---- */
 
   it('declares a raw ceiling above the seed domain, with room to trim', () => {
@@ -4895,14 +5000,6 @@ describe('a run started from an entered seed', () => {
     expect(isAcceptableRunSeed(originated)).toBe(true);
   });
 });
-
-/* ==========================================================================
- * 23. Stage goals are data, and the measurement is one function
- *
- * Rows TR-STAGE-01 to TR-STAGE-03 of docs/TRACEABILITY_MATRIX.md, reached
- * through the run layer that consumes them. The controller holds no second
- * evaluator: decision DL-RUNCTL-03.
- * ========================================================================== */
 
 describe('stageGoalForIndex', () => {
   it('derives one goal per index, deterministically', () => {
@@ -5053,14 +5150,6 @@ describe('evaluateStageGoal clamps the fraction it reports', () => {
 });
 
 
-/* ==========================================================================
- * 24. The controller SUBSCRIBES; it is never called by the engine
- *
- * Row TR-RUNCTL-01 of docs/TRACEABILITY_MATRIX.md: the three input
- * subscriptions js/game_manager.js L9-L11 installed at construction become the
- * four engine subscriptions `observe()` installs.
- * ========================================================================== */
-
 describe('observe attaches to the engine', () => {
   it('registers one listener per event it consumes and none elsewhere', () => {
     const run = drive();
@@ -5120,14 +5209,6 @@ describe('observe attaches to the engine', () => {
     expect(run.controller.goalProgress()).toBe(measured);
   });
 });
-
-/* ==========================================================================
- * 25. A stage is MEASURED at move:after and RESOLVED at stage:end
- *
- * The order Figure 4 (Turn Data Flow) publishes as `SG{"Stage goal met?"} ->
- * SE["onStageEnd dispatch to reward screen"]`, and Figure 6 (Screen Flow State
- * Machine) as `Stage -> StageClear -> Reward -> Stage`. Decision DL-STAGE-02.
- * ========================================================================== */
 
 describe('the stage in progress', () => {
   it('opens on the first ladder goal with no progress', () => {
@@ -5292,14 +5373,6 @@ describe('the progress that reaches storage', () => {
   });
 });
 
-/* ==========================================================================
- * 26. startRun, resumeRun and endRun over the ports
- *
- * Rows TR-RUNCTL-02 (js/game_manager.js L17-L21 `restart()`), TR-RUNCTL-04
- * (L35-L45 `setup()`), TR-RUNCTL-05 (L85-L89 the save-or-clear branch) and
- * TR-RUNCTL-06 (L95 the read-after-write) of docs/TRACEABILITY_MATRIX.md.
- * ========================================================================== */
-
 describe('startRun', () => {
   it('opens the engine on the board it was handed', () => {
     const run = drive({ observe: false });
@@ -5377,7 +5450,7 @@ describe('resumeRun', () => {
       first.controller.goalProgress(),
     );
 
-    // PICKUP ORDER, carried across the reload exactly as it was recorded.
+    // Pickup order, carried across the reload exactly as it was recorded.
     expect(second.controller.relics().map((relic) => relic.id)).toEqual([
       'port-charged',
       'port-plain',
@@ -5435,8 +5508,8 @@ describe('resumeRun', () => {
   it('falls back to a fresh run for a corrupted payload, and reports it', () => {
     const backing = storageHolding({ [RUN_STATE_KEY]: '{not json at all' });
 
-    // Composition itself must survive the payload; nothing here writes over it,
-    // so the second composition below reads the same corrupted value.
+    // Composition itself must survive the payload; nothing here writes over
+    // it, so the second composition below reads the same corrupted value.
     expect(() => drive({ backing, observe: false })).not.toThrow();
 
     const run = drive({ backing, observe: false });
@@ -5607,7 +5680,8 @@ describe('a restart within a run', () => {
     const stage = run.controller.stageIndex();
     const goal = run.controller.stageGoal();
 
-    // js/game_manager.js L17-L21: the board is discarded and a fresh one opens.
+    // js/game_manager.js L17-L21: the board is discarded and a fresh one
+    // opens.
     run.engine.port.restart();
     startStage(run, createMergePairBoard());
     commit(run);
@@ -5640,9 +5714,7 @@ describe('a lost run', () => {
 
     expect(ended?.detail.outcome).toBe('lost');
 
-    // Reported under the identity of the run that ENDED. `finish()` replaces the
-    // envelope with a fresh run afterwards, so the identifier the controller
-    // publishes from here on belongs to the next run rather than to this one.
+    // Reported under the identity of the run that ENDED.
     expect(ended?.correlationId).toBe(
       runCorrelationId(run.controller.seed(), finished?.runId),
     );
@@ -5655,17 +5727,6 @@ describe('a lost run', () => {
   });
 });
 
-
-/* ==========================================================================
- * 27. Reward resolution records the triple, in pickup order
- *
- * Contract 3 of AAP 0.6.1.3 fixes the persisted relic to `id`, optional
- * `charges` and optional `state`. What an OFFER is drawn from — rarity
- * weighting, sampling without replacement, the no-duplicate-in-three property —
- * belongs to src/relics/relic-draw.ts and is asserted in
- * tests/unit/relics/relic-draw.test.ts; what is asserted here is that the
- * SELECTED relic is recorded correctly.
- * ========================================================================== */
 
 describe('resolveReward records the relic it took on', () => {
   it('records an identifier alone for a relic carrying nothing else', () => {
@@ -5777,8 +5838,6 @@ describe('the order relics are recorded in', () => {
       'port-plain',
     ]);
 
-    // Handed back to the registry in the same order, so a resumed run dispatches
-    // to its relics rather than only displaying them.
     expect(second.registry.picked()).toEqual([
       'port-charged',
       'port-second-plain',
@@ -5878,8 +5937,6 @@ describe('a selection the run cannot take', () => {
 
     expect(takeReward(run, 'port-charged').accepted).toBe(true);
 
-    // Offered and selected a second time: the run holds it, so it is refused
-    // rather than recorded twice.
     const again = takeReward(run, 'port-charged');
 
     expect(again).toEqual({ accepted: false, refusal: 'held' });
@@ -6022,8 +6079,6 @@ describe('the controller branches on no individual relic', () => {
     const run = drive();
 
     // Every identifier in this suite's catalogue is declared in this file.
-    // Nothing in src/run names one, so the registry is the only construct that
-    // knows the relic exists.
     for (const relic of recordingCatalogue()) {
       expect(takeReward(run, relic.id).accepted).toBe(true);
     }
@@ -6074,8 +6129,8 @@ describe('the reward round a cleared stage opens', () => {
     resolveMove(run, boardWithHighest(16), 64);
     commit(run);
 
-    // Stage -> StageClear -> Reward of Figure 6: the stage was resolved and the
-    // index has NOT moved while the choice stands.
+    // Stage -> StageClear -> Reward of Figure 6: the stage was resolved and
+    // the index has NOT moved while the choice stands.
     expect(run.engine.endStages).toEqual([true]);
     expect(run.controller.isRewardPending()).toBe(true);
     expect(run.controller.currentOffer().map((offer) => offer.id)).toEqual([
@@ -6107,7 +6162,6 @@ describe('the reward round a cleared stage opens', () => {
       'port-plain',
     ]);
 
-    // The selection persisted itself, rather than waiting for a later commit.
     expect(storedEnvelope(run.backing)?.relics.map((relic) => relic.id)).toEqual(
       ['port-plain'],
     );
@@ -6228,14 +6282,6 @@ describe('the reward round a cleared stage opens', () => {
 });
 
 
-/* ==========================================================================
- * 28. summary(): the run as a summary screen reads it
- *
- * Working assumption A4 of AAP 0.1.1.4: the seed is DISPLAYED AND COPYABLE on
- * the run summary and accepted on the run-start screen. Sharing, networking and
- * daily seeds are out of scope per AAP 0.7.2.1, and nothing here asserts one.
- * ========================================================================== */
-
 describe('summary', () => {
   it('carries the final score, the stage reached, the relics and the seed', () => {
     const run = drive({ seed: 'summary-seed' });
@@ -6318,16 +6364,6 @@ describe('summary', () => {
   });
 });
 
-/* ==========================================================================
- * 29. The correlation identifier every report of a run carries
- *
- * Row TR-RUNCTL-04 and decision DL-RUNCTL-04: the identifier is REPUBLISHED
- * from an injected source, never derived here, and `runCorrelationId()` of
- * src/run/run-state.ts is the derivation the composition root supplies. An
- * identifier that shifted mid-run would leave every log line of that run
- * unjoinable.
- * ========================================================================== */
-
 describe('correlationId', () => {
   it('is the identifier derived from the seed and the run identifier', () => {
     const run = drive({ seed: 'correlated-run' });
@@ -6363,8 +6399,9 @@ describe('correlationId', () => {
 
     run.stop();
 
-    // THE RELOAD. A resumed run keeps the stored seed and run identifier, so it
-    // reports under the identifier the run has been reporting under all along.
+    // The reload. A resumed run keeps the stored seed and run identifier, so
+    // it reports under the identifier the run has been reporting under all
+    // along.
     const resumed = drive({ backing, observe: false });
 
     resumed.controller.resumeRun(resumed.engine.port);
@@ -6483,13 +6520,6 @@ describe('correlationId', () => {
   });
 });
 
-/* ==========================================================================
- * 30. stageCommitContextProvider: the stage slice the engine places on a commit
- *
- * Row TR-RUNCTL-08 of docs/TRACEABILITY_MATRIX.md. The provider is HANDED TO the
- * engine, which is what keeps src/engine from importing src/run or src/relics.
- * ========================================================================== */
-
 describe('stageCommitContextProvider', () => {
   it('yields a provider that reads the stage in force at call time', () => {
     const run = drive();
@@ -6502,8 +6532,6 @@ describe('stageCommitContextProvider', () => {
 
     run.controller.advanceStage();
 
-    // The SAME provider, read again: it resolves the envelope fresh rather than
-    // capturing it.
     const advanced = provider();
 
     expect(advanced.stageIndex).toBe(1);
@@ -6603,8 +6631,6 @@ describe('the persistence teardown', () => {
       expect(isolationBacking.getItem(key)).toBeUndefined();
     }
 
-    // The frozen literal is one of the keys removed, named through the imported
-    // constant rather than spelled out here.
     expect(CLEARED_KEYS).toContain(BEST_SCORE_KEY);
     expect(
       new LocalStorageManager({ storage: isolationBacking }).getBestScore(),

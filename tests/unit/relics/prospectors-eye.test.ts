@@ -2,53 +2,6 @@
 // Group 5. Three properties, in this order: the hooks the relic binds, the
 // effect it produces, and its treatment of a charge budget it does not carry.
 //
-// UNIT UNDER TEST: the `prospectors-eye` entry of `SPAWN_CONTROL_FAMILY` in
-// src/relics/families/spawn-control.ts, reached by id and cross-checked against
-// `findRelicById` of src/relics/relic-registry.ts.
-//
-// The `HookContext` every dispatch below receives is assembled here rather than
-// by src/engine/hook-bus.ts: a live `RulesConfig` from
-// `createDefaultRulesConfig()`, the four named substreams from
-// `createRngStreams()` on a fixed literal seed, a live `Grid` behind the query
-// surface of `ReadonlyGridView`, a board-effect queue that refuses and records
-// every command, the run correlation identifier, and the subscriber's own
-// mutable state slot.
-//
-// VANILLA ANCHORS, the mechanical provenance of the boundaries asserted below:
-//   js/grid.js L37-L43    `randomAvailableCell` yields no cell on a full board:
-//                         its `if (cells.length)` branch has no else. `pick` of
-//                         src/rng/rng-streams.ts carries that boundary forward
-//                         and consumes no draw on an empty candidate list.
-//   js/grid.js L45-L55    `availableCells` collects the empty cells x-outer and
-//                         y-inner, through `eachCell` at L58-L64. That order is
-//                         part of the seeded-spawn reproducibility contract and
-//                         is the order a uniform draw resolves against.
-//   js/grid.js L80-L86    `cellContent` yields null for a cell outside the
-//                         lattice rather than throwing, so an off-lattice cell
-//                         reads as empty. Every steered cell below is asserted
-//                         against `withinBounds`.
-//   js/application.js L3  the board-size literal `4`, one of the three
-//                         declaration sites AAP R4 replaces with configuration.
-//                         The ring assertions read `RulesConfig.boardSize` and
-//                         run at three board sizes and at one reduced mid-run.
-//
-// FIXTURES, from tests/fixtures/boards.ts: `createNearLossBoard(n)` is the FULL
-// board, every cell occupied, and is the board the absent-cell case runs on;
-// `createBlockedBoard(n)` fills column 0 alone and still reports empty cells.
-// `createEmptyBoard(n)` is size-parameterised, which the three-size ring cases
-// call. Each case asserts the board property it depends on before using it.
-//
-// TRACEABILITY, docs/TRACEABILITY_MATRIX.md: this suite is the evidence for the
-// rows mapping js/grid.js L37-L43 `randomAvailableCell` and L45-L55
-// `availableCells` onto the seeded spawn-position draw and the `onSpawn` hook,
-// and for TR-SPAWN-03, the `prospectors-eye` declaration.
-//
-// Decisions this suite asserts against, argued in docs/DECISION_LOG.md and
-// named here only so the construct can be found from the log:
-//   DL-SPAWN-01  a spawn relic acting through the `onSpawn` payload's `value`,
-//                `position` and `count` members alone
-//   DL-SPAWN-02  the substream a relic effect draws from
-//
 // Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
 // Substreams" (docs/architecture/data-flow.md), carries the substream fan-out
 // that the cursor assertions of section 6 measure.
@@ -56,6 +9,8 @@
 // This suite reads no DOM, starts no server, performs no network call, patches
 // no global and reads no clock. It is collected by the `unit:dom-free` project
 // of vitest.config.ts under `npm test`.
+//
+// Decisions: DL-SPAWN-01, DL-SPAWN-02 (docs/DECISION_LOG.md).
 
 import { describe, expect, it } from 'vitest';
 
@@ -109,10 +64,6 @@ import {
   createEmptyBoard,
   createNearLossBoard,
 } from '../../fixtures/boards';
-
-/* ==========================================================================
- * 1. Constants
- * ========================================================================== */
 
 /** Identifier the family declares the relic under. */
 const RELIC_ID = 'prospectors-eye';
@@ -191,10 +142,6 @@ const ONE_RELIC_DRAW: RngCursorMap = {
   'rarity-weight': 0,
 };
 
-/* ==========================================================================
- * 2. The relic under test
- * ========================================================================== */
-
 /**
  * Resolves the relic out of the family it is declared in, failing loudly when
  * the family carries no entry under `RELIC_ID`.
@@ -254,10 +201,6 @@ function boundHandlerSources(): string[] {
   return [String(spawnHandler())];
 }
 
-/* ==========================================================================
- * 3. Geometry helpers
- * ========================================================================== */
-
 /**
  * Reports whether a cell lies on the outer ring of a square board of edge
  * length `size`: the first or last column, or the first or last row.
@@ -298,8 +241,7 @@ function interiorCells(grid: Grid): Position[] {
 
 /**
  * Fills every empty outer-ring cell of the lattice, leaving the interior as it
- * stands. The candidate list is a fresh array, so inserting while walking it is
- * safe.
+ * stands.
  *
  * @param grid Board to fill.
  * @param value Face value each inserted tile carries.
@@ -312,17 +254,8 @@ function fillOuterRing(grid: Grid, value: number): void {
   }
 }
 
-/* ==========================================================================
- * 4. The hand-built dispatch bench
- * ========================================================================== */
-
 /**
  * The query half of a live `Grid`, as `HookContext.grid` declares it.
- *
- * `size` is a getter, so it is read at call time rather than captured, and
- * `cellValue` stands in for `cellContent`: js/grid.js L80-L86 yields null both
- * for an empty cell and for one outside the lattice, and this view carries that
- * single null forward.
  *
  * @param grid Board the view reads.
  * @returns The read-only view over that board.
@@ -410,7 +343,7 @@ interface EyeBench {
   readonly chargeRequests: number[];
 }
 
-/** What `bench()` accepts, every member defaulted. */
+/** What `bench` accepts, every member defaulted. */
 interface BenchOptions {
   /** Fixed literal seed the substreams are derived from. */
   readonly seed?: string;
@@ -433,9 +366,6 @@ interface BenchOptions {
  * fixture board, substreams on a fixed seed, and a context carrying the run
  * correlation identifier and a mutable state slot.
  *
- * `new Grid(size, cells)` takes the CELL MATRIX, not the whole serialised
- * board, and reads it as `state[x][y]`.
- *
  * @param options Seed, board, edge length, charge budget and hook name.
  * @returns The assembled bench.
  */
@@ -443,8 +373,7 @@ function bench(options: BenchOptions = {}): EyeBench {
   const board = options.board ?? createEmptyBoard(DEFAULT_BOARD_SIZE);
   const grid = new Grid(board.grid.size, board.grid.cells);
 
-  // `createDefaultRulesConfig()` yields a fresh mutable configuration;
-  // `DEFAULT_RULES_CONFIG` beside it is deep-frozen and shared.
+  // `createDefaultRulesConfig` yields a fresh mutable configuration.
   const config = createDefaultRulesConfig();
 
   config.boardSize = options.boardSize ?? board.grid.size;
@@ -523,9 +452,7 @@ function resolveSpawn(
 }
 
 /**
- * Dispatches one spawn and asserts the dispatch itself does not throw. The
- * boundary cases that use it are a full board, an occupied ring and an
- * exhausted charge budget.
+ * Dispatches one spawn and asserts the dispatch itself does not throw.
  *
  * @param target Bench to dispatch on.
  * @param payload Spawn the engine resolved.
@@ -651,10 +578,6 @@ describe('prospectors-eye binds onSpawn alone', () => {
     expect(EYE.description.length).toBeGreaterThan(0);
   });
 });
-
-/* ==========================================================================
- * 6. Property 2: the effect, read against the configured board size
- * ========================================================================== */
 
 describe('prospectors-eye steers a spawn onto the outer ring', () => {
   it('counts four times the edge length less four ring cells', () => {
@@ -868,10 +791,6 @@ describe('prospectors-eye steers a spawn onto the outer ring', () => {
   });
 });
 
-/* ==========================================================================
- * 7. Property 3: charges, including a zero-charge invocation
- * ========================================================================== */
-
 describe('prospectors-eye carries no charge budget and reads none', () => {
   it('declares no charges member at all, and none that is null', () => {
     expect(Object.prototype.hasOwnProperty.call(EYE, 'charges')).toBe(false);
@@ -937,10 +856,6 @@ describe('prospectors-eye carries no charge budget and reads none', () => {
     expect(target.chargeRequests).toEqual([]);
   });
 });
-
-/* ==========================================================================
- * 8. Determinism and substream hygiene
- * ========================================================================== */
 
 describe('prospectors-eye draws only from the substream a relic owns', () => {
   it('takes exactly one relic-draw value and moves no other substream', () => {
@@ -1008,10 +923,6 @@ describe('prospectors-eye draws only from the substream a relic owns', () => {
     }
   });
 });
-
-/* ==========================================================================
- * 9. The dispatch surface the relic is handed
- * ========================================================================== */
 
 describe('prospectors-eye owns no observability and no error handling', () => {
   it('receives the run correlation identifier on its hook', () => {
@@ -1276,10 +1187,6 @@ describe('prospectors-eye through a persistence round trip', () => {
     ).toBe(true);
   });
 });
-
-/* ==========================================================================
- * 10. The declaration is left as the family wrote it
- * ========================================================================== */
 
 describe('the catalogue entry is unmutated once every case has run', () => {
   it('is frozen, with a frozen hook table and a frozen family array', () => {

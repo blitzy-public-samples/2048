@@ -2077,8 +2077,6 @@ export function createScreenRouter(
     );
   };
 
-
-
   const readRelics = (): RelicCommitContext => {
     if (lastCommit !== null) {
       return lastCommit.relics;
@@ -2436,6 +2434,7 @@ export function createScreenRouter(
     return null;
   };
 
+
   /**
    * Moves focus for the state just entered.
    *
@@ -2498,14 +2497,6 @@ export function createScreenRouter(
       return;
     }
 
-    // `rewardRestoreFocusTo` is resolved HERE, per engage, and only for `reward`:
-    // that screen is reached by clearing a stage rather than by pressing a
-    // control, so there is no trigger to return to and focus goes back to the
-    // board — whose parallel layer roves its tab stop, which is why the option is
-    // a function and is called at the moment the trap engages. It serves the case
-    // where no module holds the container: the mounted reward screen is given the
-    // same resolver by the composition root, so whichever party owns the trap
-    // restores focus to the same place.
     screenTrap = focus.trap(container, {
       label: screen,
       context: REPORT_CONTEXT,
@@ -3527,19 +3518,6 @@ export function createScreenRouter(
 
   reflectTriggerExpansion(false);
 
-  /**
-   * The subtrees the settings trap marks inert: the game region, plus every
-   * overlay root that is showing underneath the dialog.
-   *
-   * The settings panel is a SIBLING of the five overlay roots inside
-   * `.screen-layer` while the game region is `#game-main`, so the region alone
-   * leaves a shown overlay — the reward offer above all — reachable by pointer
-   * from behind a modal that announces `aria-modal="true"`. The panel itself is
-   * never included, and a root is included only while it is unhidden, so a
-   * dialog opened over the bare board still marks exactly one subtree.
-   *
-   * @returns The subtrees to mark inert, in a stable order.
-   */
 
   const closeSettings = (): boolean => {
     if (refuseAfterDestroy('closeSettings')) {

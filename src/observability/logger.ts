@@ -4,6 +4,20 @@
 // JSON-lines export, and the three adapters that satisfy the reporter
 // contracts src/engine, src/input and src/storage each declare for themselves.
 //
+// Two properties of the emission path, both load-bearing:
+//   a throwable is identified by the ARGUMENT POSITION it arrives in, or by
+//   its presence on a `LogFailure`, never by its type, so a thrown plain
+//   object reaches the record as a throwable rather than as fields;
+//   a field bag is DEEP-SANITISED rather than shallow-copied, so nothing a
+//   caller retains a reference to can change a buffered record, and no
+//   record carries a value that `JSON.stringify` would alter.
+//
+// `serializeError` is the target of the discarded-error `catch` in
+// js/local_storage_manager.js, which bound `error` and returned `false` without
+// reporting it. Two further silent-failure sites in that same file — an
+// unguarded `setItem` and an unguarded `JSON.parse` — report through
+// `createStorageReporter`.
+//
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
 // this module's area enumerated:
 //   TR-LOG-01  js/local_storage_manager.js  the discarded-error `catch`, whose
@@ -1110,6 +1124,10 @@ const NOOP_UNSUBSCRIBE = (): void => {
 /**
  * Builds the emission arguments of a `warn` or `error` call.
  *
+ * The thrown value's POSITION is what identifies it, never its type, so a
+ * thrown plain object is carried as a throwable rather than read as fields.
+ * Decision DL-LOG-05.
+ *
  * @param fields Second argument of the call.
  * @param rest Remaining arguments; the first of them, if any, is the thrown
  *   value. Its length is what records the throwable's presence, so an
@@ -1318,6 +1336,10 @@ function normalizeFieldRecord(
 
 /**
  * Normalises a caller's field bag to bounded JSON data.
+ *
+ * Every value is normalised through `normalizeFieldValue`, so a record cannot
+ * carry a structure the caller keeps a reference into, one that grows without
+ * limit, or one `JSON.stringify` cannot render. Decision DL-LOG-06.
  *
  * @param fields Bag as supplied.
  * @returns A frozen bounded copy, or `undefined` when there is nothing to
@@ -1975,6 +1997,16 @@ function toLogLevel(level: InputReportLevel): LogLevel {
 /**
  * Builds the engine's reporter.
  *
+ * Records every contained hook-handler throw and every contained event-listener
+ * throw at `'error'`, with the thrown value serialised onto `LogRecord.error`,
+ * and every engine counter at `'debug'`. ALL THREE members of `EngineReporter`
+ * are implemented, `onListenerError` included, so an error the emitter contains
+ * is reported rather than swallowed.
+ *
+ * `reportedCorrelationId` carries the identifier the engine was injected
+ * with, beside the record's own `correlationId`, so a mismatch between the
+ * two is visible in the log stream rather than silent.
+ *
  * Each record carries both identifiers of its report: `correlationId`, which
  * is the same value `LogRecord.correlationId` holds when the logger was built
  * with the run's canonical identifier, and `runId`, which is the run-instance
@@ -2014,7 +2046,7 @@ export function createEngineReporter(logger: Logger): EngineReporter {
 
     onCount(report: EngineCountReport): void {
       // `hook` and `event` are separate dimensions and a report carries at
-      // most one, so both are recorded and the absent one is `null`.
+      // most one, so BOTH are recorded and the absent one is `null`.
       scoped.debug('Engine counter incremented.', {
         reportedCorrelationId: report.correlationId,
         metric: report.metric,
@@ -2133,6 +2165,8 @@ export function createInputReporter(logger: Logger): InputReporter {
 
       copyInputFields(fields, bounded);
 
+      // The caught value arrives unconverted, so `serializeError` keeps its
+      // name, message, stack and cause chain. Decision DL-LOG-05.
       scoped.failure(toLogLevel(level), message, {
         thrown,
         fields: bounded,

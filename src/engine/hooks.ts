@@ -7,7 +7,8 @@
 // This module reads no DOM, performs no I/O, consumes no randomness and reads
 // no clock.
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece:
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THAT DOCUMENT HAS
+// NOT LANDED: these ordinals are RESERVED against it:
 //   TR-HOOK-01  onStageStart  js/game_manager.js L35-L59   setup()
 //   TR-HOOK-02  onBeforeMove  js/game_manager.js L134      terminal guard
 //   TR-HOOK-03  onMerge       js/game_manager.js L156-L170 merge branch
@@ -488,6 +489,28 @@ export interface HookContext {
   /**
    * Requests that a charge be spent for this dispatch, because the effect the
    * handler was invoked for has been APPLIED.
+   *
+   * THE HANDLER ASKS AND THE BUS DECIDES. AAP Contract 2 places the charge
+   * guard and the decrement in src/engine/hook-bus.ts, so no handler reads,
+   * compares or writes a budget; this is the signal that a dispatch applied the
+   * effect it was invoked for. Nothing in the bus is relic-specific. Decision
+   * DL-HOOKBUS-01.
+   *
+   * A HANDLER THAT DOES NOT ASK PAYS NOTHING, whatever else it did. A
+   * transformed payload member and a written board command are both effects
+   * whose TRIGGER only the relic can judge, and a stage-start rule installation
+   * is the clearest case — it writes a command and must cost nothing, since it
+   * prepares the rule rather than using it.
+   *
+   * FULFILLED WITH THE REST OF THE TRANSACTION. The request is recorded, not
+   * applied: the bus spends the charge only once the handler has returned and
+   * its return has been ACCEPTED, in the same commit as the state slot, the
+   * randomness and the board effects. A handler that requests a charge and then
+   * throws, or whose return the bus refuses, spends nothing.
+   *
+   * ONE POOL PER SUBSCRIBER, SHARED ACROSS ITS HOOKS. `temporal-anchor` binds
+   * two hooks and draws on one budget, so a charge spent on `onAfterMove`
+   * leaves fewer for `onBeforeMove`.
    *
    * A subscriber carrying no budget is unlimited, and a request against it
    * spends nothing and is not an error. Repeated requests within one dispatch

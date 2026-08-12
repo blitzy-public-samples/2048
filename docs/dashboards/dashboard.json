@@ -1,22 +1,85 @@
 {
-  "__comment": "Grafana-compatible dashboard TEMPLATE for the game2048_ metric families exported by src/observability/metrics.ts. It declares panels, expressions and units only; it names no data source of its own and is not wired to a running Prometheus. Load an exported game2048-metrics.prom into a Prometheus-compatible source, then select that source for the ${DS} variable. docs/dashboards/dashboard.html is the server-free equivalent that consumes the exported file directly. See docs/OBSERVABILITY.md section 7.",
-  "schemaVersion": 39,
   "title": "2048 Roguelike — Client Observability",
   "uid": "game2048-client",
-  "tags": ["game2048", "client", "observability"],
+  "description": "TEMPLATE, not a live-wired dashboard. It names no data source of its own and is not wired to a running Prometheus, so a freshly imported copy shows EMPTY PANELS until a source is selected for the ${DS} variable — that emptiness is expected. This architecture has no scrape target at all: the runtime is a fully static browser bundle with no server process, so nothing exposes an HTTP endpoint for Prometheus to scrape (see DL-METRIC-05 and DL-DIAG-06 in docs/DECISION_LOG.md). To populate it, export a snapshot from the in-page diagnostics surface and load the resulting game2048-metrics.prom into a Prometheus-compatible store, then select that store for ${DS}. For the form that renders an exported snapshot directly — no store, no server, no build step — open docs/dashboards/dashboard.html. The reused-versus-added record, the Rule 3 substitution table and the step-by-step local exercise procedure live in docs/OBSERVABILITY.md and are not repeated here. Every series charted below belongs to a family declared in src/observability/metrics.ts (METRIC_NAMES), plus game2048_reports_total declared in src/main.ts. Durations are MILLISECONDS throughout, never seconds. For orientation: Figure 3 'Component Interaction' in docs/architecture/component-interaction.md and Figure 5 'Hook Dispatch Sequence' in docs/architecture/hook-dispatch-sequence.md.",
+  "schemaVersion": 39,
+  "version": 1,
   "editable": true,
   "graphTooltip": 1,
-  "time": { "from": "now-30m", "to": "now" },
+  "timezone": "browser",
+  "tags": ["game2048", "client", "observability", "template"],
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
   "refresh": "",
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
   "templating": {
     "list": [
       {
         "name": "DS",
         "label": "Data source",
+        "description": "The Prometheus-compatible store an exported game2048-metrics.prom has been loaded into. Declared as a variable rather than a fixed uid so this file imports into any Grafana; every panel below references it.",
         "type": "datasource",
         "query": "prometheus",
         "current": {},
-        "hide": 0
+        "options": [],
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "multi": false,
+        "includeAll": false,
+        "skipUrlSync": false
+      },
+      {
+        "name": "hook",
+        "label": "Hook",
+        "description": "Filters the per-hook panels to a subset of the six HOOK_NAMES declared in src/engine/hooks.ts L57-L64. Values are read from the hook label of game2048_hook_dispatches_total.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS}"
+        },
+        "definition": "label_values(game2048_hook_dispatches_total, hook)",
+        "query": {
+          "query": "label_values(game2048_hook_dispatches_total, hook)",
+          "refId": "HookVariable"
+        },
+        "current": {
+          "selected": true,
+          "text": ["All"],
+          "value": ["$__all"]
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          }
+        ],
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false
       }
     ]
   },
@@ -24,386 +87,1419 @@
     {
       "id": 1,
       "type": "row",
-      "title": "Turns and the board",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "title": "Gameplay counters",
+      "description": "The engine's own turn, merge and spawn counts, and the engine event stream they are derived from. Families: game2048_turns_total, game2048_merges_total, game2048_spawns_total, game2048_spawn_attempts_total, game2048_spawn_suppressed_total, game2048_frames_rendered_total, game2048_engine_events_total — all declared in src/observability/metrics.ts METRIC_NAMES.",
       "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "panels": []
     },
     {
       "id": 2,
       "type": "stat",
-      "title": "Turns by resolution",
-      "description": "game2048_turns_total. One series per resolution, so an idle or cancelled turn is visible beside a committed one.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
-      "fieldConfig": {
-        "defaults": { "unit": "short", "decimals": 0 },
-        "overrides": []
+      "title": "Run totals",
+      "description": "Cumulative totals for the run. Sources, with their exposition help text: game2048_turns_total 'Turns whose slide moved at least one tile, one per engine turn that resolved a move. Neither an idle turn nor one changed by a hook effect alone is counted.'; game2048_merges_total 'Tile merges resolved, one per tile:merge emission.'; game2048_spawns_total 'Tiles inserted, one per tile:spawn emission carrying a position.'; game2048_frames_rendered_total 'Frames composited by the render loop.' All four are UNLABELLED families. The reducer is lastNotNull, which on a monotonic counter is the running total rather than a rate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
       },
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "value_and_name"
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 1
       },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
           "expr": "game2048_turns_total",
-          "legendFormat": "{{resolution}}",
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 3,
-      "type": "timeseries",
-      "title": "Merges and spawns",
-      "description": "game2048_merges_total is incremented once per merge, so a turn resolving two merges raises it by two. game2048_spawns_total counts tiles actually inserted; game2048_spawn_suppressed_total counts attempts a relic or a full board suppressed.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
-      "fieldConfig": {
-        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2 } },
-        "overrides": []
-      },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "sum(game2048_merges_total)",
-          "legendFormat": "merges"
+          "legendFormat": "turns resolved",
+          "instant": true,
+          "range": false
         },
         {
           "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "sum(game2048_spawns_total)",
-          "legendFormat": "spawns"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_merges_total",
+          "legendFormat": "merges",
+          "instant": true,
+          "range": false
         },
         {
           "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "sum(game2048_spawn_attempts_total)",
-          "legendFormat": "spawn attempts"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_spawns_total",
+          "legendFormat": "tiles spawned",
+          "instant": true,
+          "range": false
         },
         {
           "refId": "D",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "sum(game2048_spawn_suppressed_total)",
-          "legendFormat": "spawns suppressed"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_frames_rendered_total",
+          "legendFormat": "frames rendered",
+          "instant": true,
+          "range": false
         }
-      ]
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Spawn attempts, insertions and suppressions",
+      "description": "The three spawn families side by side. game2048_spawn_attempts_total 'Spawn attempts, one per engine spawn entry whether or not a cell was available.'; game2048_spawns_total 'Tiles inserted, one per tile:spawn emission carrying a position.'; game2048_spawn_suppressed_total 'Spawn attempts that inserted no tile, on a full board or after a handler returned no usable cell.' attempts equals insertions plus suppressions, per the contract comment on spawnAttemptsTotal in src/observability/metrics.ts. Both the attempt and the insertion family are counted deliberately (DL-METRIC-02); a reader who sums all three double-counts.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_spawn_attempts_total",
+          "legendFormat": "attempts",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_spawns_total",
+          "legendFormat": "inserted",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_spawn_suppressed_total",
+          "legendFormat": "suppressed",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "id": 4,
       "type": "timeseries",
       "title": "Engine events by name",
-      "description": "game2048_engine_events_total. The seven typed events of the engine contract.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "description": "game2048_engine_events_total 'Engine events emitted, by event name, counted per emission and not per listener.' ONE counter family broken out by the event label, not seven metric names: the seven ENGINE_EVENT_NAMES of src/engine/engine-events.ts L49-L57 contain a colon, which the exposition reserves in a metric name, so they are carried as label values (DL-METRIC-04). Expect exactly seven series — stage:start, move:before, tile:merge, tile:spawn, move:after, stage:end, state:commit. turns_total is never above the move:after series and is below it by exactly the number of idle inputs.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
           "expr": "game2048_engine_events_total",
-          "legendFormat": "{{event}}"
+          "legendFormat": "{{event}}",
+          "instant": false,
+          "range": true
         }
-      ]
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": ["lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "id": 5,
       "type": "row",
-      "title": "Latency and frames",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "title": "Latency, frames and spans",
+      "description": "The three duration histograms. All share one boundary set, DEFAULT_DURATION_BUCKETS in src/observability/metrics.ts L192-L194, so they are directly comparable (DL-METRIC-01). Boundaries in MILLISECONDS: 1, 2, 4, 8, 16, 32, 64, 100, 200, 400, 600, 800, 1200, 2000, +Inf. Sub-16 boundaries give sub-frame resolution, 16 is the frame budget, 32 and 64 are two and four budgets, and the rest are animation timings the product already held. These panels are also the tracing view — Rule 3's tracing capability is delivered as Performance-API spans across module boundaries (DL-TRACE-01), and every span close records its duration here.",
       "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
       "panels": []
     },
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Turn latency quantiles",
-      "description": "game2048_turn_latency_milliseconds. Buckets are shared with frame time so the two are directly comparable.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 10 },
-      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "title": "Frame time against the 16 ms budget",
+      "description": "Frame-duration percentiles over game2048_frame_time_milliseconds_bucket. Help text: 'Frame duration in milliseconds.' Fed by recordFrame in src/observability/metrics.ts, called from the frame hook of src/observability/tracer.ts L2186 — the render.frame span, which is the system's only asynchronous boundary and was unmeasured before this work. THRESHOLDS: 16 ms is the product's own frame budget, taken from js/animframe_polyfill.js L13 'var timeToCall = Math.max(0, 16 - (currTime - lastTime));'. 32 ms is two budgets. Both are real le boundaries of DEFAULT_DURATION_BUCKETS, so neither line falls between buckets. The axis soft maximum is 64 ms, the four-budget boundary; a soft maximum expands when a sample exceeds it rather than clipping.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "histogram_quantile(0.50, sum by (le) (game2048_turn_latency_milliseconds_bucket))",
-          "legendFormat": "p50"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (game2048_frame_time_milliseconds_bucket))",
+          "legendFormat": "p50",
+          "instant": false,
+          "range": true
         },
         {
           "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "histogram_quantile(0.95, sum by (le) (game2048_turn_latency_milliseconds_bucket))",
-          "legendFormat": "p95"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (game2048_frame_time_milliseconds_bucket))",
+          "legendFormat": "p95",
+          "instant": false,
+          "range": true
         },
         {
           "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "histogram_quantile(0.99, sum by (le) (game2048_turn_latency_milliseconds_bucket))",
-          "legendFormat": "p99"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_frame_time_milliseconds_sum / game2048_frame_time_milliseconds_count",
+          "legendFormat": "mean",
+          "instant": false,
+          "range": true
         }
-      ]
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "axisPlacement": "auto",
+            "axisSoftMax": 64,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 16
+              },
+              {
+                "color": "red",
+                "value": 32
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Frame time quantiles, against a 16.7 ms budget",
-      "description": "game2048_frame_time_milliseconds. The render loop is the product's first per-frame JavaScript work, so this is the panel that shows whether the 2.5D renderer holds a frame budget.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 10 },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ms",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 16.7 },
-              { "color": "red", "value": 33.4 }
-            ]
-          }
-        },
-        "overrides": []
+      "title": "Turn latency against the animation cadence",
+      "description": "Turn-latency percentiles over game2048_turn_latency_milliseconds_bucket. Help text: 'Turn latency in milliseconds, input dispatch through commit.' Fed by recordTurnLatency in src/observability/metrics.ts, called from src/observability/tracer.ts L1706 for the engine.turn span, whose boundary is js/game_manager.js L130 through L91-L97. THRESHOLDS are the product's own animation cadence, each a real le boundary: 100 ms is $transition-speed at style/main.scss L22, the move transition a turn must not outlast; 200 ms is the appear and pop animations at style/main.scss L430 and L450; 600 ms is move-up, the score delta, at style/main.scss L104. The 800 ms fade-in at L234 and its 1200 ms delay are not marked here; they govern the terminal overlay rather than a turn. The axis soft maximum is 600 ms, and a soft maximum expands when a sample exceeds it rather than clipping.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
       },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "histogram_quantile(0.50, sum by (le) (game2048_frame_time_milliseconds_bucket))",
-          "legendFormat": "p50"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (game2048_turn_latency_milliseconds_bucket))",
+          "legendFormat": "p50",
+          "instant": false,
+          "range": true
         },
         {
           "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "histogram_quantile(0.95, sum by (le) (game2048_frame_time_milliseconds_bucket))",
-          "legendFormat": "p95"
-        }
-      ]
-    },
-    {
-      "id": 8,
-      "type": "timeseries",
-      "title": "Span duration by name",
-      "description": "game2048_span_duration_milliseconds. Every span of src/observability/tracer.ts lands here, including render.frame — the frame-callback seam that was unmeasured before this project.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 19 },
-      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "right" } },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "histogram_quantile(0.95, sum by (le, span) (game2048_span_duration_milliseconds_bucket))",
-          "legendFormat": "p95 {{span}}"
-        }
-      ]
-    },
-    {
-      "id": 9,
-      "type": "row",
-      "title": "Hooks and relics",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
-      "collapsed": false,
-      "panels": []
-    },
-    {
-      "id": 10,
-      "type": "barchart",
-      "title": "Hook dispatches by hook",
-      "description": "game2048_hook_dispatches_total. One series per hook name, so an unbound hook reads zero rather than being absent.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 29 },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "game2048_hook_dispatches_total",
-          "legendFormat": "{{hook}}",
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 11,
-      "type": "timeseries",
-      "title": "Handlers invoked, skipped and refused",
-      "description": "A skip is the charge guard doing its job: once a budget is spent the bus skips every handler that relic binds. A payload rejection is a handler return the bus refused, which leaves the accumulated payload as it stood.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 29 },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "sum(game2048_hook_handler_invocations_total)",
-          "legendFormat": "invoked"
-        },
-        {
-          "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "sum(game2048_hook_handler_skipped_total)",
-          "legendFormat": "skipped"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (game2048_turn_latency_milliseconds_bucket))",
+          "legendFormat": "p95",
+          "instant": false,
+          "range": true
         },
         {
           "refId": "C",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "sum(game2048_hook_payload_rejections_total)",
-          "legendFormat": "payload refused"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (game2048_turn_latency_milliseconds_bucket))",
+          "legendFormat": "p99",
+          "instant": false,
+          "range": true
         }
-      ]
-    },
-    {
-      "id": 12,
-      "type": "stat",
-      "title": "Relic handler errors",
-      "description": "game2048_relic_handler_errors_total. A non-zero value means a relic threw and was marked degraded; the HUD shows that relic as no longer firing. Any value above zero deserves a look.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 29 },
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "decimals": 0,
+          "unit": "ms",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "axisPlacement": "auto",
+            "axisSoftMax": 600,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "orange",
+                "value": 200
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
             ]
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "heatmap",
+      "title": "Frame time distribution across the bucket set",
+      "description": "The per-bucket occupancy of game2048_frame_time_milliseconds_bucket over time, as opposed to the percentile lines of the panel above, which read the same series. The bucket boundaries are pre-computed by the registry, so the panel calculates nothing (calculate: false) and the Prometheus query returns the heatmap format directly; the cumulative bucketCounts the registry emits are converted to per-bucket counts by the data source. Boundaries are milliseconds: 1, 2, 4, 8, 16, 32, 64, 100, 200, 400, 600, 800, 1200, 2000, +Inf.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
       },
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "value_and_name",
-        "colorMode": "background"
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 25
       },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "game2048_relic_handler_errors_total",
-          "legendFormat": "{{relic}}",
-          "instant": true
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (le) (game2048_frame_time_milliseconds_bucket)",
+          "legendFormat": "{{le}}",
+          "format": "heatmap",
+          "instant": false,
+          "range": true
         }
-      ]
+      ],
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "cellValues": {
+          "unit": "short"
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "Blues",
+          "steps": 64,
+          "reverse": false,
+          "exponent": 0.5,
+          "fill": "dark-blue"
+        },
+        "filterValues": {
+          "le": 1e-9
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": false,
+          "yHistogram": true
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "ms"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      }
     },
     {
-      "id": 13,
+      "id": 9,
+      "type": "timeseries",
+      "title": "Span duration p95 by module boundary",
+      "description": "game2048_span_duration_milliseconds 'Span duration in milliseconds, by span name.' One histogram family broken out by the span label; the bucket series carry the labels as {span=\"...\",le=\"...\"}. Written by src/observability/tracer.ts L2327, which calls recordSpanDuration on every span close. The seven BOUNDARY_SPAN_NAMES of src/observability/tracer.ts L110-L118 are the chain validation gate V8 is asserted against — input.dispatch, engine.turn, engine.move.resolve, hook.dispatch, relic.handler, render.commit, render.frame — and are drawn as Figure 5 'Hook Dispatch Sequence' in docs/architecture/hook-dispatch-sequence.md. The regex filter excludes tracer.inert, the shared span returned while tracing is disabled, and engine.stage, which spans a whole stage rather than a module boundary. Thresholds are the same cadence anchors as the turn-latency panel: 100 ms from style/main.scss L22 and 200 ms from L430 and L450.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, span) (game2048_span_duration_milliseconds_bucket{span=~\"input.dispatch|engine.turn|engine.move.resolve|hook.dispatch|relic.handler|render.commit|render.frame\"}))",
+          "legendFormat": "p95 {{span}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "axisPlacement": "auto",
+            "axisSoftMax": 200,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "orange",
+                "value": 200
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
       "type": "row",
-      "title": "Determinism, health and the registry itself",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 },
+      "title": "Hook dispatch and relics",
+      "description": "The five hook-bus families, every one carried on the hook label rather than as a metric name per hook (DL-METRIC-04). Expect exactly six series apiece — the HOOK_NAMES of src/engine/hooks.ts L57-L64: onStageStart, onBeforeMove, onMerge, onSpawn, onAfterMove, onStageEnd. These counts are PULLED from the bus at snapshot time rather than pushed on dispatch (DL-METRIC-03), and are folded only when the bus's correlation identifier agrees with the registry's (DL-METRIC-06); a wiring error therefore presents as permanently zero counts rather than as an error. The dispatch chain is drawn as Figure 5 'Hook Dispatch Sequence' in docs/architecture/hook-dispatch-sequence.md.",
       "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
       "panels": []
     },
     {
-      "id": 14,
-      "type": "barchart",
-      "title": "RNG draws by substream",
-      "description": "game2048_rng_draws_total. Four substreams — spawn-value, spawn-position, relic-draw and rarity-weight — kept separate so a relic drawing once cannot shift the spawn sequence. These are the counts a resumed run's persisted cursors must agree with.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 38 },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "id": 11,
+      "type": "bargauge",
+      "title": "Hook dispatches by hook",
+      "description": "game2048_hook_dispatches_total 'Hook dispatches, by hook name.' One bar per hook, filtered by the $hook variable. Read from the per-hook dispatch counts on HookBusMetrics.hooks in src/engine/hook-bus.ts L343, folded by foldHookDispatchCounts in src/observability/metrics.ts. A dispatch is counted once per hook invocation by the bus, independently of how many subscribers it then fans out to.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 35
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "game2048_rng_draws_total",
-          "legendFormat": "{{stream}}",
-          "instant": true
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_hook_dispatches_total{hook=~\"$hook\"}",
+          "legendFormat": "{{hook}}",
+          "instant": true,
+          "range": false
         }
-      ]
-    },
-    {
-      "id": 15,
-      "type": "stat",
-      "title": "Health checks",
-      "description": "game2048_health_check_status. One series per check: 1 is pass, 0 is fail, -1 is not-applicable. Five of the six are reused pre-migration probes; webgl is the one added for the renderer.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 38 },
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "namePlacement": "auto",
+        "sizing": "auto"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "bargauge",
+      "title": "Handlers invoked by hook",
+      "description": "game2048_hook_handler_invocations_total 'Hook handlers invoked, by hook name.' Counts individual handler calls, so it stands above the dispatch count of panel 11 by the fan-out at each hook. The gap between the two is the number of subscribers the bus reached; the gap between this and the skip count of panel 13 is what the charge guard and the degraded set withheld.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 35
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_hook_handler_invocations_total{hook=~\"$hook\"}",
+          "legendFormat": "{{hook}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "namePlacement": "auto",
+        "sizing": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "bargauge",
+      "title": "Handlers skipped by hook and reason",
+      "description": "game2048_hook_handler_skipped_total 'Hook handlers skipped before invocation, by hook and reason.' The only family carrying two labels. The three HookSkipReason values of src/engine/hook-bus.ts L240 are exhausted, degraded and detached: exhausted is the charge guard — the bus checks charges before dispatch and skips a handler at zero or below, so this is where charge exhaustion is visible; degraded is a subscriber the bus has already contained a throw from; detached is one removed since registration. The query aggregates by reason and retains that dimension, so the three appear as three bars.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 35
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (reason) (game2048_hook_handler_skipped_total{hook=~\"$hook\"})",
+          "legendFormat": "{{reason}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "namePlacement": "auto",
+        "sizing": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "yellow"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Relic handler errors by hook",
+      "description": "game2048_relic_handler_errors_total 'Relic handler throws contained by the hook bus, by hook name.' Labelled by HOOK, not by relic: src/observability/metrics.ts reads only HookDispatchCountsView, which is Pick<HookBusMetrics, 'hooks' | 'correlationId'>, so the per-subscriber rows on HookBusMetrics.subscribers never reach the exposition and no relic-identity label exists to group by. Per-relic attribution is available only from the JSON snapshot and the diagnostics overlay. The bus contains a throwing handler, marks the subscriber degraded and lets the turn complete, so a broken relic produces no gameplay symptom and this counter is its only signal on a dashboard. The threshold renders any value at or above one on a red background. The degraded skips in panel 13 count the dispatches withheld from a subscriber already marked this way.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_relic_handler_errors_total{hook=~\"$hook\"}",
+          "legendFormat": "{{hook}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Handler payload rejections by hook",
+      "description": "game2048_hook_payload_rejections_total 'Handler returns discarded as non-payloads, by hook name.' A handler that returns something the bus cannot use as the next payload has that return discarded, and the accumulated payload continues unchanged — the compounding protocol therefore stays intact while a relic's effect is silently lost, which makes this the second degradation channel alongside panel 14. Any non-zero value is marked.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_hook_payload_rejections_total{hook=~\"$hook\"}",
+          "legendFormat": "{{hook}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": ["lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "axisPlacement": "auto",
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "row",
+      "title": "Determinism, health and the registry itself",
+      "description": "The RNG substream cursors, the six health probes, the generic report counter, and the registry's own refusal channel. Health results reach a dashboard only through the metrics snapshot, because there is no port for an orchestrator to poll (DL-HEALTH-04, DL-HEALTH-05).",
+      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 50
+      },
+      "panels": []
+    },
+    {
+      "id": 17,
+      "type": "bargauge",
+      "title": "RNG draws by substream",
+      "description": "game2048_rng_draws_total 'Draws consumed, by named RNG substream.' One bar per member of RNG_STREAM_NAMES in src/rng/rng-streams.ts L39-L44: spawn-value, spawn-position, relic-draw, rarity-weight. Folded from the persisted draw cursors, so the value is the cursor position rather than an incrementing count. The four substreams advance independently: a draw on relic-draw does not move the spawn-position cursor.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 51
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_rng_draws_total",
+          "legendFormat": "{{stream}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "namePlacement": "auto",
+        "sizing": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Health checks — all six",
+      "description": "game2048_health_check_status 'Health check result: 1 healthy, 0 unhealthy, -1 not applicable (the host offers nothing to evaluate).' One series per member of HEALTH_CHECK_IDS in src/observability/health.ts L55-L62, in report order: functionBind, classList, requestAnimationFrame, pointerEvents, storage, webgl. Five are REUSED probes the pre-migration product already performed but reported nowhere — functionBind from js/bind_polyfill.js L1, classList from js/classlist_polyfill.js L2-L5, requestAnimationFrame from js/animframe_polyfill.js L3-L10 and L23, pointerEvents from js/keyboard_input_manager.js L4-L13, storage from js/local_storage_manager.js L29-L40 — and webgl is the one ADDED check, from src/render/webgl-support.ts. The mapping is THREE-state, per HEALTH_GAUGE_VALUES at src/observability/health.ts L74-L79: 1 pass, 0 fail, -1 not-applicable. All three reach this one series; a not-applicable result is written through the gauge directly and a pass or fail through recordHealthCheck. A binary reading of this panel misreports not-applicable as a failure.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 51
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_health_check_status",
+          "legendFormat": "{{check}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": -1,
+          "max": 1,
+          "noValue": "not reported",
           "mappings": [
             {
               "type": "value",
               "options": {
-                "1": { "text": "pass", "color": "green", "index": 0 },
-                "0": { "text": "fail", "color": "red", "index": 1 },
-                "-1": { "text": "n/a", "color": "text", "index": 2 }
+                "1": {
+                  "text": "pass",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "fail",
+                  "color": "red",
+                  "index": 1
+                },
+                "-1": {
+                  "text": "not-applicable",
+                  "color": "blue",
+                  "index": 2
+                }
               }
             }
           ]
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "type": "table",
+      "title": "Health check detail",
+      "description": "The same six game2048_health_check_status series as the panel to the left, in tabular form: one row per check, with the check id in the Check column and the mapped status word in the Status column. An organize transformation drops the Time, __name__, job and instance fields the data source adds. The Status column carries the same three-state mapping from HEALTH_GAUGE_VALUES at src/observability/health.ts L74-L79 as a field override.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
       },
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "value_and_name",
-        "colorMode": "value"
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 51
       },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
           "expr": "game2048_health_check_status",
           "legendFormat": "{{check}}",
-          "instant": true
+          "format": "table",
+          "instant": true,
+          "range": false
         }
-      ]
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "check": "Check",
+              "Value": "Status"
+            },
+            "indexByName": {}
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": ["sum"],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "pass",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "0": {
+                        "text": "fail",
+                        "color": "red",
+                        "index": 1
+                      },
+                      "-1": {
+                        "text": "not-applicable",
+                        "color": "blue",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
     },
     {
-      "id": 16,
+      "id": 20,
       "type": "timeseries",
-      "title": "Registry refusals by reason",
-      "description": "game2048_metrics_rejected_by_reason_total, the labelled companion of the unlabelled game2048_metrics_rejected_total (DL-METRIC-08) \u2014 plot one or the other, never their sum. The registry bounding itself rather than throwing. A rising seriesLimitReached or familyLimitReached is the real unbounded-cardinality alarm; metadataBudgetReached is a backstop that the two ceilings normally reach first. A reason the registry could not read is counted as unspecified.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 38 },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "title": "Reports by subsystem",
+      "description": "game2048_reports_total 'Reports counted across every subsystem. The report name is the report label and its leading segment the subsystem label.' Declared in src/main.ts L355-L366 rather than in METRIC_NAMES, and the only family whose label values are an open set rather than a closed union. Every generic subsystem report lands on this one family (DL-MAIN-11), so a rise in a subsystem here is the first place a wiring or teardown defect shows.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 59
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "game2048_metrics_rejected_by_reason_total",
-          "legendFormat": "{{reason}}"
-        }
-      ]
-    },
-    {
-      "id": 17,
-      "type": "timeseries",
-      "title": "Reports by subsystem, and frames rendered",
-      "description": "game2048_reports_total collapses every subsystem's reports onto one family, labelled by report and subsystem. game2048_frames_rendered_total is the render loop's own counter.",
-      "datasource": { "type": "prometheus", "uid": "${DS}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "right" } },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
           "expr": "sum by (subsystem) (game2048_reports_total)",
-          "legendFormat": "reports: {{subsystem}}"
+          "legendFormat": "{{subsystem}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": ["lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Registry refusals",
+      "description": "The registry's own refusal channel, as two families. game2048_metrics_rejected_total 'Metric calls this registry rejected and reported.' is UNLABELLED — its label layout was fixed empty by the first series the constructor declares, so the reason dimension could not be added to it. game2048_metrics_rejected_by_reason_total 'Metric calls this registry rejected, by reason. Sums to metrics_rejected_total, less any rejection raised while this family was resolving a series of its own, which only the total counts.' is the companion family carrying the reason label, with a series created on the first rejection carrying that reason (DL-METRIC-08). The two count the same events, so summing both double-counts. A sustained rise, especially under seriesLimitReached or familyLimitReached, indicates unbounded label cardinality.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 59
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_metrics_rejected_by_reason_total",
+          "legendFormat": "{{reason}}",
+          "instant": false,
+          "range": true
         },
         {
           "refId": "B",
-          "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "sum(game2048_frames_rendered_total)",
-          "legendFormat": "frames rendered"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS}"
+          },
+          "editorMode": "code",
+          "expr": "game2048_metrics_rejected_total",
+          "legendFormat": "total (all reasons)",
+          "instant": false,
+          "range": true
         }
-      ]
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": ["lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "axisPlacement": "auto",
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total (all reasons)"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [10, 10],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

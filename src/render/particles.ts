@@ -146,7 +146,15 @@ const GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 
 const BAND_CENTRE = 0.5;
 
-/** Construction values with no counterpart in the token layer. */
+/**
+ * Construction values with no counterpart in the token layer.
+ *
+ * style/main.scss declares no particle vocabulary of any kind, so four of these
+ * are declared here — the mote count, the concurrency limit and the mask's two
+ * parameters — while the four lengths beside them are token-derived. Every
+ * entry is overridable through `ParticleSystemOptions`. Decision
+ * DL-PARTICLE-05.
+ */
 export const particleDefaults = Object.freeze({
   particlesPerBurst: 12,
   maxConcurrentBursts: 6,

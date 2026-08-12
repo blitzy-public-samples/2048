@@ -3,65 +3,12 @@
 // src/rng/rng-streams.ts, proving a resumed run continues the sequence it was
 // on rather than restarting it.
 //
-// This is the file tests/unit/run/run-state.test.ts and
-// tests/unit/run/run-state-store.test.ts both name as the owner of this
-// coverage. Those two suites verify the schema and the store in isolation;
-// neither reconstructs an `RngStreams` from what was persisted, so neither can
-// show that the persisted number is the number a resume actually needs.
-//
-// What is at stake: validation gate V2 (0.8.2) requires the same seed and the
-// same move list to yield an identical board AND identical relic offers across
-// repeated runs AND ACROSS A RELOAD. `RunState.rngCursor` is the entire
-// mechanism for the reload half — AAP Contract 5 (0.6.1.5) and Contract 6
-// (0.6.1.6) — and nothing else in the product recovers it. A cursor that is
-// persisted but not resumable would satisfy every existing assertion in this
-// folder and still break the guarantee.
-//
-// Superseded constructs this suite is a verification target for:
-//   Math.random() spawn value          js/game_manager.js L71
-//   Math.random() spawn position       js/grid.js         L37-L43
-//   available-cell order               js/grid.js         L45-L64
-//   the absence of any persisted draw position at all
-//                                      js/local_storage_manager.js L52-L59
-//
-// The first two rows above are the whole set of superseded randomness: a grep
-// of the tree finds exactly two `Math.random()` calls and no third, so the
-// substitution the substreams make is closed and enumerable. The order the
-// position draw indexes into is fixed by `Grid.prototype.availableCells` and
-// `Grid.prototype.eachCell` at js/grid.js L45-L64, x-outer and y-inner, so no
-// expectation below assumes another traversal.
-//
 // The `Math.random` identity assertions in section 9 are the descendant of
 // .jshintrc L5 `freeze: true`, the retired prohibition on writing to a native.
-//
-// Collected by the unit:dom-free project of vitest.config.ts, environment
-// 'node'. Nothing here reads a document, a Web Storage global or a clock;
-// randomness is consumed only through the seeded substreams under test, and the
-// Math.random invariant is asserted rather than relied on.
 //
 // Figure this suite is the mechanical proof of: Figure 7 (Seeded Determinism)
 // of docs/architecture/data-flow.md, whose four substream cursors converge on
 // the envelope's `rngCursor` map.
-//
-// Coverage boundaries this suite stays inside. What it owns is the draw
-// accounting the persisted cursor map is assembled from and the resume that map
-// feeds; every neighbouring concern has its own owner:
-//   substream derivation arithmetic    tests/unit/rng/rng-streams.test.ts
-//   the ambient Math.random guard      tests/unit/rng/math-random-guard.test.ts
-//   the schema, and `normalizeRngCursor`'s degenerate input matrix
-//                                      tests/unit/run/run-state.test.ts
-//   store verdicts and failure paths   tests/unit/run/run-state-store.test.ts
-//   relic offer content: rarity weighting, sampling without replacement
-//                                      tests/unit/relics/relic-draw.test.ts
-//   board-size reconciliation          tests/unit/run/run-relic-board-size
-//                                        .test.ts
-//   the frozen best-score contract     tests/unit/storage/best-score.test.ts
-//
-// Determinism is achieved by construction here: every value is drawn from a
-// seeded substream, no clock, network or ambient randomness is read for test
-// data, and no snapshot artifact is written — the seeded snapshot gate under
-// tests/snapshot/ is configured and stored separately, and this suite compares
-// captured sequences in file instead.
 //
 // Decisions behind this file: docs/DECISION_LOG.md.
 
@@ -106,19 +53,15 @@ import {
 } from '../../../src/storage/storage-keys';
 import { MERGE_PAIR_BOARD, copyBoard } from '../../fixtures/boards';
 
-/* ===== 1. Fixtures and the injected world ===== */
-
 /**
  * The `Math.random` this file was loaded beside, read at module scope and so
- * before any generator, substream or store in this file exists. Section 9
- * compares against this reference by identity.
+ * before any generator, substream or store in this file exists.
  */
 const PLATFORM_MATH_RANDOM: () => number = Math.random;
 
 /**
  * Own property names `globalThis` carried before this file constructed
- * anything, read at module scope alongside the reference above. Section 9
- * compares the set against it.
+ * anything, read at module scope alongside the reference above.
  */
 const PLATFORM_GLOBAL_KEYS: readonly string[] = Object.freeze(
   Object.getOwnPropertyNames(globalThis)
@@ -138,12 +81,7 @@ const STAGE_GOAL: PersistedStageGoal = {
   target: 16,
 };
 
-/**
- * Draws taken from each substream before the run is persisted. No two counts
- * are equal, which makes a resume that reads one substream's cursor for
- * another distinguishable from a correct one. The counts themselves are
- * argued in docs/DECISION_LOG.md.
- */
+/** Draws taken from each substream before the run is persisted. */
 const DRAWS_BEFORE_SAVE: Readonly<Record<StreamName, number>> = Object.freeze({
   'spawn-value': 5,
   'spawn-position': 3,
@@ -154,14 +92,14 @@ const DRAWS_BEFORE_SAVE: Readonly<Record<StreamName, number>> = Object.freeze({
 /** Draws compared after the resume, per substream. */
 const DRAWS_AFTER_RESUME = 6;
 
+
 /** Weighted draws taken when the spawn-value distribution is measured. */
 const WEIGHTED_DRAW_COUNT = 1000;
 
 /**
- * The counts `WEIGHTED_DRAW_COUNT` weighted draws from `RUN_SEED`'s spawn-value
- * substream resolve to, against the distribution `createDefaultRulesConfig()`
- * declares. Exact counts, not a tolerance; the substream is seeded, so the
- * tally is fixed. Argued in docs/DECISION_LOG.md.
+ * The counts `WEIGHTED_DRAW_COUNT` weighted draws from `RUN_SEED`'s
+ * spawn-value substream resolve to, against the distribution
+ * `createDefaultRulesConfig` declares.
  */
 const WEIGHTED_DRAW_TALLY: Readonly<Record<number, number>> = Object.freeze({
   2: 883,
@@ -171,11 +109,7 @@ const WEIGHTED_DRAW_TALLY: Readonly<Record<number, number>> = Object.freeze({
 /** Every backing store a test built, emptied by the teardown below. */
 const trackedStorages: MemoryStorage[] = [];
 
-/**
- * A reporter that keeps every RNG refusal it is handed. Section 8 reads
- * `rejections` to assert what a repaired cursor map reported; a sink that
- * discarded its argument would leave the restore path unobserved.
- */
+/** A reporter that keeps every RNG refusal it is handed. */
 interface CapturedRngReports extends RngReporter {
   readonly rejections: RngRejection[];
 }
@@ -346,13 +280,9 @@ function envelopeAt(cursor: RngCursorMap): RunState {
 /**
  * Runs the whole round trip: advance, persist, reload, recreate.
  *
- * The one sequence the requirement is about. Every assertion below reads its
- * result rather than repeating the steps, so a step that stops being exercised
- * cannot go unnoticed in one test while others still pass.
- *
  * @param counts Draws to take before persisting.
- * @returns The advanced streams, the persisted cursor, the load result and the
- *   streams recreated from what was loaded.
+ * @returns The advanced streams, the persisted cursor, the load result and
+ *   the streams recreated from what was loaded.
  */
 function roundTrip(
   counts: Readonly<Record<StreamName, number>> = DRAWS_BEFORE_SAVE
@@ -386,7 +316,8 @@ function roundTrip(
  * A reference run that took the same draws and was never interrupted.
  *
  * @param counts Draws to take first.
- * @returns The uninterrupted streams, standing where the resume should stand.
+ * @returns The uninterrupted streams, standing where the resume should
+ *   stand.
  */
 function reference(
   counts: Readonly<Record<StreamName, number>> = DRAWS_BEFORE_SAVE
@@ -398,23 +329,12 @@ function reference(
   return streams;
 }
 
-/**
- * Every key this suite may have written, as one list with no repeat.
- * `BEST_SCORE_KEY` is named beside `OWNED_STORAGE_KEYS` although the latter
- * already contains it, so the frozen key is removed even were the owned list to
- * stop carrying it. js/local_storage_manager.js L61-L63 removed the board
- * snapshot and never the best score.
- */
+/** Every key this suite may have written, as one list with no repeat. */
 const CLEARED_STORAGE_KEYS: readonly string[] = Object.freeze([
   ...new Set<string>([...OWNED_STORAGE_KEYS, BEST_SCORE_KEY]),
 ]);
 
-/**
- * Empties and forgets every backing store a test built. Idempotent and total:
- * removing an absent key is a no-op on `MemoryStorage`, so this composes with
- * the teardown the shared setup file of vitest.config.ts registers and runs
- * safely twice.
- */
+/** Empties and forgets every backing store a test built. */
 function clearTrackedStorages(): void {
   for (const storage of trackedStorages) {
     for (const key of CLEARED_STORAGE_KEYS) {
@@ -428,8 +348,6 @@ function clearTrackedStorages(): void {
 beforeEach(clearTrackedStorages);
 
 afterEach(clearTrackedStorages);
-
-/* ===== 2. The four substreams and the shape of the persisted map ===== */
 
 describe('the substreams a run persists a cursor for', () => {
   it('names the four substreams in the order the map is keyed by', () => {
@@ -511,14 +429,9 @@ describe('the cursor map a run hands the envelope', () => {
   });
 });
 
-/* ===== 3. What the persisted count counts ===== */
-
 /**
  * Takes `WEIGHTED_DRAW_COUNT` weighted selections from `stream` against the
  * configured spawn distribution, tallying what was selected.
- *
- * Replaces js/game_manager.js L71, `Math.random() < 0.9 ? 2 : 4`. The values
- * and weights are read from `createDefaultRulesConfig()` rather than restated.
  *
  * @param stream Substream to draw from.
  * @returns How many times each value was selected.
@@ -568,9 +481,8 @@ describe('a cursor counts draws taken and nothing else', () => {
   it('rises by one per selection from a list of cells', () => {
     const stream = createRngStreams(RUN_SEED).stream('spawn-position');
 
-    // Replaces js/grid.js L41, `cells[Math.floor(Math.random() *
-    // cells.length)]`. The list is written in the x-outer, y-inner order
-    // `Grid.prototype.eachCell` built it in at js/grid.js L45-L64.
+    // Replaces js/grid.js L41, `cells[Math.floor(Math.random *
+    // cells.length)]`.
     const cells = ['0,0', '0,1', '0,2', '0,3'];
     const chosen = stream.pick(cells);
 
@@ -582,8 +494,8 @@ describe('a cursor counts draws taken and nothing else', () => {
     const stream = createRngStreams(RUN_SEED).stream('spawn-position');
 
     // js/grid.js L37-L43: `randomAvailableCell` fell through and returned
-    // undefined on a full board, the `if (cells.length)` guard at L40 having no
-    // else branch.
+    // undefined on a full board, the `if (cells.length)` guard at L40 having
+    // no else branch.
     expect(stream.pick([])).toBeUndefined();
     expect(stream.cursor).toBe(0);
   });
@@ -643,8 +555,6 @@ describe('a cursor counts draws taken and nothing else', () => {
   });
 });
 
-/* ===== 4. The cursor survives the store ===== */
-
 describe('the persisted cursor records where every substream stood', () => {
   it('carries a distinct count for each of the four substreams', () => {
     const { savedCursor } = roundTrip();
@@ -689,8 +599,6 @@ describe('the persisted cursor records where every substream stood', () => {
   });
 });
 
-/* ===== 5. A recreated run continues the sequence ===== */
-
 describe('a run recreated from the persisted cursor continues', () => {
   it('stands exactly where the uninterrupted run stands', () => {
     const { resumed } = roundTrip();
@@ -727,8 +635,6 @@ describe('a run recreated from the persisted cursor continues', () => {
     const continued = drawEach(resumed, DRAWS_AFTER_RESUME);
     const restarted = drawEach(createRngStreams(RUN_SEED), DRAWS_AFTER_RESUME);
 
-    // Were the persisted cursor dropped, these would be equal and the reload
-    // would replay the run's opening draws.
     for (const name of RNG_STREAM_NAMES) {
       expect(continued[name], `${name} restart`).not.toEqual(restarted[name]);
     }
@@ -842,8 +748,6 @@ describe('the fast-forward every resume is built on', () => {
     }
   });
 });
-
-/* ===== 6. Every substream resumes independently ===== */
 
 describe('one substream advancing cannot shift another resume', () => {
   it('resumes each substream against a counts map advancing only it', () => {
@@ -1113,8 +1017,6 @@ describe('relic offers reproduce across a reload', () => {
   });
 });
 
-/* ===== 8. A partial or absent cursor map still resumes ===== */
-
 describe('a partial or absent cursor map still resumes', () => {
   /**
    * Writes a raw payload whose `rngCursor` member is `cursor`, then loads it
@@ -1247,8 +1149,6 @@ describe('the restore reports the counts it could not use', () => {
   });
 });
 
-/* ===== 9. The invariants the resume must not break ===== */
-
 describe('the resume leaves the run RNG contract intact', () => {
   it('never patches Math.random, across the whole resume cycle', () => {
     const straight = createSeededRng(RUN_SEED);
@@ -1260,9 +1160,7 @@ describe('the resume leaves the run RNG contract intact', () => {
     drawEach(resumed, DRAWS_AFTER_RESUME);
 
     // The invariant Figure 7 (Seeded Determinism) of
-    // docs/architecture/data-flow.md publishes as a guard node. Compared by
-    // identity against the reference read at module scope: a generator
-    // installed over the built-in would still answer `typeof 'function'`.
+    // docs/architecture/data-flow.md publishes as a guard node.
     expect(Math.random).toBe(PLATFORM_MATH_RANDOM);
 
     // And by property descriptor, which is what a `defineProperty` install

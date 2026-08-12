@@ -211,6 +211,10 @@ const settleAnnouncements = async (): Promise<void> => {
 const announced = (): string =>
   [...spokenLines, regionText()].join(' ').toLowerCase();
 
+/* ==========================================================================
+ * 1. The offer is drawn when a stage clears
+ * ========================================================================== */
+
 describe('the reward offer', () => {
   it('is empty before any stage has cleared', () => {
     const subject = startSeededRun();

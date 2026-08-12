@@ -120,6 +120,10 @@ $palette-default: (
   overlay-win: rgba($tile-gold-color, 0.5),
   overlay-win-text: $bright-text-color,
 
+  // CONTRAST INVARIANT: the outer band measures at least 3.7:1 against every
+  // default surface the ring is drawn on, which is what this derivation — the
+  // same one $diagnostics-surface below is written from — holds.
+  // src/theme/themes.ts carries the compiled form of the same pair.
   focus-ring: color.adjust($text-color, $lightness: -22%),
   focus-ring-contrast: $bright-text-color,
 

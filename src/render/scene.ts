@@ -1,9 +1,29 @@
 // The scene graph, the camera and the lighting rig of the 2.5D board.
 //
-// Figures 1 and 2 of docs/architecture/ARCHITECTURE.md are the two states this
-// subsystem moved between, and Figure 3 of
-// docs/architecture/component-interaction.md places this module among its
-// peers.
+// PLANNED DOCUMENTS, cited as where this subsystem will be placed rather than as
+// present authorities: Figures 1 and 2 of docs/architecture/ARCHITECTURE.md are
+// the two states it moved between, and Figure 3 of
+// docs/architecture/component-interaction.md places this module among its peers.
+// Neither file exists at this commit; all eight figures are specified in AAP
+// 0.6.5 meanwhile.
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-SCENE-01  style/main.scss L171-L194  `@mixin game-field`, reproduced as
+//                                           the board surface
+//   TR-SCENE-02  style/main.scss L254       the `.grid-container` layer, which
+//                                           the scene replaces
+//   TR-SCENE-03  style/main.scss L288       the `.tile-container` layer, which
+//                                           the scene replaces
+//   TR-SCENE-04  style/main.scss L475-L548  the mobile scale, framed through
+//                                           this code with no branch
+//   TR-SCENE-05  target-only row            `createScene()` and `BoardScene`
+//   TR-SCENE-06  target-only row            `frameBoard()`, `BoardFraming` and
+//                                           `CameraRestPose`
+//   TR-SCENE-07  target-only row            `LightingRig` and `RigTuning`
+//   TR-SCENE-08  target-only row            `sceneOptics`
+//   TR-SCENE-09  target-only row            `SceneStats` and the injected
+//                                           reporter
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
 // this module's area enumerated:

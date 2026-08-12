@@ -95,13 +95,21 @@
 // reads no clock, and is synchronous throughout. Nothing it hands a handler
 // re-enters dispatch, and it branches on no subscriber identity.
 //
+// THE SHARED CHANNEL. Besides dispatching the six hooks to relics, this bus
+// carries the seven engine events to every non-relic peer — the renderer, the
+// screen flow and the observability layer — through `events` and
+// `attachEvents`. The engine emits; `attachEvents` relays; peers subscribe to
+// `events`. Relics and peers therefore share ONE bus, which is the topology
+// AAP Figure 2 and Figure 3 declare. A payload crosses the relay by reference
+// and unwrapped, so a peer receives the object the engine emitted.
+//
 // Decisions behind this file: DL-HOOKBUS-01, the charge guard living in
 // the bus; DL-HOOKBUS-02, the pickup-order index deciding dispatch order;
 // DL-HOOKBUS-03, the compounding return protocol in which a handler that
-// returns nothing leaves the payload as it stands; DL-HOOKBUS-04, the error
-// isolation that marks a throwing subscriber degraded and completes the
-// dispatch; and DL-HOOKBUS-05, the payload validation a return is measured
-// against.
+// returns nothing leaves the payload as it stands; DL-HOOKBUS-04, the
+// per-subscriber error isolation that marks a throwing registration degraded
+// and completes the dispatch; DL-HOOKBUS-05, the payload validation a return is
+// measured against; and DL-HOOKBUS-06, the engine-event relay above.
 
 import type {
   HookContext,
@@ -578,6 +586,19 @@ const MAX_STATE_MEMBERS = 256;
 
 /**
  * Copies one state slot, all the way down.
+ *
+ * THE STATE-OWNERSHIP BOUNDARY. A slot is JSON data — the run envelope
+ * persists it — so a copy of it is a copy in full, and the bus holds a slot no
+ * caller and no handler shares an object with. Copying at EVERY crossing —
+ * registration and each hand-off to a context — is what makes a rollback total:
+ * a reference held across one of them would let a handler's write into a nested
+ * member survive a throw the reassignment was rolled back for. Decision
+ * DL-HOOKBUS-04.
+ *
+ * A value JSON cannot carry — a function, a symbol, `undefined` inside an
+ * object — is dropped exactly as `JSON.stringify` would drop it, so a slot
+ * that survives a copy is a slot that survives persistence. `NaN` and the
+ * infinities are kept as they are, because the slot is not serialised here.
  *
  * @param value Slot to copy.
  * @param depth Levels already descended.
@@ -1144,6 +1165,18 @@ interface RngTransaction {
 
 /**
  * Opens one handler's randomness transaction over the run's substreams.
+ *
+ * THE RANDOMNESS BOUNDARY. `stream` hands back a FORK of the named substream
+ * rather than the substream itself, memoised so the instance-stability
+ * contract holds within one dispatch: a handler that addresses one name twice
+ * draws from one fork. The real substreams are advanced only by `commit()`, so
+ * a handler that draws and then throws consumes no randomness and shifts no
+ * later spawn — which is what keeps a failed handler unable to change a seeded
+ * run. Decision DL-HOOKBUS-04.
+ *
+ * `snapshotCursors` reports the fork's position for a substream the handler
+ * has drawn from and the real position for the rest, so a handler observes its
+ * own consumption.
  *
  * @param rng The run's substreams.
  * @returns The transaction.

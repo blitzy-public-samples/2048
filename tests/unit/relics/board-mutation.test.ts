@@ -7,9 +7,72 @@
 // 0.1.2.5: "board-size-altering cursed relics (e.g. shrink board) must not
 // corrupt existing tile positions or win/lose check" — across a reload.
 //
+// SCOPE. tests/unit/relics/risk-reward-cursed.test.ts owns the relic's own
+// declaration and its immediate in-memory shrink mechanics.
+// tests/unit/run/run-state-store.test.ts owns the general version and
+// corruption policy, and tests/unit/run/run-relic-board-size.test.ts owns the
+// controller-driven load path over hand-written envelopes. This file owns the
+// intersection those three leave: collapse, persist, load, reconcile, verdict.
+//
+// THREE EDGE LENGTHS are in play after a reload — the one the snapshot
+// recorded, the one the rules configuration declares, and the one the
+// reconciliation applied. Section 4 constructs a board on which all three
+// yield DIFFERENT verdict pairs, and asserts the terminal-state evaluation
+// reads the third.
+//
+// Mechanical provenance, from the deleted vanilla sources:
+//   js/game_manager.js L36-L45           setup()'s rehydration branch, which
+//                                        rebuilt the grid from the SAVED size
+//                                        at L40-L41, `new Grid(
+//                                        previousState.grid.size,
+//                                        previousState.grid.cells)`, with
+//                                        nothing reconciling that size against
+//                                        the configuration
+//                                        -> src/run/run-state-store.ts
+//   js/game_manager.js L238-L268         movesAvailable() and
+//                                        tileMatchesAvailable(), the neighbour
+//                                        scan bounded by `this.size`
+//                                        -> src/engine/terminal-state.ts
+//   js/game_manager.js L102-L110         serialize(), the outermost stage of
+//                                        the persisted three-stage snapshot
+//   js/grid.js         L102-L117         the middle stage, an empty cell kept
+//                                        as `null`
+//   js/tile.js         L19-L27           the innermost stage
+//   js/grid.js         L80-L86           cellContent() yields `null` for a cell
+//                                        outside the lattice rather than
+//                                        raising
+//   js/grid.js         L89-L91           insertTile() indexes
+//                                        cells[tile.x][tile.y]
+//   js/tile.js         L10-L17           savePosition() copies the current
+//                                        cell; updatePosition() writes the
+//                                        current cell alone
+//   js/local_storage_manager.js L1-L19   the in-memory store double this suite
+//                                        injects
+//   js/local_storage_manager.js L22      the best-score key literal
+//   js/local_storage_manager.js L43-L45  getBestScore() yields the stored
+//                                        string when a value is present and
+//                                        the number 0 when none is
+//   js/local_storage_manager.js L52-L55  getGameState() called JSON.parse with
+//                                        no guard -> src/storage/**
+//   js/application.js  L3                the board dimension as a literal
+//                                        argument, one of its three vanilla
+//                                        declaration sites, the other two being
+//                                        style/main.scss L6 and the sixteen
+//                                        cells of index.html L43-L68
+//                                        -> src/config/**
+//
 // CONTRIBUTING.md used to list a change to the grid size among the changes that
 // might not be accepted; the supersession entry is DL-DOC-02 of
 // docs/DECISION_LOG.md.
+//
+// Named figures, PLANNED AND NOT LANDED. docs/architecture/data-flow.md is to
+// carry Figure 4, "Turn Data Flow: From Keystroke to Composited Frame and
+// Persisted Run State", whose `Moves available?` decision and `Run state
+// written under namespaced key` node will be the two ends of the path asserted
+// here, and Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
+// Substreams", whose persisted cursor nodes the `rngCursor` cases exercise.
+// Until that document exists the assertions below rest on the sources named
+// above alone.
 //
 // Every reporter reaches its subject by injection. Nothing here reads a
 // document, a clock, the global random source or a real Web Storage, and

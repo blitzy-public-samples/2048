@@ -17,7 +17,8 @@
 // and holds no mutable state.
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, in declaration
-// order, all target-only because no vanilla construct declared a relic:
+// order, all target-only because no vanilla construct declared a relic. THAT
+// DOCUMENT HAS NOT LANDED: these ordinals are RESERVED against it:
 //   TR-SPAWN-01  twin-seed         onSpawn
 //   TR-SPAWN-02  fertile-ground    onSpawn
 //   TR-SPAWN-03  prospectors-eye   onSpawn

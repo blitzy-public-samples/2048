@@ -82,8 +82,14 @@ $_token-fallbacks: (
 // pinned by tests/unit/quality/formatting.test.ts.
 //
 // Provenance: moved here from style/helpers.scss, whose change boundary is the
-// Dart Sass migration of the vanilla helpers alone. Decision DL-TOKEN-01,
-// traceability row TR-TOKEN-01 (target-only).
+// Dart Sass migration of the vanilla helpers alone. Decision DL-TOKEN-01.
+// Traceability row TR-TOKEN-01, a target-only row.
+//
+// THE ONE DECLARATION of `quantised()` in this file, and the authoritative one.
+// Sass resolves a repeated `@function` to the last declaration, so a second one
+// would supersede this block silently and with nothing reporting it; the
+// formatting gate of tests/unit/quality/formatting.test.ts asserts that each
+// `@function` is declared exactly once per stylesheet.
 //
 // @param {Color} $color - the colour to serialise.
 // @return {Color} the same colour with each RGB channel floored to an integer.

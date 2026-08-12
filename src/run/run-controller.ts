@@ -1938,7 +1938,7 @@ export class RunController {
       },
     };
 
-    // THE OFFER ITSELF IS REPORTABLE, not only the selection made from it: an
+    // The offer itself is reportable, not only the selection made from it: an
     // offer drawn and never taken is exactly the case a bare selection counter
     // cannot see, and it is the one that says a reward screen was reached.
     this.reporter.onRewardOffered?.({

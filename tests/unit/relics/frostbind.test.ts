@@ -1,51 +1,10 @@
 // Per-relic isolation suite for the `merge-magic` relic `frostbind`.
 //
-// PROVENANCE
-//   js/game_manager.js L156 — `next && next.value === tile.value &&
-//   !next.mergedFrom` — is the merge predicate this relic wraps. It ports to
-//   `RulesConfig.merge.canMerge` of src/config/rules-config.ts and to
-//   `defaultCanMerge` of src/config/default-config.ts, which is the
-//   traceability row this suite evidences. The `!next.mergedFrom` half is what
-//   holds one merger per traversal; the `next &&` existence guard stayed
-//   OUTSIDE the predicate, in src/engine/move-resolver.ts.
-//
-//   AAP working assumption A2 places the charge-based freeze and thaw relic in
-//   `merge-magic` rather than in `board-manipulation`.
-//
-//   Figure 5, "Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard
-//   and Error Isolation" (docs/architecture/hook-dispatch-sequence.md), is the
-//   diagram this suite is the executable counterpart of: its legend records
-//   that the charge guard is implemented once in the bus rather than sixteen
-//   times in handlers. Figure 4, "Turn Data Flow"
-//   (docs/architecture/data-flow.md), carries the `Merge condition from
-//   config.merge.canMerge` decision node this relic wraps.
-//
-//   docs/DECISION_LOG.md holds every decision; DL-MERGE-01 and DL-MERGE-02
-//   name the family module's own.
-//
-// WHAT THIS SUITE HOLDS
-//   The three mandatory per-relic properties, plus the two catalogue-level
-//   invariants this relic is the only one to exercise:
-//     1. it fires on its bound hooks alone;
-//     2. its `onMerge` handler returns nothing, and the bus therefore keeps
-//        the incoming payload — one void-returning handler in the catalogue;
-//     3. it records the frozen-cell merge predicate, freezing and thawing a
-//        cell without losing the base rule's semantics;
-//     4. it is one of five charge-bearing relics, its handlers hold no charge
-//        guard of their own, and a direct invocation at zero and at negative
-//        charges neither throws nor corrupts run state;
-//     5. it consumes no randomness.
-//
-// WHAT THIS SUITE DOES NOT HOLD
-//   The `HookBus` mechanism itself — pickup-order dispatch, the charge guard,
-//   error isolation and the compounding protocol — belong to the suites under
-//   tests/unit/engine, which drive it with synthetic handlers. The bus appears
-//   here only as the vehicle carrying the real handler's return and its
-//   recorded effect, and neither suite duplicates the other.
-//
 // This suite reads no DOM, no storage and no clock, calls no `Math.random`,
 // installs no timer and no mock library, and runs under the `test` script with
 // no server, browser or network.
+//
+// Decisions: DL-MERGE-01, DL-MERGE-02 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -97,10 +56,6 @@ import {
   createMergePairBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * Fixtures
- * ========================================================================== */
-
 /** Identifier the family module declares for the unit under test. */
 const RELIC_ID = 'frostbind';
 
@@ -121,10 +76,6 @@ const ORIGIN: Position = { x: 1, y: 0 };
 
 /** Face value of both merge operands, which `defaultCanMerge` accepts. */
 const OPERAND_VALUE = 2;
-
-/* ==========================================================================
- * The unit under test, resolved two ways
- * ========================================================================== */
 
 /**
  * The relic as the family module declares it, reached through
@@ -204,10 +155,6 @@ const DECLARED_AT_LOAD = Object.freeze({
   state: declaredRelic().state,
 });
 
-/* ==========================================================================
- * Payload builders
- * ========================================================================== */
-
 /**
  * A merge dispatch payload over real tiles, which is what
  * src/engine/move-resolver.ts dispatches: the bus projects each tile into the
@@ -237,8 +184,7 @@ function mergeDispatch(destination: Position = DESTINATION): {
 
 /**
  * A handler-facing merge payload over real tiles, for a direct invocation that
- * does not go through the bus. `Tile` satisfies `ReadonlyTileView`
- * structurally, which is the shape the bus would otherwise project.
+ * does not go through the bus.
  *
  * @param destination Cell the merge resolves onto.
  * @returns The payload.
@@ -255,7 +201,8 @@ function mergePayload(destination: Position = DESTINATION): MergePayload {
  * A stage-start payload at one board size.
  *
  * @param boardSize Reconciled edge length the stage begins at.
- * @returns The payload, which is identical on the dispatch and handler sides.
+ * @returns The payload, which is identical on the dispatch and handler
+ *   sides.
  */
 function stageStartPayload(boardSize: number): StageStartPayload {
   return {
@@ -265,16 +212,6 @@ function stageStartPayload(boardSize: number): StageStartPayload {
     boardSize,
   };
 }
-
-/* ==========================================================================
- * Harness
- *
- * Every collaborator is rebuilt for each test. The rules in particular:
- * `createDefaultRulesConfig()` of src/config/default-config.ts returns a fresh
- * mutable configuration on every call, while `DEFAULT_RULES_CONFIG` beside it
- * is deep-frozen, and this relic installs a merge predicate over
- * `config.merge.canMerge`. The `beforeEach` below calls the factory.
- * ========================================================================== */
 
 /** One test's collaborators, with the relic registered on the bus. */
 interface Bench {
@@ -393,16 +330,6 @@ function benchWithRegistry(): {
   };
 }
 
-/* ==========================================================================
- * A recording board-effect queue
- *
- * The channel a handler records through. The product's own queue is
- * transactional and is opened by the bus per handler; this double is what a
- * DIRECT invocation is handed, so a test that never goes through the bus can
- * still read what the handler recorded. Every lattice command is refused, as
- * the product's inert queue refuses them; this relic records none.
- * ========================================================================== */
-
 /** The double, and what was recorded through it. */
 interface RecordingQueue {
   readonly queue: BoardEffectQueue;
@@ -481,10 +408,6 @@ function openRecordingQueue(board: Grid): RecordingQueue {
   };
 }
 
-/* ==========================================================================
- * A hand-built dispatch context
- * ========================================================================== */
-
 /** One hand-built context, and what a direct invocation can be read from. */
 interface DirectContext {
   readonly context: HookContext;
@@ -495,11 +418,6 @@ interface DirectContext {
 }
 
 /**
- * Builds the context a direct invocation is handed: the rules, board and
- * substreams `beforeEach` rebuilt, a recording effect queue, the run
- * correlation identifier, and a `spendCharge` that records the request exactly
- * as the bus does rather than writing a budget.
- *
  * @param hook Hook the invocation stands for.
  * @param charges Budget the notional subscription holds.
  * @param state Slot value the notional subscription carries.
@@ -538,7 +456,7 @@ function directContext(
     charges,
 
     // As the bus does: the request is RECORDED and the budget is not written
-    // here. A subscription carrying no budget has nothing to spend.
+    // here.
     spendCharge: (amount = 1): boolean => {
       if (charges === undefined || !Number.isFinite(amount)) {
         return false;
@@ -564,10 +482,6 @@ function directContext(
   return { context, effects, requested: (): number => requested };
 }
 
-
-/* ==========================================================================
- * Shared assertions
- * ========================================================================== */
 
 /** The rule members that must never change: everything but `canMerge`. */
 function rulesBeyondThePredicate(rules: RulesConfig): unknown {
@@ -613,10 +527,6 @@ function expectOnlyThePredicateChanged(
   expect(config.merge.canMerge).toBeTypeOf('function');
 }
 
-/* ==========================================================================
- * 1. The declaration, and the hooks it binds
- * ========================================================================== */
-
 describe('the frostbind declaration', () => {
   it('is declared by merge-magic and indexed by the catalogue', () => {
     expect(declaredRelic()).toBe(catalogueRelic());
@@ -657,10 +567,6 @@ describe('the frostbind declaration', () => {
     expect(stageStartHandler()).toBeTypeOf('function');
   });
 });
-
-/* ==========================================================================
- * 2. The void return, and the payload the bus keeps
- * ========================================================================== */
 
 describe('the frostbind onMerge handler', () => {
   it('returns undefined, not null and not a payload of its own', () => {
@@ -722,7 +628,7 @@ describe('the bus keeps the incoming payload on the void return', () => {
     let seenTarget: unknown = null;
 
     // Registered AFTER the relic, so what it receives is what the relic's void
-    // return left standing. It transforms nothing and returns nothing.
+    // return left standing.
     expect(
       bench.bus.register({
         id: 'downstream-observer',
@@ -766,10 +672,6 @@ describe('the bus keeps the incoming payload on the void return', () => {
   });
 });
 
-
-/* ==========================================================================
- * 3. The merge-predicate wrapper: freeze, thaw, and the base rule beneath
- * ========================================================================== */
 
 describe('frostbind records the frozen-cell merge predicate', () => {
   it('records a command and writes the rules through no other path', () => {
@@ -821,8 +723,6 @@ describe('frostbind records the frozen-cell merge predicate', () => {
     const moving = new Tile(ORIGIN, OPERAND_VALUE);
     const frosted = new Tile(DESTINATION, OPERAND_VALUE);
 
-    // The refused side is asserted against what the base rule answers on the
-    // same operands rather than against a hardcoded verdict.
     expect(defaultCanMerge(moving, frosted)).toBe(true);
     expect(config.merge.canMerge(moving, frosted)).toBe(false);
   });
@@ -872,8 +772,7 @@ describe('frostbind records the frozen-cell merge predicate', () => {
 
   it('still refuses a target that already merged this turn', () => {
     // js/game_manager.js L156's `!next.mergedFrom` half, which is what holds
-    // one merger per traversal. A wrapper that lost it would let a traversal
-    // merge the same target twice.
+    // one merger per traversal.
     const bench = benchWithRelic();
 
     bench.bus.dispatch('onMerge', mergeDispatch().payload, bench.environment);
@@ -937,10 +836,7 @@ describe('frostbind records the frozen-cell merge predicate', () => {
   });
 
   it('installs one wrapper however many merges resolve', () => {
-    // Three toggles: frost (0, 0), frost (1, 1), thaw (0, 0). A wrapper nested
-    // inside its predecessor would answer against a stale ledger and keep
-    // refusing (0, 0); a wrapper that REPLACED it answers against the ledger
-    // the third toggle left.
+    // Three toggles: frost (0, 0), frost (1, 1), thaw (0, 0).
     const bench = benchWithRelic();
 
     bench.bus.dispatch(
@@ -1017,10 +913,6 @@ describe('frostbind records the frozen-cell merge predicate', () => {
 });
 
 
-/* ==========================================================================
- * 4. Charges, and the zero-charge edge case
- * ========================================================================== */
-
 describe('the frostbind charge budget', () => {
   it('is declared on the relic, finite, whole and above zero', () => {
     const relic = declaredRelic();
@@ -1044,8 +936,6 @@ describe('the frostbind charge budget', () => {
   });
 
   it('is guarded by the bus, and named by neither handler', () => {
-    // AAP Contract 2 puts the guard in src/engine/hook-bus.ts once rather than
-    // sixteen times in handlers, which is Figure 5's legend.
     for (const source of [
       String(mergeHandler()),
       String(stageStartHandler()),
@@ -1080,9 +970,6 @@ describe('the frostbind charge budget', () => {
 
 describe('invoked with zero charges', () => {
   it('neither throws nor corrupts run state', () => {
-    // The bus would have skipped the handler outright; this asserts a DIRECT
-    // invocation cannot corrupt anything either. The bus's own skip is held by
-    // the suites under tests/unit/engine.
     const payload = mergePayload();
     const invocation = directContext('onMerge', 0);
     const rulesBefore = rulesBeyondThePredicate(config);
@@ -1773,10 +1660,6 @@ describe('frostbind consumes no randomness', () => {
 });
 
 
-/* ==========================================================================
- * 6. The dispatch context, and the correlation identifier on it
- * ========================================================================== */
-
 describe('the context frostbind is dispatched with', () => {
   it('carries the run correlation identifier through the bus', () => {
     const bench = benchWithRelic();
@@ -1806,10 +1689,6 @@ describe('the context frostbind is dispatched with', () => {
     expect(invocation.context.subscriberId).toBe(RELIC_ID);
   });
 });
-
-/* ==========================================================================
- * 7. The declaration is a template, and stays one
- * ========================================================================== */
 
 describe('the catalogue declaration after every dispatch above', () => {
   it('carries the members it carried when this module loaded', () => {

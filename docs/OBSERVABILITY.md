@@ -839,7 +839,9 @@ The five controls are **Refresh**, **Export metrics**, **Export snapshot**,
 diagnostics**. Collapsing renders the heading and control row alone and keeps
 every reading running, so the surface and the board coexist on a narrow viewport;
 what is exported does not change (`DL-DIAG-11`). Closing takes the readings off
-screen and returns focus to wherever it came from (`DL-DIAG-17`). The controls
+screen and returns focus to wherever it came from (`DL-DIAG-17`). The five
+controls keep their identity across every render, so a handle to one stays valid
+(`DL-DIAG-16`). The controls
 take the palette of the active theme, so the high-contrast and colourblind-safe
 themes reach this surface as they reach every other (`DL-DIAG-09`).
 

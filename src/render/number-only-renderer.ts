@@ -59,8 +59,19 @@
 //                                               rendered-board snapshot, from
 //                                               `StateCommitEvent.degraded`
 //
-// Decisions: DL-NUMBER-01, DL-NUMBER-02, DL-NUMBER-03, DL-NUMBER-04,
-// DL-NUMBER-05 (docs/DECISION_LOG.md).
+// Decisions behind this file, argued in docs/DECISION_LOG.md and named here
+// only so the construct can be found from the log:
+//   DL-NUMBER-01  the number-only mode as a first-class renderer that consults
+//                 no capability probe
+//   DL-NUMBER-02  `classList` as the class-mutation surface
+//   DL-NUMBER-03  the tile appearance published as custom properties
+//   DL-NUMBER-04  a moved tile's node reconciled across paints while a spawn
+//                 and a merge each take a fresh node
+//   DL-NUMBER-05  every element lookup guarded and an absent element reported
+//                 once
+//   DL-NUMBER-06  exactly one `role="grid"` describing the board, so the
+//                 parallel accessibility layer is suppressed while this
+//                 renderer is mounted
 
 import {
   MAX_BOARD_SIZE,
@@ -362,12 +373,32 @@ export interface NumberOnlyRendererOptions {
   /** The WebGL canvas layer, `#board-canvas` of index.html. */
   readonly canvas?: Element | null;
 
-  /** The parallel accessibility board, `#board-a11y` of index.html. */
+  /**
+   * The parallel accessibility board, `#board-a11y` of index.html.
+   *
+   * SEMANTIC EXCLUSIVITY, the invariant this option exists to hold: exactly one
+   * `role="grid"` describes the board at any moment. This renderer publishes
+   * its own complete lattice — a `role="grid"` carrying one labelled
+   * `role="gridcell"` per cell — so for as long as it is mounted the parallel
+   * board is marked `aria-hidden` and `hidden`, which takes it out of both the
+   * rendering tree and the accessibility tree. Every attribute it carried is
+   * restored on unmount, so the surface is available again to whichever
+   * renderer takes over. Decision DL-NUMBER-06.
+   *
+   * ITS CHILDREN ARE NEVER TOUCHED. They belong to `ParallelBoardLayer`, which
+   * holds a reference to each of them; a caller that wants them removed hands
+   * in `parallelBoardLayer` below so the layer is unmounted through its own api.
+   */
   readonly parallelBoard?: Element | null;
 
   /**
-   * The layer that owns the parallel board's cells, where the caller holds
-   * one.
+   * The layer that owns the parallel board's cells, where the caller holds one.
+   *
+   * Supplied, the other lattice is taken down through its own api —
+   * `unmount()` on claim and `mount()` on release — so the layer's
+   * `isMounted()` and `boardSize()` stay truthful and its cell references are
+   * never left pointing at detached nodes. Omitted, the element is left hidden
+   * with its children intact and in the document.
    */
   readonly parallelBoardLayer?: ParallelBoardLifecycle | null;
 

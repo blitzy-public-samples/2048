@@ -7,8 +7,55 @@
 // determinism and substream-hygiene block the gate turns on and a closing
 // integrity block.
 //
-// The absent-position dispatch below is the boundary at js/grid.js L37-L43,
-// where `randomAvailableCell` carries no else branch and so yields no cell.
+//   1. binding   the handler is bound to `onSpawn` and to no other hook.
+//   2. effect    the spawn value is re-drawn with the live
+//                `config.spawn.weights` reversed, on a copy.
+//   3. charges   the declaration carries no budget, and a dispatch made while a
+//                notional budget stands at zero neither throws nor corrupts
+//                anything.
+//
+// PROVENANCE
+//   The distribution this relic inverts is the ported vanilla one: values
+//   `[2, 4]` at weights `[0.9, 0.1]`, from the single expression at
+//   js/game_manager.js L71 - randomness source #1 of exactly two in the vanilla
+//   codebase, the other being the spawn position at js/grid.js L41. The
+//   traceability row this suite evidences maps js/game_manager.js L71 onto
+//   `RulesConfig.spawn` of src/config/rules-config.ts together with the
+//   `spawn-value` substream of src/rng/rng-streams.ts.
+//
+//   The absent-position dispatch below is the boundary at js/grid.js L37-L43,
+//   where `randomAvailableCell` carries no else branch and so yields no cell.
+//
+//   The substream fan-out the cursor assertions here read is to be drawn as
+//   Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
+//   Substreams", in docs/architecture/data-flow.md. THAT DOCUMENT HAS NOT
+//   LANDED, so nothing below rests on it: src/rng/rng-streams.ts is the
+//   authority for the substream set, and the cursor expectations in this file
+//   are asserted against it directly.
+//
+//   Decision-log pointers, named only so each construct can be found from
+//   docs/DECISION_LOG.md: DL-SPAWN-01 for this family acting through the
+//   `onSpawn` payload alone, DL-SPAWN-02 for every handler draw coming from
+//   `relic-draw` while the engine's two spawn substreams stay untouched --
+//   which is the policy the cursor section below asserts -- DL-DRAW-02 for the
+//   two substreams a reward offer consumes, DL-RELIC-01 for relic behaviour
+//   living in hook-bound handlers, and DL-RNG-04 for the run seed fanned into
+//   four named substreams.
+//
+// THE HANDLER IS INVOKED DIRECTLY, through a `HookContext` this file builds
+// member by member from the shape src/engine/hooks.ts declares. The bus is not
+// involved here: the charge guard, the pickup-order dispatch and the
+// per-handler transaction are src/engine/hook-bus.ts mechanisms and
+// tests/unit/engine owns their suites, and the invariant that `Math.random` is
+// never patched belongs to tests/unit/rng. The assertion here reads this
+// handler's own source alone.
+//
+// SUBSTREAM READ BY THIS RELIC. The family contract states that every draw a
+// spawn-control handler takes comes from the `relic-draw` substream, and that
+// the two spawn substreams are the engine's own and are never addressed. The
+// cursor assertions below therefore expect `relic-draw` to advance by exactly
+// one per acting dispatch, and `spawn-value`, `spawn-position` and
+// `rarity-weight` to stand still. Recorded under DL-SPAWN-02.
 //
 // Every seed is a fixed literal. Nothing here reads a document, a clock,
 // `Math.random` or a timer, and this suite runs under `npm test` with no

@@ -84,12 +84,20 @@ import type {
   ScreenContext,
 } from '../screen-router';
 
+/* ==========================================================================
+ * 1. Names, selectors and layers
+ * ========================================================================== */
+
 /** Label naming this module in every report. */
 const REPORT_CONTEXT = 'run-start';
 
 /** State this screen renders, as both name unions spell it. */
 const SCREEN_NAME = 'runStart' as const;
 
+/**
+ * Container selector, read from `SCREEN_MOUNTS` rather than restated:
+ * index.html is the authority for it and the router resolves the same entry.
+ */
 const HOST_SELECTOR: string = SCREEN_MOUNTS[SCREEN_NAME];
 
 /** Logical name of the container mount, carried into every report. */
@@ -114,6 +122,10 @@ export const RUN_START_LAYER: number = zIndex.screenOverlay;
 /**
  * Attribute `focusInitial` resolves its marker step against, declared at
  * src/ui/a11y/focus-manager.ts as `FOCUS_INITIAL_ATTRIBUTE`.
+ *
+ * Written on the seed field, which is also the first focusable descendant, so
+ * the marker step of `focusInitial` and the first-focusable default of the
+ * router's focus trap resolve to one element. Decision DL-RUNSTART-02.
  */
 const FOCUS_MARKER_ATTRIBUTE = 'data-focus-initial';
 
@@ -299,6 +311,10 @@ export const runStartCopy = Object.freeze({
 /** The copy this screen renders, as `runStartCopy` declares it. */
 export type RunStartCopy = typeof runStartCopy;
 
+/* ==========================================================================
+ * 4. Public API
+ * ========================================================================== */
+
 /**
  * The part of src/input/input-manager.ts this screen invokes.
  *
@@ -441,6 +457,10 @@ export interface RunStartScreen extends Screen {
   beginRun(): RunStartBegin;
 }
 
+/* ==========================================================================
+ * 5. Construction
+ * ========================================================================== */
+
 /** The document, where there is one. */
 function readAmbientDocument(): Document | null {
   return typeof document === 'undefined' ? null : document;
@@ -498,6 +518,11 @@ interface RunStartElements {
 
 /**
  * Builds the screen's subtree, in the DOM order its focus contract requires.
+ *
+ * The seed field precedes every other focusable node, so the marker step of
+ * `focusInitial` and the first-focusable default of the router's focus trap
+ * resolve to the same element. Every class comes from style/_screens.scss and
+ * no colour, length, radius or duration is written here.
  *
  * @param owner Document the elements are created in.
  * @param copy The copy in force.
@@ -636,6 +661,10 @@ function readCount(value: number): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
+/* ==========================================================================
+ * 6. The screen
+ * ========================================================================== */
+
 /**
  * Builds the run-start screen.
  *
@@ -646,6 +675,7 @@ function readCount(value: number): number | null {
  *
  * @param options Ports, container, document, copy and report sink.
  * @returns The screen, whether or not a container resolved.
+ *
  * @example
  * ```ts
  * const runStart = createRunStartScreen({ input, announcer, preferences });
@@ -663,6 +693,7 @@ export function createRunStartScreen(
   const input = options.input ?? null;
   const announcer = options.announcer ?? null;
   const preferences = options.preferences ?? null;
+  /** Whether entry places focus, as `RunStartOptions.placeFocus` declares. */
   const placeFocusOnEntry = options.placeFocus !== false;
   const owner = options.document ?? readAmbientDocument();
   const announceOnEntry = options.announceEntry !== false;
@@ -738,6 +769,10 @@ export function createRunStartScreen(
       name: HOST_MOUNT,
     });
   };
+
+  /* ------------------------------------------------------------------------
+   * The subtree
+   * ---------------------------------------------------------------------- */
 
   /** Detaches every listener and removes the one node this module appended. */
   const teardownSubtree = (): void => {
@@ -867,6 +902,10 @@ export function createRunStartScreen(
     return true;
   };
 
+  /* ------------------------------------------------------------------------
+   * Writes
+   * ---------------------------------------------------------------------- */
+
   /**
    * Writes the seed notice, hiding it while it carries no text.
    *
@@ -989,6 +1028,9 @@ export function createRunStartScreen(
    * @param context The context in force, or `null` where none was supplied.
    */
   const placeFocus = (context: RunStartScreenContext | null): void => {
+    // Withheld placement is not a missing outlet: it is a composition saying
+    // its router owns entry focus, so it is not reported. Decision
+    // DL-RUNSTART-07.
     if (!placeFocusOnEntry) {
       return;
     }
@@ -1009,6 +1051,10 @@ export function createRunStartScreen(
       reducedMotion: readReducedMotion(context),
     });
   };
+
+  /* ------------------------------------------------------------------------
+   * Beginning a run
+   * ---------------------------------------------------------------------- */
 
   /**
    * Publishes the `startRun` action.

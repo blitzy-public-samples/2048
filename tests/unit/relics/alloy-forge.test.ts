@@ -3,7 +3,51 @@
 // fires on, the effect it produces, and its charge behaviour including an
 // invocation made at a spent budget.
 //
-// PROVENANCE of the arithmetic under test, from the vanilla merge branch.
+// The unit under test is the `alloy-forge` entry of `MERGE_MAGIC_FAMILY` in
+// src/relics/families/merge-magic.ts. Its handler is invoked directly, over a
+// `HookContext` assembled here from a fresh `RulesConfig`, a live `Grid`, the
+// run's named substreams and the run correlation identifier.
+// src/engine/hook-bus.ts owns the charge guard, the dispatch order and the
+// error isolation, and tests/unit/engine holds those mechanism suites.
+//
+// PROVENANCE of the arithmetic under test, from the vanilla merge branch:
+//
+//   js/game_manager.js L156  `next && next.value === tile.value &&
+//                            !next.mergedFrom`
+//                            -> `config.merge.canMerge`.
+//   js/game_manager.js L157  `new Tile(positions.next, tile.value * 2)`
+//                            -> `config.merge.produce`, the producer this
+//                               relic applies a SECOND time. Every expected
+//                               number below is computed by calling
+//                               `defaultProduceMergeValue`; none restates the
+//                               doubling as a literal.
+//   js/game_manager.js L167  `self.score += merged.value`
+//                            -> the payload's `scoreDelta`, dispatched equal
+//                               to `resultValue`.
+//   js/game_manager.js L170  `if (merged.value === 2048) self.won = true`
+//                            -> `config.winValue`. The win flag is resolved in
+//                               src/engine/terminal-state.ts and is asserted
+//                               in tests/unit/engine, not here.
+//
+// The dispatch driven here is the GENERIC compounding path: the bus hands each
+// handler the payload the previous one returned, in pickup order, so a second
+// `onMerge` handler transforms a payload a first has already transformed. That
+// path is to be drawn as Figure 5, "Hook Dispatch Sequence: Pickup-Order
+// Fan-Out with Charge Guard and Error Isolation", in
+// docs/architecture/hook-dispatch-sequence.md, and the turn steps it sits in as
+// Figure 4, "Turn Data Flow", in docs/architecture/data-flow.md. NEITHER
+// DOCUMENT HAS LANDED, and the figures name no relic when they do: their
+// participants are generic. src/engine/hook-bus.ts is the authority this suite
+// asserts against.
+//
+// Traceability row of docs/TRACEABILITY_MATRIX.md this suite is evidence for.
+// THAT DOCUMENT HAS NOT LANDED; the ordinal is RESERVED against it:
+//   TR-MERGE-02  the `alloy-forge` declaration and its `onMerge` binding
+//
+// Decisions this suite holds to the letter, argued in docs/DECISION_LOG.md and
+// named here only so the construct can be found from the log:
+//   DL-MERGE-01  all four merge-magic relics bound to `onMerge` alone
+//   DL-MERGE-02  `scoreDelta` transformed independently of `resultValue`
 //
 // This file reads no DOM, no clock and no storage, takes no unseeded
 // randomness, installs no timer and writes no log. It is collected by the

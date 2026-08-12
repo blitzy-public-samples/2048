@@ -128,6 +128,15 @@ export const tileGoldGlowColor = '#f3d774';
  * The neutral white point of the 2.5D lighting rig: the colour the key light
  * departs from before it warms toward a palette's halo, and the colour of the
  * fill light's sky half.
+ *
+ * The one token whose consumer is the renderer alone, and the one absent from
+ * `sassTokenProjection`: the stylesheet declares no light, so this token has no
+ * counterpart on the Sass side of the cross-check. It is the hex spelling of
+ * the unit channel Three's own `new Color()` produces, so the lighting
+ * arithmetic is unchanged by reading it from here. A palette
+ * states its own value through `ThemePalette.neutralLight`, and
+ * src/render/scene.ts holds this token as the fallback for an entry it cannot
+ * parse. Decision DL-TOKEN-07.
  */
 export const neutralLightColor = '#ffffff';
 

@@ -1,31 +1,11 @@
 // Contract suite for charge accounting, AAP R3: "relics with limited charges
 // must stop firing once exhausted", and "charge-based relics must handle being
-// invoked with ZERO charges remaining without throwing or corrupting run state".
+// invoked with ZERO charges remaining without throwing or corrupting run
+// state".
 //
-// WHY THIS SUITE EXISTS
-//   Both halves of the charge contract were present except the one that spends.
-//   The guard in src/engine/hook-bus.ts skipped a subscriber whose budget was
-//   spent, and `consumeCharge` could deduct one — but no production path ever
-//   called it, so the five relics that declare a finite budget (`frostbind` 8,
-//   `temporal-anchor` 3, `tumbler` 3, `culling-blade` 2, `scouring-wind` 1)
-//   fired for the whole run and their budgets were decoration.
-//
-//   A charge is now REQUESTED by the relic's own handler, on the one path where
-//   its effect takes hold, and deducted by the bus once that handler's return
-//   has been accepted. This suite pins the four properties that makes true:
-//
-//   exhaustion    each relic stops exactly at zero, and the budget never
-//                 underflows below it.
-//   atomicity     a handler that throws, or whose return is refused, spends
-//                 nothing.
-//   no no-ops     a dispatch that reached a handler which then changed nothing
-//                 spends nothing.
-//   persistence   the remaining budget reaches the registry's projection and
-//                 the run envelope, so a reload resumes with what is left.
-//
-// The relics are driven through a real `HookBus` with the real payloads the
-// engine dispatches, so the effect conditions each relic guards on are the ones
-// exercised rather than simulated.
+// A charge is now REQUESTED by the relic's own handler, on the one path where
+// its effect takes hold, and deducted by the bus once that handler's return
+// has been accepted. This suite pins the four properties that makes true.
 
 import { describe, expect, it } from 'vitest';
 
@@ -48,10 +28,6 @@ import {
 import { createRngStreams } from '../../../src/rng/rng-streams';
 import { RelicRegistry } from '../../../src/relics/relic-registry';
 
-/* ==========================================================================
- * Harness
- * ========================================================================== */
-
 const CORRELATION_ID = 'charge-suite';
 
 const SEED = 'charge-seed';
@@ -73,16 +49,7 @@ interface Rig {
   readonly registry: RelicRegistry;
   readonly config: RulesConfig;
 
-  /**
-   * The dispatch environment for one board.
-   *
-   * The board is handed over as `HookEnvironment.grid`, because the bus
-   * substitutes the frozen view of THAT board for the one a payload carries
-   * before the first handler runs — which is what the engine does, since it
-   * dispatches the board it is resolving the move on. One `RngStreams` instance
-   * is shared across every environment the rig builds, so a relic's draws
-   * advance the run's sequence exactly as they do in a real run.
-   */
+  /** The dispatch environment for one board. */
   readonly env: (board: Grid) => HookEnvironment;
 }
 
@@ -177,10 +144,6 @@ function merge(x: number, y: number): MergeDispatchPayload {
   return { source, target, resultValue: 4, scoreDelta: 4 };
 }
 
-/* ==========================================================================
- * 1. Every finite budget is declared and seeded (AAP R3)
- * ========================================================================== */
-
 describe('the finite charge budgets', () => {
   it.each(CHARGED_RELICS)(
     'seeds $id with its declared $charges charges',
@@ -203,10 +166,6 @@ describe('the finite charge budgets', () => {
     );
   });
 });
-
-/* ==========================================================================
- * 2. frostbind: one charge per ledger toggle
- * ========================================================================== */
 
 describe('frostbind spends one charge per merge it frosts', () => {
   it('spends exactly one charge per merge and stops at zero', () => {
@@ -248,10 +207,10 @@ describe('frostbind spends one charge per merge it frosts', () => {
 
     bus.dispatch('onMerge', merge(0, 0), env(board));
 
-    // THE STAGE BINDING RE-INSTALLS THE MERGE RULE and touches nothing else: the
-    // goal it was handed resolves exactly as it arrived, and the frost standing
-    // from the stage before is carried across as the recorded predicate. The
-    // installation is not the relic's effect, so it asks for no charge.
+    // The stage binding re-installs the merge rule and touches nothing else:
+    // the goal it was handed resolves exactly as it arrived, and the frost
+    // standing from the stage before is carried across as the recorded
+    // predicate.
     const carried = bus.dispatch('onStageStart', stage, env(board));
 
     expect(carried.payload.goal.target).toBe(stage.goal.target);
@@ -300,8 +259,6 @@ describe('frostbind spends one charge per merge it frosts', () => {
     expect(persisted[0].id).toBe('frostbind');
     expect(persisted[0].charges).toBe(6);
 
-    // A run resumed from that entry continues from what was left rather than
-    // from the declaration's own budget.
     const resumed = new RelicRegistry({
       bus: createHookBus({ correlationId: CORRELATION_ID }),
     });
@@ -312,10 +269,6 @@ describe('frostbind spends one charge per merge it frosts', () => {
   });
 });
 
-/* ==========================================================================
- * 3. temporal-anchor: one charge per withdrawal
- * ========================================================================== */
-
 describe('temporal-anchor spends one charge per withdrawn move', () => {
   it('spends nothing while the board still has an empty cell', () => {
     const { bus, env } = rig('temporal-anchor');
@@ -323,8 +276,6 @@ describe('temporal-anchor spends one charge per withdrawn move', () => {
 
     open.insertTile(new Tile({ x: 0, y: 0 }, 2));
 
-    // The anchor is recorded on the settled board, which is bookkeeping rather
-    // than the relic's effect.
     bus.dispatch('onAfterMove', afterMove(open), env(open));
 
     const allowed = bus.dispatch('onBeforeMove', beforeMove(open), env(open));
@@ -336,13 +287,11 @@ describe('temporal-anchor spends one charge per withdrawn move', () => {
   it('spends one charge per withdrawal and stops at zero', () => {
     const { bus, env } = rig('temporal-anchor');
 
-    // ONE ANCHOR PER WITHDRAWAL. The rewind RESTORES the recorded lattice and
+    // One anchor per withdrawal. The rewind RESTORES the recorded lattice and
     // consumes the anchor with it, so each withdrawal needs its own preceding
-    // settle — which is exactly the sequence a run produces: a move settles, the
-    // next move finds the board jammed, and the anchor rewinds it.
+    // settle — which is exactly the sequence a run produces: a move settles,
+    // the next move finds the board jammed, and the anchor rewinds it.
     for (let spent = 0; spent < 3; spent += 1) {
-      // ANCHORED ON THE LAST POSITION WITH ROOM, because an anchor taken on a
-      // jammed board would restore the board the player is already stuck on.
       const roomy = boardWith(4, 2);
 
       bus.dispatch('onAfterMove', afterMove(roomy), env(roomy));
@@ -396,10 +345,6 @@ describe('temporal-anchor spends one charge per withdrawn move', () => {
   });
 });
 
-/* ==========================================================================
- * 4. tumbler and culling-blade: one charge per redirected move
- * ========================================================================== */
-
 describe('tumbler spends one charge per redirected move', () => {
   it('spends only where at least one tile was actually relocated', () => {
     const { bus, env } = rig('tumbler');
@@ -417,7 +362,7 @@ describe('tumbler spends one charge per redirected move', () => {
         env(scarce),
       );
 
-      // THE TUMBLE IS A BOARD WRITE, not a redirection: the move the player
+      // The tumble is A BOARD WRITE, not a redirection: the move the player
       // pressed resolves as pressed, against the tumbled board.
       expect(result.payload.direction).toBe(DIRECTION_UP);
       expect(result.payload.cancelled).toBe(false);
@@ -430,8 +375,6 @@ describe('tumbler spends one charge per redirected move', () => {
       expect(chargesOf(bus, 'tumbler')).toBe(budget);
     }
 
-    // At least one tumble landed, so the assertion above measured a spend rather
-    // than only the absence of one.
     expect(relocations).toBeGreaterThan(0);
   });
 
@@ -484,16 +427,13 @@ describe('culling-blade spends one charge per excision', () => {
       env(armed),
     );
 
-    // THE EXCISION IS A REMOVAL, not a turn: the direction the player pressed is
-    // untouched and the move resolves against the thinned board.
+    // The excision is A REMOVAL, not a turn: the direction the player pressed
+    // is untouched and the move resolves against the thinned board.
     expect(excised.payload.direction).toBe(DIRECTION_LEFT);
     expect(excised.effectsApplied).toBe(1);
     expect(armed.availableCells().length).toBe(before + 1);
     expect(chargesOf(bus, 'culling-blade')).toBe(1);
 
-    // RE-ARMED, because the excision above left five of the lowest value on the
-    // board and the blade arms at six: a run reaches its second excision after
-    // further spawns have piled up again, not on the thinned board itself.
     const rearmed = boardWith(6, 2);
 
     bus.dispatch(
@@ -525,8 +465,6 @@ describe('culling-blade spends one charge per excision', () => {
       env(armed),
     ).payload.direction;
 
-    // A second rig, pressed in the direction the blade would have chosen: the
-    // blade has nothing to turn, so it spends nothing.
     const fresh = rig('culling-blade');
     const unchanged = fresh.bus.dispatch(
       'onBeforeMove',
@@ -582,8 +520,8 @@ describe('scouring-wind spends its single charge on the row it records', () => {
     expect(exhausted.skipped).toBe(1);
     expect(chargesOf(bus, 'scouring-wind')).toBe(0);
 
-    // The state the one sweep recorded is intact: an exhausted relic is skipped,
-    // not reset.
+    // The state the one sweep recorded is intact: an exhausted relic is
+    // skipped, not reset.
     expect(registry.serialize()[0]).toEqual({
       id: 'scouring-wind',
       charges: 0,
@@ -591,10 +529,6 @@ describe('scouring-wind spends its single charge on the row it records', () => {
     });
   });
 });
-
-/* ==========================================================================
- * 6. Zero charges, and a restored budget of zero (AAP R3 edge case)
- * ========================================================================== */
 
 describe('a relic restored with zero charges', () => {
   it.each(CHARGED_RELICS)(
@@ -668,10 +602,6 @@ describe('a relic restored with zero charges', () => {
   });
 });
 
-/* ==========================================================================
- * 7. The spend is part of the handler's transaction
- * ========================================================================== */
-
 describe('a requested charge is spent only with an adopted return', () => {
   it('spends nothing when the handler throws after asking', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
@@ -713,8 +643,8 @@ describe('a requested charge is spent only with an adopted return', () => {
         onStageEnd: (_payload, context): never => {
           context.spendCharge();
 
-          // Not this hook's payload, so the bus discards the whole
-          // transaction — the charge with it.
+          // Not this hook's payload, so the bus discards the whole transaction
+          // — the charge with it.
           return { nothing: 'like a payload' } as never;
         },
       },

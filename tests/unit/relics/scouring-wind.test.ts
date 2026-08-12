@@ -1,6 +1,8 @@
 // The isolation suite for the `board-manipulation` relic `scouring-wind`, the
-// line clear. Three properties, one section apiece: the hooks it fires on, the
-// effect it produces, and the charge budget it carries.
+// COLUMN clear — one column being a single `x` across every `y`, the outer
+// index of the x-major `cells[x][y]` store. Three properties, one section
+// apiece: the hooks it fires on, the effect it produces, and the charge budget
+// it carries.
 //
 // Five relics of the catalogue declare a charge budget — `frostbind` of
 // `merge-magic`, and `temporal-anchor`, `tumbler`, `culling-blade` and
@@ -34,15 +36,19 @@
 //                               src/engine/terminal-state.ts
 //   js/tile.js        L2-L3     a tile flattens its position onto `x` and `y`
 //
-// Traceability rows this suite evidences, per docs/TRACEABILITY_MATRIX.md:
+// Traceability row this suite is evidence for. docs/TRACEABILITY_MATRIX.md HAS
+// NOT LANDED; the ordinal is RESERVED against it:
 //   TR-BOARD-04 `scouring-wind` on `onAfterMove`, and the four `js/grid.js`
 //   anchors above together with js/game_manager.js L238-L268.
 //
-// Named figures these sections map onto: Figure 5, "Hook Dispatch Sequence"
-// (docs/architecture/hook-dispatch-sequence.md) for the charge-guard path the
-// budget section exercises, and Figure 4, "Turn Data Flow"
-// (docs/architecture/data-flow.md) for the `Moves available?` decision node the
-// terminal-board case exercises.
+// Named figures, PLANNED AND NOT LANDED.
+// docs/architecture/hook-dispatch-sequence.md is to carry Figure 5, "Hook
+// Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard and Error
+// Isolation", which will draw the charge-guard path this suite's budget section
+// exercises, and docs/architecture/data-flow.md is to carry Figure 4, "Turn
+// Data Flow", with the `Moves available?` decision node the terminal-board case
+// exercises. The assertions below rest on the sources named above, not on
+// either figure.
 //
 // Decisions: DL-BOARD-01, DL-BOARD-02 (docs/DECISION_LOG.md).
 //
@@ -57,8 +63,10 @@
 //
 // Rule 3: every context carries the run correlation identifier, and every bus
 // is built with the injected `NOOP_ENGINE_REPORTER`. Nothing here reads a
-// document, a clock, a network or `console`, so the suite runs under the `test`
-// script in the DOM-free vitest project.
+// document, a clock, a network or `console`, so the suite runs under the
+// `test` script in the DOM-free vitest project.
+//
+// Decisions: DL-BOARD-01, DL-BOARD-02 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -110,10 +118,6 @@ import {
   createNearLossBoard,
 } from '../../fixtures/boards';
 
-/* ==========================================================================
- * 1. Harness
- * ========================================================================== */
-
 /** Identifier of the relic under test. */
 const RELIC_ID = 'scouring-wind';
 
@@ -135,7 +139,6 @@ const CORRELATION_ID = 'run-scouring-wind-suite';
 /** Fixed seed every substream table below is derived from. */
 const SEED = 'scouring-wind-suite-seed';
 
-/** A second fixed seed, used to show the sweep ignores randomness. */
 const ALTERNATE_SEED = 'scouring-wind-suite-other-seed';
 
 /** Identifier of the subscriber that hands the handler a live context. */
@@ -143,9 +146,6 @@ const PROBE_ID = 'scouring-wind-probe';
 
 /**
  * Face value placed at (0, 0) to leave a full board with no mergeable pair.
- *
- * The near-loss fixture cycles the values 2, 4, 8, 16 and 32, so this value
- * matches no neighbour at any board size. Each use asserts that.
  */
 const ISOLATING_VALUE = 4096;
 
@@ -171,9 +171,6 @@ const DECLARED_MEMBERS: readonly string[] = Object.freeze([
 /**
  * The declaration reduced to comparable data, hook names included.
  *
- * Read without `expect`, so it can be taken at module scope before any test
- * runs and compared against again once every test has.
- *
  * @returns The declaration's data members as one string.
  */
 function declarationSnapshot(): string {
@@ -196,8 +193,7 @@ const SHIPPED_DECLARATION = declarationSnapshot();
 /**
  * Resolves the relic out of the real catalogue.
  *
- * @returns The declaration. Fails the case where the catalogue carries no such
- *   identifier, so a rename fails loudly rather than silently skipping.
+ * @returns The declaration.
  */
 function relicUnderTest(): Relic {
   const found = findRelicById(RELIC_ID);
@@ -223,9 +219,6 @@ function boundHandler(): HookHandler<'onAfterMove'> {
 /**
  * A handler's source with every comment removed.
  *
- * Line and block comments are stripped, so an absence check below matches
- * against the code a handler runs and not against the prose around it.
- *
  * @param handler Handler to read.
  * @returns The handler's source, comments replaced by single spaces.
  */
@@ -247,9 +240,6 @@ interface Rig {
 /**
  * Builds a live grid from a fixture board.
  *
- * `Grid.fromState` reads `state[x][y]`, so the CELL MATRIX is what a grid is
- * restored from, not the whole `{ size, cells }` record.
- *
  * @param board Fixture board, freshly built and unfrozen.
  * @returns A live grid holding that board's tiles.
  */
@@ -259,10 +249,6 @@ function gridOf(board: SerializedGameState): Grid {
 
 /**
  * Builds a rig around one board, with nothing registered on its bus.
- *
- * The rules are a fresh `createDefaultRulesConfig()` per call — never the
- * deep-frozen `DEFAULT_RULES_CONFIG` — with `boardSize` reconciled to the
- * board's own edge length.
  *
  * @param grid Board the dispatch resolves against.
  * @param seed Run seed the substreams are derived from.
@@ -292,8 +278,8 @@ function harnessOn(grid: Grid, seed: string = SEED): Rig {
  * Registers the catalogue relic on a rig's bus.
  *
  * @param rig Rig to register on.
- * @param charges Budget to register under. `UNLIMITED` registers a subscriber
- *   the bus never charge-guards.
+ * @param charges Budget to register under. `UNLIMITED` registers a
+ *   subscriber the bus never charge-guards.
  */
 function hold(rig: Rig, charges: number | undefined): void {
   const definition = relicUnderTest();
@@ -310,9 +296,6 @@ function hold(rig: Rig, charges: number | undefined): void {
 
 /**
  * Builds a rig with the relic already held under one budget.
- *
- * `charges` carries no default. `UNLIMITED` is one of the values this
- * parameter accepts, and a default would resolve it to the declared budget.
  *
  * @param grid Board the dispatch resolves against.
  * @param charges Budget to register under.
@@ -411,14 +394,6 @@ interface DirectCall {
 /**
  * Invokes the handler inside a live dispatch, under a NOTIONAL budget.
  *
- * A probe subscriber is what opens a real transaction — the live effect
- * queue, the live randomness fork and a live state copy — so the handler is
- * called with the collaborators a dispatch actually hands it. `charges` on
- * the context it reads is the value named here, which is how a zero and a
- * negative budget are put in front of a handler the bus would otherwise have
- * skipped. The bus's own skip is asserted under tests/unit/engine/ and is not
- * re-proved here.
- *
  * @param rig Rig to dispatch on. Its bus must hold no other subscriber.
  * @param charges Budget the context reports.
  * @param score Score the payload carries.
@@ -443,9 +418,9 @@ function invokeDirectly(
         onAfterMove: (payload, context): AfterMovePayload => {
           const notional: HookContext = { ...context, charges };
 
-          // The bus contains a throw raised inside a handler, so an
-          // assertion made here would go unreported; both values are recorded
-          // and asserted after the dispatch returns.
+          // The bus contains a throw raised inside a handler, so an assertion
+          // made here would go unreported; both values are recorded and
+          // asserted after the dispatch returns.
           observedCharges = notional.charges;
           observedCorrelationId = notional.correlationId;
 
@@ -465,8 +440,6 @@ function invokeDirectly(
 
   const result = sweep(rig, score);
 
-  // The probe itself returned normally, so a contained failure here would be
-  // this harness rather than the unit under test, whose throw `threw` records.
   expect(result.invoked).toBe(1);
   expect(result.failed).toBe(0);
   expect(result.rejected).toBe(0);
@@ -630,13 +603,6 @@ function valuesAt(grid: Grid, cells: readonly Position[]): number[] {
 /**
  * Asserts a board is internally consistent.
  *
- * Five checks: the matrix is square; every slot holds a `Tile` or `null`; every
- * occupant's own `x` and `y` match the slot it sits in, which is the pairing
- * js/grid.js L89-L95 wrote and js/tile.js L2-L3 flattened; no tile occupies two
- * slots; a read outside the lattice answers `null` as js/grid.js L80-L86 did;
- * the snapshot js/grid.js L102-L117 writes round-trips through `Grid`; and no
- * surviving tile carries a `mergedFrom` pair standing on an emptied cell.
- *
  * @param grid Board to check.
  */
 function expectCoherentLattice(grid: Grid): void {
@@ -743,8 +709,6 @@ function terminalBoard(size: number): Grid {
   clearCell(grid, ORIGIN);
   place(grid, ORIGIN, ISOLATING_VALUE);
 
-  // Asserted rather than assumed: the replacement matches neither orthogonal
-  // neighbour, which is what leaves the board with no mergeable pair at all.
   expect(grid.cellContent({ x: 1, y: 0 })?.value).not.toBe(ISOLATING_VALUE);
   expect(grid.cellContent({ x: 0, y: 1 })?.value).not.toBe(ISOLATING_VALUE);
 
@@ -782,10 +746,6 @@ beforeEach((): void => {
   baseline = holding(oneFullRowBoard(), DECLARED_CHARGES);
 });
 
-/* ==========================================================================
- * 2. Property one: it fires on onAfterMove and on no other hook
- * ========================================================================== */
-
 describe('scouring-wind is declared as the fourth board-manipulation relic',
   () => {
     it('is the entry at position 3 of the family, and the same object the '
@@ -796,8 +756,6 @@ describe('scouring-wind is declared as the fourth board-manipulation relic',
       expect(family.relics).toHaveLength(FAMILY_SIZE);
       expect(family.relics[FAMILY_POSITION]?.id).toBe(RELIC_ID);
 
-      // One object, not two copies: the catalogue freezes the family's own
-      // declarations in place rather than adopting copies of them.
       expect(findRelicById(RELIC_ID)).toBe(family.relics[FAMILY_POSITION]);
     });
 
@@ -922,7 +880,8 @@ describe('the sweep empties every tile at the selected y across all x', () => {
       expect(baseline.grid.cellContent(cell)).toBeNull();
     }
 
-    // js/grid.js L45-L55 collects the empty cells; every swept cell is now one.
+    // js/grid.js L45-L55 collects the empty cells; every swept cell is now
+    // one.
     expect(baseline.grid.availableCells()).toEqual(
       expect.arrayContaining(swept),
     );
@@ -1211,9 +1170,7 @@ describe('the sweep empties every tile at the selected y across all x', () => {
     + 'carrying the verdict on its own', () => {
     const rig = holding(gridOf(createNearLossBoard()), DECLARED_CHARGES);
 
-    // js/game_manager.js L238-L240 is a two-part check. The fixture is full, so
-    // its first half is false and its single adjacent equal pair — (0, 0) and
-    // (1, 0) — is what the second half answers on.
+    // js/game_manager.js L238-L240 is a two-part check.
     expect(rig.grid.cellsAvailable()).toBe(false);
     expect(movesAvailable(rig.grid, rig.config)).toBe(true);
 
@@ -1229,15 +1186,15 @@ describe('the sweep empties every tile at the selected y across all x', () => {
     + 'exported movesAvailable', () => {
     const rig = holding(terminalBoard(DEFAULT_BOARD_SIZE), DECLARED_CHARGES);
 
-    // js/game_manager.js L238-L240 is `cellsAvailable()` or
-    // `tileMatchesAvailable()`. The board is full and holds no mergeable pair,
-    // so both halves are false.
+    // js/game_manager.js L238-L240 is `cellsAvailable` or
+    // `tileMatchesAvailable`.
     expect(rig.grid.cellsAvailable()).toBe(false);
     expect(movesAvailable(rig.grid, rig.config)).toBe(false);
 
     sweep(rig);
 
-    // Figure 4's `Moves available?` node, on the board the clear left behind.
+    // The loss probe the planned Figure 4 draws as `Moves available?`, read on
+    // the board the clear left behind.
     expect(rig.grid.cellsAvailable()).toBe(true);
     expect(movesAvailable(rig.grid, rig.config)).toBe(true);
     expect(rig.grid.availableCells()).toHaveLength(rig.grid.size);
@@ -1313,10 +1270,6 @@ for (const size of [3, 5]) {
   });
 }
 
-/* ==========================================================================
- * 5. Property three: the charge budget, including the zero-charge case
- * ========================================================================== */
-
 describe('the declared charge budget', () => {
   it('is present on the declaration, finite, and above zero', () => {
     const charges = relicUnderTest().charges;
@@ -1331,8 +1284,9 @@ describe('the declared charge budget', () => {
     + 'charge instead', () => {
     const code = handlerCode(boundHandler());
 
-    // The guard and the decrement live in src/engine/hook-bus.ts, which is
-    // Figure 5's charge-guard path; a handler asks and the bus decides.
+    // The guard and the decrement live in src/engine/hook-bus.ts, the module
+    // the planned Figure 5 draws as its charge-guard path: a handler asks and
+    // the bus decides.
     expect(code).not.toContain('charges');
     expect(code).toContain('spendCharge(');
   });
@@ -1852,10 +1806,6 @@ describe('the row the sweep selects is fixed by the board alone', () => {
     expect(code).not.toContain('setTimeout');
   });
 });
-
-/* ==========================================================================
- * 7. The catalogue declaration is left as it shipped
- * ========================================================================== */
 
 describe('the catalogue declaration after every dispatch above', () => {
   it('is unchanged, still frozen, and still declares one charge', () => {

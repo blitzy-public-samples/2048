@@ -39,6 +39,14 @@
 //   TR-BOARD-04  scouring-wind     onAfterMove
 //   TR-BOARD-05  the frozen `BOARD_MANIPULATION_FAMILY` export
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, in declaration
+// order, all target-only because no vanilla construct declared a relic:
+//   TR-BOARD-01  temporal-anchor   onBeforeMove
+//   TR-BOARD-02  tumbler           onBeforeMove
+//   TR-BOARD-03  culling-blade     onAfterMove
+//   TR-BOARD-04  scouring-wind     onAfterMove
+//   TR-BOARD-05  the frozen `BOARD_MANIPULATION_FAMILY` export
+//
 // Decisions: DL-BOARD-01, DL-BOARD-02 (docs/DECISION_LOG.md).
 
 import type {

@@ -120,7 +120,9 @@ $summary-wash: rgba($tile-color, $summary-wash-alpha) !default;
   @include focusable;
 
   // The hover, activation and disabled states, from the shared mixin in
-  // style/_a11y.scss.
+  // style/_a11y.scss — the same one style/main.scss's `button` mixin, the
+  // shared screen control and the relic-tray control include, so the states
+  // cannot drift between the four surfaces.
   @include interactive-states;
 }
 
