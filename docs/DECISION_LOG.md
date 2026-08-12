@@ -1224,7 +1224,7 @@ explain a choice, it cites an identifier here instead of restating the argument:
 the rows behind its own constructs, and `docs/OBSERVABILITY.md` cites the four
 substitution rows. `docs/TRACEABILITY_MATRIX.md` answers a
 different question — which pre-migration construct became which module — in a
-namespace of its own: **554 distinct `TR-*` rows**, each cited by the one file
+namespace of its own: **569 distinct `TR-*` rows**, each cited by the one file
 that owns it, and no row of it restates an argument made here.
 
 One documented fact recorded here so it is not rediscovered as a bug: the

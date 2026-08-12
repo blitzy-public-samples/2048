@@ -17,6 +17,31 @@
 // Ported from index.html L7, the <link> to the committed generated CSS,
 // replaced by the stylesheet import below.
 //
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
+// this module's area enumerated:
+//   TR-MAIN-01  js/application.js L1-L2, L4  the one-animation-frame deferral,
+//                                            reproduced by `bootstrap()`
+//   TR-MAIN-02  js/application.js L3         the constructor injection,
+//                                            reproduced by `start()`, with the
+//                                            board-size literal now read from
+//                                            src/config/default-config.ts
+//   TR-MAIN-03  js/game_manager.js L3-L5     the three collaborators built
+//                                            from injected constructors, now
+//                                            the peers `start()` builds
+//   TR-MAIN-04  js/game_manager.js L9-L11    the `move`, `restart` and
+//                                            `keepPlaying` subscriptions,
+//                                            extended with the screen-flow
+//                                            and relic actions
+//   TR-MAIN-05  js/game_manager.js L13       `setup()` called last, now
+//                                            `RunController.openEngineBoard()`
+//   TR-MAIN-06  index.html L7                the <link> to the committed
+//                                            generated stylesheet, replaced by
+//                                            the style/main.scss import
+//   TR-MAIN-07  target-only row              the renderer, relic registry, run
+//                                            controller and observability
+//                                            peers subscribed to the shared
+//                                            event channel
+//
 // Decisions behind this file are argued in docs/DECISION_LOG.md; the ids are
 // named beside the constructs they belong to. DL-MAIN-01 to DL-MAIN-14 are
 // this file's own rows.

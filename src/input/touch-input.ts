@@ -13,11 +13,11 @@
  *                                              `detectPointerEventFamily` and
  *                                              `POINTER_EVENT_FAMILY`
  *   TR-TOUCH-02  js/keyboard_input_manager.js  the touchstart handler, ported as
- *                L96-L112                      the gesture start
+ *                L80-L95                       the gesture start
  *   TR-TOUCH-03  js/keyboard_input_manager.js  the touchmove handler, ported as
- *                L114-L117                     the default-prevention branch
+ *                L97-L99                       the default-prevention branch
  *   TR-TOUCH-04  js/keyboard_input_manager.js  the touchend handler and its
- *                L119-L137                     10px threshold, ported as the
+ *                L101-L127                     10px threshold, ported as the
  *                                              resolved swipe and
  *                                              `SWIPE_THRESHOLD_PX`
  *   TR-TOUCH-05  target-only row               `attachTouchInput`, its guarded

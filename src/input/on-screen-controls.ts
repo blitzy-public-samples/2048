@@ -15,7 +15,7 @@
 //                             order
 //   TR-CONTROL-02  L140-L144  `bindButtonPress`, its selector lookup and its
 //                             `'click'` listener
-//   TR-CONTROL-03  L145-L149  `bindButtonPress`'s resolved touch-end listener
+//   TR-CONTROL-03  L143       `bindButtonPress`'s resolved touch-end listener
 //   TR-CONTROL-04  target-only row  the generated `<button>` per action of
 //                                   `INPUT_ACTIONS`
 //   TR-CONTROL-05  target-only row  `MarkupControlBinding.contexts` and the

@@ -27,7 +27,7 @@
  *                                              elements this module orders and
  *                                              contains
  *   TR-FOCUS-02  js/keyboard_input_manager.js  the unguarded control lookups,
- *                L139-L141                     resolved here through the
+ *                L141                          resolved here through the
  *                                              guarded resolver of ./settings
  *   TR-FOCUS-03  target-only row               `collectFocusable`,
  *                                              `FOCUSABLE_SELECTORS` and the

@@ -33,8 +33,10 @@
 // docs/TRACEABILITY_MATRIX.md:
 //   TR-MOVE-01  L113-L120 prepareTiles()         -> prepareTiles()
 //   TR-MOVE-02  L123-L127 moveTile()             -> moveTile()
-//   TR-MOVE-03  L138-L143 vector, traversals and -> resolveMove()
-//   TR-MOVE-04  L146-L180 traversal walk and     -> resolveMove()
+//   TR-MOVE-03  L138-L143 vector, traversal and  -> resolveMove()
+//              prepareTiles preamble
+//   TR-MOVE-04  L146-L180 traversal walk, merge -> resolveMove()
+//              branch and moved test
 //   TR-MOVE-05  L194-L204 getVector()            -> vectorForDirection()
 //   TR-MOVE-06  L207-L220 buildTraversals()      -> buildTraversals()
 //   TR-MOVE-07  L222-L236 findFarthestPosition() -> findFarthestPosition()

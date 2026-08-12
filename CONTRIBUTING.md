@@ -206,7 +206,7 @@ merged.
    | `ANNOUNCE` | `src/ui/a11y/engine-announcer.ts` |
    | `SETTINGS` | `src/ui/a11y/settings.ts` |
    | `A11Y` | `src/ui/a11y/**`, `style/_a11y.scss` |
-   | `AUDIO` | `src/audio/sound-engine.ts`, `src/audio/sound-map.ts` |
+   | `AUDIO` | `src/audio/sound-engine.ts`, `src/audio/sound-map.ts`, `src/config/audio-bounds.ts` |
    | `LOG` | `src/observability/logger.ts` |
    | `METRIC` | `src/observability/metrics.ts` |
    | `TRACE` | `src/observability/tracer.ts` |

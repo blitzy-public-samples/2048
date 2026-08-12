@@ -17,8 +17,8 @@
  * this module's area enumerated:
  *   TR-SETTINGS-01  js/html_actuator.js L2-L5     the four unguarded lookups,
  *                                                 replaced by `resolveMount`
- *   TR-SETTINGS-02  js/keyboard_input_manager.js  the four unguarded lookups,
- *                   L96, L139-L141                replaced by `resolveMounts`
+ *   TR-SETTINGS-02  js/keyboard_input_manager.js  the unguarded host lookups,
+ *                   L78, L141                     replaced by `resolveMounts`
  *                                                 and `isMountComplete`
  *   TR-SETTINGS-03  js/keyboard_input_manager.js  the appended callback list
  *                   L18-L32                       iterated synchronously,

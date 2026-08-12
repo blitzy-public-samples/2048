@@ -12,7 +12,14 @@
  * between them.
  *
  * Nothing here is ported. js/ plays no sound and exposes no volume, so these
- * are target-only rows of docs/TRACEABILITY_MATRIX.md.
+ * are target-only rows of docs/TRACEABILITY_MATRIX.md, one apiece, every row
+ * this file owns enumerated:
+ *   TR-AUDIO-08  target-only row  `MIN_VOLUME`, the silence bound
+ *   TR-AUDIO-09  target-only row  `MAX_VOLUME`, the unattenuated bound
+ *   TR-AUDIO-10  target-only row  `DEFAULT_VOLUME`, the volume in force
+ *                                 before anything is chosen
+ *   TR-AUDIO-11  target-only row  `DEFAULT_MUTED`, the mute state before
+ *                                 anything is chosen
  */
 
 /** Lowest accepted volume: silence. */

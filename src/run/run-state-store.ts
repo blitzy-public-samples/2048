@@ -9,9 +9,9 @@
  *
  * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
  * this module's area enumerated:
- *   TR-RUNSTORE-01  js/local_storage_manager.js L47-L50  the unguarded
- *                   `JSON.parse` of the stored snapshot, replaced by `load()`,
- *                   which returns a result for every input
+ *   TR-RUNSTORE-01  js/local_storage_manager.js L52-L55  the unguarded
+ *                   `JSON.parse` of the stored snapshot at L54, replaced by
+ *                   `load()`, which returns a result for every input
  *   TR-RUNSTORE-02  js/local_storage_manager.js L57-L59  the handler-free
  *                   `setItem`, replaced by `save()`, which returns `false` on
  *                   a failed write including an exhausted quota

@@ -13,7 +13,7 @@
 //   TR-TYPES-01  js/tile.js L19-L27       `SerializedTile`
 //   TR-TYPES-02  js/grid.js L102-L117     `SerializedGrid` and `CellMatrix`
 //   TR-TYPES-03  js/game_manager.js
-//                L226-L234                `SerializedGameState`
+//                L102-L110                `SerializedGameState`
 //   TR-TYPES-04  js/game_manager.js
 //                L194-L204                `Direction` and `Vector`
 //   TR-TYPES-05  js/local_storage_manager.js

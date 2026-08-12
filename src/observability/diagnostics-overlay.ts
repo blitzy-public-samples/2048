@@ -22,13 +22,14 @@
 //                                             sources this module reads
 //   TR-DIAG-04  style/main.scss L4-L22        the token block every style value
 //                                             below resolves to
-//   TR-DIAG-05  style/main.scss L217-L245     `.diagnostics-overlay:not([hidden])`,
+//   TR-DIAG-05  style/main.scss L211-L245,    `.diagnostics-overlay:not([hidden])`,
+//               as updated
 //                                             restated by the inline
 //                                             declarations from the same tokens
-//   TR-DIAG-06  style/_themes.scss L552-L562  the three diagnostics custom
-//                                             properties, each consumed with a
+//   TR-DIAG-06  style/_themes.scss L126-L128, the three `diagnostics-*` palette
+//               as updated                    entries, each consumed with a
 //                                             token fallback
-//   TR-DIAG-07  index.html L105               `#diagnostics-overlay`, adopted
+//   TR-DIAG-07  index.html L127, as updated   `#diagnostics-overlay`, adopted
 //                                             where the markup declares it
 //   TR-DIAG-08  target-only row               the four panels, the Prometheus
 //                                             text export and the combined JSON

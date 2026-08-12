@@ -17,11 +17,12 @@
 //                                               table keyed on
 //                                               `KeyboardEvent.key` and
 //                                               `KeyboardEvent.code`
-//   TR-KEYMAP-02  js/keyboard_input_manager.js  the three event names, ported
-//                 L9-L11, L54-L70               as `INPUT_EVENT_NAMES` and
+//   TR-KEYMAP-02  js/keyboard_input_manager.js  the three emitted event
+//                 L61, L132, L137               names, ported as
+//                                               `INPUT_EVENT_NAMES` and
 //                                               `InputEventPayload`
-//   TR-KEYMAP-03  js/game_manager.js L104-L116  the direction encoding
-//                                               0 up / 1 right / 2 down /
+//   TR-KEYMAP-03  js/game_manager.js L131,      the direction encoding
+//                 L196-L201                     0 up / 1 right / 2 down /
 //                                               3 left, declared here as
 //                                               `Direction`
 //   TR-KEYMAP-04  target-only row               `INPUT_ACTIONS`, `MoveAction`
