@@ -47,40 +47,6 @@
  *                                                 `serializePreferences` and
  *                                                 `deserializePreferences`
  *
- * One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
- * this module's area enumerated:
- *   TR-SETTINGS-01  js/html_actuator.js L2-L5     the four unguarded lookups,
- *                                                 replaced by `resolveMount`
- *   TR-SETTINGS-02  js/keyboard_input_manager.js  the four unguarded lookups,
- *                   L96, L139-L141                replaced by `resolveMounts`
- *                                                 and `isMountComplete`
- *   TR-SETTINGS-03  js/keyboard_input_manager.js  the appended callback list
- *                   L18-L32                       iterated synchronously,
- *                                                 ported as `PreferenceStore`
- *                                                 subscription with
- *                                                 per-listener error isolation
- *   TR-SETTINGS-04  js/local_storage_manager.js   the discarded caught value,
- *                   L37                           replaced by the injected
- *                                                 `UiReporter` and
- *                                                 `createSafeUiReporter`
- *   TR-SETTINGS-05  target-only row               the reduced-motion surface:
- *                                                 `REDUCED_MOTION_QUERY`,
- *                                                 `queryReducedMotionPreference`,
- *                                                 `resolveEffectiveReducedMotion`
- *                                                 and the three-state
- *                                                 `MotionSetting`
- *   TR-SETTINGS-06  target-only row               `UiPreferences`,
- *                                                 `PREFERENCE_KEYS` and
- *                                                 `createPreferenceStore`
- *   TR-SETTINGS-07  target-only row               `reflectReducedMotion` and
- *                                                 `readReflectedReducedMotion`
- *   TR-SETTINGS-08  target-only row               `isValidVolume`,
- *                                                 `clampVolume` and
- *                                                 `NumberOnlyForce`
- *   TR-SETTINGS-09  target-only row               `PreferencesPayload`,
- *                                                 `serializePreferences` and
- *                                                 `deserializePreferences`
- *
  * Decisions: DL-SETTINGS-01, DL-SETTINGS-02, DL-SETTINGS-03, DL-SETTINGS-04,
  * DL-SETTINGS-05, DL-SETTINGS-06, DL-THEME-01, DL-THEME-02
  * (docs/DECISION_LOG.md).

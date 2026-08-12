@@ -3,875 +3,3703 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>2048 Roguelike — Client Observability Dashboard</title>
+    <title>2048 Roguelike — client observability dashboard</title>
 
     <!--
-      The server-free half of the Rule 3 dashboard template. It parses the
-      Prometheus text exported by src/observability/metrics.ts and draws the same
-      panels docs/dashboards/dashboard.json declares, as inline SVG.
+      The static half of the dashboard template. Its sibling
+      docs/dashboards/dashboard.json is the Grafana-compatible half; the two are
+      two forms of one template and declare the same series.
 
-      NO network access, NO data source, NO build step: open this file from disk,
-      load a game2048-metrics.prom exported by the diagnostics overlay's
-      "Export metrics" control, and the panels populate from it. A small built-in
-      sample renders before any file is chosen so the page is never blank.
+      WHAT THIS FILE IS, MECHANICALLY:
 
-      See docs/OBSERVABILITY.md section 7.
+      * It is OUTSIDE THE VITE ENTRY GRAPH. vite.config.ts declares no
+        `build.rollupOptions.input` and sets `publicDir: false`, so the whole of
+        that graph is the root index.html and nothing copies docs/ verbatim.
+        This file is never bundled, never transformed, never served by the dev
+        server, and absent from dist/.
+      * It loads NOTHING. No stylesheet, no script, no font, no image, no CDN,
+        no `fetch`. The CSS and the JavaScript below are the whole of it, so it
+        opens from a file:// URL and from any static host identically.
+      * It reads an export you supply. `fetch` against a file:// document is
+        refused by the browser's origin rules, so a snapshot arrives through the
+        file picker, the drop zone or the paste box — never over the wire.
+
+      WHAT IT PARSES — three forms, all written by
+      src/observability/metrics.ts and src/observability/diagnostics-overlay.ts:
+
+        game2048-metrics.prom        the Prometheus text of
+                                    `MetricsRegistry.toPrometheusText()`
+        game2048-metrics.json        `MetricsRegistry.snapshot()`
+        game2048-diagnostics.json    the combined `DiagnosticsSnapshot` of
+                                    `DiagnosticsOverlay.snapshot()`, which
+                                    wraps the metrics snapshot and adds the
+                                    health, readiness, hook and log sections
+
+      Every metric name, label key, bucket boundary and check id rendered below
+      is declared in the implementation, not here: `METRIC_NAMES`,
+      `METRIC_LABELS` and `DEFAULT_DURATION_BUCKETS` of
+      src/observability/metrics.ts, `HEALTH_CHECK_IDS` and
+      `HEALTH_CHECK_SOURCES` of src/observability/health.ts, `HOOK_NAMES` of
+      src/engine/hooks.ts and `ENGINE_EVENT_NAMES` of
+      src/engine/engine-events.ts.
+
+      For the reuse record, the substitution table and the procedure for
+      exercising every capability locally, read docs/OBSERVABILITY.md, which
+      owns all three. For how the layer attaches, read Figure 3 of
+      docs/architecture/component-interaction.md and Figure 5 of
+      docs/architecture/hook-dispatch-sequence.md.
+
+      Decisions: DL-DIAG-06, DL-BUILD-01, DL-HEALTH-04, DL-METRIC-04,
+      DL-METRIC-08, DL-MAIN-11 (docs/DECISION_LOG.md).
     -->
+
     <style>
+      /*
+        Token mirror. This file has no module graph, so src/theme/tokens.ts
+        cannot be imported and each value is restated here as a custom
+        property. Every declaration names the token it mirrors and the file
+        that declares it; the two halves of the upstream mirror —
+        src/theme/tokens.ts and style/_tokens.scss — are held equal to one
+        another by `_resolve-token()` in style/_tokens.scss and by
+        tests/unit/quality/stylesheet-contract.test.ts.
+      */
       :root {
-        --bg: #faf8ef;
-        --panel: #fdfcf7;
-        --ink: #776e65;
-        --ink-strong: #5c554e;
-        --rule: #d8d4d0;
-        --accent: #8f7a66;
-        --accent-2: #7d6b59;
-        --good: #3f7a4a;
-        --warn: #b8791f;
-        --bad: #a33223;
-        --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        /* --- Colour. ------------------------------------------------------ */
+
+        /* `pageBackground`, src/theme/tokens.ts. */
+        --page-background: #faf8ef;
+
+        /* `textColor` / `$text-color`, style/_tokens.scss. */
+        --text-color: #776e65;
+
+        /* `brightTextColor` / `$bright-text-color`, style/_tokens.scss. */
+        --bright-text-color: #f9f6f2;
+
+        /* `tileColor` / `$tile-color`, style/_tokens.scss. */
+        --tile-color: #eee4da;
+
+        /* `tileGoldColor` / `$tile-gold-color`, style/_tokens.scss. */
+        --tile-gold-color: #edc22e;
+
+        /* `tileGoldGlowColor`, src/theme/tokens.ts. */
+        --tile-gold-glow-color: #f3d774;
+
+        /*
+          `gameContainerBackground` / `$game-container-background`,
+          style/_tokens.scss.
+        */
+        --game-container-background: #bbada0;
+
+        /* `ruleColor`, src/theme/tokens.ts. */
+        --rule-color: #d8d4d0;
+
+        /*
+          Derived colours, in the compiled form `derivedColors` of
+          src/theme/tokens.ts publishes.
+        */
+
+        /* `derivedColors.buttonBackground`. */
+        --button-background: #8f7a66;
+
+        /*
+          `derivedColors.controlSurfaceBackground`:
+          `color.adjust($game-container-background, $lightness: -26%)`.
+        */
+        --control-surface: #7d6b59;
+
+        /*
+          `derivedColors.readoutSurfaceBackground`:
+          `color.adjust($game-container-background, $lightness: -30%)`.
+        */
+        --readout-surface: #716051;
+
+        /*
+          `derivedColors.focusRingColor`:
+          `color.adjust($text-color, $lightness: -22%)` — the same derivation
+          `diagnostics-surface` of style/_themes.scss L130 is written from, and
+          the surface src/observability/diagnostics-overlay.ts renders its
+          panels on.
+        */
+        --diagnostics-surface: #3a3631;
+
+        /* --- Length. ------------------------------------------------------ */
+
+        /* `gridSpacing` / `$grid-spacing`, style/_tokens.scss. */
+        --grid-spacing: 15px;
+
+        /* `math.div($grid-spacing, 2)`, as the overlay's own padding. */
+        --grid-spacing-half: 7.5px;
+
+        /* `tileBorderRadius` / `$tile-border-radius`, style/_tokens.scss. */
+        --tile-border-radius: 3px;
+
+        /* `boardBorderRadius`: `tileBorderRadius * 2`. */
+        --board-border-radius: 6px;
+
+        /*
+          `math.div($tile-border-radius, 3)` — the derivation `$a11y-hairline`
+          of style/_a11y.scss L36 and `CONTROL_BORDER_WIDTH` of
+          src/observability/diagnostics-overlay.ts are written from.
+        */
+        --hairline: 1px;
+
+        /* `fieldWidth` / `$field-width`, style/_tokens.scss. */
+        --field-width: 500px;
+
+        /* `mobileThreshold`: `fieldWidth + 20`. */
+        --mobile-threshold: 520px;
+
+        /* `gameContainerMarginTop` / `$game-container-margin-top`. */
+        --game-container-margin-top: 40px;
+
+        /* `gridSpacing * 3` — `CONTROL_MIN_BLOCK_UNITS` of the overlay. */
+        --control-min-block-size: 45px;
+
+        /* --- Type. -------------------------------------------------------- */
+
+        /*
+          `fontFamily`, src/theme/tokens.ts. The Clear Sans faces are declared
+          in style/fonts/clear-sans.css and are NOT loaded here: this file adds
+          no font asset, so the stack falls through to the system faces.
+        */
+        --font-family: "Clear Sans", "Helvetica Neue", Arial, sans-serif;
+
+        /* `monospaceStack` / `$diagnostics-font-family`, style/_tokens.scss. */
+        --monospace-stack: ui-monospace, SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+
+        /* `fontSizes.base`, src/theme/tokens.ts: desktop 18, mobile 15. */
+        --font-size-base: 18px;
+        --font-size-base-mobile: 15px;
+
+        /* `fontSizes.scoreValue`, src/theme/tokens.ts. */
+        --font-size-readout: 25px;
+
+        /* `fontSizes.scoreLabel`, src/theme/tokens.ts. */
+        --font-size-label: 13px;
+
+        /* `fontWeights`, src/theme/tokens.ts. */
+        --font-weight-light: 200;
+        --font-weight-regular: normal;
+        --font-weight-bold: 700;
+
+        /* `paragraphLineHeight`, src/theme/tokens.ts. */
+        --line-height: 1.65;
+
+        /* --- Motion. ------------------------------------------------------ */
+
+        /* `transitionSpeed` / `$transition-speed`, style/main.scss L22. */
+        --transition-speed: 100ms;
       }
 
-      * {
+      /*
+        Layout. Every colour, length, duration and weight below resolves to a
+        mirrored property above or to `calc()` over one. The only bare values
+        are the keywords AAP 0.5.4 permits — 0, none, auto, inherit,
+        currentColor, transparent — together with the unitless grid and
+        flex counts, percentages and `1fr`, which name no visual quantity.
+      */
+
+      *,
+      *::before,
+      *::after {
         box-sizing: border-box;
+      }
+
+      html {
+        font-size: var(--font-size-base);
       }
 
       body {
         margin: 0;
-        padding: 24px;
-        background: var(--bg);
-        color: var(--ink);
-        font: 16px/1.5 "Helvetica Neue", Arial, sans-serif;
+        padding: var(--grid-spacing);
+        background: var(--page-background);
+        color: var(--text-color);
+        font-family: var(--font-family);
+        font-size: inherit;
+        line-height: var(--line-height);
       }
 
-      header {
-        max-width: 1180px;
-        margin: 0 auto 20px;
+      /* --- Focus. --------------------------------------------------------- */
+
+      /*
+        The repository's own focus vocabulary, restated from style/_a11y.scss,
+        which a document with no module graph cannot reach. Two bands, as that
+        sheet draws them, with the second variant below carrying the ring on the
+        dark panel surface.
+      */
+      :focus-visible {
+        outline: calc(var(--hairline) * 2) solid var(--diagnostics-surface);
+        outline-offset: var(--hairline);
+        box-shadow: 0 0 0 calc(var(--hairline) * 3) var(--tile-gold-glow-color);
+      }
+
+      .panel :focus-visible,
+      .masthead :focus-visible {
+        outline-color: var(--tile-gold-color);
+        box-shadow: 0 0 0 calc(var(--hairline) * 3) var(--bright-text-color);
+      }
+
+      /* Visually hidden, exposed to assistive technology. */
+      .sr-only {
+        position: absolute;
+        inline-size: var(--hairline);
+        block-size: var(--hairline);
+        margin: calc(var(--hairline) * -1);
+        padding: 0;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      /* --- Masthead and provenance. --------------------------------------- */
+
+      .layout {
+        max-inline-size: calc(var(--field-width) * 3);
+        margin: 0 auto;
       }
 
       h1 {
-        margin: 0 0 6px;
-        font-size: 26px;
-        color: var(--ink-strong);
+        margin: 0 0 var(--grid-spacing-half);
+        font-size: var(--font-size-readout);
+        font-weight: var(--font-weight-bold);
+        line-height: var(--line-height);
       }
 
-      .sub {
-        margin: 0 0 16px;
-        font-size: 14px;
+      .masthead {
+        margin-block-end: var(--grid-spacing);
+        padding: var(--grid-spacing);
+        border-radius: var(--board-border-radius);
+        background: var(--diagnostics-surface);
+        color: var(--bright-text-color);
+      }
+
+      .masthead a {
+        color: var(--tile-gold-glow-color);
+      }
+
+      .lede {
+        margin: 0 0 var(--grid-spacing);
+      }
+
+      .provenance {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--grid-spacing);
+        margin: 0;
+      }
+
+      .provenance > div {
+        min-inline-size: calc(var(--field-width) / 4);
+      }
+
+      .provenance dt {
+        margin: 0;
+        color: var(--tile-color);
+        font-size: var(--font-size-label);
+        font-weight: var(--font-weight-bold);
+        text-transform: uppercase;
+      }
+
+      .provenance dd {
+        margin: 0;
+        font-family: var(--monospace-stack);
+        overflow-wrap: break-word;
+      }
+
+      /* A provenance value the loaded form does not carry. */
+      .absent {
+        color: var(--game-container-background);
+        font-family: var(--font-family);
+        font-style: italic;
+        font-weight: var(--font-weight-light);
+      }
+
+      /* --- Ingestion. ----------------------------------------------------- */
+
+      .ingest {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(var(--field-width), 1fr));
+        gap: var(--grid-spacing);
+        margin-block-end: var(--grid-spacing);
+      }
+
+      .ingest-field {
+        padding: var(--grid-spacing);
+        border: var(--hairline) solid var(--rule-color);
+        border-radius: var(--board-border-radius);
+        background: var(--tile-color);
+      }
+
+      .ingest-field > h3 {
+        margin: 0 0 var(--grid-spacing-half);
+        font-size: var(--font-size-label);
+        font-weight: var(--font-weight-bold);
+        text-transform: uppercase;
+      }
+
+      .hint {
+        margin: var(--grid-spacing-half) 0 0;
+        font-size: var(--font-size-label);
+      }
+
+      /*
+        The drop zone. `dragover` adds `.dropping`, which is what makes the
+        target visible while a file is over it.
+      */
+      .dropzone {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-block-size: var(--control-min-block-size);
+        padding: var(--grid-spacing);
+        border: calc(var(--hairline) * 2) dashed var(--game-container-background);
+        border-radius: var(--tile-border-radius);
+        background: var(--page-background);
+        text-align: center;
+        transition: background var(--transition-speed) ease-in-out,
+          border-color var(--transition-speed) ease-in-out;
+      }
+
+      .dropzone.dropping {
+        border-color: var(--button-background);
+        border-style: solid;
+        background: var(--tile-gold-glow-color);
+      }
+
+      textarea {
+        display: block;
+        inline-size: 100%;
+        min-block-size: calc(var(--control-min-block-size) * 2);
+        padding: var(--grid-spacing-half);
+        border: var(--hairline) solid var(--game-container-background);
+        border-radius: var(--tile-border-radius);
+        background: var(--page-background);
+        color: var(--text-color);
+        font-family: var(--monospace-stack);
+        font-size: var(--font-size-label);
+        resize: vertical;
+      }
+
+      /*
+        Controls, from `@mixin screen-control` as
+        src/observability/diagnostics-overlay.ts restates it: the control pair
+        `--control-surface` / `--bright-text-color` measures 4.73:1, and the
+        edge keeps the control's shape identifiable on either surface.
+      */
+      button {
+        min-block-size: var(--control-min-block-size);
+        padding: var(--grid-spacing-half) var(--grid-spacing);
+        border: var(--hairline) solid var(--bright-text-color);
+        border-radius: var(--tile-border-radius);
+        background: var(--control-surface);
+        color: var(--bright-text-color);
+        font-family: inherit;
+        font-size: var(--font-size-label);
+        font-weight: var(--font-weight-bold);
+        cursor: pointer;
+      }
+
+      input[type="file"] {
+        display: block;
+        inline-size: 100%;
+        font-family: inherit;
+        font-size: var(--font-size-label);
       }
 
       .controls {
         display: flex;
         flex-wrap: wrap;
-        align-items: center;
-        gap: 12px;
-        padding: 14px 16px;
-        background: var(--panel);
-        border: 1px solid var(--rule);
-        border-radius: 6px;
+        gap: var(--grid-spacing-half);
+        margin-block-start: var(--grid-spacing-half);
       }
 
-      .controls label {
-        font-weight: 700;
-        font-size: 14px;
-      }
-
-      .controls input[type="file"] {
-        font: inherit;
-        font-size: 14px;
-      }
-
-      button {
-        font: inherit;
-        font-size: 14px;
-        font-weight: 700;
-        padding: 8px 14px;
-        border: none;
-        border-radius: 3px;
-        background: var(--accent-2);
-        color: #f9f6f2;
-        cursor: pointer;
-      }
-
-      button:focus-visible {
-        outline: 3px solid var(--ink-strong);
-        outline-offset: 2px;
-      }
+      /* --- Status line. --------------------------------------------------- */
 
       .status {
-        margin: 12px auto 0;
-        max-width: 1180px;
-        font-size: 14px;
+        margin: 0 0 var(--grid-spacing);
+        padding: var(--grid-spacing-half) var(--grid-spacing);
+        border-inline-start: calc(var(--hairline) * 4) solid
+          var(--game-container-background);
+        border-radius: var(--tile-border-radius);
+        background: var(--tile-color);
       }
 
-      main {
-        max-width: 1180px;
-        margin: 0 auto;
+      .status[data-level="loaded"] {
+        border-inline-start-color: var(--button-background);
       }
 
-      h2 {
-        margin: 28px 0 10px;
-        padding-bottom: 6px;
-        font-size: 17px;
-        color: var(--ink-strong);
-        border-bottom: 1px solid var(--rule);
+      .status[data-level="error"] {
+        border-inline-start-color: var(--diagnostics-surface);
+        font-weight: var(--font-weight-bold);
       }
 
-      .grid {
+      /* --- Empty state. --------------------------------------------------- */
+
+      .empty-state {
+        padding: var(--grid-spacing);
+        border: calc(var(--hairline) * 2) dashed var(--game-container-background);
+        border-radius: var(--board-border-radius);
+        background: var(--tile-color);
+      }
+
+      .empty-state h2 {
+        margin: 0 0 var(--grid-spacing-half);
+        font-size: var(--font-size-readout);
+        font-weight: var(--font-weight-bold);
+      }
+
+      .empty-state ol {
+        margin: 0;
+        padding-inline-start: calc(var(--grid-spacing) * 2);
+      }
+
+      .empty-state p:last-child {
+        margin-block-end: 0;
+      }
+
+      /* --- Sections and panels. ------------------------------------------- */
+
+      h2.section-heading {
+        margin: var(--grid-spacing) 0 var(--grid-spacing-half);
+        padding-block-end: var(--grid-spacing-half);
+        border-block-end: var(--hairline) solid var(--rule-color);
+        font-size: var(--font-size-base);
+        font-weight: var(--font-weight-bold);
+        text-transform: uppercase;
+      }
+
+      .panel-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(var(--field-width), 1fr));
+        gap: var(--grid-spacing);
       }
 
       .panel {
-        padding: 14px 16px 16px;
-        background: var(--panel);
-        border: 1px solid var(--rule);
-        border-radius: 6px;
+        padding: var(--grid-spacing);
+        border-radius: var(--board-border-radius);
+        background: var(--diagnostics-surface);
+        color: var(--bright-text-color);
       }
 
-      .panel h3 {
-        margin: 0 0 4px;
-        font-size: 15px;
-        color: var(--ink-strong);
+      .panel.wide {
+        grid-column: 1 / -1;
       }
 
-      .panel p.desc {
-        margin: 0 0 12px;
-        font-size: 12.5px;
+      /* Panel heading, from `HEADING_STYLE` of the diagnostics overlay. */
+      .panel > h3 {
+        margin: 0;
+        color: var(--tile-gold-color);
+        font-size: inherit;
+        font-weight: var(--font-weight-bold);
       }
+
+      .panel > p.caption {
+        margin: var(--grid-spacing-half) 0 var(--grid-spacing);
+        font-size: var(--font-size-label);
+        color: var(--tile-color);
+      }
+
+      .panel .no-data {
+        margin: 0;
+        color: var(--game-container-background);
+        font-style: italic;
+        font-weight: var(--font-weight-light);
+      }
+
+      /*
+        The marker a retained render carries after an input was refused. A
+        refusal keeps the last accepted snapshot on screen rather than
+        discarding it, and this note plus the `data-stale` attribute on the
+        panel host are what say so, so no reading is attributed to the input
+        that was refused.
+      */
+      .stale-note {
+        margin: 0 0 var(--grid-spacing);
+        padding: var(--grid-spacing-half) var(--grid-spacing);
+        border: calc(var(--hairline) * 2) dashed var(--button-background);
+        border-radius: var(--tile-border-radius);
+        background: var(--tile-color);
+        font-weight: var(--font-weight-bold);
+      }
+
+      #panels[data-stale="true"] .panel > h3::after {
+        content: " (previous snapshot)";
+        color: var(--tile-color);
+        font-weight: var(--font-weight-light);
+        font-style: italic;
+      }
+
+      /* --- Tables, from `TABLE_STYLE` and `CELL_STYLE` of the overlay. ----- */
 
       table {
-        width: 100%;
+        inline-size: 100%;
         border-collapse: collapse;
-        font-size: 13.5px;
+        table-layout: fixed;
+      }
+
+      caption {
+        text-align: start;
+        font-size: var(--font-size-label);
+        color: var(--tile-color);
       }
 
       th,
       td {
-        padding: 5px 8px;
-        text-align: left;
-        border-bottom: 1px solid var(--rule);
+        padding: 0 var(--grid-spacing-half) var(--grid-spacing-half) 0;
+        vertical-align: top;
+        text-align: start;
+        overflow-wrap: break-word;
       }
 
-      th {
-        font-size: 11.5px;
+      thead th {
+        border-block-end: var(--hairline) solid var(--game-container-background);
+        color: var(--tile-color);
+        font-size: var(--font-size-label);
+        font-weight: var(--font-weight-bold);
         text-transform: uppercase;
-        letter-spacing: 0.04em;
       }
 
-      td.num {
-        text-align: right;
-        font-family: var(--mono);
+      td.numeral,
+      th.numeral {
+        font-family: var(--monospace-stack);
+        text-align: end;
       }
 
-      .empty {
+      thead th.numeral {
+        font-family: inherit;
+      }
+
+      /* A row whose series the loaded snapshot does not carry. */
+      tr.absent-row td {
+        color: var(--game-container-background);
+        font-style: italic;
+        font-weight: var(--font-weight-light);
+      }
+
+      /* --- Readouts. ------------------------------------------------------ */
+
+      .readouts {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(calc(var(--field-width) / 4), 1fr));
+        gap: var(--grid-spacing-half);
         margin: 0;
-        font-size: 13px;
+      }
+
+      .readout {
+        padding: var(--grid-spacing-half);
+        border-radius: var(--tile-border-radius);
+        background: var(--readout-surface);
+      }
+
+      .readout dt {
+        margin: 0;
+        color: var(--tile-color);
+        font-size: var(--font-size-label);
+        font-weight: var(--font-weight-bold);
+        text-transform: uppercase;
+      }
+
+      .readout dd {
+        margin: 0;
+        font-family: var(--monospace-stack);
+        font-size: var(--font-size-readout);
+      }
+
+      /* A readout raised above zero that must not be missed. */
+      .readout.raised {
+        background: var(--tile-gold-color);
+      }
+
+      .readout.raised dt,
+      .readout.raised dd {
+        color: var(--diagnostics-surface);
+      }
+
+      .readout.raised dd {
+        font-weight: var(--font-weight-bold);
+      }
+
+      /* --- Bars. ---------------------------------------------------------- */
+
+      /*
+        Bar length is written as a `--fill` percentage on the row and consumed
+        by the track below, so the geometry is authored here and only the one
+        computed number arrives from the script.
+      */
+      .bar-track {
+        position: relative;
+        block-size: var(--grid-spacing);
+        border-radius: var(--tile-border-radius);
+        background: var(--readout-surface);
+        overflow: hidden;
+      }
+
+      .bar-fill {
+        display: block;
+        block-size: 100%;
+        inline-size: var(--fill);
+        background: var(--tile-gold-color);
+      }
+
+      .bar-fill.zero {
+        background: var(--game-container-background);
+      }
+
+      /* --- Histogram. ----------------------------------------------------- */
+
+      .histogram {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: var(--grid-spacing-half);
+        margin: 0;
+      }
+
+      .histogram dt {
+        font-family: var(--monospace-stack);
+        font-size: var(--font-size-label);
+        text-align: end;
+        white-space: nowrap;
+      }
+
+      .histogram dd {
+        margin: 0;
+      }
+
+      .histogram dd.count {
+        font-family: var(--monospace-stack);
+        font-size: var(--font-size-label);
+        text-align: end;
+        white-space: nowrap;
+      }
+
+      /*
+        A bucket at or beyond a marked threshold. The marker is the boundary
+        itself, so the row that crosses it carries the mark rather than an
+        overlay being positioned over the chart.
+      */
+      .histogram dt.threshold,
+      .histogram dd.count.threshold {
+        color: var(--tile-gold-glow-color);
+        font-weight: var(--font-weight-bold);
+      }
+
+      .histogram dt.threshold::after {
+        content: " ◂";
+      }
+
+      .marker-key {
+        margin: var(--grid-spacing) 0 0;
+        padding-block-start: var(--grid-spacing-half);
+        border-block-start: var(--hairline) solid
+          var(--game-container-background);
+        font-size: var(--font-size-label);
+        color: var(--tile-color);
+      }
+
+      .marker-key dl {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0 var(--grid-spacing-half);
+        margin: var(--grid-spacing-half) 0 0;
+      }
+
+      .marker-key dt {
+        margin: 0;
+        font-family: var(--monospace-stack);
+        font-weight: var(--font-weight-bold);
+        white-space: nowrap;
+      }
+
+      .marker-key dd {
+        margin: 0;
+      }
+
+      /* --- Health, three states. ------------------------------------------ */
+
+      /*
+        `STATUS_PRESENTATION` of src/observability/diagnostics-overlay.ts,
+        restated: the three states of `HealthStatus` differ in colour, weight
+        AND slant, so none of them is distinguished by colour alone.
+      */
+      .status-cell {
+        font-family: var(--monospace-stack);
+      }
+
+      .status-cell[data-status="pass"] {
+        color: var(--bright-text-color);
+        font-weight: var(--font-weight-regular);
+        font-style: normal;
+      }
+
+      .status-cell[data-status="fail"] {
+        color: var(--tile-gold-color);
+        font-weight: var(--font-weight-bold);
+        font-style: normal;
+      }
+
+      .status-cell[data-status="not-applicable"] {
+        color: var(--game-container-background);
+        font-weight: var(--font-weight-light);
         font-style: italic;
       }
 
-      .pill {
-        display: inline-block;
-        min-width: 44px;
-        padding: 2px 8px;
-        border-radius: 999px;
-        font-size: 12px;
-        font-weight: 700;
-        text-align: center;
-        color: #f9f6f2;
+      .status-cell[data-status="unknown"] {
+        color: var(--game-container-background);
+        font-weight: var(--font-weight-light);
+        font-style: italic;
       }
 
-      .pill.pass {
-        background: var(--good);
+      .origin {
+        font-family: var(--monospace-stack);
+        font-size: var(--font-size-label);
       }
 
-      .pill.fail {
-        background: var(--bad);
+      .disposition {
+        font-size: var(--font-size-label);
+        text-transform: uppercase;
       }
 
-      .pill.na {
-        background: var(--accent);
-      }
-
-      .stat {
-        font-family: var(--mono);
-        font-size: 26px;
-        color: var(--ink-strong);
-      }
-
-      svg {
-        display: block;
-        width: 100%;
-        height: auto;
-      }
+      /* --- Footer. -------------------------------------------------------- */
 
       footer {
-        max-width: 1180px;
-        margin: 32px auto 0;
-        padding-top: 14px;
-        border-top: 1px solid var(--rule);
-        font-size: 13px;
+        margin-block-start: var(--grid-spacing);
+        padding-block-start: var(--grid-spacing-half);
+        border-block-start: var(--hairline) solid var(--rule-color);
+        font-size: var(--font-size-label);
       }
 
-      code {
-        font-family: var(--mono);
-        font-size: 0.92em;
+      /* The one breakpoint, `mobileThreshold`. Rescale, never reflow. */
+      @media (max-width: 520px) {
+        html {
+          font-size: var(--font-size-base-mobile);
+        }
+      }
+
+      /* Motion is confined to the drop-zone feedback, and is dropped here. */
+      @media (prefers-reduced-motion: reduce) {
+        .dropzone {
+          transition: none;
+        }
       }
     </style>
   </head>
 
   <body>
-    <header>
-      <h1>2048 Roguelike — Client Observability</h1>
-      <p class="sub">
-        Reads a Prometheus-text export from
-        <code>src/observability/metrics.ts</code>. No server, no data source, no
-        network access.
+    <div class="layout">
+      <header class="masthead">
+        <h1>2048 Roguelike — client observability dashboard</h1>
+        <p class="lede">
+          The static form of the dashboard template. It renders one exported
+          snapshot — <code>game2048-metrics.prom</code>,
+          <code>game2048-metrics.json</code> or
+          <code>game2048-diagnostics.json</code> — with no server, no data
+          source and no network access. Its Grafana-compatible sibling is
+          <code>dashboard.json</code> in this directory, and the two declare the
+          same series.
+        </p>
+        <dl class="provenance" id="provenance"></dl>
+      </header>
+
+      <h2 class="sr-only">Load a snapshot</h2>
+      <div class="ingest">
+        <section class="ingest-field" aria-labelledby="ingest-file-heading">
+          <h3 id="ingest-file-heading">Choose a file</h3>
+          <label for="snapshot-file">
+            Metrics export or diagnostics snapshot
+          </label>
+          <input
+            id="snapshot-file"
+            type="file"
+            accept=".prom,.json,.txt,text/plain,application/json"
+          />
+          <p class="hint">
+            The diagnostics overlay writes these with its
+            <strong>Export metrics</strong> and
+            <strong>Export snapshot</strong> controls.
+          </p>
+        </section>
+
+        <section class="ingest-field" aria-labelledby="ingest-drop-heading">
+          <h3 id="ingest-drop-heading">Or drop it here</h3>
+          <div class="dropzone" id="dropzone">
+            <p class="hint" id="dropzone-hint">
+              Drag an exported file onto this area.
+            </p>
+          </div>
+        </section>
+
+        <section class="ingest-field" aria-labelledby="ingest-paste-heading">
+          <h3 id="ingest-paste-heading">Or paste the text</h3>
+          <label for="snapshot-text">
+            Prometheus exposition or snapshot JSON
+          </label>
+          <textarea
+            id="snapshot-text"
+            spellcheck="false"
+            autocomplete="off"
+          ></textarea>
+          <div class="controls">
+            <button type="button" id="render-pasted">Render pasted text</button>
+            <button type="button" id="clear-all">Clear</button>
+          </div>
+        </section>
+      </div>
+
+      <p class="status" id="status" role="status" data-level="empty">
+        No snapshot loaded.
       </p>
 
-      <div class="controls">
-        <label for="file">Load a metrics export</label>
-        <input id="file" type="file" accept=".prom,.txt,text/plain" />
-        <button id="sample" type="button">Load the built-in sample</button>
-      </div>
-    </header>
+      <main id="panels">
+        <section class="empty-state" aria-labelledby="empty-state-heading">
+          <h2 id="empty-state-heading">Export a snapshot first</h2>
+          <p>
+            This page renders a snapshot you supply. Nothing is fetched, and no
+            sample data ships with it, so the panels below stay empty until a
+            real export is loaded.
+          </p>
+          <ol>
+            <li>
+              Run the game with the diagnostics overlay requested, and play a
+              few turns so the counters and both histograms move.
+            </li>
+            <li>
+              Press <strong>Export metrics</strong> for
+              <code>game2048-metrics.prom</code>, or
+              <strong>Export snapshot</strong> for
+              <code>game2048-diagnostics.json</code>, which also carries the
+              health, readiness and hook sections.
+            </li>
+            <li>Load that file above, by any of the three routes.</li>
+          </ol>
+          <p>
+            <strong>docs/OBSERVABILITY.md</strong> has the full procedure: how
+            the overlay is requested, what each capability looks like when it is
+            working, and how to exercise every one of them locally.
+          </p>
+        </section>
+      </main>
 
-    <p class="status" id="status" role="status">
-      Showing the built-in sample. Export
-      <code>game2048-metrics.prom</code> from the diagnostics overlay and load it
-      to see a real run.
-    </p>
-
-    <main id="board"></main>
-
-    <footer>
-      Panels mirror <code>docs/dashboards/dashboard.json</code>. Reused and added
-      capabilities are inventoried in <code>docs/OBSERVABILITY.md</code>.
-    </footer>
+      <footer>
+        <p>
+          Series, labels, bucket boundaries and check identifiers are declared
+          in <code>src/observability/metrics.ts</code>,
+          <code>src/observability/health.ts</code>,
+          <code>src/engine/hooks.ts</code> and
+          <code>src/engine/engine-events.ts</code>. Thresholds are cited to the
+          line that sets them. For the reuse record and the substitution table,
+          read <strong>docs/OBSERVABILITY.md</strong>; for the reasoning behind
+          this artifact, <strong>docs/DECISION_LOG.md</strong>
+          <code>DL-DIAG-06</code>.
+        </p>
+      </footer>
+    </div>
 
     <script>
       "use strict";
 
-      /* ====================================================================
-       * 1. Parsing Prometheus text
-       * ==================================================================== */
+      /*
+        No module graph reaches this document, so the names below are restated
+        from the modules that declare them. Each block names its declaration
+        site; a name that disagrees with its declaration is a defect in this
+        file, and the panel inventory of docs/dashboards/dashboard.json is the
+        second copy a reader can check it against.
+      */
+
+      /* `METRIC_PREFIX`, src/observability/metrics.ts. */
+      var PREFIX = "game2048_";
+
+      /* `METRIC_NAMES`, src/observability/metrics.ts. */
+      var NAMES = {
+        turnsTotal: PREFIX + "turns_total",
+        mergesTotal: PREFIX + "merges_total",
+        spawnsTotal: PREFIX + "spawns_total",
+        spawnAttemptsTotal: PREFIX + "spawn_attempts_total",
+        spawnSuppressedTotal: PREFIX + "spawn_suppressed_total",
+        engineEventsTotal: PREFIX + "engine_events_total",
+        hookDispatchesTotal: PREFIX + "hook_dispatches_total",
+        hookHandlerInvocationsTotal: PREFIX + "hook_handler_invocations_total",
+        hookHandlerSkippedTotal: PREFIX + "hook_handler_skipped_total",
+        hookPayloadRejectionsTotal: PREFIX + "hook_payload_rejections_total",
+        relicHandlerErrorsTotal: PREFIX + "relic_handler_errors_total",
+        framesRenderedTotal: PREFIX + "frames_rendered_total",
+        rngDrawsTotal: PREFIX + "rng_draws_total",
+        metricsRejectedTotal: PREFIX + "metrics_rejected_total",
+        metricsRejectedByReasonTotal:
+          PREFIX + "metrics_rejected_by_reason_total",
+        healthCheckStatus: PREFIX + "health_check_status",
+        frameTimeMilliseconds: PREFIX + "frame_time_milliseconds",
+        turnLatencyMilliseconds: PREFIX + "turn_latency_milliseconds",
+        spanDurationMilliseconds: PREFIX + "span_duration_milliseconds",
+
+        /*
+          Declared in src/main.ts rather than in metrics.ts: the one family
+          every generic subsystem report lands on, carrying the report's dotted
+          name as `report` and its leading segment as `subsystem`. DL-MAIN-11.
+        */
+        reportsTotal: PREFIX + "reports_total"
+      };
+
+      /* `METRIC_LABELS`, src/observability/metrics.ts. */
+      var LABELS = {
+        hook: "hook",
+        event: "event",
+        reason: "reason",
+        stream: "stream",
+        check: "check",
+        span: "span"
+      };
+
+      /* Labels src/main.ts puts on `reportsTotal`. */
+      var REPORT_LABELS = { report: "report", subsystem: "subsystem" };
+
+      /* `HOOK_NAMES`, src/engine/hooks.ts. Six, in declaration order. */
+      var HOOK_NAMES = [
+        "onStageStart",
+        "onBeforeMove",
+        "onMerge",
+        "onSpawn",
+        "onAfterMove",
+        "onStageEnd"
+      ];
+
+      /*
+        `ENGINE_EVENT_NAMES`, src/engine/engine-events.ts. Seven, in declaration
+        order. Each carries a colon, which the exposition format reserves in a
+        metric name, so all seven are values of the `event` label on the one
+        `engineEventsTotal` family rather than seven families. DL-METRIC-04.
+      */
+      var ENGINE_EVENT_NAMES = [
+        "stage:start",
+        "move:before",
+        "tile:merge",
+        "tile:spawn",
+        "move:after",
+        "stage:end",
+        "state:commit"
+      ];
+
+      /* `HookSkipReason`, src/engine/hook-bus.ts. */
+      var SKIP_REASONS = ["exhausted", "degraded", "detached"];
+
+      /* `StreamName`, src/rng/rng-streams.ts. */
+      var RNG_STREAMS = [
+        "spawn-value",
+        "spawn-position",
+        "relic-draw",
+        "rarity-weight"
+      ];
+
+      /*
+        `SPAN_NAMES`, src/observability/tracer.ts, less `tracer.inert`, which is
+        the shared span returned while tracing is off and is never timed.
+      */
+      var SPAN_NAMES = [
+        "input.dispatch",
+        "engine.turn",
+        "engine.move.resolve",
+        "engine.stage",
+        "hook.dispatch",
+        "relic.handler",
+        "render.commit",
+        "render.frame"
+      ];
+
+      /* `HEALTH_CHECK_IDS`, src/observability/health.ts, in report order. */
+      var HEALTH_CHECK_IDS = [
+        "functionBind",
+        "classList",
+        "requestAnimationFrame",
+        "pointerEvents",
+        "storage",
+        "webgl"
+      ];
+
+      /*
+        `HEALTH_CHECK_SOURCES`, src/observability/health.ts. Five checks are
+        reused from probes the vanilla sources already performed and reported
+        nowhere; the sixth is added for the renderer. The Prometheus text form
+        carries the `check` label alone, so these citations come from the
+        declaration rather than from the loaded file; where a combined
+        diagnostics snapshot carries its own `source`, that one is preferred.
+      */
+      var HEALTH_CHECK_SOURCES = {
+        functionBind: {
+          origin: "js/bind_polyfill.js L1",
+          owner: "src/observability/health.ts",
+          performedBy: null,
+          disposition: "reused"
+        },
+        classList: {
+          origin: "js/classlist_polyfill.js L2-L5",
+          owner: "src/observability/health.ts",
+          performedBy: null,
+          disposition: "reused"
+        },
+        requestAnimationFrame: {
+          origin: "js/animframe_polyfill.js L3-L10 and L23",
+          owner: "src/observability/health.ts",
+          performedBy: null,
+          disposition: "reused"
+        },
+        pointerEvents: {
+          origin: "js/keyboard_input_manager.js L4-L13",
+          owner: "src/input/touch-input.ts",
+          performedBy: "detectPointerEventFamily",
+          disposition: "reused"
+        },
+        storage: {
+          origin: "js/local_storage_manager.js L29-L40",
+          owner: "src/storage/local-storage-manager.ts",
+          performedBy: "probeWebStorage",
+          disposition: "reused"
+        },
+        webgl: {
+          origin: null,
+          owner: "src/render/webgl-support.ts",
+          performedBy: "probeWebGLSupport",
+          disposition: "added"
+        }
+      };
+
+      /*
+        `HEALTH_GAUGE_VALUES`, src/observability/health.ts, inverted: the gauge
+        is the only channel a three-state verdict reaches the text form
+        through. DL-HEALTH-04.
+      */
+      var GAUGE_TO_STATUS = { "1": "pass", "0": "fail", "-1": "not-applicable" };
+
+      /* `STATUS_PRESENTATION` of src/observability/diagnostics-overlay.ts. */
+      var STATUS_LABELS = {
+        pass: "healthy",
+        fail: "UNHEALTHY",
+        "not-applicable": "not-applicable",
+        unknown: "not reported"
+      };
+
+      /*
+        `DEFAULT_DURATION_BUCKETS`, src/observability/metrics.ts. Inclusive
+        upper bounds in MILLISECONDS — not the seconds the exposition format
+        conventionally carries — and rendered in the unit the serialiser writes.
+      */
+      var DEFAULT_DURATION_BUCKETS = [
+        1, 2, 4, 8, 16, 32, 64, 100, 200, 400, 600, 800, 1200, 2000
+      ];
+
+      /*
+        Thresholds. Each is a value the product already sets, cited to the line
+        that sets it, and each is drawn on the bucket whose bound equals it.
+      */
+      var FRAME_BUDGET_MS = 16;
+
+      var FRAME_THRESHOLDS = [
+        {
+          value: FRAME_BUDGET_MS,
+          label: "frame budget",
+          origin: "js/animframe_polyfill.js L13"
+        }
+      ];
+
+      var TURN_THRESHOLDS = [
+        {
+          value: 100,
+          label: "tile movement",
+          origin: "style/main.scss L22, $transition-speed"
+        },
+        {
+          value: 200,
+          label: "spawn and merge animation",
+          origin: "style/main.scss L430 appear, L450 pop"
+        },
+        {
+          value: 600,
+          label: "score-delta rise",
+          origin: "style/main.scss L104, move-up"
+        }
+      ];
+
+      /* ================================================================== */
+      /* Parsing.                                                            */
+      /* ================================================================== */
+
+      /*
+        The suffixes and the bucket label `writeHistogram` of
+        src/observability/metrics.ts appends. `le` is reserved by the exposition
+        format and is appended AFTER the sorted base labels.
+      */
+      var BUCKET_SUFFIX = "_bucket";
+      var SUM_SUFFIX = "_sum";
+      var COUNT_SUFFIX = "_count";
+      var LABELS_LE = "le";
 
       /**
-       * Parses an exposition into samples grouped by family.
+       * Reports whether `text` is an exposition numeric literal.
        *
-       * Handles the subset the registry emits: `# HELP`, `# TYPE`, and sample
-       * lines with optional labels. Escaped quotes and backslashes inside a
-       * label value are unescaped, and a malformed line is skipped rather than
-       * failing the whole parse.
+       * The three non-finite spellings `formatMetricValue` of
+       * src/observability/metrics.ts writes, or a decimal number with an
+       * optional sign and an optional exponent. This is the test that separates
+       * a sample line from an ordinary line of prose, which otherwise reads as
+       * a bare metric name followed by a word.
        */
-      function parseExposition(text) {
-        var families = Object.create(null);
-        var lines = String(text).split(/\r?\n/);
-
-        function family(name) {
-          if (!families[name]) {
-            families[name] = { name: name, type: "untyped", help: "", samples: [] };
-          }
-          return families[name];
+      function isExpositionNumber(text) {
+        if (text === "NaN" || text === "+Inf" || text === "-Inf" || text === "Inf") {
+          return true;
         }
 
-        for (var i = 0; i < lines.length; i += 1) {
-          var line = lines[i].trim();
-
-          if (line === "") {
-            continue;
-          }
-
-          if (line.charAt(0) === "#") {
-            var meta = /^#\s+(HELP|TYPE)\s+(\S+)\s*(.*)$/.exec(line);
-
-            if (meta) {
-              var entry = family(meta[2]);
-              if (meta[1] === "TYPE") {
-                entry.type = meta[3].trim() || "untyped";
-              } else {
-                entry.help = meta[3].trim();
-              }
-            }
-            continue;
-          }
-
-          var sample = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{.*\})?\s+(-?[0-9.eE+]+|NaN|\+Inf|-Inf)\s*$/.exec(
-            line
-          );
-
-          if (!sample) {
-            continue;
-          }
-
-          var metric = sample[1];
-          var labels = parseLabels(sample[2]);
-          var value = Number(sample[3]);
-          var base = metric.replace(/_(bucket|sum|count)$/, "");
-          var suffix = metric === base ? "" : metric.slice(base.length + 1);
-          var target = families[base] ? base : metric;
-
-          family(target).samples.push({
-            metric: metric,
-            suffix: suffix,
-            labels: labels,
-            value: isFinite(value) ? value : Number(sample[3] === "+Inf" ? Infinity : NaN)
-          });
-        }
-
-        return families;
+        return /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text);
       }
 
-      function parseLabels(block) {
-        var labels = Object.create(null);
-
-        if (!block) {
-          return labels;
+      /**
+       * Reads one exposition numeric literal.
+       *
+       * `formatMetricValue` of src/observability/metrics.ts writes `NaN`,
+       * `+Inf` and `-Inf` for the three non-finite values and `String(value)`
+       * otherwise, so a negative value reaches here as written.
+       */
+      function readNumber(text) {
+        if (text === "+Inf") {
+          return Number.POSITIVE_INFINITY;
         }
 
-        var body = block.slice(1, -1);
-        var pattern = /([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g;
-        var found;
+        if (text === "-Inf") {
+          return Number.NEGATIVE_INFINITY;
+        }
 
-        while ((found = pattern.exec(body)) !== null) {
-          labels[found[1]] = found[2]
-            .replace(/\\"/g, '"')
-            .replace(/\\n/g, "\n")
-            .replace(/\\\\/g, "\\");
+        if (text === "NaN") {
+          return Number.NaN;
+        }
+
+        var value = Number(text);
+
+        return typeof value === "number" ? value : Number.NaN;
+      }
+
+      /**
+       * Reads a label block, escapes included.
+       *
+       * `escapeLabelValue` of src/observability/metrics.ts writes `\\` for a
+       * backslash, `\"` for a quote and `\n` for a newline, so the scanner
+       * below unwinds exactly those three. Order within the block is NOT
+       * assumed: base labels are written sorted but the histogram `le` is
+       * appended after them, so a positional reader would misattribute it.
+       *
+       * @param block Text between the braces, exclusive.
+       * @returns The labels, or `null` when the block is malformed.
+       */
+      function parseLabels(block) {
+        var labels = {};
+        var index = 0;
+
+        while (index < block.length) {
+          while (index < block.length && /[\s,]/.test(block.charAt(index))) {
+            index += 1;
+          }
+
+          if (index >= block.length) {
+            break;
+          }
+
+          var nameStart = index;
+
+          while (index < block.length && block.charAt(index) !== "=") {
+            index += 1;
+          }
+
+          if (index >= block.length) {
+            return null;
+          }
+
+          var name = block.slice(nameStart, index).trim();
+
+          index += 1;
+
+          while (index < block.length && /\s/.test(block.charAt(index))) {
+            index += 1;
+          }
+
+          if (block.charAt(index) !== '"') {
+            return null;
+          }
+
+          index += 1;
+
+          var value = "";
+          var closed = false;
+
+          while (index < block.length) {
+            var character = block.charAt(index);
+
+            if (character === "\\") {
+              var escaped = block.charAt(index + 1);
+
+              if (escaped === "n") {
+                value += "\n";
+              } else if (escaped === "\\" || escaped === '"') {
+                value += escaped;
+              } else {
+                value += escaped;
+              }
+
+              index += 2;
+
+              continue;
+            }
+
+            if (character === '"') {
+              closed = true;
+              index += 1;
+
+              break;
+            }
+
+            value += character;
+            index += 1;
+          }
+
+          if (!closed || name.length === 0) {
+            return null;
+          }
+
+          labels[name] = value;
         }
 
         return labels;
       }
 
-      /* ====================================================================
-       * 2. Reading values out of the parse
-       * ==================================================================== */
+      /**
+       * Keys a series by its labels, so the base labels of a histogram group
+       * its bucket, sum and count lines together.
+       */
+      function labelKey(labels, omit) {
+        var names = Object.keys(labels)
+          .filter(function (name) {
+            return name !== omit;
+          })
+          .sort();
 
-      function samplesOf(model, name, suffix) {
-        var entry = model[name];
+        return names
+          .map(function (name) {
+            return name + "=" + labels[name];
+          })
+          .join(",");
+      }
 
-        if (!entry) {
-          return [];
+      /** Every label except one, as a fresh object. */
+      function labelsWithout(labels, omit) {
+        var copy = {};
+
+        Object.keys(labels).forEach(function (name) {
+          if (name !== omit) {
+            copy[name] = labels[name];
+          }
+        });
+
+        return copy;
+      }
+
+      function emptyFamily(name) {
+        return {
+          name: name,
+          help: null,
+          kind: null,
+          samples: [],
+          histograms: []
+        };
+      }
+
+      /**
+       * Parses the Prometheus text exposition of
+       * `MetricsRegistry.toPrometheusText()`.
+       *
+       * Tolerated: `# HELP` and `# TYPE` lines, any other comment, blank lines,
+       * CRLF endings, a trailing newline, `+Inf`, `-Inf`, `NaN`, negative
+       * values, an optional trailing timestamp, and label values carrying
+       * escaped quotes, backslashes and newlines.
+       *
+       * @param text Exposition text.
+       * @returns A model, or `null` when no sample line was recognised.
+       */
+      function parsePrometheusText(text) {
+        var lines = String(text).split(/\r?\n/);
+        var families = {};
+        var histogramFamilies = {};
+        var samples = [];
+        var recognised = 0;
+        var malformed = 0;
+
+        function family(name) {
+          if (!Object.prototype.hasOwnProperty.call(families, name)) {
+            families[name] = emptyFamily(name);
+          }
+
+          return families[name];
         }
 
-        return entry.samples.filter(function (sample) {
-          return sample.suffix === (suffix || "");
+        for (var index = 0; index < lines.length; index += 1) {
+          var line = lines[index].trim();
+
+          if (line.length === 0) {
+            continue;
+          }
+
+          if (line.charAt(0) === "#") {
+            var help = /^#\s+HELP\s+(\S+)\s*([\s\S]*)$/.exec(line);
+
+            if (help !== null) {
+              family(help[1]).help = help[2];
+
+              continue;
+            }
+
+            var type = /^#\s+TYPE\s+(\S+)\s+(\S+)\s*$/.exec(line);
+
+            if (type !== null) {
+              var declared = family(type[1]);
+
+              declared.kind = type[2];
+
+              if (type[2] === "histogram") {
+                histogramFamilies[type[1]] = declared;
+              }
+            }
+
+            continue;
+          }
+
+          var braceAt = line.indexOf("{");
+          var name;
+          var labels = {};
+          var remainder;
+
+          if (braceAt === -1) {
+            var parts = line.split(/\s+/);
+
+            /*
+              A sample line is `name value` with an optional trailing
+              timestamp, so three fields at most. Anything longer is not a
+              sample, whatever its first word looks like.
+            */
+            if (parts.length < 2 || parts.length > 3) {
+              malformed += 1;
+
+              continue;
+            }
+
+            name = parts[0];
+            remainder = parts[1];
+          } else {
+            name = line.slice(0, braceAt).trim();
+
+            var closeAt = line.lastIndexOf("}");
+
+            if (closeAt < braceAt) {
+              malformed += 1;
+
+              continue;
+            }
+
+            var parsed = parseLabels(line.slice(braceAt + 1, closeAt));
+
+            if (parsed === null) {
+              malformed += 1;
+
+              continue;
+            }
+
+            labels = parsed;
+            remainder = line.slice(closeAt + 1).trim().split(/\s+/)[0];
+          }
+
+          /*
+            `isValidMetricName` of src/observability/metrics.ts, restated, and
+            the value must be a number: both hold, or the line is not a sample.
+          */
+          if (
+            !/^[a-zA-Z_:][a-zA-Z0-9_:]*$/.test(name) ||
+            !remainder ||
+            !isExpositionNumber(remainder)
+          ) {
+            malformed += 1;
+
+            continue;
+          }
+
+          recognised += 1;
+          samples.push({ name: name, labels: labels, value: readNumber(remainder) });
+        }
+
+        if (recognised === 0) {
+          return null;
+        }
+
+        /*
+          Samples are attributed after every `# TYPE` has been read, so a
+          histogram whose metadata followed its samples still resolves. A
+          histogram's sample lines carry a suffix its family name does not.
+        */
+        var histogramNames = Object.keys(histogramFamilies);
+
+        samples.forEach(function (sample) {
+          var base = null;
+          var suffix = null;
+
+          for (var index = 0; index < histogramNames.length; index += 1) {
+            var candidate = histogramNames[index];
+
+            if (sample.name === candidate + BUCKET_SUFFIX) {
+              base = candidate;
+              suffix = BUCKET_SUFFIX;
+
+              break;
+            }
+
+            if (sample.name === candidate + SUM_SUFFIX) {
+              base = candidate;
+              suffix = SUM_SUFFIX;
+
+              break;
+            }
+
+            if (sample.name === candidate + COUNT_SUFFIX) {
+              base = candidate;
+              suffix = COUNT_SUFFIX;
+
+              break;
+            }
+          }
+
+          if (base === null) {
+            family(sample.name).samples.push({
+              labels: sample.labels,
+              value: sample.value
+            });
+
+            return;
+          }
+
+          var target = histogramFamilies[base];
+          var key = labelKey(sample.labels, LABELS_LE);
+          var entry = null;
+
+          for (var at = 0; at < target.histograms.length; at += 1) {
+            if (target.histograms[at].key === key) {
+              entry = target.histograms[at];
+
+              break;
+            }
+          }
+
+          if (entry === null) {
+            entry = {
+              key: key,
+              labels: labelsWithout(sample.labels, LABELS_LE),
+              buckets: [],
+              infCount: null,
+              sum: null,
+              count: null
+            };
+            target.histograms.push(entry);
+          }
+
+          if (suffix === SUM_SUFFIX) {
+            entry.sum = sample.value;
+
+            return;
+          }
+
+          if (suffix === COUNT_SUFFIX) {
+            entry.count = sample.value;
+
+            return;
+          }
+
+          var bound = sample.labels[LABELS_LE];
+
+          if (bound === "+Inf") {
+            entry.infCount = sample.value;
+
+            return;
+          }
+
+          entry.buckets.push({
+            bound: readNumber(bound),
+            cumulative: sample.value
+          });
         });
+
+        Object.keys(families).forEach(function (name) {
+          families[name].histograms.forEach(function (entry) {
+            entry.buckets.sort(function (left, right) {
+              return left.bound - right.bound;
+            });
+          });
+        });
+
+        return {
+          form: "prometheus-text",
+          formLabel: "Prometheus text exposition",
+          correlationId: null,
+          generatedAt: null,
+          schemaVersion: null,
+          rejected: null,
+          reporterFaults: null,
+          elapsedMs: null,
+          families: families,
+          health: null,
+          hooks: null,
+          traces: null,
+          logs: null,
+          malformedLines: malformed,
+          sampleCount: recognised
+        };
       }
 
-      function totalOf(model, name) {
-        return samplesOf(model, name, "").reduce(function (sum, sample) {
-          return sum + (isFinite(sample.value) ? sample.value : 0);
-        }, 0);
+      function isObject(value) {
+        return typeof value === "object" && value !== null;
       }
 
-      function byLabel(model, name, label) {
+      function readString(value) {
+        return typeof value === "string" && value.length > 0 ? value : null;
+      }
+
+      function readFinite(value) {
+        return typeof value === "number" && isFinite(value) ? value : null;
+      }
+
+      /**
+       * Folds a `MetricsSnapshot.series` array into the same family shape the
+       * text parser builds, so every panel reads one model whichever form was
+       * loaded.
+       *
+       * `MetricSeriesSnapshot` of src/observability/metrics.ts carries
+       * `{kind, name, help, labels}` plus `value` for a counter and a gauge, and
+       * `{count, sum, buckets, bucketCounts, infCount}` for a histogram — the
+       * cumulative counts positionally aligned with the boundaries.
+       */
+      function foldSeries(series) {
+        var families = {};
+        var folded = 0;
+
+        if (!Array.isArray(series)) {
+          return { families: families, folded: folded };
+        }
+
+        series.forEach(function (entry) {
+          if (!isObject(entry)) {
+            return;
+          }
+
+          var name = readString(entry.name);
+
+          if (name === null) {
+            return;
+          }
+
+          if (!Object.prototype.hasOwnProperty.call(families, name)) {
+            families[name] = emptyFamily(name);
+          }
+
+          var family = families[name];
+
+          family.kind = readString(entry.kind) || family.kind;
+          family.help = readString(entry.help) || family.help;
+
+          var labels = isObject(entry.labels) ? entry.labels : {};
+
+          if (entry.kind === "histogram") {
+            var bounds = Array.isArray(entry.buckets) ? entry.buckets : [];
+            var counts = Array.isArray(entry.bucketCounts)
+              ? entry.bucketCounts
+              : [];
+            var buckets = [];
+
+            bounds.forEach(function (bound, index) {
+              buckets.push({
+                bound: readFinite(bound),
+                cumulative: readFinite(counts[index]) || 0
+              });
+            });
+
+            family.histograms.push({
+              key: labelKey(labels, LABELS_LE),
+              labels: labels,
+              buckets: buckets,
+              infCount: readFinite(entry.infCount),
+              sum: readFinite(entry.sum),
+              count: readFinite(entry.count)
+            });
+            folded += 1;
+
+            return;
+          }
+
+          family.samples.push({ labels: labels, value: readFinite(entry.value) });
+          folded += 1;
+        });
+
+        return { families: families, folded: folded };
+      }
+
+      /** One health row, from whichever section of a snapshot carries it. */
+      function healthRow(id, status, detail, source) {
+        return {
+          id: id,
+          status: status,
+          detail: readString(detail),
+          source: isObject(source) ? source : HEALTH_CHECK_SOURCES[id] || null
+        };
+      }
+
+      /**
+       * Reads the health section of a combined `DiagnosticsSnapshot`.
+       *
+       * `report.checks` carries each result's `source` and `durationMs`;
+       * `checks` carries the id, status and detail alone. The report's rows are
+       * read where a report is attached, and the shorter rows where none is.
+       */
+      function readHealthSection(section) {
+        if (!isObject(section)) {
+          return null;
+        }
+
+        var report = isObject(section.report) ? section.report : null;
+        var source = report !== null && Array.isArray(report.checks)
+          ? report.checks
+          : Array.isArray(section.checks)
+            ? section.checks
+            : [];
         var rows = [];
 
-        samplesOf(model, name, "").forEach(function (sample) {
-          rows.push({ key: sample.labels[label] || "(none)", value: sample.value });
+        source.forEach(function (entry) {
+          if (!isObject(entry)) {
+            return;
+          }
+
+          var id = readString(entry.id);
+
+          if (id === null) {
+            return;
+          }
+
+          rows.push(
+            healthRow(
+              id,
+              readString(entry.status) || "unknown",
+              entry.detail,
+              entry.source
+            )
+          );
+        });
+
+        return {
+          status: readString(section.status),
+          checks: rows,
+          counts: isObject(section.counts) ? section.counts : null,
+          durations: report !== null ? report : null,
+          correlationId:
+            report !== null ? readString(report.correlationId) : null,
+          timestamp: report !== null ? readString(report.timestamp) : null,
+          readiness: isObject(section.readiness) ? section.readiness : null
+        };
+      }
+
+      /** Reads the hook section of a combined `DiagnosticsSnapshot`. */
+      function readHookSection(section) {
+        if (!Array.isArray(section)) {
+          return null;
+        }
+
+        var rows = [];
+
+        section.forEach(function (entry) {
+          if (!isObject(entry)) {
+            return;
+          }
+
+          var hook = readString(entry.hook);
+
+          if (hook === null) {
+            return;
+          }
+
+          rows.push({
+            hook: hook,
+            dispatched: readFinite(entry.dispatched),
+            invoked: readFinite(entry.invoked),
+            skipped: readFinite(entry.skipped),
+            rejected: readFinite(entry.rejected),
+            failed: readFinite(entry.failed)
+          });
+        });
+
+        return rows.length === 0 ? null : rows;
+      }
+
+      /**
+       * Parses either JSON export.
+       *
+       * A payload carrying `series` at its root is the `MetricsSnapshot` of
+       * `MetricsRegistry.snapshot()`; one carrying a `metrics` member is the
+       * combined `DiagnosticsSnapshot` of `DiagnosticsOverlay.snapshot()`, which
+       * wraps that snapshot and adds the health, readiness, hook and log
+       * sections.
+       *
+       * @param text JSON text.
+       * @returns A model, or `null` when neither shape is present.
+       */
+      function parseJsonSnapshot(text) {
+        var payload = JSON.parse(text);
+
+        if (!isObject(payload)) {
+          return null;
+        }
+
+        var metrics = isObject(payload.metrics) ? payload.metrics : payload;
+
+        if (!Array.isArray(metrics.series)) {
+          return null;
+        }
+
+        var combined = metrics !== payload;
+        var folded = foldSeries(metrics.series);
+
+        Object.keys(folded.families).forEach(function (name) {
+          folded.families[name].histograms.forEach(function (entry) {
+            entry.buckets.sort(function (left, right) {
+              return (left.bound || 0) - (right.bound || 0);
+            });
+          });
+        });
+
+        var health = combined ? readHealthSection(payload.health) : null;
+
+        return {
+          form: combined ? "diagnostics-json" : "metrics-json",
+          formLabel: combined
+            ? "combined diagnostics snapshot"
+            : "metrics snapshot",
+          correlationId:
+            readString(payload.correlationId) ||
+            readString(metrics.correlationId) ||
+            (health !== null ? health.correlationId : null),
+          generatedAt:
+            readString(payload.generatedAt) ||
+            readString(metrics.generatedAt) ||
+            (health !== null ? health.timestamp : null),
+          schemaVersion: readFinite(payload.schemaVersion),
+          rejected: readFinite(metrics.rejected),
+          reporterFaults: readFinite(metrics.reporterFaults),
+          elapsedMs: readFinite(metrics.elapsedMs),
+          families: folded.families,
+          health: health,
+          hooks: combined ? readHookSection(payload.hooks) : null,
+          traces: combined && isObject(payload.traces) ? payload.traces : null,
+          logs: combined && Array.isArray(payload.logs) ? payload.logs : null,
+          malformedLines: 0,
+          sampleCount: folded.folded
+        };
+      }
+
+      /**
+       * Chooses a parser by inspecting the payload, and reports what it read.
+       *
+       * @param text Text of a loaded file, a drop or the paste box.
+       * @returns `{ model }` on success and `{ error }` otherwise. Neither
+       *   branch throws.
+       */
+      function parseSnapshot(text) {
+        var trimmed = String(text === undefined || text === null ? "" : text)
+          .replace(/^\uFEFF/, "")
+          .trim();
+
+        if (trimmed.length === 0) {
+          return { error: "That input is empty. There is nothing to render." };
+        }
+
+        if (trimmed.charAt(0) === "{" || trimmed.charAt(0) === "[") {
+          try {
+            var fromJson = parseJsonSnapshot(trimmed);
+
+            if (fromJson === null) {
+              return {
+                error:
+                  "That JSON is not a snapshot this page reads. A metrics " +
+                  "snapshot carries a `series` array; a combined diagnostics " +
+                  "snapshot carries a `metrics` object holding one. Export " +
+                  "either with the diagnostics overlay."
+              };
+            }
+
+            return { model: fromJson };
+          } catch (thrown) {
+            return {
+              error:
+                "That input begins like JSON but could not be parsed: " +
+                describeThrown(thrown)
+            };
+          }
+        }
+
+        try {
+          var fromText = parsePrometheusText(trimmed);
+
+          if (fromText === null) {
+            return {
+              error:
+                "No metric sample was found in that input. A Prometheus " +
+                "export carries lines such as `" +
+                NAMES.turnsTotal +
+                " 5`. Export one with the diagnostics overlay's Export " +
+                "metrics control."
+            };
+          }
+
+          return { model: fromText };
+        } catch (thrown) {
+          return {
+            error: "That input could not be parsed: " + describeThrown(thrown)
+          };
+        }
+      }
+
+      function describeThrown(thrown) {
+        if (isObject(thrown) && readString(thrown.message) !== null) {
+          return thrown.message;
+        }
+
+        return String(thrown);
+      }
+
+      /* ================================================================== */
+      /* Reading the model.                                                  */
+      /* ================================================================== */
+
+      /**
+       * One family, or `null` when the loaded snapshot does not carry it.
+       *
+       * A family the snapshot omits and a family whose value is zero are
+       * different readings, and every panel below distinguishes them: absent is
+       * rendered as "not carried", zero as `0`.
+       */
+      function familyOf(model, name) {
+        if (model === null) {
+          return null;
+        }
+
+        var family = model.families[name];
+
+        if (family === undefined) {
+          return null;
+        }
+
+        var present =
+          family.samples.length > 0 || family.histograms.length > 0;
+
+        return present ? family : null;
+      }
+
+      /** The `# HELP` text of a family, which is its own description. */
+      function helpOf(model, name) {
+        var family = model === null ? null : model.families[name];
+
+        return family === undefined || family === null
+          ? null
+          : readString(family.help);
+      }
+
+      /** The single unlabelled value of a family. */
+      function scalarOf(model, name) {
+        var family = familyOf(model, name);
+
+        if (family === null) {
+          return null;
+        }
+
+        for (var index = 0; index < family.samples.length; index += 1) {
+          if (Object.keys(family.samples[index].labels).length === 0) {
+            return family.samples[index].value;
+          }
+        }
+
+        return null;
+      }
+
+      /** Every value of a family summed, whatever its labels. */
+      function totalOf(model, name) {
+        var family = familyOf(model, name);
+
+        if (family === null) {
+          return null;
+        }
+
+        var total = 0;
+
+        family.samples.forEach(function (sample) {
+          if (readFinite(sample.value) !== null) {
+            total += sample.value;
+          }
+        });
+
+        return total;
+      }
+
+      /**
+       * A family's values keyed by one label, restricted to a declared
+       * vocabulary.
+       *
+       * The vocabulary is what fixes the row count: the six hooks and the seven
+       * engine events are rendered in declaration order whether or not the
+       * loaded snapshot carries a series for each, so a hook that never
+       * dispatched is visible as absent rather than missing from the panel.
+       */
+      function byLabel(model, name, label, vocabulary) {
+        var family = familyOf(model, name);
+        var found = {};
+
+        if (family !== null) {
+          family.samples.forEach(function (sample) {
+            var key = sample.labels[label];
+
+            if (key === undefined) {
+              key = "(unlabelled)";
+            }
+
+            found[key] =
+              (found[key] === undefined ? 0 : found[key]) + (sample.value || 0);
+          });
+        }
+
+        var rows = [];
+        var seen = {};
+
+        (vocabulary || []).forEach(function (key) {
+          seen[key] = true;
+          rows.push({
+            key: key,
+            value: found[key] === undefined ? null : found[key]
+          });
+        });
+
+        Object.keys(found)
+          .filter(function (key) {
+            return seen[key] !== true;
+          })
+          .sort()
+          .forEach(function (key) {
+            rows.push({ key: key, value: found[key], unexpected: true });
+          });
+
+        return rows;
+      }
+
+      /** A family's values keyed by two labels, in the data's own order. */
+      function byTwoLabels(model, name, first, second) {
+        var family = familyOf(model, name);
+        var rows = [];
+
+        if (family === null) {
+          return rows;
+        }
+
+        family.samples.forEach(function (sample) {
+          rows.push({
+            first: sample.labels[first] === undefined
+              ? "(unlabelled)"
+              : sample.labels[first],
+            second: sample.labels[second] === undefined
+              ? "(unlabelled)"
+              : sample.labels[second],
+            value: sample.value
+          });
         });
 
         rows.sort(function (left, right) {
-          return right.value - left.value;
+          if (left.first === right.first) {
+            return left.second < right.second ? -1 : 1;
+          }
+
+          return left.first < right.first ? -1 : 1;
         });
 
         return rows;
       }
 
+      /** The one unlabelled histogram of a family. */
+      function histogramOf(model, name) {
+        var family = familyOf(model, name);
+
+        if (family === null || family.histograms.length === 0) {
+          return null;
+        }
+
+        for (var index = 0; index < family.histograms.length; index += 1) {
+          if (Object.keys(family.histograms[index].labels).length === 0) {
+            return family.histograms[index];
+          }
+        }
+
+        return family.histograms[0];
+      }
+
+      /** Every histogram of a family, keyed by one label. */
+      function histogramsByLabel(model, name, label) {
+        var family = familyOf(model, name);
+        var found = {};
+
+        if (family === null) {
+          return found;
+        }
+
+        family.histograms.forEach(function (entry) {
+          var key = entry.labels[label];
+
+          if (key !== undefined) {
+            found[key] = entry;
+          }
+        });
+
+        return found;
+      }
+
       /**
-       * Interpolates a quantile from cumulative histogram buckets, the way
-       * `histogram_quantile` does, per label group.
+       * Interpolates a quantile from cumulative bucket counts, as
+       * `histogram_quantile` does: the bucket holding the rank is found, then
+       * the value is interpolated linearly between its lower and upper bounds.
+       *
+       * A computed reading, so it is not present verbatim in the loaded file.
+       *
+       * @returns The interpolated value in milliseconds, or `null` when the
+       *   histogram holds no observation.
        */
-      function quantiles(model, name, quantile, groupLabel) {
-        var groups = Object.create(null);
+      function quantileOf(histogram, quantile) {
+        if (histogram === null) {
+          return null;
+        }
 
-        samplesOf(model, name, "bucket").forEach(function (sample) {
-          var key = groupLabel ? sample.labels[groupLabel] || "(none)" : "all";
-          var bound = sample.labels.le;
+        var observations =
+          readFinite(histogram.count) !== null
+            ? histogram.count
+            : readFinite(histogram.infCount);
 
-          if (bound === undefined) {
+        if (observations === null || observations <= 0) {
+          return null;
+        }
+
+        var rank = quantile * observations;
+        var previousBound = 0;
+        var previousCount = 0;
+
+        for (var index = 0; index < histogram.buckets.length; index += 1) {
+          var bucket = histogram.buckets[index];
+          var bound = readFinite(bucket.bound);
+          var cumulative = readFinite(bucket.cumulative) || 0;
+
+          if (bound === null) {
+            continue;
+          }
+
+          if (cumulative >= rank) {
+            var span = cumulative - previousCount;
+
+            if (span <= 0) {
+              return bound;
+            }
+
+            return (
+              previousBound +
+              ((rank - previousCount) / span) * (bound - previousBound)
+            );
+          }
+
+          previousBound = bound;
+          previousCount = cumulative;
+        }
+
+        /*
+          The rank falls beyond the last stated boundary, inside `+Inf`. The
+          largest boundary is the tightest bound that can be reported, and it is
+          reported as such rather than as an interpolation into infinity.
+        */
+        return histogram.buckets.length === 0 ? null : previousBound;
+      }
+
+      /** The mean of a histogram: its sum over its count. */
+      function meanOf(histogram) {
+        if (histogram === null) {
+          return null;
+        }
+
+        var sum = readFinite(histogram.sum);
+        var count = readFinite(histogram.count);
+
+        if (sum === null || count === null || count <= 0) {
+          return null;
+        }
+
+        return sum / count;
+      }
+
+      /**
+       * Observations at or beyond a boundary: the total count less the
+       * cumulative count of the bucket whose bound is that boundary.
+       */
+      function beyondBoundary(histogram, boundary) {
+        if (histogram === null) {
+          return null;
+        }
+
+        var count = readFinite(histogram.count);
+
+        if (count === null) {
+          return null;
+        }
+
+        for (var index = 0; index < histogram.buckets.length; index += 1) {
+          if (histogram.buckets[index].bound === boundary) {
+            return count - (readFinite(histogram.buckets[index].cumulative) || 0);
+          }
+        }
+
+        return null;
+      }
+
+      /* ================================================================== */
+      /* Formatting and element construction.                                */
+      /* ================================================================== */
+
+      var ABSENT_TEXT = "not carried";
+
+      function formatCount(value) {
+        if (value === null || value === undefined) {
+          return ABSENT_TEXT;
+        }
+
+        if (typeof value !== "number" || !isFinite(value)) {
+          return String(value);
+        }
+
+        return String(Math.round(value * 1000) / 1000);
+      }
+
+      /*
+        Durations are rendered in the unit the serialiser writes them in.
+        `DEFAULT_DURATION_BUCKETS` and every duration family are in
+        MILLISECONDS, so no conversion is applied anywhere in this file.
+      */
+      function formatMilliseconds(value) {
+        if (value === null || value === undefined) {
+          return ABSENT_TEXT;
+        }
+
+        if (typeof value !== "number" || !isFinite(value)) {
+          return String(value);
+        }
+
+        return (Math.round(value * 100) / 100).toFixed(2) + " ms";
+      }
+
+      function formatBound(bound) {
+        return bound === null || bound === undefined
+          ? ABSENT_TEXT
+          : "\u2264 " + formatCount(bound) + " ms";
+      }
+
+      /**
+       * Builds an element.
+       *
+       * Text is assigned through `textContent`, and attributes through
+       * `setAttribute`, so no loaded value is ever interpreted as markup.
+       */
+      function el(tag, options, children) {
+        var node = document.createElement(tag);
+        var settings = options || {};
+
+        Object.keys(settings).forEach(function (key) {
+          if (key === "text") {
+            node.textContent = String(settings[key]);
+
             return;
           }
 
-          if (!groups[key]) {
-            groups[key] = [];
-          }
-
-          groups[key].push({
-            bound: bound === "+Inf" ? Infinity : Number(bound),
-            count: sample.value
-          });
-        });
-
-        return Object.keys(groups)
-          .map(function (key) {
-            var buckets = groups[key].sort(function (left, right) {
-              return left.bound - right.bound;
+          if (key === "style") {
+            Object.keys(settings[key]).forEach(function (property) {
+              node.style.setProperty(property, settings[key][property]);
             });
-            var total = buckets.length ? buckets[buckets.length - 1].count : 0;
 
-            if (!total) {
-              return { key: key, value: 0, total: 0 };
-            }
-
-            var wanted = quantile * total;
-            var previousBound = 0;
-            var previousCount = 0;
-
-            for (var i = 0; i < buckets.length; i += 1) {
-              if (buckets[i].count >= wanted) {
-                var bound = buckets[i].bound;
-
-                if (!isFinite(bound)) {
-                  return { key: key, value: previousBound, total: total };
-                }
-
-                var span = buckets[i].count - previousCount;
-                var offset = span > 0 ? (wanted - previousCount) / span : 0;
-
-                return {
-                  key: key,
-                  value: previousBound + (bound - previousBound) * offset,
-                  total: total
-                };
-              }
-
-              previousBound = isFinite(buckets[i].bound) ? buckets[i].bound : previousBound;
-              previousCount = buckets[i].count;
-            }
-
-            return { key: key, value: previousBound, total: total };
-          })
-          .sort(function (left, right) {
-            return right.value - left.value;
-          });
-      }
-
-      /* ====================================================================
-       * 3. Rendering
-       * ==================================================================== */
-
-      function el(tag, attrs, children) {
-        var node = document.createElement(tag);
-
-        Object.keys(attrs || {}).forEach(function (key) {
-          if (key === "class") {
-            node.className = attrs[key];
-          } else if (key === "text") {
-            node.textContent = attrs[key];
-          } else {
-            node.setAttribute(key, attrs[key]);
+            return;
           }
+
+          node.setAttribute(key, String(settings[key]));
         });
 
         (children || []).forEach(function (child) {
-          node.appendChild(child);
+          if (child !== null && child !== undefined) {
+            node.appendChild(child);
+          }
         });
 
         return node;
       }
 
-      function panel(title, description, body) {
-        return el("section", { class: "panel" }, [
-          el("h3", { text: title }),
-          el("p", { class: "desc", text: description }),
-          body
+      function textNode(tag, text, options) {
+        var settings = options || {};
+
+        settings.text = text;
+
+        return el(tag, settings);
+      }
+
+      /** A panel: a heading, its description, and a body. */
+      function panel(id, title, caption, body, wide) {
+        var headingId = "panel-" + id;
+
+        return el(
+          "section",
+          {
+            class: wide === true ? "panel wide" : "panel",
+            "aria-labelledby": headingId
+          },
+          [
+            textNode("h3", title, { id: headingId }),
+            caption === null ? null : textNode("p", caption, { class: "caption" }),
+            body
+          ]
+        );
+      }
+
+      function noData(message) {
+        return textNode("p", message, { class: "no-data" });
+      }
+
+      function section(id, title, panels) {
+        var headingId = "section-" + id;
+
+        return el("section", { "aria-labelledby": headingId }, [
+          textNode("h2", title, { id: headingId, class: "section-heading" }),
+          el("div", { class: "panel-grid" }, panels)
         ]);
       }
 
-      function rowsTable(headings, rows, format) {
-        if (!rows.length) {
-          return el("p", { class: "empty", text: "No samples in this export." });
-        }
+      /** A definition list of prominent numeric readouts. */
+      function readouts(entries) {
+        return el(
+          "dl",
+          { class: "readouts" },
+          entries.map(function (entry) {
+            var classes = "readout";
 
+            if (entry.raised === true) {
+              classes += " raised";
+            }
+
+            return el("div", { class: classes }, [
+              textNode("dt", entry.label),
+              textNode("dd", entry.value)
+            ]);
+          })
+        );
+      }
+
+      /**
+       * A table.
+       *
+       * Real table semantics throughout: a caption, a `thead` of `th` cells with
+       * `scope="col"`, and a row header per row with `scope="row"`.
+       */
+      function table(caption, headings, rows) {
         var head = el(
           "tr",
           {},
-          headings.map(function (heading) {
-            return el("th", { text: heading });
+          headings.map(function (heading, index) {
+            return textNode("th", heading.label, {
+              scope: "col",
+              class: index === 0 || heading.numeral !== true ? "" : "numeral"
+            });
           })
         );
 
         var body = rows.map(function (row) {
-          return el("tr", {}, [
-            el("td", { text: row.key }),
-            el("td", { class: "num", text: format ? format(row.value) : integer(row.value) })
-          ]);
-        });
+          var cells = row.cells.map(function (cell, index) {
+            if (index === 0) {
+              return textNode("th", cell.text, {
+                scope: "row",
+                class: cell.class || ""
+              });
+            }
 
-        return el("table", {}, [el("thead", {}, [head]), el("tbody", {}, body)]);
-      }
+            var options = { class: cell.class || "" };
 
-      function integer(value) {
-        return isFinite(value) ? String(Math.round(value)) : "—";
-      }
+            if (cell.status !== undefined) {
+              options["data-status"] = cell.status;
+            }
 
-      function millis(value) {
-        return isFinite(value) ? value.toFixed(2) + " ms" : "—";
-      }
+            return textNode("td", cell.text, options);
+          });
 
-      /** A horizontal bar chart, drawn as inline SVG. */
-      function barChart(rows, format) {
-        if (!rows.length) {
-          return el("p", { class: "empty", text: "No samples in this export." });
-        }
-
-        var visible = rows.slice(0, 10);
-        var rowHeight = 26;
-        var labelWidth = 150;
-        var width = 640;
-        var height = visible.length * rowHeight + 8;
-        var peak = Math.max.apply(
-          null,
-          visible.map(function (row) {
-            return isFinite(row.value) ? row.value : 0;
-          })
-        );
-        var scale = peak > 0 ? (width - labelWidth - 90) / peak : 0;
-        var svgns = "http://www.w3.org/2000/svg";
-        var svg = document.createElementNS(svgns, "svg");
-
-        svg.setAttribute("viewBox", "0 0 " + width + " " + height);
-        svg.setAttribute("role", "img");
-
-        visible.forEach(function (row, index) {
-          var y = index * rowHeight + 4;
-          var length = Math.max(isFinite(row.value) ? row.value * scale : 0, 1);
-
-          var name = document.createElementNS(svgns, "text");
-          name.setAttribute("x", "0");
-          name.setAttribute("y", String(y + 14));
-          name.setAttribute("font-size", "12");
-          name.setAttribute("fill", "#776e65");
-          name.textContent = row.key.length > 24 ? row.key.slice(0, 23) + "…" : row.key;
-          svg.appendChild(name);
-
-          var bar = document.createElementNS(svgns, "rect");
-          bar.setAttribute("x", String(labelWidth));
-          bar.setAttribute("y", String(y + 3));
-          bar.setAttribute("width", String(length));
-          bar.setAttribute("height", "14");
-          bar.setAttribute("rx", "2");
-          bar.setAttribute("fill", "#7d6b59");
-          svg.appendChild(bar);
-
-          var value = document.createElementNS(svgns, "text");
-          value.setAttribute("x", String(labelWidth + length + 6));
-          value.setAttribute("y", String(y + 14));
-          value.setAttribute("font-size", "12");
-          value.setAttribute("font-family", "monospace");
-          value.setAttribute("fill", "#5c554e");
-          value.textContent = format ? format(row.value) : integer(row.value);
-          svg.appendChild(value);
-        });
-
-        return svg;
-      }
-
-      function healthPanel(model) {
-        var rows = byLabel(model, "game2048_health_check_status", "check");
-
-        if (!rows.length) {
-          return el("p", { class: "empty", text: "No health samples in this export." });
-        }
-
-        rows.sort(function (left, right) {
-          return left.key.localeCompare(right.key);
-        });
-
-        var body = rows.map(function (row) {
-          var status = row.value === 1 ? "pass" : row.value === 0 ? "fail" : "na";
-          var text = status === "pass" ? "pass" : status === "fail" ? "fail" : "n/a";
-
-          return el("tr", {}, [
-            el("td", { text: row.key }),
-            el("td", {}, [el("span", { class: "pill " + status, text: text })])
-          ]);
+          return el(
+            "tr",
+            { class: row.absent === true ? "absent-row" : "" },
+            cells
+          );
         });
 
         return el("table", {}, [
-          el("thead", {}, [el("tr", {}, [el("th", { text: "Check" }), el("th", { text: "Status" })])]),
+          caption === null ? null : textNode("caption", caption),
+          el("thead", {}, [head]),
           el("tbody", {}, body)
         ]);
       }
 
-      function statPanel(value) {
-        return el("p", { class: "stat", text: integer(value) });
+      /**
+       * A labelled bar row set. Bar length is the value against the largest in
+       * the set, written as a `--fill` percentage the stylesheet consumes.
+       */
+      function bars(rows, format) {
+        var render = format || formatCount;
+        var largest = 0;
+
+        rows.forEach(function (row) {
+          if (readFinite(row.value) !== null && row.value > largest) {
+            largest = row.value;
+          }
+        });
+
+        return el(
+          "dl",
+          { class: "histogram" },
+          rows.reduce(function (nodes, row) {
+            var value = readFinite(row.value);
+            var share =
+              largest > 0 && value !== null ? (value / largest) * 100 : 0;
+
+            nodes.push(
+              textNode("dt", row.key + (row.unexpected === true ? " *" : ""), {
+                class: value === null ? "absent" : ""
+              })
+            );
+            nodes.push(
+              el("dd", {}, [
+                el("div", { class: "bar-track" }, [
+                  el("span", {
+                    class: value === null || value === 0 ? "bar-fill zero" : "bar-fill",
+                    style: { "--fill": share.toFixed(2) + "%" }
+                  })
+                ])
+              ])
+            );
+            nodes.push(
+              textNode(
+                "dd",
+                value === null ? ABSENT_TEXT : render(value),
+                { class: value === null ? "count absent" : "count" }
+              )
+            );
+
+            return nodes;
+          }, [])
+        );
       }
 
-      function section(title, panels) {
-        return [el("h2", { text: title }), el("div", { class: "grid" }, panels)];
+      /**
+       * A bucket distribution with threshold markers.
+       *
+       * The export carries CUMULATIVE counts, so the per-bucket count rendered
+       * here is the difference between consecutive cumulative counts. Boundaries
+       * are the ones the loaded file states; the marked rows are those whose
+       * bound equals a threshold, so a marker always sits on a real boundary
+       * rather than at an interpolated position.
+       */
+      function distribution(histogram, thresholds) {
+        var marked = {};
+
+        (thresholds || []).forEach(function (threshold) {
+          marked[String(threshold.value)] = true;
+        });
+
+        var rows = [];
+        var previous = 0;
+
+        histogram.buckets.forEach(function (bucket) {
+          var cumulative = readFinite(bucket.cumulative) || 0;
+
+          rows.push({
+            bound: bucket.bound,
+            count: cumulative - previous,
+            cumulative: cumulative,
+            marked: marked[String(bucket.bound)] === true
+          });
+          previous = cumulative;
+        });
+
+        var total =
+          readFinite(histogram.count) !== null
+            ? histogram.count
+            : readFinite(histogram.infCount) || previous;
+
+        if (total > previous) {
+          rows.push({
+            bound: null,
+            count: total - previous,
+            cumulative: total,
+            marked: false,
+            overflow: true
+          });
+        }
+
+        var largest = 0;
+
+        rows.forEach(function (row) {
+          if (row.count > largest) {
+            largest = row.count;
+          }
+        });
+
+        var body = el(
+          "dl",
+          { class: "histogram" },
+          rows.reduce(function (nodes, row) {
+            var share = largest > 0 ? (row.count / largest) * 100 : 0;
+            var boundLabel =
+              row.overflow === true
+                ? "> " + formatCount(rows[rows.length - 2].bound) + " ms"
+                : formatBound(row.bound);
+
+            nodes.push(
+              textNode("dt", boundLabel, {
+                class: row.marked === true ? "threshold" : ""
+              })
+            );
+            nodes.push(
+              el("dd", {}, [
+                el("div", { class: "bar-track" }, [
+                  el("span", {
+                    class: row.count === 0 ? "bar-fill zero" : "bar-fill",
+                    style: { "--fill": share.toFixed(2) + "%" }
+                  })
+                ])
+              ])
+            );
+            nodes.push(
+              textNode("dd", formatCount(row.count), {
+                class:
+                  row.marked === true ? "count threshold" : "count"
+              })
+            );
+
+            return nodes;
+          }, [])
+        );
+
+        var children = [body];
+
+        if ((thresholds || []).length > 0) {
+          children.push(
+            el("div", { class: "marker-key" }, [
+              textNode(
+                "p",
+                "Marked boundaries, each cited to the line that sets it:"
+              ),
+              el(
+                "dl",
+                {},
+                thresholds.reduce(function (nodes, threshold) {
+                  nodes.push(
+                    textNode("dt", formatCount(threshold.value) + " ms")
+                  );
+                  nodes.push(
+                    textNode(
+                      "dd",
+                      threshold.label + " \u2014 " + threshold.origin
+                    )
+                  );
+
+                  return nodes;
+                }, [])
+              )
+            ])
+          );
+        }
+
+        return el("div", {}, children);
       }
 
-      function render(model) {
-        var board = document.getElementById("board");
-        board.textContent = "";
+      /* ================================================================== */
+      /* Panels.                                                             */
+      /* ================================================================== */
 
-        var blocks = [];
+      /*
+        The four sections below are the four rows of
+        docs/dashboards/dashboard.json, in its order, and mirror the panel order
+        of src/observability/diagnostics-overlay.ts. Every series either panel
+        reads is declared in the implementation.
+      */
 
-        blocks = blocks.concat(
-          section("Turns and the board", [
-            panel(
-              "Turns by resolution",
-              "game2048_turns_total — one series per resolution, so an idle or cancelled turn is visible beside a committed one.",
-              barChart(byLabel(model, "game2048_turns_total", "resolution"))
-            ),
-            panel(
-              "Merges and spawns",
-              "A merge is counted once per merge, so a double-merge turn raises it by two. Suppressed spawns are attempts a relic or a full board refused.",
-              rowsTable(
-                ["Series", "Count"],
-                [
-                  { key: "merges", value: totalOf(model, "game2048_merges_total") },
-                  { key: "spawns", value: totalOf(model, "game2048_spawns_total") },
-                  { key: "spawn attempts", value: totalOf(model, "game2048_spawn_attempts_total") },
-                  { key: "spawns suppressed", value: totalOf(model, "game2048_spawn_suppressed_total") },
-                  { key: "frames rendered", value: totalOf(model, "game2048_frames_rendered_total") }
-                ]
-              )
-            ),
-            panel(
-              "Engine events by name",
-              "game2048_engine_events_total — the seven typed events of the engine contract.",
-              barChart(byLabel(model, "game2048_engine_events_total", "event"))
-            )
-          ])
+      /** Section 1 — gameplay counters. */
+      function gameplaySection(model) {
+        var turns = scalarOf(model, NAMES.turnsTotal);
+        var merges = totalOf(model, NAMES.mergesTotal);
+        var spawns = totalOf(model, NAMES.spawnsTotal);
+        var frames = totalOf(model, NAMES.framesRenderedTotal);
+        var attempts = totalOf(model, NAMES.spawnAttemptsTotal);
+        var suppressed = totalOf(model, NAMES.spawnSuppressedTotal);
+
+        var spawnRows = [
+          {
+            cells: [
+              { text: NAMES.spawnAttemptsTotal },
+              { text: formatCount(attempts), class: "numeral" }
+            ],
+            absent: attempts === null
+          },
+          {
+            cells: [
+              { text: NAMES.spawnsTotal },
+              { text: formatCount(spawns), class: "numeral" }
+            ],
+            absent: spawns === null
+          },
+          {
+            cells: [
+              { text: NAMES.spawnSuppressedTotal },
+              { text: formatCount(suppressed), class: "numeral" }
+            ],
+            absent: suppressed === null
+          }
+        ];
+
+        var events = byLabel(
+          model,
+          NAMES.engineEventsTotal,
+          LABELS.event,
+          ENGINE_EVENT_NAMES
         );
 
-        blocks = blocks.concat(
-          section("Latency and frames", [
-            panel(
-              "Turn latency",
-              "game2048_turn_latency_milliseconds, interpolated from cumulative buckets the way histogram_quantile does.",
-              rowsTable(
-                ["Quantile", "Value"],
-                [
-                  { key: "p50", value: (quantiles(model, "game2048_turn_latency_milliseconds", 0.5)[0] || {}).value },
-                  { key: "p95", value: (quantiles(model, "game2048_turn_latency_milliseconds", 0.95)[0] || {}).value },
-                  { key: "p99", value: (quantiles(model, "game2048_turn_latency_milliseconds", 0.99)[0] || {}).value }
-                ],
-                millis
-              )
-            ),
-            panel(
-              "Frame time, against a 16.7 ms budget",
-              "game2048_frame_time_milliseconds — the render loop is the product's first per-frame JavaScript work.",
-              rowsTable(
-                ["Quantile", "Value"],
-                [
-                  { key: "p50", value: (quantiles(model, "game2048_frame_time_milliseconds", 0.5)[0] || {}).value },
-                  { key: "p95", value: (quantiles(model, "game2048_frame_time_milliseconds", 0.95)[0] || {}).value }
-                ],
-                millis
-              )
-            ),
-            panel(
-              "Span duration p95 by name",
-              "game2048_span_duration_milliseconds — every span of the tracer, including render.frame, the frame-callback seam that was unmeasured before this project.",
-              barChart(quantiles(model, "game2048_span_duration_milliseconds", 0.95, "span"), millis)
+        return section("gameplay", "Gameplay counters", [
+          panel(
+            "run-totals",
+            "Run totals",
+            helpOf(model, NAMES.turnsTotal) ||
+              "Turns, merges, insertions and composited frames.",
+            readouts([
+              { label: "turns", value: formatCount(turns) },
+              { label: "merges", value: formatCount(merges) },
+              { label: "spawns", value: formatCount(spawns) },
+              { label: "frames rendered", value: formatCount(frames) }
+            ])
+          ),
+          panel(
+            "spawn-outcomes",
+            "Spawn attempts, insertions and suppressions",
+            "Attempts equal insertions plus suppressions: a suppressed attempt " +
+              "is one a full board or an onSpawn handler left without a cell.",
+            table(
+              "The three spawn counters, by family name.",
+              [{ label: "Series" }, { label: "Count", numeral: true }],
+              spawnRows
             )
-          ])
+          ),
+          panel(
+            "engine-events",
+            "Engine events by name",
+            helpOf(model, NAMES.engineEventsTotal) ||
+              "Engine events emitted, by event name.",
+            events.length === 0
+              ? noData("No engine-event series in this snapshot.")
+              : bars(events),
+            true
+          )
+        ]);
+      }
+
+      /** Section 2 — latency, frames and spans. */
+      function latencySection(model) {
+        var frameTime = histogramOf(model, NAMES.frameTimeMilliseconds);
+        var turnLatency = histogramOf(model, NAMES.turnLatencyMilliseconds);
+        var overBudget = beyondBoundary(frameTime, FRAME_BUDGET_MS);
+
+        var framePanels = [
+          panel(
+            "frame-budget",
+            "Frame time against the " + FRAME_BUDGET_MS + " ms budget",
+            helpOf(model, NAMES.frameTimeMilliseconds) ||
+              "Frame duration in milliseconds.",
+            frameTime === null
+              ? noData("No frame-time histogram in this snapshot.")
+              : readouts([
+                  {
+                    label: "p50",
+                    value: formatMilliseconds(quantileOf(frameTime, 0.5))
+                  },
+                  {
+                    label: "p95",
+                    value: formatMilliseconds(quantileOf(frameTime, 0.95))
+                  },
+                  { label: "mean", value: formatMilliseconds(meanOf(frameTime)) },
+                  {
+                    label: "over " + FRAME_BUDGET_MS + " ms",
+                    value: formatCount(overBudget),
+                    raised: readFinite(overBudget) !== null && overBudget > 0
+                  }
+                ])
+          ),
+          panel(
+            "frame-distribution",
+            "Frame time distribution across the bucket set",
+            "Per-bucket counts, differenced from the cumulative counts the " +
+              "export carries. Boundaries are milliseconds.",
+            frameTime === null
+              ? noData("No frame-time histogram in this snapshot.")
+              : distribution(frameTime, FRAME_THRESHOLDS)
+          ),
+          panel(
+            "turn-latency",
+            "Turn latency against the animation cadence",
+            helpOf(model, NAMES.turnLatencyMilliseconds) ||
+              "Turn latency in milliseconds, input dispatch through commit.",
+            turnLatency === null
+              ? noData("No turn-latency histogram in this snapshot.")
+              : readouts([
+                  {
+                    label: "p50",
+                    value: formatMilliseconds(quantileOf(turnLatency, 0.5))
+                  },
+                  {
+                    label: "p95",
+                    value: formatMilliseconds(quantileOf(turnLatency, 0.95))
+                  },
+                  {
+                    label: "p99",
+                    value: formatMilliseconds(quantileOf(turnLatency, 0.99))
+                  },
+                  { label: "mean", value: formatMilliseconds(meanOf(turnLatency)) }
+                ])
+          ),
+          panel(
+            "turn-distribution",
+            "Turn latency distribution across the bucket set",
+            "Per-bucket counts against the cadence the retained animations " +
+              "already run at.",
+            turnLatency === null
+              ? noData("No turn-latency histogram in this snapshot.")
+              : distribution(turnLatency, TURN_THRESHOLDS)
+          )
+        ];
+
+        var spans = histogramsByLabel(
+          model,
+          NAMES.spanDurationMilliseconds,
+          LABELS.span
+        );
+        var spanKeys = SPAN_NAMES.slice();
+
+        Object.keys(spans)
+          .sort()
+          .forEach(function (key) {
+            if (spanKeys.indexOf(key) === -1) {
+              spanKeys.push(key);
+            }
+          });
+
+        var spanRows = spanKeys.map(function (name) {
+          var entry = spans[name] === undefined ? null : spans[name];
+
+          return {
+            cells: [
+              { text: name },
+              {
+                text:
+                  entry === null
+                    ? ABSENT_TEXT
+                    : formatCount(entry.count),
+                class: "numeral"
+              },
+              {
+                text: formatMilliseconds(quantileOf(entry, 0.95)),
+                class: "numeral"
+              },
+              { text: formatMilliseconds(meanOf(entry)), class: "numeral" }
+            ],
+            absent: entry === null
+          };
+        });
+
+        framePanels.push(
+          panel(
+            "span-boundaries",
+            "Span duration by module boundary",
+            helpOf(model, NAMES.spanDurationMilliseconds) ||
+              "Span duration in milliseconds, by span name.",
+            table(
+              "One row per span name the tracer declares. render.frame is the " +
+                "frame-callback seam.",
+              [
+                { label: "Span" },
+                { label: "Observations", numeral: true },
+                { label: "p95", numeral: true },
+                { label: "Mean", numeral: true }
+              ],
+              spanRows
+            ),
+            true
+          )
         );
 
-        blocks = blocks.concat(
-          section("Hooks and relics", [
-            panel(
-              "Hook dispatches by hook",
-              "game2048_hook_dispatches_total — one series per hook name.",
-              barChart(byLabel(model, "game2048_hook_dispatches_total", "hook"))
-            ),
-            panel(
-              "Handlers invoked, skipped and refused",
-              "A skip is the charge guard doing its job: once a budget is spent the bus skips every handler that relic binds.",
-              rowsTable(
-                ["Series", "Count"],
-                [
-                  { key: "invoked", value: totalOf(model, "game2048_hook_handler_invocations_total") },
-                  { key: "skipped", value: totalOf(model, "game2048_hook_handler_skipped_total") },
-                  { key: "payload refused", value: totalOf(model, "game2048_hook_payload_rejections_total") }
-                ]
-              )
-            ),
-            panel(
-              "Relic handler errors",
-              "Above zero means a relic threw and was marked degraded, and the HUD shows it as no longer firing.",
-              statPanel(totalOf(model, "game2048_relic_handler_errors_total"))
-            )
-          ])
+        return section("latency", "Latency, frames and spans", framePanels);
+      }
+
+      /** Section 3 — hook dispatch and relics. */
+      function hookSection(model) {
+        var dispatched = byLabel(
+          model,
+          NAMES.hookDispatchesTotal,
+          LABELS.hook,
+          HOOK_NAMES
+        );
+        var invoked = byLabel(
+          model,
+          NAMES.hookHandlerInvocationsTotal,
+          LABELS.hook,
+          HOOK_NAMES
+        );
+        var rejected = byLabel(
+          model,
+          NAMES.hookPayloadRejectionsTotal,
+          LABELS.hook,
+          HOOK_NAMES
+        );
+        var failed = byLabel(
+          model,
+          NAMES.relicHandlerErrorsTotal,
+          LABELS.hook,
+          HOOK_NAMES
         );
 
-        blocks = blocks.concat(
-          section("Determinism, health and the registry itself", [
-            panel(
-              "RNG draws by substream",
-              "Four substreams kept separate so a relic drawing once cannot shift the spawn sequence.",
-              barChart(byLabel(model, "game2048_rng_draws_total", "stream"))
-            ),
-            panel(
-              "Health checks",
-              "Five reused pre-migration probes plus the webgl check added for the renderer.",
-              healthPanel(model)
-            ),
-            panel(
-              "Registry refusals by reason",
-              "The labelled companion of the unlabelled game2048_metrics_rejected_total: read one or the other, never their sum. The registry bounding itself rather than throwing. A rising seriesLimitReached is the real cardinality alarm.",
-              barChart(byLabel(model, "game2048_metrics_rejected_by_reason_total", "reason"))
-            )
-          ])
+        function valueAt(rows, hook) {
+          for (var index = 0; index < rows.length; index += 1) {
+            if (rows[index].key === hook) {
+              return rows[index].value;
+            }
+          }
+
+          return null;
+        }
+
+        var skipped = byTwoLabels(
+          model,
+          NAMES.hookHandlerSkippedTotal,
+          LABELS.hook,
+          LABELS.reason
         );
 
-        blocks.forEach(function (block) {
-          board.appendChild(block);
+        function skippedAt(hook) {
+          var total = null;
+
+          skipped.forEach(function (row) {
+            if (row.first === hook && readFinite(row.value) !== null) {
+              total = (total === null ? 0 : total) + row.value;
+            }
+          });
+
+          return total;
+        }
+
+        var hookRows = HOOK_NAMES.map(function (hook) {
+          var counts = null;
+
+          if (model !== null && model.hooks !== null) {
+            model.hooks.forEach(function (row) {
+              if (row.hook === hook) {
+                counts = row;
+              }
+            });
+          }
+
+          var dispatchCount =
+            counts !== null && counts.dispatched !== null
+              ? counts.dispatched
+              : valueAt(dispatched, hook);
+          var invokeCount =
+            counts !== null && counts.invoked !== null
+              ? counts.invoked
+              : valueAt(invoked, hook);
+          var skipCount =
+            counts !== null && counts.skipped !== null
+              ? counts.skipped
+              : skippedAt(hook);
+          var rejectCount =
+            counts !== null && counts.rejected !== null
+              ? counts.rejected
+              : valueAt(rejected, hook);
+          var failCount =
+            counts !== null && counts.failed !== null
+              ? counts.failed
+              : valueAt(failed, hook);
+
+          return {
+            cells: [
+              { text: hook },
+              { text: formatCount(dispatchCount), class: "numeral" },
+              { text: formatCount(invokeCount), class: "numeral" },
+              { text: formatCount(skipCount), class: "numeral" },
+              { text: formatCount(rejectCount), class: "numeral" },
+              { text: formatCount(failCount), class: "numeral" }
+            ],
+            absent: dispatchCount === null && invokeCount === null
+          };
+        });
+
+        var skipRows = skipped.map(function (row) {
+          return {
+            cells: [
+              { text: row.first },
+              { text: row.second },
+              { text: formatCount(row.value), class: "numeral" }
+            ]
+          };
+        });
+
+        var errorTotal = totalOf(model, NAMES.relicHandlerErrorsTotal);
+        var errorReadouts = failed.map(function (row) {
+          return {
+            label: row.key,
+            value: formatCount(row.value),
+            raised: readFinite(row.value) !== null && row.value > 0
+          };
+        });
+
+        return section("hooks", "Hook dispatch and relics", [
+          panel(
+            "hook-counts",
+            "Hook dispatch by hook",
+            "Six rows, in the order src/engine/hooks.ts declares them. A " +
+              "skip is the charge guard withholding a handler; a rejection is " +
+              "a handler return discarded as a non-payload.",
+            table(
+              "One row per hook the bus dispatches, in declaration order.",
+              [
+                { label: "Hook" },
+                { label: "Dispatched", numeral: true },
+                { label: "Invoked", numeral: true },
+                { label: "Skipped", numeral: true },
+                { label: "Rejected", numeral: true },
+                { label: "Failed", numeral: true }
+              ],
+              hookRows
+            ),
+            true
+          ),
+          panel(
+            "hook-skips",
+            "Handlers skipped by hook and reason",
+            helpOf(model, NAMES.hookHandlerSkippedTotal) ||
+              "Hook handlers skipped before invocation, by hook and reason. " +
+                "The reasons are " +
+                SKIP_REASONS.join(", ") +
+                ".",
+            skipRows.length === 0
+              ? noData("No skip series in this snapshot.")
+              : table(
+                  "One row per hook and reason pair the snapshot carries.",
+                  [
+                    { label: "Hook" },
+                    { label: "Reason" },
+                    { label: "Count", numeral: true }
+                  ],
+                  skipRows
+                )
+          ),
+          panel(
+            "relic-errors",
+            "Relic handler errors by hook" +
+              (readFinite(errorTotal) !== null && errorTotal > 0
+                ? " \u2014 " + formatCount(errorTotal) + " contained"
+                : ""),
+            helpOf(model, NAMES.relicHandlerErrorsTotal) ||
+              "Relic handler throws contained by the hook bus, by hook name.",
+            errorReadouts.length === 0
+              ? noData("No relic-error series in this snapshot.")
+              : readouts(errorReadouts)
+          )
+        ]);
+      }
+
+      /**
+       * The six health rows.
+       *
+       * The status of each is read from the combined snapshot's health section
+       * where one is loaded, and otherwise from
+       * `game2048_health_check_status`, whose gauge is 1 for healthy, 0 for
+       * unhealthy and -1 for not-applicable. A check neither channel reports is
+       * rendered as `not reported`, which is distinct from all three verdicts.
+       */
+      function healthRows(model) {
+        var fromGauge = {};
+        var family = familyOf(model, NAMES.healthCheckStatus);
+
+        if (family !== null) {
+          family.samples.forEach(function (sample) {
+            var id = sample.labels[LABELS.check];
+
+            if (id !== undefined) {
+              fromGauge[id] = GAUGE_TO_STATUS[String(sample.value)] || "unknown";
+            }
+          });
+        }
+
+        var fromSection = {};
+
+        if (model !== null && model.health !== null) {
+          model.health.checks.forEach(function (row) {
+            fromSection[row.id] = row;
+          });
+        }
+
+        var ids = HEALTH_CHECK_IDS.slice();
+
+        Object.keys(fromGauge)
+          .concat(Object.keys(fromSection))
+          .sort()
+          .forEach(function (id) {
+            if (ids.indexOf(id) === -1) {
+              ids.push(id);
+            }
+          });
+
+        return ids.map(function (id) {
+          var reported = fromSection[id];
+          var status =
+            reported !== undefined && reported.status !== "unknown"
+              ? reported.status
+              : fromGauge[id] !== undefined
+                ? fromGauge[id]
+                : "unknown";
+          var source =
+            reported !== undefined && reported.source !== null
+              ? reported.source
+              : HEALTH_CHECK_SOURCES[id] || null;
+
+          return {
+            id: id,
+            status: status,
+            detail: reported === undefined ? null : reported.detail,
+            source: source
+          };
         });
       }
 
-      /* ====================================================================
-       * 4. Wiring
-       * ==================================================================== */
+      /** Section 4 — determinism, health and the registry itself. */
+      function registrySection(model) {
+        var streams = byLabel(
+          model,
+          NAMES.rngDrawsTotal,
+          LABELS.stream,
+          RNG_STREAMS
+        );
 
-      var SAMPLE = [
-        "# HELP game2048_turns_total Turns counted by resolution.",
-        "# TYPE game2048_turns_total counter",
-        'game2048_turns_total{resolution="committed"} 184',
-        'game2048_turns_total{resolution="idle"} 12',
-        'game2048_turns_total{resolution="cancelled"} 3',
-        "# HELP game2048_merges_total Merges resolved.",
-        "# TYPE game2048_merges_total counter",
-        "game2048_merges_total 271",
-        "# HELP game2048_spawns_total Tiles inserted.",
-        "# TYPE game2048_spawns_total counter",
-        "game2048_spawns_total 184",
-        "# HELP game2048_spawn_attempts_total Spawn attempts.",
-        "# TYPE game2048_spawn_attempts_total counter",
-        "game2048_spawn_attempts_total 191",
-        "# HELP game2048_spawn_suppressed_total Attempts suppressed.",
-        "# TYPE game2048_spawn_suppressed_total counter",
-        "game2048_spawn_suppressed_total 7",
-        "# HELP game2048_frames_rendered_total Frames composited.",
-        "# TYPE game2048_frames_rendered_total counter",
-        "game2048_frames_rendered_total 9421",
-        "# HELP game2048_engine_events_total Engine events by name.",
-        "# TYPE game2048_engine_events_total counter",
-        'game2048_engine_events_total{event="state:commit"} 184',
-        'game2048_engine_events_total{event="move:before"} 199',
-        'game2048_engine_events_total{event="move:after"} 184',
-        'game2048_engine_events_total{event="tile:merge"} 271',
-        'game2048_engine_events_total{event="tile:spawn"} 184',
-        'game2048_engine_events_total{event="stage:start"} 5',
-        'game2048_engine_events_total{event="stage:end"} 4',
-        "# HELP game2048_hook_dispatches_total Hook dispatches by hook.",
-        "# TYPE game2048_hook_dispatches_total counter",
-        'game2048_hook_dispatches_total{hook="onBeforeMove"} 199',
-        'game2048_hook_dispatches_total{hook="onMerge"} 271',
-        'game2048_hook_dispatches_total{hook="onSpawn"} 184',
-        'game2048_hook_dispatches_total{hook="onAfterMove"} 184',
-        'game2048_hook_dispatches_total{hook="onStageStart"} 5',
-        'game2048_hook_dispatches_total{hook="onStageEnd"} 4',
-        "# HELP game2048_hook_handler_invocations_total Handlers invoked.",
-        "# TYPE game2048_hook_handler_invocations_total counter",
-        "game2048_hook_handler_invocations_total 612",
-        "# HELP game2048_hook_handler_skipped_total Handlers skipped.",
-        "# TYPE game2048_hook_handler_skipped_total counter",
-        "game2048_hook_handler_skipped_total 46",
-        "# HELP game2048_hook_payload_rejections_total Returns refused.",
-        "# TYPE game2048_hook_payload_rejections_total counter",
-        "game2048_hook_payload_rejections_total 0",
-        "# HELP game2048_relic_handler_errors_total Handlers that threw.",
-        "# TYPE game2048_relic_handler_errors_total counter",
-        "game2048_relic_handler_errors_total 0",
-        "# HELP game2048_rng_draws_total Draws by substream.",
-        "# TYPE game2048_rng_draws_total counter",
-        'game2048_rng_draws_total{stream="spawn-value"} 184',
-        'game2048_rng_draws_total{stream="spawn-position"} 184',
-        'game2048_rng_draws_total{stream="relic-draw"} 12',
-        'game2048_rng_draws_total{stream="rarity-weight"} 4',
-        "# HELP game2048_metrics_rejected_total Registry refusals, unlabelled.",
-        "# TYPE game2048_metrics_rejected_total counter",
-        "game2048_metrics_rejected_total 3",
-        "# HELP game2048_metrics_rejected_by_reason_total Registry refusals by reason.",
-        "# TYPE game2048_metrics_rejected_by_reason_total counter",
-        'game2048_metrics_rejected_by_reason_total{reason="valueNotAString"} 2',
-        'game2048_metrics_rejected_by_reason_total{reason="unspecified"} 1',
-        "# HELP game2048_health_check_status Health check status.",
-        "# TYPE game2048_health_check_status gauge",
-        'game2048_health_check_status{check="functionBind"} 1',
-        'game2048_health_check_status{check="classList"} 1',
-        'game2048_health_check_status{check="requestAnimationFrame"} 1',
-        'game2048_health_check_status{check="pointerEvents"} 1',
-        'game2048_health_check_status{check="storage"} 1',
-        'game2048_health_check_status{check="webgl"} 1',
-        "# HELP game2048_turn_latency_milliseconds Turn latency.",
-        "# TYPE game2048_turn_latency_milliseconds histogram",
-        'game2048_turn_latency_milliseconds_bucket{le="1"} 22',
-        'game2048_turn_latency_milliseconds_bucket{le="2.5"} 96',
-        'game2048_turn_latency_milliseconds_bucket{le="5"} 158',
-        'game2048_turn_latency_milliseconds_bucket{le="10"} 179',
-        'game2048_turn_latency_milliseconds_bucket{le="25"} 184',
-        'game2048_turn_latency_milliseconds_bucket{le="+Inf"} 184',
-        "game2048_turn_latency_milliseconds_sum 741.2",
-        "game2048_turn_latency_milliseconds_count 184",
-        "# HELP game2048_frame_time_milliseconds Frame time.",
-        "# TYPE game2048_frame_time_milliseconds histogram",
-        'game2048_frame_time_milliseconds_bucket{le="1"} 512',
-        'game2048_frame_time_milliseconds_bucket{le="2.5"} 4102',
-        'game2048_frame_time_milliseconds_bucket{le="5"} 8233',
-        'game2048_frame_time_milliseconds_bucket{le="10"} 9218',
-        'game2048_frame_time_milliseconds_bucket{le="25"} 9421',
-        'game2048_frame_time_milliseconds_bucket{le="+Inf"} 9421',
-        "game2048_frame_time_milliseconds_sum 29144.5",
-        "game2048_frame_time_milliseconds_count 9421",
-        "# HELP game2048_span_duration_milliseconds Span duration by name.",
-        "# TYPE game2048_span_duration_milliseconds histogram",
-        'game2048_span_duration_milliseconds_bucket{span="engine.turn",le="2.5"} 121',
-        'game2048_span_duration_milliseconds_bucket{span="engine.turn",le="5"} 175',
-        'game2048_span_duration_milliseconds_bucket{span="engine.turn",le="+Inf"} 184',
-        'game2048_span_duration_milliseconds_bucket{span="render.frame",le="2.5"} 4102',
-        'game2048_span_duration_milliseconds_bucket{span="render.frame",le="5"} 8233',
-        'game2048_span_duration_milliseconds_bucket{span="render.frame",le="+Inf"} 9421',
-        'game2048_span_duration_milliseconds_bucket{span="hook.dispatch",le="1"} 780',
-        'game2048_span_duration_milliseconds_bucket{span="hook.dispatch",le="+Inf"} 847',
-        'game2048_span_duration_milliseconds_bucket{span="input.dispatch",le="1"} 190',
-        'game2048_span_duration_milliseconds_bucket{span="input.dispatch",le="+Inf"} 199',
-        ""
-      ].join("\n");
+        var checks = healthRows(model);
+        var counts = { pass: 0, fail: 0, "not-applicable": 0, unknown: 0 };
 
-      function show(text, note) {
-        try {
-          render(parseExposition(text));
-          document.getElementById("status").textContent = note;
-        } catch (error) {
-          document.getElementById("status").textContent =
-            "That file could not be parsed as Prometheus text: " + String(error);
+        checks.forEach(function (row) {
+          counts[row.status] = (counts[row.status] || 0) + 1;
+        });
+
+        var healthTable = table(
+          "Five probes reused from the vanilla sources, which performed them " +
+            "and reported them nowhere, plus the one added for the renderer.",
+          [
+            { label: "Check" },
+            { label: "Status" },
+            { label: "Detail" },
+            { label: "Provenance" }
+          ],
+          checks.map(function (row) {
+            var origin =
+              row.source === null
+                ? ABSENT_TEXT
+                : row.source.origin === null || row.source.origin === undefined
+                  ? "no vanilla origin"
+                  : row.source.origin;
+            var performer =
+              row.source === null
+                ? ""
+                : " \u2014 " +
+                  row.source.owner +
+                  (row.source.performedBy ? " " + row.source.performedBy : "") +
+                  " (" +
+                  row.source.disposition +
+                  ")";
+
+            return {
+              cells: [
+                { text: row.id },
+                {
+                  text: STATUS_LABELS[row.status] || row.status,
+                  class: "status-cell",
+                  status: row.status
+                },
+                {
+                  text:
+                    row.detail === null
+                      ? "not carried by this form"
+                      : row.detail,
+                  class: row.detail === null ? "absent" : ""
+                },
+                { text: origin + performer, class: "origin" }
+              ],
+              absent: row.status === "unknown"
+            };
+          })
+        );
+
+        var panels = [
+          panel(
+            "rng-streams",
+            "RNG draws by substream",
+            helpOf(model, NAMES.rngDrawsTotal) ||
+              "Draws consumed, by named RNG substream.",
+            streams.length === 0
+              ? noData("No RNG substream series in this snapshot.")
+              : bars(streams)
+          ),
+          panel(
+            "health",
+            "Health checks \u2014 all six",
+            "Three states: " +
+              STATUS_LABELS.pass +
+              " " +
+              counts.pass +
+              ", " +
+              STATUS_LABELS.fail +
+              " " +
+              counts.fail +
+              ", " +
+              STATUS_LABELS["not-applicable"] +
+              " " +
+              counts["not-applicable"] +
+              ". A gauge of 1, 0 and -1 respectively (DL-HEALTH-04).",
+            healthTable,
+            true
+          )
+        ];
+
+        if (model !== null && model.health !== null && model.health.readiness !== null) {
+          var readiness = model.health.readiness;
+          var readinessRows = [
+            { label: "ready", value: readiness.ready },
+            { label: "renderer", value: readiness.renderer },
+            { label: "may mount webgl", value: readiness.mayMountWebGLRenderer },
+            {
+              label: "number-only fallback",
+              value: readiness.requiresNumberOnlyFallback
+            },
+            { label: "webgl level", value: readiness.webglLevel },
+            { label: "webgl failure", value: readiness.webglFailure },
+            { label: "storage", value: readiness.storage },
+            { label: "storage strategy", value: readiness.storageStrategy },
+            { label: "health status", value: readiness.healthStatus }
+          ];
+
+          panels.push(
+            panel(
+              "readiness",
+              "Readiness verdicts",
+              "Carried by the combined diagnostics snapshot alone. The " +
+                "renderer verdict is what src/main.ts resolves before it " +
+                "selects a renderer.",
+              table(
+                "The nine readiness verdicts, as the health surface reports " +
+                  "them.",
+                [{ label: "Verdict" }, { label: "Value" }],
+                readinessRows.map(function (row) {
+                  var absent =
+                    row.value === undefined ||
+                    row.value === null ||
+                    row.value === "";
+
+                  return {
+                    cells: [
+                      { text: row.label },
+                      {
+                        text: absent ? ABSENT_TEXT : String(row.value),
+                        class: absent ? "absent" : "origin"
+                      }
+                    ],
+                    absent: absent
+                  };
+                })
+              )
+            )
+          );
+        }
+
+        var subsystems = byLabel(
+          model,
+          NAMES.reportsTotal,
+          REPORT_LABELS.subsystem,
+          []
+        );
+        var reports = byTwoLabels(
+          model,
+          NAMES.reportsTotal,
+          REPORT_LABELS.subsystem,
+          REPORT_LABELS.report
+        );
+
+        panels.push(
+          panel(
+            "reports",
+            "Reports by subsystem",
+            helpOf(model, NAMES.reportsTotal) ||
+              "Reports counted across every subsystem. The report name is the " +
+                "report label and its leading segment the subsystem label.",
+            subsystems.length === 0
+              ? noData("No report series in this snapshot.")
+              : el("div", {}, [
+                  bars(subsystems),
+                  table(
+                    "Every report name behind those totals.",
+                    [
+                      { label: "Subsystem" },
+                      { label: "Report" },
+                      { label: "Count", numeral: true }
+                    ],
+                    reports.map(function (row) {
+                      return {
+                        cells: [
+                          { text: row.first },
+                          { text: row.second, class: "origin" },
+                          { text: formatCount(row.value), class: "numeral" }
+                        ]
+                      };
+                    })
+                  )
+                ]),
+            true
+          )
+        );
+
+        var refusals = byLabel(
+          model,
+          NAMES.metricsRejectedByReasonTotal,
+          LABELS.reason,
+          []
+        );
+        var refusalTotal = scalarOf(model, NAMES.metricsRejectedTotal);
+
+        panels.push(
+          panel(
+            "refusals",
+            "Registry refusals",
+            "Two families count one thing: read the unlabelled total or the " +
+              "per-reason breakdown, never their sum (DL-METRIC-08).",
+            el("div", {}, [
+              readouts([
+                {
+                  label: NAMES.metricsRejectedTotal,
+                  value: formatCount(refusalTotal),
+                  raised: readFinite(refusalTotal) !== null && refusalTotal > 0
+                },
+                {
+                  label: "reporter faults",
+                  value: formatCount(
+                    model === null ? null : model.reporterFaults
+                  ),
+                  raised:
+                    model !== null &&
+                    readFinite(model.reporterFaults) !== null &&
+                    model.reporterFaults > 0
+                }
+              ]),
+              refusals.length === 0
+                ? noData("No per-reason refusal series in this snapshot.")
+                : bars(refusals)
+            ])
+          )
+        );
+
+        return section(
+          "registry",
+          "Determinism, health and the registry itself",
+          panels
+        );
+      }
+
+      /**
+       * Section 5 — the two sections only the combined diagnostics snapshot
+       * carries, which complete the panel set the in-page surface renders.
+       */
+      function diagnosticsSection(model) {
+        if (model === null || (model.traces === null && model.logs === null)) {
+          return null;
+        }
+
+        var panels = [];
+
+        if (model.traces !== null) {
+          var traces = model.traces;
+          var frames = isObject(traces.frames) ? traces.frames : {};
+          var traceRows = [
+            { label: "enabled", value: traces.enabled },
+            { label: "spans started", value: traces.started },
+            { label: "spans ended", value: traces.ended },
+            { label: "open", value: traces.open },
+            { label: "dropped", value: traces.dropped },
+            { label: "faults", value: traces.faults },
+            { label: "anomalies", value: traces.anomalies },
+            { label: "retained records", value: Array.isArray(traces.spans) ? traces.spans.length : null }
+          ];
+
+          Object.keys(frames)
+            .sort()
+            .forEach(function (key) {
+              traceRows.push({ label: "frames." + key, value: frames[key] });
+            });
+
+          panels.push(
+            panel(
+              "traces",
+              "Trace summary",
+              "The tracer's own counters, spanning input dispatch through the " +
+                "frame callback.",
+              table(
+                "The tracer's counters, and its frame statistics beneath them.",
+                [{ label: "Reading" }, { label: "Value", numeral: true }],
+                traceRows.map(function (row) {
+                  var absent = row.value === undefined || row.value === null;
+
+                  return {
+                    cells: [
+                      { text: row.label },
+                      {
+                        text: absent ? ABSENT_TEXT : String(row.value),
+                        class: "numeral"
+                      }
+                    ],
+                    absent: absent
+                  };
+                })
+              )
+            )
+          );
+        }
+
+        if (model.logs !== null) {
+          var logRows = model.logs.slice(-25).map(function (record) {
+            var entry = isObject(record) ? record : {};
+
+            return {
+              cells: [
+                { text: readString(entry.timestamp) || ABSENT_TEXT },
+                { text: readString(entry.level) || ABSENT_TEXT },
+                { text: readString(entry.subsystem) || "" },
+                { text: readString(entry.message) || ABSENT_TEXT }
+              ]
+            };
+          });
+
+          panels.push(
+            panel(
+              "logs",
+              "Recent records",
+              "The tail of the structured log ring buffer the snapshot carries" +
+                (model.correlationId === null
+                  ? "."
+                  : ", correlated as " + model.correlationId + "."),
+              logRows.length === 0
+                ? noData("The snapshot carries no log records.")
+                : table(
+                    "The most recent records the ring buffer held, oldest " +
+                      "first.",
+                    [
+                      { label: "Timestamp" },
+                      { label: "Level" },
+                      { label: "Subsystem" },
+                      { label: "Message" }
+                    ],
+                    logRows
+                  ),
+              true
+            )
+          );
+        }
+
+        return panels.length === 0
+          ? null
+          : section("diagnostics", "Traces and log records", panels);
+      }
+
+      /* ================================================================== */
+      /* Rendering and ingestion.                                            */
+      /* ================================================================== */
+
+      var provenanceHost = document.getElementById("provenance");
+      var panelHost = document.getElementById("panels");
+      var statusHost = document.getElementById("status");
+      var fileInput = document.getElementById("snapshot-file");
+      var dropzone = document.getElementById("dropzone");
+      var dropzoneHint = document.getElementById("dropzone-hint");
+      var pasteBox = document.getElementById("snapshot-text");
+      var renderButton = document.getElementById("render-pasted");
+      var clearButton = document.getElementById("clear-all");
+
+      /* The empty state, detached at the first load and restored by Clear. */
+      var emptyState = panelHost.firstElementChild;
+
+      function setStatus(level, message) {
+        statusHost.setAttribute("data-level", level);
+        statusHost.textContent = message;
+      }
+
+      function clearChildren(node) {
+        while (node.firstChild !== null) {
+          node.removeChild(node.firstChild);
         }
       }
 
-      document.getElementById("file").addEventListener("change", function (event) {
-        var file = event.target.files && event.target.files[0];
+      /**
+       * Renders the provenance strip.
+       *
+       * `toPrometheusText()` writes metric families only, so the text form
+       * carries neither a correlation identifier nor a timestamp; both are
+       * members of the JSON snapshots. A value the loaded form does not carry
+       * says so rather than reading blank.
+       */
+      function renderProvenance(model) {
+        clearChildren(provenanceHost);
 
-        if (!file) {
+        if (model === null) {
+          provenanceHost.appendChild(
+            el("div", {}, [
+              textNode("dt", "Snapshot"),
+              textNode("dd", "none loaded", { class: "absent" })
+            ])
+          );
+
+          return;
+        }
+
+        var entries = [
+          { label: "Form", value: model.formLabel, absent: false },
+          {
+            label: "Correlation id",
+            value: model.correlationId,
+            missing:
+              model.form === "prometheus-text"
+                ? "not carried by the Prometheus text form"
+                : "not carried by this snapshot"
+          },
+          {
+            label: "Generated at",
+            value: model.generatedAt,
+            missing:
+              model.form === "prometheus-text"
+                ? "not carried by the Prometheus text form"
+                : "not carried by this snapshot"
+          },
+          {
+            label: "Series read",
+            value: String(model.sampleCount),
+            absent: false
+          }
+        ];
+
+        if (model.schemaVersion !== null) {
+          entries.push({
+            label: "Schema version",
+            value: String(model.schemaVersion),
+            absent: false
+          });
+        }
+
+        if (model.elapsedMs !== null) {
+          entries.push({
+            label: "Registry uptime",
+            value: formatMilliseconds(model.elapsedMs),
+            absent: false
+          });
+        }
+
+        entries.forEach(function (entry) {
+          var missing = entry.value === null || entry.value === undefined;
+
+          provenanceHost.appendChild(
+            el("div", {}, [
+              textNode("dt", entry.label),
+              textNode("dd", missing ? entry.missing : entry.value, {
+                class: missing ? "absent" : ""
+              })
+            ])
+          );
+        });
+      }
+
+      /**
+       * Marks the panels on screen as belonging to an earlier snapshot.
+       *
+       * Called when an input is refused while a render is on screen: the render
+       * is kept, and the note plus the `data-stale` attribute state which
+       * snapshot it is a reading of. A per-panel suffix is added by the
+       * stylesheet from that attribute, so every heading carries the marker
+       * rather than only the top of the page.
+       */
+      function markPanelsStale() {
+        if (panelHost.getAttribute("data-stale") === "true") {
+          return;
+        }
+
+        if (panelHost.firstElementChild === emptyState) {
+          return;
+        }
+
+        if (panelHost.firstElementChild === null) {
+          return;
+        }
+
+        panelHost.setAttribute("data-stale", "true");
+        panelHost.insertBefore(
+          textNode(
+            "p",
+            "These panels are the previously loaded snapshot, kept on screen " +
+              "after the input above was refused. They are not a reading of " +
+              "it. Press Clear to empty the page.",
+            { class: "stale-note" }
+          ),
+          panelHost.firstChild
+        );
+      }
+
+      /**
+       * Tears the panels down and rebuilds them from `model`.
+       *
+       * A second load replaces the first: every panel is discarded and rebuilt,
+       * so no reading survives from a previous snapshot, and the staleness
+       * marker is dropped with them.
+       */
+      function renderPanels(model) {
+        clearChildren(panelHost);
+        panelHost.removeAttribute("data-stale");
+
+        [
+          gameplaySection(model),
+          latencySection(model),
+          hookSection(model),
+          registrySection(model),
+          diagnosticsSection(model)
+        ].forEach(function (node) {
+          if (node !== null) {
+            panelHost.appendChild(node);
+          }
+        });
+      }
+
+      /** Restores the pre-load state. */
+      function showEmptyState() {
+        clearChildren(panelHost);
+        panelHost.removeAttribute("data-stale");
+        panelHost.appendChild(emptyState);
+        renderProvenance(null);
+        setStatus("empty", "No snapshot loaded.");
+      }
+
+      /**
+       * Reports a refusal: the reason on the status line, and the render on
+       * screen — if there is one — marked as the earlier snapshot.
+       */
+      function refuse(message) {
+        setStatus("error", message);
+        markPanelsStale();
+      }
+
+      /**
+       * Loads one payload.
+       *
+       * Nothing thrown by parsing or rendering escapes: a failure leaves the
+       * page as it was, with the reason on the status line.
+       *
+       * @param text Payload text.
+       * @param origin How it arrived, named on the status line.
+       */
+      function load(text, origin) {
+        var outcome;
+
+        try {
+          outcome = parseSnapshot(text);
+        } catch (thrown) {
+          refuse("That input could not be read: " + describeThrown(thrown));
+
+          return;
+        }
+
+        if (outcome.error !== undefined) {
+          refuse(outcome.error);
+
+          return;
+        }
+
+        try {
+          renderProvenance(outcome.model);
+          renderPanels(outcome.model);
+        } catch (thrown) {
+          showEmptyState();
+          setStatus(
+            "error",
+            "That snapshot parsed but could not be rendered: " +
+              describeThrown(thrown)
+          );
+
+          return;
+        }
+
+        var malformed = outcome.model.malformedLines;
+
+        setStatus(
+          "loaded",
+          "Showing " +
+            origin +
+            " \u2014 " +
+            outcome.model.formLabel +
+            ", " +
+            outcome.model.sampleCount +
+            " series." +
+            (malformed > 0
+              ? malformed === 1
+                ? " 1 line could not be read and was skipped."
+                : " " +
+                  malformed +
+                  " lines could not be read and were skipped."
+              : "")
+        );
+      }
+
+      /**
+       * Reads a dropped or chosen file.
+       *
+       * `File.text()` where the platform offers it, and `FileReader` otherwise.
+       */
+      function loadFile(file) {
+        if (file === null || file === undefined) {
+          refuse("No file was received.");
+
+          return;
+        }
+
+        var name = readString(file.name) || "that file";
+
+        if (typeof file.text === "function") {
+          file.text().then(
+            function (text) {
+              load(text, name);
+            },
+            function (thrown) {
+              refuse("That file could not be read: " + describeThrown(thrown));
+            }
+          );
+
           return;
         }
 
         var reader = new FileReader();
 
         reader.onload = function () {
-          show(String(reader.result), "Showing " + file.name + ".");
+          load(String(reader.result), name);
         };
 
         reader.onerror = function () {
-          document.getElementById("status").textContent = "That file could not be read.";
+          refuse(
+            "That file could not be read: " +
+              (reader.error === null
+                ? "unknown reason"
+                : describeThrown(reader.error))
+          );
         };
 
         reader.readAsText(file);
+      }
+
+      fileInput.addEventListener("change", function () {
+        var files = fileInput.files;
+
+        if (files === null || files.length === 0) {
+          return;
+        }
+
+        loadFile(files[0]);
       });
 
-      document.getElementById("sample").addEventListener("click", function () {
-        show(SAMPLE, "Showing the built-in sample.");
+      ["dragenter", "dragover"].forEach(function (name) {
+        dropzone.addEventListener(name, function (event) {
+          event.preventDefault();
+          dropzone.classList.add("dropping");
+          dropzoneHint.textContent = "Release to load this file.";
+        });
       });
 
-      show(SAMPLE, "Showing the built-in sample. Export game2048-metrics.prom from the diagnostics overlay and load it to see a real run.");
+      ["dragleave", "dragend"].forEach(function (name) {
+        dropzone.addEventListener(name, function (event) {
+          event.preventDefault();
+          dropzone.classList.remove("dropping");
+          dropzoneHint.textContent = "Drag an exported file onto this area.";
+        });
+      });
+
+      dropzone.addEventListener("drop", function (event) {
+        event.preventDefault();
+        dropzone.classList.remove("dropping");
+        dropzoneHint.textContent = "Drag an exported file onto this area.";
+
+        var transfer = event.dataTransfer;
+
+        if (transfer === null || transfer === undefined) {
+          refuse("That drop carried nothing this page could read.");
+
+          return;
+        }
+
+        if (transfer.files !== null && transfer.files.length > 0) {
+          loadFile(transfer.files[0]);
+
+          return;
+        }
+
+        var text = transfer.getData("text/plain");
+
+        if (readString(text) !== null) {
+          load(text, "the dropped text");
+
+          return;
+        }
+
+        refuse("That drop carried no file and no text.");
+      });
+
+      /*
+        The document-level handlers keep a file dropped outside the zone from
+        being opened by the browser in place of this page.
+      */
+      ["dragover", "drop"].forEach(function (name) {
+        document.addEventListener(name, function (event) {
+          if (dropzone.contains(event.target)) {
+            return;
+          }
+
+          event.preventDefault();
+        });
+      });
+
+      renderButton.addEventListener("click", function () {
+        load(pasteBox.value, "the pasted text");
+      });
+
+      clearButton.addEventListener("click", function () {
+        fileInput.value = "";
+        pasteBox.value = "";
+        showEmptyState();
+      });
+
+      /* The pre-load state, so the page is never blank and never fabricated. */
+      renderProvenance(null);
     </script>
   </body>
 </html>

@@ -879,16 +879,22 @@ Two files, in [`docs/dashboards/`](dashboards/):
   into. It is a **template**, not a provisioned dashboard: it names no data source
   of its own and is not wired to a running Prometheus.
 - **`dashboard.html`** — a single self-contained page that consumes an exported
-  snapshot **directly**. It parses the Prometheus text the registry emits —
-  `# HELP`, `# TYPE` and sample lines, including labelled series and histogram
-  buckets — and renders the same panels as inline SVG. No server, no data source,
-  no network access, no build step.
+  snapshot **directly**. It reads all three forms this layer writes: the
+  Prometheus text of `toPrometheusText()` — `# HELP`, `# TYPE` and sample lines,
+  including labelled series and histogram buckets — the `MetricsSnapshot` of
+  `snapshot()`, and the combined `DiagnosticsSnapshot` of
+  `DiagnosticsOverlay.snapshot()`, which is the only form carrying the health
+  detail text, the check provenance, the readiness verdicts, the trace summary
+  and the log records. It declares the same series as `dashboard.json`. No
+  server, no data source, no network access, no build step.
 
 `dashboard.html` sits **outside the Vite entry graph** — the root `index.html` is
 the whole of that graph (`DL-BUILD-01`, `DL-DIAG-06`) — so it is never bundled,
 never transformed, never served by the dev server and absent from `dist/`. You open
-it from the filesystem. It carries a small built-in sample so it renders before any
-file is chosen.
+it from the filesystem. It ships **no sample data**: before a file is chosen it
+renders an empty state naming the two export controls and pointing back at this
+document, so no number on the page is ever anything but a reading of a real
+export.
 
 ## 9. What Rule 3 asks for and what is delivered
 
@@ -1229,36 +1235,41 @@ available to test.
    `google-chrome docs/dashboards/dashboard.html`. It is outside the Vite entry
    graph, so it is never bundled and the dev server does not serve it; unlike the
    game, it needs no origin because it loads no modules.
-3. It renders its built-in sample immediately, in all twelve panels, with a notice
-   reading `Showing the built-in sample. Export game2048-metrics.prom from the
-   diagnostics overlay and load it to see a real run.` The page's only two controls
-   are that file input and a **Load the built-in sample** button.
-4. Use the **Load a metrics export** file input to choose the
-   `game2048-metrics.prom` you exported. The panels repopulate from that file.
+3. It renders an **empty state**, headed `Export a snapshot first`, with the status
+   line reading `No snapshot loaded.` No sample data ships with the page, so no
+   number appears until you load an export. The empty state names the two export
+   controls and points back at this document.
+4. Load the file by any of the three routes: the **Metrics export or diagnostics
+   snapshot** file input, the drop zone beside it, or the paste box — which takes
+   the exposition text off the clipboard when you have it there rather than in a
+   file. The panels build from whatever you loaded.
 5. For the Grafana form, import `docs/dashboards/dashboard.json` into Grafana and
    point it at a Prometheus-compatible data source the exposition has been loaded
    into. It is a template and ships wired to nothing.
 
 **Expected observation — what "renders successfully" means here**, since this is
 gate V8's final line: `dashboard.html` opens and renders; before any file is chosen
-it shows the built-in sample with the notice above; after the exported file is
-loaded the notice is **replaced** — not emptied — with `Showing
-game2048-metrics.prom.`; all twelve panels tear down and rebuild from the file; the
-panel values match the corresponding lines of the `.prom` you loaded; and the
-health panel shows six rows, one per check, with the same statuses the overlay
-showed. Measured on a five-move run: `frames rendered 63` in the panel against
+it shows the empty state above; after the exported file is loaded the status line is
+**replaced** — not emptied — with `Showing game2048-metrics.prom — Prometheus text
+exposition, N series.`; the panels build from the file; the panel values match the
+corresponding lines of the `.prom` you loaded; and the health panel shows six rows,
+one per check, **in the probe order the overlay uses**, with the same statuses.
+Measured on a five-move run: `frames rendered 63` in the panel against
 `game2048_frames_rendered_total 63` in the file, and `onSpawn 8` against
-`game2048_hook_dispatches_total{hook="onSpawn"} 8`.
+`game2048_hook_dispatches_total{hook="onSpawn"} 8`. Pressing **Clear** returns the
+page to the empty state.
 
-Three things look like faults and are not. The dashboard **alphabetises** the health
-rows, so their order differs from the probe order the overlay uses. Quantile panels
-show **computed** values interpolated from the file's buckets, so they are not
-present verbatim in the file. And the *Turns by resolution* panel renders a single
-`(none)` bar on a real export, because `game2048_turns_total` is emitted unlabelled;
-the per-resolution split exists only in the built-in sample. On a `file://` document
-Chrome also logs one `Unsafe attempt to load URL … 'file:' URLs are treated as
-unique security origins` error for its own implicit favicon probe — reproducible on
-a blank local page, and unrelated to this dashboard, which requests nothing.
+Four things look like faults and are not. Quantile panels show **computed** values
+interpolated from the file's buckets the way `histogram_quantile` interpolates them,
+so they are not present verbatim in the file. The provenance strip reads
+`not carried by the Prometheus text form` for the correlation identifier and the
+timestamp, because `toPrometheusText()` writes metric families and nothing else —
+export the combined snapshot to see both. A panel whose series the loaded file does
+not carry reads `not carried` rather than `0`, because an absent counter and a
+counter at zero are different readings. And on a `file://` document Chrome logs one
+`Unsafe attempt to load URL … 'file:' URLs are treated as unique security origins`
+error for its own implicit favicon probe — reproducible on a blank local page, and
+unrelated to this dashboard, which requests nothing.
 
 ### 10.6 Without a browser
 
