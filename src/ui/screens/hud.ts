@@ -817,8 +817,8 @@ function readBoardSizeOf(board: unknown): number | null {
  * Reads the terminal state a commit reports.
  *
  * Ported from js/html_actuator.js L27-L33: the overlay is decided from the
- * terminal flags alone, and a loss takes precedence over a win because a board
- * can carry both.
+ * terminal flags alone, and a loss takes precedence over a win, which a board
+ * carrying both flags resolves to.
  *
  * @param commit Commit to read.
  * @returns The terminal state, and `null` while play continues.

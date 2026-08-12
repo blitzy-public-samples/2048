@@ -253,11 +253,6 @@ merged.
    | `DOC` | `docs/**`, `README.md`, `CONTRIBUTING.md`, `blitzy-deck/**` |
 
 ### Changes that might not be accepted
-The five categories this section used to name — undo/redo features,
-save/reload features, changes to how the tiles look or their contents, changes
-to the layout, and changes to the grid size — are superseded, because the
-run-based roguelike feature set deliberately does all five. That list no
-longer describes what will be declined. Decision `DL-DOC-02`.
 
 The five categories this section used to name — undo/redo features,
 save/reload features, changes to how the tiles look or their contents, changes

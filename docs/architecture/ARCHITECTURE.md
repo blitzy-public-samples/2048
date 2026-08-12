@@ -392,17 +392,17 @@ Each document below owns its figures and is the authority on its own subject.
 Nothing here restates them.
 
 - [`component-interaction.md`](component-interaction.md) — **Figure 3 —
-  Component Interaction: Input, Engine, Hook Bus, Relics, Renderer and
-  Persistence**, the runtime relationships between the boxes of Figure 2; and
-  the screen-flow pair **Figure 6a — Before: Seven Board States Produced by
-  CSS Class Toggles on One Screen**, and **Figure 6b — After: The Screen Flow
-  as a Declared State Machine**.
+  Component Interaction: Input, Engine, Hook Bus, Relics, Renderer,
+  Persistence**, the runtime relationships between the boxes of Figure 2. That
+  document carries Figure 3 alone, and names Figure 1 as its before state
+  rather than redrawing it.
 - [`data-flow.md`](data-flow.md) — **Figure 4 — Turn Data Flow: From
   Keystroke to Composited Frame and Persisted Run State**, and **Figure 7 —
   Seeded Determinism: One Run Seed Fanned into Named RNG Substreams**.
 - [`hook-dispatch-sequence.md`](hook-dispatch-sequence.md) — **Figure 5 —
   Hook Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard and Error
-  Isolation**.
+  Isolation**, and the screen-flow state machine **Figure 6**, paired with the
+  class-toggled board states it replaced.
 - [`../TRACEABILITY_MATRIX.md`](../TRACEABILITY_MATRIX.md) — **Figure 8 —
   File Transformation Map**, and the construct-by-construct bidirectional
   mapping from each retired `js/` source to the module carrying it now. Figure

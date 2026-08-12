@@ -10,6 +10,10 @@ three requirements at once: relics on the same hook both fire and compound, a
 relic with no charges left is skipped rather than invoked, and a throwing handler
 cannot take the turn down.
 
+The `onStageEnd` dispatch at the end of a cleared stage leads out of the bus and
+into the screen flow, so the screen-flow pair `Figure 6a` and `Figure 6b` is
+carried here too, in [section 4](#4-the-screen-flow-before-and-after).
+
 Rationale is not argued here. It lives in
 [`docs/DECISION_LOG.md`](../DECISION_LOG.md), cited below by identifier.
 
@@ -18,7 +22,8 @@ Rationale is not argued here. It lives in
 - [1. One dispatch, three relics](#1-one-dispatch-three-relics)
 - [2. Why the guard lives in the bus](#2-why-the-guard-lives-in-the-bus)
 - [3. What a throwing handler leaves behind](#3-what-a-throwing-handler-leaves-behind)
-- [4. Where to look next](#4-where-to-look-next)
+- [4. The screen flow, before and after](#4-the-screen-flow-before-and-after)
+- [5. Where to look next](#5-where-to-look-next)
 
 ## 1. One dispatch, three relics
 
@@ -98,7 +103,81 @@ A relic that throws is logged with the run correlation identifier and marked
 player that a relic it is still showing has stopped firing. The turn completes
 with the payload as it stood before that handler.
 
-## 4. Where to look next
+## 4. The screen flow, before and after
+
+The pre-migration product had **one** screen. There was no router, no hash
+handling and no History API use anywhere: seven visual states were produced by
+toggling CSS classes on a single markup tree, and nothing distinguished a legal
+transition from an illegal one — any state could show anything.
+
+**Figure 6a — Before: Seven Board States Produced by CSS Class Toggles on One
+Screen.**
+
+```mermaid
+stateDiagram-v2
+    [*] --> ColdStart : page load
+    ColdStart --> FreshGame : no stored board
+    ColdStart --> RestoredGame : stored board parsed
+    FreshGame --> InPlay
+    RestoredGame --> InPlay
+    InPlay --> InPlay : move
+    InPlay --> Won : 2048 reached, .game-won
+    InPlay --> Lost : no moves, .game-over
+    Won --> ContinuedWin : keep playing
+    ContinuedWin --> InPlay
+    Lost --> FreshGame : restart
+    Won --> FreshGame : restart
+```
+
+**Legend for Figure 6a.** *Before: Seven Board States Produced by CSS Class
+Toggles on One Screen.* Each node is a **visual** state of the one screen, not a
+state of any machine — the transitions were the side effects of two class
+toggles and a `JSON.parse`, and no table declared them. There was no state a
+player could be in that the markup refused to render, which is exactly what
+`Figure 6b` fixes.
+
+**Figure 6b — After: The Screen Flow as a Declared State Machine.**
+
+```mermaid
+stateDiagram-v2
+    [*] --> runStart : initial
+    runStart --> stage : beginRun
+    stage --> stage : move
+    stage --> stage : restart
+    stage --> stageClear : stageGoalMet
+    stage --> won : winReached
+    stage --> gameOver : noMovesAvailable
+    stageClear --> reward : stageEnd
+    reward --> stage : rewardSelected
+    won --> stage : keepPlaying
+    won --> runSummary : endRun
+    gameOver --> runSummary : acknowledge
+    runSummary --> runStart : newRun
+    note right of reward
+        Three cards drawn without replacement
+        from the relic-draw substream, so no
+        duplicate can appear in one offer
+    end note
+    note right of gameOver
+        The terminal overlay keeps the
+        pre-migration cadence: a 1200ms
+        delay, then an 800ms fade
+    end note
+```
+
+**Legend for Figure 6b.** *After: The Screen Flow as a Declared State Machine.*
+Each node is one of the seven states of `SCREEN_NAMES`, each labelled edge is a
+trigger of `ROUTER_TRIGGERS`, and the whole edge set is the frozen `TRANSITIONS`
+table of `src/ui/screen-router.ts` — twelve state-keyed edges plus the cold load.
+A **note** carries a constraint inherited from elsewhere in the system. The
+decisive difference from `Figure 6a` is that a trigger the state in force does
+not declare **takes no edge**: it is refused and counted rather than applied, so
+there is no imperative way to put a state on screen (`DL-ROUTER-12`,
+`DL-ROUTER-19`). The `stageClear` state is rendered by
+`src/ui/screens/stage-progress.ts`, and it is reachable only because
+`stage:end` takes exactly one edge rather than two (`DL-ROUTER-36`).
+
+## 5. Where to look next
 
 - [`data-flow.md`](data-flow.md) — `Figure 4`, where each dispatch sits inside a
   turn, and `Figure 7`, the substream forks named above.
