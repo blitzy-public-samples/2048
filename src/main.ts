@@ -104,7 +104,10 @@ import type { BoardFocus } from './render/number-only-renderer';
 import { createRenderLoop } from './render/render-loop';
 import type { FrameContext } from './render/render-loop';
 import type { ContextRestoreOutcome } from './render/three-renderer';
-import { createThreeRenderer } from './render/three-renderer';
+import {
+  createThreeRenderer,
+  releaseParkedRenderer,
+} from './render/three-renderer';
 import type {
   RenderCount,
   RenderDetail,
@@ -697,6 +700,17 @@ interface RunSinkObservers {
    * finish a run without emitting `stage:end`.
    */
   readonly onRunEnded?: (outcome: string) => void;
+
+  /**
+   * ADDED: called once the run has crossed between persisting and not, with the
+   * status it crossed into.
+   *
+   * The health surface holds the report its last check produced, so a crossing
+   * that nothing recomputes leaves the `storage` row describing the store as it
+   * was before the crossing. The composition recomputes it here. DL-HEALTH-08,
+   * DL-MAIN-35.
+   */
+  readonly onPersistenceStatusChanged?: (status: string) => void;
 }
 
 /**
@@ -803,6 +817,10 @@ function createRunSink(
           refusedWrites: report.refusedWrites,
         }),
       });
+
+      // ADDED, last: the two reports above are this sink's own duty and are
+      // emitted whatever the observer does. DL-HEALTH-08.
+      observers.onPersistenceStatusChanged?.(report.status);
     },
 
     onRunStarted(report): void {
@@ -1056,6 +1074,18 @@ const RENDERER_UNMOUNTED_FAILURE = 'renderer-not-mounted';
  * rendering mode of R9, not a capability gap.
  */
 const FORCED_FALLBACK_FAILURE = 'number-only-forced';
+
+/**
+ * ADDED: the storage failure the health check reports while the run is no
+ * longer being saved.
+ *
+ * Worded as the consequence rather than as the mechanism, because the `storage`
+ * row is read beside a HUD that states the same thing in the same words. The
+ * mechanism — the key, the byte length and the error itself — is in the records
+ * the store already emits per refused write. DL-HEALTH-08.
+ */
+const EPHEMERAL_STORAGE_FAILURE =
+  'the run is no longer being saved and continues in memory only';
 
 /** How the board is drawn, and what put that mode in force. */
 export interface BoardRenderSelection {
@@ -1504,6 +1534,19 @@ export function start(ownerDocument: Document): Application {
    */
   let readLiveWebGLFailure: () => string | null = (): string | null => null;
 
+  /**
+   * ADDED: the storage counterpart of the slot above, filled once the run
+   * controller exists.
+   *
+   * The health surface reads the storage manager's CONSTRUCTION-TIME probe
+   * result, which is what keeps a repeated check write-free — and what left the
+   * `storage` row reporting `pass` while the run had already stopped being
+   * saved, a green row beside the very failure an operator opened the surface to
+   * read. The controller is the owner of that fact: it tracks whether the run
+   * persists and reports every crossing. DL-HEALTH-08, DL-MAIN-35.
+   */
+  let readLiveStorageFailure: () => string | null = (): string | null => null;
+
   // The health surface: the five capability probes the vanilla sources
   // performed and reported nowhere, plus the WebGL probe the Three.js renderer
   // introduced. The live storage manager is handed over, so its
@@ -1533,6 +1576,11 @@ export function start(ownerDocument: Document): Application {
         ? probed
         : { supported: false, level: probed.level, failure };
     },
+
+    // The live storage verdict, read at check time and costing no write: the
+    // manager's probe result describes the store as it was at boot, and this
+    // describes whether the run is being saved NOW.
+    storageLiveFailure: (): string | null => readLiveStorageFailure(),
   });
 
   /**
@@ -1747,6 +1795,14 @@ export function start(ownerDocument: Document): Application {
   const runSink = createRunSink(reporter, {
     onRunEnded: (outcome): void => {
       settleTracedStage(outcome);
+    },
+
+    // The held health report follows the crossing, so the `storage` row, its
+    // gauge and the readiness verdicts describe the store the run is actually
+    // being saved to — or is not. Nothing is probed and nothing is written:
+    // `readLiveStorageFailure` below reads the controller's own status.
+    onPersistenceStatusChanged: (status): void => {
+      refreshHealth(`run persistence became ${status}`);
     },
   });
 
@@ -1986,6 +2042,20 @@ export function start(ownerDocument: Document): Application {
 
     onRunScope: adoptRunScope,
   });
+
+  // ADDED, before the load below can refuse a write: the live storage verdict
+  // the health surface reads.
+  //
+  // The controller is the owner of whether the run is being saved — it tracks
+  // the status across refused writes and reports every crossing — so the health
+  // surface reads it rather than re-probing the store, and a repeated check
+  // still performs no write. The reason is worded for a reader of the `storage`
+  // row: the row now says the run is not being saved at the same moment the HUD
+  // does. DL-HEALTH-08, DL-MAIN-35.
+  readLiveStorageFailure = (): string | null =>
+    run.persistenceStatus() === 'ephemeral'
+      ? EPHEMERAL_STORAGE_FAILURE
+      : null;
 
   // The authoritative load, and the one that reports: a refused payload, a
   // migrated version and a board-size reconciliation all reach the sink here.
@@ -2516,7 +2586,28 @@ export function start(ownerDocument: Document): Application {
       return renderer.mounted ? null : RENDERER_UNMOUNTED_FAILURE;
     }
 
-    return selection.fallback ? FORCED_FALLBACK_FAILURE : null;
+    if (!selection.fallback) {
+      return null;
+    }
+
+    // CHANGED: a fallback forced by a LOST CONTEXT keeps naming the context.
+    //
+    // The takeover replaces the renderer, so `readContextLost` above no longer
+    // has a WebGL renderer to ask and every forced fallback read as
+    // `number-only-forced` — which describes the SYMPTOM the health surface can
+    // see and discards the cause it was asked for. The reason the force was
+    // recorded under is the surviving evidence of that cause, and it is already
+    // read on the reclaim path, so the two agree on one constant. A fallback
+    // forced for any other reason — a renderer that could not be constructed or
+    // mounted — still reads as forced, because for those the mode IS the whole
+    // finding. DL-MAIN-35.
+    if (preferences.getNumberOnlyForce().reason === CONTEXT_LOST_FORCE_REASON) {
+      return contextRebuildFailed
+        ? CONTEXT_UNREBUILT_FAILURE
+        : CONTEXT_LOST_FAILURE;
+    }
+
+    return FORCED_FALLBACK_FAILURE;
   };
 
   // THE LIVE VERDICT NOW THAT A BOARD IS DRAWING. `readLiveWebGLFailure` above
@@ -3314,6 +3405,18 @@ export function start(ownerDocument: Document): Application {
       // A refused press leaves the offer standing, so the flow is brought back
       // to the same three cards.
       presentPendingReward();
+
+      // ADDED: and it says so. `RunController.selectReward` rolls the relic back
+      // where the run cannot be written (DL-RUNCTL-15), which leaves a pressed
+      // card doing nothing a player can perceive; the refusal is announced, and
+      // it names the persistence state when that is what refused it — the same
+      // state `.hud-ephemeral` shows. DL-MAIN-37.
+      announcer.announceText(
+        run.persistenceStatus() === 'ephemeral'
+          ? 'That relic was not taken: this run is not being saved. The same three are still on offer.'
+          : 'That relic was not taken. The same three are still on offer.',
+        ASSERTIVE_POLARITY,
+      );
 
       return selection;
     }
@@ -4212,6 +4315,14 @@ export function start(ownerDocument: Document): Application {
       // DL-NUMBER-07.
       loop.stop();
       renderer.destroy();
+
+      // ADDED: and the canvas's own renderer with it. An appearance switch
+      // destroys the 2.5D renderer and builds another over the SAME canvas, so
+      // `three-renderer.ts` parks the `WebGLRenderer` across that destruction
+      // rather than rebuilding one per switch; this is the call that says the
+      // canvas is finished with, and it is made here and nowhere else.
+      // DL-MAIN-36, DL-THREE-06.
+      releaseParkedRenderer(ownerDocument.querySelector(SELECTORS.boardCanvas));
 
       // THE ROUTER IS THE ONE OWNER OF SCREEN TEARDOWN. Every module this root
       // constructs is registered with it, `destroy()` drains the set it mounted,

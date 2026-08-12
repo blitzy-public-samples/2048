@@ -716,8 +716,8 @@
             ),
             panel(
               "Registry refusals by reason",
-              "The registry bounding itself rather than throwing. A rising seriesLimitReached is the real cardinality alarm.",
-              barChart(byLabel(model, "game2048_metrics_rejected_total", "reason"))
+              "The labelled companion of the unlabelled game2048_metrics_rejected_total: read one or the other, never their sum. The registry bounding itself rather than throwing. A rising seriesLimitReached is the real cardinality alarm.",
+              barChart(byLabel(model, "game2048_metrics_rejected_by_reason_total", "reason"))
             )
           ])
         );
@@ -787,9 +787,13 @@
         'game2048_rng_draws_total{stream="spawn-position"} 184',
         'game2048_rng_draws_total{stream="relic-draw"} 12',
         'game2048_rng_draws_total{stream="rarity-weight"} 4',
-        "# HELP game2048_metrics_rejected_total Registry refusals by reason.",
+        "# HELP game2048_metrics_rejected_total Registry refusals, unlabelled.",
         "# TYPE game2048_metrics_rejected_total counter",
-        'game2048_metrics_rejected_total{reason="valueNotAString"} 0',
+        "game2048_metrics_rejected_total 3",
+        "# HELP game2048_metrics_rejected_by_reason_total Registry refusals by reason.",
+        "# TYPE game2048_metrics_rejected_by_reason_total counter",
+        'game2048_metrics_rejected_by_reason_total{reason="valueNotAString"} 2',
+        'game2048_metrics_rejected_by_reason_total{reason="unspecified"} 1',
         "# HELP game2048_health_check_status Health check status.",
         "# TYPE game2048_health_check_status gauge",
         'game2048_health_check_status{check="functionBind"} 1',

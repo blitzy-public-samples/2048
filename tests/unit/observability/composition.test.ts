@@ -2792,6 +2792,71 @@ describe('a run-state write that storage refuses', () => {
     ).toBeGreaterThan(0);
   });
 
+  // The observability review's INFO finding on the health surface: at the exact
+  // moment the run stopped being saved and the HUD said so, the `storage` health
+  // row still read `pass` / "Web Storage is writable." and readiness still said
+  // `persistent` — a green row beside the failure that contradicted it, on the
+  // surface an operator trusts most. The live verdict closes that, and the
+  // crossing is what recomputes the held report. DL-HEALTH-08, DL-MAIN-35.
+  it('degrades the storage health row while the run is not being saved', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+
+    withRefusedRunWrites(() => {
+      application = startPlaying();
+      playEveryDirection();
+
+      const live = application as Application;
+      const report = live.health.report();
+      const storage = report.checks.find((check) => check.id === 'storage');
+
+      expect(storage?.status).toBe('fail');
+      expect(storage?.detail ?? '').toContain('refusing writes');
+
+      // The same fact, on the two other channels the surface publishes it
+      // through: the readiness roll-up and the per-check gauge.
+      const verdicts = live.health.readiness();
+
+      expect(verdicts.storageStatus).toBe('fail');
+      expect(verdicts.storage).toBe('ephemeral');
+
+      // The manager never fell back to memory, and the strategy still says so.
+      expect(verdicts.storageStrategy).toBe('localStorage');
+
+      expect(live.metrics.toPrometheusText()).toContain(
+        'game2048_health_check_status{check="storage"} 0',
+      );
+
+      // And the interface says the same thing at the same time, which is the
+      // agreement that was missing.
+      const hud = document.querySelector('[data-screen="hud"]');
+
+      expect(hud?.getAttribute('data-ephemeral')).toBe('true');
+    });
+  });
+
+  it('reports storage healthy again once writes are accepted', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+
+    withRefusedRunWrites(() => {
+      application = startPlaying();
+      playEveryDirection();
+    });
+
+    // The refusal is over; the verdict is read at check time and never cached,
+    // so the next check answers from the store as it is now.
+    const live = application as Application;
+
+    playEveryDirection();
+
+    const storage = live.health
+      .check()
+      .checks.find((check) => check.id === 'storage');
+
+    expect(storage?.status).toBe('pass');
+    expect(storage?.detail ?? '').toContain('writable');
+    expect(live.health.readiness().storage).toBe('persistent');
+  });
+
   it('answers both HUD run-status readers without faulting', () => {
     window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
 

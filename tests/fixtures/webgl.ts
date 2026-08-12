@@ -5,6 +5,15 @@
 /** The one method of a context this fixture is asked for. */
 export type MockContextKind = 'webgl2' | 'webgl';
 
+/** One `pixelStorei` write, named by the constant it addressed. */
+export interface MockPixelStoreWrite {
+  /** The constant's name, or its numeric code where it issued none. */
+  readonly parameter: string;
+
+  /** The value written. */
+  readonly value: unknown;
+}
+
 /** A mocked context, and the constants it has issued. */
 export interface MockWebGLContext {
   /** The context itself, as `getContext` returns it. */
@@ -15,6 +24,16 @@ export interface MockWebGLContext {
 
   /** Every method name the context was asked for, in first-call order. */
   readonly calls: readonly string[];
+
+  /**
+   * ADDED: every `pixelStorei` write, in order.
+   *
+   * The unpack state is the one piece of context state that OUTLIVES the
+   * renderer that wrote it, so a suite asserting which teardown resets it needs
+   * the arguments and not just the method name — and `calls` records a method
+   * once, on first access. DL-THREE-07.
+   */
+  readonly pixelStore: readonly MockPixelStoreWrite[];
 }
 
 /**
@@ -30,6 +49,7 @@ export interface MockWebGLContext {
 export function createMockWebGLContext(): MockWebGLContext {
   const constants = new Map<number, string>();
   const calls: string[] = [];
+  const pixelStore: MockPixelStoreWrite[] = [];
   const base: Record<string, unknown> = {};
   let nextCode = 1;
 
@@ -90,6 +110,17 @@ export function createMockWebGLContext(): MockWebGLContext {
     createFramebuffer: (): unknown => ({}),
     createRenderbuffer: (): unknown => ({}),
     isContextLost: (): boolean => false,
+
+    // ADDED: recorded rather than dropped, so a suite can say WHICH parameter a
+    // teardown wrote and to what. DL-THREE-07.
+    pixelStorei: (parameter: number, value: unknown): unknown => {
+      pixelStore.push({
+        parameter: nameOf(parameter) ?? String(parameter),
+        value,
+      });
+
+      return null;
+    },
   };
 
   const gl = new Proxy(base, {
@@ -135,7 +166,7 @@ export function createMockWebGLContext(): MockWebGLContext {
     },
   });
 
-  return Object.freeze({ gl, nameOf, calls });
+  return Object.freeze({ gl, nameOf, calls, pixelStore });
 }
 
 /** Construction parameters for the canvas stand-in. */

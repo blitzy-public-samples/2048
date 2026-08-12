@@ -38,7 +38,10 @@ import type {
   Direction,
   SerializedGameState,
 } from '../../../src/engine/types';
-import { createLogger } from '../../../src/observability/logger';
+import {
+  DEFAULT_LOG_BUFFER_CAPACITY,
+  createLogger,
+} from '../../../src/observability/logger';
 import type { LogRecord, Logger } from '../../../src/observability/logger';
 import {
   DEFAULT_DURATION_BUCKETS,
@@ -3857,6 +3860,334 @@ describe('the registry reports through the logger it was given', () => {
     }).not.toThrow();
 
     expect(registry.snapshot().reporterFaults).toBeGreaterThan(0);
+  });
+});
+
+/*
+ * ===== 14b. A rejection is observable BY REASON, and a flood of one kind is
+ * bounded in the log (DL-METRIC-08, DL-METRIC-09) =====
+ */
+
+/** Identical rejections raised to exercise the warn schedule. */
+const FLOOD_SIZE = 740;
+
+/**
+ * Records the schedule writes for `FLOOD_SIZE` occurrences of one kind: the
+ * first, then every power of two below it — 1, 2, 4 … 512.
+ */
+const FLOOD_RECORDS = 10;
+
+/**
+ * Reads the per-reason rejection breakdown out of a snapshot.
+ *
+ * @param snapshot Snapshot to read.
+ * @returns Rejections counted against each reason.
+ */
+function rejectionsByReason(
+  snapshot: MetricsSnapshot,
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const series of snapshot.series) {
+    if (
+      series.name !== METRIC_NAMES.metricsRejectedByReasonTotal ||
+      series.kind === 'histogram'
+    ) {
+      continue;
+    }
+
+    counts.set(series.labels[METRIC_LABELS.reason] ?? '', series.value);
+  }
+
+  return counts;
+}
+
+/**
+ * Sums the per-reason breakdown.
+ *
+ * @param snapshot Snapshot to read.
+ * @returns The total the breakdown accounts for.
+ */
+function rejectionBreakdownTotal(snapshot: MetricsSnapshot): number {
+  let total = 0;
+
+  for (const count of rejectionsByReason(snapshot).values()) {
+    total += count;
+  }
+
+  return total;
+}
+
+/**
+ * Reads every record one rejection kind wrote.
+ *
+ * @param logger Logger the registry reported through.
+ * @param reason Reason the records carry.
+ * @returns The records, in the order they were written.
+ */
+function recordsForReason(
+  logger: Logger,
+  reason: string,
+): readonly LogRecord[] {
+  return logger
+    .snapshot()
+    .records.filter(
+      (record: LogRecord): boolean => record.fields?.reason === reason,
+    );
+}
+
+describe('a rejection is counted by reason as well as in total', () => {
+  let harness: RegistryHarness;
+
+  beforeEach((): void => {
+    harness = createHarness();
+  });
+
+  afterEach((): void => {
+    harness.release();
+    vi.restoreAllMocks();
+  });
+
+  it('declares the breakdown family up front and carries no series for it',
+    () => {
+      const parsed = expectValidExposition(
+        harness.registry.toPrometheusText(),
+      );
+
+      // Reserved at construction, so the incident it explains — a flood of
+      // `familyLimitReached` — cannot be the reason it does not exist.
+      expect(
+        declaredKind(parsed, METRIC_NAMES.metricsRejectedByReasonTotal),
+      ).toBe('counter');
+      expect(
+        declaredHelp(parsed, METRIC_NAMES.metricsRejectedByReasonTotal)?.length,
+      ).toBeGreaterThan(0);
+
+      // A healthy run rejects nothing, so the family carries no sample.
+      expect(rejectionsByReason(harness.registry.snapshot()).size).toBe(0);
+      expect(
+        findSample(parsed, METRIC_NAMES.metricsRejectedByReasonTotal),
+      ).toBeUndefined();
+    });
+
+  it('labels each rejection with the reason its record carried', () => {
+    const counter = harness.registry.counter('suite_reasons_total');
+
+    counter.inc(-1);
+    counter.inc(-2);
+    counter.inc(Number.NaN);
+    harness.registry.recordTurnLatency(-5);
+
+    const byReason = rejectionsByReason(harness.registry.snapshot());
+
+    expect(byReason.get('negativeDelta')).toBe(2);
+    expect(byReason.get('notFinite')).toBe(1);
+    expect(byReason.get('notANonNegativeNumber')).toBe(1);
+  });
+
+  it('sums the breakdown to the unlabelled total', () => {
+    const counter = harness.registry.counter('suite_sum_total');
+
+    counter.inc(-1);
+    counter.inc(Number.NaN);
+    harness.registry.recordSpanDuration('', 1);
+    harness.registry.recordHealthCheck('', true);
+    harness.registry.recordEngineEvent(
+      'not-an-event' as unknown as EngineEventName,
+    );
+
+    const snapshot = harness.registry.snapshot();
+
+    expect(snapshot.rejected).toBe(5);
+    expect(rejectionBreakdownTotal(snapshot)).toBe(snapshot.rejected);
+    expect(
+      counterValue(snapshot, METRIC_NAMES.metricsRejectedTotal),
+    ).toBe(snapshot.rejected);
+  });
+
+  it('counts a rejection carrying no reason field as unspecified', () => {
+    // Two of the module's rejections carry no `reason`: a reader fault, and a
+    // kind collision between two describes.
+    harness.registry.reportReaderFault('cursor read failed', new Error('x'));
+    harness.registry.describe('suite_kinds', 'A counter.', 'counter');
+    harness.registry.describe('suite_kinds', 'A gauge.', 'gauge');
+
+    const snapshot = harness.registry.snapshot();
+
+    expect(rejectionsByReason(snapshot).get('unspecified')).toBe(2);
+    expect(rejectionBreakdownTotal(snapshot)).toBe(snapshot.rejected);
+  });
+
+  it('exports the breakdown as one labelled family of valid text', () => {
+    harness.registry.counter('suite_export_total').inc(-1);
+
+    const parsed = expectValidExposition(
+      harness.registry.toPrometheusText(),
+    );
+
+    expect(
+      findSample(parsed, METRIC_NAMES.metricsRejectedByReasonTotal, {
+        [METRIC_LABELS.reason]: 'negativeDelta',
+      })?.value,
+    ).toBe(1);
+
+    // One family, one layout: the total stays unlabelled and the breakdown
+    // carries `reason` on every series.
+    expect(
+      findSample(parsed, METRIC_NAMES.metricsRejectedTotal)?.value,
+    ).toBe(1);
+  });
+
+  it('zeroes the breakdown on reset and keeps its series registered', () => {
+    harness.registry.counter('suite_reset_total').inc(-1);
+    harness.registry.reset();
+
+    const snapshot = harness.registry.snapshot();
+
+    expect(snapshot.rejected).toBe(0);
+    expect(rejectionsByReason(snapshot).get('negativeDelta')).toBe(0);
+  });
+
+  it('lets no caller-supplied string widen the reason dimension', () => {
+    // A reader fault carries the caller's own message, which is the one
+    // rejection field this module does not control. It must not become a
+    // label value of its own.
+    harness.registry.reportReaderFault(
+      'a'.repeat(400),
+      new Error('unbounded'),
+    );
+
+    const byReason = rejectionsByReason(harness.registry.snapshot());
+
+    expect([...byReason.keys()]).toEqual(['unspecified']);
+  });
+});
+
+describe('a flood of one rejection kind is bounded in the log', () => {
+  let harness: RegistryHarness;
+
+  beforeEach((): void => {
+    harness = createHarness();
+  });
+
+  afterEach((): void => {
+    harness.release();
+    vi.restoreAllMocks();
+  });
+
+  it('writes the first occurrence and then every power of two', () => {
+    const counter = harness.registry.counter('suite_flood_total');
+
+    for (let index = 0; index < FLOOD_SIZE; index += 1) {
+      counter.inc(-1);
+    }
+
+    const written = recordsForReason(harness.logger, 'negativeDelta');
+
+    expect(written).toHaveLength(FLOOD_RECORDS);
+    expect(
+      written.map((record: LogRecord): unknown => record.fields?.occurrences),
+    ).toEqual([undefined, 2, 4, 8, 16, 32, 64, 128, 256, 512]);
+
+    // Each record after the first states how many went unwritten since the
+    // previous one, so the gap is accounted for rather than lost.
+    expect(
+      written.map((record: LogRecord): unknown => record.fields?.suppressed),
+    ).toEqual([undefined, 0, 1, 3, 7, 15, 31, 63, 127, 255]);
+  });
+
+  it('counts every occurrence whatever the log wrote', () => {
+    const counter = harness.registry.counter('suite_counted_total');
+
+    for (let index = 0; index < FLOOD_SIZE; index += 1) {
+      counter.inc(-1);
+    }
+
+    const snapshot = harness.registry.snapshot();
+
+    expect(snapshot.rejected).toBe(FLOOD_SIZE);
+    expect(rejectionsByReason(snapshot).get('negativeDelta')).toBe(FLOOD_SIZE);
+    expect(recordsForReason(harness.logger, 'negativeDelta').length).toBe(
+      FLOOD_RECORDS,
+    );
+  });
+
+  it('keeps the records that explain the flood instead of evicting them',
+    () => {
+      const capacity = harness.logger.snapshot().capacity;
+      const counter = harness.registry.counter('suite_history_total');
+
+      harness.logger.info('the record a reader needs');
+
+      for (let index = 0; index < FLOOD_SIZE; index += 1) {
+        counter.inc(-1);
+      }
+
+      const buffered = harness.logger.snapshot();
+      const messages = buffered.records.map(
+        (record: LogRecord): string => record.message,
+      );
+
+      // Unbounded, FLOOD_SIZE records displaced a 200-record buffer entirely
+      // and dropped 829: the history that explained the incident was gone.
+      expect(capacity).toBe(DEFAULT_LOG_BUFFER_CAPACITY);
+      expect(FLOOD_SIZE).toBeGreaterThan(capacity);
+      expect(messages).toContain('the record a reader needs');
+      expect(buffered.dropped).toBe(0);
+    });
+
+  it('separates two reasons that report under one message', () => {
+    // Both refusals report as `metric label rejected`, so a key of the
+    // message alone would have hidden the second behind the first.
+    harness.registry.counter('suite_labels_a_total', { 'not a label': 'x' });
+    harness.registry.counter('suite_labels_b_total', {
+      suite: 'v'.repeat(400),
+    });
+
+    expect(recordsForReason(harness.logger, 'invalidLabelName')).toHaveLength(
+      1,
+    );
+    expect(recordsForReason(harness.logger, 'labelValueTooLong')).toHaveLength(
+      1,
+    );
+  });
+
+  it('does not key the schedule by metric name', () => {
+    // A cardinality incident is a flood of DISTINCT names under one reason.
+    // Keying by name would give each its own quota and defeat the schedule.
+    for (let index = 0; index < FLOOD_SIZE; index += 1) {
+      harness.registry.counter(`suite flood ${index}`).inc();
+    }
+
+    expect(
+      recordsForReason(harness.logger, 'invalidMetricName'),
+    ).toHaveLength(FLOOD_RECORDS);
+    expect(harness.registry.snapshot().rejected).toBe(FLOOD_SIZE);
+    expect(
+      rejectionsByReason(harness.registry.snapshot()).get('invalidMetricName'),
+    ).toBe(FLOOD_SIZE);
+  });
+
+  it('writes the first occurrence again after a reset', () => {
+    const counter = harness.registry.counter('suite_rearm_total');
+
+    counter.inc(-1);
+    counter.inc(-1);
+    counter.inc(-1);
+
+    const before = recordsForReason(harness.logger, 'negativeDelta').length;
+
+    harness.registry.reset();
+    counter.inc(-1);
+
+    const after = recordsForReason(harness.logger, 'negativeDelta');
+
+    // Two of the three: the first and the second, the third suppressed. The
+    // reset re-arms the schedule, so the next run's first rejection is
+    // written rather than counted as a fourth occurrence.
+    expect(before).toBe(2);
+    expect(after).toHaveLength(before + 1);
+    expect(after[after.length - 1]?.fields?.occurrences).toBeUndefined();
   });
 });
 

@@ -17,12 +17,12 @@
 //                                            without-replacement rendering
 //   TR-REWARD-05  target-only row            the rarity chip, the charges chip
 //                                            and the hook badges
-//   TR-REWARD-06  target-only row            the clamped description
+//   TR-REWARD-06  target-only row            the description, rendered whole
 //   TR-REWARD-07  target-only row            the narrow-layout restatement at
 //                                            the mobile threshold
 //
-// Decisions: DL-REWARD-01, DL-REWARD-02, DL-REWARD-03, DL-REWARD-04
-// (docs/DECISION_LOG.md).
+// Decisions: DL-REWARD-01, DL-REWARD-02, DL-REWARD-03, DL-REWARD-04,
+// DL-REWARD-16 (docs/DECISION_LOG.md).
 
 @use "sass:color";
 @use "sass:list";
@@ -60,10 +60,6 @@ $reward-label-size: $grid-spacing - $reward-hairline * 2 !default;
 $reward-heading-size: $grid-spacing + $reward-mobile-gutter !default;
 
 $reward-line-height: 1.65 !default;
-
-// Ceiling on the number of line boxes a relic description occupies — a count,
-// not a length.
-$reward-description-lines: 8 !default;
 
 $reward-scrim-alpha: 0.5 !default;
 
@@ -349,16 +345,16 @@ $reward-rarities: $rarity-tiers !default;
   @include reward-chip;
 }
 
-// Clamped to $reward-description-lines line boxes with an ellipsis.
+// CHANGED: the description is no longer clamped. It carried
+// `-webkit-line-clamp: $reward-description-lines` with an ellipsis, which cut
+// the longest catalogue entry two lines short of its end at every desktop
+// width. The card grows to its text instead, and `.reward-offers` above stretches
+// all three cards to one height, so the row stays even and every badge row
+// still lands on the same line. DL-REWARD-16 supersedes DL-REWARD-03.
 .reward-offer .relic-card-description {
   min-inline-size: 0;
   line-height: $reward-line-height;
   overflow-wrap: break-word;
-
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: $reward-description-lines;
-  overflow: hidden;
 }
 
 // Held against the bottom of the card, so a set of one badge and a set of six

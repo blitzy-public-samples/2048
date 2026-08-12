@@ -388,6 +388,176 @@ describe('the accessibility palettes withhold the glow from every value', () => 
     },
   );
 
+  // ADDED: the glow is bounded by the headroom the fill leaves, so the fill the
+  // ramp states survives the addition. Before this bound the five glow-band
+  // faces all rendered with a saturated red channel: the last two steps were
+  // 2.74 apart where their fills are 5.04 apart, and the numeral ratio on 2048
+  // fell from the fill's own 1.58:1 to 1.05:1. DL-MATERIAL-04.
+  describe('the glow never saturates the fill it is added to', () => {
+    /** The glow band: every value the identity palette emits a shadow for. */
+    const GLOW_BAND = [128, 256, 512, 1024, 2048] as const;
+
+    /** One channel of a linear sum, as the 8-bit sRGB value it encodes to. */
+    const encode = (linear: number): number => {
+      const clamped = Math.min(Math.max(linear, 0), 1);
+
+      return Math.round(
+        (clamped <= 0.0031308
+          ? clamped * 12.92
+          : 1.055 * clamped ** (1 / 2.4) - 0.055) * 255,
+      );
+    };
+
+    const toLinear = (channel: number): number => {
+      const unit = channel / 255;
+
+      return unit <= 0.04045 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4;
+    };
+
+    /** The rendered face of one value: its fill plus its own glow term. */
+    const renderedFace = (value: number): [number, number, number] => {
+      const cache = createTileMaterialCache({ theme: 'default' });
+      const material = cache.getTileMaterial(value);
+      const intensity = material.emissiveIntensity;
+      const face: [number, number, number] = [
+        encode(material.color.r + material.emissive.r * intensity),
+        encode(material.color.g + material.emissive.g * intensity),
+        encode(material.color.b + material.emissive.b * intensity),
+      ];
+
+      cache.destroy();
+
+      return face;
+    };
+
+    const toLab = (
+      rgb: readonly [number, number, number],
+    ): [number, number, number] => {
+      const [red, green, blue] = rgb.map(toLinear) as [number, number, number];
+      const x = (0.4124 * red + 0.3576 * green + 0.1805 * blue) / 0.95047;
+      const y = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+      const z = (0.0193 * red + 0.1192 * green + 0.9505 * blue) / 1.08883;
+      const bend = (component: number): number =>
+        component > 0.008856
+          ? Math.cbrt(component)
+          : 7.787 * component + 16 / 116;
+
+      return [
+        116 * bend(y) - 16,
+        500 * (bend(x) - bend(y)),
+        200 * (bend(y) - bend(z)),
+      ];
+    };
+
+    const deltaE76 = (
+      first: readonly [number, number, number],
+      second: readonly [number, number, number],
+    ): number => {
+      const [l1, a1, b1] = toLab(first);
+      const [l2, a2, b2] = toLab(second);
+
+      return Math.sqrt((l1 - l2) ** 2 + (a1 - a2) ** 2 + (b1 - b2) ** 2);
+    };
+
+    it('leaves every channel of every ramp value unsaturated', () => {
+      const cache = createTileMaterialCache({ theme: 'default' });
+
+      for (
+        let exponent = tileRampConstants.exponentStart;
+        exponent <= tileRampConstants.limit;
+        exponent += 1
+      ) {
+        const material = cache.getTileMaterial(rampValue(exponent));
+        const intensity = material.emissiveIntensity;
+
+        for (const channel of ['r', 'g', 'b'] as const) {
+          // A channel driven to 1 is a channel that has stopped carrying the
+          // fill's identity: every value whose fill shares that anchor renders
+          // the same there.
+          expect(
+            material.color[channel] + material.emissive[channel] * intensity,
+          ).toBeLessThanOrEqual(1 + Number.EPSILON * 8);
+        }
+      }
+
+      cache.destroy();
+    });
+
+    it('keeps adjacent rendered steps at least one JND apart', () => {
+      for (let index = 1; index < GLOW_BAND.length; index += 1) {
+        const previous = GLOW_BAND[index - 1] as number;
+        const current = GLOW_BAND[index] as number;
+
+        expect(
+          deltaE76(renderedFace(previous), renderedFace(current)),
+        ).toBeGreaterThanOrEqual(3);
+      }
+    });
+
+    it('holds the numeral ratio close to the fill\u2019s own', () => {
+      const cache = createTileMaterialCache({ theme: 'default' });
+      const luminance = (rgb: readonly [number, number, number]): number => {
+        const [red, green, blue] = rgb.map(toLinear) as [
+          number,
+          number,
+          number,
+        ];
+
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+      };
+      const ratio = (
+        first: readonly [number, number, number],
+        second: readonly [number, number, number],
+      ): number => {
+        const a = luminance(first);
+        const b = luminance(second);
+
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      };
+
+      for (const value of GLOW_BAND) {
+        const material = cache.getTileMaterial(value);
+        const fill: [number, number, number] = [
+          encode(material.color.r),
+          encode(material.color.g),
+          encode(material.color.b),
+        ];
+        const numeral = cache.getNumeralColor(value).replace('#', '');
+        const numeralRgb: [number, number, number] = [
+          Number.parseInt(numeral.slice(0, 2), 16),
+          Number.parseInt(numeral.slice(2, 4), 16),
+          Number.parseInt(numeral.slice(4, 6), 16),
+        ];
+
+        // The renderer may not cost the numeral more than a tenth of a ratio
+        // point against the fill the ramp states. It cost 0.53 on 2048 when the
+        // term was unbounded.
+        expect(
+          ratio(fill, numeralRgb) - ratio(renderedFace(value), numeralRgb),
+        ).toBeLessThanOrEqual(0.16);
+      }
+
+      cache.destroy();
+    });
+
+    it('still grows the term with the value', () => {
+      const cache = createTileMaterialCache({ theme: 'default' });
+      const intensities = GLOW_BAND.map(
+        (value) => cache.getTileMaterial(value).emissiveIntensity,
+      );
+
+      // Bounding the term did not flatten it: style/main.scss L334-L402 grows
+      // the shadow with the exponent, and so does this.
+      for (let index = 1; index < intensities.length; index += 1) {
+        expect(intensities[index] as number).toBeGreaterThan(
+          intensities[index - 1] as number,
+        );
+      }
+
+      cache.destroy();
+    });
+  });
+
   it('keeps the identity palette\u2019s glow on the values that carry one', () => {
     const cache = createTileMaterialCache({ theme: 'default' });
 

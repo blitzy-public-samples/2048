@@ -404,6 +404,61 @@ describe('the settings dialog', () => {
     expect(control('#settings-panel').hidden).toBe(true);
   });
 
+  // ADDED: the close hands focus back to the control that opened the dialog.
+  // The control layer withholds `#settings-button` for TWO reasons while the
+  // dialog is up — `openSettings` is unauthorized in `'settings'`, and the
+  // shell the button sits in is inert — and the second is only answerable once
+  // the release has lifted the inertness, so the refresh runs from inside the
+  // release rather than before it. DL-ROUTER-41, DL-FOCUS-08.
+  it('hands focus back to the trigger, re-presenting it first', () => {
+    application = startPlaying();
+
+    const trigger = control('#settings-button');
+
+    pressControl('#settings-button');
+
+    // Withheld on both counts while the dialog holds focus.
+    expect(control('.container').hasAttribute('inert')).toBe(true);
+    expect(trigger.hasAttribute('disabled')).toBe(true);
+    expect(trigger.getAttribute('tabindex')).toBe('-1');
+    expect(control('#settings-panel').contains(document.activeElement)).toBe(
+      true,
+    );
+
+    // Sampled AT THE INSTANT focus lands rather than afterwards, because
+    // `settle()` refreshes the layer a second time and would make a later
+    // reading true either way. This document cannot fail on the ORDERING on its
+    // own — it allows focus on a disabled control that still carries
+    // `tabindex="-1"`, where a browser refuses it and drops focus to the body —
+    // so the ordering is pinned in tests/unit/ui/screen-router.test.ts against
+    // the lifted inertness, and this case holds the composed outcome.
+    const atRestore: { disabled: boolean; inert: boolean }[] = [];
+
+    trigger.addEventListener('focus', (): void => {
+      atRestore.push({
+        disabled: trigger.hasAttribute('disabled'),
+        inert: control('.container').hasAttribute('inert'),
+      });
+    });
+
+    const close = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('#settings-panel button'),
+    ).find((candidate) => candidate.textContent === 'Close settings');
+
+    close?.focus();
+    close?.click();
+
+    // Focus landed on the trigger, and it was already interactive when it did.
+    expect(document.activeElement).toBe(trigger);
+    expect(document.activeElement).not.toBe(document.body);
+    expect(atRestore).toEqual([{ disabled: false, inert: false }]);
+
+    // And it stays presented afterwards.
+    expect(control('.container').hasAttribute('inert')).toBe(false);
+    expect(trigger.hasAttribute('disabled')).toBe(false);
+    expect(trigger.getAttribute('tabindex')).toBeNull();
+  });
+
   it('engages exactly one focus trap on the dialog container', () => {
     // TWO traps on one container is the composition defect: the dialog engaged
     // its own and the router engaged another over the same element, so the
@@ -704,17 +759,35 @@ describe('the win overlay', () => {
     expect(overlay.classList.contains('game-won')).toBe(true);
     expect(application.engine.isGameTerminated()).toBe(true);
 
-    // Reachable now: shown, enabled and in the tab order.
-    expect(keepPlaying.hidden).toBe(false);
-    expect(keepPlaying.getAttribute('aria-hidden')).not.toBe('true');
-    expect(keepPlaying.getAttribute('tabindex')).not.toBe('-1');
+    // CHANGED: the RETAINED control stays withdrawn, because the `won` state
+    // marks the page shell it sits in `inert` and the control layer no longer
+    // presents a control its host has put out of reach. The operable control is
+    // the one the state renders inside its own trapped container, which is what
+    // `SCREEN_TRAPS_FOCUS` of ../screen-router already said was carrying the
+    // actions. DL-CONTROL-11.
+    expect(control('.container').hasAttribute('inert')).toBe(true);
+    expect(keepPlaying.hidden).toBe(true);
 
-    // And the key reaches it, which nothing did before: the action had no key
+    const offered = control('#screen-game-over [data-action="keepPlaying"]');
+
+    expect(offered.hidden).toBe(false);
+    expect(offered.getAttribute('aria-hidden')).not.toBe('true');
+    expect(offered.getAttribute('tabindex')).not.toBe('-1');
+
+    // And the key reaches the action, which nothing did before: it had no key
     // at all and its only context was one the page never entered.
     press('c', 'KeyC');
 
     expect(application.engine.isGameTerminated()).toBe(false);
     expect(overlay.classList.contains('game-won')).toBe(false);
+
+    // The shell is reachable again — and the retained control stays withdrawn
+    // for its ORIGINAL reason, the one the reachability term did not replace:
+    // `keepPlaying` is declared for the `'overlay'` context alone, and the board
+    // is back in the `'game'` one.
+    expect(control('.container').hasAttribute('inert')).toBe(false);
+    expect(application.router.current()).toBe('stage');
+    expect(keepPlaying.hidden).toBe(true);
   });
 
   it('continues play from the control as well as the key', () => {
@@ -724,7 +797,9 @@ describe('the win overlay', () => {
 
     expect(application.engine.isGameTerminated()).toBe(true);
 
-    control('.keep-playing-button').click();
+    // CHANGED: the state's own control, inside the container the trap holds,
+    // rather than the retained one behind the inert shell. DL-CONTROL-11.
+    pressControl('#screen-game-over [data-action="keepPlaying"]');
 
     expect(application.engine.isGameTerminated()).toBe(false);
   });
@@ -742,7 +817,7 @@ describe('the win overlay', () => {
 
     expect(moveUp?.hidden).toBe(true);
 
-    control('.keep-playing-button').click();
+    pressControl('#screen-game-over [data-action="keepPlaying"]');
 
     expect(moveUp?.hidden).toBe(false);
   });
@@ -760,7 +835,7 @@ describe('the win overlay', () => {
 
     // And released once the overlay is dismissed, so the block is the
     // overlay's and not a permanent one.
-    control('.keep-playing-button').click();
+    pressControl('#screen-game-over [data-action="keepPlaying"]');
     press('ArrowDown', 'ArrowDown');
 
     expect(moves.value).toBe(1);
@@ -1310,14 +1385,26 @@ describe('the three screen-flow actions', () => {
     expect(application.engine.isGameTerminated()).toBe(true);
     expect(shownScreens()).toEqual([SCREEN_MOUNTS.won]);
 
+    // CHANGED: the generated control is WITHHELD here, and the state's own
+    // control is the surface that publishes the action. The `won` state marks
+    // the page shell `inert`, and the control layer no longer presents a control
+    // whose host has put it out of reach — every liveness signal read live while
+    // a real press did nothing at all. DL-CONTROL-11.
     const endRun = generated('endRun');
 
-    // Reachable now, because the page is in the overlay context.
-    expect(endRun.hidden).toBe(false);
-    expect(endRun.disabled).toBe(false);
-    expect(endRun.getAttribute('tabindex')).toBe('0');
+    expect(control('.container').hasAttribute('inert')).toBe(true);
+    expect(endRun.hidden).toBe(true);
+    expect(endRun.disabled).toBe(true);
+    expect(endRun.getAttribute('tabindex')).toBe('-1');
 
     endRun.click();
+
+    // The withheld control published nothing: the state is unchanged.
+    expect(shownScreens()).toEqual([SCREEN_MOUNTS.won]);
+
+    control(SCREEN_MOUNTS.won)
+      .querySelector<HTMLElement>('[data-action="endRun"]')
+      ?.click();
 
     // THE REAL EDGE, and the only one this state declares for the trigger.
     expect(TRANSITIONS.won.endRun).toBe('runSummary');
@@ -1339,7 +1426,11 @@ describe('the three screen-flow actions', () => {
     application = start(document);
 
     press('ArrowLeft', 'ArrowLeft');
-    generated('endRun').click();
+
+    // The state's own control, for the reason the test above states.
+    control(SCREEN_MOUNTS.won)
+      .querySelector<HTMLElement>('[data-action="endRun"]')
+      ?.click();
 
     expect(shownScreens()).toEqual([SCREEN_MOUNTS.runSummary]);
 
@@ -1354,13 +1445,16 @@ describe('the three screen-flow actions', () => {
 
     expect(shownScreens()).toEqual([SCREEN_MOUNTS.runStart]);
 
-    // AND THE GENERATED CONTROL IS NOT THE SURFACE HERE. All three flow actions
-    // are declared for the `'overlay'` context alone, and the screen's trap puts
-    // focus in the seed field — a text field holding focus resolves the context
-    // to `'textEntry'`, which outranks every screen — so the layer withdraws it
-    // and the screen renders its own begin control instead. DL-ROUTER-06,
-    // DL-RUNSTART-02.
+    // AND THE GENERATED CONTROL IS NOT THE SURFACE HERE, for two reasons now.
+    // All three flow actions are declared for the `'overlay'` context alone, and
+    // the screen's trap puts focus in the seed field — a text field holding
+    // focus resolves the context to `'textEntry'`, which outranks every screen.
+    // The second reason is sufficient on its own: `runStart` marks the page
+    // shell `inert`, so the layer withholds every control inside it. The screen
+    // renders its own begin control instead. DL-ROUTER-06, DL-RUNSTART-02,
+    // DL-CONTROL-11.
     expect(application.router.context()).toBe('textEntry');
+    expect(control('.container').hasAttribute('inert')).toBe(true);
     expect(generated('startRun').hidden).toBe(true);
 
     // The begin control, which is the composed surface that publishes `startRun`.
@@ -1398,12 +1492,21 @@ describe('the three screen-flow actions', () => {
 
     expect(shownScreens()).toEqual([SCREEN_MOUNTS.stageClear]);
 
+    // CHANGED: withheld for the same reason as `endRun` above — `stageClear`
+    // marks the shell inert — and the interstitial's own continue control is the
+    // surface that publishes the action. DL-CONTROL-11.
     const continueStage = generated('continueStage');
 
-    // Offered on this state alone, which is the control gating the root applies.
-    expect(continueStage.hidden).toBe(false);
+    expect(control('.container').hasAttribute('inert')).toBe(true);
+    expect(continueStage.hidden).toBe(true);
 
     continueStage.click();
+
+    expect(shownScreens()).toEqual([SCREEN_MOUNTS.stageClear]);
+
+    control(SCREEN_MOUNTS.stageClear)
+      .querySelector<HTMLElement>('.stage-progress-continue')
+      ?.click();
 
     // THE EDGE THE ROOT'S TRIGGER TAKES, declared by the state machine and taken
     // by that very trigger — which is what makes the subscription observable
@@ -1419,7 +1522,8 @@ describe('the three screen-flow actions', () => {
     ).toBe(true);
     expect(shownScreens()).toEqual([SCREEN_MOUNTS.reward]);
 
-    // And the control goes out of reach with the state that offered it.
+    // And the interstitial's own control goes with the state that offered it.
+    expect(control(SCREEN_MOUNTS.stageClear).hidden).toBe(true);
     expect(generated('continueStage').hidden).toBe(true);
   });
 

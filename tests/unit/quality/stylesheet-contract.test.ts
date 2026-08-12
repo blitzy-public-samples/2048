@@ -213,6 +213,39 @@ describe('the relic tray is styled as the reading it is', () => {
   });
 });
 
+// ADDED: the two run-failure notices are told apart by more than a border
+// style, because one is settled and the other merely unconfirmed. DL-HUD-15.
+describe('the run-not-saved notice reads as the more urgent of the two', () => {
+  it('carries a caution bar on one edge, from the palette accent', () => {
+    const rule = /\.hud-ephemeral\s*\{([^}]*)\}/u.exec(compiled)?.[1] ?? '';
+
+    expect(rule).not.toBe('');
+
+    // The accent is resolved per palette through the published custom property,
+    // so the high-contrast and colourblind-safe themes supply their own; the
+    // fallback is this stylesheet's own compiled token.
+    expect(rule).toMatch(
+      /border-inline-start:\s*3px solid var\(--theme-tile-64,\s*#776E65\)/u,
+    );
+
+    // The width is the second channel, so the state is never colour alone.
+    expect(rule).toContain('border: 1px solid var(--theme-rule');
+
+    // And the copy keeps the page text colour, which clears 4.5:1 where the
+    // accent would not.
+    expect(rule).toContain('color: var(--theme-text');
+  });
+
+  it('leaves the merely-unconfirmed notice as it was', () => {
+    const rule = /\.hud-degraded\s*\{([^}]*)\}/u.exec(compiled)?.[1] ?? '';
+
+    // Dashed, no caution bar: a board status that has not been confirmed is not
+    // a run that has stopped being saved.
+    expect(rule).toContain('border: 1px dashed var(--theme-rule');
+    expect(rule).not.toContain('border-inline-start');
+  });
+});
+
 describe('the retained terminal overlay withdraws for the router', () => {
   /** The withdrawal rule, as the compiler emits it. */
   const withdrawal =
@@ -332,36 +365,41 @@ describe('the on-screen controls are a pad that clears the target floor', () => 
     );
   });
 
-  it('extends the hit area to the 44px floor without moving the box', () => {
+  it('meets the 44px floor in the box on both axes', () => {
     const rule =
       /\.on-screen-control\s*\{([^}]*)\}/u.exec(compiled)?.[1] ?? '';
 
-    // The painted height stays the token's 40px; the shortfall is made up by a
-    // transparent pseudo-element, so `.restart-button` and the frozen classic
-    // identity are untouched. DL-A11Y-11.
-    expect(rule).toContain('position: relative');
+    // CHANGED: the floor is in the PAINTED box, so it measures 44px by
+    // `getBoundingClientRect()` and not only by hit test. `min-block-size`
+    // rather than `block-size`, so the 40px `@mixin screen-control` declares is
+    // outranked without being restated. DL-A11Y-12.
     expect(rule).toContain('min-inline-size: 44px');
-    expect(rule).not.toContain('block-size');
+    expect(rule).toContain('min-block-size: 44px');
+    expect(rule).not.toContain('block-size: 40px');
 
-    expect(compiled).toMatch(
-      /\.on-screen-control::after\s*\{[^}]*inset-block: -2px/u,
-    );
-    expect(compiled).toMatch(
-      /\.on-screen-control::after\s*\{[^}]*background: transparent/u,
-    );
+    // The label stays centred in whichever height wins.
+    expect(rule).toContain('display: inline-flex');
+    expect(rule).toContain('align-items: center');
+
+    // The pseudo-element the box replaces is gone, so there is exactly one
+    // mechanism holding the floor.
+    expect(compiled).not.toMatch(/\.on-screen-control::after/u);
   });
 
-  it('gives the extension to no control the availability layer withdrew', () => {
-    expect(compiled).toMatch(
-      /\.on-screen-control\[hidden\]::after[^{]*\{[^}]*content: none/u,
-    );
-  });
-
-  it('leaves the retained classic controls out of the extension', () => {
+  it('leaves the retained classic controls at their frozen height', () => {
     // Named selectors, so a reader can see the scope: neither the frozen
-    // `.restart-button` nor its companion gains a pseudo-element.
+    // `.restart-button` nor its companion is raised, and neither gains a
+    // pseudo-element.
     expect(compiled).not.toMatch(/\.restart-button::after/u);
     expect(compiled).not.toMatch(/\.settings-button::after/u);
+    expect(compiled).toMatch(/\.restart-button\s*\{[^}]*height: 40px/u);
+    expect(compiled).not.toMatch(
+      /\.restart-button\s*\{[^}]*min-block-size/u,
+    );
+
+    // And the floor rule is qualified by the element, so it outranks the
+    // `display: inline-block` the shared control vocabulary declares later.
+    expect(compiled).toMatch(/button\.on-screen-control\s*\{/u);
   });
 });
 

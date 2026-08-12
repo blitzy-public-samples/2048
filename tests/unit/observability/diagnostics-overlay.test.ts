@@ -6,7 +6,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ENGINE_EVENT_NAMES } from '../../../src/engine/engine-events';
 import type { HookBusMetrics } from '../../../src/engine/hook-bus';
+import { HOOK_NAMES } from '../../../src/engine/hooks';
+import { RNG_STREAM_NAMES } from '../../../src/rng/rng-streams';
 import {
   DIAGNOSTICS_FLAG,
   DIAGNOSTICS_SNAPSHOT_SCHEMA_VERSION,
@@ -39,8 +42,20 @@ import {
   createBoundaryTracing,
   createTracer,
 } from '../../../src/observability/tracer';
-import { fieldWidth, monospaceStack, zIndex } from '../../../src/theme/tokens';
-import { METRIC_PREFIX, createMetricsRegistry } from '../../../src/observability/metrics';
+import {
+  brightTextColor,
+  derivedColors,
+  fieldWidth,
+  gridSpacing,
+  monospaceStack,
+  tileBorderRadius,
+  zIndex,
+} from '../../../src/theme/tokens';
+import {
+  METRIC_NAMES,
+  METRIC_PREFIX,
+  createMetricsRegistry,
+} from '../../../src/observability/metrics';
 import type { MetricsRegistry } from '../../../src/observability/metrics';
 import { createLogger, deriveCorrelationId } from '../../../src/observability/logger';
 import type { Logger } from '../../../src/observability/logger';
@@ -63,6 +78,37 @@ const hostText = (): string => {
 
   return (host?.textContent ?? '').replace(/\s+/g, ' ').trim();
 };
+
+/**
+ * The rendered rows of the metrics panel, one string per row.
+ *
+ * A metric row is the only row whose first cell is a metric name, so the rows
+ * are read whole and matched by prefix rather than by panel position.
+ *
+ * @param host Host the surface rendered into.
+ * @returns One entry per rendered row, cells separated by a space.
+ */
+const renderedSeries = (host: HTMLElement): readonly string[] =>
+  Array.from(host.querySelectorAll('tr'))
+    .map((row: Element): string =>
+      Array.from(row.querySelectorAll('td'))
+        .map((cell: Element): string => (cell.textContent ?? '').trim())
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    )
+    .filter((row: string): boolean => row.startsWith(METRIC_PREFIX));
+
+/**
+ * The heading text of every panel the surface rendered.
+ *
+ * @param host Host the surface rendered into.
+ * @returns One entry per panel heading.
+ */
+const panelHeadings = (host: HTMLElement): readonly string[] =>
+  Array.from(host.querySelectorAll('h2')).map((heading: Element): string =>
+    (heading.textContent ?? '').replace(/\s+/g, ' ').trim(),
+  );
 
 beforeEach(() => {
   document.body.innerHTML = HOST_MARKUP;
@@ -364,6 +410,143 @@ describe('the surface reports the registry', () => {
     expect(loud.text()).toContain('silent_total');
   });
 
+  it('shows the core counters before anything has happened', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    const text = harness.text();
+
+    // The defect: every one of these read zero at rest and the filter hid
+    // them, so the panel omitted the skeleton a reader checks a reading
+    // against. DL-DIAG-12.
+    for (const name of [
+      METRIC_NAMES.turnsTotal,
+      METRIC_NAMES.mergesTotal,
+      METRIC_NAMES.spawnsTotal,
+      METRIC_NAMES.spawnAttemptsTotal,
+      METRIC_NAMES.spawnSuppressedTotal,
+      METRIC_NAMES.framesRenderedTotal,
+      METRIC_NAMES.metricsRejectedTotal,
+    ]) {
+      expect(text).toContain(name);
+    }
+  });
+
+  it('shows every engine-event and hook-dispatch series at zero', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    const rendered = renderedSeries(harness.host);
+    const events = rendered.filter((row: string): boolean =>
+      row.startsWith(METRIC_NAMES.engineEventsTotal),
+    );
+    const hooks = rendered.filter((row: string): boolean =>
+      row.startsWith(METRIC_NAMES.hookDispatchesTotal),
+    );
+
+    // One row per canonical dimension member, whatever it reads: after a move
+    // four of the six hook rows still read zero, and their absence read as
+    // "not dispatched" being unobservable rather than as zero.
+    expect(events).toHaveLength(ENGINE_EVENT_NAMES.length);
+    expect(hooks).toHaveLength(HOOK_NAMES.length);
+
+    for (const hook of HOOK_NAMES) {
+      expect(hooks.some((row: string): boolean => row.includes(hook))).toBe(
+        true,
+      );
+    }
+  });
+
+  it('shows every RNG substream counter at zero', () => {
+    const harness = setup();
+
+    // A fresh run has folded its cursors once, at zero, so all four series
+    // exist and all four read zero.
+    harness.metrics.recordRngCursors({
+      'spawn-value': 0,
+      'spawn-position': 0,
+      'relic-draw': 0,
+      'rarity-weight': 0,
+    });
+    harness.overlay.open();
+
+    const streams = renderedSeries(harness.host).filter((row: string): boolean =>
+      row.startsWith(METRIC_NAMES.rngDrawsTotal),
+    );
+
+    // Determinism is the product's headline property, and two of the four
+    // substreams read zero until a reward is drawn. DL-DIAG-12.
+    expect(streams).toHaveLength(RNG_STREAM_NAMES.length);
+
+    for (const stream of RNG_STREAM_NAMES) {
+      expect(streams.some((row: string): boolean => row.includes(stream))).toBe(
+        true,
+      );
+    }
+  });
+
+  it('shows a gauge reading zero, because zero is a reading', () => {
+    const harness = setup({
+      health: () => [
+        { name: 'storage', healthy: false, detail: 'writes refused' },
+      ],
+    });
+
+    harness.overlay.open();
+
+    const storage = renderedSeries(harness.host).find(
+      (row: string): boolean =>
+        row.startsWith(METRIC_NAMES.healthCheckStatus) &&
+        row.includes('check="storage"'),
+    );
+
+    // `health_check_status` at zero means UNHEALTHY, so the old filter hid
+    // precisely the check an operator opened the surface to see.
+    expect(storage).toBeDefined();
+    expect(storage).toContain(' 0');
+  });
+
+  it('states how many series it is not showing, and where they are', () => {
+    const harness = setup();
+
+    harness.metrics.counter(`${METRIC_PREFIX}quiet_a_total`);
+    harness.metrics.counter(`${METRIC_PREFIX}quiet_b_total`);
+    harness.overlay.open();
+
+    const heading = panelHeadings(harness.host).find((text: string): boolean =>
+      text.startsWith('Metrics ('),
+    );
+
+    // A bare "60 of 120 series" left a reader to guess what the other sixty
+    // were and whether they had been lost. DL-DIAG-12.
+    expect(heading).toMatch(
+      /^Metrics \(\d+ of \d+ series, \d+ at zero hidden here and exported\)$/,
+    );
+
+    const shown = Number(/\((\d+) of/.exec(heading ?? '')?.[1] ?? '0');
+    const total = Number(/of (\d+) series/.exec(heading ?? '')?.[1] ?? '0');
+    const hiddenCount = Number(
+      /series, (\d+) at zero/.exec(heading ?? '')?.[1] ?? '0',
+    );
+
+    expect(total - shown).toBe(hiddenCount);
+    expect(total).toBe(harness.metrics.snapshot().series.length);
+  });
+
+  it('drops the qualifier when it is hiding nothing', () => {
+    const harness = setup({ hideEmpty: false });
+
+    harness.overlay.open();
+
+    const heading = panelHeadings(harness.host).find((text: string): boolean =>
+      text.startsWith('Metrics ('),
+    );
+
+    expect(heading).toMatch(/^Metrics \(\d+ series\)$/);
+  });
+
   it('shows recent log records', () => {
     const harness = setup();
 
@@ -511,7 +694,7 @@ describe('the exported snapshot', () => {
 });
 
 describe('the surface controls', () => {
-  it('offers refresh, export and close as real buttons', () => {
+  it('offers refresh, export, collapse and close as real buttons', () => {
     const harness = setup();
 
     harness.overlay.open();
@@ -523,11 +706,15 @@ describe('the surface controls', () => {
     );
 
     // The snapshot export sits beside the Prometheus one: the combined JSON is
-    // what docs/dashboards/dashboard.html renders against.
+    // what docs/dashboards/dashboard.html renders against. The collapse control
+    // sits before the one that closes the surface outright, because it is the
+    // lesser of the two recoveries from a panel that covers the page it floats
+    // over. DL-DIAG-11.
     expect(controls.map((control) => control.textContent)).toEqual([
       'Refresh',
       'Export metrics',
       'Export snapshot',
+      'Collapse diagnostics',
       'Close diagnostics',
     ]);
 
@@ -611,6 +798,30 @@ describe('the activation gate', () => {
 
   it('decodes a percent-encoded flag name', () => {
     expect(isDiagnosticsRequested({ search: '?%64iagnostics=1' })).toBe(true);
+  });
+
+  it('reads the flag NAME case-insensitively, as it reads the value', () => {
+    // The trap this closes: the value was already case-insensitive and trimmed,
+    // so `?diagnostics=OFF` was understood while `?DIAGNOSTICS` was not read as
+    // a flag at all and the surface silently stayed off. DL-DIAG-13.
+    for (const name of [
+      'DIAGNOSTICS',
+      'Diagnostics',
+      'dIaGnOsTiCs',
+      ' diagnostics',
+      'diagnostics ',
+    ]) {
+      expect(isDiagnosticsRequested({ search: `?${name}` })).toBe(true);
+      expect(isDiagnosticsRequested({ search: `?${name}=1` })).toBe(true);
+      expect(isDiagnosticsRequested({ hash: `#${name}` })).toBe(true);
+    }
+
+    // A name that merely contains the flag is still not the flag.
+    expect(isDiagnosticsRequested({ search: '?diagnosticsx=1' })).toBe(false);
+    expect(isDiagnosticsRequested({ search: '?xdiagnostics=1' })).toBe(false);
+
+    // Case-insensitive on BOTH halves at once.
+    expect(isDiagnosticsRequested({ search: '?DIAGNOSTICS=OFF' })).toBe(false);
   });
 
   it('answers false rather than throwing for a hostile source', () => {
@@ -875,6 +1086,245 @@ describe('the surface styling', () => {
     const table = harness.host.querySelector('table');
 
     expect(table?.style.getPropertyValue('table-layout')).toBe('fixed');
+  });
+
+  // DL-DIAG-10. `td:not(:first-child)` justified itself on figures and then
+  // right-aligned the Health panel's third column too, which is a sentence in
+  // every row — so a detail was set ragged-left and read from its end.
+  it('aligns a cell holding a sentence to its start, and only those', () => {
+    const harness = setup();
+
+    harness.overlay.mount();
+    harness.overlay.open();
+
+    const prose = Array.from(
+      harness.host.querySelectorAll<HTMLTableCellElement>(
+        'td.diagnostics-prose',
+      ),
+    );
+
+    expect(prose.length).toBeGreaterThan(0);
+
+    for (const cell of prose) {
+      expect(cell.style.getPropertyValue('text-align')).toBe('start');
+    }
+
+    // Every OTHER cell states no alignment of its own, so the sheet's
+    // end-alignment of the figure columns still governs them.
+    const figures = Array.from(
+      harness.host.querySelectorAll<HTMLTableCellElement>(
+        'td:not(.diagnostics-prose)',
+      ),
+    );
+
+    expect(figures.length).toBeGreaterThan(0);
+
+    for (const cell of figures) {
+      expect(cell.style.getPropertyValue('text-align')).toBe('');
+    }
+  });
+
+  // DL-DIAG-10, the panel the review measured: the Health rows are the ones
+  // whose third column is a sentence.
+  it('marks the health detail column as prose, detail text and all', () => {
+    const harness = setup({
+      health: () => [
+        { name: 'webgl', healthy: true, detail: 'WebGL is available at webgl2.' },
+        { name: 'storage', healthy: true, detail: 'Web Storage is writable.' },
+      ],
+    });
+
+    harness.overlay.mount();
+    harness.overlay.open();
+
+    const prose = Array.from(
+      harness.host.querySelectorAll<HTMLTableCellElement>(
+        'td.diagnostics-prose',
+      ),
+    ).map((cell) => cell.textContent);
+
+    expect(prose).toContain('WebGL is available at webgl2.');
+    expect(prose).toContain('Web Storage is writable.');
+
+    // The roll-up sentence beneath the per-check rows is prose too.
+    expect(prose.some((text) => (text ?? '').includes('checks: healthy'))).toBe(
+      true,
+    );
+  });
+});
+
+describe('the control vocabulary', () => {
+  // MINOR finding of the observability review: the controls carry the
+  // `screen-button` class, so the sheet was already theming them from
+  // `--theme-control-surface` and `--theme-control-label` — and an INLINE
+  // declaration outranked it, which left both additive palettes dead on this
+  // surface and on no other. DL-DIAG-09.
+  it('resolves the themed control pair rather than painting two literals', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    const controls = Array.from(
+      harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
+    );
+
+    expect(controls).toHaveLength(5);
+
+    for (const control of controls) {
+      const background = control.style.getPropertyValue('background');
+      const color = control.style.getPropertyValue('color');
+
+      expect(background).toContain('var(--theme-control-surface');
+      expect(color).toContain('var(--theme-control-label');
+
+      // The token literals survive as the FALLBACK, so the surface still reads
+      // correctly with no stylesheet loaded at all.
+      expect(background).toContain(derivedColors.controlSurfaceBackground);
+      expect(color).toContain(brightTextColor);
+
+      // And the frozen 3.79:1 pair of AAP 0.5.2 is no longer the value.
+      expect(background).not.toBe(derivedColors.buttonBackground);
+    }
+  });
+
+  // DL-DIAG-09. The control pair measures between 1.40:1 and 2.35:1 against the
+  // diagnostics panel, so a borderless control has no discernible boundary on
+  // it; the edge resolves the panel's own text colour, which measures at least
+  // 11:1 against the panel.
+  it('draws a hairline edge in the surface text colour rather than none', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    for (const control of Array.from(
+      harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
+    )) {
+      const border = control.style.getPropertyValue('border');
+
+      expect(border).toContain(`${String(tileBorderRadius / 3)}px`);
+      expect(border).toContain('solid');
+      expect(border).toContain('var(--theme-diagnostics-text');
+      expect(border).not.toBe('none');
+    }
+  });
+
+  // DL-DIAG-09. 40px clears WCAG 2.5.8 and falls 4px short of the 44px 2.5.5
+  // target size; three grid-spacing units is 45px and states it as a minimum,
+  // so the sheet's own 40px stays the used value on every other control.
+  it('states a minimum block size that clears the 44px target', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    for (const control of Array.from(
+      harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
+    )) {
+      const minimum = control.style.getPropertyValue('min-block-size');
+
+      expect(minimum).toBe(`${String(gridSpacing * 3)}px`);
+      expect(gridSpacing * 3).toBeGreaterThanOrEqual(44);
+    }
+  });
+});
+
+describe('the compact form of the surface', () => {
+  /**
+   * The collapse control of the rendered surface.
+   *
+   * @param harness Surface to read.
+   * @returns The control, or `undefined` where none is rendered.
+   */
+  const toggle = (harness: Harness): HTMLButtonElement | undefined =>
+    Array.from(
+      harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
+    ).find((control) => (control.textContent ?? '').includes('diagnostics') &&
+      (control.textContent ?? '') !== 'Close diagnostics');
+
+  // DL-DIAG-11. The surface is a fixed panel at the top of the layering ladder,
+  // so at a narrow width it covers the board and the on-screen controls and a
+  // pointer click lands on the panel. Collapsing is the recovery that keeps the
+  // readings.
+  it('opens expanded, with its panels drawn', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    // A panel with no row renders its empty line rather than a table, so the
+    // count is the panels this harness has readings for rather than all six.
+    const drawn = harness.host.querySelectorAll('table').length;
+
+    expect(drawn).toBeGreaterThan(0);
+    expect(harness.host.querySelectorAll('h2').length).toBeGreaterThan(0);
+    expect(harness.host.getAttribute('data-collapsed')).toBeNull();
+    expect(toggle(harness)?.textContent).toBe('Collapse diagnostics');
+    expect(toggle(harness)?.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('collapses to its heading and control row, and expands again', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    const expanded = harness.host.querySelectorAll('table').length;
+
+    expect(expanded).toBeGreaterThan(0);
+
+    toggle(harness)?.click();
+
+    expect(harness.host.querySelectorAll('table')).toHaveLength(0);
+    expect(harness.host.querySelectorAll('h2')).toHaveLength(0);
+    expect(harness.host.getAttribute('data-collapsed')).toBe('true');
+    expect(harness.host.querySelectorAll('h1')).toHaveLength(1);
+    expect(harness.host.querySelectorAll(CONTROL_QUERY)).toHaveLength(5);
+    expect(toggle(harness)?.textContent).toBe('Expand diagnostics');
+    expect(toggle(harness)?.getAttribute('aria-expanded')).toBe('false');
+
+    // The surface is still open, and still refreshes.
+    expect(harness.overlay.isOpen()).toBe(true);
+
+    toggle(harness)?.click();
+
+    expect(harness.host.querySelectorAll('table')).toHaveLength(expanded);
+    expect(harness.host.getAttribute('data-collapsed')).toBeNull();
+    expect(toggle(harness)?.textContent).toBe('Collapse diagnostics');
+  });
+
+  // Collapsing changes what is DRAWN and nothing about what is read: the fold,
+  // the metrics reading and the health check all still run, so an export taken
+  // while collapsed carries the same bytes. DL-DIAG-11.
+  it('keeps taking every reading while it draws no panel', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+    toggle(harness)?.click();
+    harness.metrics.counter(`${METRIC_PREFIX}collapsed_total`).inc(3);
+    harness.overlay.refresh();
+
+    const snapshot = harness.overlay.lastSnapshot();
+
+    expect(
+      snapshot?.series.some(
+        (series) => series.name === `${METRIC_PREFIX}collapsed_total`,
+      ),
+    ).toBe(true);
+    expect(harness.overlay.toPrometheusText()).toContain('collapsed_total');
+    expect(harness.overlay.snapshotJson()).toContain('"health"');
+
+    // And nothing of the panels is on screen while it does that.
+    expect(harness.host.querySelectorAll('table')).toHaveLength(0);
+  });
+
+  it('leaves no collapsed state on a host it releases', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+    toggle(harness)?.click();
+
+    expect(harness.host.getAttribute('data-collapsed')).toBe('true');
+
+    harness.overlay.destroy();
+
+    expect(harness.host.getAttribute('data-collapsed')).toBeNull();
   });
 });
 
@@ -1898,7 +2348,7 @@ describe('the refresh schedule', () => {
     );
 
     expect(controls).toHaveLength(1);
-    expect(buttons).toHaveLength(4);
+    expect(buttons).toHaveLength(5);
   });
 });
 
@@ -2142,7 +2592,7 @@ describe('the surface is operable and leaves storage alone', () => {
 });
 
 describe('the focus across a render', () => {
-  it('restores the focused control after an explicit refresh', () => {
+  it('keeps the focused control across an explicit refresh, as one node', () => {
     const harness = setup();
 
     harness.overlay.open();
@@ -2161,10 +2611,87 @@ describe('the focus across a render', () => {
       harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
     )[2];
 
-    // A new node at the same position, holding the focus its predecessor had.
-    expect(after).not.toBe(before);
-    expect(document.activeElement).toBe(after);
+    // The SAME node, still holding the focus. A render used to replace the five
+    // buttons and then move focus to whichever node had taken the position, so
+    // a handle to a control went stale on every tick and the focus was restored
+    // after the fact rather than never disturbed. DL-DIAG-16.
+    expect(after).toBe(before);
+    expect(document.activeElement).toBe(before);
     expect(document.activeElement?.textContent).toBe('Export snapshot');
+  });
+
+  it('keeps every control node identical across a render', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    const before = Array.from(
+      harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
+    );
+
+    harness.overlay.refresh();
+    harness.overlay.refresh();
+
+    const after = Array.from(
+      harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
+    );
+
+    expect(after).toHaveLength(before.length);
+
+    for (const [index, node] of before.entries()) {
+      expect(after[index]).toBe(node);
+    }
+  });
+
+  it('relabels the collapse control in place rather than replacing it', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    const collapse = Array.from(
+      harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
+    )[3];
+
+    expect(collapse?.textContent).toBe('Collapse diagnostics');
+    expect(collapse?.getAttribute('aria-expanded')).toBe('true');
+
+    // Focused first: a real pointer press focuses the button it activates, and
+    // `click()` alone does not, so the focus has to be placed for the assertion
+    // below to describe what a user experiences.
+    collapse?.focus();
+    collapse?.click();
+
+    const afterCollapse = Array.from(
+      harness.host.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY),
+    )[3];
+
+    expect(afterCollapse).toBe(collapse);
+    expect(collapse?.textContent).toBe('Expand diagnostics');
+    expect(collapse?.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(collapse);
+
+    collapse?.click();
+
+    expect(collapse?.textContent).toBe('Collapse diagnostics');
+    expect(collapse?.getAttribute('aria-expanded')).toBe('true');
+    expect(harness.host.querySelectorAll('h2')).toHaveLength(6);
+  });
+
+  it('renders the heading, the panels and the controls in that order', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+    harness.overlay.refresh();
+
+    const children = Array.from(harness.host.children);
+    const first = children[0];
+    const last = children[children.length - 1];
+
+    // The furniture persists, so the ORDER has to be asserted: the panels are
+    // inserted ahead of the control row rather than appended after it.
+    expect(first?.tagName).toBe('H1');
+    expect(last?.className).toBe('diagnostics-controls');
+    expect(children.filter((node) => node.tagName === 'H2')).toHaveLength(6);
   });
 
   it('keeps the focus on the refresh control it was activated from', () => {
@@ -2249,6 +2776,7 @@ describe('the focus across a render', () => {
         'Refresh',
         'Export metrics',
         'Export snapshot',
+        'Collapse diagnostics',
         'Close diagnostics',
       ]);
     } finally {
@@ -2408,6 +2936,373 @@ describe('a destroyed overlay', () => {
     }).not.toThrow();
     expect(harness.overlay.available).toBe(false);
   });
+
+  it('leaves an adopted host as it found it', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+    harness.overlay.close();
+    harness.overlay.destroy();
+
+    // A release used to leave `display: none` behind, because `display` is
+    // written by the visibility pass and is not a member of the style table the
+    // release removes, and to leave `class=""` where the class list had been
+    // emptied. DL-DIAG-14.
+    expect(harness.host.style.getPropertyValue('display')).toBe('');
+    expect(harness.host.style.getPropertyValue('position')).toBe('');
+    expect(harness.host.style.getPropertyValue('z-index')).toBe('');
+    expect(harness.host.style.getPropertyValue('background')).toBe('');
+    expect(harness.host.getAttribute('class')).toBeNull();
+    expect(harness.host.getAttribute('role')).toBeNull();
+    expect(harness.host.getAttribute('aria-label')).toBeNull();
+    expect(harness.host.getAttribute('data-collapsed')).toBeNull();
+    expect(harness.host.getAttribute('data-refresh')).toBeNull();
+    expect(harness.host.children).toHaveLength(0);
+
+    // The `style` attribute itself is dropped once every declaration is gone,
+    // which is the state a real engine reaches. This DOM implementation removes
+    // a shorthand without its longhands, so the four `padding` longhands
+    // survive here and there is nothing empty to drop; the whole-attribute
+    // removal is verified in a browser instead.
+    const surviving = Array.from(
+      { length: harness.host.style.length },
+      (_unused: unknown, index: number): string =>
+        harness.host.style.item(index),
+    );
+
+    expect(
+      surviving.filter((property: string): boolean =>
+        !property.startsWith('padding'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('drops a class attribute it emptied, and keeps one it did not', () => {
+    document.body.innerHTML =
+      '<div id="diagnostics-overlay" class="diagnostics-overlay"></div>' +
+      '<div id="second" class="diagnostics-overlay app-panel"></div>';
+
+    const bare = document.querySelector<HTMLElement>('#diagnostics-overlay');
+    const shared = document.querySelector<HTMLElement>('#second');
+    const first = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      ...(bare === null ? {} : { host: bare }),
+    });
+
+    first.open();
+    first.destroy();
+
+    // Emptied by the release, so the attribute goes with it.
+    expect(bare?.getAttribute('class')).toBeNull();
+
+    const second = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      ...(shared === null ? {} : { host: shared }),
+    });
+
+    second.open();
+    second.destroy();
+
+    // Still carries a class of its own, so the attribute stays and keeps it.
+    expect(shared?.getAttribute('class')).toBe('app-panel');
+  });
+});
+
+describe('the refresh state the surface publishes', () => {
+  it('reads live while nothing in it holds the focus', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    expect(harness.host.getAttribute('data-refresh')).toBe('live');
+    expect(harness.host.querySelector('h1')?.textContent).toBe('Diagnostics');
+  });
+
+  it('says so on the host and in the heading while it is paused', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    const control = harness.host.querySelector<HTMLButtonElement>(
+      CONTROL_QUERY,
+    );
+
+    control?.focus();
+
+    // The pause is deliberate — the panels do not change under a reader working
+    // through them — and it is now legible, where a reader watching the figures
+    // stop had nothing to distinguish it from a dead surface. DL-DIAG-15.
+    expect(harness.host.getAttribute('data-refresh')).toBe('paused');
+    expect(harness.host.querySelector('h1')?.textContent).toBe(
+      'Diagnostics — paused while focused',
+    );
+  });
+
+  it('comes back to live, and current, the moment the focus leaves', async () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    const control = harness.host.querySelector<HTMLButtonElement>(
+      CONTROL_QUERY,
+    );
+
+    control?.focus();
+    harness.metrics.counter(`${METRIC_PREFIX}after_focus_total`).inc(3);
+
+    // Paused, so the reading taken while focused is not on screen.
+    expect(harness.text()).not.toContain('after_focus_total');
+
+    control?.blur();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
+
+    // Self-healing: leaving renders at once rather than a cadence later.
+    expect(harness.host.getAttribute('data-refresh')).toBe('live');
+    expect(harness.host.querySelector('h1')?.textContent).toBe('Diagnostics');
+    expect(harness.text()).toContain('after_focus_total');
+  });
+
+  it('mutates nothing at all while it is paused', () => {
+    vi.useFakeTimers();
+
+    try {
+      const harness = setup();
+
+      harness.overlay.open();
+
+      const control = harness.host.querySelector<HTMLButtonElement>(
+        CONTROL_QUERY,
+      );
+
+      control?.focus();
+
+      let mutations = 0;
+      const observer = new MutationObserver((records) => {
+        mutations += records.length;
+      });
+
+      observer.observe(harness.host, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+      });
+
+      vi.advanceTimersByTime(5000);
+
+      // `takeRecords` is read rather than the callback awaited: an observer
+      // delivers on a microtask, which a fake-timer advance does not flush, so
+      // an assertion on the callback's tally alone would pass whatever happened.
+      mutations += observer.takeRecords().length;
+      observer.disconnect();
+
+      // A stand-off that republished the same state every tick still replaced
+      // the heading's text node and still recorded an attribute mutation every
+      // second — activity, to anything watching the DOM, and a change
+      // notification to an assistive technology, for a surface that is
+      // deliberately holding still. DL-DIAG-15, DL-DIAG-16.
+      expect(mutations).toBe(0);
+      expect(harness.host.getAttribute('data-refresh')).toBe('paused');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('publishes no refresh state at all once closed', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    expect(harness.host.getAttribute('data-refresh')).toBe('live');
+
+    const control = harness.host.querySelector<HTMLButtonElement>(
+      CONTROL_QUERY,
+    );
+
+    control?.focus();
+
+    expect(harness.host.getAttribute('data-refresh')).toBe('paused');
+
+    harness.overlay.close();
+
+    // Neither live nor paused: a closed surface has no schedule to describe, and
+    // the value the close froze would have outlived the thing it described. The
+    // heading goes back with it, so nothing left on the host still claims a
+    // stand-off.
+    expect(harness.host.getAttribute('data-refresh')).toBeNull();
+    expect(harness.host.querySelector('h1')?.textContent).toBe('Diagnostics');
+
+    // Blurred first: a real engine drops the focus as the host is hidden, and
+    // this DOM implementation performs no layout so the control keeps it — a
+    // re-open with the focus still inside is correctly paused, not live.
+    control?.blur();
+    harness.overlay.open();
+
+    expect(harness.host.getAttribute('data-refresh')).toBe('live');
+  });
+
+  it('advances on the timer with no frame produced at all', () => {
+    vi.useFakeTimers();
+
+    try {
+      let reads = 0;
+      const built = createDiagnosticsOverlay({
+        metrics: createMetricsRegistry(),
+        document,
+        hookCounts: () => {
+          reads += 1;
+
+          return {};
+        },
+      });
+
+      overlay = built;
+      built.open();
+
+      const afterOpen = reads;
+
+      // Nothing composites a frame in this environment and nothing plays: the
+      // cadence is `setInterval` and depends on neither. The reported claim it
+      // answers — "the self-refresh only ticks when a frame is produced" — is
+      // not the mechanism; the one condition that stops it is the focus hold.
+      // DL-DIAG-15.
+      vi.advanceTimersByTime(5000);
+
+      expect(reads).toBe(afterOpen + 5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('the focus when the surface closes', () => {
+  it('returns to the element that had it, from the close control', () => {
+    document.body.innerHTML =
+      `${HOST_MARKUP}<button id="game-control" type="button">Move up</button>`;
+
+    const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+    const game = document.querySelector<HTMLButtonElement>('#game-control');
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      ...(host === null ? {} : { host }),
+    });
+
+    overlay = built;
+    game?.focus();
+    built.open();
+
+    const close = Array.from(
+      host?.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY) ?? [],
+    )[4];
+
+    close?.focus();
+    close?.click();
+
+    // Hiding an element that contains the focus drops it to the body, so a
+    // keyboard user who closed the surface from its own control lost their
+    // position in the page. DL-DIAG-17.
+    expect(built.isOpen()).toBe(false);
+    expect(document.activeElement).toBe(game);
+  });
+
+  it('returns to the element focused most recently, not at open', () => {
+    document.body.innerHTML =
+      `${HOST_MARKUP}<button id="first" type="button">First</button>` +
+      '<button id="second" type="button">Second</button>';
+
+    const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+    const first = document.querySelector<HTMLButtonElement>('#first');
+    const second = document.querySelector<HTMLButtonElement>('#second');
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      ...(host === null ? {} : { host }),
+    });
+
+    overlay = built;
+    first?.focus();
+    built.open();
+
+    // The case that matters: the surface was already open — the flag mounts it
+    // at boot — and the user moved on before tabbing in.
+    second?.focus();
+
+    const close = Array.from(
+      host?.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY) ?? [],
+    )[4];
+
+    close?.focus();
+    close?.click();
+
+    expect(document.activeElement).toBe(second);
+  });
+
+  it('takes the focus from nowhere when the surface did not hold it', () => {
+    document.body.innerHTML =
+      `${HOST_MARKUP}<button id="game-control" type="button">Move up</button>` +
+      '<button id="elsewhere" type="button">Elsewhere</button>';
+
+    const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+    const game = document.querySelector<HTMLButtonElement>('#game-control');
+    const elsewhere = document.querySelector<HTMLButtonElement>('#elsewhere');
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      ...(host === null ? {} : { host }),
+    });
+
+    overlay = built;
+    game?.focus();
+    built.open();
+    elsewhere?.focus();
+
+    // Closed programmatically while the focus sits in the page: the surface
+    // must not pull it back to where it came from.
+    built.close();
+
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it('leaves the focus alone where the element it came from has gone', () => {
+    document.body.innerHTML =
+      `${HOST_MARKUP}<button id="transient" type="button">Transient</button>`;
+
+    const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+    const transient = document.querySelector<HTMLButtonElement>('#transient');
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      ...(host === null ? {} : { host }),
+    });
+
+    overlay = built;
+    transient?.focus();
+    built.open();
+    transient?.remove();
+
+    const close = Array.from(
+      host?.querySelectorAll<HTMLButtonElement>(CONTROL_QUERY) ?? [],
+    )[4];
+
+    close?.focus();
+
+    expect(() => {
+      close?.click();
+    }).not.toThrow();
+    expect(built.isOpen()).toBe(false);
+
+    // Wherever the focus ends up, it is somewhere still in the document and
+    // never the detached node: a real engine drops it to the body as the host
+    // is hidden, and this DOM implementation performs no layout so it stays on
+    // the control. Neither is the removed element.
+    expect(document.activeElement).not.toBe(transient);
+    expect(document.contains(document.activeElement)).toBe(true);
+  });
 });
 
 describe('a host that is not an element', () => {
@@ -2483,5 +3378,77 @@ describe('a host that is not an element', () => {
       overlay.destroy();
       host.remove();
     }
+  });
+});
+
+// The two shapes docs/OBSERVABILITY.md §9.1 now states as limits rather than
+// defects. Each is guarded here so the statement cannot quietly stop being
+// true: a header cell added later would falsify `DL-DIAG-18`, and an empty
+// state that stopped rendering would falsify the reachability note beside it.
+describe('the documented panel shape', () => {
+  it('builds every table from a tbody alone, with no th, caption or role', () => {
+    const harness = setup();
+
+    harness.overlay.open();
+
+    const tables = Array.from(harness.host.querySelectorAll('table'));
+
+    expect(tables.length).toBeGreaterThan(0);
+
+    for (const table of tables) {
+      // DL-DIAG-18: a row's first cell is that row's label, not a column
+      // heading, so there is no header row to mark up.
+      expect(table.querySelectorAll('th')).toHaveLength(0);
+      expect(table.querySelectorAll('caption')).toHaveLength(0);
+      expect(table.getAttribute('role')).toBeNull();
+      expect(table.querySelectorAll('tbody')).toHaveLength(1);
+
+      // Every cell the surface writes is a td.
+      const cells = table.querySelectorAll('tbody > tr > td');
+
+      expect(cells.length).toBeGreaterThan(0);
+      expect(cells.length).toBe(table.querySelectorAll('tbody td').length);
+    }
+  });
+
+  it('swaps one panel for an unclassed paragraph once its rows are gone', () => {
+    const harness = setup();
+
+    // One record, so the panel has a row to lose. A bare harness starts with an
+    // empty buffer; in the shipped composition the BOOT fills it, because
+    // health writes one record per check as it publishes each result, and no
+    // control on the surface clears it.
+    harness.logger.info('a record the panel can render');
+    harness.overlay.open();
+
+    const withRecords = harness.host.querySelectorAll('table').length;
+
+    expect(withRecords).toBeGreaterThan(0);
+    expect(harness.text()).not.toContain('Nothing recorded.');
+
+    // Reachable only programmatically. A refresh does NOT write records — the
+    // health panel reads `report()` and `readiness()`, never `check()` — so
+    // refreshing after a clear re-renders the emptied buffer rather than
+    // refilling it. That is exactly why the state is unreachable through the
+    // UI, where nothing clears the buffer in the first place.
+    harness.logger.clear();
+    harness.overlay.refresh();
+
+    expect(harness.text()).toContain('Nothing recorded.');
+
+    // The table is replaced rather than emptied, so the structural count drops
+    // by exactly one and no panel reports a failure.
+    expect(harness.host.querySelectorAll('table')).toHaveLength(
+      withRecords - 1,
+    );
+    expect(harness.text()).not.toContain('This panel failed to render.');
+
+    const paragraphs = Array.from(harness.host.querySelectorAll('p')).filter(
+      (node: Element): boolean =>
+        (node.textContent ?? '').trim() === 'Nothing recorded.',
+    );
+
+    expect(paragraphs).toHaveLength(1);
+    expect(paragraphs[0]?.getAttribute('class')).toBeNull();
   });
 });

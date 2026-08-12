@@ -438,6 +438,66 @@ describe('the frozen persistence contract', () => {
     );
   });
 
+  // The MINOR finding of the run-flow review, reproduced at the seam it was
+  // observed on: BOTH keys present, the envelope corrupted, the page reloaded.
+  // `main.ts` states the contract above the expression that decides it — an
+  // envelope that was read and REFUSED belongs to another run, so it is not a
+  // resume, while no envelope at all still resumes a board written before the
+  // upgrade. The flag the expression reads was derived from the payload rather
+  // than from the outcome, so a refused envelope answered "no envelope" and the
+  // pre-upgrade board came back under a fresh run. DL-RUNCTL-21, DL-MAIN-11,
+  // DL-MAIN-19.
+  it('holds run start for a refused envelope, and revives no legacy board', () => {
+    window.localStorage.setItem(
+      GAME_STATE_KEY,
+      JSON.stringify(
+        boardWithTiles([
+          { x: 0, y: 0, value: 8 },
+          { x: 1, y: 0, value: 8 },
+        ]),
+      ),
+    );
+    window.localStorage.setItem(RUN_STATE_KEY, 'NOT-JSON');
+
+    application = start(document);
+
+    // The flow holds the opening screen rather than dropping the player onto a
+    // board that came from a run this one is not.
+    expect(application.router.current()).toBe('runStart');
+    expect(document.getElementById('screen-run-start')?.hidden).toBe(false);
+
+    // And the board behind it is not the legacy one: nothing of the 8-and-8
+    // snapshot is in play, and no score came with it.
+    expect(application.engine.score).toBe(0);
+    expect(application.run.hadStoredEnvelope()).toBe(true);
+  });
+
+  it('still resumes the legacy board when no envelope was stored at all', () => {
+    // The isolation control of the same finding: the clause the fix closes for a
+    // refused envelope must stay OPEN for an absent one, which is the case AAP
+    // 0.4.1.3 requires to keep working.
+    window.localStorage.setItem(
+      GAME_STATE_KEY,
+      JSON.stringify(
+        boardWithTiles([
+          { x: 0, y: 0, value: 8 },
+          { x: 1, y: 0, value: 8 },
+        ]),
+      ),
+    );
+
+    application = start(document);
+
+    expect(application.router.current()).toBe('stage');
+    expect(application.run.hadStoredEnvelope()).toBe(false);
+    expect(
+      application.engine
+        .serialize()
+        .grid.cells.flat()
+        .filter((cell) => cell !== null),
+    ).toHaveLength(2);
+  });
+
   it('leaves no other key of the origin behind', () => {
     window.localStorage.setItem('an-unrelated-key', 'untouched');
 

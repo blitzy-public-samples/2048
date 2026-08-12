@@ -68,8 +68,10 @@ $a11y-instant: math.div($transition-speed, 10000) !default;
 $a11y-control-height: math.div($grid-spacing * 8, 3) !default;
 $a11y-target-size: 44px !default;
 
-// Half the shortfall, applied to each block edge, so the hit area reaches the
-// floor while the painted box keeps the height its token gives it.
+// The shortfall between the painted height a control's token gives it and the
+// floor above, halved. Published for a caller that needs the difference; the
+// generated controls now meet the floor in their own box and consume neither.
+// DL-A11Y-12.
 $a11y-target-inset: math.div($a11y-target-size - $a11y-control-height, 2) !default;
 
 // Clip inset that collapses an element's paint region while keeping its box.
@@ -231,47 +233,42 @@ $a11y-shadow-none: 0 0 transparent;
   }
 }
 
-// ADDED: the generated on-screen controls reach the WCAG 2.5.5 target floor
-// without their painted box moving.
+// CHANGED: the generated on-screen controls reach the WCAG 2.5.5 target floor
+// IN THEIR PAINTED BOX.
 //
-// A CONFLICT RESOLVED RATHER THAN A TOKEN BROKEN. 40px is the height the design
-// token gives every control, and `.restart-button` — part of the frozen classic
-// identity — carries the same one, so raising the height would change the
-// appearance of the one control the pre-migration game had. The floor is 44px.
-// The two are reconciled by growing the HIT AREA and not the box: a transparent
-// pseudo-element extends the control by half the shortfall on each block edge,
-// which hit-tests as part of the control that generates it. The painted height,
-// the background, the radius and every neighbour's position are untouched, and
-// the $control-gap of 9px between controls is more than the 4px the extension
-// takes, so no two extensions overlap.
+// The rule previously grew a transparent `::after` by `$a11y-target-inset` on
+// each block edge and left the box at the 40px `$a11y-control-height`, so the
+// target measured 44px by hit test and 40px by `getBoundingClientRect()`.
+// `min-block-size` puts the floor in the box itself, where it is measurable by
+// either method, and the pseudo-element extension it replaces is gone.
 //
-// SCOPED TO THE GENERATED CONTROLS ALONE — `.restart-button`, `.settings-button`
-// and the retained overlay controls are not selected, so the frozen identity is
-// not touched by this rule at all.
-//
-// `min-inline-size` covers the other axis, which matters now that the four
+// SCOPED TO THE GENERATED CONTROLS ALONE — `.restart-button`,
+// `.settings-button` and the retained overlay controls are not selected, so the
+// 40px the design token gives the frozen classic identity is untouched by this
+// rule. `min-inline-size` covers the other axis, which matters now that the four
 // movement controls paint the direction word alone: their widest label no longer
-// guarantees the floor on its own. DL-A11Y-11.
-.on-screen-control {
-  position: relative;
+// guarantees the floor on its own. DL-A11Y-12 supersedes DL-A11Y-11.
+// The `button` qualifier is load-bearing: every generated control also carries
+// `.screen-button`, whose rule is emitted LATER in the sheet, so a bare class
+// selector here would lose `display` to `@mixin screen-control`'s
+// `inline-block`. Element-plus-class outranks class alone at any position, and
+// `.on-screen-control[hidden]` in style/main.scss still outranks both, so a
+// withdrawn control stays out of the rendering.
+button.on-screen-control {
   min-inline-size: $a11y-target-size;
 
-  &::after {
-    content: "";
-    position: absolute;
-    inset-block: -$a11y-target-inset;
-    inset-inline: 0;
+  // `min-block-size`, not `block-size`: `@mixin screen-control` declares the
+  // painted 40px as `block-size`, and a minimum outranks it without the rule
+  // having to restate or override the token's own declaration.
+  min-block-size: $a11y-target-size;
 
-    // Nothing is painted; the box exists only to be hit.
-    background: transparent;
-    border-radius: inherit;
-  }
-
-  // A control the availability layer has withdrawn has no hit area to offer.
-  &[hidden]::after,
-  &[disabled]::after {
-    content: none;
-  }
+  // The label stays centred in whichever of the two heights wins, so the taller
+  // box does not leave the text riding its block-start edge: the mixin's
+  // `line-height` is the 40px it also sets as the painted height, which no
+  // longer fills the box.
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 // Drops the element from the visual rendering while leaving it in the

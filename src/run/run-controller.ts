@@ -1366,7 +1366,22 @@ export class RunController {
     // `hadStoredEnvelope()` is what separates the two cases for a caller.
     this.adoptedBoard = adopted ? this.current.board : undefined;
     this.openingSnapshot = adopted ? this.current.board : null;
-    this.storedEnvelopeRead = restored !== null;
+
+    // CHANGED: read off the load OUTCOME rather than off the payload.
+    //
+    // `state` is `null` for two outcomes that mean opposite things here —
+    // `'absent'`, where the key held nothing, and `'fresh-fallback'`, where it
+    // held something this load READ AND REFUSED — so deriving the flag from the
+    // payload answered `false` for a refused envelope. Everything downstream
+    // then treated a corrupt envelope as no envelope: `openEngineBoard()` fell
+    // through to the engine's own port read and revived the pre-upgrade
+    // `gameState` board, and src/main.ts resumed onto it under a fresh run
+    // identifier, a fresh seed, zeroed cursors and no relics — while logging
+    // `resumed: true`, so the observability record was wrong too.
+    //
+    // Every outcome except `'absent'` means a value was there to be read.
+    // DL-RUNCTL-21.
+    this.storedEnvelopeRead = result.outcome !== 'absent';
 
     this.stageCleared = false;
     this.ended = false;

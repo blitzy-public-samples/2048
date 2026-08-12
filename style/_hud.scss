@@ -21,7 +21,8 @@
 //   TR-HUD-14  target-only row            the `.hud-degraded` notice, the
 //                                         visible half of TR-HUD-12
 //
-// Decisions: DL-HUD-04, DL-HUD-05, DL-HUD-06 (docs/DECISION_LOG.md).
+// Decisions: DL-HUD-04, DL-HUD-05, DL-HUD-06, DL-HUD-15
+// (docs/DECISION_LOG.md).
 
 @use "sass:color";
 @use "sass:list";
@@ -92,6 +93,16 @@ $hud-rarity-plate-anchor: color.adjust(
   $lightness: -40%
 ) !default;
 $hud-rarity-plate-weight: 55% !default;
+
+// ADDED: the caution accent and bar width the run-not-saved notice carries.
+//
+// `--theme-tile-64` is the hottest step of the accent band style/main.scss
+// L334-L402 generates, published per palette by style/_themes.scss so each
+// palette supplies its own; $text-color is the fallback this file can derive
+// without importing that module. The bar width is the same channel
+// `.relic-tray-item` encodes rarity in, three hairlines wide. DL-HUD-15.
+$hud-caution: var(--theme-tile-64, #{$text-color}) !default;
+$hud-caution-bar: $hud-hairline * 3 !default;
 
 // HUD root.
 
@@ -220,6 +231,12 @@ $hud-rarity-plate-weight: 55% !default;
   padding-inline: $hud-gap-inner;
 
   border: $hud-hairline solid $hud-rule;
+
+  // CHANGED: a caution bar on the inline-start edge, declared after the
+  // shorthand above so it takes that one edge. Two channels carry the state —
+  // the accent and the width — so neither rests on colour alone, and the text
+  // keeps the page colour and its contrast. DL-HUD-15.
+  border-inline-start: $hud-caution-bar solid $hud-caution;
   border-radius: $tile-border-radius;
 
   font-size: $hud-label-size;

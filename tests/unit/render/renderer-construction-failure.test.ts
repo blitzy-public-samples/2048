@@ -32,8 +32,30 @@ const hostileThrow = (): never => {
   throw hostile;
 };
 
+/**
+ * ADDED: the canvases the composition root asked the module to release, in the
+ * order it asked.
+ *
+ * Hoisted, because the factory below is hoisted above every declaration in this
+ * file and reads it. The module publishes a second export — the canvas-park
+ * release the root calls once, on disposal — so a mock naming only the factory
+ * makes every teardown here raise on an undefined call instead of on the
+ * factory this suite is about. DL-THREE-06, DL-MAIN-36.
+ */
+const { releaseRequests } = vi.hoisted(() => ({
+  releaseRequests: [] as (Element | null | undefined)[],
+}));
+
 vi.mock('../../../src/render/three-renderer', () => ({
   createThreeRenderer: (): never => hostileThrow(),
+
+  // Records rather than releases: the factory above never constructed a
+  // renderer, so this canvas parks nothing and `false` is the honest answer.
+  releaseParkedRenderer: (candidate: Element | null | undefined): boolean => {
+    releaseRequests.push(candidate);
+
+    return false;
+  },
 }));
 
 const { CONTEXT_RESTORE_GRACE_MS, start } = await import('../../../src/main');
@@ -166,6 +188,10 @@ beforeEach(() => {
   window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
   installWebGL();
   resetWebGLSupportProbe();
+
+  // ADDED: the teardown below disposes, and disposal is what asks for the
+  // release, so the record is emptied per case rather than accumulated.
+  releaseRequests.length = 0;
 });
 
 afterEach(() => {
@@ -243,6 +269,25 @@ describe('when the 2.5D factory itself raises', () => {
     // The number-only board is still the board, and still drawing.
     expect(application.renderer.mode).toBe('number-only');
     expect(numberOnlyTiles()).toBeGreaterThan(0);
+  });
+
+  it('hands the canvas back on disposal, having built nothing over it', () => {
+    application = start(document);
+
+    const canvas = document.querySelector('#board-canvas');
+
+    // The release is made on disposal and NOWHERE ELSE, so a boot that reached
+    // the factory and got nothing must not have asked for one either.
+    expect(releaseRequests).toHaveLength(0);
+
+    application.dispose();
+    application = null;
+
+    // And it is made unconditionally: the canvas is what is finished with, not
+    // the renderer that happened to be built over it, so the number-only
+    // fallback releases exactly as the 2.5D board would. DL-MAIN-36.
+    expect(releaseRequests).toHaveLength(1);
+    expect(releaseRequests[0]).toBe(canvas);
   });
 
   it('records the failure as an error the log can carry whole', () => {

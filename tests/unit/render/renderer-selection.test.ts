@@ -704,12 +704,75 @@ describe('when the context is lost after mounting', () => {
     const webgl = held?.checks.find((check) => check.id === 'webgl');
 
     expect(webgl?.status).toBe('fail');
+
+    // STILL the forced-fallback verdict, and for a reason worth stating: the
+    // reclaim listener releases a context-loss force the moment the context is
+    // reported back, so the board is remounted — and here the remount fails,
+    // because this case is one where no context can be obtained at all. The
+    // force in place at the end therefore names the REMOUNT rather than the
+    // context, so the generic verdict is the accurate one. The lost-context
+    // verdict is asserted by the takeover case below, which is the one the
+    // review measured. DL-MAIN-35.
+    expect(application.preferences.getNumberOnlyForce().reason).toContain(
+      'remounted',
+    );
     expect(webgl?.data.failure).toBe('number-only-forced');
     expect(application.health.readiness().requiresNumberOnlyFallback).toBe(
       true,
     );
     expect(application.health.readiness().renderer).toBe('number-only');
   });
+
+  // The observability review's INFO finding on the health surface: after the
+  // automatic takeover the HELD report read `number-only-forced` rather than the
+  // root cause, which was left in the log record alone. DL-MAIN-35.
+  it('keeps naming the lost context after the number-only board takes over',
+    async () => {
+      application = start(document);
+      await settleFrames();
+
+      fireContextEvent('webglcontextlost');
+      await waitOutGrace();
+      await settleFrames();
+
+      expect(application.renderer.mode).toBe('number-only');
+      expect(application.renderer.fallback).toBe(true);
+
+      const webgl = application.health
+        .report({ refresh: true })
+        .checks.find((check) => check.id === 'webgl');
+
+      expect(webgl?.status).toBe('fail');
+      expect(webgl?.data.failure).toBe('context-lost');
+      expect(webgl?.detail ?? '').toContain('context-lost');
+      expect(application.health.readiness().webglFailure).toBe('context-lost');
+    });
+
+  // The other half of the same distinction: a number-only board forced for a
+  // reason that is NOT a lost context still reports the mode, because for those
+  // the mode is the whole finding.
+  it('still reports a forced fallback as forced when no context was lost',
+    async () => {
+      application = start(document);
+      await settleFrames();
+
+      expect(application.renderer.mode).toBe('three');
+
+      application.preferences.forceNumberOnlyMode(
+        'the renderer could not be constructed',
+      );
+      await settleFrames();
+
+      expect(application.renderer.mode).toBe('number-only');
+      expect(application.renderer.fallback).toBe(true);
+
+      const webgl = application.health
+        .report({ refresh: true })
+        .checks.find((check) => check.id === 'webgl');
+
+      expect(webgl?.status).toBe('fail');
+      expect(webgl?.data.failure).toBe('number-only-forced');
+    });
 
   it('recomputes the held health report when the rebuild succeeds',
     async () => {

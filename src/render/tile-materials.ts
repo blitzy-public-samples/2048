@@ -34,8 +34,8 @@
 //                                              `fromThreeColor()` and
 //                                              `formatThreeColor()`
 //
-// Decisions: DL-MATERIAL-01, DL-MATERIAL-02, DL-MATERIAL-03, DL-RAMP-02,
-// DL-RAMP-04 (docs/DECISION_LOG.md).
+// Decisions: DL-MATERIAL-01, DL-MATERIAL-02, DL-MATERIAL-03, DL-MATERIAL-04,
+// DL-RAMP-02, DL-RAMP-04 (docs/DECISION_LOG.md).
 
 import { Color, MeshStandardMaterial, SRGBColorSpace } from 'three';
 
@@ -639,6 +639,45 @@ function readTileRoughness(
 }
 
 /**
+ * ADDED: the largest emissive intensity that leaves every channel of the lit
+ * fill unsaturated — the headroom the fill itself leaves.
+ *
+ * Both colours are read in the linear working space Three.js holds them in, so
+ * the sum this bounds is the sum the renderer performs. A channel the emissive
+ * does not touch places no bound; a fill already at or over the ceiling leaves
+ * no headroom at all and yields zero. DL-MATERIAL-04.
+ *
+ * @param fill Lit fill, linear.
+ * @param glow Emissive colour, linear.
+ * @returns Intensity ceiling, at least zero.
+ */
+function emissiveHeadroom(fill: Color, glow: Color): number {
+  const channels: readonly [number, number][] = [
+    [fill.r, glow.r],
+    [fill.g, glow.g],
+    [fill.b, glow.b],
+  ];
+
+  let ceiling = Number.POSITIVE_INFINITY;
+
+  for (const [base, emitted] of channels) {
+    if (emitted <= ALPHA_CLEAR) {
+      continue;
+    }
+
+    ceiling = Math.min(ceiling, (ALPHA_OPAQUE - base) / emitted);
+  }
+
+  if (!Number.isFinite(ceiling)) {
+    // The emissive colour is black: its intensity changes nothing, so no bound
+    // is meaningful and the declared share is left alone.
+    return ALPHA_OPAQUE;
+  }
+
+  return Math.max(ceiling, ALPHA_CLEAR);
+}
+
+/**
  * Builds the material for one tile value.
  *
  * @param material Material to dress.
@@ -673,8 +712,22 @@ function applyTileMaterial(
     readPalette(palette.tileGlow, tileGoldGlowColor, 'tileGlow'),
     material.emissive,
   );
+
+  // CHANGED: the halo alpha now selects a SHARE OF THE HEADROOM the fill leaves,
+  // where it was the intensity itself.
+  //
+  // Every fill from 128 up carries the ramp's shared red anchor, so an intensity
+  // taken from the halo alpha alone drove red past its ceiling for all five of
+  // them: the five faces rendered with an identical saturated red, the last two
+  // steps separated by less than one just-noticeable difference, and the numeral
+  // ratio on 2048 fell to 1.05:1 where the fill's own is 1.58:1. Bounding the
+  // term by the headroom keeps the progression — the share still rises with the
+  // exponent — while the fill the ramp states survives the addition, which is
+  // what style/main.scss L334-L402 describes: an OUTER halo and an inset
+  // highlight, neither of which tints the fill. DL-MATERIAL-04.
   material.emissiveIntensity =
-    confineAlpha(tileTheme.haloAlpha) * response.emissiveScale;
+    confineAlpha(confineAlpha(tileTheme.haloAlpha) * response.emissiveScale) *
+    emissiveHeadroom(material.color, material.emissive);
   material.needsUpdate = true;
 
   return material;

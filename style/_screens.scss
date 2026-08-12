@@ -525,6 +525,23 @@ $settings-binding-label-measure-mobile: math.div(
     td:not(:first-child) {
       text-align: end;
     }
+
+    // CHANGED: except the ones that hold a sentence.
+    //
+    // The rule above justified itself on the figures and then applied to the
+    // Health panel's third column too, which is prose — so a health detail was
+    // set ragged-left and read from its end. The overlay marks those cells with
+    // this class and mirrors the declaration inline; the class is stated after
+    // the rule above and with one more selector, so it wins on both counts.
+    //
+    // `overflow-wrap: break-word` above is RETAINED, and a token longer than
+    // its own line still breaks mid-word. That is the price of the guarantee
+    // that this surface never overflows its width at any breakpoint, which the
+    // fixed table layout and the stated column widths exist to hold.
+    // DL-DIAG-10.
+    td.diagnostics-prose {
+      text-align: start;
+    }
   }
 
   // Kept in reach without scrolling.
@@ -540,6 +557,22 @@ $settings-binding-label-measure-mobile: math.div(
     margin-block-end: -$grid-spacing;
     padding-block: $screen-control-gap $grid-spacing;
     background: var(--theme-diagnostics-surface, #{$text-color});
+  }
+}
+
+// ADDED: the collapsed surface, which renders its heading and its control row
+// and no panel.
+//
+// The footprint is content-driven once the panels are gone, so the panel's own
+// height collapses with them; the negative end margin the control row carries
+// while it is sticky is released here, because there is nothing left for it to
+// sit over. The declaration is a state selector on the same element, so an
+// expanded surface reads exactly as it did. DL-DIAG-11.
+.diagnostics-overlay[data-collapsed="true"] {
+  .diagnostics-controls {
+    position: static;
+    margin-block-end: 0;
+    padding-block: $screen-control-gap 0;
   }
 }
 

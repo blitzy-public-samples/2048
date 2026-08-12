@@ -334,6 +334,15 @@ export interface StorageProbeView {
 export type StorageProbe = () => StorageProbeView;
 
 /**
+ * ADDED: a reader of the live storage verdict.
+ *
+ * Answers the reason writes are being refused as this check runs, or `null`
+ * where they are not. Read at check time and never cached, so a store that
+ * recovers reports `pass` again on the next check. DL-HEALTH-08.
+ */
+export type StorageLiveFailureReader = () => string | null;
+
+/**
  * The two cached members this module reads off a live storage manager. A
  * `LocalStorageManager` satisfies it as it stands.
  *
@@ -379,6 +388,13 @@ const WEBGL_NO_DOCUMENT = 'no-document';
 
 /** `StorageProbeView.strategy` of a store supplied by the caller. */
 const INJECTED_STRATEGY = 'injected';
+
+/**
+ * ADDED: the live-storage reader of a surface that was given none, so the
+ * `storage` check reads one reader whether or not a caller supplied it.
+ * DL-HEALTH-08.
+ */
+const NO_LIVE_STORAGE_FAILURE: StorageLiveFailureReader = (): null => null;
 
 /** `StorageProbeView.strategy` of real Web Storage. */
 const WEB_STORAGE_STRATEGY = 'localStorage';
@@ -680,7 +696,10 @@ function probePointerEvents(probe: PointerFamilyProbe): ProbeOutcome {
  *   a throw, and `'not-applicable'` where no global store exists at all, which
  *   the probe reports as an unsupported result carrying no error.
  */
-function evaluateStorage(view: StorageStateView): ProbeOutcome {
+function evaluateStorage(
+  view: StorageStateView,
+  liveFailure: string | null,
+): ProbeOutcome {
   const probeResult = view.probe;
   const error = probeResult.error;
   const data: Record<string, LogFieldValue> = {
@@ -692,6 +711,26 @@ function evaluateStorage(view: StorageStateView): ProbeOutcome {
   if (isRecord(error)) {
     data.errorName = isNonEmptyString(error.name) ? error.name : '';
     data.quotaExceeded = error.quota === true;
+  }
+
+  // ADDED, and evaluated FIRST: the live verdict outranks the probe result.
+  //
+  // The probe describes the store as it was at construction, and the branches
+  // below all read that description. A caller reporting refused writes NOW is
+  // describing the same capability at this instant, and a check that answered
+  // `pass` beside a live `QuotaExceededError` was the defect — the surface an
+  // operator trusts most was green at exactly the moment it should not have
+  // been. The detail names the live cause, and the probe's own account of the
+  // store is kept in the data beside it. DL-HEALTH-08.
+  if (isNonEmptyString(liveFailure)) {
+    data.liveFailure = liveFailure;
+    data.live = true;
+
+    return outcome(
+      'fail',
+      asSentence(`Web Storage is refusing writes: ${liveFailure}`),
+      data,
+    );
   }
 
   if (view.strategy === INJECTED_STRATEGY) {
@@ -846,6 +885,21 @@ export interface HealthSurfaceOptions {
   readonly storageProbe?: StorageProbe;
 
   /**
+   * ADDED: the LIVE storage verdict, read at check time.
+   *
+   * `storage` above is a construction-time probe result by design — repeating
+   * the write-and-remove round trip on every check is the cost this surface
+   * exists to avoid — so a store that accepted a write at boot and refuses one
+   * now would keep reporting `pass`. This reader is how the owner of that fact
+   * says so: a non-empty string is the reason writes are being refused NOW and
+   * degrades the check to `'fail'`; `null` leaves the probe result to speak.
+   *
+   * It is the storage counterpart of the live verdict `webglProbe` already
+   * carries, and it costs no write and no probe. DL-HEALTH-08.
+   */
+  readonly storageLiveFailure?: StorageLiveFailureReader;
+
+  /**
    * The pointer-family probe. Defaults to `detectPointerEventFamily` from the
    * module that owns it.
    */
@@ -954,6 +1008,12 @@ export class HealthSurface {
 
   private readonly storageProbe: StorageProbe;
 
+  /**
+   * ADDED: the live storage verdict, or a reader that always answers `null`
+   * where the caller supplied none. DL-HEALTH-08.
+   */
+  private readonly storageLiveFailure: StorageLiveFailureReader;
+
   private readonly pointerProbe: PointerFamilyProbe;
 
   private readonly webglProbe: WebGLProbe;
@@ -986,6 +1046,10 @@ export class HealthSurface {
       typeof supplied.storageProbe === 'function'
         ? supplied.storageProbe
         : probeWebStorage;
+    this.storageLiveFailure =
+      typeof supplied.storageLiveFailure === 'function'
+        ? supplied.storageLiveFailure
+        : NO_LIVE_STORAGE_FAILURE;
     this.pointerProbe =
       typeof supplied.pointerProbe === 'function'
         ? supplied.pointerProbe
@@ -1285,11 +1349,36 @@ export class HealthSurface {
       case 'pointerEvents':
         return probePointerEvents(this.pointerProbe);
       case 'storage':
-        return evaluateStorage(this.resolveStorageState(refresh));
+        return evaluateStorage(
+          this.resolveStorageState(refresh),
+          this.readLiveStorageFailure(),
+        );
       case 'webgl':
         return evaluateWebGL(this.webglProbe);
       default:
         return outcome('fail', UNKNOWN_CHECK_DETAIL, { recognised: false });
+    }
+  }
+
+  /**
+   * ADDED: reads the live storage verdict inside a no-throw boundary.
+   *
+   * A reader that raises is contained here rather than failing the check for a
+   * reason of its own: the probe result is then the only account of the store,
+   * which is the behaviour of a surface that was given no reader at all.
+   * DL-HEALTH-08.
+   *
+   * @returns The reason writes are being refused now, or `null`.
+   */
+  private readLiveStorageFailure(): string | null {
+    try {
+      const read = this.storageLiveFailure();
+
+      return typeof read === 'string' && read.length > 0 ? read : null;
+    } catch {
+      this.faultCount += 1;
+
+      return null;
     }
   }
 

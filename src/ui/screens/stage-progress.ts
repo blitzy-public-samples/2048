@@ -110,6 +110,15 @@ export const CONTINUE_CONTROL_SELECTOR = `.${CONTINUE_CONTROL_CLASS}`;
 
 /** The classes of style/_screens.scss this module renders with. */
 const SCREEN_CLASSES = Object.freeze({
+  /**
+   * ADDED: the bounded reading surface, the class `@mixin screen-panel-surface`
+   * of style/_screens.scss dresses. It carries the opaque background and the
+   * dark text colour, which is what every sibling screen appends its content
+   * inside — ../screens/run-start.ts and ../screens/game-over.ts both render
+   * one. DL-STAGECLEAR-06.
+   */
+  panel: 'screen-panel',
+
   /** The verdict type treatment, at both scales. */
   verdict: 'screen-verdict',
 
@@ -790,8 +799,14 @@ interface FactNodes {
  * Every node this module owns. `all` is the append and remove set, in the
  * order the container lays them out, so `leave` and `unmount` take away
  * exactly what `mount` created and nothing the container held already.
+ *
+ * CHANGED: `all` is the panel alone, and the five content nodes are its
+ * children rather than the container's. DL-STAGECLEAR-06.
  */
 interface StageProgressNodes {
+  /** The bounded reading surface every content node sits on. */
+  readonly panel: HTMLElement;
+
   readonly heading: HTMLElement;
   readonly goal: FactNodes;
   readonly score: FactNodes;
@@ -930,6 +945,13 @@ export function createStageProgressScreen(
    * @returns Every node this module owns.
    */
   const buildNodes = (doc: Document): StageProgressNodes => {
+    // ADDED: the surface, built first and appended last, so the five content
+    // nodes below are laid out on it rather than on the container's tint.
+    // DL-STAGECLEAR-06.
+    const panel = doc.createElement('div');
+
+    panel.className = SCREEN_CLASSES.panel;
+
     const heading = doc.createElement('h2');
 
     heading.className = SCREEN_CLASSES.verdict;
@@ -964,20 +986,26 @@ export function createStageProgressScreen(
 
     actions.append(control);
 
+    panel.append(
+      heading,
+      goal.paragraph,
+      score.paragraph,
+      progress.paragraph,
+      actions,
+    );
+
     return {
+      panel,
       heading,
       goal,
       score,
       progress,
       actions,
       control,
-      all: Object.freeze([
-        heading,
-        goal.paragraph,
-        score.paragraph,
-        progress.paragraph,
-        actions,
-      ]),
+
+      // The panel alone: it holds the other five, so appending and removing it
+      // appends and removes all of them.
+      all: Object.freeze([panel]),
     };
   };
 

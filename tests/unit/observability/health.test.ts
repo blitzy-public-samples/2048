@@ -646,6 +646,127 @@ describe('storage', () => {
     expect(result.source.owner).toBe('src/storage/local-storage-manager.ts');
     expect(result.source.performedBy).toBe('probeWebStorage');
   });
+
+  // The observability review's INFO finding on this check: the probe result is a
+  // construction-time reading by design, so after a real quota exhaustion the
+  // row still read `pass` / "Web Storage is writable." while the run had already
+  // stopped being saved and the HUD said so. The live verdict is the second,
+  // write-free source of truth. DL-HEALTH-08.
+  describe('the live verdict', () => {
+    it('fails the check while writes are being refused now', () => {
+      const live = createHealthSurface({
+        logger,
+        metrics,
+        storageLiveFailure: (): string =>
+          'the run is no longer being saved and continues in memory only',
+      });
+      const result = live.checkOne(STORAGE);
+
+      expect(result.status).toBe(FAIL);
+      expect(result.detail).toContain('refusing writes');
+      expect(result.detail).toContain('no longer being saved');
+      expect(readData(result, 'live')).toBe(true);
+      expect(typeof readData(result, 'liveFailure')).toBe('string');
+
+      // The probe's own account of the store is kept beside it rather than
+      // overwritten, so a reader can still see WHAT store is in use.
+      expect(readData(result, 'strategy')).toBe('localStorage');
+      expect(readData(result, 'supported')).toBe(true);
+    });
+
+    it('carries the failure into readiness, which reports ephemeral', () => {
+      const live = createHealthSurface({
+        logger,
+        metrics,
+        storageLiveFailure: (): string => 'writes are refused',
+      });
+      const verdicts = live.readiness();
+
+      expect(verdicts.storageStatus).toBe(FAIL);
+      expect(verdicts.storage).toBe('ephemeral');
+
+      // The STRATEGY is still the truth about which store is in use: the run is
+      // not being saved to it, and it never fell back to memory.
+      expect(verdicts.storageStrategy).toBe('localStorage');
+      expect(verdicts.ready).toBe(false);
+    });
+
+    it('recovers on the next check when the refusals stop', () => {
+      let refusing = true;
+      const live = createHealthSurface({
+        logger,
+        metrics,
+        storageLiveFailure: (): string | null =>
+          refusing ? 'writes are refused' : null,
+      });
+
+      expect(live.checkOne(STORAGE).status).toBe(FAIL);
+
+      refusing = false;
+
+      // Read at check time and never cached, so nothing has to be invalidated.
+      expect(live.checkOne(STORAGE).status).toBe(PASS);
+      expect(live.checkOne(STORAGE).detail).toContain('writable');
+    });
+
+    it('performs no storage write of its own, however often it is checked', () => {
+      // The composition hands over the LIVE manager, so the surface reads its
+      // construction-time probe result and never probes for itself — which is
+      // the property `DL-HEALTH-02` exists for and the one the live verdict must
+      // not cost. Ten checks, `refresh` included, and not one write.
+      const writes: string[] = [];
+
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(
+        (key: string): void => {
+          writes.push(key);
+        },
+      );
+
+      const state: StorageStateView = {
+        probe: { supported: true, strategy: 'localStorage' },
+        strategy: 'localStorage',
+      };
+      const live = createHealthSurface({
+        logger,
+        metrics,
+        storage: state,
+        storageLiveFailure: (): string => 'writes are refused',
+      });
+
+      for (let index = 0; index < 10; index += 1) {
+        expect(requireCheck(live.check({ refresh: true }), STORAGE).status).toBe(
+          FAIL,
+        );
+      }
+
+      expect(writes).toEqual([]);
+    });
+
+    it('reads the probe result alone where the reader raises', () => {
+      const live = createHealthSurface({
+        logger,
+        metrics,
+        storageLiveFailure: (): string => {
+          throw new Error('the reader exploded');
+        },
+      });
+      const result = live.checkOne(STORAGE);
+
+      // Contained: a reader that raises is a reader that answered nothing, not a
+      // storage failure of its own.
+      expect(result.status).toBe(PASS);
+      expect(readData(result, 'live')).toBeUndefined();
+      expect(live.reporterFaults).toBeGreaterThan(0);
+    });
+
+    it('answers from the probe alone where no reader was supplied', () => {
+      const result = surface.checkOne(STORAGE);
+
+      expect(result.status).toBe(PASS);
+      expect(readData(result, 'live')).toBeUndefined();
+      expect(readData(result, 'liveFailure')).toBeUndefined();
+    });
+  });
 });
 
 describe('webgl', () => {

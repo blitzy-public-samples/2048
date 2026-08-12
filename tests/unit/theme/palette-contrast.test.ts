@@ -443,3 +443,91 @@ describe('the settings surface', () => {
     ).toBeGreaterThanOrEqual(TEXT_MINIMUM);
   });
 });
+
+describe('the diagnostics surface controls, in every palette', () => {
+  // The MINOR finding of the observability review: the four controls of the
+  // diagnostics surface carry the `screen-button` class and were nevertheless
+  // painted from two inline literals, so they measured 3.79:1 in all three
+  // palettes — including the one named "high contrast", on a pure-black panel.
+  // They now resolve the control pair below, and their edge resolves the
+  // surface's own text colour. Decision DL-DIAG-09.
+
+  /** The WCAG 2.1 AA minimum for a component boundary, SC 1.4.11. */
+  const BOUNDARY_MINIMUM = 3;
+
+  const palettes: readonly (readonly [string, Theme])[] = [
+    ['default', defaultTheme],
+    ['high contrast', highContrastTheme],
+    ['colourblind safe', colorblindSafeTheme],
+  ];
+
+  it.each(palettes)(
+    'clears AA for the control label in the %s palette',
+    (_name, theme) => {
+      const palette = theme.palette;
+
+      expect(
+        contrast(palette.controlLabel, palette.controlSurface),
+      ).toBeGreaterThanOrEqual(TEXT_MINIMUM);
+    },
+  );
+
+  it.each(palettes)(
+    'needs the edge, because the fill alone does not separate in %s',
+    (_name, theme) => {
+      const palette = theme.palette;
+
+      // Measured: 2.35:1, 1.82:1 and 1.40:1. This is why substituting the
+      // tokens without also drawing an edge would have dissolved the controls
+      // into the panel.
+      expect(
+        contrast(palette.controlSurface, palette.diagnosticsSurface),
+      ).toBeLessThan(BOUNDARY_MINIMUM);
+    },
+  );
+
+  it.each(palettes)(
+    'identifies the control boundary through its edge in %s',
+    (_name, theme) => {
+      const palette = theme.palette;
+
+      // The edge against the panel it sits on, and against the fill it
+      // encloses: both are what makes the control's shape discernible.
+      expect(
+        contrast(palette.diagnosticsText, palette.diagnosticsSurface),
+      ).toBeGreaterThanOrEqual(BOUNDARY_MINIMUM);
+      expect(
+        contrast(palette.diagnosticsText, palette.controlSurface),
+      ).toBeGreaterThanOrEqual(BOUNDARY_MINIMUM);
+    },
+  );
+
+  it('measures the three label ratios the review reported', () => {
+    expect(
+      contrast(
+        defaultTheme.palette.controlLabel,
+        defaultTheme.palette.controlSurface,
+      ),
+    ).toBeCloseTo(4.7319, 4);
+    expect(
+      contrast(
+        highContrastTheme.palette.controlLabel,
+        highContrastTheme.palette.controlSurface,
+      ),
+    ).toBeCloseTo(11.5422, 4);
+    expect(
+      contrast(
+        colorblindSafeTheme.palette.controlLabel,
+        colorblindSafeTheme.palette.controlSurface,
+      ),
+    ).toBeCloseTo(12.6218, 4);
+
+    // What the surface rendered before: one ratio, below AA, in all three.
+    expect(
+      contrast(
+        defaultTheme.palette.brightText,
+        defaultTheme.palette.buttonSurface,
+      ),
+    ).toBeCloseTo(3.7896, 4);
+  });
+});

@@ -367,7 +367,7 @@
       "id": 16,
       "type": "timeseries",
       "title": "Registry refusals by reason",
-      "description": "game2048_metrics_rejected_total. The registry bounding itself rather than throwing. A rising seriesLimitReached or familyLimitReached is the real unbounded-cardinality alarm; metadataBudgetReached is a backstop that the two ceilings normally reach first.",
+      "description": "game2048_metrics_rejected_by_reason_total, the labelled companion of the unlabelled game2048_metrics_rejected_total (DL-METRIC-08) \u2014 plot one or the other, never their sum. The registry bounding itself rather than throwing. A rising seriesLimitReached or familyLimitReached is the real unbounded-cardinality alarm; metadataBudgetReached is a backstop that the two ceilings normally reach first. A reason the registry could not read is counted as unspecified.",
       "datasource": { "type": "prometheus", "uid": "${DS}" },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 38 },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
@@ -376,7 +376,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS}" },
-          "expr": "game2048_metrics_rejected_total",
+          "expr": "game2048_metrics_rejected_by_reason_total",
           "legendFormat": "{{reason}}"
         }
       ]

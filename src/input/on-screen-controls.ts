@@ -20,13 +20,15 @@
 //                                   `INPUT_ACTIONS`
 //   TR-CONTROL-05  target-only row  `MarkupControlBinding.contexts` and the
 //                                   per-context availability of every control
+//   TR-CONTROL-06  target-only row  the reachability term: `isInert` and the
+//                                   focus-change re-apply
 //
 // Retained from that port: `bindButtonPress` binds BOTH `'click'` and the
 // resolved touch-end event to one handler, so a tap can dispatch twice. Noted,
 // not fixed.
 //
-// Decisions: DL-CONTROL-01, DL-CONTROL-02, DL-CONTROL-03, DL-CONTROL-04
-// (docs/DECISION_LOG.md).
+// Decisions: DL-CONTROL-01, DL-CONTROL-02, DL-CONTROL-03, DL-CONTROL-04,
+// DL-CONTROL-11 (docs/DECISION_LOG.md).
 
 import type {
   Direction,
@@ -93,6 +95,28 @@ const REDUCED_MOTION_METRIC = 'input.onScreen.reducedMotion';
 const INDEX_REJECTED_METRIC = 'input.onScreen.index.rejected';
 
 const AVAILABILITY_FAULT_METRIC = 'input.onScreen.availability.faulted';
+
+/**
+ * ADDED: counter raised once per apply that withheld at least one control
+ * because its host was inert, with the number withheld. The withholding is
+ * otherwise invisible: an inert control answers every liveness probe — it
+ * reports `pointer-events: auto`, `opacity: 1`, `tabIndex: 0` and
+ * `checkVisibility() === true` — so a count is the only way a reader sees the
+ * reachability term act. DL-CONTROL-11.
+ */
+const INERT_WITHHELD_METRIC = 'input.onScreen.withheld.inert';
+
+/**
+ * ADDED: counter raised once per apply driven by a focus change, labelled with
+ * the event that drove it. DL-CONTROL-11.
+ */
+const FOCUS_REFRESH_METRIC = 'input.onScreen.focus.reapplied';
+
+/** ADDED: attribute the reachability term reads. DL-CONTROL-11. */
+const INERT_ATTRIBUTE = 'inert';
+
+/** ADDED: `INERT_ATTRIBUTE` as an attribute selector. DL-CONTROL-11. */
+const INERT_SELECTOR = `[${INERT_ATTRIBUTE}]`;
 
 const BIND_FAILED_METRIC = 'input.onScreen.bind.failed';
 
@@ -762,6 +786,49 @@ function hasKey(binding: InputBinding): boolean {
   return binding.keys.length > 0 || binding.codes.length > 0;
 }
 
+/**
+ * ADDED: whether a control can be reached at all, which is a separate question
+ * from whether its action is legal.
+ *
+ * A control inside a subtree marked `inert` is announced by nothing, focused by
+ * nothing and activated by nothing — the attribute takes the whole subtree out
+ * of the tab order and out of hit testing — and no descendant can opt back in.
+ * So a control whose host is inert is UNAVAILABLE however legal its action is,
+ * and presenting it advertises an action that cannot be taken.
+ *
+ * `closest` is the same idiom the focusable resolver of ../ui/a11y/focus-manager
+ * uses for the same attribute; the parent walk is the fallback for an element
+ * whose host implements no `closest`, which a test double may not.
+ * DL-CONTROL-11.
+ *
+ * @param element Control to test.
+ * @returns Whether the element lies inside an inert subtree.
+ */
+function isInert(element: Element): boolean {
+  if (typeof element.closest === 'function') {
+    try {
+      return element.closest(INERT_SELECTOR) !== null;
+    } catch {
+      // A host that refuses the selector is walked instead.
+    }
+  }
+
+  let node: Element | null = element;
+
+  while (node !== null) {
+    if (
+      typeof node.hasAttribute === 'function' &&
+      node.hasAttribute(INERT_ATTRIBUTE)
+    ) {
+      return true;
+    }
+
+    node = node.parentElement;
+  }
+
+  return false;
+}
+
 function labelFor(action: InputAction, ordinal: number): string {
   const label = describeAction(action);
 
@@ -1380,17 +1447,25 @@ export function mountOnScreenControls(
   let activeKeymap = resolveKeymap();
   let activeContext = resolveContext();
 
+  /** ADDED: controls withheld by the reachability term on the last apply. */
+  let withheldByInert = 0;
+
   /**
-   * Whether one control is available: its action's declared contexts first, and
-   * then the caller's own predicate where one was supplied.
+   * Whether one control is available: its host's REACHABILITY first, then its
+   * action's declared contexts, and then the caller's own predicate where one
+   * was supplied.
    *
    * Contained: a predicate that raises is reported and the control is treated
    * as available. Decision DL-CONTROL-06.
+   *
+   * CHANGED: the reachability term is new and comes first, because it can
+   * refuse a control the other two terms both accept. DL-CONTROL-11.
    *
    * @param action Action the control publishes.
    * @param index Payload index the control carries.
    * @param contexts Contexts the control is available in.
    * @param context Context in force.
+   * @param element Control the verdict is for.
    * @returns Whether the control is available.
    */
   const isAvailable = (
@@ -1398,7 +1473,14 @@ export function mountOnScreenControls(
     index: number,
     contexts: readonly InputContext[],
     context: InputContext,
+    element: Element,
   ): boolean => {
+    if (isInert(element)) {
+      withheldByInert += 1;
+
+      return false;
+    }
+
     if (!isActiveIn(contexts, context)) {
       return false;
     }
@@ -1514,6 +1596,7 @@ export function mountOnScreenControls(
         DEFAULT_CONTROL_INDEX,
         contexts ?? activeKeymap[binding.action].contexts,
         activeContext,
+        element,
       ),
     };
     const handler = bindRecord(record, binding.selector, true);
@@ -1623,6 +1706,7 @@ export function mountOnScreenControls(
             index,
             binding.contexts,
             activeContext,
+            element,
           ),
         };
 
@@ -1659,6 +1743,10 @@ export function mountOnScreenControls(
     let padAvailable = false;
     let actionAvailable = false;
 
+    // ADDED: counted for THIS apply, so the report below states what this pass
+    // withheld rather than a running total. DL-CONTROL-11.
+    withheldByInert = 0;
+
     for (const record of records) {
       const contexts = record.contexts ?? keymap[record.action].contexts;
 
@@ -1667,6 +1755,7 @@ export function mountOnScreenControls(
         record.index,
         contexts,
         context,
+        record.element,
       );
 
       if (record.generated) {
@@ -1708,6 +1797,22 @@ export function mountOnScreenControls(
 
     applyGroupAvailability(padGroup, padAvailable);
     applyGroupAvailability(actionGroup, actionAvailable);
+
+    // ADDED: the one report of the reachability term. An inert control answers
+    // every liveness probe as live, so without this the withholding — and the
+    // state that caused it — would be invisible to a reader of the logs.
+    // DL-CONTROL-11.
+    if (withheldByInert > 0) {
+      reporter.count(INERT_WITHHELD_METRIC, {
+        withheld: withheldByInert,
+        context,
+      });
+      reporter.log(
+        'debug',
+        'On-screen controls were withheld: their host is inert.',
+        { withheld: withheldByInert, context },
+      );
+    }
   };
 
   // Reduced motion, resolved from three sources in a fixed order and then
@@ -1776,6 +1881,49 @@ export function mountOnScreenControls(
 
   apply(activeKeymap, activeContext);
   applyMotion();
+
+  // ADDED: a focus change re-applies the layer.
+  //
+  // `'textEntry'` is a focus-derived context — it MEANS a text field holds
+  // focus — so a focus change is one of the moments the context can change,
+  // and it was the one moment nothing re-read it: the layer re-applied on a
+  // settings toggle, a rebind, a committed turn and a screen transition, and a
+  // field taking focus is none of those. A pinned context cannot change, so the
+  // listeners are attached only where a resolver was supplied.
+  //
+  // Re-entrancy is guarded because the apply itself moves focus: withdrawing
+  // the control that holds it blurs it, which fires `focusout` from inside the
+  // apply. The second pass would compute the same verdicts, so it is dropped
+  // rather than queued. DL-CONTROL-11.
+  if (typeof options.context === 'function' && ownerDocument !== null) {
+    let reapplying = false;
+
+    const onFocusChange = (event: Event): void => {
+      if (unmounted || reapplying) {
+        return;
+      }
+
+      reapplying = true;
+
+      try {
+        apply(resolveKeymap(), resolveContext());
+        reporter.count(FOCUS_REFRESH_METRIC, {
+          event: event.type,
+          context: activeContext,
+        });
+      } finally {
+        reapplying = false;
+      }
+    };
+
+    ownerDocument.addEventListener('focusin', onFocusChange, true);
+    ownerDocument.addEventListener('focusout', onFocusChange, true);
+
+    reverts.push((): void => {
+      ownerDocument.removeEventListener('focusin', onFocusChange, true);
+      ownerDocument.removeEventListener('focusout', onFocusChange, true);
+    });
+  }
 
   const controls = Object.freeze(records.map(projectControl));
 

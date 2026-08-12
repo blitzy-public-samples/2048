@@ -1042,6 +1042,112 @@ describe('a trap release can decline the focus restore', () => {
 });
 
 /* ==========================================================================
+ * ADDED: `release({ beforeRestore })` — the window between lifting the
+ * inertness this trap applied and restoring focus, for the caller whose own
+ * presentation layer withholds the restore target while the background is
+ * inert. DL-FOCUS-08, and DL-ROUTER-41 for the caller that needs it.
+ * ========================================================================== */
+
+describe('a trap release can re-present its restore target first', () => {
+  it('invokes the callback after the lift and before the restore', () => {
+    document.body.innerHTML = `
+      <div id="background"><button type="button" id="trigger" disabled>open</button></div>
+      <div id="dialog"><button type="button" id="inside">close</button></div>
+    `;
+
+    const background = document.getElementById('background')!;
+    const dialog = document.getElementById('dialog')!;
+    const trigger = document.getElementById('trigger') as HTMLButtonElement;
+    const recorded = recorder();
+    const manager = createFocusManager({ reporter: recorded.reporter });
+
+    const trap = manager.trap(dialog, {
+      label: 'settings',
+      restoreFocusTo: trigger,
+      inertBackground: [background],
+      reporter: recorded.reporter,
+    });
+
+    expect(trap).not.toBeNull();
+    expect(background.hasAttribute('inert')).toBe(true);
+
+    // What the on-screen control layer does: the trigger is withheld while its
+    // host is inert, and is re-presented once the host is interactive again.
+    const observed: { inert: boolean; active: string | null }[] = [];
+
+    trap?.release({
+      beforeRestore: (): void => {
+        observed.push({
+          inert: background.hasAttribute('inert'),
+          active: document.activeElement?.id ?? null,
+        });
+
+        trigger.disabled = false;
+      },
+    });
+
+    // Called exactly once, with the inertness already lifted and focus not yet
+    // moved off the dialog's own control.
+    expect(observed).toEqual([{ inert: false, active: 'inside' }]);
+
+    // And because the callback re-presented it, the restore landed.
+    expect(document.activeElement).toBe(trigger);
+
+    const warnings = recorded.logs
+      .filter((entry) => entry.level === 'warn')
+      .map((entry) => entry.message);
+
+    expect(warnings).not.toContain(
+      'focus trap restore target did not take focus',
+    );
+
+    manager.destroy();
+  });
+
+  it('reports a throwing callback and completes the release anyway', () => {
+    document.body.innerHTML = `
+      <div id="background"><button type="button" id="trigger">open</button></div>
+      <div id="dialog"><button type="button" id="inside">close</button></div>
+    `;
+
+    const background = document.getElementById('background')!;
+    const dialog = document.getElementById('dialog')!;
+    const trigger = document.getElementById('trigger')!;
+    const recorded = recorder();
+    const manager = createFocusManager({ reporter: recorded.reporter });
+
+    const trap = manager.trap(dialog, {
+      label: 'settings',
+      restoreFocusTo: trigger,
+      inertBackground: [background],
+      reporter: recorded.reporter,
+    });
+
+    trap?.release({
+      beforeRestore: (): void => {
+        throw new Error('presentation layer failed');
+      },
+    });
+
+    // The release finished: inertness lifted, focus restored, trap inactive.
+    expect(background.hasAttribute('inert')).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+    expect(trap?.isActive()).toBe(false);
+
+    // And the failure was reported rather than swallowed.
+    expect(
+      recorded.logs.filter(
+        (entry) =>
+          entry.level === 'error' &&
+          entry.message === 'focus trap release callback threw',
+      ),
+    ).toHaveLength(1);
+
+    manager.destroy();
+  });
+});
+
+/* ==========================================================================
  * Both board layers name a cell row first. DL-FOCUS-06.
  * ========================================================================== */
 

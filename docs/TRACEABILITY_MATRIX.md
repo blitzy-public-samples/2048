@@ -691,7 +691,7 @@ a construct this document does not account for.
 | `TR-KEYMAP-06` | the remapping surface and the serialised keymap with its parse limits | **target-only** — no pre-migration construct |
 | `TR-KEYMAP-07` | `InputReporter` and `createSafeInputReporter` | **target-only** — no pre-migration construct |
 
-### `src/input/on-screen-controls.ts` — 5 rows, 2 target-only
+### `src/input/on-screen-controls.ts` — 6 rows, 3 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -700,6 +700,7 @@ a construct this document does not account for.
 | `TR-CONTROL-03` | `bindButtonPress`'s resolved touch-end listener | js/keyboard_input_manager.js L145-L149 |
 | `TR-CONTROL-04` | the generated `<button>` per action of `INPUT_ACTIONS` | **target-only** — no pre-migration construct |
 | `TR-CONTROL-05` | `MarkupControlBinding.contexts` and the per-context availability of every control | **target-only** — no pre-migration construct |
+| `TR-CONTROL-06` | the reachability term `isInert` and the focus-change re-apply | **target-only** — no pre-migration construct |
 
 ### `src/input/touch-input.ts` — 5 rows, 1 target-only
 
@@ -1439,14 +1440,14 @@ decision rather than by a ported construct, and the decision is named.
 Both directions are complete, and the completeness is arithmetic rather than
 assertion:
 
-- **557 rows** across **71 areas**, enumerated from the
+- **558 rows** across **71 areas**, enumerated from the
 declarations in the tree rather than counted by hand.
 - **Direction A** accounts for the **260 rows** that carry a pre-migration
 construct, distributed across the 16 artifacts listed in §2. Every retired
 source file appears there.
-- **Direction B** accounts for **all 557 rows**, distributed across the
+- **Direction B** accounts for **all 558 rows**, distributed across the
 78 modules that declare them, so every row has exactly one owning module.
-- **297 rows are target-only.** Each is declared as such by its owning
+- **298 rows are target-only.** Each is declared as such by its owning
 module, so the reverse walk ends in a positive statement rather than in a gap.
 - The one retired artifact with no row, `.jshintrc`, is accounted for in the
 ledger above by decision `DL-BUILD-10`.

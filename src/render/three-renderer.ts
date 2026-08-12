@@ -59,7 +59,8 @@
 //                                             src/render/number-only-renderer.ts
 //                                             carries
 //
-// Decisions: DL-THREE-01, DL-THREE-02, DL-THREE-03, DL-THREE-04, DL-THREE-05
+// Decisions: DL-THREE-01, DL-THREE-02, DL-THREE-03, DL-THREE-04, DL-THREE-05,
+//   DL-THREE-06, DL-THREE-07
 // (docs/DECISION_LOG.md).
 
 import { Color, SRGBColorSpace, WebGLRenderer } from 'three';
@@ -201,6 +202,15 @@ const STAGE_LIGHTING_METRIC = 'render.three.stage.lighting';
 
 /** Counter raised once per stage resolution presented. */
 const STAGE_END_METRIC = 'render.three.stage.end';
+
+/** ADDED: counter raised once per `WebGLRenderer` constructed. DL-THREE-06. */
+const SURFACE_OPENED_METRIC = 'render.three.surface.opened';
+
+/** ADDED: counter raised once per parked `WebGLRenderer` reused. DL-THREE-06. */
+const SURFACE_REUSED_METRIC = 'render.three.surface.reused';
+
+/** ADDED: counter raised once per `WebGLRenderer` released for good. */
+const SURFACE_RELEASED_METRIC = 'render.three.surface.released';
 
 /** Alpha the drawing buffer is cleared to. */
 const CLEAR_ALPHA = 0;
@@ -732,6 +742,125 @@ function asCanvas(value: Element | null | undefined): HTMLCanvasElement | null {
     : null;
 }
 
+/**
+ * ADDED: the `WebGLRenderer` parked over each canvas, held weakly so a canvas
+ * that goes out of scope takes its entry with it.
+ *
+ * A WebGL context belongs to its canvas and outlives every renderer built over
+ * it, and this application re-mounts the same canvas for the life of the page —
+ * once per appearance switch. One renderer per canvas is therefore the honest
+ * lifetime: it is built on the first mount, reused by every later one, and
+ * released only where the context is gone or a caller says the canvas is
+ * finished with. DL-THREE-06.
+ */
+const parkedRenderers = new WeakMap<HTMLCanvasElement, WebGLRenderer>();
+
+/**
+ * ADDED: the canvases whose parked renderer is currently MOUNTED and drawing.
+ *
+ * `releaseParkedRenderer` refuses one of these: a renderer in use is not a
+ * parked renderer, and disposing it would take the context away from the board
+ * on screen. DL-THREE-06.
+ */
+const mountedSurfaces = new WeakSet<HTMLCanvasElement>();
+
+/**
+ * ADDED: returns the pixel-store unpack state to its initial values, reporting
+ * nothing.
+ *
+ * Extracted from the factory's own `restoreUnpackState` so the module-level
+ * release below shares one implementation with it. The reasoning is unchanged
+ * and is stated there. DL-THREE-05.
+ *
+ * @param renderer Renderer whose context is reset.
+ * @returns Whether the reset completed.
+ */
+function resetPixelStoreUnpack(renderer: WebGLRenderer | null): boolean {
+  if (renderer === null) {
+    return true;
+  }
+
+  try {
+    // Guarded because a renderer double may implement no accessor, and a
+    // context taken away by the browser answers no constants.
+    const gl: unknown =
+      typeof renderer.getContext === 'function' ? renderer.getContext() : null;
+
+    if (gl === null || typeof gl !== 'object') {
+      return true;
+    }
+
+    const state = gl as {
+      readonly UNPACK_FLIP_Y_WEBGL?: unknown;
+      readonly UNPACK_PREMULTIPLY_ALPHA_WEBGL?: unknown;
+      readonly pixelStorei?: unknown;
+    };
+
+    if (typeof state.pixelStorei !== 'function') {
+      return true;
+    }
+
+    const pixelStorei = state.pixelStorei.bind(gl) as (
+      parameter: number,
+      value: boolean,
+    ) => void;
+
+    // A call on a context the browser has already taken away is a defined
+    // no-op, so the loss path needs no separate branch.
+    if (typeof state.UNPACK_FLIP_Y_WEBGL === 'number') {
+      pixelStorei(state.UNPACK_FLIP_Y_WEBGL, false);
+    }
+
+    if (typeof state.UNPACK_PREMULTIPLY_ALPHA_WEBGL === 'number') {
+      pixelStorei(state.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ADDED: releases the renderer parked over one canvas, for good.
+ *
+ * The counterpart of the parking: an unmount keeps the renderer so the next
+ * mount reuses it, and this is how a caller that is finished with the canvas —
+ * the composition root disposing the application — gives the context's
+ * resources back. Calling it for a canvas holding no parked renderer is a
+ * no-op. DL-THREE-06.
+ *
+ * @param candidate Canvas whose parked renderer is released.
+ * @returns Whether a renderer was released.
+ */
+export function releaseParkedRenderer(
+  candidate: Element | null | undefined,
+): boolean {
+  const surface = asCanvas(candidate);
+
+  if (surface === null) {
+    return false;
+  }
+
+  const parked = parkedRenderers.get(surface);
+
+  // A renderer still drawing is not parked: the caller unmounts or destroys the
+  // renderer first, and this refuses rather than pulling the context out from
+  // under a live board.
+  if (parked === undefined || mountedSurfaces.has(surface)) {
+    return false;
+  }
+
+  parkedRenderers.delete(surface);
+
+  // As at every other release: the canvas is handed on carrying the initial
+  // unpack state. DL-THREE-05.
+  resetPixelStoreUnpack(parked);
+  parked.dispose();
+
+  return true;
+}
+
 /** The attribute a canvas is marked with, and the value it carries. */
 const CANVAS_ARIA_ATTRIBUTE = 'aria-hidden';
 const CANVAS_ARIA_VALUE = 'true';
@@ -950,16 +1079,98 @@ export function createThreeRenderer(
    *   signal `mount` converts into its number-only fallback.
    */
   const openSurface = (surface: HTMLCanvasElement): WebGLRenderer => {
-    const renderer = new WebGLRenderer({
-      canvas: surface,
-      antialias: true,
-      alpha: true,
+    // CHANGED: a renderer already parked over this canvas is REUSED, where this
+    // constructed one per mount.
+    //
+    // Each construction takes a fresh set of GL objects from the canvas's own
+    // context — among them the two placeholder textures its state cache uploads
+    // for `TEXTURE_2D_ARRAY` and `TEXTURE_3D`, named in DL-THREE-05 — and
+    // `dispose()` does not delete them, so ten appearance switches over one
+    // canvas grew the live `WebGLTexture` count from 12 to 71 and the
+    // `WebGLProgram` count from 6 to 15. One renderer per canvas removes the
+    // growth at its source rather than chasing the objects it leaves behind.
+    // `releaseParkedRenderer` is how the instance is finally released.
+    // DL-THREE-06.
+    const parked = parkedRenderers.get(surface);
+    const renderer =
+      parked ??
+      new WebGLRenderer({
+        canvas: surface,
+        antialias: true,
+        alpha: true,
+      });
+
+    if (parked === undefined) {
+      parkedRenderers.set(surface, renderer);
+    }
+
+    mountedSurfaces.add(surface);
+
+    reporter.onCount({
+      name: parked === undefined ? SURFACE_OPENED_METRIC : SURFACE_REUSED_METRIC,
+      value: 1,
     });
 
+    // Re-applied on every mount, reused or not: the platform's pixel ratio can
+    // have changed while the renderer was parked, and the size and the clear
+    // colour are written by `applySize` and `applyClearColor` after this.
     renderer.setPixelRatio(resolvePixelRatio());
     renderer.shadowMap.enabled = false;
 
     return renderer;
+  };
+
+  /**
+   * ADDED: leaves the renderer parked over its canvas for the next mount.
+   *
+   * The mount's counterpart of `discardSurface` below: nothing is disposed and
+   * the registry entry stands, so the next mount over this canvas takes the
+   * same instance and the same GL objects. DL-THREE-06.
+   *
+   * It writes NO pixel-store state. DL-THREE-05 places that reset immediately
+   * before each `webgl.dispose()`, and parking disposes nothing: the instance
+   * that wrote the state is the one that takes the context back, and its own
+   * state cache is the record of what it wrote. DL-THREE-07.
+   */
+  const parkSurface = (): void => {
+    if (canvas !== null) {
+      mountedSurfaces.delete(canvas);
+    }
+
+    webgl = null;
+  };
+
+  /**
+   * ADDED: releases the renderer and un-parks it, for a context that is gone.
+   *
+   * A lost context takes every GL object with it, so the instance holding it
+   * has nothing left to reuse and a later mount must build over the restored
+   * context instead. DL-THREE-06.
+   */
+  const discardSurface = (): void => {
+    restoreUnpackState(webgl);
+
+    const surface = canvas;
+    const released = webgl;
+
+    if (
+      surface !== null &&
+      released !== null &&
+      parkedRenderers.get(surface) === released
+    ) {
+      parkedRenderers.delete(surface);
+    }
+
+    if (surface !== null) {
+      mountedSurfaces.delete(surface);
+    }
+
+    released?.dispose();
+    webgl = null;
+
+    if (released !== null) {
+      reporter.onCount({ name: SURFACE_RELEASED_METRIC, value: 1 });
+    }
   };
 
   /**
@@ -988,60 +1199,22 @@ export function createThreeRenderer(
    * @param renderer Renderer about to be disposed, or `null`.
    */
   const restoreUnpackState = (renderer: WebGLRenderer | null): void => {
-    if (renderer === null) {
+    // CHANGED: the reset itself moved to the module-level `resetPixelStoreUnpack`
+    // so `releaseParkedRenderer` shares it; this wrapper keeps the report.
+    if (resetPixelStoreUnpack(renderer)) {
       return;
     }
 
-    try {
-      // Guarded because a renderer double may implement no accessor, and a
-      // context taken away by the browser answers no constants.
-      const gl: unknown =
-        typeof renderer.getContext === 'function'
-          ? renderer.getContext()
-          : null;
-
-      if (gl === null || typeof gl !== 'object') {
-        return;
-      }
-
-      const state = gl as {
-        readonly UNPACK_FLIP_Y_WEBGL?: unknown;
-        readonly UNPACK_PREMULTIPLY_ALPHA_WEBGL?: unknown;
-        readonly pixelStorei?: unknown;
-      };
-
-      if (typeof state.pixelStorei !== 'function') {
-        return;
-      }
-
-      const pixelStorei = state.pixelStorei.bind(gl) as (
-        parameter: number,
-        value: boolean,
-      ) => void;
-
-      // A call on a context the browser has already taken away is a defined
-      // no-op, so the loss path needs no separate branch.
-      if (typeof state.UNPACK_FLIP_Y_WEBGL === 'number') {
-        pixelStorei(state.UNPACK_FLIP_Y_WEBGL, false);
-      }
-
-      if (typeof state.UNPACK_PREMULTIPLY_ALPHA_WEBGL === 'number') {
-        pixelStorei(state.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-      }
-    } catch (error: unknown) {
-      // Never fatal: the reset is hygiene, and a renderer that cannot be asked
-      // for its context still has to be disposed.
-      reporter.onDiagnostic({
-        level: 'warning',
-        source: DIAGNOSTIC_SOURCE,
-        message:
-          'The pixel-store unpack state could not be reset before the ' +
-          'renderer was released; a later re-mount may warn about a ' +
-          'placeholder texture upload.',
-        error: describeRenderError(error),
-        thrown: error,
-      });
-    }
+    // Never fatal: the reset is hygiene, and a renderer that cannot be asked
+    // for its context still has to be released.
+    reporter.onDiagnostic({
+      level: 'warning',
+      source: DIAGNOSTIC_SOURCE,
+      message:
+        'The pixel-store unpack state could not be reset before the ' +
+        'renderer was released; a later re-mount may warn about a ' +
+        'placeholder texture upload.',
+    });
   };
 
   /** Writes one theme's page background into the clear colour. */
@@ -2035,11 +2208,10 @@ export function createThreeRenderer(
     scene?.dispose();
     scene = null;
 
-    // ADDED: before the release, while this renderer still holds the context it
-    // wrote unpack state into. DL-THREE-05.
-    restoreUnpackState(webgl);
-    webgl?.dispose();
-    webgl = null;
+    // CHANGED: released and un-parked rather than parked, because this path
+    // serves a LOST context and a rebuild over the restored one. The unpack
+    // reset still runs first, inside `discardSurface`. DL-THREE-05, DL-THREE-06.
+    discardSurface();
     board = null;
     geometry = null;
     boardSize = 0;
@@ -2377,12 +2549,12 @@ export function createThreeRenderer(
     contextRestores = 0;
     orphanedTriggers = 0;
 
-    // ADDED: as in `releaseGpuResources`, so a canvas this renderer is handing
-    // back carries the initial unpack state whichever teardown released it.
-    // DL-THREE-05.
-    restoreUnpackState(webgl);
-    webgl?.dispose();
-    webgl = null;
+    // CHANGED: PARKED rather than disposed, so the next mount over this canvas
+    // takes the same renderer and the same GL objects, and the pixel-store
+    // state is left exactly as this renderer wrote it.
+    // `releaseParkedRenderer` is the caller's way to give the context back, and
+    // it resets that state as every release does. DL-THREE-06, DL-THREE-07.
+    parkSurface();
     board = null;
     geometry = null;
     boardSize = 0;

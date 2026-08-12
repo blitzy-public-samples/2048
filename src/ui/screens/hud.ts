@@ -101,12 +101,15 @@
 //   DL-HUD-11  the entry line supplied to the router through `announcement()`
 //   DL-HUD-12  focus placement opted out of through `focusContainer: null` in
 //              the composed root
+//   DL-HUD-15  the run-not-saved line written assertively while the recovery
+//              line stays polite, and the notice element itself taking no
+//              `role="alert"`
 //
 // Nothing is read or written at import time: every lookup, every report and
 // every DOM write happens inside a call.
 //
 // Decisions: DL-HUD-01, DL-HUD-02, DL-HUD-03, DL-HUD-07, DL-HUD-08, DL-HUD-09,
-// DL-HUD-10 (docs/DECISION_LOG.md).
+// DL-HUD-10, DL-HUD-15 (docs/DECISION_LOG.md).
 
 import type { StageGoal } from '../../config/stage-config';
 import type { StateCommitEvent } from '../../engine/engine-events';
@@ -119,7 +122,14 @@ import type { ActiveRelic, Rarity } from '../../relics/relic-types';
 import { zIndex } from '../../theme/tokens';
 import type { ScreenName as FocusScreenName } from '../a11y/focus-manager';
 import { focusInitial } from '../a11y/focus-manager';
-import type { LiveRegionAnnouncer } from '../a11y/live-region';
+import type {
+  AnnouncementPolarity,
+  LiveRegionAnnouncer,
+} from '../a11y/live-region';
+
+// CHANGED: a value import beside the type imports, for the one line this screen
+// writes assertively. DL-HUD-15.
+import { ASSERTIVE_POLARITY } from '../a11y/live-region';
 import type { UiReporter } from '../a11y/settings';
 import {
   NOOP_UI_REPORTER,
@@ -1039,8 +1049,15 @@ export function createHud(options: HudOptions = {}): Hud {
    *
    * @param text Line to announce.
    * @param kind Kind carried into the report.
+   * @param polarity CHANGED: polarity the line is written with. Omitted, the
+   *   announcer's own default governs, which is polite — the behaviour every
+   *   caller but the persistence notice keeps. DL-HUD-15.
    */
-  const announceLine = (text: string, kind: string): void => {
+  const announceLine = (
+    text: string,
+    kind: string,
+    polarity?: AnnouncementPolarity,
+  ): void => {
     const announcer = readAnnouncer();
 
     if (announcer === null) {
@@ -1048,8 +1065,12 @@ export function createHud(options: HudOptions = {}): Hud {
     }
 
     try {
-      announcer.announceText(text);
-      reporter.count(ANNOUNCED_METRIC, { context: REPORT_CONTEXT, kind });
+      announcer.announceText(text, polarity);
+      reporter.count(ANNOUNCED_METRIC, {
+        context: REPORT_CONTEXT,
+        kind,
+        polarity: polarity ?? 'default',
+      });
     } catch (error: unknown) {
       reporter.error('a HUD announcement raised', error, {
         context: REPORT_CONTEXT,
@@ -1244,6 +1265,13 @@ export function createHud(options: HudOptions = {}): Hud {
           ? copy.ephemeralAnnouncement
           : copy.persistentAnnouncement,
         'persistence',
+
+        // CHANGED: the LOSS of persistence is written assertively, into the
+        // `role="alert"` region ../a11y/live-region.ts keeps for that polarity
+        // — the treatment src/main.ts already gives a lost WebGL context. The
+        // recovery keeps the default polite polarity. The notice element itself
+        // takes no `role="alert"`. DL-HUD-15.
+        status === 'ephemeral' ? ASSERTIVE_POLARITY : undefined,
       );
       reporter.count(PERSISTENCE_METRIC, {
         context: REPORT_CONTEXT,

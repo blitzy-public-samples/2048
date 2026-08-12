@@ -567,6 +567,205 @@ describe('mounting twice over one host leaves one set of controls', () => {
 // one control per slot rather than one per action, and the two are read
 // together: a slot with no control cannot be reached by a pointer or by a
 // screen reader however many keys are bound to it.
+describe('an inert host withholds every control inside it', () => {
+  /** The `#on-screen-controls` host, wrapped in a shell a modal can inert. */
+  function seedShell(): { shell: HTMLElement; host: HTMLElement } {
+    document.body.innerHTML = [
+      '<div class="container">',
+      '<button type="button" class="restart-button">New Game</button>',
+      '<div class="game-message">',
+      '<button type="button" class="keep-playing-button">Keep going</button>',
+      '<button type="button" class="retry-button">Try again</button>',
+      '</div>',
+      '<div id="on-screen-controls"></div>',
+      '</div>',
+    ].join('');
+
+    const shell = document.querySelector<HTMLElement>('.container');
+    const host = document.querySelector<HTMLElement>('#on-screen-controls');
+
+    if (shell === null || host === null) {
+      throw new Error('the fixture did not build');
+    }
+
+    return { shell, host };
+  }
+
+  /** How many generated controls are presented right now. */
+  function presented(): number {
+    return document.querySelectorAll(
+      '#on-screen-controls .on-screen-control:not([hidden])',
+    ).length;
+  }
+
+  it('presents nothing while the shell around the host is inert', () => {
+    const { shell } = seedShell();
+
+    shell.setAttribute('inert', '');
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'game',
+      keymap: DEFAULT_KEY_BINDINGS,
+    });
+
+    mounted.push(handle);
+
+    // Every liveness signal except reachability says these controls are live:
+    // the context is active for the movement actions and no predicate refuses
+    // them. The reachability term is the only thing withholding them.
+    expect(presented()).toBe(0);
+    expect(isSuppressed('.restart-button')).toBe(true);
+  });
+
+  it('presents them again once the shell is no longer inert', () => {
+    const { shell } = seedShell();
+
+    shell.setAttribute('inert', '');
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'game',
+      keymap: DEFAULT_KEY_BINDINGS,
+    });
+
+    mounted.push(handle);
+
+    expect(presented()).toBe(0);
+
+    shell.removeAttribute('inert');
+    handle.refresh();
+
+    expect(presented()).toBeGreaterThan(0);
+    expect(isSuppressed('.restart-button')).toBe(false);
+  });
+
+  it('withholds a control published by an action its state allows', () => {
+    const { shell } = seedShell();
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      context: 'overlay',
+      keymap: DEFAULT_KEY_BINDINGS,
+
+      // The composition root's own predicate, saying the action IS offered.
+      available: (): boolean => true,
+    });
+
+    mounted.push(handle);
+
+    const before = presented();
+
+    expect(before).toBeGreaterThan(0);
+
+    shell.setAttribute('inert', '');
+    handle.refresh();
+
+    expect(presented()).toBe(0);
+  });
+
+  it('publishes nothing when an inert control is activated anyway', () => {
+    const { shell } = seedShell();
+    const host = createHost();
+
+    shell.setAttribute('inert', '');
+
+    const handle = mountOnScreenControls({
+      host,
+      context: 'game',
+      keymap: DEFAULT_KEY_BINDINGS,
+    });
+
+    mounted.push(handle);
+
+    const first = document.querySelector<HTMLElement>(
+      '#on-screen-controls .on-screen-control',
+    );
+
+    first?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(host.log.moves).toEqual([]);
+    expect(host.log.published).toEqual([]);
+  });
+});
+
+describe('a focus change re-applies the layer', () => {
+  it('re-reads a resolved context when focus moves', () => {
+    seedMarkup();
+
+    const field = document.createElement('input');
+
+    field.type = 'text';
+    document.body.append(field);
+
+    let context: InputContext = 'game';
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      keymap: DEFAULT_KEY_BINDINGS,
+
+      // A RESOLVER, as the composition root supplies: the layer re-reads it.
+      context: (): InputContext => context,
+    });
+
+    mounted.push(handle);
+
+    expect(isSuppressed('.restart-button')).toBe(false);
+
+    // The context a text field holding focus produces, with no call to
+    // `refresh()`, `setContext()` or `setKeymap()` in between.
+    context = 'textEntry';
+    field.focus();
+    field.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+
+    expect(isSuppressed('.restart-button')).toBe(true);
+
+    // And back, on the blur.
+    context = 'game';
+    field.blur();
+    field.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+
+    expect(isSuppressed('.restart-button')).toBe(false);
+  });
+
+  it('listens for nothing where the context was pinned', () => {
+    seedMarkup();
+    mount(createHost(), 'game');
+
+    expect(isSuppressed('.restart-button')).toBe(false);
+
+    // A pinned context cannot change, so a focus event must not re-apply — and
+    // must not throw either.
+    document.body.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+
+    expect(isSuppressed('.restart-button')).toBe(false);
+  });
+
+  it('stops re-applying once unmounted', () => {
+    seedMarkup();
+
+    let context: InputContext = 'game';
+
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      keymap: DEFAULT_KEY_BINDINGS,
+      context: (): InputContext => context,
+    });
+
+    mounted.push(handle);
+    handle.unmount();
+
+    context = 'textEntry';
+
+    // The markup control is back as index.html declared it, and a focus event
+    // after the unmount neither re-applies nor throws.
+    expect(() => {
+      document.body.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    }).not.toThrow();
+    expect(control('.restart-button').hasAttribute('hidden')).toBe(false);
+  });
+});
+
 describe('availability narrows by the caller as well as the context', () => {
   it('withdraws a control the predicate refuses, in an active context', () => {
     seedMarkup();

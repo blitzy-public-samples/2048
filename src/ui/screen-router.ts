@@ -1259,7 +1259,21 @@ export interface ScreenRouter {
   /** `send`, under the name a state machine conventionally exposes. */
   go(trigger: RouterEventName, payload?: RouterTriggerPayload): boolean;
 
-  /** Whether `TRANSITIONS` declares an edge for a trigger right now. */
+  /**
+   * Whether `TRANSITIONS` declares an edge for a TRIGGER right now.
+   *
+   * The argument is a member of `ROUTER_TRIGGERS` — `beginRun`, `move`,
+   * `stageGoalMet`, `endRun` and the rest — and never a member of
+   * `SCREEN_NAMES`. The two vocabularies are disjoint, so `can('stage')` is
+   * `false` while `current()` is exactly `'stage'`: it asks whether a trigger
+   * named `stage` has an edge, and no such trigger exists. This is not a
+   * reachability oracle for a SCREEN, and there is no such member; ask
+   * `can('stageGoalMet')` to learn whether the stage can be cleared from here.
+   * DL-ROUTER-42.
+   *
+   * @param trigger Trigger to test, from `ROUTER_TRIGGERS`.
+   * @returns Whether the state in force declares an edge for it.
+   */
   can(trigger: RouterEventName): boolean;
 
   /** The container resolved for a state, and `null` where none was. */
@@ -3541,28 +3555,31 @@ export function createScreenRouter(
 
     settingsOpen = false;
 
-    // Re-applied HERE, before the release below, and not left to the `settle()`
-    // at the end of this function.
-    //
-    // The control layer disables every control whose action the CURRENT screen
-    // does not authorize, and `#settings-button` publishes `openSettings`,
-    // which `ACTION_SCREENS` does not authorize in `'settings'`. So for as long
-    // as `screen()` answers `'settings'` that button is `disabled` — and it is
-    // the element this trap recorded to restore focus to. Releasing first
-    // restored focus onto a disabled button, which cannot take it: focus fell
-    // to the body and two restore failures were reported for a button that was
-    // about to be perfectly focusable. `settingsOpen` is already `false` above,
-    // so this refresh re-enables it first. `settle()` still refreshes, which
-    // raises the refresh counter twice per close. DL-ROUTER-40.
-    refreshControls();
-
     // Released BEFORE the panel is hidden: a trap restores focus to the
     // element it recorded, and restoring into a subtree that has just become
     // `hidden` places focus on the body instead.
     const engaged = trap;
 
     trap = null;
-    engaged?.release();
+
+    // The control layer withholds `#settings-button` for two reasons while this
+    // dialog is up — the action `openSettings` is not authorized in
+    // `'settings'`, and the button sits inside the background the dialog made
+    // inert — and that button is the element this trap recorded to restore
+    // focus to. `settingsOpen` is already `false` above, which answers the
+    // first; the second is only answered once the release has lifted the
+    // inertness, so the refresh runs from inside the release, between the lift
+    // and the restore. It was called here, before the release, while
+    // authorization was the only term. `settle()` still refreshes, which raises
+    // the refresh counter twice per close. DL-ROUTER-41 supersedes
+    // DL-ROUTER-40; the window itself is DL-FOCUS-08.
+    engaged?.release({ beforeRestore: refreshControls });
+
+    // No trap to release, so nothing lifted inertness and nothing re-presented
+    // the shell: the refresh the release would have run happens here instead.
+    if (engaged === null) {
+      refreshControls();
+    }
 
     setHidden(panelElement ?? panel, true);
     reflectTriggerExpansion(false);

@@ -200,15 +200,21 @@ afterEach(() => {
  * ========================================================================== */
 
 describe('the rendered interstitial', () => {
-  it('appends its own children to the container the router supplied', () => {
+  it('appends one panel to the container, holding its own content', () => {
     const harness = mounted();
 
     expect(harness.screen.hasHost()).toBe(true);
     expect(harness.screen.isPresented()).toBe(true);
 
-    // Appended DIRECTLY, not wrapped: the container is the flex column that
-    // lays them out, and that layout reaches its own children only.
-    expect(Array.from(harness.container.children).map((child) => child.tagName))
+    // CHANGED: the container takes ONE node, the `.screen-panel` surface every
+    // sibling screen renders, and the five content nodes are its children.
+    // DL-STAGECLEAR-06.
+    const panel = harness.container.firstElementChild;
+
+    expect(harness.container.children).toHaveLength(1);
+    expect(panel?.tagName).toBe('DIV');
+    expect(panel?.className).toBe('screen-panel');
+    expect(Array.from(panel?.children ?? []).map((child) => child.tagName))
       .toEqual(['H2', 'P', 'P', 'P', 'DIV']);
     expect(harness.reporter.counts('ui.stageProgress.mounted')).toHaveLength(1);
     expect(harness.reporter.counts('ui.stageProgress.entered')).toHaveLength(1);
@@ -717,7 +723,8 @@ describe('leaving the state', () => {
     // Re-entered, the same container carries the content again.
     harness.screen.enter(context());
 
-    expect(harness.container.children).toHaveLength(5);
+    expect(harness.container.children).toHaveLength(1);
+    expect(harness.container.firstElementChild?.children).toHaveLength(5);
   });
 
   it('removes nothing the container already held', () => {

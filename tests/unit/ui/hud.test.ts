@@ -1201,13 +1201,21 @@ describe('the tray renders the held relics in pickup order', () => {
   });
 });
 
-/** A recording stand-in for the one announcer of ../a11y/live-region. */
+/**
+ * A recording stand-in for the one announcer of ../a11y/live-region.
+ *
+ * CHANGED: `written` records the POLARITY beside each line, because the
+ * persistence notice is the one line this screen writes assertively and `lines`
+ * alone cannot tell the two polarities apart. DL-HUD-15.
+ */
 function recorder(): {
   readonly announcer: HudAnnouncerPort;
   readonly lines: string[];
+  readonly written: { text: string; polarity?: string }[];
   readonly structured: { kind: string; name?: string; rarity?: string }[];
 } {
   const lines: string[] = [];
+  const written: { text: string; polarity?: string }[] = [];
   const structured: { kind: string; name?: string; rarity?: string }[] = [];
 
   return {
@@ -1215,11 +1223,13 @@ function recorder(): {
       announce: (input): void => {
         structured.push({ ...input });
       },
-      announceText: (text): void => {
+      announceText: (text, polarity): void => {
         lines.push(text);
+        written.push({ text, polarity });
       },
     },
     lines,
+    written,
     structured,
   };
 }
@@ -1954,6 +1964,59 @@ describe('a run that is no longer reaching storage', () => {
     // status to have changed from, and is exactly the case the player most needs
     // told.
     expect(sink.lines).toContain(hudCopy.ephemeralAnnouncement);
+
+    hud.destroy();
+  });
+
+  // ADDED: the loss interrupts and the recovery does not, and the notice element
+  // stays out of the announcement path so one event is spoken once. DL-HUD-15.
+  it('writes the loss assertively, the recovery politely, and announces once', () => {
+    const outlets = runFixture();
+    const sink = recorder();
+    let status: 'persistent' | 'ephemeral' = 'persistent';
+    const hud = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => status,
+      announcer: (): HudAnnouncerPort => sink.announcer,
+    });
+
+    hud.render(commit(10));
+
+    status = 'ephemeral';
+    hud.render(commit(20));
+
+    // The polarity the composition already gives a lost WebGL context.
+    expect(sink.written).toContainEqual({
+      text: hudCopy.ephemeralAnnouncement,
+      polarity: 'assertive',
+    });
+
+    const notice = outlets.hudGroup.querySelector<HTMLElement>(
+      '.hud-ephemeral',
+    );
+
+    // The announcer owns the alert region, so the notice itself carries no live
+    // semantics: with them it would speak on insertion AND the queued line
+    // would speak, for one event.
+    expect(notice?.hidden).toBe(false);
+    expect(notice?.getAttribute('role')).toBeNull();
+    expect(notice?.getAttribute('aria-live')).toBeNull();
+    expect(notice?.getAttribute('aria-atomic')).toBeNull();
+    expect(
+      sink.written.filter(
+        (entry) => entry.text === hudCopy.ephemeralAnnouncement,
+      ),
+    ).toHaveLength(1);
+
+    status = 'persistent';
+    hud.render(commit(30));
+
+    // Interrupting a reader to say a problem has gone away is the interruption
+    // with nothing at stake, so the recovery takes the announcer's own default.
+    expect(sink.written).toContainEqual({
+      text: hudCopy.persistentAnnouncement,
+      polarity: undefined,
+    });
 
     hud.destroy();
   });

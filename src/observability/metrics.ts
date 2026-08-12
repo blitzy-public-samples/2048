@@ -295,6 +295,19 @@ export const METRIC_NAMES = Object.freeze({
   framesRenderedTotal: `${METRIC_PREFIX}frames_rendered_total`,
   rngDrawsTotal: `${METRIC_PREFIX}rng_draws_total`,
   metricsRejectedTotal: `${METRIC_PREFIX}metrics_rejected_total`,
+
+  /**
+   * ADDED: the same rejections broken down by reason, one series per reason
+   * that actually occurred.
+   *
+   * A COMPANION to `metricsRejectedTotal` rather than a label on it: the
+   * unlabelled total is declared first, with an empty label set, which fixes
+   * that family's layout for its lifetime, and a family whose series disagree
+   * on their label names cannot be exposed. The breakdown therefore needs a
+   * family of its own. DL-METRIC-08.
+   */
+  metricsRejectedByReasonTotal:
+    `${METRIC_PREFIX}metrics_rejected_by_reason_total`,
   healthCheckStatus: `${METRIC_PREFIX}health_check_status`,
   frameTimeMilliseconds: `${METRIC_PREFIX}frame_time_milliseconds`,
   turnLatencyMilliseconds: `${METRIC_PREFIX}turn_latency_milliseconds`,
@@ -348,6 +361,10 @@ const METRIC_HELP: Readonly<Record<keyof typeof METRIC_NAMES, string>> =
     rngDrawsTotal: 'Draws consumed, by named RNG substream.',
     metricsRejectedTotal:
       'Metric calls this registry rejected and reported.',
+    metricsRejectedByReasonTotal:
+      'Metric calls this registry rejected, by reason. Sums to ' +
+      'metrics_rejected_total, less any rejection raised while this family ' +
+      'was resolving a series of its own, which only the total counts.',
     healthCheckStatus:
       'Health check result: 1 healthy, 0 unhealthy, -1 not applicable ' +
       '(the host offers nothing to evaluate).',
@@ -374,6 +391,7 @@ const METRIC_KINDS: Readonly<Record<keyof typeof METRIC_NAMES, MetricKind>> =
     framesRenderedTotal: 'counter',
     rngDrawsTotal: 'counter',
     metricsRejectedTotal: 'counter',
+    metricsRejectedByReasonTotal: 'counter',
     healthCheckStatus: 'gauge',
     frameTimeMilliseconds: 'histogram',
     turnLatencyMilliseconds: 'histogram',
@@ -526,6 +544,41 @@ const MAX_HELP_LENGTH = 240;
  * every series: family names, help texts, label names and label values.
  */
 const MAX_METADATA_CHARS = 262144;
+
+/**
+ * ADDED: distinct `reason` values the rejection breakdown will hold series
+ * for. Beyond it every further reason folds into `REJECTION_REASON_OTHER`, so
+ * the family that reports a cardinality incident cannot itself become one.
+ *
+ * The module raises 48 distinct reasons, so the bound is headroom rather than
+ * a ceiling any internal rejection reaches. DL-METRIC-08.
+ */
+const MAX_REJECTION_REASONS = 64;
+
+/** Reason a rejection carrying no usable `reason` field is counted under. */
+const REJECTION_REASON_UNSPECIFIED = 'unspecified';
+
+/** Reason every further one folds into once the vocabulary bound is reached. */
+const REJECTION_REASON_OTHER = 'other';
+
+/**
+ * Shape a `reason` field must have to become a label value: an identifier, so
+ * an unbounded or caller-supplied string cannot widen the dimension.
+ */
+const REJECTION_REASON_PATTERN = /^[A-Za-z][A-Za-z0-9]*$/;
+
+/**
+ * ADDED: distinct rejection kinds the warn throttle tracks. Beyond it every
+ * further kind shares one bucket, so the throttle's own state is bounded.
+ * DL-METRIC-09.
+ */
+const MAX_REJECTION_WARN_KEYS = 64;
+
+/** Characters of a rejection message the throttle key carries. */
+const MAX_REJECTION_WARN_KEY_CHARS = 80;
+
+/** Throttle bucket every rejection kind beyond the bound shares. */
+const REJECTION_WARN_OVERFLOW_KEY = '*';
 
 /** Subsystem tag the registry's logger is tagged with. */
 const LOGGER_SUBSYSTEM = 'metrics';
@@ -836,6 +889,48 @@ function boundedLabel(value: unknown): string {
   return value.length > MAX_LABEL_VALUE_LENGTH
     ? value.slice(0, MAX_LABEL_VALUE_LENGTH)
     : value;
+}
+
+/**
+ * ADDED: reads the label value a rejection is counted under.
+ *
+ * The `reason` field of a rejection is an internal literal at every call site
+ * of this module, but `reportReaderFault` is public and carries none, so the
+ * field is validated rather than trusted: anything that is not an identifier
+ * becomes `REJECTION_REASON_UNSPECIFIED` instead of a label value of its own.
+ * DL-METRIC-08.
+ *
+ * @param fields Fields the rejection was reported with.
+ * @returns The reason to label the breakdown series with.
+ */
+function rejectionReasonOf(fields: LogFields): string {
+  const carried: unknown = fields.reason;
+
+  if (
+    typeof carried !== 'string' ||
+    carried.length > MAX_LABEL_VALUE_LENGTH ||
+    !REJECTION_REASON_PATTERN.test(carried)
+  ) {
+    return REJECTION_REASON_UNSPECIFIED;
+  }
+
+  return carried;
+}
+
+/**
+ * ADDED: whether the occurrence at this count is written to the log.
+ *
+ * True for the first occurrence and then at every power of two, so a flood of
+ * one rejection kind costs a logarithmic number of records — 740 identical
+ * rejections write ten — and cannot evict the buffer holding the history that
+ * explains it. Each written record carries the running total, so the ones in
+ * between are accounted for rather than lost. DL-METRIC-09.
+ *
+ * @param occurrences Occurrences of this rejection kind including this one.
+ * @returns Whether to write a record.
+ */
+function emitsRejectionWarn(occurrences: number): boolean {
+  return (occurrences & (occurrences - 1)) === 0;
 }
 
 class MetricSeries implements Counter, Gauge, Histogram {
@@ -1232,6 +1327,31 @@ export class MetricsRegistry {
   /** Per-substream draw counters, keyed by substream name. */
   private readonly rngStreamCounters = new Map<string, MetricSeries>();
 
+  /**
+   * ADDED: per-reason rejection counters, keyed by the reason they carry.
+   * DL-METRIC-08.
+   */
+  private readonly rejectionReasonCounters = new Map<string, MetricSeries>();
+
+  /**
+   * ADDED: whether a per-reason series is being resolved right now.
+   *
+   * Resolving one can itself be refused — the family limit, the series limit,
+   * the metadata budget — and a refusal reports through this same channel, so
+   * without the guard a rejection raised while recording a rejection would
+   * recurse. Guarded, the nested refusal is counted by the unlabelled total
+   * and written to the log, and only the breakdown series it could not create
+   * is missing, which is the divergence the family's help text states.
+   * DL-METRIC-08.
+   */
+  private resolvingRejectionReason = false;
+
+  /**
+   * ADDED: occurrences of each rejection kind, keyed as the warn throttle
+   * keys them. DL-METRIC-09.
+   */
+  private readonly rejectionWarnCounts = new Map<string, number>();
+
   /** Calls rejected over the registry's lifetime. */
   private rejectedCalls = 0;
 
@@ -1247,18 +1367,148 @@ export class MetricsRegistry {
       counter.addInternal(1);
     }
 
+    // ADDED: the breakdown a consumer reading metrics alone can group by.
+    // Raised before the log is written, so a logger that throws does not cost
+    // the count. DL-METRIC-08.
+    this.countRejectionReason(fields);
+
     const logger = this.logger;
 
     if (logger === undefined) {
       return;
     }
 
+    // ADDED: repeated identical rejections are counted here and written on a
+    // logarithmic schedule, so a flood cannot evict the records that explain
+    // it. DL-METRIC-09.
+    const throttled = this.throttleRejectionWarn(message, fields);
+
+    if (throttled === null) {
+      return;
+    }
+
     try {
-      logger.warn(message, fields);
+      logger.warn(message, throttled);
     } catch {
       this.reporterFaults += 1;
     }
   };
+
+  /**
+   * ADDED: raises the per-reason rejection counter.
+   *
+   * The series is created on first use rather than declared up front: a clean
+   * run rejects nothing, so its export carries this family with no series at
+   * all and reads exactly as it did before the breakdown existed.
+   *
+   * @param fields Fields the rejection was reported with.
+   */
+  private countRejectionReason(fields: LogFields): void {
+    let reason = rejectionReasonOf(fields);
+
+    // The vocabulary bound applies to a reason the breakdown does not already
+    // hold; the overflow bucket itself is always resolvable.
+    if (
+      !this.rejectionReasonCounters.has(reason) &&
+      this.rejectionReasonCounters.size >= MAX_REJECTION_REASONS
+    ) {
+      reason = REJECTION_REASON_OTHER;
+    }
+
+    const held = this.rejectionReasonCounters.get(reason);
+
+    // A held series records without touching the registry, so it can neither
+    // be refused nor recurse.
+    if (held !== undefined) {
+      held.addInternal(1);
+
+      return;
+    }
+
+    if (this.resolvingRejectionReason) {
+      return;
+    }
+
+    this.resolvingRejectionReason = true;
+
+    try {
+      // `declareSeries`, not `counterSeries`: the family is created on first
+      // use and its help text is set with it, so the export never carries a
+      // family without one.
+      this.dynamicSeries(this.rejectionReasonCounters, reason, () =>
+        this.declareSeries('metricsRejectedByReasonTotal', {
+          [METRIC_LABELS.reason]: reason,
+        }),
+      ).addInternal(1);
+    } catch {
+      this.reporterFaults += 1;
+    } finally {
+      this.resolvingRejectionReason = false;
+    }
+  }
+
+  /**
+   * ADDED: decides whether this rejection is written to the log, and with what
+   * fields.
+   *
+   * @param message Message the rejection reports under.
+   * @param fields Fields the rejection was reported with.
+   * @returns The fields to write, or `null` when this occurrence is suppressed.
+   */
+  private throttleRejectionWarn(
+    message: string,
+    fields: LogFields,
+  ): LogFields | null {
+    const key = this.rejectionWarnKey(message, fields);
+    const occurrences = (this.rejectionWarnCounts.get(key) ?? 0) + 1;
+
+    this.rejectionWarnCounts.set(key, occurrences);
+
+    if (!emitsRejectionWarn(occurrences)) {
+      return null;
+    }
+
+    if (occurrences === 1) {
+      return fields;
+    }
+
+    // The record states its own position in the flood: how many of this kind
+    // have been raised, and how many went unwritten since the last one that
+    // was. Nothing is lost silently.
+    return {
+      ...fields,
+      occurrences,
+      suppressed: occurrences - (occurrences >> 1) - 1,
+    };
+  }
+
+  /**
+   * ADDED: keys one rejection kind for the warn throttle.
+   *
+   * Message and reason together: one message covers several reasons — every
+   * label refusal reports as `metric label rejected` — and collapsing them
+   * would hide a second kind behind the first. The metric name is deliberately
+   * NOT part of the key, because a cardinality incident is a flood of distinct
+   * names under one reason and keying by name would defeat the throttle.
+   *
+   * @param message Message the rejection reports under.
+   * @param fields Fields the rejection was reported with.
+   * @returns The throttle key.
+   */
+  private rejectionWarnKey(message: string, fields: LogFields): string {
+    const key =
+      `${message.slice(0, MAX_REJECTION_WARN_KEY_CHARS)}` +
+      `|${rejectionReasonOf(fields)}`;
+
+    if (
+      !this.rejectionWarnCounts.has(key) &&
+      this.rejectionWarnCounts.size >= MAX_REJECTION_WARN_KEYS
+    ) {
+      return REJECTION_WARN_OVERFLOW_KEY;
+    }
+
+    return key;
+  }
 
   /** The tagged logger, absent when none was supplied. */
   private readonly logger: Logger | undefined;
@@ -1291,6 +1541,16 @@ export class MetricsRegistry {
     // Registered first. Rejections raised by the registrations below are
     // counted in it.
     this.rejectedCounter = this.declareSeries('metricsRejectedTotal', {});
+
+    // ADDED, immediately after it: the breakdown's FAMILY is reserved here,
+    // with no series, and each per-reason series is created on the first
+    // rejection that carries that reason. Reserving the family up front is
+    // what makes the breakdown survive the incident it exists to explain — a
+    // flood of `familyLimitReached` rejections is exactly the case in which a
+    // family created on demand could no longer be created — and it puts the
+    // help text in every export, so the metric is discoverable before it
+    // carries a sample. DL-METRIC-08.
+    this.declareFamily('metricsRejectedByReasonTotal', undefined);
 
     this.turnsCounter = this.declareSeries('turnsTotal', {});
     this.mergesCounter = this.declareSeries('mergesTotal', {});
@@ -2033,6 +2293,12 @@ export class MetricsRegistry {
       this.foldedAbsolutes.clear();
       this.rejectedCalls = 0;
       this.reporterFaults = 0;
+
+      // ADDED: the rejection counts are back at zero, so the throttle starts
+      // over with them and the first rejection of the next run is written.
+      // The per-reason SERIES survive, zeroed, exactly as every other series
+      // does. DL-METRIC-09.
+      this.rejectionWarnCounts.clear();
     } catch {
       this.reporterFaults += 1;
     }

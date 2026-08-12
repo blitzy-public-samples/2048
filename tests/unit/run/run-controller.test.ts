@@ -81,6 +81,7 @@ import {
 import * as rngStreamsModule from '../../../src/rng/rng-streams';
 import * as seededRngModule from '../../../src/rng/seeded-rng';
 import {
+  MAX_ENTERED_SEED_LENGTH,
   RunController,
   normalizeEnteredSeed,
   originateRunId,
@@ -4794,6 +4795,55 @@ describe('normalizeEnteredSeed', () => {
 
     expect(normalizeEnteredSeed(entered)).toBe(entered);
   });
+  /* ---- The raw ceiling, applied before any whole-string work ---- */
+
+  it('declares a raw ceiling above the seed domain, with room to trim', () => {
+    // The reduction trims surrounding whitespace, so the raw text may
+    // legitimately be longer than the seed it yields; the raw ceiling is the
+    // bound on the text the reduction is allowed to walk to get there.
+    expect(MAX_ENTERED_SEED_LENGTH).toBeGreaterThan(MAX_RUN_SEED_LENGTH);
+    expect(MAX_ENTERED_SEED_LENGTH).toBe(MAX_RUN_SEED_LENGTH * 4);
+  });
+
+  it('reduces a paste far above the raw ceiling to an accepted seed', () => {
+    // A megabyte of text, which a paste or a programmatic assignment can supply.
+    // Before the ceiling, `trim()` and the presence regex both walked all of it
+    // before the 256-character bound was ever applied. Decision DL-RUNCTL-07.
+    const entered = 'z'.repeat(1_000_000);
+    const normalised = normalizeEnteredSeed(entered);
+
+    expect(normalised.length).toBe(MAX_RUN_SEED_LENGTH);
+    expect(isAcceptableRunSeed(normalised)).toBe(true);
+    expect(() => createRngStreams(normalised)).not.toThrow();
+  });
+
+  it('reduces text at exactly the raw ceiling the same way', () => {
+    const entered = 'q'.repeat(MAX_ENTERED_SEED_LENGTH);
+    const normalised = normalizeEnteredSeed(entered);
+
+    expect(normalised).toBe('q'.repeat(MAX_RUN_SEED_LENGTH));
+  });
+
+  it('keeps a padded entry within the ceiling reducing to the same seed', () => {
+    // Padding well inside the ceiling is what the slack exists for: the seed is
+    // recovered intact rather than being lost to the raw bound.
+    const padding = ' '.repeat(MAX_RUN_SEED_LENGTH);
+
+    expect(normalizeEnteredSeed(`${padding}Seed-42${padding}`)).toBe('Seed-42');
+  });
+
+  it('originates for padding that fills the raw ceiling', () => {
+    // The stated consequence of bounding before trimming: a seed pushed beyond
+    // the raw ceiling by leading whitespace is not reached, and the run gets an
+    // originated seed rather than an unbounded walk. It is deliberate, and no
+    // realistic entry approaches it.
+    const entered = `${' '.repeat(MAX_ENTERED_SEED_LENGTH)}Seed-42`;
+    const normalised = normalizeEnteredSeed(entered);
+
+    expect(normalised).not.toBe('Seed-42');
+    expect(isAcceptableRunSeed(normalised)).toBe(true);
+    expect(normalised.length).toBeGreaterThan(0);
+  });
 });
 
 describe('a run started from an entered seed', () => {
@@ -5412,6 +5462,74 @@ describe('resumeRun', () => {
 
     expect(() => run.controller.resumeRun(run.engine.port)).not.toThrow();
     expect(run.controller.seed().length).toBeGreaterThan(0);
+  });
+
+  // The MINOR finding of the run-flow review. `state` is `null` for two
+  // outcomes that mean opposite things — nothing was stored, and something was
+  // stored and REFUSED — so deriving "was an envelope read" from the payload
+  // answered `false` for a refused one. src/main.ts then took the clause that
+  // exists for a save written BEFORE the upgrade and resumed the run onto that
+  // pre-upgrade board, under a fresh run identifier and a fresh seed, while
+  // logging `resumed: true`. DL-RUNCTL-21.
+  it('reports a refused envelope as read, so it is not mistaken for absent', () => {
+    const refusals: Readonly<Record<string, string>>[] = [
+      { [RUN_STATE_KEY]: '{not json at all' },
+      { [RUN_STATE_KEY]: '{"totally":"wrong"}' },
+      { [RUN_STATE_KEY]: 'null' },
+      {
+        [RUN_STATE_KEY]: JSON.stringify({
+          schemaVersion: 9999,
+          runId: 'from-the-future',
+          seed: 'unreadable',
+        }),
+      },
+    ];
+
+    for (const seeded of refusals) {
+      const run = drive({ backing: storageHolding(seeded), observe: false });
+
+      expect(run.outcome).not.toBe('absent');
+      expect(run.controller.hadStoredEnvelope()).toBe(true);
+
+      // No board was adopted, so there is nothing to resume ONTO — which is
+      // exactly the state the flow must hold Run Start for.
+      expect(run.controller.openingBoard()).toBeNull();
+
+      run.stop();
+    }
+  });
+
+  it('reports an absent envelope as unread, so a legacy save still loads', () => {
+    const run = drive({ backing: storageHolding({}), observe: false });
+
+    expect(run.outcome).toBe('absent');
+    expect(run.controller.hadStoredEnvelope()).toBe(false);
+
+    // `undefined`, not `null`: the engine falls back to its own port read of
+    // the frozen `gameState` key, which is what keeps a board written by the
+    // vanilla game loadable across the upgrade (AAP 0.4.1.3).
+    expect(run.controller.board()).toBeUndefined();
+
+    run.controller.resumeRun(run.engine.port);
+
+    expect(run.engine.setups).toEqual([undefined]);
+  });
+
+  // The other half of the same contract, at the board-load seam: a refused
+  // envelope opens a FRESH board rather than the engine's own stored one, so a
+  // legacy snapshot cannot be revived behind it.
+  it('opens a refused envelope on a fresh board, never on the stored one', () => {
+    const run = drive({
+      backing: storageHolding({ [RUN_STATE_KEY]: '{not json at all' }),
+      observe: false,
+    });
+
+    run.controller.resumeRun(run.engine.port);
+
+    expect(run.engine.setups).toEqual([null]);
+    expect(run.engine.setups).not.toContain(undefined);
+
+    run.stop();
   });
 });
 
@@ -6044,6 +6162,68 @@ describe('the reward round a cleared stage opens', () => {
     expect(run.controller.isRewardPending()).toBe(true);
     expect(run.controller.currentOffer()).toHaveLength(2);
     expect(run.controller.stageIndex()).toBe(0);
+  });
+
+  /**
+   * Emits `state:commit` carrying the terminal flags a caller chooses, which is
+   * what the two win-priority cases below turn on.
+   *
+   * @param run The composed run.
+   * @param flags The `won` and `terminated` values the commit carries.
+   */
+  const commitWith = (
+    run: Driven,
+    flags: { readonly won: boolean; readonly terminated: boolean },
+  ): void => {
+    const board = run.engine.board();
+
+    run.engine.events.emit('state:commit', {
+      turn: 1,
+      board: gridOf(board),
+      score: board.score,
+      bestScore: 0,
+      over: false,
+      won: flags.won,
+      terminated: flags.terminated,
+      degraded: false,
+      stage: run.controller.stageCommitContextProvider()(),
+      relics: run.controller.relicCommitContextProvider()(),
+    });
+  };
+
+  it('defers the payout while a terminal win stands unresolved', () => {
+    const run = drive({ offers });
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 64);
+    commitWith(run, { won: true, terminated: true });
+
+    // The 2048 win outranks the stage payout: no stage resolved, no offer
+    // drawn, no advance, so the reward cannot mask the terminal decision.
+    // DL-RUNCTL-07.
+    expect(run.engine.endStages).toEqual([]);
+    expect(run.controller.isRewardPending()).toBe(false);
+    expect(run.controller.currentOffer()).toEqual([]);
+    expect(run.controller.stageIndex()).toBe(0);
+  });
+
+  it('resolves the deferred payout once the win is continued', () => {
+    const run = drive({ offers });
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 64);
+    commitWith(run, { won: true, terminated: true });
+
+    // Keep Going clears `terminated` and commits, which is the commit that
+    // resolves the stage that was waiting.
+    commitWith(run, { won: true, terminated: false });
+
+    expect(run.engine.endStages).toEqual([true]);
+    expect(run.controller.isRewardPending()).toBe(true);
+    expect(run.controller.currentOffer().map((offer) => offer.id)).toEqual([
+      'port-charged',
+      'port-plain',
+    ]);
   });
 });
 

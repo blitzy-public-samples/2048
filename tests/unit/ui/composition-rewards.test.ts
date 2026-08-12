@@ -433,6 +433,40 @@ describe('taking an offered relic', () => {
     expect(subject.relics.ownedIds()).not.toContain(chosen);
   });
 
+  // ADDED: the refusal above is perceivable. The transaction rolls the relic
+  // back and the same three cards come back, which on its own is a pressed card
+  // that changes nothing and says nothing. DL-MAIN-37.
+  it('says why a refused press left the same three cards standing', async () => {
+    const subject = clearOpeningStage();
+
+    expect(subject.router.showReward(subject.rewards.offers())).toBe(true);
+
+    const write = vi
+      .spyOn(Storage.prototype, 'setItem')
+      .mockImplementation((): void => {
+        throw new Error('quota exceeded');
+      });
+
+    const chosen = OPENING_OFFER[0] ?? '';
+
+    expect(subject.router.selectReward(chosen, 'card')).toBe(false);
+
+    await settleAnnouncements();
+    write.mockRestore();
+
+    const said = announced();
+
+    // What happened, why, and what is still true — and the reason names the
+    // persistence state the HUD shows at the same moment.
+    expect(said).toContain('not taken');
+    expect(said).toContain('not being saved');
+    expect(said).toContain('still on offer');
+
+    // The relic really did not join, so the line is not describing a rollback
+    // that failed to happen.
+    expect(subject.relics.ownedIds()).not.toContain(chosen);
+  });
+
   it('is refused twice over, so one clear earns one relic', () => {
     const subject = clearOpeningStage();
     const id = OPENING_OFFER[0] ?? '';

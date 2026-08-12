@@ -270,7 +270,30 @@ const rewardCards = (): string[] =>
   );
 
 /** Opens the settings dialog the way a player does. */
+/**
+ * Opens the settings dialog.
+ *
+ * CHANGED: through the router rather than through `#settings-button`. The
+ * control lives in the page shell, and every state this section drives from —
+ * `won`, `reward` — marks that shell `inert`, so the control layer withholds it
+ * and a press on it publishes nothing. `openSettings` is authorized from every
+ * state, and the router is the actor that opens the dialog for every modality,
+ * so the dialog-open state under test is reached here without depending on a
+ * control that state has put out of reach. DL-CONTROL-11.
+ *
+ * The states that do NOT inert the shell still press the control itself, in
+ * `settingsFromShell` below, so the markup path stays covered.
+ */
 const openSettings = (): void => {
+  if (application === null) {
+    throw new Error('the application is not composed');
+  }
+
+  application.router.openSettings();
+};
+
+/** Opens the dialog from `#settings-button`, the shell's own control. */
+const settingsFromShell = (): void => {
   control('#settings-button').click();
 };
 
@@ -562,7 +585,9 @@ describe('the composed application behind the settings dialog', () => {
 
     expect(played).toBeGreaterThan(application.config.startTiles);
 
-    openSettings();
+    // The `stage` screen inerts nothing, so the shell's own control opens the
+    // dialog here — the markup path, exercised in the one state that offers it.
+    settingsFromShell();
 
     // Two guards refuse this press, and either alone is enough: the control
     // follows its action's `['game']` contexts so the availability layer has

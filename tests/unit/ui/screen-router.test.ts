@@ -514,6 +514,55 @@ describe('the settings dialog', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  // ADDED: the ordering the restore above depends on. The control layer
+  // withholds every control inside an inert host, and the trigger is one, so a
+  // refresh taken before the release leaves it withheld and the restore is
+  // aimed at a control that cannot take focus. DL-ROUTER-41, DL-FOCUS-08.
+  it('re-presents the control layer after the lift and before the restore', () => {
+    setup();
+
+    const trigger = document.querySelector<HTMLElement>('#settings-button');
+
+    trigger?.focus();
+
+    const region = document.querySelector('#game-main');
+    const refreshes: { inert: boolean; active: string | null }[] = [];
+
+    router = createScreenRouter({
+      document,
+      onSettingsOpen: renderCloseControl,
+    });
+
+    router.attach({
+      controls: {
+        refresh: (): void => {
+          refreshes.push({
+            inert: region?.hasAttribute('inert') ?? false,
+            active: document.activeElement?.textContent ?? null,
+          });
+        },
+      },
+    });
+
+    router.openSettings();
+
+    // The open pushed the dialog's context with the region already inert and
+    // focus already inside the dialog.
+    expect(refreshes.at(-1)).toEqual({ inert: true, active: 'Close' });
+
+    const opened = refreshes.length;
+
+    router.closeSettings();
+
+    // The FIRST refresh of the close is the one the release runs: the inertness
+    // is already lifted, and focus has not moved off the dialog's own control
+    // yet — so the trigger is re-presented before it is aimed at.
+    expect(refreshes[opened]).toEqual({ inert: false, active: 'Close' });
+
+    // Which is what makes this land rather than falling to the body.
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it('tells the trigger whether the dialog it controls is open', () => {
     setup();
 

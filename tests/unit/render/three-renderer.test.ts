@@ -19,7 +19,10 @@ import {
   EMPTY_STAGE_CONTEXT,
 } from '../../../src/engine/types';
 import { numberOnlyRendererCopy } from '../../../src/render/number-only-renderer';
-import { createThreeRenderer } from '../../../src/render/three-renderer';
+import {
+  createThreeRenderer,
+  releaseParkedRenderer,
+} from '../../../src/render/three-renderer';
 import type {
   ContextRestoreOutcome,
   ParallelBoardSurface,
@@ -34,6 +37,7 @@ import { setReducedMotionOverride } from '../../../src/render/webgl-support';
 import { createParallelBoardLayer } from '../../../src/ui/a11y/focus-manager';
 import { applyTheme } from '../../../src/theme/themes';
 import { createMockCanvas, createMockWebGLContext } from '../../fixtures/webgl';
+import type { MockWebGLContext } from '../../fixtures/webgl';
 
 afterEach(() => {
   setReducedMotionOverride(null);
@@ -873,6 +877,237 @@ describe('context loss', () => {
 
     renderer.destroy();
   });
+});
+
+/* ==========================================================================
+ * ADDED: one `WebGLRenderer` per canvas, parked across an unmount and across a
+ * whole renderer object, because an appearance switch destroys this renderer and
+ * builds another over the SAME canvas. Ten of those switches grew the live
+ * `WebGLTexture` count from 12 to 71 and the `WebGLProgram` count from 6 to 15,
+ * since each construction takes its own placeholder textures and programs from
+ * the canvas's context and `dispose()` leaves them behind. DL-THREE-06.
+ * ========================================================================== */
+
+describe('the renderer parked over a canvas', () => {
+  /** A renderer over one caller-supplied canvas, with its counts collected. */
+  const over = (
+    element: HTMLCanvasElement,
+  ): {
+    readonly renderer: ThreeRenderer;
+    readonly countOf: (name: string) => number;
+  } => {
+    const counts: { name: string; value: number }[] = [];
+    const renderer = createThreeRenderer({
+      canvas: element,
+      ownerDocument: document,
+      reporter: {
+        onDiagnostic: (): void => {},
+        onCount: (count): void => {
+          counts.push({ name: count.name, value: count.value });
+        },
+        onTiming: (): void => {},
+      },
+    });
+
+    return {
+      renderer,
+      countOf: (name): number =>
+        counts
+          .filter((entry) => entry.name === name)
+          .reduce((total, entry) => total + entry.value, 0),
+    };
+  };
+
+  it('is reused by a remount rather than rebuilt', () => {
+    const mock = createMockCanvas({ context: createMockWebGLContext().gl });
+
+    document.body.append(mock.element);
+
+    const first = over(mock.element);
+
+    expect(first.renderer.mounted).toBe(true);
+    expect(first.countOf('render.three.surface.opened')).toBe(1);
+
+    // Every `getContext` this canvas has been asked for. A construction asks;
+    // reusing a parked instance does not.
+    const acquired = mock.requests.length;
+
+    expect(acquired).toBeGreaterThan(0);
+
+    // Refused while the board is drawing: this is not a parked renderer.
+    expect(releaseParkedRenderer(mock.element)).toBe(false);
+
+    first.renderer.unmount();
+
+    expect(first.renderer.mount()).toBe(true);
+    expect(mock.requests.length).toBe(acquired);
+    expect(first.countOf('render.three.surface.reused')).toBe(1);
+    expect(first.countOf('render.three.surface.opened')).toBe(1);
+
+    // And it still draws with the instance it took back.
+    first.renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(first.renderer);
+
+    expect(first.renderer.readRenderedBoard()?.size).toBe(4);
+
+    // The case the counts were measured in: a WHOLE NEW renderer object over
+    // the same canvas, which is what an appearance switch builds.
+    first.renderer.destroy();
+
+    const second = over(mock.element);
+
+    expect(second.renderer.mounted).toBe(true);
+    expect(mock.requests.length).toBe(acquired);
+    expect(second.countOf('render.three.surface.reused')).toBe(1);
+    expect(second.countOf('render.three.surface.opened')).toBe(0);
+
+    second.renderer.destroy();
+
+    expect(releaseParkedRenderer(mock.element)).toBe(true);
+
+    mock.element.remove();
+  });
+
+  it('is rebuilt once a caller releases it', () => {
+    const mock = createMockCanvas({ context: createMockWebGLContext().gl });
+
+    document.body.append(mock.element);
+
+    const first = over(mock.element);
+    const acquired = mock.requests.length;
+
+    first.renderer.destroy();
+
+    // The composition root's disposal, and the only place the context is given
+    // back.
+    expect(releaseParkedRenderer(mock.element)).toBe(true);
+
+    // Released, so nothing is parked and a second release finds nothing.
+    expect(releaseParkedRenderer(mock.element)).toBe(false);
+
+    const second = over(mock.element);
+
+    expect(second.renderer.mounted).toBe(true);
+    expect(mock.requests.length).toBeGreaterThan(acquired);
+    expect(second.countOf('render.three.surface.opened')).toBe(1);
+    expect(second.countOf('render.three.surface.reused')).toBe(0);
+
+    second.renderer.destroy();
+    releaseParkedRenderer(mock.element);
+    mock.element.remove();
+  });
+
+  it('is released rather than parked when the context is lost', () => {
+    const mock = createMockCanvas({ context: createMockWebGLContext().gl });
+
+    document.body.append(mock.element);
+
+    const fixture = over(mock.element);
+    const acquired = mock.requests.length;
+
+    mock.emit('webglcontextlost');
+
+    expect(fixture.renderer.readStats().contextLost).toBe(true);
+
+    // A lost context takes its objects with it, so the instance holding it is
+    // released and un-parked: there is nothing left to reuse.
+    expect(fixture.countOf('render.three.surface.released')).toBe(1);
+    expect(releaseParkedRenderer(mock.element)).toBe(false);
+
+    mock.emit('webglcontextrestored');
+
+    expect(fixture.renderer.readStats().contextLost).toBe(false);
+    expect(mock.requests.length).toBeGreaterThan(acquired);
+    expect(fixture.countOf('render.three.surface.opened')).toBe(2);
+
+    fixture.renderer.destroy();
+    releaseParkedRenderer(mock.element);
+    mock.element.remove();
+  });
+
+  it('is held per canvas, so a second canvas takes its own', () => {
+    const one = createMockCanvas({ context: createMockWebGLContext().gl });
+    const two = createMockCanvas({ context: createMockWebGLContext().gl });
+
+    document.body.append(one.element, two.element);
+
+    const first = over(one.element);
+    const second = over(two.element);
+
+    expect(first.countOf('render.three.surface.opened')).toBe(1);
+    expect(second.countOf('render.three.surface.opened')).toBe(1);
+    expect(second.countOf('render.three.surface.reused')).toBe(0);
+
+    // A renderer still mounted is not parked, so neither can be released yet.
+    expect(releaseParkedRenderer(one.element)).toBe(false);
+    expect(releaseParkedRenderer(two.element)).toBe(false);
+
+    first.renderer.destroy();
+
+    // Releasing one canvas leaves the other's renderer alone.
+    expect(releaseParkedRenderer(one.element)).toBe(true);
+    expect(releaseParkedRenderer(one.element)).toBe(false);
+
+    second.renderer.destroy();
+
+    expect(releaseParkedRenderer(two.element)).toBe(true);
+
+    one.element.remove();
+    two.element.remove();
+  });
+
+  it('answers falsely for anything that is not a canvas', () => {
+    expect(releaseParkedRenderer(null)).toBe(false);
+    expect(releaseParkedRenderer(undefined)).toBe(false);
+    expect(releaseParkedRenderer(document.createElement('div'))).toBe(false);
+  });
+
+  /**
+   * The two flags `DL-THREE-05` resets, and the value it resets them to.
+   *
+   * Three.js writes both through a CACHED `pixelStorei`, so a write made behind
+   * the renderer's back leaves its cache claiming a value the context no longer
+   * carries — which mirrors every numeral texture uploaded after a re-mount.
+   * DL-THREE-07.
+   */
+  const UNPACK_FLAGS = ['UNPACK_FLIP_Y_WEBGL', 'UNPACK_PREMULTIPLY_ALPHA_WEBGL'];
+
+  /** Every unpack write this context took after `from`. */
+  const unpackWritesAfter = (
+    context: MockWebGLContext,
+    from: number,
+  ): readonly { readonly parameter: string; readonly value: unknown }[] =>
+    context.pixelStore
+      .slice(from)
+      .filter((write) => UNPACK_FLAGS.includes(write.parameter));
+
+  it('writes no pixel-store state when it parks', () => {
+    const context = createMockWebGLContext();
+    const mock = createMockCanvas({ context: context.gl });
+
+    document.body.append(mock.element);
+
+    const fixture = over(mock.element);
+
+    fixture.renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(fixture.renderer);
+
+    const wroteBefore = context.pixelStore.length;
+
+    fixture.renderer.unmount();
+
+    // The park hands the context to nobody but the instance that wrote it, and
+    // that instance's own cache is the record of what it wrote. What a genuine
+    // release writes instead is pinned by the unpack-state suite below.
+    expect(unpackWritesAfter(context, wroteBefore)).toEqual([]);
+
+    expect(fixture.renderer.mount()).toBe(true);
+
+    fixture.renderer.destroy();
+    releaseParkedRenderer(mock.element);
+    mock.element.remove();
+  });
+
 });
 
 /** A controllable stand-in for the breakpoint's `MediaQueryList`. */
@@ -1716,21 +1951,27 @@ describe('the pixel-store unpack state is left as it was found', () => {
     'UNPACK_PREMULTIPLY_ALPHA_WEBGL',
   ] as const;
 
-  it('resets both forbidden flags when the renderer is destroyed', () => {
+  it('resets both forbidden flags when the context is given back', () => {
     const context = recordingContext();
     const fixture = harness({ context: context.gl });
 
     expect(fixture.renderer.mount()).toBe(true);
 
-    const beforeTeardown = context.writes.length;
-
+    // CHANGED: measured across the RELEASE, where this measured across
+    // `destroy()`. A destroy parks the renderer for the next mount over the
+    // same canvas and disposes nothing, so it writes no pixel-store state; the
+    // parked-renderer suite above pins that silence. DL-THREE-07.
     fixture.renderer.destroy();
+
+    const beforeRelease = context.writes.length;
+
+    expect(releaseParkedRenderer(fixture.canvasElement)).toBe(true);
 
     // Every numeral is a `CanvasTexture`, whose `flipY` is true, so this
     // renderer left `UNPACK_FLIP_Y_WEBGL` set on a context that outlives it —
     // and the next renderer built on the same canvas begins with the two
     // placeholder 3D uploads for which both flips are forbidden. DL-THREE-05.
-    const reset = context.writes.slice(beforeTeardown);
+    const reset = context.writes.slice(beforeRelease);
 
     for (const flag of FORBIDDEN_FOR_3D) {
       expect(reset).toContainEqual({ parameter: flag, value: false });
@@ -1763,12 +2004,13 @@ describe('the pixel-store unpack state is left as it was found', () => {
     const fixture = harness({ context: context.gl });
 
     expect(fixture.renderer.mount()).toBe(true);
-
-    const beforeTeardown = context.writes.length;
-
     fixture.renderer.destroy();
 
-    const reset = context.writes.slice(beforeTeardown);
+    const beforeRelease = context.writes.length;
+
+    expect(releaseParkedRenderer(fixture.canvasElement)).toBe(true);
+
+    const reset = context.writes.slice(beforeRelease);
     const flips = reset.filter(
       (write) => write.parameter === 'UNPACK_FLIP_Y_WEBGL',
     );
@@ -1783,12 +2025,13 @@ describe('the pixel-store unpack state is left as it was found', () => {
     const fixture = harness({ context: context.gl });
 
     expect(fixture.renderer.mount()).toBe(true);
-
-    const beforeTeardown = context.writes.length;
-
     fixture.renderer.destroy();
 
-    const reset = context.writes.slice(beforeTeardown);
+    const beforeRelease = context.writes.length;
+
+    expect(releaseParkedRenderer(fixture.canvasElement)).toBe(true);
+
+    const reset = context.writes.slice(beforeRelease);
 
     // The specification's initial value for both is false, and restoring means
     // exactly that — anything else would trade one surviving flag for another.
@@ -1806,8 +2049,16 @@ describe('the pixel-store unpack state is left as it was found', () => {
     const fixture = harness({ context: mock.gl });
 
     expect(fixture.renderer.mount()).toBe(true);
+
+    // Both paths that reset: the context-loss release inside the renderer, and
+    // the module-level release the composition root calls. DL-THREE-07.
+    expect(() => {
+      fixture.emit('webglcontextlost');
+    }).not.toThrow();
+
     expect(() => {
       fixture.renderer.destroy();
+      releaseParkedRenderer(fixture.canvasElement);
     }).not.toThrow();
   });
 });

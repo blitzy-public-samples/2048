@@ -40,7 +40,8 @@
  *   TR-FOCUS-07  target-only row               `ScreenName`, `SCREEN_NAMES` and
  *                                              `isScreenName`
  *
- * Decisions: DL-FOCUS-01, DL-FOCUS-02, DL-FOCUS-03 (docs/DECISION_LOG.md).
+ * Decisions: DL-FOCUS-01, DL-FOCUS-02, DL-FOCUS-03, DL-FOCUS-07
+ * (docs/DECISION_LOG.md).
  */
 
 import {
@@ -112,6 +113,13 @@ const METRIC_RESTORE_FAILED = 'ui.focus.trap.restore_failed';
 
 /** Counter raised where a trap could not engage on a missing container. */
 const METRIC_TRAP_NO_CONTAINER = 'ui.focus.trap.no_container';
+
+/**
+ * ADDED: counter raised once per press that left focus outside the trapped
+ * container and was pulled back — a press on the backdrop, or on any part of a
+ * modal surface that takes no focus of its own. DL-FOCUS-07.
+ */
+const METRIC_TRAP_RECLAIMED = 'ui.focus.trap.reclaimed';
 
 /** Counter raised where the board host could not be resolved. */
 const METRIC_BOARD_NO_HOST = 'ui.a11yBoard.host.missing';
@@ -1130,6 +1138,18 @@ export interface FocusTrapReleaseOptions {
    * nothing wrong.
    */
   readonly restoreFocus?: boolean;
+
+  /**
+   * Invoked once during the release, AFTER the inertness this trap applied has
+   * been lifted and BEFORE focus is restored.
+   *
+   * ADDED for the caller that owns whether the restore target is PRESENTED: a
+   * trigger inside the background this trap made inert cannot be re-presented
+   * until the lift has happened, and has to be re-presented before the restore
+   * is attempted rather than after it has already failed. A throwing callback
+   * is reported and the release completes. DL-FOCUS-08.
+   */
+  readonly beforeRestore?: () => void;
 }
 
 /** What the enclosing manager supplies to a trap it owns. */
@@ -1415,6 +1435,67 @@ function engageTrap(
   };
 
   /**
+   * ADDED: pulls focus back after a press that left it outside the container.
+   *
+   * A press on the backdrop — or on any part of a modal surface that takes no
+   * focus of its own — moves the active element to the document body, and the
+   * body is not a focus TARGET, so `onFocusIn` below never sees it: the
+   * handler that guards this trap reacts to focus ARRIVING somewhere, and
+   * nothing arrives. This reads the active element after the press instead.
+   *
+   * Bound in the BUBBLE phase, so it runs after the handlers the press is for:
+   * a press on a control that transitions the screen releases this trap first,
+   * and the release makes this a no-op rather than a fight over focus. And it
+   * is the press, not the pointer down, that is listened for, so text
+   * selection inside the surface — the copyable seed of the run summary — is
+   * untouched. DL-FOCUS-07.
+   *
+   * @param event The `click` the document received.
+   */
+  const onClick = (event: Event): void => {
+    if (released || !host.isTopmost()) {
+      return;
+    }
+
+    const active: unknown = doc === null ? null : doc.activeElement;
+
+    // Focus is still inside: the press placed it, or never moved it.
+    if (
+      active !== null &&
+      isElementLike(active) &&
+      heldByContainer(active)
+    ) {
+      return;
+    }
+
+    const focusables = readFocusables();
+
+    if (focusables.length === 0) {
+      return;
+    }
+
+    // The marker a screen module writes, then the first focusable element —
+    // the same order the trap engaged on.
+    const marked: unknown =
+      typeof container.querySelector === 'function'
+        ? container.querySelector(FOCUS_INITIAL_SELECTOR)
+        : null;
+
+    const preferred: FocusableElement | null = isFocusableElement(marked)
+      ? marked
+      : (focusables[0] ?? null);
+
+    if (preferred === null || !focusAt(preferred)) {
+      return;
+    }
+
+    reporter.count(METRIC_TRAP_RECLAIMED, {
+      ...fields,
+      target: describeElement(event.target),
+    });
+  };
+
+  /**
    * Pulls focus back when it lands outside the container. Applied only while
    * this trap is the top of the stack, so a nested dialog is not fought.
    */
@@ -1441,6 +1522,9 @@ function engageTrap(
   if (doc !== null) {
     doc.addEventListener('keydown', onKeyDown, true);
     doc.addEventListener('focusin', onFocusIn, true);
+
+    // ADDED: in the bubble phase, unlike the two above. DL-FOCUS-07.
+    doc.addEventListener('click', onClick);
   } else {
     reporter.log('warn', 'focus trap has no document to listen on', fields);
   }
@@ -1514,9 +1598,21 @@ function engageTrap(
     if (doc !== null) {
       doc.removeEventListener('keydown', onKeyDown, true);
       doc.removeEventListener('focusin', onFocusIn, true);
+      doc.removeEventListener('click', onClick);
     }
 
     liftInertBackground(inerted, reporter, fields);
+
+    // Between the lift above and the restore below, which is the only window in
+    // which a caller can re-present a restore target that its own presentation
+    // layer withholds while the background is inert. DL-FOCUS-08.
+    if (releaseOptions.beforeRestore !== undefined) {
+      try {
+        releaseOptions.beforeRestore();
+      } catch (error) {
+        reporter.error('focus trap release callback threw', error, fields);
+      }
+    }
 
     // `restoreFocus: false` is the caller declaring it places focus itself.
     // The restore is skipped outright rather than attempted and forgiven, so
