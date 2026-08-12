@@ -269,8 +269,18 @@ export const METRIC_NAMES = Object.freeze({
    * tile from one that did not; what distinguishes them is the POSITION it
    * carries, which `spawns_total` counts and which a suppressed attempt omits.
    *
-   * Always at least `spawns_total`, and exactly `spawns_total` plus
-   * `spawn_suppressed_total`.
+   * THE RELATION BETWEEN THE THREE FAMILIES. This counter minus
+   * `spawn_suppressed_total` is the number of attempts that placed the tile the
+   * engine was resolving, so it is at most `spawns_total` and never above it:
+   * `spawns_total` counts every `tile:spawn` emission carrying a position, and
+   * ONE attempt can place SEVERAL tiles. An `onSpawn` handler that returns an
+   * `insertTile` effect, or that raises the payload's `count`, adds a further
+   * emission apiece — src/engine/engine.ts emits the base spawn, then one per
+   * accepted effect, then one per extra tile of a raised count. So the identity
+   * `attempts = spawns + suppressed` holds in the base game and in every run
+   * holding no spawn-multiplying relic, and `spawns_total` rises above
+   * `attempts - suppressed` by exactly the number of extra tiles such a relic
+   * placed. DL-METRIC-10.
    */
   spawnAttemptsTotal: `${METRIC_PREFIX}spawn_attempts_total`,
 

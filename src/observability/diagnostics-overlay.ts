@@ -2615,6 +2615,19 @@ export function createDiagnosticsOverlay(
   });
 
   /**
+   * ADDED: this panel's word for a three-state status, inside a sentence.
+   *
+   * Read from `STATUS_PRESENTATION` so the status COLUMN and any readiness
+   * detail that quotes a status carry ONE vocabulary, lowercased because a
+   * sentence is not a column heading. DL-DIAG-21.
+   *
+   * @param status Status to word.
+   * @returns `healthy`, `unhealthy` or `not-applicable`.
+   */
+  const statusWord = (status: HealthStatus): string =>
+    STATUS_PRESENTATION[status].label.toLowerCase();
+
+  /**
    * Builds the run rows.
    *
    * @param taken Snapshot the render describes.
@@ -2665,7 +2678,7 @@ export function createDiagnosticsOverlay(
       [
         'ready',
         String(readiness.ready),
-        proseCell(`roll-up ${readiness.healthStatus}`),
+        proseCell(`roll-up ${statusWord(readiness.healthStatus)}`),
       ],
       [
         'renderer',
@@ -2681,7 +2694,7 @@ export function createDiagnosticsOverlay(
       [
         'may mount webgl',
         String(readiness.mayMountWebGLRenderer),
-        proseCell(`webgl check ${readiness.webglStatus}`),
+        proseCell(`webgl check ${statusWord(readiness.webglStatus)}`),
       ],
       [
         'number-only fallback',
@@ -2693,7 +2706,7 @@ export function createDiagnosticsOverlay(
         readiness.storage,
         proseCell(
           `strategy ${readiness.storageStrategy}, ` +
-            `check ${readiness.storageStatus}`,
+            `check ${statusWord(readiness.storageStatus)}`,
         ),
       ],
     );

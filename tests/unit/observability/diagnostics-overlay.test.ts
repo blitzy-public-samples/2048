@@ -1424,6 +1424,49 @@ describe('the health panel', () => {
     expect(text).toContain('strategy local');
   });
 
+  it('words every status in the panel vocabulary, in the readiness details too',
+    () => {
+      const built = createDiagnosticsOverlay({
+        metrics: createMetricsRegistry(),
+        document,
+        health: fabricatedSurface(),
+      });
+
+      overlay = built;
+      built.open();
+
+      const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
+      const heading = [
+        ...(host?.querySelectorAll<HTMLElement>('.diagnostics-heading') ?? []),
+      ].find((node) => node.textContent === 'Health');
+      const table = heading?.nextElementSibling;
+      const panelText = (table?.textContent ?? '').replace(/\s+/gu, ' ');
+
+      // The panel the assertion reads is the Health one, resolved the way a
+      // reader following docs/OBSERVABILITY.md §7.3 resolves it.
+      expect(table?.className).toContain('diagnostics-table');
+      expect(panelText).toContain('overall');
+
+      // The documented claim, held: the API's own words reach no cell of this
+      // panel, the readiness details included. DL-DIAG-21.
+      expect(panelText).not.toContain('pass');
+      expect(panelText).not.toContain('fail');
+
+      // Each translated sentence, so a silent revocation of the translation
+      // fails here rather than only in the negative assertions above. The
+      // fabricated readiness carries a failing roll-up, a failing webgl check
+      // and a passing storage check, so both words are exercised.
+      const prose = [
+        ...(host?.querySelectorAll<HTMLTableCellElement>(
+          'td.diagnostics-prose',
+        ) ?? []),
+      ].map((cell) => cell.textContent);
+
+      expect(prose).toContain('roll-up unhealthy');
+      expect(prose).toContain('webgl check unhealthy');
+      expect(prose).toContain('strategy local, check healthy');
+    });
+
   it('renders not-applicable distinctly from a failure', () => {
     const built = createDiagnosticsOverlay({
       metrics: createMetricsRegistry(),

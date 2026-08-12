@@ -146,6 +146,14 @@
         /* `fieldWidth` / `$field-width`, style/_tokens.scss. */
         --field-width: 500px;
 
+        /*
+          `mobileFieldWidth` / `$mobile-field-width`, style/_tokens.scss — the
+          length style/main.scss L814-816 rebinds `$field-width` to inside its
+          own `smaller($mobile-threshold)` block, mirrored here so this document
+          rescales on the same token rather than on a literal. DL-DIAG-20.
+        */
+        --mobile-field-width: 280px;
+
         /* `mobileThreshold`: `fieldWidth + 20`. */
         --mobile-threshold: 520px;
 
@@ -318,9 +326,18 @@
 
       /* --- Ingestion. ----------------------------------------------------- */
 
+      /*
+        The track floor is `min(--field-width, 100%)` rather than the token
+        alone: an `auto-fit` track cannot shrink below a fixed minimum, so the
+        bare token floored this grid at 500px and every viewport narrower than
+        that plus the page inset scrolled sideways. DL-DIAG-20.
+      */
       .ingest {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(var(--field-width), 1fr));
+        grid-template-columns: repeat(
+          auto-fit,
+          minmax(min(var(--field-width), 100%), 1fr)
+        );
         gap: var(--grid-spacing);
         margin-block-end: var(--grid-spacing);
       }
@@ -470,9 +487,13 @@
         text-transform: uppercase;
       }
 
+      /* The same guarded track floor as `.ingest` above. DL-DIAG-20. */
       .panel-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(var(--field-width), 1fr));
+        grid-template-columns: repeat(
+          auto-fit,
+          minmax(min(var(--field-width), 100%), 1fr)
+        );
         gap: var(--grid-spacing);
       }
 
@@ -776,6 +797,17 @@
         html {
           font-size: var(--font-size-base-mobile);
         }
+
+        /*
+          The design system's own mobile rescale, restated: style/main.scss
+          L814-816 rebinds `$field-width` to `$mobile-field-width` inside this
+          same breakpoint, and every length here that reads `--field-width` —
+          the two grid track floors, the layout measure and the readout and
+          provenance minimums — rescales with it. DL-DIAG-20.
+        */
+        :root {
+          --field-width: var(--mobile-field-width);
+        }
       }
 
       /* Motion is confined to the drop-zone feedback, and is dropped here. */
@@ -870,7 +902,11 @@
               <code>game2048-metrics.prom</code>, or
               <strong>Export snapshot</strong> for
               <code>game2048-diagnostics.json</code>, which also carries the
-              health, readiness and hook sections.
+              health, readiness and hook sections. The third form this page
+              reads has no control of its own: call
+              <code>__blitzy2048.metrics.download("game2048-metrics.json")</code>
+              from the console — any <code>.json</code> filename writes the
+              metrics snapshot rather than the Prometheus text.
             </li>
             <li>Load that file above, by any of the three routes.</li>
           </ol>
@@ -1926,7 +1962,20 @@
         return null;
       }
 
-      /** Every value of a family summed, whatever its labels. */
+      /**
+       * Every value of a family summed, whatever its labels.
+       *
+       * A non-finite sample is SUMMED rather than skipped, so `NaN` or an
+       * infinity propagates into the total exactly as `scalarOf` above hands one
+       * through untouched. Skipping it made the two accessors disagree about the
+       * same file: one tile could read `Infinity` while the three beside it read
+       * `0`. No export this application can produce reaches either path —
+       * `Counter.inc`, `Gauge.set` and `Histogram.observe` of
+       * src/observability/metrics.ts ignore and report a non-finite value — so
+       * this governs a hand-edited file only, and on well-formed input the two
+       * accessors agree because every sample is finite. `readFinite` remains the
+       * gate everywhere a value is FORMATTED. DL-DIAG-22.
+       */
       function totalOf(model, name) {
         var family = familyOf(model, name);
 
@@ -1937,9 +1986,7 @@
         var total = 0;
 
         family.samples.forEach(function (sample) {
-          if (readFinite(sample.value) !== null) {
-            total += sample.value;
-          }
+          total += typeof sample.value === "number" ? sample.value : 0;
         });
 
         return total;
@@ -1966,8 +2013,12 @@
               key = "(unlabelled)";
             }
 
+            // Summed as written, the way `totalOf` sums an unlabelled family:
+            // `sample.value || 0` turned a stated `NaN` into `0`, which is the
+            // one reading this page never invents. DL-DIAG-22.
             found[key] =
-              (found[key] === undefined ? 0 : found[key]) + (sample.value || 0);
+              (found[key] === undefined ? 0 : found[key]) +
+              (typeof sample.value === "number" ? sample.value : 0);
           });
         }
 
@@ -2592,8 +2643,12 @@
           panel(
             "spawn-outcomes",
             "Spawn attempts, insertions and suppressions",
-            "Attempts equal insertions plus suppressions: a suppressed attempt " +
-              "is one a full board or an onSpawn handler left without a cell.",
+            "Attempts counts engine spawn entries and suppressions counts the " +
+              "attempts a full board or an onSpawn handler left without a " +
+              "cell, so attempts minus suppressions is what the engine placed " +
+              "itself. Insertions counts tiles actually placed, which a " +
+              "spawn-multiplying relic raises above that difference by every " +
+              "extra tile it added.",
             table(
               "The three spawn counters, by family name.",
               [{ label: "Series" }, { label: "Count", numeral: true }],

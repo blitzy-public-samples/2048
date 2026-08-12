@@ -816,8 +816,14 @@ The panels, in render order:
 2. **Health** — twelve rows: the six checks each with its status and `detail`, an
    `overall` roll-up row, and five readiness rows, read from the health surface's
    accessors. **The panel's status vocabulary is `healthy` and `unhealthy` where
-   the API's `HealthStatus` says `pass` and `fail`** — searching the panel for
-   "pass" finds nothing. The readiness rows are relabelled too: `may mount webgl`
+   the API's `HealthStatus` says `pass` and `fail`**, and it holds in every
+   cell rather than in the status column alone: that column, the `overall`
+   sentence and the three readiness details that quote a status all read the
+   same words through one `statusWord` helper, so searching the panel for
+   "pass" or "fail" finds nothing (`DL-DIAG-21`). The static dashboard is the
+   deliberate exception: its Readiness panel echoes the exported
+   `healthStatus` verbatim, because its contract is fidelity to the file it
+   loaded. The readiness rows are relabelled too: `may mount webgl`
    for `mayMountWebGLRenderer` and `number-only fallback` for
    `requiresNumberOnlyFallback`. `storage` therefore appears twice, once as a check
    and once as the readiness verdict.
@@ -1033,8 +1039,42 @@ The application's records are the JSON ones after those two.
 **Expected observation.** A `LogRecord` object carrying `level`, `message`, an ISO
 8601 `timestamp`, a monotonic `elapsedMs`, a `subsystem` tag, and a
 `correlationId` of the form `run-` followed by 22 characters, 26 in all — for
-example `run-0extf4n1dj2qz3-11jtujc`. Every record in the buffer carries the same
-one, and it is **byte-identical before and after a mid-run reload**.
+example `run-0extf4n1dj2qz3-11jtujc`. That identifier is **byte-identical before
+and after a mid-run reload**.
+
+**Two identifiers coexist in the buffer, and that is correct.** The ring buffer is
+not cleared when the scope rotates ([section 10.0](#100-start-here-once):
+starting a run rotates the identifier), so the records form **contiguous blocks,
+one per run instance** — the boot-scope records the run-start screen wrote, then
+the records written since **Begin run**, in emission order with no interleaving.
+So after one **Begin run**:
+
+```js
+Array.from(new Set(__blitzy2048.logger.recent(200).map(r => r.correlationId)))
+```
+
+returns **two** entries, the last of which is `__blitzy2048.logger.correlationId`,
+and every record written after the run started carries that one. The block sizes
+depend on what the session did, so count the blocks rather than the records:
+
+```js
+__blitzy2048.logger.recent(200).reduce((blocks, record) => {
+  const open = blocks[blocks.length - 1];
+
+  if (open !== undefined && open.id === record.correlationId) {
+    open.count += 1;
+
+    return blocks;
+  }
+
+  return [...blocks, { id: record.correlationId, count: 1 }];
+}, []);
+```
+
+Step 3 above reads `recent(5)`, which lands inside the newest block and therefore
+shows one identifier — the reading to take when you want *the run's* records
+(`DL-DOC-08`). Starting a run writes about nine records of its own before you
+press a key, so that window is inside the block from the moment the board opens.
 
 ### 10.2 Tracing
 
@@ -1297,10 +1337,12 @@ registry, the tracer, the health surface and the diagnostics surface are actuall
 wired to it, rather than asserting each module against a double.
 
 **Expected observation.** `npm run typecheck` exits `0` with no diagnostics, and
-`npm test` reports every file passing. Measured on this tree: 114 test files and
-6256 tests passed. Running the DOM-free project alone is also the demonstration of
-`not-applicable` described at the end of
-[section 10.4](#the-negative-tests).
+`npm test` reports **every file passing** — that is the load-bearing half, because
+the absolute total moves with every test added. Measured on this tree at the time
+of writing: 114 test files and 6268 tests passed, in about 45 s. Re-take the
+reading with `npm test` rather than trusting the figure (`DL-DOC-08`). Running the
+DOM-free project alone is also the demonstration of `not-applicable` described at
+the end of [section 10.4](#the-negative-tests).
 
 ### 10.7 Troubleshooting
 

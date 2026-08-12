@@ -392,7 +392,11 @@ describe('the spawn families', () => {
     expect(counts.inserted).toBe(0);
   });
 
-  it('keeps attempts equal to insertions plus suppressions', () => {
+  // The identity holds only while nothing multiplies a spawn: one attempt can
+  // place several tiles, so the case below feeds exactly one insertion per
+  // attempt, which is the base game. DL-METRIC-10.
+  it('keeps attempts equal to insertions plus suppressions where each ' +
+    'attempt places at most one tile', () => {
     const registry = createMetricsRegistry();
     const outcomes: readonly boolean[] = [
       true,
@@ -1018,7 +1022,7 @@ describe('the engine boundary agrees with the spawn families', () => {
       expect(counts.suppressed).toBe(0);
     });
 
-  it('keeps attempts equal to insertions plus suppressions over a run',
+  it('keeps attempts equal to insertions plus suppressions over a base-game run',
     () => {
       const registry = createMetricsRegistry();
       const engine = createWiredEngine(registry);
@@ -1029,8 +1033,48 @@ describe('the engine boundary agrees with the spawn families', () => {
 
       const counts = spawnCounts(registry);
 
+      // No relic is held, so every attempt places at most the one tile the
+      // engine was resolving and the identity closes. DL-METRIC-10.
       expect(counts.attempts).toBeGreaterThan(2);
       expect((counts.inserted ?? 0) + (counts.suppressed ?? 0)).toBe(
+        counts.attempts,
+      );
+    });
+
+  it('lifts insertions above attempts where a handler multiplies the spawn',
+    () => {
+      const registry = createMetricsRegistry();
+      const engine = createWiredEngine(registry);
+      const before = spawnCounts(registry);
+
+      // The relation the three families actually carry, held as a test because
+      // both dashboard artifacts and the contract comment on
+      // `spawnAttemptsTotal` once asserted the unconditional identity — which
+      // the rendered numbers of any run holding a spawn-multiplying relic
+      // contradict. DL-METRIC-10.
+      engine.hooks.register({
+        id: 'raises-the-spawn-count',
+        hooks: {
+          onSpawn: (payload): SpawnPayload => ({ ...payload, count: 2 }),
+        },
+      });
+
+      expect(engine.move(DIRECTION_LEFT)).toBe(true);
+
+      const counts = spawnCounts(registry);
+
+      // ONE attempt, TWO tiles placed: the base tile plus the extra the raised
+      // count asked for, each emitted as its own positioned `tile:spawn`.
+      expect(counts.attempts).toBe((before.attempts ?? 0) + 1);
+      expect(counts.suppressed).toBe(before.suppressed);
+      expect(counts.inserted).toBe((before.inserted ?? 0) + 2);
+
+      // So insertions exceed the attempts that produced them, and the identity
+      // `attempts = insertions + suppressions` does NOT hold here.
+      expect(counts.inserted as number).toBeGreaterThan(
+        counts.attempts as number,
+      );
+      expect((counts.inserted ?? 0) + (counts.suppressed ?? 0)).not.toBe(
         counts.attempts,
       );
     });
