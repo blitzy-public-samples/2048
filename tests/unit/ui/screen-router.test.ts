@@ -16,6 +16,7 @@ import {
   mountOnScreenControls,
 } from '../../../src/input/on-screen-controls';
 import { DEFAULT_KEY_BINDINGS } from '../../../src/input/keymap';
+import { createLiveRegionAnnouncer } from '../../../src/ui/a11y/live-region';
 import { createScreenRouter } from '../../../src/ui/screen-router';
 import type {
   RewardCard,
@@ -563,6 +564,43 @@ describe('the settings dialog', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  // A performance review found the close refreshing the control layer twice: once
+  // from inside the trap release, where it must be, and once more from
+  // `settle()`. DL-ROUTER-45.
+  it('refreshes the control layer once per settings close', () => {
+    setup();
+
+    const trigger = document.querySelector<HTMLElement>('#settings-button');
+
+    trigger?.focus();
+
+    let refreshes = 0;
+
+    router = createScreenRouter({
+      document,
+      onSettingsOpen: renderCloseControl,
+    });
+
+    router.attach({
+      controls: {
+        refresh: (): void => {
+          refreshes += 1;
+        },
+      },
+    });
+
+    router.openSettings();
+
+    const opened = refreshes;
+
+    router.closeSettings();
+
+    expect(refreshes - opened).toBe(1);
+
+    // And the screen change is still reported, which is `settle()`'s other half.
+    expect(router.current()).not.toBe('settings');
+  });
+
   it('tells the trigger whether the dialog it controls is open', () => {
     setup();
 
@@ -626,6 +664,106 @@ describe('the settings dialog', () => {
     expect(router.isSettingsOpen()).toBe(false);
   });
 
+  it('closes a standing dialog on destroy, past its own authorization', () => {
+    // `destroy()` raises `tearingDown` and THEN closed the dialog, and
+    // `authorizes()` refuses every action while that flag is up — so the close
+    // did nothing: the dialog stayed visible, its focus trap was never
+    // released, the board it had made inert stayed inert, and
+    // `onSettingsClose` never fired. A destroyed router left the page trapped
+    // in a dialog belonging to a router that no longer existed. DL-ROUTER-43.
+    setup();
+
+    const closes: Element[] = [];
+
+    router = createScreenRouter({
+      document,
+      onSettingsOpen: (host): void => {
+        for (const label of ['First', 'Last']) {
+          const control = document.createElement('button');
+
+          control.type = 'button';
+          control.textContent = label;
+          host.appendChild(control);
+        }
+      },
+      onSettingsClose: (host): void => {
+        closes.push(host);
+      },
+    });
+
+    expect(router.openSettings()).toBe(true);
+    expect(router.isSettingsOpen()).toBe(true);
+
+    const region = document.querySelector('#game-main');
+    const dialog = panel();
+    const trigger = document.querySelector('#settings-button');
+
+    expect(region?.hasAttribute('inert')).toBe(true);
+    expect(dialog.hidden).toBe(false);
+    expect(trigger?.getAttribute('aria-expanded')).toBe('true');
+
+    router.destroy();
+
+    // THE DIALOG IS DOWN and the router no longer believes it is open.
+    expect(router.isSettingsOpen()).toBe(false);
+    expect(dialog.hidden).toBe(true);
+    expect(trigger?.getAttribute('aria-expanded')).toBe('false');
+
+    // THE TRAP IS RELEASED, so the rest of the page is reachable again.
+    expect(region?.hasAttribute('inert')).toBe(false);
+
+    // AND THE CLOSE WAS REPORTED, so a host that renders into the dialog is
+    // told to tear its own contents down.
+    expect(closes).toHaveLength(1);
+    expect(closes[0]).toBe(dialog);
+  });
+
+  it('reports exactly one close for one dialog, whichever path closes it',
+    () => {
+      // The teardown close is not a second close: a dialog closed normally and
+      // then destroyed reports once, not twice.
+      setup();
+
+      const closes: Element[] = [];
+
+      router = createScreenRouter({
+        document,
+        onSettingsOpen: renderCloseControl,
+        onSettingsClose: (host): void => {
+          closes.push(host);
+        },
+      });
+
+      expect(router.openSettings()).toBe(true);
+      expect(router.closeSettings()).toBe(true);
+      expect(closes).toHaveLength(1);
+
+      router.destroy();
+
+      expect(closes).toHaveLength(1);
+    });
+
+  it('destroys cleanly with no dialog standing', () => {
+    setup();
+
+    const closes: Element[] = [];
+
+    router = createScreenRouter({
+      document,
+      onSettingsOpen: renderCloseControl,
+      onSettingsClose: (host): void => {
+        closes.push(host);
+      },
+    });
+
+    expect(router.isSettingsOpen()).toBe(false);
+    expect(() => {
+      router?.destroy();
+    }).not.toThrow();
+    expect(closes).toEqual([]);
+    expect(panel().hidden).toBe(true);
+  });
+
   it('is idempotent across repeated open, close and destroy', () => {
     setup();
     router = createScreenRouter({
@@ -651,6 +789,307 @@ describe('the settings dialog', () => {
 
     expect(router.openSettings()).toBe(false);
   });
+});
+
+/* ==========================================================================
+ * AN ATTACHMENT GROUP THAT CANNOT BE COMPLETED
+ *
+ * Both groups the router registers — the input surface's four actions and the
+ * engine emitter's seven events — were built as array literals, so a refusal
+ * from a later `on()` discarded the half-built array and left every
+ * registration before it attached to the source with no reference to it
+ * anywhere: the router went on acting on a surface it had reported it was not
+ * attached to, unreachable by `destroy()` or by the handle. DL-ROUTER-44.
+ * ========================================================================== */
+
+/** The four input actions `attach()` registers, in order. */
+const ATTACHED_INPUT_ACTIONS: readonly string[] = Object.freeze([
+  'openSettings',
+  'closeSettings',
+  'cancel',
+  'selectReward',
+]);
+
+/** The seven engine events `subscribe()` registers, in order. */
+const SUBSCRIBED_ENGINE_EVENTS: readonly string[] = Object.freeze([
+  'state:commit',
+  'stage:start',
+  'move:after',
+  'stage:end',
+  'move:before',
+  'tile:merge',
+  'tile:spawn',
+]);
+
+/**
+ * An input surface whose `on` refuses the `ordinal`-th registration.
+ *
+ * @param ordinal Zero-based index of the registration that raises.
+ * @returns The surface, and a reader over what stays attached.
+ */
+const refusingInput = (
+  ordinal: number,
+): {
+  readonly surface: Parameters<ScreenRouter['attach']>[0]['input'];
+  readonly attached: () => readonly string[];
+  readonly admit: () => void;
+} => {
+  const held: string[] = [];
+  const contexts: string[] = [];
+  let refuse = true;
+  let seen = 0;
+
+  const surface = {
+    on: (name: string, listener: () => void): (() => void) => {
+      const index = seen;
+
+      seen += 1;
+
+      if (refuse && index === ordinal) {
+        throw new Error(`the surface refused ${name}`);
+      }
+
+      void listener;
+      held.push(name);
+
+      return (): void => {
+        const at = held.indexOf(name);
+
+        if (at >= 0) {
+          held.splice(at, 1);
+        }
+      };
+    },
+    setContext: (context: string): void => {
+      contexts.push(context);
+    },
+  };
+
+  return {
+    surface: surface as unknown as Parameters<
+      ScreenRouter['attach']
+    >[0]['input'],
+    attached: (): readonly string[] => [...held],
+    admit: (): void => {
+      refuse = false;
+      seen = 0;
+    },
+  };
+};
+
+/**
+ * An engine emitter whose `on` refuses the `ordinal`-th registration.
+ *
+ * @param ordinal Zero-based index of the registration that raises.
+ * @returns The emitter, and a reader over what stays attached.
+ */
+const refusingEngine = (
+  ordinal: number,
+): {
+  readonly events: ReturnType<typeof createEngineEvents>;
+  readonly attached: () => readonly string[];
+  readonly admit: () => void;
+} => {
+  const inner = createEngineEvents();
+  const held: string[] = [];
+  let refuse = true;
+  let seen = 0;
+
+  const events = {
+    ...inner,
+    on: ((name: string, listener: never): (() => void) => {
+      const index = seen;
+
+      seen += 1;
+
+      if (refuse && index === ordinal) {
+        throw new Error(`the emitter refused ${name}`);
+      }
+
+      const release = (
+        inner.on as unknown as (
+          eventName: string,
+          handler: never,
+        ) => () => void
+      )(name, listener);
+
+      held.push(name);
+
+      return (): void => {
+        const at = held.indexOf(name);
+
+        if (at >= 0) {
+          held.splice(at, 1);
+        }
+
+        release();
+      };
+    }) as ReturnType<typeof createEngineEvents>['on'],
+  } as ReturnType<typeof createEngineEvents>;
+
+  return {
+    events,
+    attached: (): readonly string[] => [...held],
+    admit: (): void => {
+      refuse = false;
+      seen = 0;
+    },
+  };
+};
+
+describe('an attachment group that cannot be completed', () => {
+  for (
+    let ordinal = 0;
+    ordinal < ATTACHED_INPUT_ACTIONS.length;
+    ordinal += 1
+  ) {
+    const failing = ATTACHED_INPUT_ACTIONS[ordinal] ?? '';
+
+    it(`rolls back the input registrations taken before ${failing}`, () => {
+      setup();
+      router = createScreenRouter({ document });
+
+      const source = refusingInput(ordinal);
+
+      expect(() => router?.attach({ input: source.surface })).toThrow(
+        /refused/,
+      );
+
+      // NOTHING IS LEFT ATTACHED to the surface.
+      expect(source.attached()).toEqual([]);
+    });
+  }
+
+  it('attaches the input surface cleanly on a retry', () => {
+    setup();
+    router = createScreenRouter({ document });
+
+    const source = refusingInput(2);
+
+    expect(() => router?.attach({ input: source.surface })).toThrow(/refused/);
+    expect(source.attached()).toEqual([]);
+
+    source.admit();
+    router.attach({ input: source.surface });
+
+    expect(source.attached()).toEqual(ATTACHED_INPUT_ACTIONS);
+
+    router.destroy();
+
+    expect(source.attached()).toEqual([]);
+  });
+
+  for (
+    let ordinal = 0;
+    ordinal < SUBSCRIBED_ENGINE_EVENTS.length;
+    ordinal += 1
+  ) {
+    const failing = SUBSCRIBED_ENGINE_EVENTS[ordinal] ?? '';
+
+    it(`rolls back the engine registrations taken before ${failing}`, () => {
+      setup();
+      router = createScreenRouter({ document });
+
+      const source = refusingEngine(ordinal);
+
+      expect(() => router?.subscribe(source.events)).toThrow(/refused/);
+      expect(source.attached()).toEqual([]);
+
+      // AND NOTHING READS THE COMMIT for the half-subscription: the router
+      // stays on the screen it was on.
+      source.events.emit('state:commit', commitOf({ won: true }));
+
+      expect(router.screen()).toBe('game');
+    });
+  }
+
+  it('subscribes to the engine cleanly on a retry', () => {
+    setup();
+    router = createScreenRouter({ document });
+
+    const source = refusingEngine(4);
+
+    expect(() => router?.subscribe(source.events)).toThrow(/refused/);
+    expect(source.attached()).toEqual([]);
+
+    source.admit();
+
+    const stop = router.subscribe(source.events);
+
+    expect(source.attached()).toEqual(SUBSCRIBED_ENGINE_EVENTS);
+
+    source.events.emit('state:commit', commitOf({ won: true, terminated: true }));
+
+    expect(router.screen()).toBe('won');
+
+    stop();
+
+    expect(source.attached()).toEqual([]);
+  });
+
+  it('releases every engine registration even where one release refuses',
+    () => {
+      setup();
+      router = createScreenRouter({ document });
+
+      const inner = createEngineEvents();
+      const held: string[] = [];
+      let refusals = 0;
+      const events = {
+        ...inner,
+        on: ((name: string, listener: never): (() => void) => {
+          const release = (
+            inner.on as unknown as (
+              eventName: string,
+              handler: never,
+            ) => () => void
+          )(name, listener);
+
+          held.push(name);
+
+          const detach = (): void => {
+            const at = held.indexOf(name);
+
+            if (at >= 0) {
+              held.splice(at, 1);
+            }
+
+            release();
+          };
+
+          if (name !== 'move:after') {
+            return detach;
+          }
+
+          return (): void => {
+            refusals += 1;
+            detach();
+
+            throw new Error('this release refuses');
+          };
+        }) as ReturnType<typeof createEngineEvents>['on'],
+      } as ReturnType<typeof createEngineEvents>;
+
+      const stop = router.subscribe(events);
+
+      expect(held).toEqual(SUBSCRIBED_ENGINE_EVENTS);
+      expect(() => {
+        stop();
+      }).toThrow(/refuses/);
+
+      // EVERY ONE CAME OFF despite the refusal, so the router reads nothing.
+      expect(held).toEqual([]);
+      expect(refusals).toBe(1);
+
+      events.emit('state:commit', commitOf({ won: true, terminated: true }));
+
+      expect(router.screen()).toBe('game');
+
+      // And teardown does not call the released listeners a second time.
+      router.destroy();
+
+      expect(refusals).toBe(1);
+    });
 });
 
 describe('one binding owner per markup control', () => {
@@ -1605,5 +2044,82 @@ describe('send', () => {
     // primitive cannot reach a context builder.
     expect(router.send('beginRun', 'seed' as never)).toBe(true);
     expect(router.current()).toBe('stage');
+  });
+});
+
+/* ==========================================================================
+ * ADDED: a terminal verdict cannot outlive the state that raised it, against
+ * the REAL announcer and a deferred scheduler (DL-LIVE-06, DL-LIVE-07).
+ * ========================================================================== */
+
+describe('the verdict the router withdraws stays withdrawn', () => {
+  it('publishes no queued verdict after entering a non-terminal state', () => {
+    setup();
+
+    // The region index.html declares, plus the assertive sibling the announcer
+    // writes an alert into.
+    const layer = document.querySelector<HTMLElement>('#screen-layer');
+
+    layer?.insertAdjacentHTML(
+      'beforeend',
+      '<div class="visually-hidden live-region" id="live-region" ' +
+        'role="status" aria-live="polite" aria-atomic="true"></div>' +
+        '<div class="visually-hidden live-region" id="live-region-assertive" ' +
+        'role="alert" aria-live="assertive" aria-atomic="true"></div>',
+    );
+
+    // Tasks run only when this test releases them, which is what puts the
+    // verdict in the queue across the transition.
+    const tasks: (() => void)[] = [];
+    const announcer = createLiveRegionAnnouncer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: (callback): { cancel(): void } => {
+        const entry = (): void => {
+          callback();
+        };
+
+        tasks.push(entry);
+
+        return {
+          cancel: (): void => {
+            const index = tasks.indexOf(entry);
+
+            if (index >= 0) {
+              tasks.splice(index, 1);
+            }
+          },
+        };
+      },
+    });
+    const drain = (): void => {
+      while (tasks.length > 0) {
+        tasks.shift()?.();
+      }
+    };
+
+    router = createScreenRouter({ document, announcer });
+    router.start();
+    router.send('beginRun');
+
+    // The run is lost: the engine announcer's verdict is queued, and nothing
+    // has flushed it yet.
+    announcer.announce({ kind: 'terminal', verdict: 'loss', score: 1234 });
+    router.send('noMovesAvailable');
+
+    expect(router.current()).toBe('gameOver');
+
+    // The player acknowledges, and the flow leaves the terminal state. The
+    // verdict must not be readable afterwards, however late the queue runs.
+    router.send('acknowledge');
+    announcer.flush();
+    drain();
+
+    expect(router.current()).toBe('runSummary');
+    expect(
+      document.querySelector('#live-region-assertive')?.textContent,
+    ).toBe('');
+    expect(announcer.pending()).toBe(0);
+
+    announcer.destroy();
   });
 });

@@ -25,11 +25,9 @@
 //                     dispatch is deferred until the walk returns.
 //   charge guard      a subscriber whose `charges` is present and not
 //                     above zero is skipped before its handler is
-//                     reached, on every hook `isChargeGuardedHook` of
-//                     ./hooks reports guarded — which is every hook but
-//                     the stage-preparation `onStageStart`, where a
-//                     subscriber reinstalls the standing rules its own
-//                     persisted state records. One deduction rule inside
+//                     reached, on EVERY ONE of the six hooks: no hook is
+//                     exempt, so an exhausted relic runs no handler at
+//                     all. One deduction rule inside
 //                     this module is the only thing that writes a budget. It is
 //                     reached from `consumeCharge`, which a collaborator
 //                     calls, and from the per-handler commit below, which
@@ -109,7 +107,8 @@
 // returns nothing leaves the payload as it stands; DL-HOOKBUS-04, the
 // per-subscriber error isolation that marks a throwing registration degraded
 // and completes the dispatch; DL-HOOKBUS-05, the payload validation a return is
-// measured against; and DL-HOOKBUS-06, the engine-event relay above.
+// measured against; DL-HOOKBUS-06, the engine-event relay above; and
+// DL-HOOKBUS-07, the charge guard applying to all six hooks with none exempt.
 
 import type {
   HookContext,
@@ -125,9 +124,13 @@ import type {
   ReadonlyRulesView,
   ReadonlyTileView,
 } from './hooks';
-import { HOOK_NAMES, isChargeGuardedHook } from './hooks';
+import { HOOK_NAMES } from './hooks';
+
+// ADDED: the goal kinds as data, so the validator below measures a returned
+// `goal.kind` against the declared set rather than against `typeof`.
+// DL-HOOKBUS-08.
+import { isStageGoalKind } from '../config/stage-config';
 import type {
-  EngineEventName,
   EngineEventPayloadMap,
   EngineEventSubscription,
   EngineEvents,
@@ -816,7 +819,12 @@ function isStageGoalShape(value: unknown): boolean {
   return (
     isRecord(value) &&
     hasExactMembers(value, ['kind', 'target']) &&
-    typeof value.kind === 'string' &&
+    // CHANGED: measured against the declared kinds rather than `typeof value.kind
+    // === 'string'`. The engine ADOPTS the goal this payload resolves to, and
+    // `evaluateStageGoal` raises on a kind it cannot narrow, so a handler that
+    // returned `{ kind: 'anything', target: 8 }` was admitted here and threw
+    // later, on a stage that had already started. DL-HOOKBUS-08.
+    isStageGoalKind(value.kind) &&
     isFiniteNumber(value.target)
   );
 }
@@ -855,6 +863,12 @@ function isValidPayload<K extends HookName>(
           'boardSize',
         ]) &&
         isNonNegativeInteger(candidate.stageIndex) &&
+        // INVARIANT, exactly as src/engine/hooks.ts declares it: `goal` alone is
+        // transformable. CHANGED: the index is now pinned to the dispatched one,
+        // where any non-negative integer used to be admitted — so a handler
+        // could renumber the stage the engine had opened, and the stage it
+        // reported starting was not the stage it was on. DL-HOOKBUS-09.
+        candidate.stageIndex === original.stageIndex &&
         isStageGoalShape(candidate.goal) &&
         typeof candidate.seed === 'string' &&
         candidate.seed === original.seed &&
@@ -925,20 +939,32 @@ function isValidPayload<K extends HookName>(
           'terminated',
         ]) &&
         typeof candidate.moved === 'boolean' &&
-        // INVARIANT, exactly as src/engine/hooks.ts declares it.
+        // INVARIANT, exactly as src/engine/hooks.ts declares it: `score`, `over`
+        // and `won` are transformable and these three are not.
         candidate.moved === original.moved &&
         candidate.board === original.board &&
         isFiniteNumber(candidate.score) &&
         typeof candidate.over === 'boolean' &&
         typeof candidate.won === 'boolean' &&
-        typeof candidate.terminated === 'boolean'
+        // CHANGED: pinned to the dispatched value, where any boolean used to be
+        // admitted. The engine DERIVES `terminated` after the dispatch, so a
+        // handler that wrote it changed nothing the engine went on to use while
+        // every later handler in the chain read the untruthful value.
+        // DL-HOOKBUS-09.
+        candidate.terminated === original.terminated
       );
     }
 
     case 'onStageEnd': {
+      const original = dispatched as HookPayloadMap['onStageEnd'];
+
       return (
         hasExactMembers(candidate, ['stageIndex', 'cleared', 'score']) &&
         isNonNegativeInteger(candidate.stageIndex) &&
+        // INVARIANT, exactly as src/engine/hooks.ts declares it: `cleared` and
+        // `score` are transformable and the index is not. CHANGED as the
+        // `onStageStart` index was, and for the same reason. DL-HOOKBUS-09.
+        candidate.stageIndex === original.stageIndex &&
         typeof candidate.cleared === 'boolean' &&
         isFiniteNumber(candidate.score)
       );
@@ -1454,6 +1480,14 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
   /** Edits deferred while a dispatch walks `registrations`. */
   const pending: (() => void)[] = [];
 
+  /**
+   * ADDED: registrations accepted while a dispatch is in progress, keyed by
+   * identifier, held from the moment `register` accepts one until its deferred
+   * insertion lands. `findRegistration` reads it, so an identifier is held from
+   * acceptance rather than from insertion. DL-HOOKBUS-10.
+   */
+  const pendingRegistrations = new Map<string, Registration>();
+
   /** Counter rows keyed by hook name, created on first use. */
   const hookRows = new Map<HookName, HookCounterRow>();
 
@@ -1739,13 +1773,27 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     note(hook, id, 'failed');
   };
 
-  const findRegistration = (id: string): Registration | undefined =>
-    registrations.find(
+  const findRegistration = (id: string): Registration | undefined => {
+    const held = registrations.find(
       // A record already marked removed is not held any more, even while its
       // array edit waits for the dispatch in progress to return, so the
       // identifier is free to be registered again at once.
       (registration): boolean => !registration.removed && registration.id === id,
     );
+
+    if (held !== undefined) {
+      return held;
+    }
+
+    // ADDED: a registration accepted during a dispatch is held even though its
+    // insertion is still deferred. Without this the duplicate check below could
+    // not see it, so registering one new identifier twice inside a single
+    // dispatch queued two inserts and the bus dispatched to the same subscriber
+    // twice from the next hook onwards. DL-HOOKBUS-10.
+    const queued = pendingRegistrations.get(id);
+
+    return queued !== undefined && !queued.removed ? queued : undefined;
+  };
 
   /**
    * Reads the registrations still held, skipping any whose removal is deferred
@@ -1935,12 +1983,42 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
     // One listener per name, appended in `ENGINE_EVENT_NAMES` order. The
     // payload is passed on as it arrived: the board, the tiles and the score
     // travel by reference exactly as they do on the source.
-    const releases: EngineEventSubscription[] = ENGINE_EVENT_NAMES.map(
-      <K extends EngineEventName>(name: K): EngineEventSubscription =>
-        source.on(name, (payload: EngineEventPayloadMap[K]): void => {
-          events.emit(name, payload);
-        }),
-    );
+    //
+    // CHANGED: taken one at a time inside a guard, where they used to be taken
+    // by one `map` over the names. An emitter whose `on` raised part-way through
+    // that map left every listener taken before the throw registered with no
+    // handle to release them, and left `source` marked relayed — so the relay
+    // could neither be released nor attached again. DL-HOOKBUS-11.
+    const releases: EngineEventSubscription[] = [];
+
+    try {
+      for (const name of ENGINE_EVENT_NAMES) {
+        releases.push(
+          source.on(
+            name,
+            (payload: EngineEventPayloadMap[typeof name]): void => {
+              events.emit(name, payload);
+            },
+          ),
+        );
+      }
+    } catch (error: unknown) {
+      // Everything taken before the throw is released, and the marker is
+      // cleared, so a caller that fixes the emitter and attaches again gets a
+      // full relay rather than the no-op handle of an already-relayed source.
+      for (const release of releases) {
+        try {
+          release();
+        } catch {
+          // A release that raises during a rollback cannot be recovered from
+          // and must not displace the failure being reported.
+        }
+      }
+
+      relayed.delete(source);
+
+      throw error;
+    }
 
     count(RELAY_ATTACHED_METRIC, undefined, releases.length);
 
@@ -1995,9 +2073,29 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
         removed: false,
       };
 
+      // ADDED: held under its identifier for as long as its insertion is
+      // deferred. DL-HOOKBUS-10.
+      if (dispatchDepth > 0) {
+        pendingRegistrations.set(id, registration);
+      }
+
       // Inserted in pickup order, and deferred behind a dispatch in progress
       // so the walk sees a stable membership.
       applyOrDefer((): void => {
+        // Compared first, so an identifier registered again after being
+        // unregistered inside the same dispatch keeps the entry of the LATER
+        // acceptance.
+        if (pendingRegistrations.get(id) === registration) {
+          pendingRegistrations.delete(id);
+        }
+
+        // ADDED: an identifier unregistered while its own insertion was still
+        // deferred is not inserted at all, so the array never holds a record
+        // whose removal has already been accounted for. DL-HOOKBUS-10.
+        if (registration.removed) {
+          return;
+        }
+
         insertOrdered(registration);
       });
 
@@ -2106,15 +2204,17 @@ export function createHookBus(options: HookBusOptions = {}): HookBus {
             const charges = subscription.charges;
 
             // THE CHARGE GUARD, and the one place a spent budget withholds a
-            // handler. It is withheld from the hooks that ACT inside a stage and
-            // not from the ones that PREPARE one: `STANDING_HOOK_NAMES` of
-            // ./hooks names the second set, and `onStageStart` is its only
-            // member, so a subscriber whose budget is spent still reinstalls the
-            // standing rules its own persisted state records. Nothing is given
-            // away by that — the commit below deducts only what the handler ASKS
-            // for and a budget at zero can pay for nothing, so an exhausted
-            // relic still cannot fire. DL-HOOKBUS-06.
-            if (isChargeSpent(charges) && isChargeGuardedHook(hook)) {
+            // handler.
+            //
+            // CHANGED: it withholds ALL SIX hooks, with no hook exempted, so a
+            // subscriber whose budget is spent runs no handler and applies no
+            // effect — the frozen requirement that a limited-charge relic stops
+            // firing once exhausted (AAP R3, V6). Standing rules a relic's
+            // persisted `state` slot records are reinstated on the rehydration
+            // path by `applyStandingRelicRules` of
+            // src/relics/relic-registry.ts, which dispatches nothing.
+            // DL-HOOKBUS-07.
+            if (isChargeSpent(charges)) {
               skipped += 1;
               noteSkip(hook, id, 'exhausted');
 

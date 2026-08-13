@@ -14,12 +14,20 @@ import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import {
   createCameraEffects,
   mergeIntensity,
+  punchZoomFor,
 } from '../../../src/render/camera-effects';
 import {
   createParticleSystem,
   particleDefaults,
+  particleSpreadFor,
 } from '../../../src/render/particles';
 import { createScene } from '../../../src/render/scene';
+import { resolveBoardGeometry } from '../../../src/render/tile-mesh-factory';
+import type { GeometryScale } from '../../../src/theme/tokens';
+import {
+  desktopGeometry,
+  mobileGeometry,
+} from '../../../src/theme/tokens';
 import {
   queryReducedMotion,
   setReducedMotionOverride,
@@ -444,6 +452,176 @@ describe('the camera punch', () => {
     effects.advance({ delta: 16 });
 
     expect(displacement(camera, rest)).toBe(0);
+  });
+});
+
+/* ==========================================================================
+ * ADDED: both geometry-derived magnitudes follow the geometry in force, not the
+ * desktop constants (DL-PARTICLE-07, DL-CAMERA-05, DL-THREE-10).
+ *
+ * `spread` is one CELL PITCH and the punch's peak is a share of the FIELD
+ * MEASURE, so both are planar lengths — which is precisely what the stylesheet's
+ * mobile scale and a configured board size change. `lift`, `size`,
+ * `punchDistance` and `shakeDistance` are expressions on `depthScale` and are
+ * deliberately left alone: every block is extruded by the same depth at both
+ * scales.
+ * ========================================================================== */
+
+describe('the geometry-derived effect magnitudes', () => {
+  /** One cell pitch of a geometry, which is what a burst's spread must be. */
+  const pitchOf = (geometry: GeometryScale): number =>
+    geometry.tileSize + geometry.gridSpacing;
+
+  it('measures the burst spread as one pitch of the geometry in force', () => {
+    const desktop = createParticleSystem({
+      reducedMotion: false,
+      geometry: desktopGeometry,
+    });
+    const mobile = createParticleSystem({
+      reducedMotion: false,
+      geometry: mobileGeometry,
+    });
+
+    expect(desktop.readStats().spread).toBeCloseTo(pitchOf(desktopGeometry), 6);
+    expect(desktop.readStats().spread).toBeCloseTo(particleDefaults.spread, 6);
+    expect(mobile.readStats().spread).toBeCloseTo(pitchOf(mobileGeometry), 6);
+
+    // The defect: the desktop pitch on the mobile field is about 1.8 of the
+    // pitches the spray is supposed to cross.
+    expect(particleDefaults.spread / pitchOf(mobileGeometry)).toBeGreaterThan(
+      1.7,
+    );
+    expect(mobile.readStats().spreadPinned).toBe(false);
+
+    desktop.dispose();
+    mobile.dispose();
+  });
+
+  it('re-measures the spread when the renderer rebuilds its board', () => {
+    const system = createParticleSystem({
+      reducedMotion: false,
+      geometry: desktopGeometry,
+    });
+
+    // The breakpoint crossing, which rebuilds the board at the other scale.
+    expect(system.useGeometry(mobileGeometry)).toBeCloseTo(
+      pitchOf(mobileGeometry),
+      6,
+    );
+    expect(system.readStats().spread).toBeCloseTo(pitchOf(mobileGeometry), 6);
+
+    // And a board size that changed: a 3x3 desktop board has a WIDER pitch than
+    // the 4x4 the default is derived from, so a fixed spread crosses only three
+    // quarters of a cell.
+    const wider = resolveBoardGeometry(3, 'desktop');
+
+    expect(system.useGeometry(wider)).toBeCloseTo(pitchOf(wider), 6);
+    expect(pitchOf(wider)).toBeGreaterThan(particleDefaults.spread);
+
+    // Idempotent: the same geometry twice re-measures nothing.
+    expect(system.useGeometry(wider)).toBeCloseTo(pitchOf(wider), 6);
+
+    system.dispose();
+  });
+
+  it('keeps a spread a caller stated, and says so', () => {
+    const system = createParticleSystem({
+      reducedMotion: false,
+      geometry: desktopGeometry,
+      spread: 42,
+    });
+
+    expect(system.readStats().spread).toBe(42);
+    expect(system.readStats().spreadPinned).toBe(true);
+    expect(system.useGeometry(mobileGeometry)).toBe(42);
+    expect(system.readStats().spread).toBe(42);
+
+    system.dispose();
+  });
+
+  it('measures the punch peak against the field in force', () => {
+    const desktop = createCameraEffects(createCamera(), {
+      reducedMotion: false,
+      geometry: desktopGeometry,
+    });
+    const mobile = createCameraEffects(createCamera(), {
+      reducedMotion: false,
+      geometry: mobileGeometry,
+    });
+    const desktopPeak = desktop.readStats().punchZoom;
+    const mobilePeak = mobile.readStats().punchZoom;
+
+    expect(mobilePeak).toBeGreaterThan(desktopPeak);
+
+    // The defect: the desktop share on the mobile field is 280/500 of the punch
+    // that field deserves — about 44% weaker.
+    expect(desktopPeak / mobilePeak).toBeCloseTo(
+      mobileGeometry.fieldWidth / desktopGeometry.fieldWidth,
+      6,
+    );
+    expect(desktop.readStats().punchZoomPinned).toBe(false);
+
+    desktop.destroy();
+    mobile.destroy();
+  });
+
+  it('re-measures the punch peak, and its ceiling, on a reframe', () => {
+    const camera = createCamera();
+    const restZoom = camera.zoom;
+    const effects = createCameraEffects(camera, {
+      reducedMotion: false,
+      geometry: desktopGeometry,
+    });
+    const desktopPeak = effects.readStats().punchZoom;
+
+    expect(effects.useGeometry(mobileGeometry)).toBeGreaterThan(desktopPeak);
+
+    const mobilePeak = effects.readStats().punchZoom;
+
+    // The re-measured peak is what the next punch is drawn with.
+    expect(effects.punch(1)).toBe(true);
+
+    effects.advance({ delta: POP_DELAY_MS + POP_DURATION_MS / 2 });
+
+    const share = effects.readStats().zoomShare;
+
+    expect(share).toBeGreaterThan(desktopPeak);
+    expect(share).toBeLessThanOrEqual(mobilePeak);
+    expect(camera.zoom).toBeCloseTo(restZoom / (1 + share), 10);
+
+    effects.advance({ delta: 10_000 });
+    effects.destroy();
+  });
+
+  it('keeps a punch zoom a caller stated, and says so', () => {
+    const effects = createCameraEffects(createCamera(), {
+      reducedMotion: false,
+      geometry: desktopGeometry,
+      punchZoom: 0.03,
+    });
+
+    expect(effects.readStats().punchZoom).toBe(0.03);
+    expect(effects.readStats().punchZoomPinned).toBe(true);
+    expect(effects.useGeometry(mobileGeometry)).toBe(0.03);
+
+    effects.destroy();
+  });
+
+  it('falls back to the desktop magnitudes for an unusable geometry', () => {
+    // Neither derivation may answer with a value a burst or a projection cannot
+    // be drawn from, whatever a caller hands it.
+    const broken = {
+      ...desktopGeometry,
+      tileSize: Number.NaN,
+      gridSpacing: Number.NaN,
+      fieldWidth: 0,
+    };
+
+    expect(particleSpreadFor(broken)).toBe(particleDefaults.spread);
+    expect(punchZoomFor(broken)).toBeCloseTo(
+      punchZoomFor(desktopGeometry),
+      10,
+    );
   });
 });
 

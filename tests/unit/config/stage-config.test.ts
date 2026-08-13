@@ -21,6 +21,8 @@ import {
   createDefaultStageConfig,
   DEFAULT_STAGE_CONFIG,
   evaluateStageGoal,
+  isStageIndex,
+  MAX_STAGE_INDEX,
   stageGoalForIndex,
 } from '../../../src/config/stage-config';
 import type {
@@ -245,6 +247,74 @@ describe('stageGoalForIndex, the A3 config-driven stage target', () => {
     expect(stageGoalForIndex(-0, DEFAULT_STAGE_CONFIG)).toEqual(
       EXPECTED_DEFAULT_GOALS[0],
     );
+  });
+
+  // DL-STAGE-05. THIS MODULE PUBLISHES THE ONE STAGE DOMAIN, and the two
+  // consumers that used to declare their own read it here instead:
+  // `MAX_PERSISTED_STAGE_INDEX` of src/run/run-state.ts bounds a stored index by
+  // it, and `RunController.advanceStage()` refuses to leave it. The domain is
+  // pinned as the safe-integer range because a stage index is reached by repeated
+  // increment and carried through `JSON.stringify`, and above it neither is exact.
+  it('publishes the stage-index domain as the safe-integer range', () => {
+    expect(MAX_STAGE_INDEX).toBe(Number.MAX_SAFE_INTEGER);
+
+    for (const index of [0, -0, 1, LAST_LADDER_INDEX, LARGE_STAGE_INDEX,
+      1024, 1025, 100_000, MAX_STAGE_INDEX - 1, MAX_STAGE_INDEX]) {
+      expect(isStageIndex(index)).toBe(true);
+    }
+
+    for (const index of [
+      MAX_STAGE_INDEX + 1,
+      Number.MAX_VALUE,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      Number.NaN,
+      -1,
+      1.5,
+    ]) {
+      expect(isStageIndex(index)).toBe(false);
+    }
+  });
+
+  // Total and non-throwing over every input, because the persistence guards of
+  // src/run/run-state.ts delegate to it and their own no-throw guarantee rests
+  // on nothing else.
+  it('reduces any value to a stage-index verdict without throwing', () => {
+    const hostile: readonly unknown[] = [
+      null,
+      undefined,
+      'text',
+      '0',
+      true,
+      [],
+      [0],
+      {},
+      { valueOf: (): number => 0 },
+      0n,
+      Symbol('0'),
+      new Number(0),
+    ];
+
+    for (const value of hostile) {
+      expect(isStageIndex(value)).toBe(false);
+    }
+  });
+
+  // Totality of the curve over the whole published domain: every index the
+  // predicate admits resolves to a goal, so a run that reaches one is never
+  // holding an index its own goal derivation refuses.
+  it('derives a goal at every boundary of the published domain', () => {
+    for (const index of [0, 1024, 1025, MAX_STAGE_INDEX - 1, MAX_STAGE_INDEX]) {
+      const goal = stageGoalForIndex(index, DEFAULT_STAGE_CONFIG);
+
+      expect(Number.isFinite(goal.target)).toBe(true);
+      expect(goal.target).toBeGreaterThan(0);
+      expect(goal.target).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
+    }
+
+    expect(() =>
+      stageGoalForIndex(MAX_STAGE_INDEX + 1, DEFAULT_STAGE_CONFIG),
+    ).toThrow(RangeError);
   });
 
   it('reads the frozen constant and the factory result alike', () => {

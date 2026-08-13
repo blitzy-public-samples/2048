@@ -4,7 +4,9 @@
 // Provenance is the vanilla merge branch js/game_manager.js L156-L170, which
 // src/engine/move-resolver.ts ports and dispatches `onMerge` from.
 //
-// One frozen `RelicFamily` is exported and nothing else. Each relic is plain
+// CHANGED: one frozen `RelicFamily` and one standing-rule reinstatement
+// function are exported, where the family export was the whole surface. Each
+// relic is plain
 // data carrying the members src/relics/relic-types.ts declares, and behaviour
 // lives in the handlers of its `hooks` table. The declaration order of
 // `relics` is the catalogue order src/relics/relic-registry.ts flattens.
@@ -19,6 +21,8 @@
 //   TR-MERGE-03  frostbind         onMerge
 //   TR-MERGE-04  chain-catalyst    onMerge
 //   TR-MERGE-05  the frozen `MERGE_MAGIC_FAMILY` export
+//   TR-MERGE-06  `reinstateFrostbindRule`, the non-hook reinstatement of the
+//                frozen-cell rule on rehydrated rules
 //
 // Decisions behind this file, argued in docs/DECISION_LOG.md and named here
 // only so the construct can be found from the log:
@@ -28,8 +32,14 @@
 //   DL-MERGE-02  `scoreDelta` transformed independently of `resultValue`,
 //                as the two are separate payload members
 //   DL-MERGE-03  `chain-catalyst`'s ladder branch refusing a target that
-//                already merged this traversal, so the widening reaches values
-//                and not turn structure
+//                already merged this traversal and inheriting any structural
+//                denial its delegate made, so the widening reaches values and
+//                neither turn structure nor another relic's rule
+//   DL-MERGE-04  `frostbind` thawing the cell a merge moved OUT of, which is
+//                the transition the rule it installs leaves reachable
+//   DL-MERGE-05  `reinstateFrostbindRule`, reached from the rehydration path
+//                rather than from a hook, so an exhausted relic dispatches
+//                nothing while the frost it already paid for survives a reload
 
 import {
   defaultCanMerge,
@@ -38,7 +48,9 @@ import {
 import type {
   MergePredicate,
   MergeProducer,
+  MergeRules,
   MergeTileView,
+  RulesConfig,
 } from '../../config/rules-config';
 import type {
   HookContext,
@@ -249,24 +261,59 @@ function alloyForgeOnMerge(
 }
 
 /**
- * Toggles the destination cell in the frosted-cell ledger: frosts a cell the
- * ledger does not hold, and thaws one it does — then re-records the
- * frozen-cell merge rule over the ledger the toggle produced.
+ * Removes one cell from a frosted-cell ledger, in place.
  *
- * @param payload Merge being resolved, read for the destination cell.
+ * @param cells Ledger to thaw from.
+ * @param cell Cell to thaw.
+ * @returns Whether the ledger held it.
+ */
+function thawCell(cells: Position[], cell: Position): boolean {
+  const held = cells.findIndex(
+    (frosted) => frosted.x === cell.x && frosted.y === cell.y,
+  );
+
+  if (held < 0) {
+    return false;
+  }
+
+  cells.splice(held, 1);
+
+  return true;
+}
+
+/**
+ * Resolves one merge against the frosted-cell ledger: THAWS the cell the merge
+ * moved out of, then toggles the cell it landed on — frosting one the ledger
+ * does not hold and thawing one it does — and re-records the frozen-cell merge
+ * rule over the ledger those two steps produced.
+ *
+ * ADDED: the thaw of `payload.source`. The only thaw the relic had was the
+ * destination toggle below, and the rule it installs refuses precisely the merge
+ * that would reach it — a merge INTO a frosted cell — so no legal move could
+ * ever thaw anything and a frosted cell stayed frosted for the rest of the run.
+ * The installed rule constrains the merge's DESTINATION and never its source, so
+ * a frosted cell whose tile slides out and merges elsewhere is reachable by
+ * ordinary play, and that is the transition the frost is released on.
+ *
+ * The destination toggle is KEPT: it is the branch that frosts, and its thaw
+ * half remains the defined answer where a merge does land on a frosted cell
+ * because a later relic replaced the merge rule outright rather than wrapping it.
+ *
+ * DL-MERGE-04.
+ *
+ * @param payload Merge being resolved, read for both cells it spans.
  * @param context Dispatch context, whose `state` slot carries the ledger and
  *   whose effect queue records the rule.
  */
 function frostbindOnMerge(payload: MergePayload, context: HookContext): void {
   const cells = readFrostedCells(context.state);
-  const x = payload.target.x;
-  const y = payload.target.y;
-  const held = cells.findIndex((cell) => cell.x === x && cell.y === y);
 
-  if (held < 0) {
-    cells.push({ x, y });
-  } else {
-    cells.splice(held, 1);
+  thawCell(cells, { x: payload.source.x, y: payload.source.y });
+
+  const destination = { x: payload.target.x, y: payload.target.y };
+
+  if (!thawCell(cells, destination)) {
+    cells.push(destination);
   }
 
   context.state = { frozen: cells };
@@ -366,6 +413,76 @@ function frostbindOnStageStart(
 }
 
 /**
+ * Projects one operand carrying a substituted face value.
+ *
+ * ADDED for the structural-denial probe of `chainCatalystPredicate`. Every member
+ * the operand declares beyond its value travels across — the cell where it
+ * carries one and the merge history either way — so a delegate keyed on position
+ * or on merge history answers the probe from its own rule rather than from a
+ * no-position fall-through, exactly as `probeView` of
+ * src/engine/terminal-state.ts carries a cell for the same reason.
+ *
+ * @param operand Operand to project.
+ * @param value Face value the projection carries.
+ * @returns A frozen operand at `value`, standing where `operand` stands.
+ */
+function operandAtValue(operand: MergeTileView, value: number): MergeTileView {
+  const cell = operandCell(operand);
+  const projected = { value, mergedFrom: operand.mergedFrom };
+
+  return Object.freeze(
+    cell === null ? projected : { ...projected, x: cell.x, y: cell.y },
+  );
+}
+
+/**
+ * ADDED: reinstates `frostbind`'s frozen-cell merge rule on a set of rules
+ * REHYDRATED from a persisted slot, dispatching nothing.
+ *
+ * A reload builds fresh rules carrying the default merge predicate, so the
+ * wrapper an earlier session installed is gone while the frosted cells that
+ * session persisted are not. This is the non-hook path that puts the wrapper
+ * back: it is handed the slot and the live rules by
+ * `applyStandingRelicRules` of ../relic-registry and never sees a hook, a
+ * dispatch context or a charge budget — so a budget spent long ago neither
+ * withholds the reinstatement nor is charged for it, and no exhausted handler
+ * runs. Cells outside the rehydrated board are dropped, as the stage-start
+ * install drops them. `DL-MERGE-05`.
+ *
+ * @param state Slot as `RunState.relics[i].state` carried it.
+ * @param rules Live rules to write the predicate into.
+ * @returns Whether a predicate was installed, which is `false` only where
+ *   `rules` carries no writable merge member.
+ */
+export function reinstateFrostbindRule(
+  state: unknown,
+  rules: RulesConfig,
+): boolean {
+  const merge: MergeRules | undefined = rules.merge;
+
+  if (merge === undefined || merge === null) {
+    return false;
+  }
+
+  const size = rules.boardSize;
+  const bounded = Number.isFinite(size) ? size : 0;
+  const cells = readFrostedCells(state).filter(
+    (cell) => cell.x < bounded && cell.y < bounded,
+  );
+  const live = merge.canMerge ?? defaultCanMerge;
+  const held: unknown = (live as TaggedPredicate)[FROSTBIND_PREDICATE_TAG];
+
+  // The wrapper a previous install left behind is REPLACED rather than wrapped
+  // a second time, exactly as `taggedDelegate` replaces one during a dispatch.
+  merge.canMerge = frostbindPredicate(
+    typeof held === 'function' ? (held as MergePredicate) : live,
+    (): readonly Position[] => cells,
+  );
+
+  return true;
+}
+
+/**
  * Builds the predicate `chain-catalyst` installs: the predicate in force, ALSO
  * accepting a pair whose values are adjacent on the doubling ladder — a pair
  * for which the producer in force, applied to the smaller operand, yields the
@@ -380,6 +497,18 @@ function frostbindOnStageStart(
  * it has already merged during the traversal in progress. The ladder branch
  * refuses such a target: this relic widens WHICH VALUES may merge and nothing
  * else. Without the refusal a produced tile merged a second time in one move.
+ *
+ * ADDED: A STRUCTURAL DENIAL THE DELEGATE MADE IS INHERITED, NOT OVERRIDDEN.
+ * The ladder branch treated every refusal the delegate returned as a refusal
+ * about the two face values, so wrapping a delegate that refuses on some OTHER
+ * ground — `frostbind`'s wrapper refuses by destination CELL — widened past that
+ * ground and admitted a merge onto a frozen cell whenever the pair happened to
+ * be a ladder step apart. The two grounds are told apart by asking the delegate
+ * the same question with the pair made value-COMPATIBLE: a delegate that still
+ * refuses the equal-valued pair standing in the same cells with the same merge
+ * history is refusing structurally, and its refusal stands. The probe reads the
+ * delegate alone and names no relic, so it composes against any predicate a
+ * later relic installs.
  *
  * The two operands arrive already existing — js/game_manager.js L156 kept the
  * `next &&` guard outside the equality test and src/engine/move-resolver.ts
@@ -420,7 +549,15 @@ function chainCatalystPredicate(
 
     const operand = mergeOperand(low);
 
-    return produce(operand, operand) === high;
+    if (produce(operand, operand) !== high) {
+      return false;
+    }
+
+    // THE INHERITED-DENIAL PROBE. The pair is value-compatible for this relic;
+    // whether it is admissible at all is still the delegate's to say, and it is
+    // asked with the value difference — the one ground this relic widens —
+    // removed.
+    return delegate(operandAtValue(moving, target.value), target);
   };
 
   return withTag(wrapper, CHAIN_CATALYST_PREDICATE_TAG, delegate);
@@ -508,7 +645,8 @@ const frostbind: Relic = Object.freeze({
   rarity: RARITIES[2],
   description:
     'Each merge freezes the cell it lands on, and no further merge resolves ' +
-    'on a frozen cell until another merge there thaws it. Limited charges.',
+    'on a frozen cell until the tile standing there merges away. ' +
+    'Limited charges.',
   hooks: Object.freeze({
     onStageStart: frostbindOnStageStart,
     onMerge: frostbindOnMerge,

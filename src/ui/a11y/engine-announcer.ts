@@ -20,7 +20,8 @@
 //                   transition of `StateCommitEvent.degraded` in both
 //                   directions
 //
-// Decisions: DL-ANNOUNCE-01, DL-ANNOUNCE-02 (docs/DECISION_LOG.md).
+// Decisions: DL-ANNOUNCE-01, DL-ANNOUNCE-02, DL-ANNOUNCE-03
+//   (docs/DECISION_LOG.md).
 
 import type { EngineEventName, EngineEvents } from '../../engine/engine-events';
 import type { AnnouncedDirection, LiveRegionAnnouncer, TerminalVerdict } from './live-region';
@@ -165,24 +166,69 @@ export function createEngineAnnouncer(
         };
       }
 
-      const bound: (() => void)[] = [
-        events.on('move:before', (payload): void => {
+      const bound: (() => void)[] = [];
+
+      /**
+       * Records one release AS IT IS TAKEN.
+       *
+       * ADDED: the six were taken in one array literal, so a refusal from a
+       * later `on()` discarded the half-built array and left every listener
+       * before it attached to the emitter with no reference to it anywhere —
+       * the announcer went on announcing for a subscription it had reported it
+       * did not hold, unreachable by `destroy()` or the returned release.
+       * DL-ANNOUNCE-03.
+       *
+       * @param release The release the emitter returned.
+       */
+      const hold = (release: () => void): void => {
+        bound.push(release);
+      };
+
+      /** Releases everything held, whichever release refuses. */
+      const releaseBound = (): void => {
+        let raised: unknown = null;
+        let failed = false;
+
+        for (const release of bound) {
+          try {
+            release();
+          } catch (error: unknown) {
+            if (!failed) {
+              failed = true;
+              raised = error;
+            }
+          }
+
+          const index = releases.indexOf(release);
+
+          if (index >= 0) {
+            releases.splice(index, 1);
+          }
+        }
+
+        if (failed) {
+          throw raised;
+        }
+      };
+
+      try {
+        hold(events.on('move:before', (payload): void => {
           // Held, not announced: a cancelled move emits no `move:after`, and
           // the next `move:before` overwrites this, so a withdrawn move can
           // never be announced as one that happened.
           pendingDirection = payload.direction;
-        }),
+        }));
 
-        events.on('tile:merge', (payload): void => {
+        hold(events.on('tile:merge', (payload): void => {
           announcer.announce({
             kind: 'merge',
             resultValue: payload.resultValue,
             scoreDelta: payload.scoreDelta,
           });
           announced('tile:merge');
-        }),
+        }));
 
-        events.on('tile:spawn', (payload): void => {
+        hold(events.on('tile:spawn', (payload): void => {
           // An attempt that inserted nothing carries no position: the full
           // board of AAP Contract 1, a suppressing `onSpawn` handler, or a
           // handler that named a cell off the lattice.
@@ -196,9 +242,9 @@ export function createEngineAnnouncer(
             position: payload.position,
           });
           announced('tile:spawn');
-        }),
+        }));
 
-        events.on('move:after', (payload): void => {
+        hold(events.on('move:after', (payload): void => {
           if (pendingDirection === null) {
             // No direction was captured, so this move did not come through
             // `move:before` in this subscription's lifetime.
@@ -213,18 +259,18 @@ export function createEngineAnnouncer(
           });
           announced('move:after');
           pendingDirection = null;
-        }),
+        }));
 
-        events.on('stage:end', (payload): void => {
+        hold(events.on('stage:end', (payload): void => {
           announcer.announce({
             kind: 'stageClear',
             stageIndex: payload.stageIndex,
             cleared: payload.cleared,
           });
           announced('stage:end');
-        }),
+        }));
 
-        events.on('state:commit', (payload): void => {
+        hold(events.on('state:commit', (payload): void => {
           // The unconfirmed status is announced on its transitions, both of
           // them: a commit whose terminal or stage status the engine could not
           // establish, and the commit that establishes one again.
@@ -270,8 +316,25 @@ export function createEngineAnnouncer(
             context: REPORT_CONTEXT,
             verdict,
           });
-        }),
-      ];
+        }));
+      } catch (error: unknown) {
+        // Rolled back and rethrown, so the emitter is exactly as it was and
+        // the same call can simply be retried. DL-ANNOUNCE-03.
+        try {
+          releaseBound();
+        } catch {
+          // A release that refuses during a rollback is contained: the
+          // registration failure is the one the caller has to act on.
+        }
+
+        bound.length = 0;
+        reporter.count(REFUSED_METRIC, {
+          context: REPORT_CONTEXT,
+          reason: 'registering',
+        });
+
+        throw error;
+      }
 
       releases.push(...bound);
       reporter.count(SUBSCRIBE_METRIC, {
@@ -288,15 +351,11 @@ export function createEngineAnnouncer(
 
         released = true;
 
-        for (const release of bound) {
-          release();
-
-          const index = releases.indexOf(release);
-
-          if (index >= 0) {
-            releases.splice(index, 1);
-          }
-        }
+        // CHANGED: every listener is released and every entry removed from
+        // the shared list whichever release refuses. The loop stopped at the
+        // first refusal, stranding the rest attached AND listed — so
+        // `destroy()` then called them a second time. DL-ANNOUNCE-03.
+        releaseBound();
       };
     },
 

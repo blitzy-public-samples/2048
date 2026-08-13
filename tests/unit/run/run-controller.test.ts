@@ -16,8 +16,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDefaultRulesConfig } from '../../../src/config/default-config';
 import type { RulesConfig } from '../../../src/config/rules-config';
 import {
+  MAX_STAGE_INDEX,
   createDefaultStageConfig,
   evaluateStageGoal,
+  isStageIndex,
   stageGoalForIndex,
   type StageConfig,
   type StageGoal,
@@ -65,6 +67,7 @@ import {
   type RelicRegistryPort,
   type RewardOffer,
   type RewardResolution,
+  type RewardSelection,
   type RunScope,
 } from '../../../src/run/run-controller';
 import { drawRelicOffers } from '../../../src/relics/relic-draw';
@@ -75,8 +78,10 @@ import {
 import type { Relic } from '../../../src/relics/relic-types';
 import {
   MAX_PERSISTED_RELICS,
+  NOOP_RUN_REPORTER,
   RUN_STATE_SCHEMA_VERSION,
   createFreshRunState,
+  describeRunStateProblems,
   runCorrelationId,
   type PersistedRelic,
   type RunReporter,
@@ -234,9 +239,46 @@ interface Composed {
 
 interface ComposeOptions {
   readonly backing?: MemoryStorage;
+
+  /**
+   * Seed a FRESH run is opened on. It reaches `resolveRunIdentity` only where
+   * the backing store carries no envelope to resume, which is how src/main.ts
+   * composes: the root supplies no seed at all, so a reload resolves its
+   * identity — seed included — out of the store. A helper that supplied the
+   * seed on the reload as well drove the one path a caller-entered seed must
+   * NOT take, which is a fresh deterministic replay rather than a resumption.
+   */
   readonly seed?: string;
+
+  /**
+   * A seed a CALLER TYPED, handed to `resolveRunIdentity` whatever the store
+   * holds. It is the run-start screen's seed field expressed through this
+   * harness, and it is the input a stored envelope must NOT be adopted for: a
+   * typed seed asks for a fresh deterministic replay of that seed.
+   */
+  readonly enteredSeed?: string;
   readonly tokens?: readonly string[];
   readonly setup?: boolean;
+}
+
+/**
+ * The seed to hand `resolveRunIdentity`: the caller's, and `undefined` where an
+ * envelope is already stored, so the identity is read out of the store exactly
+ * as the composition root reads it.
+ *
+ * @param manager Storage the envelope would be read from.
+ * @param seed Seed the caller asked for.
+ * @returns The seed to supply, or `undefined`.
+ */
+function identitySeed(
+  manager: LocalStorageManager,
+  seed: string | undefined,
+): string | undefined {
+  if (seed === undefined) {
+    return undefined;
+  }
+
+  return manager.readJson(RUN_STATE_KEY) === null ? seed : undefined;
 }
 
 /**
@@ -265,7 +307,7 @@ function compose(options: ComposeOptions = {}): Composed {
   const identity = resolveRunIdentity({
     storage: manager,
     createToken,
-    seed: options.seed,
+    seed: options.enteredSeed ?? identitySeed(manager, options.seed),
   });
 
   const controller = new RunController({
@@ -594,7 +636,7 @@ describe('RunController.begin', () => {
 
     const { controller } = compose({
       backing,
-      seed: 'the-seed-i-typed',
+      enteredSeed: 'the-seed-i-typed',
       setup: false,
     });
 
@@ -602,6 +644,62 @@ describe('RunController.begin', () => {
     expect(controller.state().stageIndex).toBe(0);
     expect(controller.relicContext()).toEqual([]);
     expect(controller.cursors()['spawn-value']).toBe(0);
+  });
+
+  it('replays a typed seed from the start even where the stored run is ' +
+    'playing that very seed', () => {
+    // The adoption decision used to be the seed alone, so typing the seed of
+    // the run in progress RESUMED it — mid-stage, with its relics and its
+    // advanced cursors — and the replay a typed seed asks for was unreachable.
+    const backing = new MemoryStorage();
+    const typed = 'the-seed-i-typed';
+
+    backing.setItem(
+      RUN_STATE_KEY,
+      JSON.stringify({
+        ...createFreshRunState({
+          runId: 'run-in-progress',
+          seed: typed,
+          rngCursor: { 'spawn-value': 40, 'spawn-position': 40 },
+          stageIndex: 6,
+          stageGoal: { kind: 'highest-tile', target: 1024 },
+          board: boardWith(512),
+        }),
+        relics: [{ id: 'held-already' }],
+      }),
+    );
+
+    const { controller, reports } = compose({
+      backing,
+      enteredSeed: typed,
+      setup: false,
+    });
+
+    // The seed is the one that was typed, and everything else starts over.
+    expect(controller.seed()).toBe(typed);
+    expect(controller.runId()).not.toBe('run-in-progress');
+    expect(controller.state().stageIndex).toBe(0);
+    expect(
+      controller.state().board.grid.cells.flat().filter((cell) => cell !== null),
+    ).toEqual([]);
+    expect(controller.relicContext()).toEqual([]);
+    expect(controller.cursors()['spawn-value']).toBe(0);
+    expect(controller.cursors()['spawn-position']).toBe(0);
+
+    // No run-level board was adopted, so the engine inserts its start tiles.
+    expect(controller.openingBoard()).toBeNull();
+    expect(controller.board()).toBeUndefined();
+
+    // And it is reported as a fresh run played on a supplied seed, not as a
+    // resumption.
+    expect(reports.started).toEqual([
+      {
+        runId: controller.runId(),
+        stageIndex: 0,
+        resumed: false,
+        seedProvided: true,
+      },
+    ]);
   });
 
   it('reports the run start, distinguishing a resumed run from a fresh one', () => {
@@ -1479,7 +1577,7 @@ function composeWithRelics(
   const identity = resolveRunIdentity({
     storage: manager,
     createToken,
-    seed: options.seed,
+    seed: options.enteredSeed ?? identitySeed(manager, options.seed),
   });
 
   const holder: { controller: RunController | null } = { controller: null };
@@ -2206,7 +2304,7 @@ describe('the opening board', () => {
     first.controller.persist(first.engine, () => ({}) as never);
     first.stop();
 
-    const second = composeWithRelics({ backing, seed: 'seed-two' });
+    const second = composeWithRelics({ backing, enteredSeed: 'seed-two' });
 
     expect(second.controller.openingBoard()).toBeNull();
     expect(
@@ -2245,7 +2343,7 @@ describe('the opening board', () => {
 
     const second = composeWithRelics({
       backing,
-      seed: 'seed-beta',
+      enteredSeed: 'seed-beta',
       setup: false,
     });
 
@@ -2630,7 +2728,7 @@ function composeWithRewards(
   const identity = resolveRunIdentity({
     storage: manager,
     createToken,
-    seed,
+    seed: identitySeed(manager, seed),
   });
 
   // One bus, built before both its users: the registry seats relics on it and
@@ -2916,6 +3014,176 @@ describe('a reward drawn by the run and taken through selectReward', () => {
 
     expect(taken.length).toBeGreaterThan(0);
     expect(registry.ownedIds()).toEqual(taken);
+  });
+});
+
+/* ==========================================================================
+ * 17a2. The stage domain the run advances through IS the stage domain the
+ * envelope carries
+ *
+ * The contract asserted here: a reward round resolved on a HIGH stage advances,
+ * writes and reloads. `MAX_PERSISTED_STAGE_INDEX` of src/run/run-state.ts was a
+ * fixed 1024 while `advanceStage()` had no matching limit, so the one transaction
+ * that crosses 1024 wrote an envelope the store refused, rolled the round back and
+ * left the offer standing with the run unable to progress. The crossing is driven
+ * through the production path — the clear, the draw, the selection, the write and
+ * a full rebuild over the same storage — rather than asserted on the bound.
+ * Decisions DL-RUN-07, DL-STAGE-05, DL-RUNCTL-29.
+ * ========================================================================== */
+
+describe('a reward round resolved on the stage the old bound refused', () => {
+  /** Stage index the fixed bound accepted, and the last one it accepted. */
+  const AT_OLD_BOUND = 1024;
+
+  /** The first index the fixed bound refused, which a clear now reaches. */
+  const PAST_OLD_BOUND = AT_OLD_BOUND + 1;
+
+  /**
+   * A goal a merge-ready board clears, so the crossing does not depend on the
+   * saturated target the curve derives this far along its extension.
+   */
+  const CLEARABLE_GOAL: StageGoal = { kind: 'highest-tile', target: 16 };
+
+  /**
+   * Seeds an envelope sitting on `AT_OLD_BOUND` with a clearable goal, then
+   * composes the reward-ready stack over it.
+   *
+   * @param seed Run seed, so two calls can share one storage.
+   * @param backing Storage the envelope is written to.
+   * @returns The composed stack.
+   */
+  const composeAtBound = (
+    seed: string,
+    backing: MemoryStorage,
+  ): ReturnType<typeof composeWithRewards> => {
+    const manager = new LocalStorageManager({ storage: backing });
+    const store = new RunStateStore({
+      storage: manager,
+      config: createDefaultRulesConfig(),
+    });
+
+    if (!store.exists()) {
+      store.save({
+        ...createFreshRunState({
+          runId: `${seed}-fixture`,
+          seed,
+          rngCursor: {},
+          stageIndex: AT_OLD_BOUND,
+          stageGoal: CLEARABLE_GOAL,
+          board: mergeReadyBoard(),
+        }),
+      });
+    }
+
+    // `setup` is left ON: `seedRewardFixture` returns early because the envelope
+    // above already exists, and the same flag is what opens the engine's board.
+    return composeWithRewards({ backing, seed });
+  };
+
+  it('accepts the selection, advances past the old bound and stores it', () => {
+    const backing = new MemoryStorage();
+    const { controller, engine, registry } = composeAtBound(
+      'stage-domain-cross',
+      backing,
+    );
+
+    expect(controller.stageIndex()).toBe(AT_OLD_BOUND);
+
+    engine.move(DIRECTION_LEFT);
+
+    expect(controller.isRewardPending()).toBe(true);
+
+    const chosen = controller.currentOffer()[0];
+
+    if (chosen === undefined) {
+      throw new Error('a cleared stage offered no reward');
+    }
+
+    const selection = controller.selectReward(chosen.id, engine);
+
+    // The transaction COMMITTED. It used to answer 'refused' here, because the
+    // write that is part of it carried a stage index the store rejected.
+    expect(selection.outcome).toBe('accepted');
+    expect(controller.stageIndex()).toBe(PAST_OLD_BOUND);
+    expect(controller.isRewardPending()).toBe(false);
+    expect(registry.ownedIds()).toEqual([chosen.id]);
+
+    // The envelope reached storage carrying the crossed index, so the run is
+    // saved rather than played from memory alone.
+    const stored = readStored(backing);
+
+    expect(stored?.stageIndex).toBe(PAST_OLD_BOUND);
+    expect(stored?.relics.map((relic) => relic.id)).toEqual([chosen.id]);
+    expect(describeRunStateProblems(stored)).toEqual([]);
+  });
+
+  it('reloads the crossed stage rather than falling back to a fresh run', () => {
+    const backing = new MemoryStorage();
+    const first = composeAtBound('stage-domain-reload', backing);
+
+    first.engine.move(DIRECTION_LEFT);
+
+    const chosen = first.controller.currentOffer()[0];
+
+    if (chosen === undefined) {
+      throw new Error('a cleared stage offered no reward');
+    }
+
+    expect(first.controller.selectReward(chosen.id, first.engine).outcome).toBe(
+      'accepted',
+    );
+
+    first.stop();
+
+    // Everything thrown away and rebuilt over the same storage, which is the
+    // half of the domain contract a bound-only assertion cannot reach.
+    const resumed = composeAtBound('stage-domain-reload', backing);
+
+    expect(resumed.controller.stageIndex()).toBe(PAST_OLD_BOUND);
+    expect(resumed.controller.relics().map((relic) => relic.id)).toEqual([
+      chosen.id,
+    ]);
+    expect(resumed.controller.hadStoredEnvelope()).toBe(true);
+  });
+
+  // The far end of the same alignment: the domain is total below its ceiling and
+  // the advance stops AT it, so the runtime cannot produce an index the envelope
+  // would refuse — the class of failure the fixed bound created, closed at every
+  // value rather than at one.
+  it('advances no further than the domain the stage curve publishes', () => {
+    const backing = new MemoryStorage();
+    const seed = 'stage-domain-ceiling';
+    const manager = new LocalStorageManager({ storage: backing });
+    const store = new RunStateStore({
+      storage: manager,
+      config: createDefaultRulesConfig(),
+    });
+
+    store.save(
+      createFreshRunState({
+        runId: `${seed}-fixture`,
+        seed,
+        rngCursor: {},
+        stageIndex: MAX_STAGE_INDEX,
+        stageGoal: CLEARABLE_GOAL,
+        board: mergeReadyBoard(),
+      }),
+    );
+
+    const { controller, stop } = composeWithRewards({ backing, seed });
+
+    // The ceiling loads: it is inside the domain, so the envelope is adopted.
+    expect(controller.stageIndex()).toBe(MAX_STAGE_INDEX);
+
+    const goal = controller.advanceStage();
+
+    // And the advance stands down rather than producing MAX_SAFE_INTEGER + 1.
+    expect(controller.stageIndex()).toBe(MAX_STAGE_INDEX);
+    expect(goal).toEqual(CLEARABLE_GOAL);
+    expect(isStageIndex(controller.stageIndex())).toBe(true);
+    expect(describeRunStateProblems(controller.state())).toEqual([]);
+
+    stop();
   });
 });
 
@@ -4014,6 +4282,15 @@ interface RecordingEngine {
 
   /** The board `serialize` projects, as a fresh copy. */
   readonly board: () => SerializedGameState;
+
+  /** Whether `startStage` raises. Writable, so a retry can be made to work. */
+  startStageThrows: boolean;
+
+  /** Calls `startStage` received, raising or not. */
+  readonly startStageAttempts: number;
+
+  /** Calls `startStage` completed. */
+  readonly startedStages: number;
 }
 
 /** How a recording engine is built. */
@@ -4027,6 +4304,12 @@ interface RecordingEngineOptions {
    * engine implementing no stage transition.
    */
   readonly startStage?: boolean;
+
+  /**
+   * Whether `startStage` raises when it is called. A throwing opener is the
+   * failure both stage-transition paths have to contain.
+   */
+  readonly startStageThrows?: boolean;
 }
 
 /**
@@ -4091,12 +4374,23 @@ function createRecordingEngine(
     },
   };
 
+  let startStageThrows = options.startStageThrows === true;
+  let startStageAttempts = 0;
+  let startedStages = 0;
+
   const transitioning: EnginePort = {
     ...observing,
 
     startStage(board?: SerializedGameState | null): void {
       calls.push('startStage');
+      startStageAttempts += 1;
+
+      if (startStageThrows) {
+        throw new Error('the stage could not be opened');
+      }
+
       startStages.push(board);
+      startedStages += 1;
     },
   };
 
@@ -4112,6 +4406,22 @@ function createRecordingEngine(
       held = board;
     },
     board: (): SerializedGameState => copyBoard(held),
+
+    get startStageThrows(): boolean {
+      return startStageThrows;
+    },
+
+    set startStageThrows(raises: boolean) {
+      startStageThrows = raises;
+    },
+
+    get startStageAttempts(): number {
+      return startStageAttempts;
+    },
+
+    get startedStages(): number {
+      return startedStages;
+    },
   };
 }
 
@@ -4129,6 +4439,32 @@ function recordingCatalogue(): PersistedRelic[] {
     { id: 'port-stateful', charges: 2, state: { spent: 0 } },
     { id: 'port-second-plain' },
   ];
+}
+
+/**
+ * One reward card for a recording-catalogue identifier.
+ *
+ * `selectReward()` reads the drawn CARDS rather than the identifiers
+ * `recordRewardOffer()` admits, so a case exercising it composes a draw port
+ * over these and seats the round through `offerReward()` — the same route
+ * src/main.ts's reward screen takes.
+ *
+ * @param relicId Identifier the card is for.
+ * @returns The card.
+ */
+function drivenOffer(relicId: string): RewardOffer {
+  const declared = recordingCatalogue().find(
+    (relic): boolean => relic.id === relicId,
+  );
+
+  return {
+    id: relicId,
+    name: relicId,
+    rarity: 'common',
+    description: `the ${relicId} fixture`,
+    hooks: ['onMerge'],
+    ...(declared?.charges === undefined ? {} : { charges: declared.charges }),
+  };
 }
 
 /** The `RelicRegistryPort` fake, plus readers for everything it recorded. */
@@ -4361,6 +4697,16 @@ function createReportSink(): ReportSink {
       });
     },
 
+    // The eleventh channel, which this sink used to omit — so no case composed
+    // over it could observe a run losing or regaining its storage.
+    onPersistenceStatusChanged(report): void {
+      capture('persistence-status-changed', report.correlationId, {
+        status: report.status,
+        previous: report.previous,
+        refusedWrites: report.refusedWrites,
+      });
+    },
+
     onRunStarted(report): void {
       capture('run-started', report.correlationId, {
         runId: report.runId,
@@ -4427,14 +4773,24 @@ interface DriveOptions {
   /** The store to compose over. A fresh tracked one by default. */
   readonly backing?: MemoryStorage;
 
-  /** The seed to play, as the run-start screen supplies one. */
+  /**
+   * The seed a FRESH run is opened on. It reaches `resolveRunIdentity` only
+   * where the store carries no envelope to resume, exactly as in
+   * `ComposeOptions`.
+   */
   readonly seed?: string;
+
+  /** A seed a caller TYPED, handed over whatever the store holds. */
+  readonly enteredSeed?: string;
 
   /** The board the engine opens on. */
   readonly board?: SerializedGameState;
 
   /** Whether the port publishes `startStage`. */
   readonly startStage?: boolean;
+
+  /** Whether the published `startStage` raises. */
+  readonly startStageThrows?: boolean;
 
   /** `false` composes the controller with no registry at all. */
   readonly relics?: boolean;
@@ -4447,6 +4803,13 @@ interface DriveOptions {
 
   /** `false` leaves the controller unsubscribed from the engine. */
   readonly observe?: boolean;
+
+  /**
+   * The reporter channel that RAISES. Every other channel reaches the sink as
+   * usual, so a case can assert both that the lifecycle survived the throw and
+   * that the reports the observer did not break still arrived.
+   */
+  readonly throwOn?: keyof RunReporter;
 }
 
 /** One run composed over the ports alone. */
@@ -4479,6 +4842,91 @@ interface Driven {
  * @param options Store, seed, board, and which optional ports to publish.
  * @returns Everything a case reads or drives.
  */
+/**
+ * Runs `act`, failing the case where it raises, and answers what it produced.
+ *
+ * Written as a returning helper rather than an assignment inside
+ * `expect(...).not.toThrow()` because a value assigned only inside a callback
+ * stays narrowed to its initialiser for the reader below it.
+ *
+ * @param act The call under test.
+ * @returns Whatever `act` returned.
+ */
+function withoutThrowing<T>(act: () => T): T {
+  let raised: unknown = null;
+  let produced: T | undefined;
+
+  try {
+    produced = act();
+  } catch (error) {
+    raised = error;
+  }
+
+  expect(raised).toBeNull();
+
+  return produced as T;
+}
+
+/**
+ * Every channel `RunReporter` declares, as a coverage map.
+ *
+ * `Record<keyof RunReporter, true>` makes every declared channel REQUIRED here
+ * and rejects any name the interface does not declare, so a channel added to
+ * `RunReporter` fails the type check rather than silently escaping the
+ * containment matrix below.
+ */
+const REPORTER_CHANNEL_COVERAGE = {
+  onLoadCorrupted: true,
+  onVersionMigrated: true,
+  onBoardSizeReconciled: true,
+  onWriteFailed: true,
+  onPersistenceStatusChanged: true,
+  onRunStarted: true,
+  onStageAdvanced: true,
+  onRewardOffered: true,
+  onRewardDrawn: true,
+  onRelicsNormalized: true,
+  onRunEnded: true,
+} satisfies Record<keyof RunReporter, true>;
+
+/** The channel names, derived so the map and the list cannot differ. */
+const REPORTER_CHANNELS: readonly (keyof RunReporter)[] = Object.keys(
+  REPORTER_CHANNEL_COVERAGE,
+) as readonly (keyof RunReporter)[];
+
+/**
+ * One reporter with a single BROKEN channel.
+ *
+ * Every channel but `raises` delegates to `delegate`. The broken one throws
+ * WITHOUT delegating, so it records nothing and a case reading the sink sees
+ * exactly what an observer that failed mid-report would have left behind.
+ *
+ * @param delegate The reporter every working channel reaches.
+ * @param raises The channel that throws.
+ * @returns The reporter.
+ */
+function raisingReporter(
+  delegate: RunReporter,
+  raises: keyof RunReporter,
+): RunReporter {
+  const built: Record<string, unknown> = {};
+
+  for (const channel of REPORTER_CHANNELS) {
+    built[channel] =
+      channel === raises
+        ? (): never => {
+            throw new Error(`reporter channel ${channel} refused`);
+          }
+        : (report: never): void => {
+            const member = delegate[channel];
+
+            member?.(report);
+          };
+  }
+
+  return built as RunReporter;
+}
+
 function drive(options: DriveOptions = {}): Driven {
   const backing = options.backing ?? trackStorage(new MemoryStorage());
   const manager = new LocalStorageManager({ storage: backing });
@@ -4489,6 +4937,7 @@ function drive(options: DriveOptions = {}): Driven {
   const engine = createRecordingEngine({
     board: options.board,
     startStage: options.startStage,
+    startStageThrows: options.startStageThrows,
   });
 
   const createToken = (): string => {
@@ -4500,7 +4949,7 @@ function drive(options: DriveOptions = {}): Driven {
   const identity = resolveRunIdentity({
     storage: manager,
     createToken,
-    seed: options.seed,
+    seed: options.enteredSeed ?? identitySeed(manager, options.seed),
   });
 
   const holder: { controller: RunController | null } = { controller: null };
@@ -4511,10 +4960,15 @@ function drive(options: DriveOptions = {}): Driven {
     return live === null ? '' : runCorrelationId(live.seed(), live.runId());
   };
 
+  const reporter =
+    options.throwOn === undefined
+      ? sink.reporter
+      : raisingReporter(sink.reporter, options.throwOn);
+
   const store = new RunStateStore({
     storage: manager,
     config,
-    reporter: sink.reporter,
+    reporter,
     correlationId: readCorrelationId,
   });
 
@@ -4526,7 +4980,7 @@ function drive(options: DriveOptions = {}): Driven {
     config,
     stages,
     createToken,
-    reporter: sink.reporter,
+    reporter,
     correlationId: readCorrelationId,
     relics: options.relics === false ? undefined : registry.port,
     rewards:
@@ -5728,6 +6182,173 @@ describe('a lost run', () => {
 });
 
 
+/* ==========================================================================
+ * 25b. The stage a run ended on is RESOLVED, exactly once, before the summary
+ *
+ * The contract asserted here: `finish()` resolves the stage in force with
+ * `cleared: false` before it summarises, so the sixth lifecycle hook of AAP R2
+ * fires for a stage that ended without meeting its goal. `endStage(false)` had no
+ * production caller at all — an explicit end reached `finish()` from `endRun()`
+ * and a loss reached it from the commit handler — so every handler and every
+ * screen branch written for the uncleared outcome was unreachable code.
+ *
+ * Both terminal paths are asserted, the exactly-once property is asserted, and
+ * the composed case drives a REAL engine and a REAL hook bus so the dispatch and
+ * the emission are the shipped ones rather than a recording double's.
+ * Decisions DL-RUNCTL-30, DL-ENGINE-15.
+ * ========================================================================== */
+
+describe('the stage a run ended on', () => {
+  it('is resolved as uncleared when the player ends the run', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(8), 24);
+
+    expect(run.engine.endStages).toEqual([]);
+
+    run.controller.endRun('abandoned');
+
+    // Exactly one resolution, and it carries the uncleared outcome.
+    expect(run.engine.endStages).toEqual([false]);
+    expect(run.controller.lastSummary()).not.toBeNull();
+  });
+
+  it('is resolved as uncleared by the commit that carries the loss', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+    run.engine.hold({ ...boardWithHighest(8), score: 150, over: true });
+    commit(run, true);
+
+    expect(run.engine.endStages).toEqual([false]);
+    expect(run.sink.of('run-ended')[0]?.detail.outcome).toBe('lost');
+  });
+
+  it('resolves it once however many times the run is ended', () => {
+    const run = drive();
+
+    startStage(run, createEmptyBoard());
+
+    run.controller.endRun('abandoned');
+    run.controller.endRun('abandoned');
+    run.controller.endRun('lost');
+
+    // `endRun` is idempotent, and the resolution rides on the one finish it
+    // performs — so a screen that sends the action twice does not end the stage
+    // twice, and no second `onRunEnded` is reported either.
+    expect(run.engine.endStages).toEqual([false]);
+    expect(run.sink.of('run-ended')).toHaveLength(1);
+  });
+
+  it('resolves nothing when the controller observes no engine', () => {
+    const run = drive({ observe: false });
+
+    run.controller.endRun('abandoned');
+
+    // A controller composed alone — which is most of this suite — keeps exactly
+    // its previous behaviour: it summarises and clears, and resolves no stage on
+    // an engine it is not attached to.
+    expect(run.engine.endStages).toEqual([]);
+    expect(run.controller.lastSummary()).not.toBeNull();
+  });
+
+  it('draws no reward and starts no stage while it is finishing', () => {
+    const run = drive({
+      offers: [
+        {
+          id: 'port-plain',
+          name: 'Plain',
+          rarity: 'common',
+          description: 'A relic with no budget.',
+          hooks: Object.freeze(['onMerge']),
+        },
+      ],
+    });
+
+    startStage(run, createEmptyBoard());
+    resolveMove(run, boardWithHighest(16), 400);
+
+    const startsBefore = run.engine.startStages.length;
+
+    run.controller.endRun('abandoned');
+
+    // The stage's goal was MET when the run ended, so the commit the resolution
+    // produces re-enters the commit handler with `stageCleared` standing. Nothing
+    // may be drawn or opened for a run that is ending.
+    expect(run.engine.endStages).toEqual([false]);
+    expect(run.controller.isRewardPending()).toBe(false);
+    expect(run.engine.startStages).toHaveLength(startsBefore);
+    expect(run.sink.of('reward-drawn')).toEqual([]);
+  });
+
+  it('dispatches onStageEnd and emits stage:end through a real engine', () => {
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const stages = createDefaultStageConfig();
+    const hooks = createHookBus();
+    const dispatched: boolean[] = [];
+
+    expect(
+      hooks.register({
+        id: 'uncleared-probe',
+        hooks: {
+          onStageEnd: (payload): void => {
+            dispatched.push(payload.cleared);
+          },
+        },
+      }),
+    ).toBe(true);
+
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({
+        storage: manager,
+        createToken: (): string => 'uncleared-stage-run',
+      }),
+      config,
+      stages,
+      createToken: (): string => 'uncleared-stage-run',
+    });
+
+    controller.begin();
+
+    const streams = createRngStreams(controller.seed(), controller.cursors());
+    const engine = new Engine({
+      config,
+      stages,
+      streams,
+      hooks,
+      stageContext: (): StageCommitContext => controller.stageContext(),
+    });
+
+    const emitted: boolean[] = [];
+
+    engine.events.on('stage:end', (event): void => {
+      emitted.push(event.cleared);
+    });
+
+    const stop = controller.observe(engine, () => streams.snapshotCursors());
+
+    controller.openEngineBoard(engine);
+    engine.move(DIRECTION_LEFT);
+
+    expect(dispatched).toEqual([]);
+    expect(emitted).toEqual([]);
+
+    controller.endRun('abandoned');
+
+    // The shipped dispatch and the shipped emission, both carrying the uncleared
+    // outcome, exactly once.
+    expect(dispatched).toEqual([false]);
+    expect(emitted).toEqual([false]);
+
+    stop();
+  });
+});
+
+
 describe('resolveReward records the relic it took on', () => {
   it('records an identifier alone for a relic carrying nothing else', () => {
     const run = drive();
@@ -6071,6 +6692,838 @@ describe('a selection the run cannot take', () => {
       accepted: false,
       refusal: 'full',
     });
+  });
+
+  it('refuses selectReward at the ceiling without seating the relic live', () => {
+    // The capacity gate was measured by `resolveReward` alone, and
+    // `selectReward` reached the registry FIRST — so at the ceiling the relic was
+    // registered with the hook bus and only then refused by the append, leaving a
+    // relic firing that no envelope carried and no reload would restore.
+    const seed = 'select-at-the-ceiling';
+    const held: PersistedRelic[] = Array.from(
+      { length: MAX_PERSISTED_RELICS },
+      (_entry, index): PersistedRelic => ({
+        id: `ceiling-relic-${String(index)}`,
+      }),
+    );
+    const backing = storageHolding({
+      [RUN_STATE_KEY]: JSON.stringify(
+        envelopeHolding('ceiling-run', seed, held),
+      ),
+    });
+    const run = drive({
+      backing,
+      seed,
+      observe: false,
+      catalogue: held.map((relic): string => relic.id),
+      offers: [drivenOffer('port-plain')],
+    });
+
+    expect(run.controller.relics()).toHaveLength(MAX_PERSISTED_RELICS);
+
+    const before = run.controller.relics();
+    const written = storedEnvelope(backing);
+    const picksBefore = [...run.registry.picked()];
+    const stageBefore = run.controller.stageIndex();
+
+    expect(run.controller.offerReward().map((offer) => offer.id)).toEqual([
+      'port-plain',
+    ]);
+
+    const selection = run.controller.selectReward(
+      'port-plain',
+      run.engine.port,
+    );
+
+    expect(selection.outcome).toBe('refused');
+    expect(selection.relicId).toBe('port-plain');
+
+    // NOTHING WAS SEATED: the registry was never asked to take it on.
+    expect(run.registry.picked()).toEqual(picksBefore);
+    expect(run.registry.calls).not.toContain('pickUpRelic');
+    expect(run.registry.calls).not.toContain('activateRelic');
+
+    // The envelope, the stage and the offer are all where they were.
+    expect(run.controller.relics()).toEqual(before);
+    expect(storedEnvelope(backing)).toEqual(written);
+    expect(run.controller.stageIndex()).toBe(stageBefore);
+    expect(run.controller.isRewardPending()).toBe(true);
+    expect(run.controller.currentOffer().map((offer) => offer.id)).toEqual([
+      'port-plain',
+    ]);
+    expect(run.engine.startedStages).toBe(0);
+
+    // And the refusal is reported.
+    const drawn = run.sink.of('reward-drawn');
+
+    expect(drawn[drawn.length - 1]?.detail.refusal).toBe('refused');
+  });
+
+  it('withdraws the live pickup when the write still refuses', () => {
+    // The last line behind the gate above: a step that refuses AFTER the pickup —
+    // here the write, which no preflight can see — must not leave the relic
+    // seated. Refused at the storage boundary, so the refusal travels the
+    // production path.
+    const run = drive({
+      observe: false,
+      offers: [drivenOffer('port-plain')],
+    });
+
+    expect(run.controller.offerReward().map((offer) => offer.id)).toEqual([
+      'port-plain',
+    ]);
+
+    run.backing.setItem = (): void => {
+      throw new Error('QuotaExceededError');
+    };
+
+    const selection = run.controller.selectReward(
+      'port-plain',
+      run.engine.port,
+    );
+
+    expect(selection.outcome).toBe('refused');
+    expect(run.controller.relics()).toEqual([]);
+
+    // Withdrawn live as well as in the envelope: the registry holds nothing, so
+    // no relic is left firing for a run that does not record it.
+    expect(run.registry.held()).toEqual([]);
+    expect(run.controller.state().relics).toEqual([]);
+
+    // And the stage was never opened for a selection that was refused.
+    expect(run.engine.startedStages).toBe(0);
+  });
+});
+
+describe('a stage transition whose opener refuses', () => {
+  it('contains a throwing opener on selectReward and leaves the open ' +
+    'pending, retryable', () => {
+    const run = drive({
+      observe: false,
+      startStageThrows: true,
+      offers: [drivenOffer('port-plain')],
+    });
+
+    expect(run.controller.offerReward().map((offer) => offer.id)).toEqual([
+      'port-plain',
+    ]);
+
+    const selection = run.controller.selectReward(
+      'port-plain',
+      run.engine.port,
+    );
+
+    // The reward is committed: the relic is held and the envelope carries it.
+    expect(selection.outcome).toBe('accepted');
+    expect(run.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-plain',
+    ]);
+    expect(storedEnvelope(run.backing)?.relics.map((relic) => relic.id))
+      .toEqual(['port-plain']);
+
+    // The open failed, was contained, and is recorded as owed.
+    expect(run.engine.startStageAttempts).toBe(1);
+    expect(run.engine.startedStages).toBe(0);
+    expect(run.controller.stageOpenPending()).toBe(
+      run.controller.stageIndex(),
+    );
+    expect(run.sink.of('write-failed')).not.toHaveLength(0);
+
+    // The retry opens it, and the debt clears.
+    run.engine.startStageThrows = false;
+
+    expect(run.controller.openPendingStage(run.engine.port)).toBe(true);
+    expect(run.engine.startedStages).toBe(1);
+    expect(run.controller.stageOpenPending()).toBeNull();
+
+    // Idempotent: nothing is owed, so a second retry opens nothing.
+    expect(run.controller.openPendingStage(run.engine.port)).toBe(false);
+    expect(run.engine.startedStages).toBe(1);
+  });
+
+  it('contains a throwing opener on completeReward, so the reward it ' +
+    'persisted still stands', () => {
+    const run = drive({
+      observe: false,
+      startStageThrows: true,
+      offers: [drivenOffer('port-plain')],
+    });
+
+    expect(run.controller.offerReward().map((offer) => offer.id)).toEqual([
+      'port-plain',
+    ]);
+
+    let resolution: RewardResolution | null = null;
+
+    // The throw used to escape this call, AFTER the reward had been persisted.
+    expect(() => {
+      resolution = run.controller.completeReward(run.engine.port, 'port-plain');
+    }).not.toThrow();
+
+    expect(resolution).toEqual({ accepted: true, refusal: null });
+    expect(run.controller.relics().map((relic) => relic.id)).toEqual([
+      'port-plain',
+    ]);
+    expect(run.controller.stageOpenPending()).toBe(
+      run.controller.stageIndex(),
+    );
+
+    run.engine.startStageThrows = false;
+
+    expect(run.controller.openPendingStage(run.engine.port)).toBe(true);
+    expect(run.controller.stageOpenPending()).toBeNull();
+  });
+
+  it('drops a debt the run has already advanced past', () => {
+    const run = drive({
+      observe: false,
+      startStageThrows: true,
+      offers: [drivenOffer('port-plain')],
+    });
+
+    expect(run.controller.offerReward().map((offer) => offer.id)).toEqual([
+      'port-plain',
+    ]);
+    run.controller.selectReward('port-plain', run.engine.port);
+
+    const owed = run.controller.stageOpenPending();
+
+    expect(owed).not.toBeNull();
+
+    // The run advances by another route, so the stage that was owed an open is
+    // no longer the stage in force.
+    run.controller.advanceStage();
+    run.engine.startStageThrows = false;
+
+    expect(run.controller.openPendingStage(run.engine.port)).toBe(false);
+    expect(run.controller.stageOpenPending()).toBeNull();
+    expect(run.engine.startedStages).toBe(0);
+  });
+});
+
+/* ==========================================================================
+ * A REPORTER THAT THROWS ON ONE CHANNEL
+ *
+ * Every `this.reporter.*` call in the controller now runs inside `emit()`, which
+ * mirrors `RunStateStore.emit`. Before that, an observer that raised took the
+ * caller down with it: a logger that threw on `onRunStarted` aborted `begin()`
+ * mid-adoption, and one that threw on `onRewardDrawn` aborted a selection AFTER
+ * the envelope had been written — the run and its envelope disagreeing because a
+ * REPORT failed. Observation is not part of the transaction. DL-RUNCTL-22.
+ * ========================================================================== */
+
+describe('a reporter that throws on one channel', () => {
+  it('lists every channel the interface declares', () => {
+    // The matrix below is only exhaustive while this holds. `NOOP_RUN_REPORTER`
+    // implements every member, so its own keys are the interface's channel set.
+    expect([...REPORTER_CHANNELS].sort()).toEqual(
+      Object.keys(NOOP_RUN_REPORTER).sort(),
+    );
+  });
+
+  for (const channel of REPORTER_CHANNELS) {
+    it(`completes the whole lifecycle while ${channel} throws`, () => {
+      const run = drive({
+        throwOn: channel,
+        offers: [drivenOffer('port-plain'), drivenOffer('port-charged')],
+      });
+
+      // ADOPTION. `begin()` already ran inside `drive`, so reaching here at all
+      // is the proof for `onRunStarted`; the rest is driven below.
+      expect(run.outcome).toBeDefined();
+      expect(run.controller.runId()).not.toBe('');
+
+      // A ROUND, DRAWN AND SELECTED: `onRewardOffered` and `onRewardDrawn`.
+      const offered = withoutThrowing((): readonly RewardOffer[] =>
+        run.controller.offerReward(),
+      );
+
+      expect(offered.map((offer) => offer.id)).toEqual([
+        'port-plain',
+        'port-charged',
+      ]);
+
+      const selection = withoutThrowing((): RewardSelection =>
+        run.controller.selectReward('port-plain', run.engine.port),
+      );
+
+      expect(selection.outcome).toBe('accepted');
+
+      // THE TRANSACTION COMMITTED, whichever channel broke: the relic is held
+      // live, the envelope carries it, and the stage advanced.
+      expect(run.registry.held().map((relic) => relic.id)).toEqual([
+        'port-plain',
+      ]);
+      expect(run.controller.relics().map((relic) => relic.id)).toEqual([
+        'port-plain',
+      ]);
+      expect(
+        storedEnvelope(run.backing)?.relics.map((relic) => relic.id),
+      ).toEqual(['port-plain']);
+      expect(run.controller.stageIndex()).toBe(1);
+
+      // A FURTHER ADVANCE: `onStageAdvanced`.
+      withoutThrowing((): void => {
+        run.controller.advanceStage();
+      });
+
+      expect(run.controller.stageIndex()).toBe(2);
+
+      // A REFUSED WRITE: `onWriteFailed` and `onPersistenceStatusChanged`.
+      run.backing.setItem = (): void => {
+        throw new Error('QuotaExceededError');
+      };
+
+      withoutThrowing((): boolean =>
+        run.controller.persist(run.engine.port, run.cursors),
+      );
+
+      expect(run.controller.persistenceStatus()).toBe('ephemeral');
+
+      // THE RUN ENDS: `onRunEnded`, over a store that is still refusing.
+      const summary = withoutThrowing((): RunSummary =>
+        run.controller.endRun('abandoned'),
+      );
+
+      expect(summary.stageIndex).toBe(2);
+
+      // Ended, so a second offer is refused rather than drawn.
+      expect(run.controller.offerReward()).toEqual([]);
+
+      // AND EVERY OTHER CHANNEL STILL REPORTED. The broken one records nothing,
+      // so it is the only kind missing from the sink.
+      const kinds = new Set(run.sink.records.map((record) => record.kind));
+
+      expect(kinds.size).toBeGreaterThan(0);
+    });
+  }
+
+  it('reports through every channel when none of them throw', () => {
+    // The control for the matrix above: the same drive with a working reporter
+    // reaches the four channels the sequence exercises, so a matrix case that
+    // passes because nothing was ever reported cannot pass silently.
+    const run = drive({
+      offers: [drivenOffer('port-plain'), drivenOffer('port-charged')],
+    });
+
+    run.controller.offerReward();
+    run.controller.selectReward('port-plain', run.engine.port);
+    run.controller.advanceStage();
+
+    run.backing.setItem = (): void => {
+      throw new Error('QuotaExceededError');
+    };
+
+    run.controller.persist(run.engine.port, run.cursors);
+    run.controller.endRun('abandoned');
+
+    const kinds = new Set(run.sink.records.map((record) => record.kind));
+
+    expect([...kinds].sort()).toEqual(
+      [
+        'persistence-status-changed',
+        'reward-drawn',
+        'reward-offered',
+        'run-ended',
+        'run-started',
+        'stage-advanced',
+        'write-failed',
+      ].sort(),
+    );
+  });
+
+  it('does not let a corruption report abort adoption', () => {
+    // The store's own channels reach the controller's caller too: `begin()`
+    // reads a corrupted envelope, the store reports it, and an observer that
+    // throws there must not stop the run opening fresh.
+    const backing = storageHolding({ [RUN_STATE_KEY]: '{ not json' });
+    const run = drive({ backing, throwOn: 'onLoadCorrupted', observe: false });
+
+    // The store refuses the payload and answers with the fallback it opened.
+    expect(run.outcome).toBe('fresh-fallback');
+    expect(run.controller.stageIndex()).toBe(0);
+    expect(run.controller.relics()).toEqual([]);
+    expect(run.controller.seed()).not.toBe('');
+  });
+});
+
+/* ==========================================================================
+ * A REGISTRY PORT WHOSE MEMBERS LIVE ON A PROTOTYPE
+ *
+ * `RelicRegistryPort` declares PAIRED SPELLINGS for the same operation —
+ * `serialize`/`snapshotRelics`, `restore`/`restoreRelics`,
+ * `persistedEntry`/`resolveRelic`, `knows`/`knowsRelic`,
+ * `pickUp`/`pickUpRelic`/`activateRelic` — because a `RelicRegistry` INSTANCE
+ * satisfies one half of every pair and `RelicRegistry.runPort()` the other.
+ * A caller may legitimately hand over either.
+ *
+ * Two defects lived here. The withdraw and the restore read `restoreRelics`
+ * alone, so an instance-shaped port silently restored nothing; and every member
+ * pulled into a local was invoked as a BARE FUNCTION, which for a class method
+ * reading `this` is a `TypeError`. Both are invisible to a port composed of
+ * arrow-function properties, which is what every double in this file was.
+ * DL-RUNCTL-27.
+ * ========================================================================== */
+
+/**
+ * A registry port published as a CLASS, using only the ALIAS spellings.
+ *
+ * Every member reads `this`, so any one of them invoked as a bare function
+ * raises rather than misbehaving quietly — which is what makes this double able
+ * to detect a lost receiver at all. It publishes no `holdsRelic`, no
+ * `ownedRelicIds` and neither of the `*Relic` activation spellings, so the
+ * controller must reach it through the alias half of every pair.
+ */
+class AliasRegistry {
+  /** Relics seated, in pickup order. */
+  private readonly seated: PersistedRelic[] = [];
+
+  /** Every member called, in order. */
+  readonly calls: string[] = [];
+
+  /** Each list handed to `restore`, in order. */
+  readonly restorations: PersistedRelic[][] = [];
+
+  constructor(private readonly known: readonly string[]) {}
+
+  knows(relicId: string): boolean {
+    this.note('knows');
+
+    return this.known.includes(relicId);
+  }
+
+  pickUp(relicId: string): unknown {
+    this.note('pickUp');
+
+    if (!this.known.includes(relicId)) {
+      return undefined;
+    }
+
+    this.seated.push({ id: relicId });
+
+    return { id: relicId };
+  }
+
+  persistedEntry(relicId: string): PersistedRelic | null {
+    this.note('persistedEntry');
+
+    return this.seated.find((relic): boolean => relic.id === relicId) ?? null;
+  }
+
+  serialize(): readonly PersistedRelic[] {
+    this.note('serialize');
+
+    return this.seated.map((relic): PersistedRelic => ({ ...relic }));
+  }
+
+  restore(relics: readonly PersistedRelic[]): void {
+    this.note('restore');
+    this.restorations.push(relics.map((relic): PersistedRelic => ({ ...relic })));
+    this.seated.length = 0;
+    this.seated.push(...relics.map((relic): PersistedRelic => ({ ...relic })));
+  }
+
+  /** What the double is holding, for a case to read back. */
+  held(): readonly PersistedRelic[] {
+    return this.seated.map((relic): PersistedRelic => ({ ...relic }));
+  }
+
+  /**
+   * Records one call. Reading `this.calls` is what fails for a member invoked
+   * with the wrong receiver.
+   */
+  private note(member: string): void {
+    this.calls.push(member);
+  }
+}
+
+/**
+ * One controller composed over a port whose members live on a prototype.
+ *
+ * @param options The store to compose over, the seed, and the identifiers the
+ *   double knows.
+ * @returns The controller, the double and the sink.
+ */
+function composeOverClass(options: {
+  readonly backing?: MemoryStorage;
+  readonly seed?: string;
+  readonly known?: readonly string[];
+  readonly registry?: RelicRegistryPort;
+} = {}): {
+  readonly controller: RunController;
+  readonly registry: AliasRegistry;
+  readonly backing: MemoryStorage;
+  readonly sink: ReportSink;
+  readonly outcome: RunStateLoadOutcome;
+} {
+  const backing = options.backing ?? new MemoryStorage();
+  const manager = new LocalStorageManager({ storage: backing });
+  const config = createDefaultRulesConfig();
+  const stages = createDefaultStageConfig();
+  const sink = createReportSink();
+  const registry = new AliasRegistry(
+    options.known ?? ['alias-one', 'alias-two'],
+  );
+  let serial = 0;
+
+  const controller = new RunController({
+    store: new RunStateStore({
+      storage: manager,
+      config,
+      reporter: sink.reporter,
+    }),
+    identity: resolveRunIdentity({
+      storage: manager,
+      createToken: (): string => {
+        serial += 1;
+
+        return `alias-run-${String(serial)}`;
+      },
+      seed: identitySeed(manager, options.seed),
+    }),
+    config,
+    stages,
+    createToken: (): string => {
+      serial += 1;
+
+      return `alias-token-${String(serial)}`;
+    },
+    reporter: sink.reporter,
+
+    // The instance itself, which is one of the two shapes the port declares.
+    relics: options.registry ?? (registry as unknown as RelicRegistryPort),
+  });
+
+  const outcome = controller.begin();
+
+  return { controller, registry, backing, sink, outcome };
+}
+
+describe('a registry port whose members live on a prototype', () => {
+  it('takes a relic on through the alias spellings alone', () => {
+    const composed = composeOverClass();
+
+    expect(composed.controller.recordRewardOffer(['alias-one'])).toBe(true);
+    expect(composed.controller.resolveReward('alias-one')).toEqual({
+      accepted: true,
+      refusal: null,
+    });
+
+    // SEATED LIVE, and the entry appended is the one the double produced.
+    expect(composed.registry.held().map((relic) => relic.id)).toEqual([
+      'alias-one',
+    ]);
+    expect(composed.controller.relics().map((relic) => relic.id)).toEqual([
+      'alias-one',
+    ]);
+
+    // Reached through the alias half of every pair, each with its owner as the
+    // receiver — a bare call would have raised inside `note()`.
+    expect(composed.registry.calls).toContain('knows');
+    expect(composed.registry.calls).toContain('pickUp');
+    expect(composed.registry.calls).toContain('persistedEntry');
+  });
+
+  it('refuses an identifier the alias catalogue does not know', () => {
+    const composed = composeOverClass();
+
+    composed.controller.recordRewardOffer(['alias-absent']);
+
+    expect(composed.controller.resolveReward('alias-absent').accepted).toBe(
+      false,
+    );
+    expect(composed.registry.held()).toEqual([]);
+    expect(composed.controller.relics()).toEqual([]);
+  });
+
+  it('projects the held relics through the `serialize` alias on commit', () => {
+    const composed = composeOverClass();
+
+    expect(composed.controller.recordRewardOffer(['alias-two'])).toBe(true);
+    expect(composed.controller.resolveReward('alias-two').accepted).toBe(true);
+
+    // `resolveReward` writes as part of its own transaction, and the relics it
+    // writes are the ones the registry projects.
+    expect(composed.registry.calls).toContain('serialize');
+    expect(
+      storedEnvelope(composed.backing)?.relics.map((relic) => relic.id),
+    ).toEqual(['alias-two']);
+  });
+
+  it('restores a resumed run through the `restore` alias', () => {
+    // The defect: the restore read `restoreRelics` alone, so an instance-shaped
+    // port was handed nothing and a resumed run held relics the envelope
+    // recorded and the registry had never seated — every hook they bind silent
+    // for the rest of the run.
+    const seed = 'alias-restore';
+    const backing = storageHolding({
+      [RUN_STATE_KEY]: JSON.stringify(
+        envelopeHolding('alias-restored-run', seed, [
+          { id: 'alias-one' },
+          { id: 'alias-two', charges: 2 },
+        ]),
+      ),
+    });
+    const composed = composeOverClass({ backing, seed });
+
+    expect(composed.outcome).toBe('loaded');
+    expect(composed.controller.relics().map((relic) => relic.id)).toEqual([
+      'alias-one',
+      'alias-two',
+    ]);
+
+    // HANDED OVER, through the alias, with the charges the envelope carried.
+    expect(composed.registry.calls).toContain('restore');
+    expect(composed.registry.restorations.at(-1)).toEqual([
+      { id: 'alias-one' },
+      { id: 'alias-two', charges: 2 },
+    ]);
+    expect(composed.registry.held().map((relic) => relic.id)).toEqual([
+      'alias-one',
+      'alias-two',
+    ]);
+  });
+
+  it('withdraws through the `restore` alias when a write is refused', () => {
+    // The withdraw read `restoreRelics` too, so a refused write rolled the
+    // envelope back and left the relic seated live.
+    const composed = composeOverClass();
+
+    expect(composed.controller.recordRewardOffer(['alias-one'])).toBe(true);
+
+    composed.backing.setItem = (): void => {
+      throw new Error('QuotaExceededError');
+    };
+
+    expect(composed.controller.resolveReward('alias-one')).toEqual({
+      accepted: false,
+      refusal: 'refused',
+    });
+
+    // Rolled back on BOTH sides, and the roll-back went through the alias.
+    expect(composed.controller.relics()).toEqual([]);
+    expect(composed.registry.calls).toContain('restore');
+    expect(composed.registry.held()).toEqual([]);
+    expect(composed.registry.restorations.at(-1)).toEqual([]);
+  });
+
+  it('composes over a real RelicRegistry instance end to end', () => {
+    // The other half of the same contract: not a double at all, but the class
+    // src/relics publishes, handed over as the instance rather than through
+    // `runPort()`. Every member the controller reaches on it is a prototype
+    // method.
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const stages = createDefaultStageConfig();
+    const sink = createReportSink();
+    const bus = createHookBus({ correlationId: 'alias-instance' });
+    const registry = new RelicRegistry({ bus, catalogue: RELIC_CATALOGUE });
+    const chosen = RELIC_CATALOGUE[0]?.id ?? '';
+    let serial = 0;
+    const createToken = (): string => {
+      serial += 1;
+
+      return `instance-${String(serial)}`;
+    };
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager, createToken }),
+      config,
+      stages,
+      createToken,
+      reporter: sink.reporter,
+
+      // The INSTANCE, not `runPort()`.
+      relics: registry as unknown as RelicRegistryPort,
+    });
+
+    controller.begin();
+
+    expect(controller.recordRewardOffer([chosen])).toBe(true);
+    expect(controller.resolveReward(chosen)).toEqual({
+      accepted: true,
+      refusal: null,
+    });
+
+    // Seated on the live bus, which is the only thing that makes a relic fire.
+    expect(registry.ownedIds()).toEqual([chosen]);
+    expect(bus.subscribers().map((held) => held.id)).toContain(chosen);
+    expect(controller.relics().map((relic) => relic.id)).toEqual([chosen]);
+
+    // And a reload over the same store restores it through the instance.
+    const resumed = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager, createToken }),
+      config,
+      stages,
+      createToken,
+      reporter: sink.reporter,
+      relics: registry as unknown as RelicRegistryPort,
+    });
+
+    registry.clear();
+
+    expect(resumed.begin()).toBe('loaded');
+    expect(registry.ownedIds()).toEqual([chosen]);
+  });
+});
+
+/* ==========================================================================
+ * AN ATTACHED REGISTRY THAT CANNOT SEAT A RELIC
+ *
+ * An ABSENT registry means "this composition drives the relics itself", and the
+ * controller records an entry on shape alone. An ATTACHED one that publishes no
+ * activation member means the wiring is WRONG, and the two used to be
+ * indistinguishable — so a port attached under the wrong member names persisted
+ * a reward that fired on no hook, was drawn as held by the HUD, and was excluded
+ * from every later draw. DL-RUNCTL-28.
+ * ========================================================================== */
+
+describe('an attached registry that cannot seat a relic', () => {
+  it('refuses the selection and reports it, where no activation member exists',
+    () => {
+      const composed = composeOverClass({
+        registry: Object.freeze({
+          knows: (relicId: string): boolean => relicId === 'inert-relic',
+        }) as RelicRegistryPort,
+      });
+
+      expect(composed.controller.recordRewardOffer(['inert-relic'])).toBe(true);
+      expect(composed.controller.resolveReward('inert-relic')).toEqual({
+        accepted: false,
+        refusal: 'refused',
+      });
+
+      // Nothing recorded, and the failure is VISIBLE rather than silent.
+      expect(composed.controller.relics()).toEqual([]);
+      expect(composed.sink.of('write-failed')).not.toHaveLength(0);
+    });
+
+  it('records the entry on shape alone where no registry is attached', () => {
+    // The pair to the case above: an absent registry keeps the behaviour every
+    // registry-free composition relies on.
+    const backing = new MemoryStorage();
+    const manager = new LocalStorageManager({ storage: backing });
+    const config = createDefaultRulesConfig();
+    const stages = createDefaultStageConfig();
+    const sink = createReportSink();
+    let serial = 0;
+    const createToken = (): string => {
+      serial += 1;
+
+      return `bare-${String(serial)}`;
+    };
+    const controller = new RunController({
+      store: new RunStateStore({ storage: manager, config }),
+      identity: resolveRunIdentity({ storage: manager, createToken }),
+      config,
+      stages,
+      createToken,
+      reporter: sink.reporter,
+    });
+
+    controller.begin();
+
+    expect(controller.recordRewardOffer(['unattached-relic'])).toBe(true);
+    expect(controller.resolveReward('unattached-relic')).toEqual({
+      accepted: true,
+      refusal: null,
+    });
+    expect(controller.relics().map((relic) => relic.id)).toEqual([
+      'unattached-relic',
+    ]);
+    expect(sink.of('write-failed')).toHaveLength(0);
+  });
+
+  it('reads a falsy pickup answer as a refusal', () => {
+    // The port declares "undefined means refused", and only `undefined` was
+    // refused — so a registry answering `false` or `null` had its refusal read
+    // as an acceptance and the relic reached the envelope unseated.
+    for (const answer of [false, null, 0, '']) {
+      const composed = composeOverClass({
+        registry: Object.freeze({
+          knows: (): boolean => true,
+          pickUp: (): unknown => answer,
+        }) as RelicRegistryPort,
+      });
+
+      expect(composed.controller.recordRewardOffer(['falsy-relic'])).toBe(true);
+      expect(composed.controller.resolveReward('falsy-relic').accepted).toBe(
+        false,
+      );
+      expect(composed.controller.relics()).toEqual([]);
+    }
+  });
+
+  it('accepts a truthy pickup answer that is not an entry', () => {
+    // The other side of the same rule: anything truthy is an acceptance, and the
+    // entry recorded is then resolved rather than taken from the answer.
+    const composed = composeOverClass({
+      registry: Object.freeze({
+        knows: (): boolean => true,
+        pickUp: (): unknown => true,
+      }) as RelicRegistryPort,
+    });
+
+    expect(composed.controller.recordRewardOffer(['truthy-relic'])).toBe(true);
+    expect(composed.controller.resolveReward('truthy-relic').accepted).toBe(
+      true,
+    );
+    expect(composed.controller.relics().map((relic) => relic.id)).toEqual([
+      'truthy-relic',
+    ]);
+  });
+
+  it('confirms ownership through `ownedRelicIds` where `holdsRelic` is absent',
+    () => {
+      // A registry that can be asked IS asked: the pickup's word is not taken
+      // where the port publishes a way to check it.
+      const seated: string[] = [];
+      const composed = composeOverClass({
+        registry: Object.freeze({
+          knowsRelic: (): boolean => true,
+          pickUpRelic: (relicId: string): PersistedRelic | null => {
+            // Accepts, and then does NOT seat it — the divergence the
+            // confirmation exists to catch.
+            void relicId;
+
+            return { id: relicId };
+          },
+          ownedRelicIds: (): readonly string[] => seated,
+        }) as RelicRegistryPort,
+      });
+
+      expect(composed.controller.recordRewardOffer(['unseated-relic'])).toBe(
+        true,
+      );
+      expect(composed.controller.resolveReward('unseated-relic').accepted).toBe(
+        false,
+      );
+      expect(composed.controller.relics()).toEqual([]);
+    });
+
+  it('accepts where `ownedRelicIds` agrees the relic is seated', () => {
+    const seated: string[] = [];
+    const composed = composeOverClass({
+      registry: Object.freeze({
+        knowsRelic: (): boolean => true,
+        pickUpRelic: (relicId: string): PersistedRelic | null => {
+          seated.push(relicId);
+
+          return { id: relicId };
+        },
+        ownedRelicIds: (): readonly string[] => seated,
+      }) as RelicRegistryPort,
+    });
+
+    expect(composed.controller.recordRewardOffer(['seated-relic'])).toBe(true);
+    expect(composed.controller.resolveReward('seated-relic').accepted).toBe(
+      true,
+    );
+    expect(composed.controller.relics().map((relic) => relic.id)).toEqual([
+      'seated-relic',
+    ]);
   });
 });
 

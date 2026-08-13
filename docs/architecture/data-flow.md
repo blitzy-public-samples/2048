@@ -41,29 +41,36 @@ flowchart TD
   SS["onStageStart dispatch<br/>as the stage board is prepared"]
   SS --> K["Key, swipe or on-screen control"]
   K --> D["Direction 0 to 3"]
-  D --> BM["onBeforeMove dispatch<br/>cancellable"]
-  BM -->|"vetoed"| END1["Turn ends, no state change"]
+  D --> GUARD{"Play blocked?<br/>lost, or won and not continued"}
+  GUARD -->|"yes"| END0["Turn refused, nothing emitted"]
+  GUARD -->|"no"| BM["onBeforeMove dispatch<br/>cancellable, may redirect,<br/>may record board commands"]
+  BM -->|"vetoed, board unchanged"| END1["Turn ends, no state change"]
+  BM -->|"vetoed, a command reseated the board"| SETTLE["Verdict re-derived,<br/>no spawn"]
   BM -->|"allowed"| PREP["prepareTiles<br/>clear mergedFrom, snapshot position"]
   PREP --> TRAV["Traversal walk<br/>over the configured board size"]
   TRAV --> MG{"Merge condition<br/>from config.merge.canMerge?"}
   MG -->|"yes"| MH["onMerge dispatch<br/>score delta applied"]
   MG -->|"no"| MV["Reposition tile"]
-  MH --> CHK["Win check against<br/>config.winValue"]
-  MV --> CHK
+  MH --> CHK["Win check on the merged value<br/>against config.winValue"]
   CHK --> MOVED{"Any position changed?"}
+  MV --> MOVED
   MOVED -->|"no"| END2["Turn ends, no spawn"]
-  MOVED -->|"yes"| SP["onSpawn dispatch<br/>value and position from<br/>named RNG substreams"]
-  SP --> AF["onAfterMove dispatch<br/>stage goal evaluated here"]
-  AF --> LOSS{"Moves still available?"}
-  LOSS -->|"no"| OVER["Game over"]
-  LOSS -->|"yes"| COMMIT["state:commit"]
-  OVER --> COMMIT
+  MOVED -->|"yes"| SP["Spawn: value and position from<br/>named RNG substreams,<br/>then onSpawn dispatch"]
+  SP --> LOSS{"Moves still available?"}
+  LOSS -->|"no"| OVER["Game over recorded"]
+  LOSS -->|"yes"| AF
+  OVER --> AF["onAfterMove dispatch<br/>may declare the run over,<br/>may record board commands"]
+  AF --> MA["move:after emitted<br/>run controller measures goal progress"]
+  MA --> COMMIT["commit<br/>1 best score promoted, then re-read<br/>2 board snapshot written or cleared<br/>3 state:commit emitted, ten members"]
+  SETTLE --> COMMIT
   COMMIT --> R["Renderer tweens<br/>and composites a frame"]
+  COMMIT --> VIEWS["HUD, announcer, sound engine<br/>and screen router"]
   COMMIT --> PERSIST["Run state written<br/>under a namespaced key"]
-  COMMIT --> BEST["Best score promoted,<br/>then re-read from storage"]
-  COMMIT --> SG{"Stage goal met?"}
-  SG -->|"yes"| SE["onStageEnd dispatch<br/>to the reward screen"]
+  COMMIT --> SG{"Stage goal met?<br/>evaluated after the commit"}
   SG -->|"no"| WAIT["Await next input"]
+  SG -->|"yes"| SE["endStage: onStageEnd dispatch,<br/>then stage:end emitted"]
+  SE --> COMMIT2["Second commit of the same turn"]
+  COMMIT2 --> SC["Stage clear on screen;<br/>the player's own continue<br/>opens the reward offer"]
 ```
 
 **Legend.** *Figure 4 — Turn Data Flow: From Keystroke to Composited Frame and
@@ -73,16 +80,33 @@ a decision. The **six hook names mark the dispatch points**: `onStageStart`,
 the six sit inside the turn; `onStageStart` is dispatched once as a stage's
 board is prepared, so it enters the figure ahead of the first keystroke rather
 than within the turn. An **edge label** on a branch names the outcome that
-takes it, and `onBeforeMove` is the only cancellable dispatch, so its `vetoed`
-branch is a real exit. `state:commit` fans out to four consumers and the engine
-names none of them (`DL-ENGINE-01`).
+takes it, and `onBeforeMove` is the only cancellable dispatch, so its two
+`vetoed` branches are real exits — one of them still commits, because a command
+the vetoing dispatch recorded changed the board. The **numbered `commit` box**
+is one method, and its three steps run in the order printed: the promotion and
+the snapshot write are inside it, ahead of the emission, not consequences of it.
+`state:commit` fans out to consumers that **subscribe**, and the engine names no
+view (`DL-ENGINE-01`); the one consumer it does name is the injected persistence
+port the promotion and the snapshot write go through (`DL-STORE-02`). A cleared
+stage adds a **second commit to the same turn**, because `endStage` commits
+after its dispatch.
 
 Read top to bottom, the figure says: a direction is resolved to one of four
 bare numeric values before anything else happens, the four being the vectors of
-`js/game_manager.js` L194-L204 — 0 up, 1 right, 2 down, 3 left. Tile
-preparation clears `mergedFrom` and snapshots each position, which is
-`prepareTiles` at L113-L120. The traversal walk then resolves the slide, and
-every tile it moves or merges reaches the win check.
+`js/game_manager.js` L194-L204 — 0 up, 1 right, 2 down, 3 left. The turn's
+entry guard is next, reading the loss flag together with the continue-after-win
+flag, which is `js/game_manager.js` L134. Tile preparation clears `mergedFrom`
+and snapshots each position, which is `prepareTiles` at L113-L120. The traversal
+walk then resolves the slide.
+
+**Only a merge reaches the win check.** The check tests the value a merge
+produced, so a tile that merely slid never passes through it — that is the
+placement of `js/game_manager.js` L170, inside the merge branch — and a
+repositioned tile goes straight to the change test. The loss check is the
+opposite case: it is taken once per turn, after the spawn and **before** the
+`onAfterMove` dispatch, so a handler that changes the board is measured against
+a verdict the engine had already established, and a handler that reopened a
+lost board is re-probed rather than trusted (`DL-ENGINE-09`).
 
 Three boxes read configuration rather than a literal: the traversal walk is
 sized by `boardSize`, the merge diamond calls `merge.canMerge`, and the win
@@ -106,13 +130,47 @@ no draw: that is the boundary `randomAvailableCell` set at `js/grid.js`
 L37-L43, whose `if (cells.length)` guard has no else branch and so answers
 `undefined`.
 
-The stage goal is evaluated where `onAfterMove` is dispatched, and a met goal
-is resolved through the `onStageEnd` dispatch (`DL-ENGINE-07`). The screen flow
-that dispatch leads into is Figure 6, in
-[`hook-dispatch-sequence.md`](hook-dispatch-sequence.md).
+**The stage goal is measured twice and cleared once, and the clearing verdict is
+taken after the commit.** The `move:after` box is where the run controller takes
+its measurement, and the commit box asks for the stage slice again while the
+payload is assembled — which is why the published `goalProgress` describes the
+board that commit carries. The **clearing** verdict is a second, independent
+evaluation the engine runs in the tail of the turn: `commit()` and then
+`resolveMetStageGoal()`, in that order, so the decision reads state that has
+already been published and no subscriber sees a stage resolved against a board it
+never saw. `evaluateStageGoal` of `src/config/stage-config.ts` owns the
+arithmetic and `endStage()` resolves a met goal (`DL-ENGINE-07`, `DL-STAGE-02`);
+[`../CONFIGURATION.md`](../CONFIGURATION.md#45-the-evaluation-lifecycle) carries
+the nine-step sequence step by step and is the authority for it. Resolution is
+guarded to **one end per stage**: a goal stays met on every later turn, so
+without the guard a cleared stage would pay out and offer a reward on every
+commit that followed it.
 
-The board on every payload the figure carries is the live lattice, passed by
-reference (`DL-EVENT-01`).
+`endStage()` then dispatches `onStageEnd`, adopts the score that dispatch
+returned, applies the board commands it recorded, emits `stage:end`, and
+**commits a second time** — which is why a clearing turn is two commits, and why
+a subscriber sees the stage resolve and the state that resolved it in the same
+turn. What the flow reaches from there is Figure 6, in
+[`hook-dispatch-sequence.md`](hook-dispatch-sequence.md): `stage:end` takes the
+board to **stage clear**, and the **player's own continue action** is what opens
+the reward offer.
+
+The figure shows the CLEARED path, and it is not the only one that reaches
+`onStageEnd`. A stage the run leaves without meeting its goal is resolved too,
+with `cleared: false`, from `RunController.finish()` before the run is
+summarised (`DL-RUNCTL-30`) — so the hook fires once for every stage that ends,
+not only for every stage that clears, and the branch the diamond does not draw
+ends the run rather than opening a reward. Where that resolution reseats the
+lattice — a cursed relic collapsing the board is the case — the terminal verdict
+is re-derived before the commit publishes it (`DL-ENGINE-15`).
+
+The board on an event **payload** is the live lattice, passed by reference
+(`DL-EVENT-01`). A relic handler is handed something narrower: the `HookContext`
+exposes the rules, the substreams and the board as **read-only capability
+views**, and a handler writes only by recording commands the bus applies once its
+return has validated (`DL-BOARD-02`). What leaves the run controller as a
+projection — a stage goal, a summary, a board — is cloned and frozen, so no
+caller holds a reference into the run (`DL-RUNCTL-06`).
 
 The turn is instrumented across this flow: the `engine.turn` span opens on
 `move:before` and closes on `state:commit`, and the frame callback behind the
@@ -136,14 +194,15 @@ and called at L175-L177 — was the sole signal that a move had occurred. An
 and a turn preceded by one re-derives the verdict and commits while still
 spawning nothing (`DL-ENGINE-09`).
 
-**The best score is promoted, then re-read from storage.** The `state:commit`
-box writes through a node that names both steps in that order.
-`js/game_manager.js` L80-L82 compared and wrote, and L95 read the value back
-through `getBestScore()` while building the L91-L97 payload — after the
-possible write, so the number on screen is the number in storage and never a
-cached copy of the number intended. The accessor answers the raw stored string
-when a value is present and the number `0` when it is absent, and the
-comparison at L80-L82 relies on that coercion (`DL-STORE-02`).
+**The best score is promoted, then re-read from storage, and both happen inside
+the commit.** The `commit` box numbers its steps for exactly this reason: the
+promotion is step one and the emission is step three, so the payload carries a
+value read back **after** the possible write rather than the value the engine
+intended to write. `js/game_manager.js` L80-L82 compared and wrote, and L95 read
+the value back through `getBestScore()` while building the L91-L97 payload — the
+same order, in the same method. The accessor answers the raw stored string when a
+value is present and the number `0` when it is absent, and the comparison at
+L80-L82 relies on that coercion (`DL-STORE-02`).
 
 Four further details the figure itself has no room to spell out:
 
@@ -217,9 +276,17 @@ the availability lookup rather than reached as a module binding (`DL-RNG-01`,
 Two consequences the figure carries:
 
 - **A relic drawing from `relic-draw` cannot shift the `spawn-position`
-  sequence.** The four streams advance independently, so adding a relic to the
-  catalogue does not invalidate a seeded snapshot recorded before that relic
-  existed (`DL-RNG-04`, `DL-DRAW-02`).
+  sequence.** The four streams advance independently, so a draw made on one of
+  them consumes nothing from another: the board a seed produces is unaffected by
+  how many relic offers were drawn along the way, and the raw draw sequence — the
+  rarity tiers and the shrinking-pool positions — is unaffected by the catalogue,
+  because those values carry no relic identifier (`DL-RNG-04`, `DL-DRAW-02`).
+  **The guarantee stops there, and stops deliberately.** Adding, removing or
+  reordering a relic in the catalogue changes which relic a given pool position
+  resolves to, so the offer **identities** a seed produces are not invariant
+  across a catalogue change: the snapshot suite records the draw primitives and
+  the produced offers in separate layers for that reason, and a catalogue change
+  is expected to re-record the second layer while leaving the first untouched.
 - **Persisting each cursor is what keeps a *resumed* run deterministic.** All
   four cursors converge on the `rngCursor` map of the run-state envelope, and a
   reload resumes each substream from its own count; without them a reload would

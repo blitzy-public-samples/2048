@@ -61,15 +61,21 @@ import type {
  * ========================================================================== */
 
 interface Report {
-  readonly kind: 'log' | 'count' | 'error';
+  readonly kind: 'log' | 'count' | 'error' | 'failure';
   readonly name: string;
   readonly fields?: UiReportFields | undefined;
+
+  /** The caught value, on the two channels that carry one. */
+  readonly thrown?: unknown;
 }
 
 interface Sink extends UiReporter {
   readonly reports: Report[];
   counts(metric: string): Report[];
   errors(): Report[];
+
+  /** Every report filed through the level-preserving failure channel. */
+  failures(): Report[];
 }
 
 function sink(): Sink {
@@ -83,8 +89,19 @@ function sink(): Sink {
     count(metric, fields): void {
       reports.push({ kind: 'count', name: metric, fields });
     },
-    error(message, _error, fields): void {
-      reports.push({ kind: 'error', name: message, fields });
+    error(message, error, fields): void {
+      reports.push({ kind: 'error', name: message, fields, thrown: error });
+    },
+
+    // ADDED with `UiReporter.failure`: the channel that carries the caught
+    // value at the caller's own severity. DL-SETTINGS-07, DL-SUMMARY-15.
+    failure(level, message, thrown, fields): void {
+      reports.push({
+        kind: 'failure',
+        name: `${level}:${message}`,
+        fields,
+        thrown,
+      });
     },
     counts(metric): Report[] {
       return reports.filter(
@@ -93,6 +110,9 @@ function sink(): Sink {
     },
     errors(): Report[] {
       return reports.filter((entry) => entry.kind === 'error');
+    },
+    failures(): Report[] {
+      return reports.filter((entry) => entry.kind === 'failure');
     },
   };
 }
@@ -548,7 +568,12 @@ describe('copying the seed', () => {
     await expect(harness.screen.copySeed()).resolves.toBe(true);
 
     expect(written).toEqual(['  Player Seed  ']);
-    expect(harness.screen.readSnapshot()?.copyState).toBe('idle');
+
+    // CHANGED: the snapshot and the attribute AGREE. This asserted `'idle'`
+    // beside an attribute reading `'copied'`, which pinned the contradiction
+    // rather than the contract: the published snapshot froze `copyState` at
+    // render and was never revised. DL-SUMMARY-15.
+    expect(harness.screen.readSnapshot()?.copyState).toBe('copied');
     expect(harness.panel.getAttribute(runSummaryAttributes.copyState)).toBe(
       'copied',
     );
@@ -557,6 +582,189 @@ describe('copying the seed', () => {
     expect(
       harness.reporter.counts('ui.runSummary.seed_copy')[0]?.fields?.path,
     ).toBe('clipboard');
+  });
+
+  it('publishes every copy state on the snapshot, not just the first', async () => {
+    // The published snapshot carries `copyState`, and it was frozen at `render()`
+    // and never revised — so every consumer reading the snapshot rather than the
+    // DOM was told the copy had not happened. DL-SUMMARY-15.
+    const harness = mounted({
+      clipboard: {
+        writeText: (): void => {
+          return;
+        },
+      },
+    });
+
+    expect(harness.screen.readSnapshot()?.copyState).toBe('idle');
+
+    await expect(harness.screen.copySeed()).resolves.toBe(true);
+
+    // COPIED, on both surfaces.
+    expect(harness.screen.readSnapshot()?.copyState).toBe('copied');
+    expect(harness.panel.getAttribute(runSummaryAttributes.copyState)).toBe(
+      'copied',
+    );
+  });
+
+  it('publishes the failed state on the snapshot', async () => {
+    const harness = mounted({
+      clipboard: {
+        writeText: (): Promise<void> =>
+          Promise.reject(new Error('permission denied')),
+      },
+    });
+
+    await expect(harness.screen.copySeed()).resolves.toBe(false);
+
+    expect(harness.screen.readSnapshot()?.copyState).toBe('failed');
+    expect(harness.panel.getAttribute(runSummaryAttributes.copyState)).toBe(
+      'failed',
+    );
+  });
+
+  it('publishes the unavailable state on the snapshot', async () => {
+    // No seed anywhere — the summary's own is the one the resolver prefers — so
+    // there is nothing to copy and the ladder never starts.
+    const harness = mounted(
+      { clipboard: null },
+      { summary: { ...SUMMARY, seed: '' }, seed: null },
+    );
+
+    expect(harness.screen.readSnapshot()?.copyState).toBe('unavailable');
+
+    await expect(harness.screen.copySeed()).resolves.toBe(false);
+
+    expect(harness.screen.readSnapshot()?.copyState).toBe('unavailable');
+    expect(harness.panel.getAttribute(runSummaryAttributes.copyState)).toBe(
+      'unavailable',
+    );
+  });
+
+  it('returns the snapshot to idle when a new seed is entered', async () => {
+    const harness = mounted({
+      clipboard: {
+        writeText: (): void => {
+          return;
+        },
+      },
+    });
+
+    await harness.screen.copySeed();
+
+    expect(harness.screen.readSnapshot()?.copyState).toBe('copied');
+
+    // The SUMMARY's seed is the one the resolver prefers, so that is the one a
+    // new visit has to change.
+    harness.screen.enter(
+      context({ summary: { ...SUMMARY, seed: 'another-seed' } }),
+    );
+
+    expect(harness.screen.readSnapshot()?.copyState).toBe('idle');
+    expect(harness.panel.getAttribute(runSummaryAttributes.copyState)).toBe(
+      'idle',
+    );
+  });
+
+  it('releases the busy mark when the seed changes mid-write', async () => {
+    // A write still in flight when the seed is replaced belongs to a visit that
+    // is over, and the busy mark used to come off only for the visit that made
+    // the attempt — so `aria-disabled` stayed on the one control on this screen
+    // for the rest of the page's life, and no later press could clear it
+    // because `copyInFlight` was already false. DL-SUMMARY-16.
+    const gate: { settle: (() => void) | null } = { settle: null };
+    const harness = mounted({
+      clipboard: {
+        writeText: (): Promise<void> =>
+          new Promise<void>((resolve) => {
+            gate.settle = resolve;
+          }),
+      },
+    });
+
+    const control = action(harness.panel, 'copySeed');
+
+    expect(control).not.toBeNull();
+
+    const pending = harness.screen.copySeed();
+
+    expect(control?.getAttribute('aria-disabled')).toBe('true');
+
+    // The seed is replaced while the write is outstanding. The SUMMARY's seed is
+    // the one the resolver prefers, so that is the one that has to change for
+    // the visit's copy generation to advance.
+    harness.screen.enter(
+      context({ summary: { ...SUMMARY, seed: 'replacement-seed' } }),
+    );
+
+    gate.settle?.();
+
+    // The visit that made the attempt is over, so its answer reports no
+    // success — but its busy mark must still come off.
+    await expect(pending).resolves.toBe(false);
+
+    // OPERABLE AGAIN, on whichever control is live after the re-render.
+    const live = action(harness.panel, 'copySeed');
+
+    expect(live).not.toBeNull();
+    expect(live?.hasAttribute('aria-disabled')).toBe(false);
+    expect(control?.hasAttribute('aria-disabled')).toBe(false);
+
+    // And the control still works: a second attempt is admitted rather than
+    // being refused by a guard the first attempt never released.
+    const again = harness.screen.copySeed();
+
+    expect(live?.getAttribute('aria-disabled')).toBe('true');
+
+    gate.settle?.();
+
+    await expect(again).resolves.toBe(true);
+    expect(live?.hasAttribute('aria-disabled')).toBe(false);
+  });
+
+  it('releases the busy mark when the screen is left mid-write', async () => {
+    const gate: { settle: (() => void) | null } = { settle: null };
+    const harness = mounted({
+      clipboard: {
+        writeText: (): Promise<void> =>
+          new Promise<void>((resolve) => {
+            gate.settle = resolve;
+          }),
+      },
+    });
+
+    const control = action(harness.panel, 'copySeed');
+    const pending = harness.screen.copySeed();
+
+    expect(control?.getAttribute('aria-disabled')).toBe('true');
+
+    harness.screen.leave();
+    gate.settle?.();
+
+    await expect(pending).resolves.toBe(false);
+    expect(control?.hasAttribute('aria-disabled')).toBe(false);
+  });
+
+  it('does not throw when destroyed mid-write', async () => {
+    const gate: { settle: (() => void) | null } = { settle: null };
+    const harness = mounted({
+      clipboard: {
+        writeText: (): Promise<void> =>
+          new Promise<void>((resolve) => {
+            gate.settle = resolve;
+          }),
+      },
+    });
+
+    const pending = harness.screen.copySeed();
+
+    harness.screen.destroy();
+    gate.settle?.();
+
+    // A destroyed panel reports no success for a write whose confirmation it can
+    // no longer show, and it neither throws nor rejects.
+    await expect(pending).resolves.toBe(false);
+    expect(harness.reporter.errors()).toEqual([]);
   });
 
   it('falls back to the selection when the clipboard refuses', async () => {
@@ -577,18 +785,45 @@ describe('copying the seed', () => {
     );
     expect(harness.panel.textContent).toContain(runSummaryCopy.copyFailed);
 
-    // DL-SUMMARY-14. Both rungs are pinned, because the severity now depends on
+    // DL-SUMMARY-14. Both rungs are pinned, because the severity depends on
     // which one was reached. The clipboard's own refusal is recoverable and
-    // reports at `warn`, carrying the rejected reason in a field; the error
-    // severity belongs to the conclusion below it, where the selection failed
-    // too and the seed genuinely did not reach the player. This test is the
-    // case that reaches both, so it is where the pair is separated.
-    const refusals = harness.reporter.reports.filter(
+    // reports at `warn`; the error severity belongs to the conclusion below it,
+    // where the selection failed too and the seed genuinely did not reach the
+    // player. This test is the case that reaches both, so it is where the pair
+    // is separated.
+    //
+    // CHANGED: the refusal is filed through the FAILURE channel, and its field
+    // carries the rejection's class rather than its message. The field used to
+    // carry `permission denied` — arbitrary text from the rejection, in an
+    // ordinary field nothing redacts. DL-SUMMARY-15.
+    const refusals = harness.reporter.failures().filter(
       (report) => report.name === 'warn:the clipboard refused the seed',
     );
 
     expect(refusals).toHaveLength(1);
-    expect(refusals[0]?.fields?.reason).toContain('permission denied');
+    expect(refusals[0]?.fields?.reason).toBe('Error');
+
+    // The value itself still travels, so the failure stays diagnosable — on the
+    // channel that hands it to the logger's redacting failure path.
+    expect((refusals[0]?.thrown as Error | undefined)?.message).toBe(
+      'permission denied',
+    );
+
+    // And no ordinary field of any report carries the rejection's own text.
+    expect(
+      harness.reporter.reports.flatMap((report) =>
+        Object.values(report.fields ?? {}),
+      ),
+    ).not.toContain('permission denied');
+
+    // Nothing was filed through the `log` channel under that message.
+    expect(
+      harness.reporter.reports.filter(
+        (report) =>
+          report.kind === 'log' &&
+          report.name === 'warn:the clipboard refused the seed',
+      ),
+    ).toEqual([]);
 
     const failures = harness.reporter.reports.filter(
       (report) =>
@@ -631,7 +866,9 @@ describe('copying the seed', () => {
         ),
       ).toHaveLength(1);
 
-      // The recovered path files nothing at error severity, by either channel.
+      // The recovered path files nothing at error severity, by any of the three
+      // channels — the failure channel included, which preserves the `warn` the
+      // caller chose. DL-SUMMARY-15.
       expect(harness.reporter.errors()).toEqual([]);
       expect(
         harness.reporter.reports.filter((report) =>

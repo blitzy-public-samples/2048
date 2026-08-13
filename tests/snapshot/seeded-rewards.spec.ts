@@ -690,6 +690,41 @@ describe('a run played through the production reward path', () => {
     const first = playProductionRun(SEEDS[0] as string);
     const second = playProductionRun(SEEDS[1] as string);
 
-    expect(renderProductionRun(first)).not.toBe(renderProductionRun(second));
+    /**
+     * The ordered offer identifiers, round by round.
+     *
+     * @param played One played run.
+     * @returns One entry per round, holding that round's card ids in order.
+     */
+    const offeredIds = (played: {
+      readonly offers: readonly OfferRecord[];
+    }): string[] =>
+      played.offers.map((record): string =>
+        record.cards.map((card): string => card.id).join(','),
+      );
+
+    // CHANGED: this compared `renderProductionRun` of each run — the WHOLE
+    // rendered run, including the board, the score and the spawn positions,
+    // every one of which differs between two seeds for reasons that have
+    // nothing to do with the draw. The assertion therefore held even where both
+    // seeds offered the identical relics in the identical order, which is the
+    // one thing it is named to detect. Only the offer identifiers are compared
+    // now. DL-TEST-15.
+    expect(offeredIds(first)).not.toEqual(offeredIds(second));
+
+    // NON-EMPTY. Two runs that offered nothing at all would compare two empty
+    // lists — equal, so this would fail rather than pass vacuously, but a run
+    // whose rounds carried no cards would compare lists of empty strings. Both
+    // are ruled out explicitly so the comparison above is about real draws.
+    expect(first.offers.length).toBeGreaterThan(0);
+    expect(second.offers.length).toBeGreaterThan(0);
+
+    for (const record of [...first.offers, ...second.offers]) {
+      expect(record.cards.length).toBeGreaterThan(0);
+
+      for (const card of record.cards) {
+        expect(card.id).not.toBe('');
+      }
+    }
   });
 });

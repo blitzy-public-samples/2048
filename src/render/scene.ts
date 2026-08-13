@@ -1,11 +1,9 @@
 // The scene graph, the camera and the lighting rig of the 2.5D board.
 //
-// PLANNED DOCUMENTS, cited as where this subsystem will be placed rather than as
-// present authorities: Figures 1 and 2 of docs/architecture/ARCHITECTURE.md are
-// the two states it moved between, and Figure 3 of
-// docs/architecture/component-interaction.md places this module among its peers.
-// Neither file exists at this commit; all eight figures are specified in AAP
-// 0.6.5 meanwhile.
+// WHERE THIS SUBSYSTEM IS PLACED: Figures 1 and 2 of
+// docs/architecture/ARCHITECTURE.md are the two states it moved between, and
+// Figure 3 of docs/architecture/component-interaction.md places this module among
+// its peers. Both documents are delivered and are the present authorities.
 //
 // One traceability row of docs/TRACEABILITY_MATRIX.md apiece, every row of
 // this module's area enumerated:

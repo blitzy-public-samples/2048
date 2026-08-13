@@ -62,9 +62,12 @@ merged.
 
  - Please test your modification thoroughly before submitting your Pull
    Request. Run `npm run typecheck`, `npm test` and `npm run test:snapshot`
-   before you open it; at this commit those are the three gates with a suite to
-   run, and `npx sass style/main.scss` is the fourth if you touched a
-   stylesheet.
+   before you open it, `npm run test:e2e` as well if you touched the renderer,
+   the run flow or the screens, and `npx sass style/main.scss` if you touched a
+   stylesheet. `.github/workflows/ci.yml` runs the type check, the stylesheet
+   deprecation gate, the unit suite, the snapshot gate, the dashboard gate, the
+   build and the recorded proof against every push and every Pull Request to
+   `master`.
 
    `npm run test:snapshot` is its own command because the seeded snapshot suite
    is a separate regression gate, with its own configuration in
@@ -76,11 +79,49 @@ merged.
    vitest.snapshot.config.ts -u`, which declares every previously recorded run
    unreproducible, so please do it deliberately and say why.
 
-   `npm run test:e2e` is still configured ahead of its suite and exits reporting
-   that it found no tests until `tests/e2e/gameplay-recording.spec.ts` lands;
-   from that change onwards please run it whenever you touch the renderer or the
-   run flow, and `npm run e2e:install` fetches the browser it needs the first
-   time.
+   `npm run test:e2e` is the recorded gameplay proof, and it is the one gate
+   that opens a browser. It builds the bundle, serves it on
+   `http://127.0.0.1:4173` itself with `--strictPort` and
+   `reuseExistingServer: false`, so a recording can never be made against a
+   stale bundle, and runs five cases across five headless-Chromium projects. Two
+   of them carry the two cases of `tests/e2e/gameplay-recording.spec.ts`, one
+   case each by the tag that case declares. `gameplay-recording` plays a seeded
+   run from the run-start screen through a merge, a stage clear and a 1-of-3
+   relic reward to a terminal state and on into the run summary, and then
+   decodes the file it recorded to assert a finite, non-zero duration at the
+   configured frame size. `diagnostics-surface` exercises the diagnostics
+   overlay and the observability surfaces behind it, at the same viewport and
+   with no video of its own. The other three — `variant-webgl-unavailable`,
+   `variant-reduced-motion` and `variant-mobile` — run one tagged case each of
+   `tests/e2e/browser-variants.spec.ts`. Only the recording project captures
+   video, so the gate still produces exactly the one R11 artifact. Please run it
+   whenever you touch the renderer, the run flow, the screens or the storage
+   keys, because those are what it asserts against a real WebGL context rather
+   than a DOM emulator.
+   Recording is unconditional, so a `video.webm` lands under `test-results/`
+   whether the run passed or failed — watch it before you push a rendering
+   change, because a recording that exists and shows a blank board still fails
+   the gate it exists to satisfy. It takes a little over a minute, most of it the
+   filmed run itself, and leaves that video, a trace and end-of-test screenshots
+   per case under `test-results/`, with the HTML report under
+   `playwright-report/`; both directories are git-ignored, and the workflow
+   uploads `test-results/**/*.webm` as an artifact with
+   `if-no-files-found: error` instead.
+
+   `npm run e2e:install` provisions what that gate needs, and it needs running
+   once rather than per run: it installs the pinned browser build and, on Linux,
+   the system packages the browser links against, which means it wants root or
+   `sudo` there. On macOS and Windows the system-package half is a no-op. If
+   your machine already has those libraries, `npx playwright install chromium`
+   installs the browser alone. Port 4173 has to be free, since the gate starts
+   its own preview server with `--strictPort`.
+
+   `npm run test:dashboard` is the dashboard-template gate: it feeds real
+   exports through `docs/dashboards/dashboard.html` and checks every expression
+   in `docs/dashboards/dashboard.json` against the metric families and labels
+   the registry declares. `npm test` collects it as well, so run it on its own
+   only when you have touched either template, the metrics vocabulary or the
+   health check ids.
 
    The observability surfaces are exercisable: `src/observability/` carries the
    structured logger, the metrics registry, the diagnostics overlay, the tracer
@@ -146,34 +187,6 @@ merged.
    both `EFFECT` and `EFFECTS`, which is why one registry row names two codes.
    Every one of those codes is registered and resolves to the module named
    beside it, and ordinals are unique within each code.
-
- - Two identifier namespaces join the code to those documents, and a comment
-   cites an identifier rather than repeating what it stands for.
-   `DL-<AREA>-<NN>` names one decision in `docs/DECISION_LOG.md` — for example
-   `DL-TERM-04` or `DL-RNG-01`. A comment states *what* was decided and cites
-   the identifier; the alternatives, the reasoning and the risks belong to the
-   log row alone. `TR-<AREA>-<NN>` names one row of
-   `docs/TRACEABILITY_MATRIX.md`, pairing a construct of the retired `js/`
-   sources with the module that carries it now, with a row that has no `js/`
-   source marked target-only. Both documents have landed, so a citation of
-   either kind must resolve to a row that exists — a suite under
-   `tests/unit/quality/` fails the build when one does not. `<NN>` is a
-   two-digit ordinal, unique within its area and never reused once assigned; a
-   new decision or row takes the next free ordinal in its area.
-
-   `<AREA>` names one CONCERN, and the table below is the complete registry of
-   them: every `DL-*` and every `TR-*` identifier in the tree resolves to one of
-   these, and a new area is added here in the same change that first uses it. A
-   concern that spans a TypeScript module and the stylesheet mirroring it —
-   accessibility, the HUD, the tokens, the themes — is ONE area, so its
-   ordinals are unique across both files.
-
-   One file is reached by two codes: `src/ui/screens/reward.ts` carries its
-   decisions under `REWARD`, beside the stylesheet that concern spans, and its
-   traceability rows under `REWARDSCREEN`. Both are registered and both resolve
-   to that module; ordinals are unique within each code. It is the one exception
-   to the paragraph above and it is not a pattern to follow — a new concern
-   takes one code for both namespaces.
 
    | Area | Owner |
    |---|---|
@@ -247,8 +260,9 @@ merged.
    | `REWARD` | `style/_reward.scss`, `src/ui/screens/reward.ts` |
    | `SUMMARY` | `style/_summary.scss`, `src/ui/screens/run-summary.ts` |
    | `BUILD` | `vite.config.ts` |
-   | `TEST` | `vitest.config.ts`, `vitest.snapshot.config.ts`, `tests/snapshot/**` |
-   | `PW` | `playwright.config.ts` |
+   | `TEST` | `vitest.config.ts`, `vitest.snapshot.config.ts`, `tests/snapshot/**`, `tests/unit/quality/**` |
+   | `PW` | `playwright.config.ts`, `tests/e2e/gameplay-recording.spec.ts` |
+   | `CI` | `.github/workflows/ci.yml` |
    | `FIXTURE` | `tests/fixtures/**` |
    | `DOC` | `docs/**`, `README.md`, `CONTRIBUTING.md`, `blitzy-deck/**` |
 

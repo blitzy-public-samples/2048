@@ -450,7 +450,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Turn latency against the animation cadence",
-      "description": "Turn-latency percentiles over game2048_turn_latency_milliseconds_bucket. Help text: 'Turn latency in milliseconds, input dispatch through commit.' Fed by recordTurnLatency in src/observability/metrics.ts, called from src/observability/tracer.ts L1706 for the engine.turn span, whose boundary is js/game_manager.js L130 through L91-L97. THRESHOLDS are the product's own animation cadence, each a real le boundary: 100 ms is $transition-speed at style/main.scss L22, the move transition a turn must not outlast; 200 ms is the appear and pop animations at style/main.scss L430 and L450; 600 ms is move-up, the score delta, at style/main.scss L104. The 800 ms fade-in at L234 and its 1200 ms delay are not marked here; they govern the terminal overlay rather than a turn. The axis soft maximum is 600 ms, and a soft maximum expands when a sample exceeds it rather than clipping.",
+      "description": "Turn-latency percentiles over game2048_turn_latency_milliseconds_bucket. Help text: 'Turn latency in milliseconds, input dispatch through commit.' Fed by recordTurnLatency in src/observability/metrics.ts, called from src/observability/tracer.ts L1706 for the engine.turn span, whose boundary is js/game_manager.js L130 through L91-L97. THRESHOLDS are the product's own animation cadence, each a real le boundary: 100 ms is $transition-speed, declared today at style/_tokens.scss L39 and applied to the move transition at style/main.scss L567, which a turn must not outlast; 200 ms is the appear and pop animations at style/main.scss L670 and L690; 600 ms is move-up, the score delta, at style/main.scss L141. The 800 ms fade-in at style/main.scss L384 and its $transition-speed * 12 delay are not marked here; they govern the terminal overlay rather than a turn. src/theme/tokens.ts `motion` carries the same four durations for the renderer. The pre-migration positions of these values, cited by the implementation plan, were style/main.scss L22, L104, L234, L430 and L450 in the 549-line source this build replaced; they are historical and do not resolve against the current stylesheet. The axis soft maximum is 600 ms, and a soft maximum expands when a sample exceeds it rather than clipping.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS}"
@@ -633,7 +633,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Span duration p95 by module boundary",
-      "description": "game2048_span_duration_milliseconds 'Span duration in milliseconds, by span name.' One histogram family broken out by the span label; the bucket series carry the labels as {span=\"...\",le=\"...\"}. Written by src/observability/tracer.ts L2327, which calls recordSpanDuration on every span close. The seven BOUNDARY_SPAN_NAMES of src/observability/tracer.ts L110-L118 are the chain validation gate V8 is asserted against — input.dispatch, engine.turn, engine.move.resolve, hook.dispatch, relic.handler, render.commit, render.frame — and are drawn as Figure 5 'Hook Dispatch Sequence' in docs/architecture/hook-dispatch-sequence.md. The regex filter excludes tracer.inert, the shared span returned while tracing is disabled, and engine.stage, which spans a whole stage rather than a module boundary. Thresholds are the same cadence anchors as the turn-latency panel: 100 ms from style/main.scss L22 and 200 ms from L430 and L450.",
+      "description": "game2048_span_duration_milliseconds 'Span duration in milliseconds, by span name.' One histogram family broken out by the span label; the bucket series carry the labels as {span=\"...\",le=\"...\"}. Written by src/observability/tracer.ts L2327, which calls recordSpanDuration on every span close. The seven BOUNDARY_SPAN_NAMES of src/observability/tracer.ts L110-L118 are the chain validation gate V8 is asserted against — input.dispatch, engine.turn, engine.move.resolve, hook.dispatch, relic.handler, render.commit, render.frame — and are drawn as Figure 5 'Hook Dispatch Sequence' in docs/architecture/hook-dispatch-sequence.md. The regex filter excludes tracer.inert, the shared span returned while tracing is disabled, and engine.stage, which spans a whole stage rather than a module boundary. Thresholds are the same cadence anchors as the turn-latency panel: 100 ms from $transition-speed at style/_tokens.scss L39 and 200 ms from the appear and pop animations at style/main.scss L670 and L690.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS}"
@@ -730,7 +730,7 @@
       "id": 11,
       "type": "bargauge",
       "title": "Hook dispatches by hook",
-      "description": "game2048_hook_dispatches_total 'Hook dispatches, by hook name.' One bar per hook, filtered by the $hook variable. Read from the per-hook dispatch counts on HookBusMetrics.hooks in src/engine/hook-bus.ts L343, folded by foldHookDispatchCounts in src/observability/metrics.ts. A dispatch is counted once per hook invocation by the bus, independently of how many subscribers it then fans out to.",
+      "description": "game2048_hook_dispatches_total 'Hook dispatches, by hook name.' One bar per hook, filtered by the $hook variable. Read from the per-hook dispatch counts on HookBusMetrics.hooks in src/engine/hook-bus.ts L351, folded by foldHookDispatchCounts in src/observability/metrics.ts. A dispatch is counted once per hook invocation by the bus, independently of how many subscribers it then fans out to.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS}"
@@ -862,7 +862,7 @@
       "id": 13,
       "type": "bargauge",
       "title": "Handlers skipped by hook and reason",
-      "description": "game2048_hook_handler_skipped_total 'Hook handlers skipped before invocation, by hook and reason.' The only family carrying two labels. The three HookSkipReason values of src/engine/hook-bus.ts L240 are exhausted, degraded and detached: exhausted is the charge guard — the bus checks charges before dispatch and skips a handler at zero or below, so this is where charge exhaustion is visible; degraded is a subscriber the bus has already contained a throw from; detached is one removed since registration. The query aggregates by reason and retains that dimension, so the three appear as three bars.",
+      "description": "game2048_hook_handler_skipped_total 'Hook handlers skipped before invocation, by hook and reason.' The only family carrying two labels. The three HookSkipReason values of src/engine/hook-bus.ts L248 are exhausted, degraded and detached: exhausted is the charge guard — the bus checks charges before dispatch and skips a handler at zero or below, so this is where charge exhaustion is visible; degraded is a subscriber the bus has already contained a throw from; detached is one removed since registration. The query aggregates by reason and retains that dimension, so the three appear as three bars.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS}"

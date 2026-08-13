@@ -20,6 +20,7 @@ import type {
   DiagnosticsOverlay,
   DiagnosticsSnapshot,
   HealthSurfaceView,
+  RngCursorsReader,
 } from '../../../src/observability/diagnostics-overlay';
 import {
   HEALTH_CHECK_IDS,
@@ -138,6 +139,7 @@ const setup = (
       detail?: string;
     }[];
     hideEmpty?: boolean;
+    rngCursors?: RngCursorsReader;
   } = {},
 ): Harness => {
   const host = document.querySelector<HTMLElement>('#diagnostics-overlay');
@@ -158,6 +160,9 @@ const setup = (
     document,
     ...(options.health === undefined ? {} : { health: options.health }),
     ...(options.hideEmpty === undefined ? {} : { hideEmpty: options.hideEmpty }),
+    ...(options.rngCursors === undefined
+      ? {}
+      : { rngCursors: options.rngCursors }),
   });
 
   overlay = built;
@@ -1314,6 +1319,58 @@ describe('the compact form of the surface', () => {
     expect(harness.host.querySelectorAll('table')).toHaveLength(0);
   });
 
+  // A performance review found the collapsed surface taking every reading once a
+  // second for panels it was not drawing. The SCHEDULED tick stands down; every
+  // other path still reads. DL-DIAG-24.
+  it('takes no reading on a scheduled tick while it is collapsed', () => {
+    vi.useFakeTimers();
+
+    try {
+      let reads = 0;
+      const harness = setup({
+        health: () => {
+          reads += 1;
+
+          return [{ name: 'probe', healthy: true, detail: 'fine' }];
+        },
+      });
+
+      harness.overlay.open();
+
+      const afterOpen = reads;
+
+      // Expanded, the cadence reads once per tick.
+      vi.advanceTimersByTime(3000);
+
+      expect(reads).toBe(afterOpen + 3);
+
+      // The collapse itself renders, so it reads once.
+      toggle(harness)?.click();
+
+      const collapsed = reads;
+
+      expect(collapsed).toBe(afterOpen + 4);
+
+      // And then ten ticks pass over a surface that draws nothing.
+      vi.advanceTimersByTime(10000);
+
+      expect(reads).toBe(collapsed);
+
+      // The surface is still live: a refresh reads, and so does the expand.
+      harness.overlay.refresh();
+
+      expect(reads).toBe(collapsed + 1);
+
+      toggle(harness)?.click();
+      vi.advanceTimersByTime(2000);
+
+      expect(reads).toBeGreaterThan(collapsed + 2);
+      expect(harness.host.querySelectorAll('h2')).toHaveLength(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('leaves no collapsed state on a host it releases', () => {
     const harness = setup();
 
@@ -2376,6 +2433,56 @@ describe('the refresh schedule', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // The other half of DL-DIAG-24: a render used to rebuild six panels into a
+  // fragment and replace every panel node, so an expanded surface handed the
+  // accessibility tree a wholesale replacement of content that had mostly not
+  // changed, once a second.
+  it('keeps every panel node across a render and writes only what moved', () => {
+    const harness = setup();
+
+    harness.logger.info('a record the log panel can render');
+    harness.overlay.open();
+
+    const headings = Array.from(harness.host.querySelectorAll('h2'));
+    const tables = Array.from(harness.host.querySelectorAll('table'));
+    const cells = Array.from(harness.host.querySelectorAll('td'));
+
+    expect(headings).toHaveLength(6);
+    expect(tables.length).toBeGreaterThan(0);
+    expect(cells.length).toBeGreaterThan(0);
+
+    let mutations = 0;
+    const observer = new MutationObserver((records) => {
+      mutations += records.length;
+    });
+
+    observer.observe(harness.host, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+    });
+
+    harness.overlay.refresh();
+    harness.overlay.refresh();
+
+    // `takeRecords` is read rather than the callback awaited, for the reason the
+    // stand-off suite gives: an observer delivers on a microtask.
+    mutations += observer.takeRecords().length;
+    observer.disconnect();
+
+    // The same nodes, in the same order: nothing was replaced.
+    expect(Array.from(harness.host.querySelectorAll('h2'))).toEqual(headings);
+    expect(Array.from(harness.host.querySelectorAll('table'))).toEqual(tables);
+    expect(Array.from(harness.host.querySelectorAll('td'))).toEqual(cells);
+
+    // And the writes are proportional to the change. The run panel's elapsed-ms
+    // and generated-at cells move on every reading, which is two per render;
+    // replacing the panels recorded one removal per panel node plus the
+    // insertion, whatever had changed.
+    expect(mutations).toBeLessThanOrEqual(8);
   });
 
   it('registers one listener per control however often it renders', () => {
@@ -3493,5 +3600,370 @@ describe('the documented panel shape', () => {
 
     expect(paragraphs).toHaveLength(1);
     expect(paragraphs[0]?.getAttribute('class')).toBeNull();
+  });
+});
+
+// The production `rngCursors` reader, supplied exactly as the composition root
+// supplies it. Every branch of `foldRngCursors` is driven here: a reader that
+// answers, none at all, one that throws, the release on destroy, and the
+// latest-read rule that makes a pull taken between two commits current.
+
+/** The counter family the cursors fold into. */
+const RNG_DRAWS_FAMILY = METRIC_NAMES.rngDrawsTotal;
+
+/**
+ * Reads one substream's folded counter out of a snapshot.
+ *
+ * @param snapshot Snapshot to read.
+ * @param stream Substream the series is labelled with.
+ * @returns The counter value, or `null` where the series is absent.
+ */
+const cursorSeries = (
+  snapshot: DiagnosticsSnapshot,
+  stream: string,
+): number | null => {
+  for (const series of snapshot.metrics.series) {
+    if (series.name !== RNG_DRAWS_FAMILY) {
+      continue;
+    }
+
+    if (series.labels['stream'] !== stream) {
+      continue;
+    }
+
+    return series.kind === 'counter' ? series.value : null;
+  }
+
+  return null;
+};
+
+/**
+ * Reads one substream's counter out of the Prometheus text.
+ *
+ * @param text Exposition text to read.
+ * @param stream Substream the series is labelled with.
+ * @returns The counter value, or `null` where the line is absent.
+ */
+const cursorLine = (text: string, stream: string): number | null => {
+  for (const line of text.split('\n')) {
+    if (!line.startsWith(RNG_DRAWS_FAMILY)) {
+      continue;
+    }
+
+    if (!line.includes(`stream="${stream}"`)) {
+      continue;
+    }
+
+    const value = Number(line.slice(line.lastIndexOf(' ') + 1));
+
+    return Number.isFinite(value) ? value : null;
+  }
+
+  return null;
+};
+
+/** A logger whose records are captured, for the reported failures. */
+const capturingLogger = (): {
+  readonly logger: Logger;
+  readonly records: { message: string; panel: unknown }[];
+} => {
+  const logger = createLogger({
+    correlationId: deriveCorrelationId('cursor-seed', 'cursor-run'),
+    subsystem: 'test',
+    consoleOutput: false,
+  });
+  const records: { message: string; panel: unknown }[] = [];
+
+  logger.subscribe((record) => {
+    records.push({
+      message: record.message,
+      panel: (record.fields as Record<string, unknown> | undefined)?.['panel'],
+    });
+  });
+
+  return { logger, records };
+};
+
+describe('the RNG cursor reader', () => {
+  it('folds every named substream into the combined snapshot', () => {
+    const harness = setup({
+      rngCursors: () => ({
+        'spawn-value': 11,
+        'spawn-position': 7,
+        'relic-draw': 3,
+        'rarity-weight': 2,
+      }),
+    });
+
+    const snapshot = harness.overlay.snapshot();
+
+    expect(cursorSeries(snapshot, 'spawn-value')).toBe(11);
+    expect(cursorSeries(snapshot, 'spawn-position')).toBe(7);
+    expect(cursorSeries(snapshot, 'relic-draw')).toBe(3);
+    expect(cursorSeries(snapshot, 'rarity-weight')).toBe(2);
+
+    // The canonical tuple is what is folded, so every named stream has a
+    // series whether the reader mentioned it or not.
+    for (const stream of RNG_STREAM_NAMES) {
+      expect(cursorSeries(snapshot, stream)).not.toBeNull();
+    }
+  });
+
+  it('answers the Prometheus text from the same reading', () => {
+    let reads = 0;
+    const harness = setup({
+      rngCursors: () => {
+        reads += 1;
+
+        return { 'spawn-value': 5, 'spawn-position': 4 };
+      },
+    });
+
+    const snapshot = harness.overlay.snapshot();
+    const text = harness.overlay.toPrometheusText();
+
+    // Two surfaces, two pulls — and identical values, because the fold is
+    // absolute rather than additive.
+    expect(reads).toBe(2);
+    expect(cursorSeries(snapshot, 'spawn-value')).toBe(5);
+    expect(cursorLine(text, 'spawn-value')).toBe(5);
+    expect(cursorLine(text, 'spawn-position')).toBe(4);
+  });
+
+  it('reports the family at zero where no reader is attached', () => {
+    const captured = capturingLogger();
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry({ logger: captured.logger }),
+      logger: captured.logger,
+      document,
+      hideEmpty: false,
+    });
+
+    overlay = built;
+
+    const snapshot = built.snapshot();
+
+    // No reader means no series: the per-stream series are created by the fold
+    // itself, so nothing invents a cursor the run never took.
+    for (const stream of RNG_STREAM_NAMES) {
+      expect(cursorSeries(snapshot, stream)).toBeNull();
+    }
+
+    // The family is DECLARED regardless, so a scrape reads a known-empty
+    // counter rather than an unknown metric name.
+    const text = built.toPrometheusText();
+
+    expect(text).toContain(`# TYPE ${RNG_DRAWS_FAMILY} counter`);
+    expect(cursorLine(text, 'spawn-value')).toBeNull();
+
+    // An absent reader is not a failure.
+    expect(
+      captured.records.filter(
+        (record) => record.message === 'A diagnostics panel failed to render.',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('contains a reader that throws and still answers the snapshot', () => {
+    const captured = capturingLogger();
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry({ logger: captured.logger }),
+      logger: captured.logger,
+      document,
+      rngCursors: (): never => {
+        throw new Error('the cursor reader exploded');
+      },
+    });
+
+    overlay = built;
+
+    let snapshot: DiagnosticsSnapshot | null = null;
+
+    expect(() => {
+      snapshot = built.snapshot();
+    }).not.toThrow();
+
+    expect(snapshot).not.toBeNull();
+
+    const failures = captured.records.filter(
+      (record) => record.message === 'A diagnostics panel failed to render.',
+    );
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.panel).toBe('Export metrics');
+  });
+
+  it('still answers the Prometheus text where the reader throws', () => {
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      rngCursors: (): never => {
+        throw new Error('the cursor reader exploded');
+      },
+    });
+
+    overlay = built;
+
+    let text = '';
+
+    expect(() => {
+      text = built.toPrometheusText();
+    }).not.toThrow();
+
+    // The text is the whole registry, so a refusing pull costs its own family
+    // and nothing else.
+    expect(text).not.toBe('');
+    expect(text).toContain(METRIC_NAMES.rngDrawsTotal);
+  });
+
+  it('opens and renders where the reader throws', () => {
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry(),
+      document,
+      rngCursors: (): never => {
+        throw new Error('the cursor reader exploded');
+      },
+    });
+
+    overlay = built;
+
+    expect(() => {
+      built.open();
+    }).not.toThrow();
+
+    expect(built.isOpen()).toBe(true);
+  });
+
+  it('reads the LATEST cursors, not the reading the last render took', () => {
+    const cursors: Record<string, number> = {
+      'spawn-value': 1,
+      'spawn-position': 1,
+      'relic-draw': 0,
+      'rarity-weight': 0,
+    };
+    const harness = setup({ rngCursors: () => ({ ...cursors }) });
+
+    harness.overlay.open();
+
+    expect(cursorSeries(harness.overlay.snapshot(), 'spawn-value')).toBe(1);
+
+    // Draws taken BETWEEN two commits, with no render in between.
+    cursors['spawn-value'] = 9;
+    cursors['relic-draw'] = 3;
+
+    const later = harness.overlay.snapshot();
+
+    expect(cursorSeries(later, 'spawn-value')).toBe(9);
+    expect(cursorSeries(later, 'relic-draw')).toBe(3);
+    expect(cursorLine(harness.overlay.toPrometheusText(), 'spawn-value')).toBe(
+      9,
+    );
+  });
+
+  it('folds absolutely, so repeated reads never accumulate', () => {
+    const harness = setup({ rngCursors: () => ({ 'spawn-value': 6 }) });
+
+    harness.overlay.snapshot();
+    harness.overlay.snapshot();
+    harness.overlay.toPrometheusText();
+    harness.overlay.refresh();
+
+    // Four pulls of the same cursor: still 6, never 24.
+    expect(cursorSeries(harness.overlay.snapshot(), 'spawn-value')).toBe(6);
+  });
+
+  it('never counts a cursor down', () => {
+    const cursors: Record<string, number> = { 'spawn-value': 8 };
+    const harness = setup({ rngCursors: () => ({ ...cursors }) });
+
+    expect(cursorSeries(harness.overlay.snapshot(), 'spawn-value')).toBe(8);
+
+    // A reader that answers lower than it did — a fresh run's cursors read
+    // through a registry that already folded the last run's. A counter is
+    // monotonic, so the fold must not walk it backwards.
+    cursors['spawn-value'] = 2;
+
+    expect(
+      cursorSeries(harness.overlay.snapshot(), 'spawn-value'),
+    ).toBeGreaterThanOrEqual(8);
+  });
+
+  it('releases the reader on destroy and never pulls it again', () => {
+    let reads = 0;
+    const harness = setup({
+      rngCursors: () => {
+        reads += 1;
+
+        return { 'spawn-value': 1 };
+      },
+    });
+
+    harness.overlay.snapshot();
+
+    expect(reads).toBe(1);
+
+    harness.overlay.destroy();
+
+    const readsAtDestroy = reads;
+
+    // Every surface that folds is asked again after teardown.
+    harness.overlay.refresh();
+    harness.overlay.toPrometheusText();
+    harness.overlay.snapshot();
+    harness.overlay.exportPrometheusText();
+
+    expect(reads).toBe(readsAtDestroy);
+  });
+
+  it('is pulled by the scheduled render, not only by an explicit read', () => {
+    vi.useFakeTimers();
+
+    try {
+      let reads = 0;
+      const built = createDiagnosticsOverlay({
+        metrics: createMetricsRegistry(),
+        document,
+        rngCursors: () => {
+          reads += 1;
+
+          return { 'spawn-value': 1 };
+        },
+      });
+
+      overlay = built;
+      built.open();
+
+      expect(reads).toBe(1);
+
+      vi.advanceTimersByTime(1000);
+
+      expect(reads).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hands the reader answer through verbatim, refusals included', () => {
+    const captured = capturingLogger();
+    const built = createDiagnosticsOverlay({
+      metrics: createMetricsRegistry({ logger: captured.logger }),
+      logger: captured.logger,
+      document,
+      rngCursors: () => ({ 'spawn-value': 4, 'not-a-stream': 99 }),
+    });
+
+    overlay = built;
+
+    const snapshot = built.snapshot();
+
+    // The named stream folds; the invented one is refused by the registry
+    // rather than becoming a series of its own.
+    expect(cursorSeries(snapshot, 'spawn-value')).toBe(4);
+    expect(cursorSeries(snapshot, 'not-a-stream')).toBeNull();
+    expect(
+      captured.records.some(
+        (record) => record.message === 'rng cursor rejected',
+      ),
+    ).toBe(true);
   });
 });

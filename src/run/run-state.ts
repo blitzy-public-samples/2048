@@ -108,14 +108,16 @@
  *   DL-RUN-06  the unresolved reward round persisted as an OPTIONAL member
  *              carrying identifiers alone, with `schemaVersion` left where it
  *              stood
- *   DL-RUN-07  `MAX_PERSISTED_STAGE_INDEX`, the upper bound on a stored stage
- *              index
+ *   DL-RUN-07  `MAX_PERSISTED_STAGE_INDEX` taken from the stage curve's own
+ *              `MAX_STAGE_INDEX`, so the wire domain of a stored stage index is
+ *              the domain a run advances through
  */
 
 import {
   MAX_BOARD_SIZE,
   isSupportedBoardSize,
 } from '../config/default-config';
+import { MAX_STAGE_INDEX, isStageIndex } from '../config/stage-config';
 import type { StageGoal, StageGoalKind } from '../config/stage-config';
 import type {
   CorrelationId,
@@ -435,25 +437,29 @@ export const MAX_PERSISTED_RELICS = 64;
 export const MAX_REWARD_OFFER_IDS = MAX_PERSISTED_RELICS;
 
 /**
- * ADDED: the highest `stageIndex` an envelope carries.
+ * The highest `stageIndex` an envelope carries, re-exported from
+ * src/config/stage-config.ts rather than restated so this module and the stage
+ * curve cannot disagree about the indices they accept — the arrangement
+ * `MAX_SUPPORTED_BOARD_SIZE` above already follows for the board edge length.
  *
- * A stage index was bounded below and not above, so a hand-edited or corrupted
- * envelope claiming stage 99999 was accepted verbatim and presented as
- * "Stage 100000" — a figure no run can reach, in front of a goal that stays
- * sane because src/config/stage-config.ts caps its own target.
- *
- * Chosen the way `MAX_REWARD_OFFER_IDS` is: the bound a stored index is refused
- * ABOVE, not the count a run must hold. The default curve's eight-entry ladder
- * extends by doubling from 4096 up to its own 2^52 ceiling, which is forty
- * further stages — so the last index carrying distinct progression is 47, and
- * a build configured with a far longer ladder is still not refused by a value
- * this module fixed, while a payload claiming five figures is.
+ * CHANGED: the value was a fixed `1024` declared here. The stage curve derives a
+ * goal for every index up to `MAX_STAGE_INDEX` and `RunController.advanceStage()`
+ * advances through the same domain, so a run that passed 1024 wrote an envelope
+ * this module refused: the reward transaction that produced it rolled back, the
+ * offer stayed standing and progression stopped. Widening to the curve's own
+ * domain needs no schema change — every envelope the fixed bound accepted is
+ * still accepted, so no stored run is re-read differently. DL-RUN-07, DL-STAGE-05.
  */
-export const MAX_PERSISTED_STAGE_INDEX = 1024;
+export const MAX_PERSISTED_STAGE_INDEX = MAX_STAGE_INDEX;
 
-/** Whether `value` is a stage index an envelope may carry. */
+/**
+ * Whether `value` is a stage index an envelope may carry.
+ *
+ * Delegates to the stage curve's own `isStageIndex`, so the wire domain IS the
+ * runtime domain rather than a copy of it.
+ */
 function isPersistedStageIndex(value: unknown): value is number {
-  return isNonNegativeInteger(value) && value <= MAX_PERSISTED_STAGE_INDEX;
+  return isStageIndex(value);
 }
 
 function isBoardSize(value: unknown): value is number {
@@ -1379,10 +1385,55 @@ function isSerializedTileShape(value: unknown): value is SerializedTile {
 }
 
 /**
+ * ADDED: reports whether a tile's position is the CELL IT SITS IN — a pair of
+ * whole numbers inside the lattice, equal to the indices it was found at.
+ *
+ * The shape test above measures the position as two finite numbers alone, so a
+ * fractional coordinate, one off the lattice, and one naming a different cell
+ * altogether were all admitted. Every consumer treats `tile.position` as
+ * authoritative — the renderer places a block at it, the parallel board labels
+ * a cell from it, and `Grid` rehydrates the lattice from it — so a mismatch put
+ * a tile on screen in a cell the board does not believe is occupied.
+ * DL-RUN-08.
+ *
+ * @param tile Tile to measure.
+ * @param x Column index the tile was found at.
+ * @param y Row index the tile was found at.
+ * @param size Declared edge length, or `null` where none was readable.
+ * @returns `true` where the position is whole, in bounds, and its own cell.
+ */
+function tilePositionMatchesCell(
+  tile: SerializedTile,
+  x: number,
+  y: number,
+  size: number | null,
+): boolean {
+  const position = tile.position;
+
+  if (!Number.isInteger(position.x) || !Number.isInteger(position.y)) {
+    return false;
+  }
+
+  if (size !== null && (position.x >= size || position.y >= size)) {
+    return false;
+  }
+
+  if (position.x < 0 || position.y < 0) {
+    return false;
+  }
+
+  return position.x === x && position.y === y;
+}
+
+/**
  * Records a problem for every cell that is neither a persisted tile nor
  * `null`.
  */
-function checkCellMatrix(value: unknown, problems: string[]): void {
+function checkCellMatrix(
+  value: unknown,
+  problems: string[],
+  size: number | null
+): void {
   if (!Array.isArray(value)) {
     addProblem(problems, 'board.grid.cells is not an array');
     return;
@@ -1392,6 +1443,20 @@ function checkCellMatrix(value: unknown, problems: string[]): void {
     addProblem(
       problems,
       `board.grid.cells holds more than ${MAX_SUPPORTED_BOARD_SIZE} columns`
+    );
+    return;
+  }
+
+  // ADDED: the matrix must be the SQUARE the declared size names. A jagged or
+  // undersized matrix used to validate, and `Grid` rehydrates by reading
+  // `cells[x][y]` across `size` — so a short column read `undefined` where the
+  // lattice expected a cell or `null`, and a long one silently dropped the
+  // tiles past the edge. DL-RUN-08.
+  if (size !== null && value.length !== size) {
+    addProblem(
+      problems,
+      `board.grid.cells holds ${String(value.length)} columns, and ` +
+        `board.grid.size declares ${String(size)}`
     );
     return;
   }
@@ -1417,6 +1482,17 @@ function checkCellMatrix(value: unknown, problems: string[]): void {
       continue;
     }
 
+    // ADDED: every column is the same declared length, so the matrix is square
+    // rather than merely bounded. DL-RUN-08.
+    if (size !== null && column.length !== size) {
+      addProblem(
+        problems,
+        `board.grid.cells[${x}] holds ${String(column.length)} cells, and ` +
+          `board.grid.size declares ${String(size)}`
+      );
+      continue;
+    }
+
     for (let y = 0; y < column.length; y += 1) {
       if (problems.length >= MAX_REPORTED_PROBLEMS) {
         return;
@@ -1429,6 +1505,18 @@ function checkCellMatrix(value: unknown, problems: string[]): void {
         addProblem(
           problems,
           `board.grid.cells[${x}][${y}] is neither a tile nor null`
+        );
+        continue;
+      }
+
+      // ADDED: a tile's own position must be the cell it was found in.
+      // DL-RUN-08.
+      if (cell !== null && !tilePositionMatchesCell(cell, x, y, size)) {
+        addProblem(
+          problems,
+          `board.grid.cells[${x}][${y}] carries the position ` +
+            `(${String(cell.position.x)}, ${String(cell.position.y)}), which ` +
+            'is not that cell'
         );
       }
     }
@@ -1471,7 +1559,15 @@ function checkGrid(value: unknown, problems: string[]): void {
   );
 
   if (cells.readable) {
-    checkCellMatrix(cells.value, problems);
+    // ADDED: the declared size is handed to the matrix check, which had no way
+    // to measure the matrix against it. An unreadable or invalid size is passed
+    // as `null` — it is already reported above — and the matrix is then measured
+    // against the bounds alone. DL-RUN-08.
+    checkCellMatrix(
+      cells.value,
+      problems,
+      size.readable && isBoardSize(size.value) ? size.value : null
+    );
   }
 }
 
@@ -2279,6 +2375,15 @@ export const NOOP_RUN_REPORTER: RunReporter = Object.freeze({
     return;
   },
   onRewardDrawn(): void {
+    return;
+  },
+
+  // ADDED: the eleventh channel. This constant is documented as implementing
+  // every member, and `onRelicsNormalized` was the one it omitted — so a module
+  // constructed without a reporter was not, in fact, reporting through a fully
+  // implemented one. Every member is optional, so the omission compiled.
+  // DL-RUN-09.
+  onRelicsNormalized(): void {
     return;
   },
   onRunEnded(): void {

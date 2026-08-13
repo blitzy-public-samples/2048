@@ -25,6 +25,10 @@ import {
   getTheme,
 } from '../../../src/theme/themes';
 import { rampValue, tileRampConstants } from '../../../src/theme/tile-ramp';
+import type {
+  RenderDiagnostic,
+  RenderReporter,
+} from '../../../src/render/webgl-support';
 
 /** The first tile value strictly above the ramp, which is the super band. */
 const FIRST_SUPER_VALUE = rampValue(tileRampConstants.limit + 1);
@@ -573,5 +577,739 @@ describe('the accessibility palettes withhold the glow from every value', () => 
     }
 
     cache.destroy();
+  });
+});
+
+/* ==========================================================================
+ * THE NUMERAL A BLOCK WEARS
+ *
+ * The numerals are what make the 2.5D board READABLE, and nothing tested them:
+ * jsdom publishes neither `OffscreenCanvas` nor a 2D context, so
+ * `createNumeralSurface()` answered `null` on every call, every numeral was
+ * refused as `'no-2d-context'`, and a board of blank blocks passed the whole
+ * suite. R7 and validation gate V9 both require a legible board.
+ *
+ * These cases install a RECORDING `OffscreenCanvas` — a deterministic 2D
+ * context that logs every call and answers `measureText` from a width this
+ * suite controls — so the drawing itself, the texture, the plane, the
+ * condensing, the failure fallbacks, the theme redraw and the cache bound are
+ * all observable. DL-MESH-05.
+ * ========================================================================== */
+
+/** One call the recording 2D context received. */
+interface NumeralCall {
+  readonly member: string;
+  readonly args: readonly unknown[];
+}
+
+/** The recording surface, and readers over what was drawn on it. */
+interface NumeralRecorder {
+  /** Every call, in order, across every canvas created. */
+  readonly calls: NumeralCall[];
+
+  /** Canvases constructed, in order, as `[width, height]` pairs. */
+  readonly canvases: { width: number; height: number }[];
+
+  /** Every `fillText` call, in order. */
+  readonly texts: () => readonly NumeralCall[];
+
+  /** The last value assigned to one context property. */
+  readonly lastSet: (member: string) => unknown;
+
+  /** Every value assigned to one context property, in order. */
+  readonly setsOf: (member: string) => readonly unknown[];
+
+  /** Makes `measureText` answer `width` for every later call. */
+  readonly measureAs: (width: number) => void;
+
+  /** Makes the next `fillText` raise. */
+  readonly failNextDraw: () => void;
+
+  /** Makes `getContext` answer `null` for every later canvas. */
+  readonly refuseContext: () => void;
+
+  /** Restores whatever `OffscreenCanvas` was there before. */
+  readonly restore: () => void;
+}
+
+/**
+ * Installs a recording `OffscreenCanvas` on the global object.
+ *
+ * The context is a plain object whose members push onto `calls`, with the
+ * properties `drawNumeral` assigns — `fillStyle`, `font`, `textAlign`,
+ * `textBaseline` — recorded through setters so an assertion can read what the
+ * production code actually asked for. `measureText` is deterministic: it
+ * answers a width this recorder controls, which is the only way to drive the
+ * condensing branch on demand.
+ *
+ * @returns The recorder.
+ */
+const recordNumeralSurface = (): NumeralRecorder => {
+  const calls: NumeralCall[] = [];
+  const canvases: { width: number; height: number }[] = [];
+  const original = (globalThis as { OffscreenCanvas?: unknown })
+    .OffscreenCanvas;
+  let measuredWidth = 10;
+  let failDraw = false;
+  let contextRefused = false;
+
+  const note = (member: string, ...args: readonly unknown[]): void => {
+    calls.push({ member, args });
+  };
+
+  const makeContext = (): Record<string, unknown> => {
+    const state: Record<string, unknown> = {};
+    const context: Record<string, unknown> = {
+      setTransform: (...args: readonly unknown[]): void => {
+        note('setTransform', ...args);
+      },
+      clearRect: (...args: readonly unknown[]): void => {
+        note('clearRect', ...args);
+      },
+      measureText: (text: string): { width: number } => {
+        note('measureText', text);
+
+        return { width: measuredWidth };
+      },
+      fillText: (...args: readonly unknown[]): void => {
+        note('fillText', ...args);
+
+        if (failDraw) {
+          failDraw = false;
+
+          throw new Error('fillText refused');
+        }
+      },
+    };
+
+    for (const member of ['fillStyle', 'font', 'textAlign', 'textBaseline']) {
+      Object.defineProperty(context, member, {
+        configurable: true,
+        get: (): unknown => state[member],
+        set: (value: unknown): void => {
+          state[member] = value;
+          note(`set:${member}`, value);
+        },
+      });
+    }
+
+    return context;
+  };
+
+  class RecordingOffscreenCanvas {
+    width: number;
+
+    height: number;
+
+    constructor(width: number, height: number) {
+      this.width = width;
+      this.height = height;
+      canvases.push({ width, height });
+    }
+
+    getContext(kind: string): unknown {
+      note('getContext', kind);
+
+      return contextRefused ? null : makeContext();
+    }
+  }
+
+  Object.defineProperty(globalThis, 'OffscreenCanvas', {
+    configurable: true,
+    writable: true,
+    value: RecordingOffscreenCanvas,
+  });
+
+  return {
+    calls,
+    canvases,
+    texts: (): readonly NumeralCall[] =>
+      calls.filter((call): boolean => call.member === 'fillText'),
+    lastSet: (member: string): unknown =>
+      calls.filter((call): boolean => call.member === `set:${member}`).at(-1)
+        ?.args[0],
+    setsOf: (member: string): readonly unknown[] =>
+      calls
+        .filter((call): boolean => call.member === `set:${member}`)
+        .map((call): unknown => call.args[0]),
+    measureAs: (width: number): void => {
+      measuredWidth = width;
+    },
+    failNextDraw: (): void => {
+      failDraw = true;
+    },
+    refuseContext: (): void => {
+      contextRefused = true;
+    },
+    restore: (): void => {
+      if (original === undefined) {
+        delete (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas;
+
+        return;
+      }
+
+      Object.defineProperty(globalThis, 'OffscreenCanvas', {
+        configurable: true,
+        writable: true,
+        value: original,
+      });
+    },
+  };
+};
+
+/** A reporter that keeps every diagnostic and count. */
+const collectReports = (): {
+  readonly reporter: RenderReporter;
+  readonly diagnostics: RenderDiagnostic[];
+  readonly counts: { name: string; detail?: unknown }[];
+  readonly countOf: (name: string) => number;
+} => {
+  const diagnostics: RenderDiagnostic[] = [];
+  const counts: { name: string; detail?: unknown }[] = [];
+
+  return {
+    reporter: {
+      onDiagnostic: (diagnostic): void => {
+        diagnostics.push(diagnostic);
+      },
+      onCount: (count): void => {
+        counts.push({ name: count.name, detail: count.detail });
+      },
+      onTiming: (): void => {},
+    },
+    diagnostics,
+    counts,
+    countOf: (name: string): number =>
+      counts.filter((entry): boolean => entry.name === name).length,
+  };
+};
+
+describe('the numeral a block wears', () => {
+  it('draws the value onto a 2D surface and dresses the plane with it', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const reports = collectReports();
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+        reporter: reports.reporter,
+      });
+
+      factory.buildBoard(4);
+
+      const mesh = factory.acquireTileMesh(2048);
+      const numeral = mesh.children[0];
+
+      // DRAWN: the text is the value, centred on the tile box.
+      const drawn = recorder.texts();
+
+      expect(drawn).toHaveLength(1);
+      expect(drawn[0]?.args[0]).toBe('2048');
+
+      const geometry = resolveBoardGeometry(4, 'desktop');
+      const centre = geometry.tileBoxSize / 2;
+
+      expect(drawn[0]?.args[1]).toBeCloseTo(centre, 6);
+      expect(drawn[0]?.args[2]).toBeCloseTo(centre, 6);
+
+      // Cleared first, and centred through the two alignment properties.
+      expect(
+        recorder.calls.some((call): boolean => call.member === 'clearRect'),
+      ).toBe(true);
+      expect(recorder.lastSet('textAlign')).toBe('center');
+      expect(recorder.lastSet('textBaseline')).toBe('middle');
+
+      // Dressed in the numeral colour the ramp resolves for that value.
+      expect(recorder.lastSet('fillStyle')).toBe(
+        materials.getNumeralColor(2048),
+      );
+
+      // Bold, at the font size the layout resolved.
+      expect(String(recorder.lastSet('font'))).toMatch(/^bold \d+(\.\d+)?px /);
+
+      // THE PLANE IS DRESSED AND VISIBLE, with a canvas-backed map.
+      expect(numeral).toBeDefined();
+      expect(numeral?.visible).toBe(true);
+
+      // The map is the canvas that was just drawn on, carried as a texture.
+      // `needsUpdate` is write-only on a three.js texture, so the upload flag is
+      // read through the version counter it raises.
+      const material = (
+        numeral as {
+          material?: {
+            map?: {
+              image?: { width?: number };
+              version?: number;
+              colorSpace?: string;
+            };
+            transparent?: boolean;
+            depthWrite?: boolean;
+          };
+        }
+      ).material;
+
+      expect(material?.map).toBeDefined();
+      expect(material?.map?.image?.width).toBe(recorder.canvases[0]?.width);
+      expect(material?.map?.version).toBeGreaterThan(0);
+      expect(material?.map?.colorSpace).toBe('srgb');
+
+      // Drawn over the block's top face, so the numeral is legible against it.
+      expect(material?.transparent).toBe(true);
+      expect(material?.depthWrite).toBe(false);
+
+      // COUNTED, and cached.
+      expect(reports.countOf('render.numeral.created')).toBe(1);
+      expect(reports.countOf('render.numeral.unavailable')).toBe(0);
+      expect(factory.readStats().numeralsCreated).toBe(1);
+      expect(factory.readStats().cachedNumerals).toBe(1);
+      expect(factory.readStats().numeralsUnavailable).toBe(0);
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('sizes the canvas from the tile box and the texture scale', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+      });
+
+      factory.buildBoard(4);
+      factory.acquireTileMesh(2);
+
+      const geometry = resolveBoardGeometry(4, 'desktop');
+      const created = recorder.canvases[0];
+
+      expect(created).toBeDefined();
+      expect(created?.width).toBe(created?.height);
+      expect(created?.width).toBeGreaterThanOrEqual(
+        Math.ceil(geometry.tileBoxSize),
+      );
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('draws one texture per value and reuses it for a second block', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+      });
+
+      factory.buildBoard(4);
+
+      const first = factory.acquireTileMesh(8);
+      const second = factory.acquireTileMesh(8);
+
+      expect(recorder.texts()).toHaveLength(1);
+      expect(factory.readStats().numeralsCreated).toBe(1);
+
+      // The same material object, so the texture is genuinely shared.
+      expect((first.children[0] as { material?: unknown }).material).toBe(
+        (second.children[0] as { material?: unknown }).material,
+      );
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('condenses a numeral too wide for the tile, and reports it', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const reports = collectReports();
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+        reporter: reports.reporter,
+      });
+
+      factory.buildBoard(4);
+
+      // Wider than the tile can hold, so the font is re-set smaller.
+      recorder.measureAs(10_000);
+
+      const mesh = factory.acquireTileMesh(131072);
+      const fonts = recorder.setsOf('font');
+
+      // TWO font assignments: the layout size, then the fitted one.
+      expect(fonts).toHaveLength(2);
+
+      const sizeOf = (font: unknown): number =>
+        Number(/^bold ([\d.]+)px/.exec(String(font))?.[1] ?? '0');
+
+      expect(sizeOf(fonts[1])).toBeLessThan(sizeOf(fonts[0]));
+      expect(sizeOf(fonts[1])).toBeGreaterThan(0);
+
+      // Still drawn, and still visible.
+      expect(recorder.texts()).toHaveLength(1);
+      expect(mesh.children[0]?.visible).toBe(true);
+
+      expect(factory.readStats().numeralsCondensed).toBe(1);
+      expect(reports.countOf('render.numeral.condensed')).toBe(1);
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('leaves the font alone for a numeral that already fits', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+      });
+
+      factory.buildBoard(4);
+      recorder.measureAs(1);
+      factory.acquireTileMesh(2);
+
+      expect(recorder.setsOf('font')).toHaveLength(1);
+      expect(factory.readStats().numeralsCondensed).toBe(0);
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('renders a blank block where no 2D context is reachable', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const reports = collectReports();
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+        reporter: reports.reporter,
+      });
+
+      factory.buildBoard(4);
+      recorder.refuseContext();
+
+      const mesh = factory.acquireTileMesh(4);
+
+      // THE FALLBACK: the plane is hidden rather than showing a blank texture,
+      // and the block itself still renders.
+      expect(mesh.children[0]?.visible).toBe(false);
+      expect(mesh.visible).toBe(true);
+
+      expect(factory.readStats().numeralsCreated).toBe(0);
+      expect(factory.readStats().numeralsUnavailable).toBeGreaterThan(0);
+      expect(reports.countOf('render.numeral.unavailable')).toBe(1);
+      expect(
+        reports.diagnostics.some((diagnostic): boolean =>
+          diagnostic.message.includes('two-dimensional drawing surface'),
+        ),
+      ).toBe(true);
+
+      // And it is not retried for every later block: the surface is known
+      // unreachable, so the second block costs no further attempt.
+      factory.acquireTileMesh(16);
+
+      expect(reports.countOf('render.numeral.unavailable')).toBe(2);
+      expect(
+        recorder.calls.filter((call): boolean => call.member === 'getContext'),
+      ).toHaveLength(1);
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('renders a blank block where the drawing itself raises', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const reports = collectReports();
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+        reporter: reports.reporter,
+      });
+
+      factory.buildBoard(4);
+      recorder.failNextDraw();
+
+      const mesh = factory.acquireTileMesh(32);
+
+      expect(mesh.children[0]?.visible).toBe(false);
+      expect(mesh.visible).toBe(true);
+      expect(factory.readStats().numeralsCreated).toBe(0);
+      expect(factory.readStats().numeralsUnavailable).toBeGreaterThan(0);
+      expect(
+        reports.diagnostics.some((diagnostic): boolean =>
+          diagnostic.message.includes('Drawing the numeral failed'),
+        ),
+      ).toBe(true);
+
+      // The refusal is REMEMBERED for that value, so a later block wearing it
+      // does not re-attempt the draw.
+      const attempts = recorder.texts().length;
+
+      factory.acquireTileMesh(32);
+
+      expect(recorder.texts()).toHaveLength(attempts);
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('redraws every numeral in use when the theme changes', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const reports = collectReports();
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+        reporter: reports.reporter,
+      });
+
+      factory.buildBoard(4);
+
+      const mesh = factory.acquireTileMesh(64);
+      const before = (mesh.children[0] as { material?: unknown }).material;
+      const firstColour = recorder.lastSet('fillStyle');
+
+      expect(recorder.texts()).toHaveLength(1);
+
+      applyTheme('high-contrast');
+
+      expect(factory.refreshTheme()).toBe(true);
+
+      // DRAWN AGAIN, in the new theme's numeral colour, and the plane is
+      // dressed in the new material rather than the stale one. The count is a
+      // lower bound because the factory's own theme subscription discards the
+      // cache as the theme lands, before `refreshTheme()` redraws from it.
+      expect(recorder.texts().length).toBeGreaterThan(1);
+      expect(recorder.lastSet('fillStyle')).toBe(
+        materials.getNumeralColor(64),
+      );
+      expect(recorder.lastSet('fillStyle')).not.toBe(firstColour);
+      expect((mesh.children[0] as { material?: unknown }).material).not.toBe(
+        before,
+      );
+      expect(mesh.children[0]?.visible).toBe(true);
+      expect(factory.readStats().numeralThemeRebuilds).toBeGreaterThan(0);
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('evicts the least recently used numeral no block is wearing', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const reports = collectReports();
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+        reporter: reports.reporter,
+      });
+
+      factory.buildBoard(4);
+
+      // Fill the cache past its ceiling with blocks that are RELEASED, so
+      // every held numeral is evictable.
+      const ceiling = 24;
+
+      for (let exponent = 1; exponent <= ceiling + 4; exponent += 1) {
+        const mesh = factory.acquireTileMesh(2 ** exponent);
+
+        factory.releaseTileMesh(mesh);
+      }
+
+      const stats = factory.readStats();
+
+      // BOUNDED: the cache never exceeds its ceiling, and eviction happened.
+      expect(stats.cachedNumerals).toBeLessThanOrEqual(ceiling);
+      expect(stats.numeralsEvicted).toBeGreaterThan(0);
+      expect(stats.numeralsDisposed).toBeGreaterThan(0);
+      expect(reports.countOf('render.numeral.evicted')).toBe(
+        stats.numeralsEvicted,
+      );
+
+      // And every one of those draws really happened.
+      expect(recorder.texts().length).toBe(stats.numeralsCreated);
+      expect(stats.numeralsCreated).toBeGreaterThan(ceiling);
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('refuses rather than evicting a numeral a live block is wearing', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const reports = collectReports();
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+        reporter: reports.reporter,
+      });
+
+      factory.buildBoard(4);
+
+      const ceiling = 24;
+      const held: ReturnType<typeof factory.acquireTileMesh>[] = [];
+
+      // Every block is KEPT, so every cached numeral is worn and none can be
+      // evicted. The block past the ceiling renders without its numeral.
+      for (let exponent = 1; exponent <= ceiling; exponent += 1) {
+        held.push(factory.acquireTileMesh(2 ** exponent));
+      }
+
+      expect(factory.readStats().cachedNumerals).toBe(ceiling);
+      expect(factory.readStats().numeralsEvicted).toBe(0);
+
+      const overflow = factory.acquireTileMesh(2 ** (ceiling + 1));
+
+      expect(overflow.children[0]?.visible).toBe(false);
+      expect(factory.readStats().numeralsRefused).toBeGreaterThan(0);
+      expect(reports.countOf('render.numeral.refused')).toBeGreaterThan(0);
+      expect(
+        reports.diagnostics.some((diagnostic): boolean =>
+          diagnostic.message.includes('every held numeral is worn'),
+        ),
+      ).toBe(true);
+
+      // The numerals already drawn are untouched, and still visible.
+      expect(factory.readStats().cachedNumerals).toBe(ceiling);
+      expect(held[0]?.children[0]?.visible).toBe(true);
+
+      // Releasing one makes room again, and the refused value then draws.
+      const releasable = held[0];
+
+      expect(releasable).toBeDefined();
+
+      if (releasable !== undefined) {
+        factory.releaseTileMesh(releasable);
+      }
+
+      const drawnBefore = recorder.texts().length;
+      const retried = factory.acquireTileMesh(2 ** (ceiling + 2));
+
+      expect(retried.children[0]?.visible).toBe(true);
+      expect(recorder.texts().length).toBe(drawnBefore + 1);
+      expect(factory.readStats().numeralsEvicted).toBeGreaterThan(0);
+
+      factory.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('draws the mobile numeral smaller than the desktop one', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const materials = createTileMaterialCache();
+      const sizeOf = (font: unknown): number =>
+        Number(/^bold ([\d.]+)px/.exec(String(font))?.[1] ?? '0');
+
+      const desktop = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+        scale: 'desktop',
+      });
+
+      desktop.buildBoard(4);
+      desktop.acquireTileMesh(2);
+
+      const desktopFont = sizeOf(recorder.lastSet('font'));
+
+      const mobile = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+        scale: 'mobile',
+      });
+
+      mobile.buildBoard(4);
+      mobile.acquireTileMesh(2);
+
+      const mobileFont = sizeOf(recorder.lastSet('font'));
+
+      expect(desktopFont).toBeGreaterThan(0);
+      expect(mobileFont).toBeGreaterThan(0);
+      expect(mobileFont).toBeLessThan(desktopFont);
+
+      desktop.dispose();
+      mobile.dispose();
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
+  });
+
+  it('disposes every numeral texture it drew', () => {
+    const recorder = recordNumeralSurface();
+
+    try {
+      const materials = createTileMaterialCache();
+      const factory = createTileMeshFactory({
+        config: { boardSize: 4 },
+        materials,
+      });
+
+      factory.buildBoard(4);
+      factory.acquireTileMesh(2);
+      factory.acquireTileMesh(4);
+      factory.acquireTileMesh(8);
+
+      expect(factory.readStats().numeralsCreated).toBe(3);
+
+      factory.dispose();
+
+      expect(factory.readStats().numeralsDisposed).toBe(3);
+      expect(factory.readStats().cachedNumerals).toBe(0);
+
+      materials.destroy();
+    } finally {
+      recorder.restore();
+    }
   });
 });

@@ -4,6 +4,22 @@
 //
 // Nothing else lives in this file. A colour helper written for the ramp was
 // moved to style/_tokens.scss, the token layer that exists for that parity.
+//
+// This file is its own successor, so every construct below carries a
+// traceability row of docs/TRACEABILITY_MATRIX.md under the HELPER area, which
+// is unique to it:
+//   TR-HELPER-01  L4-L21 pre-migration   `exponent()` and `pow()`, the
+//                                        powers-of-two arithmetic the tile
+//                                        ramp iterates over
+//   TR-HELPER-02  L14 pre-migration      `math.div()` at the negative-exponent
+//                                        division, and the `sass:math` load
+//   TR-HELPER-03  L23-L51 pre-migration  the vendor-prefix mixins
+//   TR-HELPER-04  L53-L66 pre-migration  the `keyframes()` mixin, with the
+//                                        animation name interpolated
+//   TR-HELPER-05  L68-L73 pre-migration  the `smaller()` media-query mixin
+//   TR-HELPER-06  L75-L82 pre-migration  the `clearfix` mixin
+//
+// Decisions: DL-SHEET-01, DL-SHEET-03, DL-RAMP-01 (docs/DECISION_LOG.md).
 @use "sass:math";
 
 // Exponent From:

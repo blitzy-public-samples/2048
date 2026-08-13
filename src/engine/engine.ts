@@ -39,7 +39,7 @@
 //
 // Decisions: DL-ENGINE-01, DL-ENGINE-02, DL-ENGINE-03, DL-ENGINE-04,
 // DL-ENGINE-05, DL-ENGINE-06, DL-ENGINE-07, DL-ENGINE-08, DL-ENGINE-09,
-// DL-ENGINE-10 (docs/DECISION_LOG.md).
+// DL-ENGINE-10, DL-ENGINE-15 (docs/DECISION_LOG.md).
 
 import {
   createDefaultRulesConfig,
@@ -658,6 +658,17 @@ export class Engine {
    */
   private stageEnded: boolean;
 
+  /**
+   * ADDED: whether the last `onStageStart` dispatch reseated the lattice.
+   *
+   * Written by `beginStage()` and read by both of its callers, which take the
+   * terminal re-derivation at different points: `setup()` after its start tiles
+   * are placed, `startStage()` immediately. Not a verdict and not state a
+   * subscriber sees — it is one dispatch's accounting result, overwritten by the
+   * next dispatch. DL-ENGINE-15.
+   */
+  private latticeChangedOnStageStart: boolean;
+
   /** Whether the last turn's terminal status could not be established. */
   private terminalUnknown: boolean;
 
@@ -746,6 +757,7 @@ export class Engine {
     this.continuedPlay = false;
     this.stageGoalOverride = null;
     this.stageEnded = false;
+    this.latticeChangedOnStageStart = false;
     this.terminalUnknown = false;
     this.turnCounter = 0;
     this.reporterFaultCount = 0;
@@ -1034,6 +1046,15 @@ export class Engine {
       this.addStartTiles();
     }
 
+    // ADDED: the same re-derivation `endStage()` takes, on the board the start
+    // tiles were placed on. Silent unless a stage-start handler reseated the
+    // lattice, so a board opened without relic effects carries exactly the
+    // verdict the snapshot or the fresh grid gave it — which keeps the vanilla
+    // `setup()` of js/game_manager.js L35-L59 unchanged. DL-ENGINE-15.
+    if (this.latticeChangedOnStageStart) {
+      this.deriveTerminalState();
+    }
+
     this.events.emit('stage:start', started);
 
     this.commit();
@@ -1070,7 +1091,16 @@ export class Engine {
     // the dispatch and before the start tiles are inserted, so a relic that
     // resized or reseated the board for the opening position has those tiles
     // placed on the board it asked for. Accounted for here.
-    this.accountEffects(started.effects, started.effectsRefused);
+    //
+    // ADDED: the verdict of that accounting is RECORDED rather than discarded,
+    // so the two callers can re-derive the terminal state against the board the
+    // effects left. `setup()` takes the measurement after its start tiles are
+    // placed and `startStage()` takes it at once, which is why the flag is held
+    // here instead of the measurement being taken here. DL-ENGINE-15.
+    this.latticeChangedOnStageStart = this.accountEffects(
+      started.effects,
+      started.effectsRefused,
+    );
 
     // A board opened afresh — or reopened at another edge length — has its
     // own terminal status and its own unresolved stage.
@@ -1134,7 +1164,16 @@ export class Engine {
       return;
     }
 
-    this.events.emit('stage:start', this.beginStage());
+    const started = this.beginStage();
+
+    // ADDED: the same re-derivation `setup()` and `endStage()` take. This path
+    // inserts no start tiles, so the measurement follows the dispatch directly.
+    // DL-ENGINE-15.
+    if (this.latticeChangedOnStageStart) {
+      this.deriveTerminalState();
+    }
+
+    this.events.emit('stage:start', started);
 
     this.commit();
   }
@@ -1788,7 +1827,23 @@ export class Engine {
     // the board is the case this exists for — reached the board before the
     // emission, so a subscriber to `stage:end` and the commit below it both see
     // the board the stage actually ended on. Accounted for here.
-    this.accountEffects(dispatched.effects, dispatched.effectsRefused);
+    const reseated = this.accountEffects(
+      dispatched.effects,
+      dispatched.effectsRefused,
+    );
+
+    // ADDED: THE VERDICT IS RE-DERIVED AGAINST THE BOARD THE EFFECTS LEFT. The
+    // return of `accountEffects` was discarded here, so a stage-end handler that
+    // reseated the lattice committed the verdict the board carried BEFORE it: a
+    // collapse onto a smaller board with no empty cell and no adjacent match
+    // published `over: false`, and the next turn re-derived only if that turn's
+    // own pre-move dispatch reseated the board again. Taken before the emission,
+    // so `stage:end`, the commit below it and any reward or advance that follows
+    // all read one verdict. The measurement is `deriveTerminalState()`, the same
+    // one the resolved turn and the two effect-only turns take. DL-ENGINE-15.
+    if (reseated) {
+      this.deriveTerminalState();
+    }
 
     this.events.emit('stage:end', resolved);
 

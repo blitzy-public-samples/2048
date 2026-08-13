@@ -16,6 +16,7 @@ import {
   createDefaultRulesConfig,
 } from '../../../src/config/default-config';
 import type { RulesConfig } from '../../../src/config/rules-config';
+import { STAGE_GOAL_KINDS } from '../../../src/config/stage-config';
 import {
   createHookBus,
 } from '../../../src/engine/hook-bus';
@@ -115,6 +116,9 @@ const HUGE_BOARD_SIZE = 1_000_000;
  * those bounds.
  */
 const EFFECT_BOARD_EDGE = 3;
+
+/** A goal target a handler replaces the dispatched one with. */
+const REPLACED_GOAL_TARGET = 512;
 
 type Exact<Left, Right> = [Left] extends [Right]
   ? [Right] extends [Left]
@@ -1245,6 +1249,46 @@ describe('the charge guard skips a spent subscriber (AAP Contract 2)', () => {
     expect(bus.metrics().totals.skippedExhausted).toBe(2);
   });
 
+  it('withholds all six hooks from a spent subscriber, none exempt', () => {
+    const bus = createHookBus({ correlationId: CORRELATION_ID });
+    const board = createBoard();
+    const payloads = createPayloadsByHook(board);
+    const reached: HookName[] = [];
+    const handlers: Record<string, HookHandler<HookName>> = {};
+
+    for (const hook of HOOK_NAMES) {
+      handlers[hook] = (): void => {
+        reached.push(hook);
+      };
+    }
+
+    register(
+      bus,
+      createSubscriber('spent-on-all', handlers as HookHandlerTable, {
+        charges: 0,
+      }),
+    );
+
+    // No hook is exempt, stage preparation included: an exhausted relic must
+    // stop firing outright (AAP R3, V6). DL-HOOKBUS-07.
+    for (const hook of HOOK_NAMES) {
+      const resolved = bus.dispatch(hook, payloads[hook], createEnvironment());
+
+      expect(resolved.invoked, `${hook} invoked`).toBe(0);
+      expect(resolved.skipped, `${hook} skipped`).toBe(1);
+      expect(resolved.failed, `${hook} failed`).toBe(0);
+      expect(resolved.chargesConsumed, `${hook} charges`).toBe(0);
+      expect(
+        bus.metrics().hooks[hook].skippedExhausted,
+        `${hook} exhausted counter`,
+      ).toBe(1);
+    }
+
+    expect(reached).toEqual([]);
+    expect(bus.metrics().totals.skippedExhausted).toBe(HOOK_NAMES.length);
+    expect(bus.subscribers()[0]?.charges).toBe(0);
+  });
+
   it('records a skipped handler as exhausted, not as failed', () => {
     const bus = createHookBus({ correlationId: CORRELATION_ID });
 
@@ -2008,11 +2052,6 @@ describe(
       expect(
         recording.errors.map((report): string => report.subscriberId),
       ).toEqual(['first-thrower', 'second-thrower']);
-      expect(
-        recording.errors.every(
-          (report): boolean => report.correlationId === CORRELATION_ID,
-        ),
-      ).toBe(true);
       expect(
         recording.errors.every(
           (report): boolean => report.correlationId === CORRELATION_ID,
@@ -2946,6 +2985,220 @@ describe(
       expect(result.payload.boardSize).toBe(BOARD_SIZE);
     });
 
+    it('rejects a stage goal whose kind is not one the ladder declares', () => {
+      // `evaluateStageGoal` narrows on `kind` and raises on one it cannot, so a
+      // kind admitted here throws later — on a stage that has already started.
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+      register(
+        bus,
+        createSubscriber('invents-a-kind', {
+          onStageStart: (payload): StageStartPayload => ({
+            ...payload,
+            goal: { kind: 'tiles-cleared', target: 4 } as unknown as
+              StageStartPayload['goal'],
+          }),
+        }),
+      );
+
+      const original = createStageStartPayload();
+      const result = bus.dispatch(
+        'onStageStart',
+        original,
+        createEnvironment(),
+      );
+
+      expect(result.rejected).toBe(1);
+      expect(result.payload.goal).toEqual(original.goal);
+    });
+
+    it('accepts every kind the ladder does declare', () => {
+      for (const kind of STAGE_GOAL_KINDS) {
+        const bus = createHookBus({ correlationId: CORRELATION_ID });
+
+        register(
+          bus,
+          createSubscriber(`adopts-${kind}`, {
+            onStageStart: (payload): StageStartPayload => ({
+              ...payload,
+              goal: { kind, target: REPLACED_GOAL_TARGET },
+            }),
+          }),
+        );
+
+        const result = bus.dispatch(
+          'onStageStart',
+          createStageStartPayload(),
+          createEnvironment(),
+        );
+
+        expect(result.rejected).toBe(0);
+        expect(result.payload.goal).toEqual({
+          kind,
+          target: REPLACED_GOAL_TARGET,
+        });
+      }
+    });
+
+    it('rejects a stage start that renumbers the stage, and the next handler ' +
+      'reads the index the engine opened', () => {
+      // `stageIndex` is invariant on `onStageStart`: `goal` alone is
+      // transformable. A renumbered index used to be adopted, so the stage the
+      // engine reported starting was not the stage it was on.
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const seen: number[] = [];
+
+      register(
+        bus,
+        createSubscriber(
+          'renumbers-the-stage',
+          {
+            onStageStart: (payload): StageStartPayload => ({
+              ...payload,
+              stageIndex: payload.stageIndex + 1,
+            }),
+          },
+          { pickupOrder: 0 },
+        ),
+      );
+      register(
+        bus,
+        createSubscriber(
+          'reads-the-stage',
+          {
+            onStageStart: (payload): void => {
+              seen.push(payload.stageIndex);
+            },
+          },
+          { pickupOrder: 1 },
+        ),
+      );
+
+      const result = bus.dispatch(
+        'onStageStart',
+        createStageStartPayload(),
+        createEnvironment(),
+      );
+
+      expect(result.rejected).toBe(1);
+      expect(result.payload.stageIndex).toBe(STAGE_INDEX);
+      expect(seen).toEqual([STAGE_INDEX]);
+    });
+
+    it('rejects a stage end that renumbers the stage, and the next handler ' +
+      'reads the index the engine resolved', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const seen: number[] = [];
+
+      register(
+        bus,
+        createSubscriber(
+          'renumbers-the-end',
+          {
+            onStageEnd: (payload): StageEndPayload => ({
+              ...payload,
+              stageIndex: payload.stageIndex + 2,
+              cleared: false,
+            }),
+          },
+          { pickupOrder: 0 },
+        ),
+      );
+      register(
+        bus,
+        createSubscriber(
+          'reads-the-end',
+          {
+            onStageEnd: (payload): void => {
+              seen.push(payload.stageIndex);
+            },
+          },
+          { pickupOrder: 1 },
+        ),
+      );
+
+      const original = createStageEndPayload();
+      const result = bus.dispatch('onStageEnd', original, createEnvironment());
+
+      // The whole return is refused, so the transformable `cleared` it carried
+      // is refused with the invariant it broke.
+      expect(result.rejected).toBe(1);
+      expect(result.payload.stageIndex).toBe(STAGE_INDEX);
+      expect(result.payload.cleared).toBe(original.cleared);
+      expect(seen).toEqual([STAGE_INDEX]);
+    });
+
+    it('rejects an after-move return that writes the terminated flag, and the ' +
+      'next handler reads the truthful one', () => {
+      // The engine DERIVES `terminated` after this dispatch, so a handler that
+      // wrote it changed nothing the engine used while every later handler read
+      // the untruthful value.
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const board = createBoard();
+      const seen: boolean[] = [];
+
+      register(
+        bus,
+        createSubscriber(
+          'writes-terminated',
+          {
+            onAfterMove: (payload): AfterMovePayload => ({
+              ...payload,
+              terminated: true,
+              score: payload.score + 1,
+            }),
+          },
+          { pickupOrder: 0 },
+        ),
+      );
+      register(
+        bus,
+        createSubscriber(
+          'reads-terminated',
+          {
+            onAfterMove: (payload): void => {
+              seen.push(payload.terminated);
+            },
+          },
+          { pickupOrder: 1 },
+        ),
+      );
+
+      const original = createAfterMovePayload(board);
+      const result = bus.dispatch('onAfterMove', original, createEnvironment());
+
+      expect(result.rejected).toBe(1);
+      expect(result.payload.terminated).toBe(false);
+      expect(result.payload.score).toBe(original.score);
+      expect(seen).toEqual([false]);
+    });
+
+    it('still adopts the after-move members that are transformable', () => {
+      const bus = createHookBus({ correlationId: CORRELATION_ID });
+      const board = createBoard();
+
+      register(
+        bus,
+        createSubscriber('rescores', {
+          onAfterMove: (payload): AfterMovePayload => ({
+            ...payload,
+            score: payload.score + REPLACED_GOAL_TARGET,
+            over: true,
+            won: true,
+          }),
+        }),
+      );
+
+      const original = createAfterMovePayload(board);
+      const result = bus.dispatch('onAfterMove', original, createEnvironment());
+
+      expect(result.rejected).toBe(0);
+      expect(result.payload.score).toBe(original.score + REPLACED_GOAL_TARGET);
+      expect(result.payload.over).toBe(true);
+      expect(result.payload.won).toBe(true);
+      expect(result.payload.terminated).toBe(original.terminated);
+    });
+
     it('rolls back an in-place mutation made by a handler that then throws',
       () => {
         const bus = createHookBus({ correlationId: CORRELATION_ID });
@@ -3672,11 +3925,6 @@ describe(
         ),
       ).toBe(true);
       expect(
-        recording.counts.every(
-          (report): boolean => report.correlationId === CORRELATION_ID,
-        ),
-      ).toBe(true);
-      expect(
         recording.counts.find(
           (report): boolean => report.metric === 'engine.hook.dispatch',
         )?.hook,
@@ -4163,6 +4411,140 @@ describe('an edit during a dispatch leaves the walk in progress stable ' +
 
     expect(bus.subscribers().map((held) => held.id)).toEqual(['first']);
   });
+
+  it('refuses the same new identifier registered twice during one dispatch',
+    () => {
+      // The duplicate check reads the registrations HELD, and an insertion
+      // deferred behind the walk had not landed yet, so both calls were accepted
+      // and the bus went on to dispatch to one subscriber twice.
+      const bus = createHookBus();
+      const order: string[] = [];
+      const accepted: boolean[] = [];
+
+      register(
+        bus,
+        createSubscriber(
+          'first',
+          {
+            onStageEnd: (): void => {
+              order.push('first');
+              accepted.push(
+                bus.register(createStageEndRecorder('late', order)),
+                bus.register(createStageEndRecorder('late', order)),
+              );
+            },
+          },
+          { pickupOrder: 0 },
+        ),
+      );
+
+      dispatchStageEnd(bus);
+
+      expect(accepted).toEqual([true, false]);
+      expect(bus.subscribers().map((held) => held.id)).toEqual([
+        'first',
+        'late',
+      ]);
+
+      order.length = 0;
+      dispatchStageEnd(bus);
+
+      // One registration, so one invocation.
+      expect(order).toEqual(['first', 'late']);
+      expect(bus.subscriptions('onStageEnd').map((held) => held.subscriberId))
+        .toEqual(['first', 'late']);
+    });
+
+  it('refuses a duplicate queued by a nested dispatch, not only by the outer ' +
+    'one', () => {
+    const bus = createHookBus();
+    const order: string[] = [];
+    const accepted: boolean[] = [];
+
+    register(
+      bus,
+      createSubscriber(
+        'outer',
+        {
+          onStageEnd: (): void => {
+            order.push('outer');
+
+            if (order.filter((entry) => entry === 'outer').length > 1) {
+              // The nested dispatch below re-enters this handler once; the
+              // registration is attempted from the inner turn alone.
+              accepted.push(bus.register(createStageEndRecorder('nested', order)));
+
+              return;
+            }
+
+            accepted.push(bus.register(createStageEndRecorder('nested', order)));
+            dispatchStageEnd(bus);
+          },
+        },
+        { pickupOrder: 0 },
+      ),
+    );
+
+    dispatchStageEnd(bus);
+
+    expect(accepted).toEqual([true, false]);
+    expect(bus.subscribers().map((held) => held.id)).toEqual([
+      'outer',
+      'nested',
+    ]);
+  });
+
+  it('admits an identifier registered again after it was unregistered inside ' +
+    'the same dispatch', () => {
+    const bus = createHookBus();
+    const order: string[] = [];
+    const accepted: boolean[] = [];
+
+    let edited = false;
+
+    register(
+      bus,
+      createSubscriber(
+        'first',
+        {
+          onStageEnd: (): void => {
+            order.push('first');
+
+            // Once: the dance belongs to the first dispatch, and the second
+            // dispatch below is what reads what it left.
+            if (edited) {
+              return;
+            }
+
+            edited = true;
+            accepted.push(bus.register(createStageEndRecorder('late', order)));
+            expect(bus.unregister('late')).toBe(true);
+            accepted.push(
+              bus.register(
+                createStageEndRecorder('late', order, { pickupOrder: 9 }),
+              ),
+            );
+          },
+        },
+        { pickupOrder: 0 },
+      ),
+    );
+
+    dispatchStageEnd(bus);
+
+    // Both registrations were accepted, and exactly one record is held: the
+    // pickup index of the LATER acceptance.
+    expect(accepted).toEqual([true, true]);
+    expect(bus.subscribers().map((held) => held.id)).toEqual(['first', 'late']);
+    expect(bus.subscribers().filter((held) => held.id === 'late')).toHaveLength(
+      1,
+    );
+
+    order.length = 0;
+    dispatchStageEnd(bus);
+
+    expect(order).toEqual(['first', 'late']);
+  });
 });
 
 describe('HookPayloadMap types each handler to its own payload ' +
@@ -4361,7 +4743,11 @@ describe('the charge guard reads a budget however it was written', () => {
     }
   );
 
-  it('never spends an infinite budget, however often it dispatches', () => {
+  it('normalises a non-finite budget to zero on the first consumption, and the guard skips it afterwards', () => {
+    // RENAMED. The old title, 'never spends an infinite budget, however often it
+    // dispatches', named a contract this body does not prove: the handler never
+    // ASKS, so no budget of any size would be spent by the three dispatches, and
+    // what the body actually proves is the normalisation below.
     const bus = createHookBus({ correlationId: CORRELATION_ID });
     const order: string[] = [];
     const subscriber = createStageEndRecorder('endless', order, {
@@ -4375,6 +4761,12 @@ describe('the charge guard reads a budget however it was written', () => {
     }
 
     expect(order).toEqual(['endless', 'endless', 'endless']);
+
+    // Dispatching a handler that asks for nothing leaves the budget as declared,
+    // whatever it holds.
+    expect(bus.subscriptions('onStageEnd')[0].charges).toBe(
+      Number.POSITIVE_INFINITY,
+    );
 
     // The deduction normalises a non-finite budget to zero, so the first
     // consumption spends the whole of it and the guard skips the handler

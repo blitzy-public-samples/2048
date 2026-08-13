@@ -90,6 +90,14 @@
  *   TR-RUNCTL-10  target-only row             `projectRelic()`, the contained
  *                                             per-relic copy every projection
  *                                             of a held relic passes through
+ *   TR-RUNCTL-11  target-only row             `openStageOn()`, the one contained
+ *                                             stage opener, with
+ *                                             `stageOpenPending()` and
+ *                                             `openPendingStage()` as the
+ *                                             record and the retry
+ *   TR-RUNCTL-12  target-only row             `emit()`, the containment every
+ *                                             report this class makes passes
+ *                                             through
  *
  * Decisions behind this file, argued in docs/DECISION_LOG.md and named here
  * only so the construct can be found from the log:
@@ -129,12 +137,18 @@
  *                 `observe(engine, cursors)` and never being called by it
  *   DL-RUNCTL-18  no charge-spending member at all, a tray press being an
  *                 inspection that spends nothing
+ *   DL-RUNCTL-29  `advanceStage()` refusing an advance that would leave the
+ *                 stage domain src/config/stage-config.ts publishes
+ *   DL-RUNCTL-30  `finish()` resolving the stage in force as UNCLEARED before
+ *                 it summarises, with the re-entrant commit that resolution
+ *                 produces recorded and otherwise ignored
  */
 
 import type { RulesConfig } from '../config/rules-config';
 import {
   DEFAULT_STAGE_CONFIG,
   evaluateStageGoal,
+  isStageIndex,
   stageGoalForIndex,
   type StageConfig,
   type StageGoal,
@@ -907,6 +921,9 @@ const NO_OFFER_STAGE = -1;
 /** The stage index recorded while the engine has reported starting none. */
 const NO_STARTED_STAGE = -1;
 
+/** ADDED: the value recorded while no stage open is owed. DL-RUNCTL-25. */
+const NO_PENDING_STAGE = -1;
+
 /**
  * Copies one persisted relic entry, detaching its state slot by structural
  * copy.
@@ -1203,6 +1220,13 @@ export class RunController {
    */
   private startedStageIndex: number;
 
+  /**
+   * ADDED: the stage index a transition advanced to and could not open, and
+   * `NO_PENDING_STAGE` while none is owed. `openPendingStage()` is the retry.
+   * DL-RUNCTL-25.
+   */
+  private pendingStageOpen: number = NO_PENDING_STAGE;
+
   /** The envelope in force. Replaced wholesale; never mutated in place. */
   private current: RunState;
 
@@ -1217,6 +1241,28 @@ export class RunController {
    * that called it is re-entered before it returns.
    */
   private resolvingStage: boolean;
+
+  /**
+   * ADDED: guards the second re-entrant path. `finish()` resolves the stage in
+   * force as UNCLEARED, and the commit `endStage()` ends with re-enters the
+   * commit handler — which would otherwise finish the run a second time, or
+   * resolve and pay out a stage the run is in the middle of abandoning.
+   *
+   * Set for the duration of one `finish()` and cleared in its `finally`, so a
+   * reporter that raises cannot leave it standing. DL-RUNCTL-30.
+   */
+  private finishing = false;
+
+  /**
+   * ADDED: the engine `observe()` attached to, and `null` while none is
+   * attached.
+   *
+   * `finish()` needs the engine to resolve the stage in force, and its public
+   * caller — `endRun()`, which a summary screen's end-run action reaches — takes
+   * no engine argument. Recorded at subscription and released with the
+   * subscriptions, so a detached controller resolves nothing. DL-RUNCTL-30.
+   */
+  private observedEngine: RunEnginePort | null = null;
 
   /** Whether the run in force has ended. Set by `finish`. */
   private ended: boolean;
@@ -1342,7 +1388,20 @@ export class RunController {
     });
 
     const restored = result.state;
-    const adopted = restored !== null && restored.seed === this.identity.seed;
+
+    // CHANGED: adoption now requires the identity to have been RESOLVED FROM the
+    // store. It used to be decided on the seed alone, so a caller-entered seed
+    // that happened to match the stored envelope's resumed that envelope
+    // mid-run instead of replaying the seed from the start — which is the whole
+    // point of entering one (AAP V2, and the seed field of the run-start
+    // screen). `resolveRunIdentity` reports both facts: `resumed` is true only
+    // for an identity read out of the store, and `seedProvided` is true only for
+    // one a caller supplied. DL-RUNCTL-23.
+    const adopted =
+      restored !== null &&
+      restored.seed === this.identity.seed &&
+      this.identity.resumed &&
+      !this.identity.seedProvided;
 
     this.current = adopted
       ? (restored as RunState)
@@ -1413,15 +1472,17 @@ export class RunController {
     // own substreams mid-sequence, a fresh one starts them at zero.
     this.publishRunScope(this.identity.seedProvided);
 
-    this.reporter.onRunStarted?.({
-      correlationId: this.readRunCorrelationId(),
-      runId: this.current.runId,
-      stageIndex: this.current.stageIndex,
+    this.emit((): void => {
+      this.reporter.onRunStarted?.({
+        correlationId: this.readRunCorrelationId(),
+        runId: this.current.runId,
+        stageIndex: this.current.stageIndex,
 
-      // Whether a stored run was ADOPTED, which is the question the report
-      // asks.
-      resumed: adopted,
-      seedProvided: this.identity.seedProvided,
+        // Whether a stored run was ADOPTED, which is the question the report
+        // asks.
+        resumed: adopted,
+        seedProvided: this.identity.seedProvided,
+      });
     });
 
     return result.outcome;
@@ -1718,6 +1779,11 @@ export class RunController {
    * @returns Releases all three subscriptions.
    */
   observe(engine: RunEnginePort, cursors: () => RngCursorMap): () => void {
+    // ADDED: recorded so `finish()` can resolve the stage in force as uncleared.
+    // `endRun()` takes no engine, and the run's last stage still has to be ended
+    // exactly once before the run is summarised. DL-RUNCTL-30.
+    this.observedEngine = engine;
+
     const stopStageStart = engine.events.on('stage:start', (event): void => {
       // WHICH STAGE THE ENGINE HAS OPEN, recorded from the engine's own
       // emission so a second opener can tell that this stage is already begun.
@@ -1777,6 +1843,10 @@ export class RunController {
       stopStageEnd();
       stopCommit();
       this.boardReader = null;
+
+      // Released with the subscriptions: a detached controller resolves no
+      // stage on an engine it no longer observes.
+      this.observedEngine = null;
     };
   }
 
@@ -1834,11 +1904,25 @@ export class RunController {
    * for the stage — and so is the board snapshot, because a stage transition is
    * not a restart.
    *
+   * ADDED: THE ADVANCE STAYS INSIDE THE PUBLISHED STAGE DOMAIN. The index a run
+   * occupies is bounded by `MAX_STAGE_INDEX` of src/config/stage-config.ts, and
+   * src/run/run-state.ts refuses an envelope carrying one above it, so an advance
+   * that would leave the domain holds the stage in force instead of producing a
+   * state the store would reject and the reward transaction would have to roll
+   * back. Nothing is reported: no stage was advanced. DL-RUNCTL-29, DL-STAGE-05.
+   *
    * @returns The goal of the stage now in force.
    */
   advanceStage(): StageGoal {
     const from = this.current.stageIndex;
     const to = from + 1;
+
+    if (!isStageIndex(to)) {
+      this.stageCleared = false;
+
+      return cloneStageGoal(this.current.stageGoal);
+    }
+
     const goal = this.goalForStage(to);
 
     this.current = {
@@ -1849,11 +1933,13 @@ export class RunController {
     };
     this.stageCleared = false;
 
-    this.reporter.onStageAdvanced?.({
-      correlationId: this.readRunCorrelationId(),
-      fromStageIndex: from,
-      toStageIndex: to,
-      goal,
+    this.emit((): void => {
+      this.reporter.onStageAdvanced?.({
+        correlationId: this.readRunCorrelationId(),
+        fromStageIndex: from,
+        toStageIndex: to,
+        goal,
+      });
     });
 
     return goal;
@@ -1896,11 +1982,13 @@ export class RunController {
         ownedIds: this.ownedIds(),
       });
     } catch (error) {
-      this.reporter.onWriteFailed?.({
-        correlationId: this.readRunCorrelationId(),
-        key: RUN_STATE_KEY,
-        byteLength: 0,
-        error,
+      this.emit((): void => {
+        this.reporter.onWriteFailed?.({
+          correlationId: this.readRunCorrelationId(),
+          key: RUN_STATE_KEY,
+          byteLength: 0,
+          error,
+        });
       });
 
       return NO_OFFER;
@@ -1941,10 +2029,12 @@ export class RunController {
     // The offer itself is reportable, not only the selection made from it: an
     // offer drawn and never taken is exactly the case a bare selection counter
     // cannot see, and it is the one that says a reward screen was reached.
-    this.reporter.onRewardOffered?.({
-      correlationId: this.readRunCorrelationId(),
-      stageIndex: this.offerStageIndex,
-      offeredRelicIds: this.offeredRelicIds,
+    this.emit((): void => {
+      this.reporter.onRewardOffered?.({
+        correlationId: this.readRunCorrelationId(),
+        stageIndex: this.offerStageIndex,
+        offeredRelicIds: this.offeredRelicIds,
+      });
     });
 
     return this.offer;
@@ -2015,6 +2105,22 @@ export class RunController {
       return this.refuseSelection(relicId, 'not-offered');
     }
 
+    // ADDED: the four gates `resolveReward()` applies, measured BEFORE the relic
+    // is taken on live. The capacity gate is the one that mattered: at
+    // `MAX_PERSISTED_RELICS` the append below fails, and this path used to have
+    // already registered the relic with the hook bus — so a refused selection
+    // left a relic firing on every hook that no envelope carried and no reload
+    // would ever restore. Measuring first means the live registry is never
+    // touched for a selection the envelope cannot accept. DL-RUNCTL-24.
+    const refusal = this.refuseReward(relicId);
+
+    if (refusal !== null) {
+      return this.refuseSelection(
+        relicId,
+        refusal === 'unknown' ? 'unknown-relic' : 'refused',
+      );
+    }
+
     // LIVE FIRST, exactly as `resolveReward()` does it: the entry appended
     // below is the one the registry produced by taking the relic on, so the
     // persisted record is a consequence of the registration rather than
@@ -2028,6 +2134,12 @@ export class RunController {
     const held = this.current.relics;
 
     if (!this.appendRelic(relicId, activated)) {
+      // ADDED: the pickup is withdrawn. A gate above makes this branch a last
+      // line rather than the expected path, and a relic left seated on the bus
+      // by an append this controller then refused is exactly the divergence the
+      // withdraw exists to prevent. DL-RUNCTL-24.
+      this.withdrawRelic(held);
+
       return this.refuseSelection(relicId, 'refused');
     }
 
@@ -2414,12 +2526,39 @@ export class RunController {
    * @param error Whatever was thrown.
    */
   private reportRegistryFault(error: unknown): void {
-    this.reporter.onWriteFailed?.({
-      correlationId: this.readRunCorrelationId(),
-      key: RUN_STATE_KEY,
-      byteLength: 0,
-      error,
+    this.emit((): void => {
+      this.reporter.onWriteFailed?.({
+        correlationId: this.readRunCorrelationId(),
+        key: RUN_STATE_KEY,
+        byteLength: 0,
+        error,
+      });
     });
+  }
+
+  /**
+   * ADDED: delivers one report, containing a sink that refuses it.
+   *
+   * Every `this.reporter.*` call in this class goes through here. They were
+   * called directly, so a sink that threw travelled out of whichever lifecycle
+   * method was reporting — `begin()`, `startRun()`, `selectReward()`,
+   * `endStage()` and `finish()` among them — and aborted it part-way: a run
+   * ended without its envelope being cleared, a reward was taken without its
+   * stage being opened, and the throw surfaced at the caller as though the
+   * operation itself had failed. The pattern is `RunStateStore.emit`, so both
+   * halves of the persistence layer contain an observer the same way.
+   * DL-RUNCTL-22.
+   *
+   * @param deliver Invokes the sink member, keeping its `this` binding.
+   */
+  private emit(deliver: () => void): void {
+    try {
+      deliver();
+    } catch {
+      // A sink that throws is contained here: an observer cannot decide whether
+      // a run starts, a relic is taken, a stage opens or a run ends.
+      return;
+    }
   }
 
   /**
@@ -2472,8 +2611,12 @@ export class RunController {
     // The port declares `startStage` optional, so an engine that does not
     // implement stage transitions leaves the index advanced and begins nothing
     // — which is what a double that only observes does.
+    //
+    // CHANGED: routed through the ONE contained opener, where it used to call
+    // `engine.startStage?.()` directly — so a throwing opener escaped this
+    // method after the reward had already been persisted. DL-RUNCTL-25.
     if (this.startedStageIndex !== this.current.stageIndex) {
-      engine.startStage?.();
+      this.openStageOn(engine);
     }
 
     return resolution;
@@ -2531,21 +2674,30 @@ export class RunController {
    * @returns The identifiers, in pickup order.
    */
   private ownedIds(): readonly string[] {
-    const owned = this.registry?.ownedRelicIds;
+    const registry = this.registry;
+    const owned = registry?.ownedRelicIds;
 
-    if (owned !== undefined) {
+    if (registry !== undefined && owned !== undefined) {
       try {
-        const ids = owned();
+        // CHANGED: called through its owner. A class-based registry whose
+        // `ownedRelicIds` reads `this` threw when it was invoked as a bare
+        // function, and the catch below then fell back to the envelope's own
+        // list — so the exclusion set the reward draw uses came from the wrong
+        // authority and a relic already held could be offered again.
+        // DL-RUNCTL-27.
+        const ids = owned.call(registry);
 
         if (Array.isArray(ids)) {
           return ids;
         }
       } catch (error) {
-        this.reporter.onWriteFailed?.({
-          correlationId: this.readRunCorrelationId(),
-          key: RUN_STATE_KEY,
-          byteLength: 0,
-          error,
+        this.emit((): void => {
+          this.reporter.onWriteFailed?.({
+            correlationId: this.readRunCorrelationId(),
+            key: RUN_STATE_KEY,
+            byteLength: 0,
+            error,
+          });
         });
       }
     }
@@ -2572,7 +2724,12 @@ export class RunController {
         ? originateRunSeed()
         : normalizeEnteredSeed(options.seed);
 
-    this.store.clear();
+    // CHANGED: the removal's answer is read. A refused `clear()` leaves the
+    // PREVIOUS run's envelope in storage, and a caller told the new run had
+    // started would have found the old one on the next load; the run is marked
+    // ephemeral here so the interface says so, and the first commit's write is
+    // what promotes it back. DL-RUNCTL-26.
+    const cleared = this.store.clear();
 
     this.current = createFreshRunState({
       runId: this.createToken(),
@@ -2605,6 +2762,10 @@ export class RunController {
     // to have been read and no legacy board to fall back to.
     this.storedEnvelopeRead = true;
 
+    if (!cleared) {
+      this.markPersistence('ephemeral');
+    }
+
     this.restoreRelics();
 
     // BEFORE THE FIRST REPORT OF THE NEW RUN, and before the board opens, NOT
@@ -2615,12 +2776,14 @@ export class RunController {
     // run that emitted it rather than to the ended run.
     this.publishRunScope(options.seed !== undefined);
 
-    this.reporter.onRunStarted?.({
-      correlationId: this.readRunCorrelationId(),
-      runId: this.current.runId,
-      stageIndex: this.current.stageIndex,
-      resumed: false,
-      seedProvided: options.seed !== undefined,
+    this.emit((): void => {
+      this.reporter.onRunStarted?.({
+        correlationId: this.readRunCorrelationId(),
+        runId: this.current.runId,
+        stageIndex: this.current.stageIndex,
+        resumed: false,
+        seedProvided: options.seed !== undefined,
+      });
     });
 
     this.openEngineBoard(engine);
@@ -2738,6 +2901,19 @@ export class RunController {
   ): void {
     this.refresh(engine, cursors);
 
+    // ADDED: THE COMMIT A RUN'S OWN LAST STAGE-END PRODUCED. `finish()` resolves
+    // the stage in force as uncleared, and `endStage()` commits, so this handler
+    // is re-entered from inside the finish. The refresh above is kept — it is
+    // what puts the resolved score and the board the stage ended on into the
+    // envelope the summary is then taken from — and everything after it is
+    // skipped: finishing again would report a second `onRunEnded`, and the stage
+    // payout below would draw a reward for a run that is ending. No write is
+    // made either, because `finish()` clears the stored envelope immediately
+    // after this returns. DL-RUNCTL-30.
+    if (this.finishing) {
+      return;
+    }
+
     if (event.over) {
       // The engine clears `gameState` on a loss, exactly as js/game_manager.js
       // L84-L86 did.
@@ -2839,30 +3015,115 @@ export class RunController {
    * @returns Whether a stage was opened.
    */
   private openNextStage(engine: RunEnginePort): boolean {
+    return this.openStageOn(engine, engine.serialize());
+  }
+
+  /**
+   * ADDED: the ONE contained stage opener both public transition paths use.
+   *
+   * `selectReward()` reached it through `openNextStage()`, which contained a
+   * throwing `startStage` and answered `false` — and the answer was discarded,
+   * so an accepted selection could leave the run on a stage no board had been
+   * opened for, with nothing recording that. `completeReward()` called
+   * `engine.startStage?.()` directly, so the same throw escaped it AFTER the
+   * reward had been persisted, and surfaced at the caller as though the
+   * selection itself had failed.
+   *
+   * The two paths open a stage differently and still do: `selectReward()` hands
+   * the engine the board it is holding, while `completeReward()` opens the live
+   * board by passing no snapshot. Only the containment and the record are
+   * shared.
+   *
+   * A refused or failed open leaves `stageOpenPending()` true, which is what
+   * makes the transition RECOVERABLE: `openPendingStage()` retries it, and the
+   * engine's own `stage:start` is what clears the record. DL-RUNCTL-25.
+   *
+   * @param engine The engine to open the stage on.
+   * @param board The board to open on, or `undefined` to open the live one.
+   * @returns Whether a stage was opened.
+   */
+  private openStageOn(
+    engine: RunEnginePort,
+    board?: SerializedGameState,
+  ): boolean {
     const start = engine.startStage;
 
     if (start === undefined) {
+      // An engine that does not implement stage transitions owes no open, so
+      // nothing is left pending for a retry that could never succeed.
       return false;
     }
 
     if (this.startedStageIndex === this.current.stageIndex) {
+      this.pendingStageOpen = NO_PENDING_STAGE;
+
       return false;
     }
 
     try {
-      start.call(engine, engine.serialize());
+      if (board === undefined) {
+        start.call(engine);
+      } else {
+        start.call(engine, board);
+      }
+
+      // DISCHARGED BY THE CALL RETURNING, not by the report the engine makes.
+      // The debt this record carries is "the engine refused the open"; an engine
+      // that accepted it owes nothing whether or not the controller is
+      // subscribed to hear its `stage:start`. Opening one stage twice is refused
+      // by the `startedStageIndex` guard above rather than by this record.
+      this.pendingStageOpen = NO_PENDING_STAGE;
 
       return true;
     } catch (error) {
-      this.reporter.onWriteFailed?.({
-        correlationId: this.readRunCorrelationId(),
-        key: RUN_STATE_KEY,
-        byteLength: 0,
-        error,
+      this.pendingStageOpen = this.current.stageIndex;
+
+      this.emit((): void => {
+        this.reporter.onWriteFailed?.({
+          correlationId: this.readRunCorrelationId(),
+          key: RUN_STATE_KEY,
+          byteLength: 0,
+          error,
+        });
       });
 
       return false;
     }
+  }
+
+  /**
+   * ADDED: the stage index a transition advanced to and could not open, and
+   * `null` where nothing is owed. DL-RUNCTL-25.
+   *
+   * @returns The index owed an open, or `null`.
+   */
+  stageOpenPending(): number | null {
+    return this.pendingStageOpen === NO_PENDING_STAGE
+      ? null
+      : this.pendingStageOpen;
+  }
+
+  /**
+   * ADDED: retries the stage open a failed transition left owed. Idempotent, and
+   * a no-op where nothing is owed. DL-RUNCTL-25.
+   *
+   * @param engine The engine to open the stage on.
+   * @returns Whether a stage was opened by this call.
+   */
+  openPendingStage(engine: RunEnginePort): boolean {
+    if (this.pendingStageOpen === NO_PENDING_STAGE) {
+      return false;
+    }
+
+    if (this.pendingStageOpen !== this.current.stageIndex) {
+      // The run has moved on from the stage that was owed an open, so the debt
+      // is stale and is dropped rather than opened.
+      this.pendingStageOpen = NO_PENDING_STAGE;
+
+      return false;
+    }
+
+    return this.openStageOn(engine, engine.serialize());
   }
 
   /**
@@ -2933,11 +3194,13 @@ export class RunController {
       this.refusedWrites = 0;
     }
 
-    this.reporter.onPersistenceStatusChanged?.({
-      correlationId: this.readRunCorrelationId(),
-      status,
-      previous,
-      refusedWrites: this.refusedWrites,
+    this.emit((): void => {
+      this.reporter.onPersistenceStatusChanged?.({
+        correlationId: this.readRunCorrelationId(),
+        status,
+        previous,
+        refusedWrites: this.refusedWrites,
+      });
     });
   }
 
@@ -2960,11 +3223,13 @@ export class RunController {
     try {
       read = cursors();
     } catch (error) {
-      this.reporter.onWriteFailed?.({
-        correlationId: this.readRunCorrelationId(),
-        key: RUN_STATE_KEY,
-        byteLength: 0,
-        error,
+      this.emit((): void => {
+        this.reporter.onWriteFailed?.({
+          correlationId: this.readRunCorrelationId(),
+          key: RUN_STATE_KEY,
+          byteLength: 0,
+          error,
+        });
       });
 
       return normalizeRngCursor(this.current.rngCursor);
@@ -3001,11 +3266,13 @@ export class RunController {
 
       return Array.isArray(projected) ? projected : this.current.relics;
     } catch (error) {
-      this.reporter.onWriteFailed?.({
-        correlationId: this.readRunCorrelationId(),
-        key: RUN_STATE_KEY,
-        byteLength: 0,
-        error,
+      this.emit((): void => {
+        this.reporter.onWriteFailed?.({
+          correlationId: this.readRunCorrelationId(),
+          key: RUN_STATE_KEY,
+          byteLength: 0,
+          error,
+        });
       });
 
       return this.current.relics;
@@ -3157,7 +3424,9 @@ export class RunController {
       report.refusal = refusal;
     }
 
-    this.reporter.onRewardDrawn?.(report);
+    this.emit((): void => {
+      this.reporter.onRewardDrawn?.(report);
+    });
   }
 
   /**
@@ -3235,10 +3504,13 @@ export class RunController {
 
     const takeAndRead = registry?.pickUpRelic ?? registry?.activateRelic;
 
-    if (takeAndRead !== undefined) {
+    if (registry !== undefined && takeAndRead !== undefined) {
       try {
-        // Called through its owner; see `projectRelics`.
-        const accepted = takeAndRead(relicId);
+        // CHANGED: called through its owner, which the comment already claimed.
+        // A class-based registry's activation step threw when it was invoked as
+        // a bare function, and the catch treated that as a refusal — so a reward
+        // the registry would have seated was reported as unknown. DL-RUNCTL-27.
+        const accepted = takeAndRead.call(registry, relicId);
 
         if (accepted === null || typeof accepted !== 'object') {
           return null;
@@ -3257,9 +3529,18 @@ export class RunController {
 
     if (registry?.pickUp !== undefined) {
       try {
-        // A falsy return is a pickup the registry refused, and nothing is
-        // appended for one.
-        if (registry.pickUp(relicId) === undefined) {
+        // CHANGED: any FALSY return is a pickup the registry refused, which is
+        // what `RelicRegistryPort.pickUp` declares. Only `undefined` was
+        // refused, so a registry answering `false`, `null` or `0` had its
+        // refusal read as an acceptance and the relic reached the envelope
+        // unseated. DL-RUNCTL-28.
+        const accepted: unknown = registry.pickUp(relicId);
+
+        // `Boolean()` rather than a bare condition so every falsy shape the
+        // port permits — `undefined`, `null`, `false`, `0`, `''`, `NaN` — is
+        // read as the one refusal it is, and the answer is read ONCE so a
+        // second call cannot seat a second registration.
+        if (!Boolean(accepted)) {
           return null;
         }
       } catch (error) {
@@ -3267,6 +3548,32 @@ export class RunController {
 
         return null;
       }
+
+      return this.resolveRelicEntry(relicId);
+    }
+
+    // ADDED: an ATTACHED registry that publishes no activation step cannot seat
+    // a relic, so nothing is appended for it. An ABSENT registry keeps the
+    // behaviour it has always had — the entry is resolved on shape alone, which
+    // is what a composition driving the engine itself and every registry-free
+    // double relies on. The two cases used to be identical, so a port attached
+    // with the wrong member names persisted a reward that fired on no hook, was
+    // drawn as held by the HUD, and was excluded from every later draw.
+    // DL-RUNCTL-28.
+    if (registry !== undefined) {
+      this.emit((): void => {
+        this.reporter.onWriteFailed?.({
+          correlationId: this.readRunCorrelationId(),
+          key: RUN_STATE_KEY,
+          byteLength: 0,
+          error: new Error(
+            'the attached relic registry publishes no pickup member, so ' +
+              `"${relicId}" could not be taken on live`,
+          ),
+        });
+      });
+
+      return null;
     }
 
     return this.resolveRelicEntry(relicId);
@@ -3282,14 +3589,42 @@ export class RunController {
    * @returns Whether the live registry and the envelope agree.
    */
   private registryHolds(relicId: string): boolean {
-    const holds = this.registry?.holdsRelic;
+    const registry = this.registry;
+    const holds = registry?.holdsRelic;
 
-    if (holds === undefined) {
+    if (registry === undefined) {
       return true;
     }
 
+    if (holds === undefined) {
+      // ADDED: an attached registry with no `holdsRelic` is confirmed through
+      // `ownedRelicIds` where it publishes one, so ownership is checked against
+      // the live registry rather than assumed from the pickup's word. A registry
+      // publishing neither is still taken at its word — there is nothing left to
+      // ask. DL-RUNCTL-28.
+      const owned = registry.ownedRelicIds;
+
+      if (owned === undefined) {
+        return true;
+      }
+
+      try {
+        const ids = owned.call(registry);
+
+        return Array.isArray(ids) && ids.includes(relicId);
+      } catch (error) {
+        this.reportRegistryFault(error);
+
+        return false;
+      }
+    }
+
     try {
-      return holds(relicId) === true;
+      // CHANGED: called through its owner. A class-based registry's confirmation
+      // threw as a bare function, and this method reads a throw as "does not
+      // hold" — so a relic the registry HAD seated had its append withdrawn.
+      // DL-RUNCTL-27.
+      return holds.call(registry, relicId) === true;
     } catch (error) {
       this.reportRegistryFault(error);
 
@@ -3354,11 +3689,13 @@ export class RunController {
         ? registry.relicBoardSize(stored)
         : undefined;
     } catch (error) {
-      this.reporter.onWriteFailed?.({
-        correlationId: this.readRunCorrelationId(),
-        key: RUN_STATE_KEY,
-        byteLength: 0,
-        error,
+      this.emit((): void => {
+        this.reporter.onWriteFailed?.({
+          correlationId: this.readRunCorrelationId(),
+          key: RUN_STATE_KEY,
+          byteLength: 0,
+          error,
+        });
       });
 
       return undefined;
@@ -3461,10 +3798,12 @@ export class RunController {
       },
     };
 
-    this.reporter.onRewardOffered?.({
-      correlationId: this.readRunCorrelationId(),
-      stageIndex: this.offerStageIndex,
-      offeredRelicIds: this.offeredRelicIds,
+    this.emit((): void => {
+      this.reporter.onRewardOffered?.({
+        correlationId: this.readRunCorrelationId(),
+        stageIndex: this.offerStageIndex,
+        offeredRelicIds: this.offeredRelicIds,
+      });
     });
   }
 
@@ -3490,7 +3829,15 @@ export class RunController {
   private restoreRelics(): void {
     const registry = this.registry;
 
-    if (registry?.restoreRelics === undefined) {
+    // CHANGED: the `restore` alias is read as well as `restoreRelics`. The port
+    // declares both names for one hydration and `withdrawRelic()` already read
+    // either, so a registry publishing only `restore` — which is what
+    // `RelicRegistry.restore` is — silently restored NOTHING here: a resumed
+    // run's relics reached the envelope and never reached the hook bus.
+    // DL-RUNCTL-27.
+    const restore = registry?.restoreRelics ?? registry?.restore;
+
+    if (registry === undefined || restore === undefined) {
       return;
     }
 
@@ -3499,13 +3846,15 @@ export class RunController {
     try {
       // Called through the port object, so a class-based registry keeps its
       // receiver.
-      registry.restoreRelics(this.current.relics);
+      restore.call(registry, this.current.relics);
     } catch (error) {
-      this.reporter.onWriteFailed?.({
-        correlationId: this.readRunCorrelationId(),
-        key: RUN_STATE_KEY,
-        byteLength: 0,
-        error,
+      this.emit((): void => {
+        this.reporter.onWriteFailed?.({
+          correlationId: this.readRunCorrelationId(),
+          key: RUN_STATE_KEY,
+          byteLength: 0,
+          error,
+        });
       });
 
       return;
@@ -3522,11 +3871,13 @@ export class RunController {
     try {
       restored = snapshot.call(registry);
     } catch (error) {
-      this.reporter.onWriteFailed?.({
-        correlationId: this.readRunCorrelationId(),
-        key: RUN_STATE_KEY,
-        byteLength: 0,
-        error,
+      this.emit((): void => {
+        this.reporter.onWriteFailed?.({
+          correlationId: this.readRunCorrelationId(),
+          key: RUN_STATE_KEY,
+          byteLength: 0,
+          error,
+        });
       });
 
       return;
@@ -3544,25 +3895,96 @@ export class RunController {
       relics: Object.freeze(restored.map(cloneRelicEntry)),
     });
 
-    this.reporter.onRelicsNormalized?.({
-      correlationId: this.readRunCorrelationId(),
-      requested: requested.length,
-      restored: restored.length,
-      refused: Object.freeze(
-        requested
-          .map((relic): string => relic.id)
-          .filter(
-            (id) => !restored.some((entry): boolean => entry.id === id),
-          ),
-      ),
+    this.emit((): void => {
+      this.reporter.onRelicsNormalized?.({
+        correlationId: this.readRunCorrelationId(),
+        requested: requested.length,
+        restored: restored.length,
+        refused: Object.freeze(
+          requested
+            .map((relic): string => relic.id)
+            .filter(
+              (id) => !restored.some((entry): boolean => entry.id === id),
+            ),
+        ),
+      });
     });
+  }
+
+  /**
+   * Resolves the stage in force as UNCLEARED, exactly once, before the run is
+   * summarised.
+   *
+   * ADDED. `endStage(false)` had no production caller at all: an explicit end
+   * reached `finish()` straight from `endRun()` and a loss reached it straight
+   * from the commit handler, so the sixth hook of AAP R2 never fired for a stage
+   * that ended without its goal being met and `stage:end` never carried
+   * `cleared: false`. Every handler written for that outcome was dead —
+   * `brittle-crown`'s spawn-weight restoration and `hollow-ascension`'s bank
+   * reset among them — and so was the screen router's uncleared-stage branch.
+   *
+   * Resolved through the engine rather than by emitting anything here: the engine
+   * owns the dispatch, the emission and the commit, and its own one-shot guard is
+   * what makes a stage already resolved as cleared not resolve again. A
+   * controller observing no engine resolves nothing, which is every unit bench
+   * that composes this class alone.
+   *
+   * Never raises out of the finish: an engine whose dispatch throws is reported
+   * and the run still ends. DL-RUNCTL-30.
+   */
+  private resolveAbandonedStage(): void {
+    const engine = this.observedEngine;
+
+    if (engine === null) {
+      return;
+    }
+
+    try {
+      engine.endStage(false);
+    } catch (error) {
+      this.reporter.onWriteFailed?.({
+        correlationId: this.readRunCorrelationId(),
+        key: RUN_STATE_KEY,
+        byteLength: 0,
+        error,
+      });
+    }
   }
 
   /**
    * Summarises the run, reports it, clears the stored envelope and replaces
    * the envelope in force with a fresh one.
+   *
+   * THE STAGE IN FORCE IS RESOLVED FIRST, and the summary is taken after it, so
+   * a score an `onStageEnd` handler transformed and the board the stage ended on
+   * both reach the summary this reports and returns. Re-entrant calls — the
+   * commit that resolution produces reaches the commit handler, which on a loss
+   * would finish again — are answered with the run in force rather than being
+   * allowed to finish it twice. DL-RUNCTL-30.
    */
   private finish(outcome: RunOutcome): RunSummary {
+    if (this.finishing) {
+      return this.finished ?? this.summary();
+    }
+
+    this.finishing = true;
+
+    try {
+      return this.finishResolved(outcome);
+    } finally {
+      this.finishing = false;
+    }
+  }
+
+  /**
+   * The body of `finish()`, run exactly once per finish.
+   *
+   * @param outcome How the run ended.
+   * @returns The finished run.
+   */
+  private finishResolved(outcome: RunOutcome): RunSummary {
+    this.resolveAbandonedStage();
+
     const summary = this.summary();
 
     this.finished = summary;
@@ -3579,14 +4001,27 @@ export class RunController {
     this.resolvedStageIndex = NO_OFFER_STAGE;
     this.startedStageIndex = NO_STARTED_STAGE;
 
-    this.reporter.onRunEnded?.({
-      correlationId: this.readRunCorrelationId(),
-      outcome,
-      summary: redactRunSummary(summary),
+    this.emit((): void => {
+      this.reporter.onRunEnded?.({
+        correlationId: this.readRunCorrelationId(),
+        outcome,
+        summary: redactRunSummary(summary),
+      });
     });
 
-    this.store.clear();
+    // CHANGED: the removal's answer is read here too, and a refused one is
+    // OVERWRITTEN rather than left. The envelope of an ended run that survives a
+    // refused removal is a mid-run save with relics, a stage and advanced
+    // cursors, and the next load resumes it — so a finished run came back to
+    // life. Writing the fresh envelope over it leaves at worst a stage-0 empty
+    // board to resume, and reports the degradation. DL-RUNCTL-26.
+    const cleared = this.store.clear();
+
     this.current = this.freshState(this.createToken());
+
+    if (!cleared) {
+      this.write();
+    }
 
     return summary;
   }

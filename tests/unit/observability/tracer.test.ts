@@ -48,12 +48,14 @@ import type {
   SpawnPayload,
 } from '../../../src/engine/hooks';
 import {
+  DIRECTION_DOWN,
   DIRECTION_LEFT,
   DIRECTION_UP,
   EMPTY_RELIC_CONTEXT,
   EMPTY_STAGE_CONTEXT,
 } from '../../../src/engine/types';
 import type {
+  Direction,
   EngineHookErrorReport,
   EngineListenerErrorReport,
   EngineReporter,
@@ -89,6 +91,7 @@ import {
 } from '../../../src/observability/tracer';
 import type {
   BoundaryTracing,
+  EngineTracingSubscription,
   SpanName,
   SpanRecord,
   Tracer,
@@ -3627,6 +3630,12 @@ describe('turn-span settlement across every unresolved path', () => {
     expect(turn.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
       SPAN_OUTCOMES.cancelled,
     );
+
+    // AND the attribute the attempt is the authority for. The hook bus casts
+    // the veto AFTER this subscription's `move:before` listener has written the
+    // payload's own `cancelled`, so the attribute is reconciled from the
+    // attempt as the span closes. DL-TRACE-16.
+    expect(turn.attributes[SPAN_ATTRIBUTES.cancelled]).toBe(true);
     expect(subscription.currentTurnSpan()).toBeUndefined();
     expect(latency.count).toBe(0);
     expect(tracer.snapshot().open).toBe(0);
@@ -3701,7 +3710,15 @@ describe('turn-span settlement across every unresolved path', () => {
 
       const turns = recordsFor(SPAN_NAMES.engineTurn);
 
-      outcomes.push(turns[turns.length - 1].attributes[SPAN_ATTRIBUTES.outcome]);
+      const closed = turns[turns.length - 1];
+
+      outcomes.push(closed.attributes[SPAN_ATTRIBUTES.outcome]);
+
+      // ADDED: the attribute agrees with the outcome on BOTH orders. Registered
+      // second, the veto arrived after this listener had already written
+      // `cancelled: false`, so the span said the turn was not cancelled while
+      // closing as cancelled — a span contradicting itself. DL-TRACE-16.
+      expect(closed.attributes[SPAN_ATTRIBUTES.cancelled]).toBe(true);
 
       expect(subscription.currentTurnSpan()).toBeUndefined();
       subscription();
@@ -3737,5 +3754,197 @@ describe('turn-span settlement across every unresolved path', () => {
     ]).toBe(SPAN_OUTCOMES.unmoved);
     expect(tracer.snapshot().doubleEnds).toBe(0);
     expect(tracer.snapshot().anomalies).toBe(0);
+  });
+});
+
+/* ==========================================================================
+ * Per-turn tallies, and the lifecycle spawns that are not part of a turn
+ *
+ * `setup()`, `restart()` and `startStage()` each open a board by spawning the
+ * configured start tiles, outside any turn — and the composition root attaches
+ * tracing BEFORE the first board opens, so those emissions arrived with no turn
+ * span standing. Counted unconditionally, they were written onto the first real
+ * turn's `spawns` attribute. Decision DL-TRACE-15.
+ * ========================================================================== */
+
+describe('a turn span counts its own merges and spawns', () => {
+  /**
+   * Attaches tracing and only then opens the board, which is the order
+   * src/main.ts composes in: `attachEngineTracing` runs while the run controller
+   * is being built, and the board opens at the end of the boot.
+   *
+   * @returns The engine and its subscription.
+   */
+  const tracedFromBeforeSetup = (): {
+    readonly engine: Engine;
+    readonly subscription: EngineTracingSubscription;
+  } => {
+    const engine = new Engine({ streams: createRngStreams(RUN_SEED) });
+    const subscription = attachEngineTracing(engine.events, tracer);
+
+    // TWO START TILES, emitted as two `tile:spawn` events outside any turn.
+    engine.setup(null);
+
+    return { engine, subscription };
+  };
+
+  it('excludes the start tiles the board opened with from the first turn', () => {
+    const { engine, subscription } = tracedFromBeforeSetup();
+
+    expect(engine.grid.availableCells().length).toBe(
+      engine.config.boardSize * engine.config.boardSize -
+        engine.config.startTiles,
+    );
+
+    // No turn span was open while the board opened, so nothing was tallied.
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(0);
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    subscription.settleMove(attempt);
+
+    const turn = oneRecordFor(SPAN_NAMES.engineTurn);
+    const spawns = turn.attributes[SPAN_ATTRIBUTES.spawns];
+
+    // The first turn spawns at most the tiles ITS OWN move placed — one for a
+    // move that resolved, none for one that did not — never the two the board
+    // opened with.
+    expect(spawns).toBe(attempt.moved ? 1 : 0);
+    expect(spawns).not.toBe(engine.config.startTiles);
+
+    // The spawn EVENTS on the span agree with the attribute, which is the
+    // property that was already conditional and is now the one the tally
+    // follows.
+    expect(
+      turn.events.filter((event) => event.name === SPAN_EVENT_NAMES.spawn),
+    ).toHaveLength(Number(spawns));
+  });
+
+  it('leaves every lifecycle spawn emitted, so nothing is lost', () => {
+    const engine = new Engine({ streams: createRngStreams(RUN_SEED) });
+    const subscription = attachEngineTracing(engine.events, tracer);
+    let emitted = 0;
+
+    engine.events.on('tile:spawn', (): void => {
+      emitted += 1;
+    });
+
+    engine.setup(null);
+
+    // The emissions still happen and are still observable — the engine's own
+    // per-emission `spawns_total` counter is fed by them, turn or not. What
+    // changed is only which SPAN a lifecycle spawn is attributed to, and the
+    // answer is now none rather than the next turn's. DL-TRACE-15.
+    expect(emitted).toBe(engine.config.startTiles);
+    expect(recordsFor(SPAN_NAMES.engineTurn)).toHaveLength(0);
+
+    subscription();
+  });
+
+  it('does not carry a restart s start tiles into the next turn', () => {
+    const { engine, subscription } = tracedFromBeforeSetup();
+
+    subscription.settleMove(engine.attemptMove(DIRECTION_LEFT));
+
+    // A restart opens a fresh board — two more lifecycle spawns — between two
+    // turns, which is the case a running tally would carry forward.
+    engine.restart();
+
+    const attempt = engine.attemptMove(DIRECTION_UP);
+
+    subscription.settleMove(attempt);
+
+    const turns = recordsFor(SPAN_NAMES.engineTurn);
+    const last = turns[turns.length - 1];
+
+    expect(last.attributes[SPAN_ATTRIBUTES.spawns]).toBe(
+      attempt.moved ? 1 : 0,
+    );
+  });
+});
+
+/* ==========================================================================
+ * The direction a turn RESOLVED in
+ *
+ * The span is opened with the direction the caller asked for, read at this
+ * subscription's own `move:before` turn. An `onBeforeMove` handler can redirect
+ * the move afterwards, so the attempt is the authority and the attribute is
+ * reconciled from it as the span closes. Decision DL-TRACE-16.
+ * ========================================================================== */
+
+describe('a redirected turn names the direction it resolved in', () => {
+  /**
+   * Registers a handler that redirects every move, and optionally withdraws it.
+   *
+   * @param engine Engine to register on.
+   * @param direction Direction the move is redirected to.
+   * @param cancelled Whether the handler also withdraws the move.
+   */
+  const redirectEveryMove = (
+    engine: Engine,
+    direction: Direction,
+    cancelled: boolean,
+  ): void => {
+    engine.hooks.register({
+      id: 'redirects-every-move',
+      hooks: {
+        onBeforeMove: (payload): BeforeMovePayload => ({
+          ...payload,
+          direction,
+          cancelled,
+        }),
+      },
+    });
+  };
+
+  it('reports the resolved direction on the turn the caller settles', () => {
+    const engine = engineOn(NEAR_WIN_BOARD);
+    const subscription = attachEngineTracing(engine.events, tracer);
+
+    redirectEveryMove(engine, DIRECTION_UP, true);
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(attempt.direction).toBe(DIRECTION_LEFT);
+    expect(attempt.resolvedDirection).toBe(DIRECTION_UP);
+    expect(subscription.currentTurnSpan()).toBeDefined();
+    expect(subscription.settleMove(attempt)).toBe(true);
+
+    const turn = recordsFor(SPAN_NAMES.engineTurn).slice(-1)[0];
+
+    // Both attributes come from the ATTEMPT: the span was opened with the
+    // direction the player asked for, and the handler changed both facts after
+    // that. DL-TRACE-16.
+    expect(turn.attributes[SPAN_ATTRIBUTES.direction]).toBe(DIRECTION_UP);
+    expect(turn.attributes[SPAN_ATTRIBUTES.cancelled]).toBe(true);
+  });
+
+  it('leaves the requested direction standing on a turn that committed', () => {
+    const engine = engineOn(NEAR_WIN_BOARD);
+    const subscription = attachEngineTracing(engine.events, tracer);
+
+    // Downward RESOLVES on this board — the two near-win tiles sit on row 0 —
+    // so this attempt commits, which is the case the boundary below is about.
+    redirectEveryMove(engine, DIRECTION_DOWN, false);
+
+    const attempt = engine.attemptMove(DIRECTION_LEFT);
+
+    expect(attempt.resolvedDirection).toBe(DIRECTION_DOWN);
+    expect(attempt.committed).toBe(true);
+
+    // THE BOUNDARY OF THE RECONCILIATION, stated rather than implied. A turn
+    // that committed closed its own span at `state:commit`, which is the close
+    // that measures the turn, so the caller's settle finds nothing left to
+    // write and the span keeps the direction it was opened with. Only a turn the
+    // caller has to close — the withdrawn one above — can be reconciled.
+    expect(subscription.currentTurnSpan()).toBeUndefined();
+    expect(subscription.settleMove(attempt)).toBe(false);
+
+    const turn = recordsFor(SPAN_NAMES.engineTurn).slice(-1)[0];
+
+    expect(turn.attributes[SPAN_ATTRIBUTES.direction]).toBe(DIRECTION_LEFT);
+    expect(turn.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
+      SPAN_OUTCOMES.committed,
+    );
   });
 });

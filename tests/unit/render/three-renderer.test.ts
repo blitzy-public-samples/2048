@@ -30,10 +30,12 @@ import type {
 } from '../../../src/render/three-renderer';
 import { threeRendererCopy } from '../../../src/render/three-renderer';
 import type {
+  RenderDetail,
   RenderDiagnostic,
   RenderReporter,
 } from '../../../src/render/webgl-support';
 import { setReducedMotionOverride } from '../../../src/render/webgl-support';
+import { resolveBoardGeometry } from '../../../src/render/tile-mesh-factory';
 import { createParallelBoardLayer } from '../../../src/ui/a11y/focus-manager';
 import { applyTheme } from '../../../src/theme/themes';
 import { createMockCanvas, createMockWebGLContext } from '../../fixtures/webgl';
@@ -106,9 +108,22 @@ interface Harness {
   readonly numberOnlyHost: HTMLElement;
   readonly layer: ParallelBoardSurface;
   readonly diagnostics: RenderDiagnostic[];
-  readonly counts: { readonly name: string; readonly value: number }[];
+  readonly counts: {
+    readonly name: string;
+    readonly value: number;
+    readonly detail?: Readonly<Record<string, unknown>>;
+  }[];
   readonly work: () => number;
   readonly countOf: (name: string) => number;
+
+  /**
+   * The DETAIL of the last count under one name, or `undefined`.
+   *
+   * The board count carries the geometry the board was actually laid out with,
+   * which is how a case reads the real cell pitch and tile footprint rather
+   * than the scale's name.
+   */
+  readonly detailOf: (name: string) => Readonly<Record<string, unknown>> | undefined;
 
   /** Fires one event on the canvas, which is how a context loss arrives. */
   readonly emit: (type: string) => void;
@@ -140,13 +155,23 @@ const harness = (
   document.body.append(numberOnlyHost, parallelHost, mock.element);
 
   const diagnostics: RenderDiagnostic[] = [];
-  const counts: { name: string; value: number }[] = [];
+  const counts: {
+    name: string;
+    value: number;
+    detail?: Readonly<Record<string, unknown>>;
+  }[] = [];
   const reporter: RenderReporter = {
     onDiagnostic: (diagnostic): void => {
       diagnostics.push(diagnostic);
     },
     onCount: (count): void => {
-      counts.push({ name: count.name, value: count.value });
+      counts.push({
+        name: count.name,
+        value: count.value,
+        ...(count.detail === undefined
+          ? {}
+          : { detail: count.detail as Readonly<Record<string, unknown>> }),
+      });
     },
     onTiming: (): void => {},
   };
@@ -195,6 +220,10 @@ const harness = (
       counts
         .filter((entry) => entry.name === name)
         .reduce((total, entry) => total + entry.value, 0),
+    detailOf: (
+      name: string,
+    ): Readonly<Record<string, unknown>> | undefined =>
+      counts.filter((entry) => entry.name === name).at(-1)?.detail,
     emit: (type: string): void => {
       mock.emit(type);
     },
@@ -535,6 +564,204 @@ describe('drawing one turn', () => {
     expect(fixture.work()).toBeGreaterThan(before);
 
     fixture.renderer.destroy();
+  });
+});
+
+/* ==========================================================================
+ * A SUBSCRIPTION THAT CANNOT BE COMPLETED
+ *
+ * `subscribe()` takes the six names of AAP Contract 1. They were taken in one
+ * array literal, so a throw from the third `on()` left the first two attached to
+ * the emitter with no reference to them anywhere: this renderer went on drawing
+ * for an engine it had reported it was not subscribed to, and neither
+ * `dispose()` nor the returned release could reach them. DL-THREE-09.
+ * ========================================================================== */
+
+/** The six names `ThreeRenderer.subscribe()` registers, in order. */
+const SUBSCRIBED_EVENT_NAMES: readonly string[] = Object.freeze([
+  'stage:start',
+  'tile:merge',
+  'tile:spawn',
+  'move:after',
+  'stage:end',
+  'state:commit',
+]);
+
+/**
+ * An event source that refuses the `ordinal`-th registration.
+ *
+ * Wraps a real emitter, so every registration it does admit is a genuine one
+ * and a case can count what is left attached afterwards.
+ *
+ * @param ordinal Zero-based index of the registration that raises.
+ * @returns The source, and readers over what it holds.
+ */
+const refusingSource = (
+  ordinal: number,
+): {
+  readonly events: ReturnType<typeof createEngineEvents>;
+  readonly attached: () => readonly string[];
+  readonly admit: () => void;
+} => {
+  const inner = createEngineEvents();
+  const held: string[] = [];
+  let refuse = true;
+  let seen = 0;
+
+  const events = {
+    ...inner,
+    on: ((name: string, listener: never): (() => void) => {
+      const index = seen;
+
+      seen += 1;
+
+      if (refuse && index === ordinal) {
+        throw new Error(`the source refused ${name}`);
+      }
+
+      const release = (
+        inner.on as unknown as (
+          eventName: string,
+          handler: never,
+        ) => () => void
+      )(name, listener);
+
+      held.push(name);
+
+      return (): void => {
+        const at = held.indexOf(name);
+
+        if (at >= 0) {
+          held.splice(at, 1);
+        }
+
+        release();
+      };
+    }) as ReturnType<typeof createEngineEvents>['on'],
+  } as ReturnType<typeof createEngineEvents>;
+
+  return {
+    events,
+    attached: (): readonly string[] => [...held],
+    admit: (): void => {
+      refuse = false;
+      seen = 0;
+    },
+  };
+};
+
+describe('a subscription that cannot be completed', () => {
+  for (let ordinal = 0; ordinal < SUBSCRIBED_EVENT_NAMES.length; ordinal += 1) {
+    const failing = SUBSCRIBED_EVENT_NAMES[ordinal] ?? '';
+
+    it(`rolls back the ${String(ordinal)} listeners taken before ${failing}`,
+      () => {
+        const fixture = harness();
+        const source = refusingSource(ordinal);
+
+        expect(() => fixture.renderer.subscribe(source.events)).toThrow(
+          /refused/,
+        );
+
+        // NOTHING IS LEFT ATTACHED: the listeners taken before the refusal were
+        // released, so the emitter is exactly as it was.
+        expect(source.attached()).toEqual([]);
+
+        // The refusal is reported rather than being silent.
+        expect(
+          fixture.countOf('render.three.subscribe.refused'),
+        ).toBeGreaterThan(0);
+
+        // AND NOTHING WAS DRAWN FOR THE HALF-SUBSCRIPTION: a commit through the
+        // source reaches no listener, so the renderer's counters do not move.
+        const before = fixture.renderer.readStats().commits;
+
+        source.events.emit(
+          'state:commit',
+          commitOf(4, [{ x: 0, y: 0, value: 2 }]),
+        );
+
+        expect(fixture.renderer.readStats().commits).toBe(before);
+
+        fixture.renderer.destroy();
+      });
+  }
+
+  it('subscribes cleanly on a retry once the source admits', () => {
+    // RETRYABLE, which is the point of rolling back rather than half-attaching:
+    // the same renderer and the same source complete the subscription.
+    const fixture = harness();
+    const source = refusingSource(3);
+
+    expect(() => fixture.renderer.subscribe(source.events)).toThrow(/refused/);
+    expect(source.attached()).toEqual([]);
+
+    source.admit();
+
+    const release = fixture.renderer.subscribe(source.events);
+
+    expect(source.attached()).toEqual(SUBSCRIBED_EVENT_NAMES);
+
+    source.events.emit('state:commit', commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+
+    expect(fixture.renderer.readStats().commits).toBe(1);
+
+    // And the release still takes every one of them back off.
+    release();
+
+    expect(source.attached()).toEqual([]);
+
+    fixture.renderer.destroy();
+  });
+
+  it('keeps the shared collection accurate when a release refuses', () => {
+    // The release half of the same lifecycle: one listener whose release raises
+    // must not strand the other five in the renderer's own collection, or
+    // `dispose()` calls each of them a second time.
+    const fixture = harness();
+    const inner = createEngineEvents();
+    let refusals = 0;
+    const events = {
+      ...inner,
+      on: ((name: string, listener: never): (() => void) => {
+        const release = (
+          inner.on as unknown as (
+            eventName: string,
+            handler: never,
+          ) => () => void
+        )(name, listener);
+
+        if (name !== 'tile:spawn') {
+          return release;
+        }
+
+        return (): void => {
+          refusals += 1;
+          release();
+
+          throw new Error('this release refuses');
+        };
+      }) as ReturnType<typeof createEngineEvents>['on'],
+    } as ReturnType<typeof createEngineEvents>;
+
+    const release = fixture.renderer.subscribe(events);
+
+    expect(() => {
+      release();
+    }).toThrow(/refuses/);
+
+    expect(refusals).toBe(1);
+
+    // Every listener was released despite the refusal, so a commit reaches
+    // none of them.
+    events.emit('state:commit', commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+
+    expect(fixture.renderer.readStats().commits).toBe(0);
+
+    // And `destroy()` does not call the released listeners a second time.
+    fixture.renderer.destroy();
+
+    expect(refusals).toBe(1);
   });
 });
 
@@ -997,6 +1224,63 @@ describe('the renderer parked over a canvas', () => {
     mock.element.remove();
   });
 
+  it('reports the release the application disposal makes', () => {
+    const mock = createMockCanvas({ context: createMockWebGLContext().gl });
+
+    document.body.append(mock.element);
+
+    const fixture = over(mock.element);
+
+    expect(fixture.countOf('render.three.surface.opened')).toBe(1);
+    expect(fixture.countOf('render.three.surface.released')).toBe(0);
+
+    // The composition root's teardown: the renderer is destroyed, which PARKS
+    // the context, and then the canvas is declared finished with.
+    fixture.renderer.destroy();
+
+    expect(fixture.countOf('render.three.surface.released')).toBe(0);
+    expect(releaseParkedRenderer(mock.element)).toBe(true);
+
+    // COUNTED. The normal final release is the one an ordinary teardown makes,
+    // and it went unreported while the context-loss release was reported — so
+    // the counter never balanced `opened` on a disposal. DL-THREE-11.
+    expect(fixture.countOf('render.three.surface.released')).toBe(1);
+    expect(fixture.countOf('render.three.surface.opened')).toBe(1);
+
+    // A release that finds nothing parked reports nothing.
+    expect(releaseParkedRenderer(mock.element)).toBe(false);
+    expect(fixture.countOf('render.three.surface.released')).toBe(1);
+
+    mock.element.remove();
+  });
+
+  it('reports a release through the sink of the last renderer to mount', () => {
+    const mock = createMockCanvas({ context: createMockWebGLContext().gl });
+
+    document.body.append(mock.element);
+
+    // An appearance switch: the first renderer is destroyed and a second is
+    // built over the SAME canvas, taking the parked context back.
+    const first = over(mock.element);
+
+    first.renderer.destroy();
+
+    const second = over(mock.element);
+
+    expect(second.countOf('render.three.surface.reused')).toBe(1);
+
+    second.renderer.destroy();
+
+    expect(releaseParkedRenderer(mock.element)).toBe(true);
+
+    // The live sink is the one reported through; the destroyed renderer's own
+    // sink is not reached, so a disposed owner cannot be handed a count.
+    expect(second.countOf('render.three.surface.released')).toBe(1);
+    expect(first.countOf('render.three.surface.released')).toBe(0);
+
+    mock.element.remove();
+  });
+
   it('is released rather than parked when the context is lost', () => {
     const mock = createMockCanvas({ context: createMockWebGLContext().gl });
 
@@ -1209,6 +1493,367 @@ describe('the change of scale', () => {
 
       expect(fixture.renderer.readStats().scale).toBe('desktop');
       expect(fixture.renderer.readStats().liveTiles).toBe(3);
+
+      fixture.renderer.destroy();
+    } finally {
+      scale.restore();
+    }
+  });
+
+  // ADDED: the two effect controllers were created with the DESKTOP defaults and
+  // were never re-measured, so a board whose geometry differed from the desktop
+  // 4x4 sprayed the wrong number of cell pitches and punched by the wrong share
+  // of its own field. DL-THREE-10, DL-PARTICLE-07, DL-CAMERA-05.
+  it('re-measures the burst spread for a board size that changed', () => {
+    const fixture = harness();
+
+    fixture.renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(fixture.renderer);
+
+    // Nothing is re-measured while the geometry stands: both controllers are
+    // constructed against the geometry the board was mounted at.
+    expect(fixture.countOf('render.particles.geometry')).toBe(0);
+    expect(fixture.countOf('render.camera.geometry')).toBe(0);
+
+    // A board-mutating relic shrinks the board mid-run, which rebuilds the
+    // geometry: the CELL PITCH moves, so the spray is re-measured. The FIELD
+    // measure does not — the board is drawn across the same field whatever its
+    // size — so the punch's share is left exactly as it was.
+    fixture.renderer.render(commitOf(3, [{ x: 0, y: 0, value: 2 }]));
+    drain(fixture.renderer);
+
+    expect(fixture.renderer.readStats().boardSize).toBe(3);
+    expect(fixture.countOf('render.particles.geometry')).toBe(1);
+    expect(fixture.countOf('render.camera.geometry')).toBe(0);
+
+    // Neither controller is pinned, so nothing was refused.
+    expect(fixture.countOf('render.particles.geometry.pinned')).toBe(0);
+    expect(fixture.countOf('render.camera.geometry.pinned')).toBe(0);
+
+    fixture.renderer.destroy();
+  });
+
+  it('re-measures once when a rebuild changes the scale, and not again', () => {
+    const scale = stubScaleQuery();
+
+    try {
+      const fixture = harness();
+
+      fixture.renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+      drain(fixture.renderer);
+
+      // The breakpoint crossing rebuilds the board AT THE SCALE NOW IN FORCE:
+      // `DL-THREE-08` tracks the scale the factory was constructed at and
+      // rebuilds it whenever the scale in force differs, so the mobile rebuild
+      // resolves the mobile lengths rather than keeping the desktop ones. A
+      // scale change moves the CELL PITCH and the FIELD together — the mobile
+      // board is a smaller board, not the same board re-divided — so each
+      // controller re-measures exactly ONCE, against the magnitude that moved.
+      // That is the difference from a board-size change at one scale, where the
+      // pitch moves and the field does not.
+      scale.cross();
+      drain(fixture.renderer);
+
+      expect(fixture.renderer.readStats().boardsBuilt).toBe(2);
+      expect(fixture.countOf('render.particles.geometry')).toBe(1);
+      expect(fixture.countOf('render.camera.geometry')).toBe(1);
+
+      // No churn: draining again re-measures nothing, because `useGeometry`
+      // reports only a spread that actually moved.
+      drain(fixture.renderer);
+
+      expect(fixture.renderer.readStats().boardsBuilt).toBe(2);
+      expect(fixture.countOf('render.particles.geometry')).toBe(1);
+      expect(fixture.countOf('render.camera.geometry')).toBe(1);
+      expect(fixture.countOf('render.particles.geometry.pinned')).toBe(0);
+      expect(fixture.countOf('render.camera.geometry.pinned')).toBe(0);
+
+      fixture.renderer.destroy();
+    } finally {
+      scale.restore();
+    }
+  });
+
+  it('seeds both controllers from the geometry the board mounted at', () => {
+    const numberOnlyHost = document.createElement('div');
+
+    numberOnlyHost.id = 'board-number-only';
+    numberOnlyHost.hidden = true;
+
+    const mock = createMockCanvas({ context: createMockWebGLContext().gl });
+
+    document.body.append(numberOnlyHost, mock.element);
+
+    const measured: RenderDetail[] = [];
+    const renderer = createThreeRenderer({
+      canvas: mock.element,
+      numberOnlyHost,
+      ownerDocument: document,
+
+      // The scale a phone-sized session mounts at, stated rather than queried.
+      scale: 'mobile',
+      reporter: {
+        onDiagnostic: (): void => {},
+        onCount: (count): void => {
+          if (count.name === 'render.particles.geometry') {
+            measured.push(count.detail ?? {});
+          }
+        },
+        onTiming: (): void => {},
+      },
+    });
+
+    renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+    renderer.render(commitOf(3, [{ x: 0, y: 0, value: 2 }]));
+    drain(renderer);
+
+    // MOBILE LENGTHS ON BOTH SIDES of the re-measure: the pitch it moved FROM is
+    // the mobile 4-cell pitch of 67.5 and not the desktop 121.25 the default
+    // carries, which is the proof the construction seeding reached the
+    // controller; the pitch it moved TO is the mobile 3-cell pitch of 90.
+    expect(measured).toHaveLength(1);
+    expect(measured[0]?.previous).toBeCloseTo(67.5, 6);
+    expect(measured[0]?.spread).toBeCloseTo(90, 6);
+    expect(measured[0]?.gridRowCells).toBe(3);
+
+    renderer.destroy();
+  });
+});
+
+/**
+ * The geometry the board count says the board was actually laid out with.
+ *
+ * @param fixture Harness to read.
+ * @returns The lengths, as numbers.
+ */
+const laidOutGeometry = (
+  fixture: Harness,
+): {
+  readonly scale: string;
+  readonly factoryScale: string;
+  readonly cellPitch: number;
+  readonly tileSize: number;
+  readonly tileBoxSize: number;
+  readonly fieldWidth: number;
+  readonly gridSpacing: number;
+  readonly cameraDistance: number;
+  readonly boardSize: number;
+} => {
+  const detail = fixture.detailOf('render.three.board');
+
+  expect(detail).toBeDefined();
+
+  return {
+    scale: String(detail?.scale),
+    factoryScale: String(detail?.factoryScale),
+    cellPitch: Number(detail?.cellPitch),
+    tileSize: Number(detail?.tileSize),
+    tileBoxSize: Number(detail?.tileBoxSize),
+    fieldWidth: Number(detail?.fieldWidth),
+    gridSpacing: Number(detail?.gridSpacing),
+    cameraDistance: Number(detail?.cameraDistance),
+    boardSize: Number(detail?.boardSize),
+  };
+};
+
+/* ==========================================================================
+ * THE GEOMETRY BEHIND THE SCALE'S NAME
+ *
+ * `TileMeshFactory` resolves the cell pitch, the tile footprint, the extrusion
+ * depth and the numeral font size from the scale handed to it ONCE, at
+ * construction, and publishes no way to change it. The renderer reported the
+ * LIVE scale from `resolveScale()`, so a breakpoint crossing rebuilt the board
+ * and reported `'mobile'` while every length in it was still the desktop one;
+ * and the context-restore closure captured the size and scale `mount()` had
+ * read, so a restore after a crossing came back at the mount-time pair.
+ *
+ * These cases read the lengths the board was ACTUALLY laid out with, from the
+ * board count's own detail, and compare them against `resolveBoardGeometry()`
+ * for the scale in force. A stats-only assertion passed throughout. DL-THREE-08.
+ * ========================================================================== */
+
+describe('the geometry behind the scale name', () => {
+  it('lays the board out with the desktop lengths on mount', () => {
+    const fixture = harness();
+    const expected = resolveBoardGeometry(4, 'desktop');
+    const actual = laidOutGeometry(fixture);
+
+    expect(actual.scale).toBe('desktop');
+    expect(actual.factoryScale).toBe('desktop');
+    expect(actual.tileSize).toBeCloseTo(expected.tileSize, 6);
+    expect(actual.tileBoxSize).toBe(expected.tileBoxSize);
+    expect(actual.fieldWidth).toBe(expected.fieldWidth);
+    expect(actual.gridSpacing).toBe(expected.gridSpacing);
+    expect(actual.cellPitch).toBeCloseTo(
+      expected.tileBoxSize + expected.gridSpacing,
+      6,
+    );
+
+    fixture.renderer.destroy();
+  });
+
+  it('re-lays every length when the breakpoint is crossed', () => {
+    const scale = stubScaleQuery();
+
+    try {
+      const fixture = harness();
+      const desktop = resolveBoardGeometry(4, 'desktop');
+      const mobile = resolveBoardGeometry(4, 'mobile');
+
+      // The two scales must genuinely differ, or the assertions below would
+      // hold for a factory that was never rebuilt.
+      expect(mobile.tileBoxSize).not.toBe(desktop.tileBoxSize);
+      expect(mobile.fieldWidth).not.toBe(desktop.fieldWidth);
+      expect(mobile.gridSpacing).not.toBe(desktop.gridSpacing);
+
+      fixture.renderer.render(
+        commitOf(4, [
+          { x: 0, y: 0, value: 2 },
+          { x: 1, y: 1, value: 4 },
+        ]),
+      );
+      drain(fixture.renderer);
+
+      expect(laidOutGeometry(fixture).tileBoxSize).toBe(desktop.tileBoxSize);
+
+      const desktopFraming = laidOutGeometry(fixture).cameraDistance;
+
+      scale.cross();
+      drain(fixture.renderer);
+
+      const crossed = laidOutGeometry(fixture);
+
+      // THE FACTORY ITSELF WAS REBUILT, so the lengths follow the name.
+      expect(crossed.scale).toBe('mobile');
+      expect(crossed.factoryScale).toBe('mobile');
+      expect(crossed.tileSize).toBeCloseTo(mobile.tileSize, 6);
+      expect(crossed.tileBoxSize).toBe(mobile.tileBoxSize);
+      expect(crossed.fieldWidth).toBe(mobile.fieldWidth);
+      expect(crossed.gridSpacing).toBe(mobile.gridSpacing);
+      expect(crossed.cellPitch).toBeCloseTo(
+        mobile.tileBoxSize + mobile.gridSpacing,
+        6,
+      );
+
+      // AND THE CAMERA WAS REFRAMED for the smaller field.
+      expect(crossed.cameraDistance).not.toBeCloseTo(desktopFraming, 6);
+
+      // The blocks the commit drew are still drawn, at the new scale.
+      expect(fixture.renderer.readStats().liveTiles).toBe(2);
+
+      // And back, so nothing about this is one-directional.
+      scale.cross();
+      drain(fixture.renderer);
+
+      const returned = laidOutGeometry(fixture);
+
+      expect(returned.scale).toBe('desktop');
+      expect(returned.factoryScale).toBe('desktop');
+      expect(returned.tileBoxSize).toBe(desktop.tileBoxSize);
+      expect(returned.fieldWidth).toBe(desktop.fieldWidth);
+      expect(returned.cameraDistance).toBeCloseTo(desktopFraming, 6);
+      expect(fixture.renderer.readStats().liveTiles).toBe(2);
+
+      fixture.renderer.destroy();
+    } finally {
+      scale.restore();
+    }
+  });
+
+  it('restores a lost context at the scale in force, not the mounted one',
+    () => {
+      const scale = stubScaleQuery();
+
+      try {
+        const fixture = harness();
+        const mobile = resolveBoardGeometry(4, 'mobile');
+
+        fixture.renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+        drain(fixture.renderer);
+
+        expect(laidOutGeometry(fixture).factoryScale).toBe('desktop');
+
+        // Cross to mobile, THEN lose and restore the context. The restore
+        // closure used to carry the size and scale `mount()` read, so the board
+        // came back desktop-sized on a mobile viewport.
+        scale.cross();
+        drain(fixture.renderer);
+
+        expect(laidOutGeometry(fixture).factoryScale).toBe('mobile');
+
+        fixture.emit('webglcontextlost');
+
+        expect(fixture.renderer.readStats().contextLost).toBe(true);
+
+        fixture.emit('webglcontextrestored');
+        drain(fixture.renderer);
+
+        expect(fixture.renderer.readStats().contextLost).toBe(false);
+        expect(fixture.renderer.readStats().contextRestores).toBe(1);
+
+        const restored = laidOutGeometry(fixture);
+
+        expect(restored.scale).toBe('mobile');
+        expect(restored.factoryScale).toBe('mobile');
+        expect(restored.tileBoxSize).toBe(mobile.tileBoxSize);
+        expect(restored.fieldWidth).toBe(mobile.fieldWidth);
+        expect(restored.gridSpacing).toBe(mobile.gridSpacing);
+        expect(restored.cellPitch).toBeCloseTo(
+          mobile.tileBoxSize + mobile.gridSpacing,
+          6,
+        );
+
+        fixture.renderer.destroy();
+      } finally {
+        scale.restore();
+      }
+    });
+
+  it('restores at the board size in force, not the mounted one', () => {
+    // The size half of the same capture: a board rebuilt at another size before
+    // the loss must come back at that size.
+    const fixture = harness();
+
+    fixture.renderer.render(commitOf(4, [{ x: 0, y: 0, value: 2 }]));
+    drain(fixture.renderer);
+
+    expect(laidOutGeometry(fixture).boardSize).toBe(4);
+
+    fixture.renderer.render(commitOf(3, [{ x: 0, y: 0, value: 2 }]));
+    drain(fixture.renderer);
+
+    expect(laidOutGeometry(fixture).boardSize).toBe(3);
+    expect(fixture.renderer.readStats().boardSize).toBe(3);
+
+    fixture.emit('webglcontextlost');
+    fixture.emit('webglcontextrestored');
+    drain(fixture.renderer);
+
+    expect(fixture.renderer.readStats().contextRestores).toBe(1);
+    expect(laidOutGeometry(fixture).boardSize).toBe(3);
+    expect(fixture.renderer.readStats().boardSize).toBe(3);
+
+    fixture.renderer.destroy();
+  });
+
+  it('rebuilds the board even where the size did not change', () => {
+    // The up-to-date short-circuit in `ensureBoard` compares the size alone, so
+    // the scale reconciliation has to run BEFORE it — otherwise a crossing at a
+    // constant board size kept the board it already had.
+    const scale = stubScaleQuery();
+
+    try {
+      const fixture = harness();
+      const built = fixture.renderer.readStats().boardsBuilt;
+
+      scale.cross();
+
+      expect(fixture.renderer.readStats().boardsBuilt).toBe(built + 1);
+      expect(laidOutGeometry(fixture).factoryScale).toBe('mobile');
+      expect(laidOutGeometry(fixture).boardSize).toBe(
+        fixture.renderer.readStats().boardSize,
+      );
 
       fixture.renderer.destroy();
     } finally {
@@ -2060,5 +2705,186 @@ describe('the pixel-store unpack state is left as it was found', () => {
       fixture.renderer.destroy();
       releaseParkedRenderer(fixture.canvasElement);
     }).not.toThrow();
+  });
+});
+
+/* ==========================================================================
+ * ADDED: the module-level release REPORTS itself.
+ *
+ * The instance-level release inside the factory counts
+ * `render.three.surface.released` and warns where the unpack reset fails. The
+ * module-level one — the release the composition root performs when it disposes
+ * the application, and the only release an ordinary session makes — did neither,
+ * so the release nothing else counts was the one release nothing counted at all.
+ * Decision DL-THREE-12.
+ * ========================================================================== */
+
+describe('the release the composition root performs', () => {
+  /** A recording sink, and readers over what it received. */
+  const sink = (): {
+    readonly reporter: RenderReporter;
+    readonly counts: { readonly name: string; readonly detail?: unknown }[];
+    readonly diagnostics: RenderDiagnostic[];
+    readonly detailOf: (name: string) => Record<string, unknown> | undefined;
+  } => {
+    const counts: { name: string; detail?: unknown }[] = [];
+    const diagnostics: RenderDiagnostic[] = [];
+
+    return {
+      counts,
+      diagnostics,
+      reporter: {
+        onDiagnostic: (diagnostic): void => {
+          diagnostics.push(diagnostic);
+        },
+        onCount: (count): void => {
+          counts.push({ name: count.name, detail: count.detail });
+        },
+        onTiming: (): void => {},
+      },
+      detailOf: (name): Record<string, unknown> | undefined => {
+        const found = counts.find((entry) => entry.name === name);
+
+        return typeof found?.detail === 'object' && found.detail !== null
+          ? (found.detail as Record<string, unknown>)
+          : undefined;
+      },
+    };
+  };
+
+  /** Every count of one name the sink received. */
+  const countsOf = (
+    received: readonly { readonly name: string }[],
+    name: string,
+  ): number => received.filter((entry) => entry.name === name).length;
+
+  it('counts the release, and the reset it performed with it', () => {
+    const reports = sink();
+    const fixture = harness();
+
+    expect(fixture.renderer.mount()).toBe(true);
+    fixture.renderer.destroy();
+
+    expect(
+      releaseParkedRenderer(fixture.canvasElement, reports.reporter),
+    ).toBe(true);
+
+    expect(countsOf(reports.counts, 'render.three.surface.released')).toBe(1);
+    expect(reports.detailOf('render.three.surface.released')).toEqual({
+      unpackReset: true,
+    });
+
+    // A clean release warns about nothing.
+    expect(reports.diagnostics).toEqual([]);
+  });
+
+  it('counts a refusal, naming which refusal it was', () => {
+    const reports = sink();
+    const fixture = harness();
+
+    expect(fixture.renderer.mount()).toBe(true);
+
+    // Mounted and drawing: not a parked renderer.
+    expect(
+      releaseParkedRenderer(fixture.canvasElement, reports.reporter),
+    ).toBe(false);
+    expect(reports.detailOf('render.three.surface.release_refused')).toEqual({
+      reason: 'mounted',
+    });
+
+    fixture.renderer.destroy();
+
+    // The release itself is reported into a sink of its own, so the refusal
+    // counts read below belong to refusals alone.
+    expect(releaseParkedRenderer(fixture.canvasElement, sink().reporter)).toBe(
+      true,
+    );
+
+    const afterRelease = sink();
+
+    // Released already, so there is nothing parked to release.
+    expect(
+      releaseParkedRenderer(fixture.canvasElement, afterRelease.reporter),
+    ).toBe(false);
+    expect(
+      afterRelease.detailOf('render.three.surface.release_refused'),
+    ).toEqual({ reason: 'not-parked' });
+
+    const notACanvas = sink();
+
+    expect(
+      releaseParkedRenderer(
+        document.createElement('div'),
+        notACanvas.reporter,
+      ),
+    ).toBe(false);
+    expect(
+      notACanvas.detailOf('render.three.surface.release_refused'),
+    ).toEqual({ reason: 'not-a-canvas' });
+
+    // And nothing is counted as released on any refusing path.
+    for (const received of [reports, afterRelease, notACanvas]) {
+      expect(
+        countsOf(received.counts, 'render.three.surface.released'),
+      ).toBe(0);
+    }
+  });
+
+  it('warns where the unpack reset failed, and still releases', () => {
+    const reports = sink();
+    const mock = createMockWebGLContext();
+
+    // A context whose `pixelStorei` raises is the case the reset's own guard
+    // exists for, and the case whose failure used to disappear here while the
+    // same failure inside the factory is a warning. DL-THREE-05, DL-THREE-12.
+    (mock.gl as Record<string, unknown>)['pixelStorei'] = (): never => {
+      throw new Error('the context refused the write');
+    };
+
+    const fixture = harness({ context: mock.gl });
+
+    expect(fixture.renderer.mount()).toBe(true);
+    fixture.renderer.destroy();
+
+    expect(
+      releaseParkedRenderer(fixture.canvasElement, reports.reporter),
+    ).toBe(true);
+
+    expect(reports.detailOf('render.three.surface.released')).toEqual({
+      unpackReset: false,
+    });
+    expect(
+      reports.diagnostics.filter(
+        (diagnostic) =>
+          diagnostic.level === 'warning' &&
+          diagnostic.message.includes('pixel-store unpack state'),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('reports through a sink that throws without raising into its caller', () => {
+    const fixture = harness();
+
+    expect(fixture.renderer.mount()).toBe(true);
+    fixture.renderer.destroy();
+
+    // The sink is guarded at this boundary, as every other sink in src/render/
+    // is: a faulty reporter cannot turn a release into a failed disposal.
+    expect(() =>
+      releaseParkedRenderer(fixture.canvasElement, {
+        onDiagnostic: (): never => {
+          throw new Error('the sink threw');
+        },
+        onCount: (): never => {
+          throw new Error('the sink threw');
+        },
+        onTiming: (): never => {
+          throw new Error('the sink threw');
+        },
+      }),
+    ).not.toThrow();
+
+    // And the release still happened.
+    expect(releaseParkedRenderer(fixture.canvasElement)).toBe(false);
   });
 });

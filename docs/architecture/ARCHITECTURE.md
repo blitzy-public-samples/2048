@@ -116,7 +116,7 @@ and Hook Bus.**
 ```mermaid
 graph TD
   subgraph Shell["Document shell and build"]
-    ENTRY["main.ts<br/>single module entry"]
+    ENTRY["main.ts<br/>single module entry,<br/>the only wiring site"]
     VITE["Vite build to static output"]
   end
   subgraph Core["Pure engine - zero DOM references"]
@@ -128,7 +128,7 @@ graph TD
     EV["engine-events.ts<br/>typed emitter, seven events"]
     BE["board-effects.ts<br/>transactional write channel"]
   end
-  BUS["hook-bus.ts<br/>six hooks, pickup order,<br/>charge guard, error isolation"]
+  BUS["hook-bus.ts<br/>six hooks, pickup order,<br/>charge guard, error isolation,<br/>plus the shared event channel"]
   CFG["config layer<br/>boardSize, winValue, startTiles,<br/>spawn, merge"]
   RNG["rng layer<br/>one seed to four named substreams"]
   subgraph Subscribers["Independent subscribers - peers on one bus"]
@@ -154,8 +154,9 @@ graph TD
   CFG --> REL
   RNG --> ENG
   RNG --> REL
+  ENG ==>|"dispatches the six hooks"| BUS
   ENG --> EV
-  EV -->|"emits, holds no view reference"| BUS
+  EV -.->|"seven events relayed<br/>onto the bus channel"| BUS
   BUS -->|"dispatches in pickup order"| REL
   BUS --> REND
   BUS --> UI
@@ -163,17 +164,26 @@ graph TD
   REL -->|"transformed payload"| BUS
   REL -->|"records commands"| BE
   BE -->|"applied on a validated return"| G2
-  ENG --> RUN
+  EV -.->|"observed at the emitter:<br/>turn and stage spans,<br/>RNG cursor metrics"| OBS
+  EV -.->|"observed at the emitter:<br/>run persistence"| RUN
+  EV -.->|"observed at the emitter:<br/>reward reconciliation"| UI
+  ENG -->|"best score and board snapshot,<br/>through an injected port"| STORE2
   RUN --> STORE2
 ```
 
 **Legend for Figure 2.** *To-Be Architecture: Event-Driven Engine with
-Subscribed Renderer and Hook Bus.* A **solid arrow** is a typed call, an
-import or an event dispatch. A **multi-line box** is a module group annotated
-with its responsibility. The **cylinder** is browser-provided persistence. The
-**region titles carry their own constraints**: the engine region is labelled
-as holding zero DOM references, and the subscriber region as holding peers
-rather than one privileged view.
+Subscribed Renderer and Hook Bus.* Three edge kinds are drawn, and the
+distinction between them is the point of the figure. A **solid arrow** is a
+typed call, an import or a construction. A **thick arrow** is the engine's own
+**direct hook dispatch**: `engine.ts` calls `hook-bus.ts`'s `dispatch()` for
+each of the six hooks, so that edge is a call and not a subscription. A
+**dotted arrow** is an **event edge** — either the relay that republishes the
+emitter's seven events onto the bus channel, or a consumer subscribing to the
+emitter itself. A **multi-line box** is a module group annotated with its
+responsibility. The **cylinder** is browser-provided persistence. The **region
+titles carry their own constraints**: the engine region is labelled as holding
+zero DOM references, and the subscriber region as holding peers rather than one
+privileged view.
 
 Figure 2 exists to make two changes from Figure 1 visible, and again both of
 them are edges.
@@ -195,13 +205,38 @@ rather than overwrite (`DL-HOOKBUS-03`), and they are reached in pickup order
 relic has to the lattice, because nothing in a relic writes the grid, a tile or
 the rules directly (`DL-BOARD-02`).
 
-The **observability group is a peer subscriber, not an annex**, and that is a
-structural fact rather than a drawing choice. The emitter's `on()` **appends**
-to a per-name listener array at `src/engine/engine-events.ts` L430, so the
-logger, the tracer and the metrics registry attach exactly as any other
-subscriber does, with no call site inside the engine: no module under
-`src/engine`, `src/input`, `src/relics` or `src/render` imports anything from
-`src/observability` (`DL-MAIN-05`). What each surface emits, which capability
+Three further edges are drawn apart from each other because the code treats
+them apart, and reading them as one thing is the easiest way to misread this
+architecture.
+
+- **The engine dispatches the six hooks itself.** The thick arrow from
+  `engine.ts` to `hook-bus.ts` is a call: the engine holds the bus and invokes
+  `dispatch()` at each of the six points, with `onMerge` reaching it through the
+  callback `move-resolver.ts` is handed (`DL-MOVE-02`). Nothing subscribes a
+  hook into existence.
+- **The seven events reach the bus by relay.** `src/main.ts` calls
+  `attachEvents(engine.events)`, which republishes every name in
+  `ENGINE_EVENT_NAMES` onto the bus's own channel by reference, so relics and
+  every non-relic peer share one channel rather than two that happen to carry
+  the same payloads (`DL-HOOKBUS-06`).
+- **Four consumers stay on the emitter itself**, and each for a stated ordering
+  reason: the turn and stage spans, which must bracket the relay; the RNG cursor
+  metrics, which read the run rather than a report; the run-state persistence,
+  which must follow the views; and the reward reconciliation, which must follow
+  the persistence (`DL-MAIN-12`, `DL-MAIN-30`, `DL-RUNCTL-17`).
+
+The **observability group is a peer subscriber, not an annex.** The emitter's
+`on()` **appends** to a per-name listener array at
+`src/engine/engine-events.ts` L430, so the tracer's `attachEngineTracing` and
+the cursor-metrics fold attach exactly as any other subscriber does and no
+engine file was edited to admit them. That property is about the **direction of
+the dependency**, and it is narrower than "no engine-side call site": no module
+under `src/engine`, `src/input`, `src/relics` or `src/render` imports anything
+from `src/observability`, but each of those subsystems **declares its own
+reporter contract and calls it** — the engine holds an `EngineReporter`, raises
+its counters through it and routes resolution through an injected tracing
+wrapper — and the root injects the adapter that satisfies it (`DL-MAIN-05`,
+`DL-MAIN-07`, `DL-HOOKBUS-05`). What each surface emits, which capability
 probes were reused and which was added, and how to exercise every one of
 them locally all belong to
 [`docs/OBSERVABILITY.md`](../OBSERVABILITY.md), not here.
@@ -219,16 +254,27 @@ argument is checked against the name it subscribed to.
 | `tile:merge` | Once **per merge**, so a turn with two merges emits twice |
 | `tile:spawn` | Once a spawn has been resolved; the position may be absent on a full board |
 | `move:after` | Once a move has been resolved |
-| `stage:end` | Once a stage is resolved; the one event with **no** pre-migration counterpart |
+| `stage:end` | Once a stage is resolved, whether it **cleared its goal or not** — a run that is lost or ended resolves the stage it was on with `cleared: false` before it summarises — and the one event with **no** pre-migration counterpart |
 | `state:commit` | Last in every turn, closing it |
 
-`state:commit` is the direct successor to the single push call of Figure 1: the
-same six members, extended with the stage and relic contexts. It is what a view
-reconciles against, and the six events before it are what a view animates from.
-The board itself travels **by reference** on a commit, exactly as the
-pre-migration view read the live grid (`DL-EVENT-01`), and a subscriber that
-throws is contained inside `emit` rather than aborting the emission
-(`DL-EVENT-03`).
+`state:commit` is the direct successor to the single push call of Figure 1, and
+it carries **ten members**: the six the pre-migration payload carried — `board`,
+`score`, `bestScore`, `over`, `won` and `terminated`, from
+`js/game_manager.js` L91-L97 — plus four this architecture added.
+
+| Added member | What it carries |
+|---|---|
+| `turn` | The monotonic commit number, counting from one and never reset. Every granular event of the turn this commit ends — `tile:merge`, `tile:spawn`, `move:after` — carries the same value, so a buffering view can correlate them |
+| `degraded` | Whether the turn's terminal status could not be established, so a view and the diagnostics surface both see a verdict that was measured and one that was not |
+| `stage` | The stage slice, from an injected provider whose neutral default is `EMPTY_STAGE_CONTEXT` |
+| `relics` | The active relics in pickup order, from an injected provider whose neutral default is `EMPTY_RELIC_CONTEXT` |
+
+`StateCommitEvent` in `src/engine/engine-events.ts` is the authority for all
+ten. It is what a view reconciles against, and the six events before it are what
+a view animates from. The board itself travels **by reference** on a commit,
+exactly as the pre-migration view read the live grid (`DL-EVENT-01`), and a
+subscriber that throws is contained inside `emit` rather than aborting the
+emission (`DL-EVENT-03`).
 
 The bus above those events dispatches the six mandated hooks and no seventh —
 `onStageStart`, `onBeforeMove`, `onMerge`, `onSpawn`, `onAfterMove` and

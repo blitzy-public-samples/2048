@@ -260,6 +260,76 @@ describe('the shared engine-event channel', () => {
     expect(received).toBe(3);
   });
 
+  it('registers no listener at all when a source refuses one part-way, and ' +
+    'relays it in full on a retry', () => {
+    // A part-way attach used to leave every listener taken before the throw
+    // registered with no handle to release them, AND leave the source marked
+    // relayed — so the relay could neither be released nor attached again.
+    const source = createEngineEvents();
+    const registered: EngineEventName[] = [];
+    const released: EngineEventName[] = [];
+    let refuseFrom: number | null = 2;
+
+    // A source whose `on` refuses the third registration, and answers normally
+    // once `refuseFrom` is cleared.
+    const faulting = {
+      ...source,
+      on: <K extends EngineEventName>(
+        name: K,
+        listener: Parameters<typeof source.on<K>>[1],
+      ): (() => void) => {
+        if (refuseFrom !== null && registered.length >= refuseFrom) {
+          throw new Error(`the source refuses "${name}"`);
+        }
+
+        registered.push(name);
+
+        const release = source.on(name, listener);
+
+        return (): void => {
+          released.push(name);
+          release();
+        };
+      },
+    } as unknown as typeof source;
+
+    const bus = createHookBus();
+    let received = 0;
+
+    bus.events.on('state:commit', (): void => {
+      received += 1;
+    });
+
+    expect(() => bus.attachEvents(faulting)).toThrow(/refuses/u);
+
+    // Every listener taken before the throw was released, in the order taken,
+    // and the source is relaying nothing.
+    expect(released).toEqual(registered.slice(0, 2));
+
+    source.emit('state:commit', createCommit(0));
+
+    expect(received).toBe(0);
+
+    // The marker was rolled back with the listeners, so a retry registers the
+    // whole set rather than handing back an already-relayed no-op.
+    refuseFrom = null;
+    registered.length = 0;
+    released.length = 0;
+
+    const stop = bus.attachEvents(faulting);
+
+    expect(registered).toEqual([...ENGINE_EVENT_NAMES]);
+
+    source.emit('state:commit', createCommit(0));
+
+    expect(received).toBe(1);
+
+    stop();
+    source.emit('state:commit', createCommit(0));
+
+    expect(received).toBe(1);
+  });
+
   it('is idempotent on a handle called more than once', () => {
     const bus = createHookBus();
     const source = createEngineEvents();

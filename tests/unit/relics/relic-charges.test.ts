@@ -464,11 +464,11 @@ describe('every charge relic invoked with no charges remaining', () => {
       let invoked = 0;
       let spent = 0;
 
-      // STAGE PREPARATION IS DISPATCHED SEPARATELY. `STANDING_HOOK_NAMES` of
-      // src/engine/hooks.ts exempts `onStageStart` from the charge guard, so a
-      // relic that binds it reinstates the standing rules its own persisted slot
-      // records however little budget is left. What it must not do is act: no
-      // board write, no charge, no throw.
+      // STAGE PREPARATION IS DISPATCHED SEPARATELY so its own counters can be
+      // read: it is guarded exactly as the other five are, because no hook is
+      // exempt from the charge guard (DL-HOOKBUS-07). A standing rule an
+      // exhausted relic's slot records is reinstated off the hook path, by
+      // `applyStandingRelicRules` of src/relics/relic-registry.ts.
       const stage = harness.dispatch('onStageStart', {
         stageIndex: 0,
         goal: GOAL,
@@ -476,7 +476,7 @@ describe('every charge relic invoked with no charges remaining', () => {
         boardSize: harness.grid.size,
       });
 
-      // The five EFFECT hooks, dispatched with a spent budget. Each must be
+      // The other five hooks, dispatched with a spent budget. Each must be
       // refused at the guard.
       const opened = harness.dispatch('onBeforeMove', beforeMove(harness));
       const merged = harness.dispatch('onMerge', mergePayload());
@@ -499,6 +499,12 @@ describe('every charge relic invoked with no charges remaining', () => {
 
       expect(stage.failed).toBe(0);
       expect(stage.chargesConsumed).toBe(0);
+      expect(stage.invoked).toBe(0);
+
+      // Skipped where the relic binds the hook at all: only a subscription can
+      // be withheld, and `frostbind` is the one charge relic that binds stage
+      // preparation.
+      expect(stage.skipped).toBe(entry.hooks.onStageStart === undefined ? 0 : 1);
 
       expect(harness.layout()).toEqual(before);
       expect(harness.stateOf(entry.id)).toEqual(entry.state);

@@ -31,7 +31,8 @@
 //   TR-CAMERA-05  target-only row                  `mergeIntensity()`, linear
 //                                                  in the tile-ramp exponent
 //
-// Decisions: DL-CAMERA-01, DL-CAMERA-02, DL-CAMERA-03 (docs/DECISION_LOG.md).
+// Decisions: DL-CAMERA-01, DL-CAMERA-02, DL-CAMERA-03, DL-CAMERA-05
+// (docs/DECISION_LOG.md).
 
 import type {
   Camera,
@@ -42,6 +43,10 @@ import type {
 import { Vector3 } from 'three';
 
 import { rampExponent, tileRampConstants } from '../theme/tile-ramp';
+
+// CHANGED: a type import beside the value imports, for the board geometry the
+// punch's zoom share is measured against. DL-CAMERA-05.
+import type { GeometryScale } from '../theme/tokens';
 import { depthScale, fieldWidth, motion } from '../theme/tokens';
 import type { Tween, TweenInterpolator, TweenStop } from './animations';
 import { createTween, easingFor, mix } from './animations';
@@ -91,6 +96,18 @@ const PREFERENCE_CLEARED_METRIC = 'render.camera.preference.cleared';
 
 const ZOOM_CLAMPED_METRIC = 'render.camera.zoom.clamped';
 
+/**
+ * Counter raised per zoom share re-measured against a new board geometry,
+ * carrying the share it moved to. DL-CAMERA-05.
+ */
+const GEOMETRY_METRIC = 'render.camera.geometry';
+
+/**
+ * Counter raised where a geometry is offered to an instance whose zoom share a
+ * caller pinned, so the refusal is visible rather than silent. DL-CAMERA-05.
+ */
+const GEOMETRY_PINNED_METRIC = 'render.camera.geometry.pinned';
+
 const PUNCH_TWEEN_NAME = 'camera-punch';
 
 const SHAKE_TWEEN_NAME = 'camera-shake';
@@ -130,11 +147,16 @@ const DEFAULT_MAX_OFFSET_FACTOR = 4;
  * clearance and the field mesh it draws is `fieldWidth` across, so widening the
  * frustum by this share reveals more of the same field and narrowing it by any
  * perceptible share would crop the outer tile row. The punch therefore widens.
+ *
+ * The DESKTOP measure, and the fallback alone: `punchZoomFor` derives the share
+ * from the field in force, so the punch stays the same share of the board the
+ * player is looking at. DL-CAMERA-05.
  */
 const DEFAULT_PUNCH_ZOOM = depthScale.board / fieldWidth;
 
 /** Multiple of the punch's own peak the composed zoom share is confined to. */
 const DEFAULT_MAX_ZOOM_FACTOR = 2;
+
 
 const NO_ZOOM_SHARE = 0;
 
@@ -146,6 +168,30 @@ const LOCAL_RIGHT: Vector3Like = Object.freeze({ x: 1, y: 0, z: 0 });
 const LOCAL_UP: Vector3Like = Object.freeze({ x: 0, y: 1, z: 0 });
 
 const LOCAL_FORWARD: Vector3Like = Object.freeze({ x: 0, y: 0, z: -1 });
+
+/**
+ * The punch's peak zoom share for one board geometry: the board's extrusion
+ * depth over THAT geometry's field measure.
+ *
+ * `punchDistance` and `shakeDistance` have no counterpart here on purpose. Both
+ * are expressions on `depthScale`, which src/render/tile-mesh-factory.ts
+ * extrudes every block by at both scales, so neither changes with the scale. The
+ * zoom share is the one magnitude measured against a PLANAR length, and the
+ * planar lengths are exactly what a scale changes: the mobile field is 280px
+ * against the desktop 500px, so a share fixed to the desktop measure resolves to
+ * 0.56 of the punch the same board deserves. DL-CAMERA-05.
+ *
+ * @param geometry The scale and board size in force.
+ * @returns The share, or the desktop default where the scale states no usable
+ *   field measure.
+ */
+export function punchZoomFor(geometry: GeometryScale): number {
+  const share = depthScale.board / geometry.fieldWidth;
+
+  return Number.isFinite(share) && share > NO_ZOOM_SHARE
+    ? share
+    : DEFAULT_PUNCH_ZOOM;
+}
 
 interface CameraOffsetValue {
   readonly displacement: number;
@@ -257,9 +303,18 @@ export interface CameraEffectsOptions {
   /**
    * Share of the rest zoom a full-intensity punch adds to the frustum, which is
    * what a punch is drawn with wherever the camera's projection carries a zoom.
-   * Defaults to `DEFAULT_PUNCH_ZOOM`.
+   * Defaults to one derived from `geometry` below, and to `DEFAULT_PUNCH_ZOOM`
+   * where no geometry is supplied.
    */
   readonly punchZoom?: number;
+
+  /**
+   * The board geometry the punch's zoom share is measured against. Supplied,
+   * `punchZoom` defaults to `punchZoomFor(geometry)`; `useGeometry` replaces it
+   * whenever the renderer reframes for another scale or board size. An explicit
+   * `punchZoom` outranks both. DL-CAMERA-05.
+   */
+  readonly geometry?: GeometryScale;
   readonly shakeDistance?: number;
 
   /**
@@ -314,6 +369,15 @@ export interface CameraEffectStats {
    * zero for a camera carrying no zoom.
    */
   readonly zoomShare: number;
+
+  /**
+   * Peak share a full-intensity punch adds, as measured against the geometry in
+   * force or as pinned by a caller. DL-CAMERA-05.
+   */
+  readonly punchZoom: number;
+
+  /** Whether an explicit `punchZoom` option pinned that share. */
+  readonly punchZoomPinned: boolean;
 }
 
 /**
@@ -344,6 +408,26 @@ export interface CameraEffects {
   advance(context: CameraFrameContext): void;
   isActive(): boolean;
   reset(): void;
+
+  /**
+   * Measures the punch's zoom share against a different board geometry, and
+   * re-derives the composed ceiling with it.
+   *
+   * Called by the renderer from every path that rebuilds its board — a
+   * configured board size that changed, the breakpoint crossing that swaps the
+   * scale, and the rebuild after a restored context — beside
+   * `setRestTransform`, which carries the reframed camera's rest pose. Running
+   * effects keep the share they were started under; the next punch takes the new
+   * one.
+   *
+   * An instance constructed with an explicit `punchZoom` is PINNED: the request
+   * is reported and the stated share stands. DL-CAMERA-05.
+   *
+   * @param geometry The scale and board size now in force.
+   * @returns The peak zoom share in force after the call.
+   */
+  useGeometry(geometry: GeometryScale): number;
+
   setRestTransform(input?: CameraRestInput): void;
   readRestTransform(): CameraRestTransform;
   isReducedMotion(): boolean;
@@ -430,14 +514,24 @@ export function createCameraEffects(
     reporter,
   );
 
-  const punchZoom = resolveOption(
+  /**
+   * CHANGED: `let`, seeded from the geometry the caller supplied. An explicit
+   * `punchZoom` PINS the share, so a caller that stated a magnitude is never
+   * overridden by a reframe. DL-CAMERA-05.
+   */
+  const punchZoomPinned = options.punchZoom !== undefined;
+  let punchZoom = resolveOption(
     options.punchZoom,
-    DEFAULT_PUNCH_ZOOM,
+    options.geometry === undefined
+      ? DEFAULT_PUNCH_ZOOM
+      : punchZoomFor(options.geometry),
     'punchZoom',
     reporter,
   );
 
-  const maxZoomShare = punchZoom * DEFAULT_MAX_ZOOM_FACTOR;
+  // Derived from the peak, so re-measuring the peak re-measures the ceiling with
+  // it: a mobile field would otherwise keep a desktop ceiling.
+  let maxZoomShare = punchZoom * DEFAULT_MAX_ZOOM_FACTOR;
 
   const shakeDistance = resolveOption(
     options.shakeDistance,
@@ -992,6 +1086,40 @@ export function createCameraEffects(
       applyRest();
     },
 
+    useGeometry: (geometry: GeometryScale): number => {
+      if (punchZoomPinned) {
+        reporter.onCount({
+          name: GEOMETRY_PINNED_METRIC,
+          value: 1,
+          detail: Object.freeze({ punchZoom, requested: null }),
+        });
+
+        return punchZoom;
+      }
+
+      const next = punchZoomFor(geometry);
+
+      if (next === punchZoom) {
+        return punchZoom;
+      }
+
+      const previous = punchZoom;
+
+      punchZoom = next;
+      maxZoomShare = punchZoom * DEFAULT_MAX_ZOOM_FACTOR;
+      reporter.onCount({
+        name: GEOMETRY_METRIC,
+        value: 1,
+        detail: Object.freeze({
+          punchZoom: next,
+          previous,
+          gridRowCells: geometry.gridRowCells,
+        }),
+      });
+
+      return punchZoom;
+    },
+
     setRestTransform,
 
     readRestTransform: (): CameraRestTransform =>
@@ -1016,6 +1144,8 @@ export function createCameraEffects(
         invalidDeltas,
         offsetDistance: appliedOffset.length(),
         zoomShare: appliedZoomShare,
+        punchZoom,
+        punchZoomPinned,
       }),
 
     resetStats: (): void => {

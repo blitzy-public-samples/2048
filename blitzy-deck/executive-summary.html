@@ -10,12 +10,46 @@
          than linked, so this file carries no local dependency and stays
          outside the Vite entry graph. -->
 
+    <!-- EVERY PINNED CDN SUBRESOURCE CARRIES SUBRESOURCE INTEGRITY. A version
+         in a URL fixes which release is asked for; the `integrity` hash beside
+         it fixes which BYTES are accepted, so a substituted file is refused by
+         the browser rather than executed. `crossorigin="anonymous"` is required
+         with it: integrity is only checked on a response the page is allowed to
+         read, and this deck is opened from a file:// URL whose origin is null,
+         which jsdelivr answers with `access-control-allow-origin: *`.
+
+         TO CHANGE A VERSION, change its hash in the same edit. Take the hash
+         from the bytes themselves:
+
+           curl -sSL <url> | openssl dgst -sha384 -binary | openssl base64 -A
+
+         and prefix the result with `sha384-`. Take it from TWO independent
+         mirrors of the same package — jsdelivr and unpkg both serve npm — and
+         use the value only if they agree; a hash read from one host alone is
+         that host's word for it. The four below were taken that way and agreed.
+
+         The Google Fonts stylesheet below is deliberately NOT hashed: it is
+         generated per user agent, so its bytes differ between browsers and no
+         single hash can match. Decision `DL-DOC-09`. -->
+
     <!-- reveal.js 5.1.0, base stylesheet only: it supplies layout, scaling and
          transitions. No bundled reveal theme is loaded, so nothing competes
-         with the inlined Blitzy identity below. -->
+         with the inlined Blitzy identity below.
+
+         Every jsdelivr resource in this file carries a sha384 Subresource
+         Integrity hash of the exact pinned bytes, with `crossorigin` and
+         `referrerpolicy`, so a version-pinned URL that ever served different
+         bytes is refused rather than executed. The pins themselves are the ones
+         the executive-presentation rule states; the Mermaid pin, its published
+         advisories and the escalation that owns them are DL-DOC-09 in
+         docs/DECISION_LOG.md. Google Fonts is deliberately not integrity-pinned:
+         it negotiates its CSS per user agent, so a fixed hash would block it. -->
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css"
+      integrity="sha384-YgvgKeZJykuztG+iQPoZHNZENTFZvOcOJ/uRzmJTje6GHYN9zAw+y5rx/L8MQKA/"
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
     />
 
     <!-- Inter, Space Grotesk and Fira Code at the weights the Blitzy type
@@ -923,7 +957,7 @@ graph TD
 <pre class="mermaid">
 graph TD
   subgraph Shell["Document shell and build"]
-    ENTRY["main.ts<br/>single module entry"]
+    ENTRY["main.ts<br/>single module entry,<br/>the only wiring site"]
     VITE["Vite build to static output"]
   end
   subgraph Core["Pure engine - zero DOM references"]
@@ -935,7 +969,7 @@ graph TD
     EV["engine-events.ts<br/>typed emitter, seven events"]
     BE["board-effects.ts<br/>transactional write channel"]
   end
-  BUS["hook-bus.ts<br/>six hooks, pickup order,<br/>charge guard, error isolation"]
+  BUS["hook-bus.ts<br/>six hooks, pickup order,<br/>charge guard, error isolation,<br/>plus the shared event channel"]
   CFG["config layer<br/>boardSize, winValue, startTiles,<br/>spawn, merge"]
   RNG["rng layer<br/>one seed to four named substreams"]
   subgraph Subscribers["Independent subscribers - peers on one bus"]
@@ -961,8 +995,9 @@ graph TD
   CFG --> REL
   RNG --> ENG
   RNG --> REL
+  ENG ==>|"dispatches the six hooks"| BUS
   ENG --> EV
-  EV -->|"emits, holds no view reference"| BUS
+  EV -.->|"seven events relayed<br/>onto the bus channel"| BUS
   BUS -->|"dispatches in pickup order"| REL
   BUS --> REND
   BUS --> UI
@@ -970,15 +1005,18 @@ graph TD
   REL -->|"transformed payload"| BUS
   REL -->|"records commands"| BE
   BE -->|"applied on a validated return"| G2
-  ENG --> RUN
+  EV -.->|"observed at the emitter:<br/>turn and stage spans,<br/>RNG cursor metrics"| OBS
+  EV -.->|"observed at the emitter:<br/>run persistence"| RUN
+  EV -.->|"observed at the emitter:<br/>reward reconciliation"| UI
+  ENG -->|"best score and board snapshot,<br/>through an injected port"| STORE2
   RUN --> STORE2
 </pre>
             <div class="figure-foot">
               <div class="diagram-legend">
                 <span class="legend-title">Legend for Figure 2</span>
                 <p>
-                  Solid arrow · a typed call or event. Multi-line box · a module
-                  group. Cylinder · browser storage.
+                  Solid · a call. Thick · a hook dispatch. Dotted · an event.
+                  Cylinder · storage.
                 </p>
               </div>
               <p class="figure-note">
@@ -1004,136 +1042,107 @@ graph TD
           </div>
         </section>
 
-        <!-- 6. Content — scope, mapping summary and delivery timeline -->
+        <!-- 6. Content — the replacement map.
+             Figure 8 is reproduced verbatim from docs/TRACEABILITY_MATRIX.md,
+             which is its canonical home. The two dense tables this slide used
+             to carry are the figure and slide 7 respectively; the row-level
+             detail they summarised was never the deck's to hold.
+             Decision `DL-DOC-09`. -->
         <section>
           <div class="slide-inner">
             <div class="slide-head">
               <p class="eyebrow">
                 <i data-lucide="route" aria-hidden="true"></i>
-                Scope and sequence
+                Scope
               </p>
-              <h2>What Replaced What, And In What Order</h2>
+              <h2>Figure 8 — File Transformation Map</h2>
             </div>
-            <ul>
-              <li>Every phase left a game that ran.</li>
-              <li>Each retired file has one named successor.</li>
-              <li>
-                Row-by-row coverage lives in
-                <code>docs/TRACEABILITY_MATRIX.md</code>.
-              </li>
-            </ul>
-            <div class="two-column">
-              <table class="styled-table compact">
-                <caption>
-                  Mapping summary
-                </caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Retired</th>
-                    <th scope="col">Replaced by</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td class="was">
-                      <code>application.js</code> · four lines that wired the whole
-                      game
-                    </td>
-                    <td class="now">Single module entry point</td>
-                  </tr>
-                  <tr>
-                    <td class="was"><code>game_manager.js</code></td>
-                    <td class="now">
-                      Engine group with no screen access, plus run management
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="was">
-                      <code>grid.js</code> · <code>tile.js</code>
-                    </td>
-                    <td class="now">Typed engine grid and tile</td>
-                  </tr>
-                  <tr>
-                    <td class="was"><code>html_actuator.js</code></td>
-                    <td class="now">
-                      Rendering group: 2.5D renderer and accessible fallback
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="was"><code>keyboard_input_manager.js</code></td>
-                    <td class="now">
-                      Input group: keyboard, touch, remapping, on-screen controls
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="was"><code>local_storage_manager.js</code></td>
-                    <td class="now">
-                      Storage group, with the best-score format unchanged
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="was">Three browser compatibility shims</td>
-                    <td class="now">
-                      Removed; the modern baseline supersedes them
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="was">The committed generated stylesheet</td>
-                    <td class="now">Produced by the build instead</td>
-                  </tr>
-                </tbody>
-              </table>
-              <table class="styled-table compact">
-                <caption>
-                  Delivery timeline
-                </caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Phase</th>
-                    <th scope="col">What it left running</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td class="now">Foundation</td>
-                    <td>
-                      Typed engine split from the screen, rules moved into
-                      configuration, replay from a seed, first test suites. Plays
-                      identically to the original.
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="now">2.5D</td>
-                    <td>
-                      Subscribing renderer, animated block merges, camera and
-                      lighting.
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="now">Roguelike</td>
-                    <td>
-                      Relic system, stage goals, reward screen, run summary.
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="now">Polish</td>
-                    <td>
-                      Full screen flow, themes, sound and accessibility.
-                    </td>
-                  </tr>
-                  <tr>
-                    <td class="now">Stretch</td>
-                    <td class="was">
-                      Deferred by decision, and not implemented.
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+            <div class="kpi-grid">
+              <div class="kpi-card">
+                <span class="kpi-icon" aria-hidden="true"
+                  ><i data-lucide="archive"></i
+                ></span>
+                <span class="kpi-value">13</span>
+                <p class="kpi-label">Files retired</p>
+                <p class="kpi-note">successor sets documented</p>
+              </div>
+              <div class="kpi-card">
+                <span class="kpi-icon" aria-hidden="true"
+                  ><i data-lucide="boxes"></i
+                ></span>
+                <span class="kpi-value">68</span>
+                <p class="kpi-label">Typed modules now</p>
+                <p class="kpi-note">engine, render, run, screens</p>
+              </div>
+              <div class="kpi-card">
+                <span class="kpi-icon" aria-hidden="true"
+                  ><i data-lucide="milestone"></i
+                ></span>
+                <span class="kpi-value">4</span>
+                <p class="kpi-label">Phases shipped</p>
+                <p class="kpi-note">each shipped playable</p>
+              </div>
+              <div class="kpi-card">
+                <span class="kpi-icon" aria-hidden="true"
+                  ><i data-lucide="pause"></i
+                ></span>
+                <span class="kpi-value">0</span>
+                <p class="kpi-label">Stretch items built</p>
+                <p class="kpi-note">deferred by decision</p>
+              </div>
+            </div>
+            <p class="source-note">
+              Mapped in docs/TRACEABILITY_MATRIX.md
+            </p>
+          </div>
+        </section>
+
+        <!-- 7. Content — the delivery sequence.
+             This diagram is authored for the deck rather than reproduced: no
+             documentation figure carries the phase order. Decision
+             `DL-DOC-09`. -->
+        <section>
+          <div class="slide-inner">
+            <div class="slide-head">
+              <p class="eyebrow">
+                <i data-lucide="git-commit-horizontal" aria-hidden="true"></i>
+                Sequence
+              </p>
+              <h2>
+                Delivery Sequence — Four Phases, Each Leaving A Game That Ran
+              </h2>
+            </div>
+<pre class="mermaid">
+graph LR
+  P1["Foundation<br/>typed engine split from the screen,<br/>rules moved into configuration,<br/>replay from a seed, first test suites"]
+  P2["2.5D<br/>subscribing renderer,<br/>animated block merges,<br/>camera and lighting"]
+  P3["Roguelike<br/>relic system, stage goals,<br/>reward screen, run summary"]
+  P4["Polish<br/>full screen flow, themes,<br/>sound and accessibility"]
+  P5["Stretch<br/>deferred by decision"]
+  P1 --> P2 --> P3 --> P4
+  P4 -.-> P5
+  P1 --> G1(["Plays identically<br/>to the original"])
+  P2 --> G2(["The same game,<br/>rendered as blocks"])
+  P3 --> G3(["Run-based,<br/>with relics"])
+  P4 --> G4(["Shippable"])
+</pre>
+            <div class="figure-foot">
+              <div class="diagram-legend">
+                <span class="legend-title">Legend for Delivery Sequence</span>
+                <p>
+                  Solid arrow · the phase that followed. Dotted arrow · deferred.
+                  Rounded node · what the phase left running.
+                </p>
+              </div>
+              <p class="figure-note">
+                Delivery Sequence reads left to right; no phase left the game
+                broken.
+              </p>
             </div>
           </div>
         </section>
 
-        <!-- 7. Section divider -->
+        <!-- 8. Section divider -->
         <section class="slide-divider">
           <div class="slide-inner">
             <span class="divider-icon" aria-hidden="true"
@@ -1148,7 +1157,10 @@ graph TD
           </div>
         </section>
 
-        <!-- 8. Content — business value -->
+        <!-- 9. Content — business value.
+             The five before-and-after rows this slide carried as a table are
+             the diagram below; the table copy was what put the slide over the
+             body-word limit. Decision `DL-DOC-09`. -->
         <section>
           <div class="slide-inner">
             <div class="slide-head">
@@ -1159,67 +1171,41 @@ graph TD
               <h2>What The Business Gets</h2>
             </div>
             <ul>
-              <li>
-                A run replays exactly from its seed; a defect travels as one
-                number.
-              </li>
+              <li>A run replays from its seed and ordered moves.</li>
               <li>Five automated gates replace review by eye.</li>
-              <li>The board is reachable by keyboard and screen reader.</li>
+              <li>The board is keyboard and screen-reader reachable.</li>
               <li>Hosting stays free and static.</li>
             </ul>
-            <table class="styled-table">
-              <caption>
-                Verified before and after
-              </caption>
-              <thead>
-                <tr>
-                  <th scope="col">Area</th>
-                  <th scope="col">Before</th>
-                  <th scope="col">Now</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td class="now">Testing</td>
-                  <td class="was">
-                    None at all, across 181 commits of history
-                  </td>
-                  <td>Unit, seeded-replay and recorded-run gates</td>
-                </tr>
-                <tr>
-                  <td class="now">Stylesheet</td>
-                  <td class="was">
-                    758 generated lines committed beside 549 of source, with
-                    nothing checking they matched
-                  </td>
-                  <td>Generated by the build, so the drift cannot recur</td>
-                </tr>
-                <tr>
-                  <td class="now">Accessibility</td>
-                  <td class="was">
-                    No language or screen-reader markup, and three controls no
-                    keyboard could reach
-                  </td>
-                  <td>Labelled, focusable and announced</td>
-                </tr>
-                <tr>
-                  <td class="now">Page contract</td>
-                  <td class="was">
-                    Eight lookups into the page, none of them checked
-                  </td>
-                  <td>Guarded, so a rename is no longer fatal</td>
-                </tr>
-                <tr>
-                  <td class="now">Hosting cost</td>
-                  <td class="was">Free static host</td>
-                  <td>Unchanged, and protected by mandate</td>
-                </tr>
-              </tbody>
-            </table>
+            <div class="icon-row">
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="repeat"></i
+                ></span>
+                <span class="step-title">Reproducible</span>
+              </div>
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="shield-check"></i
+                ></span>
+                <span class="step-title">Gated</span>
+              </div>
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="accessibility"></i
+                ></span>
+                <span class="step-title">Reachable</span>
+              </div>
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="cloud"></i
+                ></span>
+                <span class="step-title">Free hosting</span>
+              </div>
+            </div>
           </div>
         </section>
 
-        <!-- 9. Section divider -->
+        <!-- 10. Section divider -->
         <section class="slide-divider">
           <div class="slide-inner">
             <span class="divider-icon" aria-hidden="true"
@@ -1234,7 +1220,7 @@ graph TD
           </div>
         </section>
 
-        <!-- 10. Content — component interaction.
+        <!-- 11. Content — component interaction.
              Figure 3 is reproduced verbatim from
              docs/architecture/component-interaction.md, its canonical home. -->
         <section>
@@ -1253,18 +1239,27 @@ graph TD
 graph LR
   P((Player))
   P --> IN2["Input adapter<br/>keys, touch, on-screen controls"]
-  IN2 -->|"direction, restart,<br/>relic activation"| ENG2["Engine"]
-  ENG2 -->|"six hook dispatches"| BUS2["Hook bus"]
-  BUS2 -->|"accumulated payload in"| REL2["Relic registry<br/>pickup-ordered"]
-  REL2 -->|"compounded payload back"| BUS2
-  BUS2 --> REND2["Three.js renderer"]
-  BUS2 --> RT["Screen router"]
+  IN2 -->|"move, restart, keepPlaying"| ENG2["Engine"]
+  IN2 -->|"startRun, endRun, continueStage,<br/>selectReward, activateRelic,<br/>openSettings, closeSettings, cancel"| ROOT["Composition root<br/>main.ts, the only wiring site"]
+  ROOT -->|"begin, resolve and end a run"| RUNC["Run controller"]
+  ROOT -->|"router triggers"| RT["Screen router"]
+  ENG2 ==>|"six hook dispatches"| BUS2["Hook bus"]
+  BUS2 -->|"accumulated payload plus<br/>read-only capability views"| REL2["Relic registry<br/>pickup-ordered"]
+  REL2 -->|"compounded payload and<br/>recorded board commands"| BUS2
+  ENG2 -.->|"seven events, relayed<br/>onto the bus channel"| BUS2
+  BUS2 --> REND2["Board renderer<br/>Three.js or number-only"]
+  BUS2 --> RT
+  BUS2 -->|"subscribed by the root"| HUD2["HUD, announcer<br/>and sound engine"]
   BUS2 --> OBS2["Observability"]
+  ENG2 -.->|"observed at the emitter"| RUNC
+  ENG2 -.->|"observed at the emitter"| OBS2
   REND2 -->|"frames"| CANVAS["Canvas<br/>aria-hidden"]
-  RT --> DOMUI["Screens plus HUD"]
-  RT --> A11Y["Parallel a11y DOM<br/>plus live region"]
-  ENG2 -->|"engine events"| RUNC["Run controller"]
-  RUNC --> STOR["Storage adapter"]
+  REND2 -->|"cells, labels and the tab stop"| A11Y["Parallel board DOM<br/>plus live region"]
+  RT -->|"screen lifecycle"| DOMUI["Screen modules"]
+  HUD2 --> DOMUI
+  HUD2 --> A11Y
+  ENG2 -->|"best score and board snapshot"| STOR["Storage adapter"]
+  RUNC --> STOR
   STOR --> LS[("localStorage")]
   CANVAS -->|"pixels"| P
   DOMUI --> P
@@ -1274,19 +1269,18 @@ graph LR
               <div class="diagram-legend">
                 <span class="legend-title">Legend for Figure 3</span>
                 <p>
-                  Circle · the player. Rectangle · a module. Cylinder · storage. The
-                  paired arrows are relics compounding.
+                  Circle · player. Rectangle · module. Cylinder · storage. Thick ·
+                  hook dispatch. Dotted · event.
                 </p>
               </div>
               <p class="figure-note">
-                Figure 3 shows one picture reaching the player two ways: on screen
-                and spoken.
+                Figure 3 reaches the player two ways: on screen and spoken.
               </p>
             </div>
           </div>
         </section>
 
-        <!-- 11. Content — turn data flow.
+        <!-- 12. Content — turn data flow.
              Figure 4 is reproduced verbatim from
              docs/architecture/data-flow.md, its canonical home. -->
         <section>
@@ -1308,29 +1302,36 @@ flowchart TD
   SS["onStageStart dispatch<br/>as the stage board is prepared"]
   SS --> K["Key, swipe or on-screen control"]
   K --> D["Direction 0 to 3"]
-  D --> BM["onBeforeMove dispatch<br/>cancellable"]
-  BM -->|"vetoed"| END1["Turn ends, no state change"]
+  D --> GUARD{"Play blocked?<br/>lost, or won and not continued"}
+  GUARD -->|"yes"| END0["Turn refused, nothing emitted"]
+  GUARD -->|"no"| BM["onBeforeMove dispatch<br/>cancellable, may redirect,<br/>may record board commands"]
+  BM -->|"vetoed, board unchanged"| END1["Turn ends, no state change"]
+  BM -->|"vetoed, a command reseated the board"| SETTLE["Verdict re-derived,<br/>no spawn"]
   BM -->|"allowed"| PREP["prepareTiles<br/>clear mergedFrom, snapshot position"]
   PREP --> TRAV["Traversal walk<br/>over the configured board size"]
   TRAV --> MG{"Merge condition<br/>from config.merge.canMerge?"}
   MG -->|"yes"| MH["onMerge dispatch<br/>score delta applied"]
   MG -->|"no"| MV["Reposition tile"]
-  MH --> CHK["Win check against<br/>config.winValue"]
-  MV --> CHK
+  MH --> CHK["Win check on the merged value<br/>against config.winValue"]
   CHK --> MOVED{"Any position changed?"}
+  MV --> MOVED
   MOVED -->|"no"| END2["Turn ends, no spawn"]
-  MOVED -->|"yes"| SP["onSpawn dispatch<br/>value and position from<br/>named RNG substreams"]
-  SP --> AF["onAfterMove dispatch<br/>stage goal evaluated here"]
-  AF --> LOSS{"Moves still available?"}
-  LOSS -->|"no"| OVER["Game over"]
-  LOSS -->|"yes"| COMMIT["state:commit"]
-  OVER --> COMMIT
+  MOVED -->|"yes"| SP["Spawn: value and position from<br/>named RNG substreams,<br/>then onSpawn dispatch"]
+  SP --> LOSS{"Moves still available?"}
+  LOSS -->|"no"| OVER["Game over recorded"]
+  LOSS -->|"yes"| AF
+  OVER --> AF["onAfterMove dispatch<br/>may declare the run over,<br/>may record board commands"]
+  AF --> MA["move:after emitted<br/>run controller measures goal progress"]
+  MA --> COMMIT["commit<br/>1 best score promoted, then re-read<br/>2 board snapshot written or cleared<br/>3 state:commit emitted, ten members"]
+  SETTLE --> COMMIT
   COMMIT --> R["Renderer tweens<br/>and composites a frame"]
+  COMMIT --> VIEWS["HUD, announcer, sound engine<br/>and screen router"]
   COMMIT --> PERSIST["Run state written<br/>under a namespaced key"]
-  COMMIT --> BEST["Best score promoted,<br/>then re-read from storage"]
-  COMMIT --> SG{"Stage goal met?"}
-  SG -->|"yes"| SE["onStageEnd dispatch<br/>to the reward screen"]
+  COMMIT --> SG{"Stage goal met?<br/>evaluated after the commit"}
   SG -->|"no"| WAIT["Await next input"]
+  SG -->|"yes"| SE["endStage: onStageEnd dispatch,<br/>then stage:end emitted"]
+  SE --> COMMIT2["Second commit of the same turn"]
+  COMMIT2 --> SC["Stage clear on screen;<br/>the player's own continue<br/>opens the reward offer"]
 </pre>
               </div>
               <div class="figure-side">
@@ -1338,13 +1339,12 @@ flowchart TD
                   <div class="diagram-legend">
                     <span class="legend-title">Legend for Figure 4</span>
                     <p>
-                      Rectangle · a step. Diamond · a decision. The six hook names
-                      mark where a relic may act.
+                      Rectangle · a step. Diamond · a decision. Hook names mark
+                      where relics act.
                     </p>
                   </div>
                   <p class="figure-note">
-                    Figure 4 traces one turn: a tile appears only when something
-                    actually moved.
+                    Figure 4 traces one turn; a cleared stage commits twice.
                   </p>
                 </div>
               </div>
@@ -1352,7 +1352,7 @@ flowchart TD
           </div>
         </section>
 
-        <!-- 12. Section divider -->
+        <!-- 13. Section divider -->
         <section class="slide-divider">
           <div class="slide-inner">
             <span class="divider-icon" aria-hidden="true"
@@ -1367,7 +1367,11 @@ flowchart TD
           </div>
         </section>
 
-        <!-- 13. Content — risks and mitigations -->
+        <!-- 14. Content — risks and mitigations.
+             The five risk-and-mitigation pairs were a table whose cells were
+             whole sentences, which is what put this slide furthest over the
+             body-word limit; they are the diagram below, paired one to one.
+             Decision `DL-DOC-09`. -->
         <section>
           <div class="slide-inner">
             <div class="slide-head">
@@ -1377,79 +1381,43 @@ flowchart TD
               </p>
               <h2>What Could Go Wrong, And What Answers It</h2>
             </div>
-            <table class="styled-table compact">
-              <caption>
-                Accepted risks and their mitigations
-              </caption>
-              <thead>
-                <tr>
-                  <th scope="col">Risk</th>
-                  <th scope="col">Mitigation</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td class="was">
-                    Older browsers lose support: three compatibility shims are
-                    gone and hardware-accelerated rendering is now required, which
-                    drops a long tail of legacy devices.
-                  </td>
-                  <td class="now">
-                    A number-only mode ships as a first-class, fully playable
-                    path, not a degraded fallback.
-                  </td>
-                </tr>
-                <tr>
-                  <td class="was">
-                    Development no longer starts by double-clicking the page,
-                    because module-based delivery needs a served origin.
-                  </td>
-                  <td class="now">
-                    One documented command serves the built bundle locally, and
-                    the deployment story is unchanged.
-                  </td>
-                </tr>
-                <tr>
-                  <td class="was">
-                    Rendering now depends on graphics support being present on the
-                    player's machine.
-                  </td>
-                  <td class="now">
-                    A capability probe at startup, a handler for a lost rendering
-                    context, and an automatic switch to the fallback renderer.
-                  </td>
-                </tr>
-                <tr>
-                  <td class="was">
-                    The recorded gameplay proof could silently capture a black
-                    screen, passing a file-exists check while proving nothing.
-                  </td>
-                  <td class="now">
-                    Verified software-rendering flags, plus an assertion on real
-                    rendered content rather than on duration alone.
-                  </td>
-                </tr>
-                <tr>
-                  <td class="was">
-                    The project's historical design freeze is deliberately
-                    superseded by this work.
-                  </td>
-                  <td class="now">
-                    The governing contribution guide is updated, and the original
-                    palette, colour ramp and animation timings remain the default
-                    theme.
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <div class="icon-row">
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="monitor-off"></i
+                ></span>
+                <span class="step-title">Older browsers</span>
+                <p class="step-body">Number-only mode stays playable</p>
+              </div>
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="cpu"></i
+                ></span>
+                <span class="step-title">No graphics support</span>
+                <p class="step-body">A probe swaps the renderer</p>
+              </div>
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="server"></i
+                ></span>
+                <span class="step-title">Served origin needed</span>
+                <p class="step-body">One command serves it</p>
+              </div>
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="palette"></i
+                ></span>
+                <span class="step-title">Design freeze superseded</span>
+                <p class="step-body">Original theme stays default</p>
+              </div>
+            </div>
             <p class="source-note">
-              Every decision behind these, with the alternatives weighed and the
-              risk carried, is recorded in docs/DECISION_LOG.md
+              Recorded in docs/DECISION_LOG.md
             </p>
           </div>
         </section>
 
-        <!-- 14. Section divider -->
+        <!-- 15. Section divider -->
         <section class="slide-divider">
           <div class="slide-inner">
             <span class="divider-icon" aria-hidden="true"
@@ -1464,7 +1432,11 @@ flowchart TD
           </div>
         </section>
 
-        <!-- 15. Content — operational readiness and onboarding -->
+        <!-- 16. Content — operational readiness and onboarding.
+             The readiness rows are stated at reading length rather than at
+             sentence length, which is what brought this slide inside the
+             body-word limit; docs/OBSERVABILITY.md carries the account.
+             Decision `DL-DOC-09`. -->
         <section>
           <div class="slide-inner">
             <div class="slide-head">
@@ -1474,90 +1446,38 @@ flowchart TD
               </p>
               <h2>Ready To Run, Ready To Hand Over</h2>
             </div>
-            <div class="two-column">
-              <div>
-                <table class="styled-table compact">
-                  <caption>
-                    Operational readiness
-                  </caption>
-                  <tbody>
-                    <tr>
-                      <td class="now">Health</td>
-                      <td>
-                        Six checks reported, five of which previously ran unseen
-                      </td>
-                    </tr>
-                    <tr>
-                      <td class="now">Logs</td>
-                      <td>Structured, each carrying a per-run identifier</td>
-                    </tr>
-                    <tr>
-                      <td class="now">Traces</td>
-                      <td>
-                        Input through to the renderer, including the frame
-                        boundary nothing measured before
-                      </td>
-                    </tr>
-                    <tr>
-                      <td class="now">Metrics</td>
-                      <td>A portable snapshot, plus a dashboard template</td>
-                    </tr>
-                    <tr>
-                      <td class="now">Delivery</td>
-                      <td>
-                        In the page rather than over a network, because there is
-                        no server
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+            <div class="icon-row">
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="download"></i
+                ></span>
+                <span class="step-title">Install</span>
+                <p class="step-body"><code>npm install</code></p>
               </div>
-              <div>
-                <p class="column-title">
-                  <i data-lucide="rocket" aria-hidden="true"></i>
-                  Onboarding
-                </p>
-                <div class="icon-row">
-                  <div class="step">
-                    <span class="step-icon" aria-hidden="true"
-                      ><i data-lucide="download"></i
-                    ></span>
-                    <span class="step-title">Install</span>
-                    <p class="step-body"><code>npm install</code></p>
-                  </div>
-                  <div class="step">
-                    <span class="step-icon" aria-hidden="true"
-                      ><i data-lucide="package"></i
-                    ></span>
-                    <span class="step-title">Build</span>
-                    <p class="step-body"><code>npm run build</code></p>
-                  </div>
-                  <div class="step">
-                    <span class="step-icon" aria-hidden="true"
-                      ><i data-lucide="upload"></i
-                    ></span>
-                    <span class="step-title">Deploy</span>
-                    <p class="step-body">Copy the folder to any host</p>
-                  </div>
-                </div>
-                <ul>
-                  <li>
-                    No server, no server-side rendering, no API routes, no
-                    serverless functions.
-                  </li>
-                  <li>
-                    <code>docs/OBSERVABILITY.md</code> is the full account.
-                  </li>
-                  <li>
-                    <code>npm run preview</code> serves the bundle locally.
-                  </li>
-                </ul>
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="package"></i
+                ></span>
+                <span class="step-title">Build</span>
+                <p class="step-body"><code>npm run build</code></p>
+              </div>
+              <div class="step">
+                <span class="step-icon" aria-hidden="true"
+                  ><i data-lucide="upload"></i
+                ></span>
+                <span class="step-title">Deploy</span>
+                <p class="step-body">Copy the folder anywhere</p>
               </div>
             </div>
+            <ul>
+              <li>Health, logs, traces and metrics ship in the page.</li>
+              <li>No server, no API, no runtime process.</li>
+              <li>docs/OBSERVABILITY.md is the full account.</li>
+            </ul>
           </div>
         </section>
 
-        <!-- 16. Closing -->
+        <!-- 17. Closing -->
         <section class="slide-closing">
           <div class="slide-inner">
             <p class="eyebrow">
@@ -1567,7 +1487,7 @@ flowchart TD
             <h2>Shipped, Observable, Ready To Extend</h2>
             <ul>
               <li>Take the recorded run as the acceptance artifact.</li>
-              <li>Quote a seed whenever a defect is reported.</li>
+              <li>Quote the seed and ordered moves in defect reports.</li>
               <li>Stretch scope stays deferred until it is prioritised.</li>
             </ul>
             <div class="closing-foot">
@@ -1586,20 +1506,46 @@ flowchart TD
     </div>
 
     <!-- Classic, non-module builds throughout: a module script would be
-         blocked by the file:// scheme, and this deck is opened from disk. -->
-    <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+         blocked by the file:// scheme, and this deck is opened from disk.
+         Each carries the sha384 hash of its pinned bytes; jsdelivr answers with
+         `access-control-allow-origin: *`, so the CORS mode integrity checking
+         requires is satisfied from a served origin and from disk alike.
+         DL-DOC-09. -->
+    <script
+      src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"
+      integrity="sha384-M/JtqCVlLcK9lwVnBnMXP0V577CBULkjodKsR/PITOe4MSKNbbwqCemEyluOw0+5"
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.min.js"
+      integrity="sha384-Wm9qzEgq4j1jEnuFK2FxKTlwuhbV2QqtGhcchvjDoKxeJ7WWAW7fysBq+1s6myfX"
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"
+      integrity="sha384-ieG+IKD0d/ZPXyCBTMVAbqsQdns8QGJR/e26WMw7M4fkaI/rHcS/YIoi+ah9WGge"
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    ></script>
 
     <script>
       (function () {
         'use strict';
 
         // Mermaid renders on demand rather than on load, so reveal.js decides
-        // when a figure is drawn.
+        // when a figure is drawn: `mermaid.run()` over the hosts belonging to
+        // the current slide, marked by Mermaid's own `data-processed`.
+        // DL-DOC-07.
+        //
+        // `securityLevel` is stated rather than left to the default: every
+        // diagram source in this file is authored here, and the strict level is
+        // what keeps that true if a later default ever loosened. DL-DOC-09.
         if (window.mermaid) {
           window.mermaid.initialize({
             startOnLoad: false,
+            securityLevel: 'strict',
             theme: 'base',
             themeVariables: {
               primaryColor: '#F2F0FE',

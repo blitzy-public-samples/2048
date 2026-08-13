@@ -1,10 +1,10 @@
 // TypeScript configuration for the tooling sources: the four root config
 // files — vite.config.ts, vitest.config.ts, vitest.snapshot.config.ts and
-// playwright.config.ts — each executed by its own tool's loader. No file here
-// reads a Node global. tsconfig.json covers the browser-context sources, the
-// Playwright specs under tests/e2e/ included, so the two projects partition the
-// repository's root file set and share no root file. `npm run typecheck` runs
-// both in sequence.
+// playwright.config.ts — each executed by its own tool's loader, together with
+// the suites that read the filesystem. tsconfig.json covers the browser-context
+// sources, the Playwright specs under tests/e2e/ included, so the two projects
+// partition the repository's root file set and share no root file.
+// `npm run typecheck` runs both in sequence.
 //
 // Supersedes .jshintrc, which is deleted along with Rakefile, the only other
 // build-tooling file the repository had. One .jshintrc check has a compiler
@@ -44,9 +44,10 @@
     // `/// <reference types="node" />` in vite's own declaration entry point is
     // covered by `skipLibCheck` below.
     // `node` is listed for the six read-only gates under tests/unit/quality/,
-    // each of which opens files with `node:fs`. It is listed HERE and not in
-    // tsconfig.json so the application's own type universe stays browser-only:
-    // nothing under src/ can reach a Node global.
+    // each of which opens files with `node:fs`, and for the Playwright spec,
+    // which stats the recorded video through `node:fs/promises`. It is listed
+    // HERE and not in tsconfig.json so the application's own type universe stays
+    // browser-only: nothing under src/ can reach a Node global. DL-PW-06.
     "types": ["node"],
 
     // Permits the explicit `.ts` specifier vite.config.ts uses to reach
@@ -75,9 +76,9 @@
   },
 
   // The tooling file set, listed exhaustively: the four root configuration
-  // files and nothing else. src/, js/ and every tests/ subtree — tests/e2e
-  // included — are unmatched here; tsconfig.json's `tests/**/*.ts` pattern
-  // claims them.
+  // files, the read-only gates that open files with `node:fs`, and the
+  // Playwright spec. src/ and every other tests/ subtree are unmatched here;
+  // tsconfig.json's `tests/**/*.ts` pattern claims them.
   //
   // A module a config file imports still enters this project through that
   // import: vite.config.ts imports src/theme/tokens.ts for the Sass token

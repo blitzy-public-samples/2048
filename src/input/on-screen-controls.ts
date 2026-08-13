@@ -1730,6 +1730,38 @@ export function mountOnScreenControls(
   }
 
   /**
+   * ADDED: the reachability of the layer, as one comparable string.
+   *
+   * Read over the layer's ANCHORS rather than over every control: a generated
+   * control's only inert ancestry is its group's, since this layer never marks
+   * an individual control inert, and an adopted markup control sits wherever
+   * index.html placed it. That is at most six ancestry walks where a pass makes
+   * one per control. DL-CONTROL-12.
+   *
+   * @returns One character per anchor, in a fixed order.
+   */
+  const reachabilityOf = (): string => {
+    let verdict = '';
+
+    for (const group of generatedRoots) {
+      verdict += isInert(group) ? '1' : '0';
+    }
+
+    for (const record of records) {
+      if (!record.generated) {
+        verdict += isInert(record.element) ? '1' : '0';
+      }
+    }
+
+    return verdict;
+  };
+
+  /**
+   * ADDED: the reachability the last pass was made against. DL-CONTROL-12.
+   */
+  let appliedReachability = '';
+
+  /**
    * Applies the resolved keymap and context to every control: names first, so
    * a remapped key is announced, then availability.
    *
@@ -1797,6 +1829,10 @@ export function mountOnScreenControls(
 
     applyGroupAvailability(padGroup, padAvailable);
     applyGroupAvailability(actionGroup, actionAvailable);
+
+    // ADDED: recorded at the END of the pass, so a focus-driven refresh can tell
+    // whether anything it reads has moved since the last one. DL-CONTROL-12.
+    appliedReachability = reachabilityOf();
 
     // ADDED: the one report of the reachability term. An inert control answers
     // every liveness probe as live, so without this the withholding — and the
@@ -1895,31 +1931,96 @@ export function mountOnScreenControls(
   // the control that holds it blurs it, which fires `focusout` from inside the
   // apply. The second pass would compute the same verdicts, so it is dropped
   // rather than queued. DL-CONTROL-11.
+  //
+  // CHANGED: a transition is ONE refresh, scheduled on a microtask, and it is
+  // made only where the keymap, the context or the layer's reachability has
+  // moved since the last pass. DL-CONTROL-12.
   if (typeof options.context === 'function' && ownerDocument !== null) {
     let reapplying = false;
 
-    const onFocusChange = (event: Event): void => {
+    /** The event type that opened the transition being coalesced. */
+    let scheduledEvent: string | null = null;
+
+    /**
+     * Re-applies the layer for a settled focus transition.
+     *
+     * @param event Type of the event that opened the transition.
+     */
+    const refreshFromFocus = (event: string): void => {
       if (unmounted || reapplying) {
+        return;
+      }
+
+      const keymap = resolveKeymap();
+      const context = resolveContext();
+      const reachability = reachabilityOf();
+
+      if (
+        keymap === activeKeymap &&
+        context === activeContext &&
+        reachability === appliedReachability
+      ) {
+        reporter.count(FOCUS_REFRESH_METRIC, {
+          event,
+          context,
+          applied: false,
+        });
+
         return;
       }
 
       reapplying = true;
 
       try {
-        apply(resolveKeymap(), resolveContext());
+        apply(keymap, context);
         reporter.count(FOCUS_REFRESH_METRIC, {
-          event: event.type,
+          event,
           context: activeContext,
+          applied: true,
         });
       } finally {
         reapplying = false;
       }
     };
 
+    const onFocusChange = (event: Event): void => {
+      if (unmounted || reapplying) {
+        return;
+      }
+
+      // The second event of a pair joins the first one's scheduled pass.
+      if (scheduledEvent !== null) {
+        return;
+      }
+
+      scheduledEvent = event.type;
+
+      const run = (): void => {
+        const opened = scheduledEvent ?? event.type;
+
+        scheduledEvent = null;
+        refreshFromFocus(opened);
+      };
+
+      const queue = globalThis.queueMicrotask;
+
+      if (typeof queue === 'function') {
+        queue(run);
+
+        return;
+      }
+
+      void Promise.resolve().then(run);
+    };
+
     ownerDocument.addEventListener('focusin', onFocusChange, true);
     ownerDocument.addEventListener('focusout', onFocusChange, true);
 
     reverts.push((): void => {
+      // A scheduled pass cannot be cancelled, so it is disarmed: `unmounted` is
+      // read by both members above, and the slot is cleared so a later mount
+      // over the same document schedules its own.
+      scheduledEvent = null;
       ownerDocument.removeEventListener('focusin', onFocusChange, true);
       ownerDocument.removeEventListener('focusout', onFocusChange, true);
     });

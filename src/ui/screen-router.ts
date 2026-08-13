@@ -82,7 +82,8 @@
 // It renders no reward card either: `SCREEN_MODULES` names the module that
 // renders each state, and this module drives that module's lifecycle.
 //
-// Decisions: DL-ROUTER-01, DL-ROUTER-02, DL-ROUTER-03 (docs/DECISION_LOG.md).
+// Decisions: DL-ROUTER-01, DL-ROUTER-02, DL-ROUTER-03, DL-ROUTER-43,
+//   DL-ROUTER-44, DL-ROUTER-45 (docs/DECISION_LOG.md).
 
 import type { StageGoal, StageGoalProgress } from '../config/stage-config';
 import { evaluateStageGoal } from '../config/stage-config';
@@ -1773,14 +1774,78 @@ export function createScreenRouter(
    * them, AND the returned handle removes them from that list as it releases,
    * so nothing released is held to teardown. Releasing twice is a no-op.
    *
+   * ALL OR NOTHING. CHANGED: the group is taken through `register`, which hands
+   * each release to `hold` as the source returns it, so a registration that
+   * refuses part-way through the group is rolled back and rethrown. The groups
+   * were built as array literals, so a refusal from a later `on()` discarded the
+   * half-built array and left every registration before it attached to the
+   * source with no reference to it anywhere — the router went on acting on an
+   * input surface or an engine it had reported it was not attached to, and
+   * neither `destroy()` nor the handle could reach them. DL-ROUTER-44.
+   *
    * @param source Object the registrations were made on.
-   * @param releases Releases the registrations returned.
+   * @param register Makes the registrations, handing each release to `hold`.
    * @returns The handle.
+   * @throws Whatever a registration threw, after every earlier one is released.
    */
   const holdAttachment = (
     source: object,
-    releases: readonly (() => void)[],
+    register: (hold: (release: () => void) => void) => void,
   ): Attachment => {
+    const releases: (() => void)[] = [];
+
+    /**
+     * Releases every entry and removes it from `subscriptions`, whichever
+     * release refuses.
+     *
+     * CHANGED: the loop stopped at the first refusal, so one refusing release
+     * stranded every registration behind it both attached AND listed — and
+     * `destroy()` then called them a second time. DL-ROUTER-44.
+     */
+    const releaseAll = (): void => {
+      let raised: unknown = null;
+      let failed = false;
+
+      for (const release of releases) {
+        const at = subscriptions.indexOf(release);
+
+        if (at !== -1) {
+          subscriptions.splice(at, 1);
+        }
+
+        try {
+          release();
+        } catch (error: unknown) {
+          if (!failed) {
+            failed = true;
+            raised = error;
+          }
+        }
+      }
+
+      if (failed) {
+        throw raised;
+      }
+    };
+
+    try {
+      register((release: () => void): void => {
+        releases.push(release);
+      });
+    } catch (error: unknown) {
+      try {
+        // Nothing has reached `subscriptions` yet, so this only detaches.
+        releaseAll();
+      } catch {
+        // A release that refuses during a rollback is contained: the
+        // registration failure is the one the caller has to act on.
+      }
+
+      releases.length = 0;
+
+      throw error;
+    }
+
     for (const release of releases) {
       subscriptions.push(release);
     }
@@ -1795,16 +1860,7 @@ export function createScreenRouter(
         }
 
         released = true;
-
-        for (const release of releases) {
-          const at = subscriptions.indexOf(release);
-
-          if (at !== -1) {
-            subscriptions.splice(at, 1);
-          }
-
-          release();
-        }
+        releaseAll();
       },
     };
   };
@@ -2626,6 +2682,12 @@ export function createScreenRouter(
     // verdict outlived its own state and was still readable on run start.
     // Blanked on entering any NON-terminal state, before this state's own line
     // is read. DL-LIVE-06.
+    //
+    // The operation called here WITHDRAWS the verdict rather than blanking a
+    // node: ./a11y/live-region drains the queued announcement and the pending
+    // utterance as well, so a verdict this router has just left behind cannot be
+    // written back by the announcer's deferred scheduler a task later.
+    // DL-LIVE-07.
     if (!(screen in TERMINAL_VERDICTS_BY_SCREEN)) {
       const blank = announcer.clearAssertive?.bind(announcer);
 
@@ -2944,8 +3006,14 @@ export function createScreenRouter(
     typeof (value as { seed?: unknown }).seed === 'string' &&
     typeof (value as { score?: unknown }).score === 'number';
 
-  /** Reports a screen change and re-applies the context to the controls. */
-  const settle = (): void => {
+  /**
+   * Reports a screen change and re-applies the context to the controls.
+   *
+   * @param refreshed Whether the caller has already refreshed the controls for
+   *   this settle, in which case the report is made and the refresh is not
+   *   repeated. ADDED for DL-ROUTER-45.
+   */
+  const settle = (refreshed = false): void => {
     const next = screen();
 
     if (next !== lastScreen) {
@@ -2956,6 +3024,10 @@ export function createScreenRouter(
         context: context(),
       });
       lastScreen = next;
+    }
+
+    if (refreshed) {
+      return;
     }
 
     refreshControls();
@@ -3519,18 +3591,25 @@ export function createScreenRouter(
   reflectTriggerExpansion(false);
 
 
-  const closeSettings = (): boolean => {
-    if (refuseAfterDestroy('closeSettings')) {
-      return false;
-    }
-
-    // `ACTION_SCREENS.closeSettings` names `'settings'` and nothing else, so
-    // this is the `!settingsOpen` refusal expressed through the one decision
-    // every other action resolves against. Decision DL-ROUTER-18.
-    if (!authorizes('closeSettings')) {
-      return false;
-    }
-
+  /**
+   * ADDED: the mechanics of a settings close, with no authorization and no
+   * settle.
+   *
+   * `closeSettings()` is the authorized entry point and `destroy()` is the
+   * unauthorized one. `destroy()` raises `tearingDown` before it closes, and
+   * `authorizes()` refuses every action while that flag is up — so the close it
+   * asked for did nothing at all: the dialog stayed visible, the focus trap was
+   * never released, the background it had made inert stayed inert, and
+   * `onSettingsClose` never fired. A destroyed router left the page trapped in a
+   * dialog belonging to a router that no longer existed. DL-ROUTER-43.
+   *
+   * @param refresh Whether the control layer is refreshed as the trap lifts
+   *   inertness. False during teardown, where there is no shell left to
+   *   re-present.
+   * @returns Whether this close refreshed the control layer, so the caller's
+   *   `settle()` does not walk every managed control a second time.
+   */
+  const performSettingsClose = (refresh: boolean): boolean => {
     settingsOpen = false;
 
     // Released BEFORE the panel is hidden: a trap restores focus to the
@@ -3548,15 +3627,32 @@ export function createScreenRouter(
     // first; the second is only answered once the release has lifted the
     // inertness, so the refresh runs from inside the release, between the lift
     // and the restore. It was called here, before the release, while
-    // authorization was the only term. `settle()` still refreshes, which raises
-    // the refresh counter twice per close. DL-ROUTER-41 supersedes
-    // DL-ROUTER-40; the window itself is DL-FOCUS-08.
-    engaged?.release({ beforeRestore: refreshControls });
+    // authorization was the only term. DL-ROUTER-41 supersedes DL-ROUTER-40; the
+    // window itself is DL-FOCUS-08.
+    //
+    // CHANGED: `settle()` used to refresh a second time, which walked every
+    // managed control twice per close. Whichever branch below performs the
+    // refresh says so, and `settle()` reports the screen change without
+    // repeating it. The teardown close passes `refresh` false, so neither branch
+    // runs and `settle()` is the only refresh there. DL-ROUTER-45.
+    let refreshed = false;
+
+    engaged?.release(
+      refresh
+        ? {
+            beforeRestore: (): void => {
+              refreshControls();
+              refreshed = true;
+            },
+          }
+        : {},
+    );
 
     // No trap to release, so nothing lifted inertness and nothing re-presented
     // the shell: the refresh the release would have run happens here instead.
-    if (engaged === null) {
+    if (engaged === null && refresh) {
       refreshControls();
+      refreshed = true;
     }
 
     setHidden(panelElement ?? panel, true);
@@ -3574,7 +3670,37 @@ export function createScreenRouter(
       });
     }
 
-    settle();
+    return refreshed;
+  };
+
+  const closeSettings = (): boolean => {
+    if (refuseAfterDestroy('closeSettings')) {
+      return false;
+    }
+
+    // `ACTION_SCREENS.closeSettings` names `'settings'` and nothing else, so
+    // this is the `!settingsOpen` refusal expressed through the one decision
+    // every other action resolves against. Decision DL-ROUTER-18.
+    if (!authorizes('closeSettings')) {
+      return false;
+    }
+
+    settle(performSettingsClose(true));
+
+    return true;
+  };
+
+  /**
+   * ADDED: closes the settings dialog during teardown, past authorization.
+   *
+   * @returns Whether a dialog was standing and was closed.
+   */
+  const closeSettingsForTeardown = (): boolean => {
+    if (!settingsOpen) {
+      return false;
+    }
+
+    performSettingsClose(false);
 
     return true;
   };
@@ -4148,13 +4274,13 @@ export function createScreenRouter(
 
         input = attached;
 
-        inputAttachment = holdAttachment(attached, [
-          attached.on('openSettings', (): void => {
+        inputAttachment = holdAttachment(attached, (hold): void => {
+          hold(attached.on('openSettings', (): void => {
             openSettings();
-          }),
-          attached.on('closeSettings', (): void => {
+          }));
+          hold(attached.on('closeSettings', (): void => {
             closeSettings();
-          }),
+          }));
 
           // `cancel` is Escape everywhere. The trap's own `onEscape` covers
           // the press that lands inside the dialog; this covers the press the
@@ -4162,12 +4288,12 @@ export function createScreenRouter(
           //
           // The reward screen is NOT cancellable: the stage is cleared and a
           // relic must be taken. DL-ROUTER-15.
-          attached.on('cancel', (): void => {
+          hold(attached.on('cancel', (): void => {
             closeSettings();
-          }),
+          }));
 
           // The digit bindings of ../input/keymap publish a zero-based index.
-          attached.on('selectReward', (index: number): void => {
+          hold(attached.on('selectReward', (index: number): void => {
             // `rewardOpen` says a screen is up; `authorizes` says it is the
             // screen in force. The two differ exactly when an unrelated modal
             // is on top of it, which is the press this refuses. Decision
@@ -4193,8 +4319,8 @@ export function createScreenRouter(
             }
 
             chooseReward(chosen.id, 'keyboard');
-          }),
-        ]);
+          }));
+        });
 
         reporter.count(ATTACHMENT_METRIC, {
           context: REPORT_CONTEXT,
@@ -4276,27 +4402,27 @@ export function createScreenRouter(
       // Subscribed through the append-only `on` ported from
       // js/keyboard_input_manager.js L18-L32: a registration here displaces no
       // registration already made.
-      const releases: (() => void)[] = [
-        target.on('state:commit', readCommit),
-        target.on('stage:start', readStageStart),
-        target.on('move:after', readMoveAfter),
-        target.on('stage:end', readStageEnd),
+      const attachment = holdAttachment(target, (hold): void => {
+        hold(target.on('state:commit', readCommit));
+        hold(target.on('stage:start', readStageStart));
+        hold(target.on('move:after', readMoveAfter));
+        hold(target.on('stage:end', readStageEnd));
 
         // Read-only: `cancelled` is never written from here, so no move is
         // vetoed by the screen flow.
-        target.on('move:before', (payload): void => {
+        hold(target.on('move:before', (payload): void => {
           pendingDirection = payload.direction;
-        }),
+        }));
 
-        target.on('tile:merge', (payload: TileMergeEvent): void => {
+        hold(target.on('tile:merge', (payload: TileMergeEvent): void => {
           announceGameplay((): Announcement => ({
             kind: 'merge',
             resultValue: payload.resultValue,
             scoreDelta: payload.scoreDelta,
           }));
-        }),
+        }));
 
-        target.on('tile:spawn', (payload: TileSpawnEvent): void => {
+        hold(target.on('tile:spawn', (payload: TileSpawnEvent): void => {
           announceGameplay((): Announcement => ({
             kind: 'spawn',
             value: payload.value,
@@ -4305,10 +4431,9 @@ export function createScreenRouter(
                 ? undefined
                 : { x: payload.position.x, y: payload.position.y },
           }));
-        }),
-      ];
+        }));
+      });
 
-      const attachment = holdAttachment(target, releases);
 
       engineAttachment = attachment;
 
@@ -4349,7 +4474,10 @@ export function createScreenRouter(
 
       tearingDown = true;
 
-      closeSettings();
+      // CHANGED: the teardown close, which does not consult `authorizes()` —
+      // the flag raised on the line above made every authorized close a no-op.
+      // DL-ROUTER-43.
+      closeSettingsForTeardown();
       hideReward();
       releaseScreenTrap();
 

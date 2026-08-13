@@ -36,7 +36,7 @@
 //   TR-MESH-10  target-only row               `createTileMeshFactory()` and
 //                                             `cellArrayIndex()`
 //
-// Decisions: DL-MESH-01, DL-MESH-02, DL-MESH-03, DL-MESH-04
+// Decisions: DL-MESH-01, DL-MESH-02, DL-MESH-03, DL-MESH-04, DL-MESH-05
 // (docs/DECISION_LOG.md).
 
 import {

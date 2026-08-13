@@ -291,6 +291,16 @@ three channels to the logger and to the metrics registry, and the preference, UI
 sound, run and RNG adapters are all narrowed from that one hub (`DL-MAIN-03`,
 `DL-MAIN-07`).
 
+Two of the narrowed contracts — `InputReporter` and `UiReporter` — carry an
+optional fourth-position channel, `failure(level, message, thrown, fields)`. It
+takes the caught value **as the value it is**, at the caller's own severity, so
+it reaches `logger.failure` and is serialised, bounded and redacted there. A
+sink that implements none still gets a record: the safe wrapper logs at that
+same level with the value's class in an `errorName` field and **none of its
+text**. This is the channel a screen uses instead of stringifying a rejection
+into a field of its own, which is how arbitrary text used to reach the ring
+buffer and the exported snapshot (`DL-SETTINGS-07`, `DL-SUMMARY-17`).
+
 **`src/main.ts` is the only file that connects the two sides.** It is also the
 only file that constructs the five observability modules, and it holds the
 authoritative map of which collaborator spans which boundary, as a comment block
@@ -305,12 +315,31 @@ synchronously with a single argument (`js/keyboard_input_manager.js` L18-L32).
 new subscriber is added to the end of the list and no existing subscriber is
 displaced, reordered or informed.
 
-That is the mechanical reason the whole observability stack attaches **without a
-single engine-side call site**. `attachEngineTracing(events, tracer)` subscribes
-through the same `on` any other consumer uses, opens a turn span on `move:before`
-and closes it on `state:commit`. Nothing in `src/engine` knows tracing exists. A
-suite asserts the non-interference directly, in
+That is the mechanical reason **`attachEngineTracing(events, tracer)` needs no
+engine-side call site at all**: it subscribes through the same `on` any other
+consumer uses, opens a turn span on `move:before` and closes it on
+`state:commit`, and nothing in `src/engine` knows it exists. A suite asserts the
+non-interference directly, in
 `tests/unit/engine/engine-observer-non-interference.test.ts`.
+
+**The rest of the stack is not zero-touch, and `DL-MAIN-05` is explicit that the
+two are not the same claim.** What an event carries is a payload; what it does
+not carry is a refused direction, a span that has to wrap the resolution walk, or
+a throw the bus contained. Those are reported through contracts the producing
+subsystem **declares itself and calls at its own boundaries** — `EngineReporter`,
+`InputReporter`, `StorageReporter`, `RenderReporter`, `RunReporter`,
+`RngReporter`, `SoundReporter` and `UiReporter`, plus the `HookBusTracing` and
+`BoundaryTracing` wrappers — each with a no-op default, and each satisfied by an
+adapter `src/main.ts` injects (`DL-MAIN-05`, `DL-MAIN-07`, `DL-HOOKBUS-05`). So
+the engine holds a `reporter`, raises its counters through it and routes
+resolution through an injected wrapper; adding a boundary still means editing the
+subsystem that owns it.
+
+The property that holds without exception is the **direction of the dependency**,
+not the absence of call sites: no module under `src/engine`, `src/input`,
+`src/relics` or `src/render` imports anything from `src/observability`, which is
+why the whole stack can be deleted and the game still compiles, and why the
+instrumentation could be added without any subsystem learning who implements it.
 
 ### 2.4 The hazard this creates
 
@@ -340,7 +369,7 @@ compares against. `isLogLevel` narrows an arbitrary value to one.
 | Member | What it carries |
 |---|---|
 | `level` | one of the four `LogLevel` names |
-| `message` | the message, verbatim |
+| `message` | the message the caller wrote, carried as written — with one exception, the record budget below |
 | `timestamp` | wall-clock time of emission, ISO 8601; empty when the wall clock could not be read |
 | `elapsedMs` | monotonic offset from `performance.now()`, so records order correctly even if the wall clock jumps |
 | `correlationId` | the run correlation identifier — on **every** record |
@@ -382,6 +411,30 @@ does so. A field bag is deep-normalised on the way in — cycles replaced, depth
 and breadth capped, strings bounded, forbidden keys dropped — within the limits
 `logRecordBounds` states, and the record shares no object with the caller's bag
 at any depth (`DL-LOG-06`).
+
+**The record budget, and what it does to `message`.** A record whose JSON
+exceeds `logRecordBounds.record` — `8192` characters — is reduced before it is
+frozen, in this order, stopping as soon as it fits (`DL-LOG-06`):
+
+1. the whole field bag is replaced by the single field
+   `logRecordBounds.truncatedValue` under the key `__truncated__`;
+2. the serialised error's `stack` is dropped, its `name`, `message` and `cause`
+   chain kept;
+3. **`message` is clamped to `logRecordBounds.errorMessage` — `512`
+   characters — with `logRecordBounds.truncationSuffix` appended**
+   (`DL-DOC-09`).
+
+So `message` is the caller's text in every ordinary record and in every record
+this product emits today, and the one thing that shortens it is that budget.
+Two things it is **not**: it is not redacted, and it is not a place to put a
+value that must not be published. `redactMessage` — the `data:` URI, the
+credential-like assignment and the over-long quoted run of `DL-LOG-10` — is
+applied to the **message of a caught value**, on the emission path unless the
+logger carries `errorDetail: 'full'` and on `toJsonLines` and `snapshot`
+regardless; it is never applied to this member. A caller with something to say
+about a failure puts the value in the third argument, where `failure` serialises
+and redacts it, and keeps the message a constant sentence — which is what
+`DL-SUMMARY-17` and `DL-SETTINGS-07` exist to make easy.
 
 ### 3.1 Correlation identifiers
 
@@ -468,7 +521,9 @@ into `game2048_turn_latency_milliseconds`.
 ### 4.1 The two functions that make tracing zero-touch
 
 **`attachEngineTracing(events, tracer)`** subscribes through the append-only
-`EngineEventEmitter.on`, so tracing attaches with **no engine-side call site**.
+`EngineEventEmitter.on`, so **this** tracing attaches with no engine-side call
+site — the two functions of this section are the two that are zero-touch, and the
+wrappers of the paragraph below §4.1 are the ones that are not.
 It opens the `engine.turn` span on `move:before` and closes it on
 `state:commit`, opens `engine.stage` across a stage, and returns a **callable**
 `EngineTracingSubscription`: calling it detaches every listener and closes
@@ -481,15 +536,76 @@ into the turn histogram (`DL-TRACE-08`, `DL-TRACE-11`). The stage span is opened
 off the parent stack rather than under the turn in progress (`DL-TRACE-12`), and
 frame spans are opened as roots (`DL-TRACE-09`).
 
-**`Tracer.frameLifecycleHooks()`** returns the `FrameLifecycleHooks` pair
-`onFrameBegin` and `onFrameEnd`, which is exactly the pair
-`src/render/render-loop.ts` accepts. This is what measures the
+**Every path an `engine.turn` span closes on.** One is opened on every
+`move:before` the emitter delivers — including one that will move nothing — so
+every attempt the engine got as far as announcing leaves a record, and
+`SPAN_ATTRIBUTES.outcome` on it is what says which path it took. All nine are
+tabulated rather than summarised because the behaviour is a nine-way branch and
+a reader needs to tell a missing span from a documented outcome (`DL-DOC-10`):
+
+| `outcome` | The turn it closed | Closed by | In `turn_latency_milliseconds` |
+|---|---|---|---|
+| `committed` | a slide that moved at least one tile | the `state:commit` listener | yes — this is the only outcome that takes a sample |
+| `unmoved` | **an idle input: a legal direction that moved nothing.** The span is opened, attributed with `moved: false` and the score, over, won and terminated flags, and closed | the `move:after` listener, on `moved: false` | no |
+| `effect` | a turn that changed the board without sliding a tile — an `onBeforeMove` handler reseated it (an undo, a permutation, an excision) and the slide then resolved to nothing, or withdrew the move after the board had already changed | `settleMove`, from `{resolution: 'idle' \| 'cancelled', committed: true}` | no |
+| `cancelled` | a move an `onBeforeMove` veto withdrew with no state change | the `move:before` listener where the veto was already on the payload it read, and `settleMove` where it was cast behind that listener | no |
+| `blocked` | a move the engine refused **before emitting anything** — the game is over, or the direction was outside the four | `settleMove`, and only where a span is open: no `move:before` was emitted, so ordinarily there is none and the attempt is recorded by its counter alone | no |
+| `failed` | a turn whose pipeline threw | `settleMove` | no |
+| `superseded` | a turn still open when the next `move:before` arrived | the next turn's listener | no |
+| `unwound` | a span left open beneath one that closed, unwound off the stack | `Span.end` on the parent | no |
+| `detached` | a span still open when the subscription was called to detach | `EngineTracingSubscription` | no |
+
+So an idle input is **recorded** — as an `unmoved` span carrying its
+attributes — and what it does not do is take a turn-latency sample, because that
+histogram measures resolved slides. `game2048_turns_total` counts the same
+resolved slides, so an idle turn moves neither the counter nor the histogram
+while still appearing in `tracer.snapshot()`.
+
+`settleMove(result)` also **reconciles the attributes it can only know at the
+end**. The `cancelled` attribute is written from the resolution the engine
+actually reached, and the direction from `resolvedDirection` where the caller
+reports one, because both are decided after the span was opened: a relic may
+veto or redirect a move in a handler registered behind the tracer's own
+`move:before` listener, and the payload the tracer read on the way in is a
+snapshot from before that. A turn that COMMITTED closed its own span at
+`state:commit`, so it is the turn a caller settles — vetoed,
+redirected-and-withdrawn, blocked, idle or failed — whose attributes this
+reconciliation reaches (`DL-TRACE-16`).
+
+**A turn span counts its own merges and spawns.** The `tile:merge` and
+`tile:spawn` events are recorded as span events and tallied into
+`SPAN_ATTRIBUTES.merges` and `SPAN_ATTRIBUTES.spawns`, and both tallies are
+cleared when a turn span opens and advanced only while one is open. The tiles a
+`setup()`, a `restart()` or a `startStage()` inserts therefore land on no span
+rather than on the next turn's attributes; `game2048_spawns_total` counts them
+as it always did (`DL-TRACE-15`).
+
+**`Tracer.frameLifecycleHooks()`** returns the three `FrameLifecycleHooks`
+members `onFrameBegin`, `onFrameEnd` and `onFrameError`, which are exactly the
+three `src/render/render-loop.ts` accepts. This is what measures the
 **frame-callback seam** — the system's **only** asynchronous boundary, and one the
 product never measured: before this work no JavaScript ran per frame at all, as
 every animation was a CSS transition. The loop also exposes `getFrameStats()` and
 `resetFrameStats()` for the same numbers without a tracer, and the tracer's own
-`frameStats()` returns a `FrameTraceStats`. `src/main.ts` hands the pair to the
+`frameStats()` returns a `FrameTraceStats`. `src/main.ts` hands all three to the
 loop at construction.
+
+`onFrameError` is the third member because the loop **contains** a throw from
+its begin hook, from any registered callback and from its end hook: it counts
+it, reports it through its own render sink and runs the next frame. Without a
+channel for that, the pair above was told the frame began and ended and never
+that anything inside it failed, so a frame that threw closed a span reading as a
+clean frame. The announcement records the value on the **open** `render.frame`
+span through `Span.recordError` — serialised on the logger's redacting path, so
+the span carries `failed: true` and a bounded message — and writes
+`SPAN_ATTRIBUTES.failureSource`, one of `frame-begin`, `frame-callback` or
+`frame-end`, at the moment of the announcement rather than at the close, so a
+span the next frame supersedes still names what failed inside it. The span then
+closes under `SPAN_OUTCOMES.failed`. Nothing is logged from the hook itself: the
+loop already reports every throw it contains, and a second record of one event
+is the duplication this repository has removed elsewhere. A failure announced
+with no frame span open is reported as a tracer anomaly (`DL-TRACE-14`,
+`DL-LOOP-05`).
 
 The remaining boundaries are wrapped by **`createBoundaryTracing(tracer)`**,
 which returns `traceInput`, `traceMoveResolution`, `traceHookDispatch`,
@@ -586,11 +702,17 @@ Every one is anchored in a number this product already held:
 - **16** is the frame budget itself, the literal in the retired shim at
   `js/animframe_polyfill.js` L13: `Math.max(0, 16 - (currTime - lastTime))`.
 - **32 and 64** are two and four frame budgets.
-- **100, 200, 600, 800 and 1200** are the stylesheet's own animation cadence:
-  `$transition-speed: 100ms` at `style/main.scss` L22 and the move transition at
-  L329; `appear 200ms` at L430 and `pop 200ms` at L450; `move-up 600ms` at L104;
-  and `fade-in 800ms` after `$transition-speed * 12`, which is the 1200 ms
-  overlay delay, at L234.
+- **100, 200, 600, 800 and 1200** are the stylesheet's own animation cadence.
+  Where each is declared **today**: `$transition-speed: 100ms` at
+  `style/_tokens.scss` L39, applied to the move transition at `style/main.scss`
+  L567; `appear 200ms` at `style/main.scss` L670 and `pop 200ms` at L690;
+  `move-up 600ms` at L141; and `fade-in 800ms` after `$transition-speed * 12`,
+  which is the 1200 ms overlay delay, at L384. `src/theme/tokens.ts` `motion`
+  carries the same five numbers for the renderer. The positions the implementation plan cites for
+  these values — `style/main.scss` L22, L104, L234, L329, L430 and L450 — are
+  **pre-migration**: they belong to the 549-line source this build replaced, and
+  the token block moved to `style/_tokens.scss` when it was extracted, so those
+  line numbers do not resolve against the current stylesheet.
 - **400** fills the gap between 200 and 600, and **2000** is the overflow
   shoulder past the longest animation.
 
@@ -738,6 +860,19 @@ and a health check reports it now (`DL-MAIN-35`, `DL-HEALTH-08`):
   reports `localStorage`, because the store in use has not changed — only its
   writability has.
 
+A live reader is an injected function, so it can also **throw**, and a reader
+that throws is not a reader that reported nothing: the check **fails**, under
+the
+detail *the live storage verdict could not be read, so whether writes are being
+refused is unknown*, with `liveReaderFailed: true` in its `data` and the thrown
+value serialised onto the result's `error`. That is what puts it in the `warn`
+record and writes `0` on the gauge, and `readiness()` then reports
+`storage: 'ephemeral'` and `ready: false`. The probe's own data is kept beside
+it, so `storageStrategy` still names the real store rather than being replaced
+by a
+failure marker. The throw itself is contained and counted on the surface's fault
+count — no caller sees it (`DL-HEALTH-09`).
+
 ### 6.4 Health results are also metrics
 
 Every result is registered as a gauge on `game2048_health_check_status`, keyed by
@@ -842,12 +977,20 @@ The panels, in render order:
 
 The five controls are **Refresh**, **Export metrics**, **Export snapshot**,
 **Collapse diagnostics** — which becomes **Expand diagnostics** — and **Close
-diagnostics**. Collapsing renders the heading and control row alone and keeps
-every reading running, so the surface and the board coexist on a narrow viewport;
-what is exported does not change (`DL-DIAG-11`). Closing takes the readings off
-screen and returns focus to wherever it came from (`DL-DIAG-17`). The five
-controls keep their identity across every render, so a handle to one stays valid
-(`DL-DIAG-16`). The controls
+diagnostics**. Collapsing renders the heading and control row alone, so the
+surface and the board coexist on a narrow viewport; the surface stays open and
+**what is exported does not change** (`DL-DIAG-11`), because every export folds
+and reads its own sources. What the collapse does stand down is the **scheduled**
+reading: a tick that would draw nothing takes no health, hook, cursor, metric,
+trace or log reading either, so a collapsed surface left on screen costs nothing
+per second. **Refresh**, an expand and every export each take a full reading as
+they always did; the one consequence is that `lastSnapshot()` reports the last
+reading actually taken rather than one from a second ago (`DL-DIAG-24`). Closing
+takes the readings off screen and returns focus to wherever it came from
+(`DL-DIAG-17`). The five controls keep their identity across every render, so a
+handle to one stays valid, and since `DL-DIAG-24` the panels do too: a render
+patches the heading, rows and cells it already has and writes only what the
+reading changed (`DL-DIAG-16`, `DL-DIAG-24`). The controls
 take the palette of the active theme, so the high-contrast and colourblind-safe
 themes reach this surface as they reach every other (`DL-DIAG-09`).
 
@@ -901,6 +1044,36 @@ it from the filesystem. It ships **no sample data**: before a file is chosen it
 renders an empty state naming the two export controls and pointing back at this
 document, so no number on the page is ever anything but a reading of a real
 export.
+
+It also **bounds what it reads**, because all three routes carry whatever you hand
+them. A file over 16 MiB is refused before it is read, a pasted payload over
+16,777,216 characters before it is parsed, and the line, series, family, label,
+bucket, health-row, hook-row, log-record and frame-key counts are each checked
+before the fold or render that walks them. Every one of those limits derives from
+a ceiling the producing module already enforces, with headroom — `MAX_FAMILIES`,
+`MAX_SERIES_PER_FAMILY`, `MAX_BUCKETS` and `MAX_LABELS_PER_SERIES` of
+[`metrics.ts`](../src/observability/metrics.ts) and `MAX_LOG_BUFFER_CAPACITY` of
+[`logger.ts`](../src/observability/logger.ts) — so no export this layer can write
+is refused. A payload over a limit is refused **whole**, with the limit named on
+the status line, rather than rendered in part: a folded head of a series array
+would show a total the run never produced (`DL-DIAG-23`).
+
+**Both files are gated automatically, and the gate executes them.**
+`tests/unit/observability/dashboard.test.ts` composes the real application,
+plays a seeded run, drives the tracer's own frame lifecycle hooks, and feeds all
+three
+export forms into `dashboard.html`'s **own inline script** running in the test's
+document — then reads the rendered panels back and compares each against the
+series the registry exported. The same file validates every expression in
+`dashboard.json` against `METRIC_NAMES`, `METRIC_LABELS` and the fixed label
+vocabularies, holds the page's ES5 restatements of those constants against the
+constants themselves, and asserts that **every family the registry declares is
+read by at least one panel**. It runs inside `npm test` and again as its own
+`npm run test:dashboard`, which the CI workflow calls as a named step; the
+recorded-proof case additionally opens `dashboard.html` in a real browser and
+feeds it the snapshot that session exported (`DL-TEST-16`). A family, a label or
+a check id renamed on one side and not the other now fails a gate rather than
+quietly rendering nothing.
 
 ## 9. What Rule 3 asks for and what is delivered
 
@@ -1286,14 +1459,32 @@ available to test.
 5. For the Grafana form, import `docs/dashboards/dashboard.json` into Grafana and
    point it at a Prometheus-compatible data source the exposition has been loaded
    into. It is a template and ships wired to nothing.
+6. To have the machine do steps 1 to 4 for you, run `npm run test:dashboard`. It
+   composes the application, plays a seeded run, feeds all three export forms
+   into this page's own script and asserts what each panel rendered, then checks
+   every `dashboard.json` expression against the registry's families and labels
+   ([section 8](#8-the-dashboard-template)). It is the same gate CI runs, and it
+   is what makes a rename fail loudly instead of rendering an empty panel.
 
 **Expected observation — what "renders successfully" means here**, since this is
 gate V8's final line: `dashboard.html` opens and renders; before any file is chosen
 it shows the empty state above; after the exported file is loaded the status line is
 **replaced** — not emptied — with `Showing game2048-metrics.prom — Prometheus text
-exposition, N series.`; the panels build from the file; the panel values match the
-corresponding lines of the `.prom` you loaded; and the health panel shows six rows,
+exposition, N sample lines.`; the panels build from the file; the panel values match
+the corresponding lines of the `.prom` you loaded; and the health panel shows six rows,
 one per check, **in the probe order the overlay uses**, with the same statuses.
+
+**The two forms count different quantities, and the dashboard names which one it
+counted.** A Prometheus exposition is read line by line, so the figure it reports
+— under the provenance label `Sample lines read` — is a count of **sample lines**:
+one histogram contributes its fifteen `_bucket` lines plus `_sum` and `_count`,
+seventeen in all. A JSON snapshot is folded record by record, so the figure it
+reports — labelled `Series read` — is a count of **logical series**, one per
+`MetricSeriesSnapshot`, a histogram included as one. The same run therefore reads
+as a larger number through the `.prom` file than through the `.json` file, which
+is arithmetic rather than a discrepancy; before this was labelled per form, both
+were displayed as "series" and the exposition's figure looked like an inflated
+series count.
 Measured on a five-move run: `frames rendered 63` in the panel against
 `game2048_frames_rendered_total 63` in the file, and `onSpawn 8` against
 `game2048_hook_dispatches_total{hook="onSpawn"} 8`. Pressing **Clear** returns the
@@ -1358,7 +1549,9 @@ constructs the module and injects its adapter, and run
 | The overlay does not appear | the flag: `?diagnostics` on the URL, and not `?diagnostics=off`. `isDiagnosticsRequested()` reads the location and **no storage** (`DL-DIAG-01`) |
 | `__blitzy2048` is `undefined` | the page has not finished booting, or the boot threw — read the console. It is non-enumerable, so it will not show in an enumeration of `globalThis`, only by name |
 | `document.querySelector('.diagnostics-overlay')` exists but nothing renders | the host is adopted and prepared in **every** session, flag or no flag (`DL-DIAG-02`). Its presence is **not** an activation check — assert `isOpen()`, the panel count or `data-refresh` (`DL-DIAG-19`) |
-| No spans anywhere | `__blitzy2048.tracer.isEnabled()`. Also note nothing is recorded for an **idle** input that moved no tile |
+| No spans anywhere | `__blitzy2048.tracer.isEnabled()` |
+| A turn is missing from `turn_latency_milliseconds` | expected for every outcome but `committed`. An **idle** input still records an `engine.turn` span, under `outcome: "unmoved"`; it is the latency sample and `turns_total` that a resolved slide alone moves ([section 4.1](#41-the-two-functions-that-make-tracing-zero-touch)) |
+| A `render.frame` span reads clean over a frame that threw | read `outcome` and `failureSource` on it. Both are written by `onFrameError`, which `src/main.ts` must be passing to `createRenderLoop`; `tests/unit/render/render-loop-tracing.test.ts` fails when it is not (`DL-TRACE-14`) |
 | `performance.getEntriesByType('measure')` is empty | expected. Marks and measures are cleared as each span closes (`DL-TRACE-07`); use a `PerformanceObserver`, a Performance-panel recording, or `tracer.snapshot()` |
 | Hook dispatch counts read zero in a direct export | export through `__blitzy2048.diagnostics`, not `__blitzy2048.metrics` — the hook families are **pulled** and only the overlay folds them (`DL-METRIC-03`) |
 | Hook counts stay zero even through the overlay | a correlation-identifier mismatch makes a fold a no-op rather than an error (`DL-METRIC-06`) |

@@ -22,8 +22,9 @@
  *                                             and the guarded reads
  *   TR-LOOP-04  target-only row               `FrameContext` and
  *                                             `FrameSubscription`
- *   TR-LOOP-05  target-only row               `onFrameBegin` and `onFrameEnd`,
- *                                             the frame-callback seam a tracer
+ *   TR-LOOP-05  target-only row               `onFrameBegin`, `onFrameEnd` and
+ *                                             `onFrameError`, the
+ *                                             frame-callback seam a tracer
  *                                             spans
  *   TR-LOOP-06  target-only row               `FrameStats`,
  *                                             `FrameDurationBucket` and
@@ -31,7 +32,7 @@
  *   TR-LOOP-07  target-only row               `FrameScheduler`, the injected
  *                                             scheduler and clock
  *
- * Decisions: DL-LOOP-01, DL-LOOP-02, DL-LOOP-03, DL-LOOP-04
+ * Decisions: DL-LOOP-01, DL-LOOP-02, DL-LOOP-03, DL-LOOP-04, DL-LOOP-05
  * (docs/DECISION_LOG.md).
  */
 
@@ -184,6 +185,22 @@ export interface RenderLoopOptions {
    * negative.
    */
   readonly onFrameEnd?: (context: FrameContext, durationMs: number) => void;
+
+  /**
+   * ADDED: called for each failure the frame contains, before `onFrameEnd`.
+   *
+   * The loop contains a throw from `onFrameBegin`, from a registered callback
+   * and from `onFrameEnd`, so the frame completes and the loop keeps
+   * scheduling. Without this channel a lifecycle observer — the tracer's frame
+   * span — was told the frame began and ended and never that anything inside it
+   * failed, so a contained failure closed a SUCCESSFUL span. A throw from this
+   * hook is itself contained, counted on `FrameStats.hookErrors` and never
+   * re-reported through this channel. DL-LOOP-05.
+   */
+  readonly onFrameError?: (
+    context: FrameContext,
+    failure: FrameFailure,
+  ) => void;
 
   /**
    * Scheduling pair to use in place of the platform pair. Defaults to
@@ -380,6 +397,13 @@ const CALLBACK_ERROR_METRIC = 'render.frame.callback.error';
 
 /** Counter name for a frame hook that threw. */
 const HOOK_ERROR_METRIC = 'render.frame.hook.error';
+
+/**
+ * ADDED: the name `onFrameError` is reported under where it throws, so a faulty
+ * failure observer is distinguishable from a faulty begin or end hook.
+ * DL-LOOP-05.
+ */
+const FRAME_ERROR_HOOK_NAME = 'frame-error';
 
 /** Counter name for a delta that was clamped. */
 const DELTA_CLAMPED_METRIC = 'render.frame.delta.clamped';
@@ -657,6 +681,30 @@ interface MutableFrameContext {
 /** Which hook a contained throw came from. */
 type FrameHookName = 'frame-begin' | 'frame-end';
 
+/**
+ * ADDED: where inside one frame a contained throw came from — the two hooks
+ * above, or a registered callback. DL-LOOP-05.
+ */
+export type FrameFailureSource = FrameHookName | 'frame-callback';
+
+/** ADDED: one failure a frame contained, as `onFrameError` receives it. */
+export interface FrameFailure {
+  /** Which part of the frame threw. */
+  readonly source: FrameFailureSource;
+
+  /** The value that was thrown, passed through unconverted. */
+  readonly thrown: unknown;
+
+  /** `FrameContext.frame` of the frame that contained it. */
+  readonly frame: number;
+
+  /**
+   * Identifier of the registration that threw, present for
+   * `'frame-callback'` alone.
+   */
+  readonly callbackId?: number;
+}
+
 /** Which scheduling operation a contained throw came from. */
 type SchedulerOperation = 'request' | 'cancel';
 
@@ -679,6 +727,9 @@ export function createRenderLoop(
   const clock = options.now ?? monotonicNow;
   const hookBegin = options.onFrameBegin;
   const hookEnd = options.onFrameEnd;
+
+  // ADDED: the failure channel of the same lifecycle contract. DL-LOOP-05.
+  const hookFailure = options.onFrameError;
   const timingMode: FrameTimingMode = options.timingMode ?? 'aggregate';
   const autoStopWhenIdle = options.autoStopWhenIdle === true;
   const maxDelta = resolveMaxDelta(options.maxDelta, reporter);
@@ -767,6 +818,15 @@ export function createRenderLoop(
       error: describeRenderError(error),
       thrown: error,
     });
+
+    // ADDED: the lifecycle observer is told too, so a span open over this frame
+    // closes as the failure it was rather than as a clean frame. DL-LOOP-05.
+    announceFrameFailure({
+      source: 'frame-callback',
+      thrown: error,
+      frame: frameIndex,
+      callbackId: id,
+    });
   };
 
   /**
@@ -789,6 +849,48 @@ export function createRenderLoop(
       error: describeRenderError(error),
       thrown: error,
     });
+
+    // ADDED, for the two hooks as well as for a callback: a `frame-begin` that
+    // threw still opened whatever the observer opens, and a `frame-end` that
+    // threw closes it. DL-LOOP-05.
+    announceFrameFailure({ source: hook, thrown: error, frame: frameIndex });
+  };
+
+  /**
+   * ADDED: hands one contained failure to `onFrameError`.
+   *
+   * A throw from that hook is contained here and counted as a hook error, and is
+   * NOT announced through this channel again: re-entering would turn one failing
+   * observer into an unbounded chain. DL-LOOP-05.
+   *
+   * @param failure The failure this frame contained.
+   */
+  const announceFrameFailure = (failure: FrameFailure): void => {
+    if (hookFailure === undefined) {
+      return;
+    }
+
+    try {
+      hookFailure(context, Object.freeze(failure));
+    } catch (error: unknown) {
+      hookErrors += 1;
+
+      const detail = Object.freeze({
+        hook: FRAME_ERROR_HOOK_NAME,
+        frame: frameIndex,
+        source: failure.source,
+      });
+
+      reporter.onCount({ name: HOOK_ERROR_METRIC, value: 1, detail });
+      reporter.onDiagnostic({
+        level: 'error',
+        source: DIAGNOSTIC_SOURCE,
+        message: `The ${FRAME_ERROR_HOOK_NAME} hook threw and was contained.`,
+        detail,
+        error: describeRenderError(error),
+        thrown: error,
+      });
+    }
   };
 
   /**

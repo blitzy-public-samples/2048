@@ -53,14 +53,14 @@ export default defineConfig({
 
     // Ceiling on one emitted chunk before the build advises splitting it, in kB.
     //
-    // MEASURED, not chosen: the emitted bundle is 1064 kB minified and 294 kB
+    // MEASURED, not chosen: the emitted bundle is 1100 kB minified and 305 kB
     // gzipped at this commit, and the ceiling sits just above that figure so a
     // chunk growing beyond what the composed application needs still trips the
     // advisory. The figure moves whenever a module becomes reachable from the
     // entry point, because a module nothing reaches is one the bundler leaves
-    // out. The bundle is emitted as ONE chunk. Decisions DL-BUILD-12,
-    // DL-BUILD-13.
-    chunkSizeWarningLimit: 1100,
+    // out, and it moves when reachable code grows. The bundle is emitted as ONE
+    // chunk. Decisions DL-BUILD-12, DL-BUILD-13, DL-BUILD-18.
+    chunkSizeWarningLimit: 1150,
 
     // No source map is emitted, and none may be: `npm run build` produces the
     // directory copied verbatim to a static host, so every file dist/ carries

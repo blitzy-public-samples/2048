@@ -283,7 +283,23 @@ describe('the screen registry', () => {
     // carries both of its outlets.
     expect(hidden('screen-hud')).toBe(false);
     expect(el('#hud-stage').textContent?.length ?? 0).toBeGreaterThan(0);
-    expect(el('#relic-tray').children.length).toBeGreaterThanOrEqual(0);
+    // The run stored above holds no relic, so the tray carries EXACTLY the
+    // empty-state row — one real `<li>` marked as the empty row — and its own
+    // accessible name. `children.length >= 0` stood here, which is true of every
+    // element there has ever been and would have passed for a tray that was
+    // never populated at all.
+    const tray = el('#relic-tray');
+
+    expect(tray.getAttribute('aria-label')).toBe(
+      'Active relics, in pickup order',
+    );
+    expect(tray.children).toHaveLength(1);
+
+    const emptyRow = tray.children[0];
+
+    expect(emptyRow?.tagName).toBe('LI');
+    expect(emptyRow?.getAttribute('data-relic-empty')).toBe('true');
+    expect(emptyRow?.textContent).toBe('No relics yet');
 
     // Each overlay root is populated by its own module the first time it is
     // entered, and `start()` mounts every one of them, so each has already

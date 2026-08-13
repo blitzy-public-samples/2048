@@ -65,14 +65,13 @@
 // might not be accepted; the supersession entry is DL-DOC-02 of
 // docs/DECISION_LOG.md.
 //
-// Named figures, PLANNED AND NOT LANDED. docs/architecture/data-flow.md is to
-// carry Figure 4, "Turn Data Flow: From Keystroke to Composited Frame and
-// Persisted Run State", whose `Moves available?` decision and `Run state
-// written under namespaced key` node will be the two ends of the path asserted
-// here, and Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
-// Substreams", whose persisted cursor nodes the `rngCursor` cases exercise.
-// Until that document exists the assertions below rest on the sources named
-// above alone.
+// Named figures, both delivered in docs/architecture/data-flow.md: Figure 4,
+// "Turn Data Flow: From Keystroke to Composited Frame and Persisted Run State",
+// whose `Moves available?` decision and `Run state written under namespaced key`
+// node are the two ends of the path asserted here, and Figure 7, "Seeded
+// Determinism: One Run Seed Fanned into Named RNG Substreams", whose persisted
+// cursor nodes the `rngCursor` cases exercise. The assertions below rest on the
+// sources named above rather than on either figure.
 //
 // Every reporter reaches its subject by injection. Nothing here reads a
 // document, a clock, the global random source or a real Web Storage, and
@@ -90,6 +89,7 @@ import {
   createDefaultStageConfig,
   stageGoalForIndex,
 } from '../../../src/config/stage-config';
+import { Engine } from '../../../src/engine/engine';
 import { Grid } from '../../../src/engine/grid';
 import { createHookBus } from '../../../src/engine/hook-bus';
 import type { HookBus } from '../../../src/engine/hook-bus';
@@ -1636,5 +1636,224 @@ describe('the rules configuration a collapse wrote', () => {
       'relic-draw': 0,
       'rarity-weight': 0,
     });
+  });
+});
+
+/* ==========================================================================
+ * 8. The verdict the collapse published, and the verdict a reload reads
+ *
+ * Sections 1 through 7 dispatch `onStageEnd` on a bus and then reason about the
+ * lattice, the envelope and the reconciled size. None of them asks the ENGINE
+ * what it published, and that is the edge this section closes: `Engine.endStage`
+ * applied the stage-end board commands and committed WITHOUT re-deriving the loss
+ * flag, so a collapse that left a full board with no adjacent match committed
+ * `over: false` — and because the envelope wraps the engine's own snapshot
+ * verbatim, that stale flag was what a reload inherited. The board-shape
+ * assertions above all passed while it did.
+ *
+ * Both halves are asserted here: the verdict on the commit, and the verdict a
+ * store round trip hands back at the reconciled edge length.
+ *
+ * The same root cause reached the stage-START path, which the last case closes.
+ * `onStageStart` runs the same effect queue, so a handler that reseats or
+ * resizes the lattice as a stage OPENS could leave a board with no legal move
+ * and still commit the verdict of the board the stage was handed. That path has
+ * no cursed relic behind it today — `collapsing-vault` binds `onStageEnd` alone
+ * — so it is exercised with a minimal stage-start subscriber rather than a
+ * catalogue relic, which is also what keeps the case about the ENGINE's
+ * guarantee rather than about one relic's bindings.
+ *
+ * Decisions: DL-ENGINE-15, DL-RISK-01, DL-RUNSTORE-01.
+ * ========================================================================== */
+
+/**
+ * Nine cells filling a 3x3 lattice with no two orthogonal neighbours equal, so
+ * the default merge rule finds no match anywhere on it.
+ */
+const UNPLAYABLE_AT_COLLAPSED_SIZE: readonly (readonly number[])[] =
+  Object.freeze([
+    Object.freeze([0, 0, 2]),
+    Object.freeze([1, 0, 8]),
+    Object.freeze([2, 0, 32]),
+    Object.freeze([0, 1, 128]),
+    Object.freeze([1, 1, 512]),
+    Object.freeze([2, 1, 2048]),
+    Object.freeze([0, 2, 4]),
+    Object.freeze([1, 2, 16]),
+    Object.freeze([2, 2, 64]),
+  ]);
+
+/**
+ * Composes a real engine over the bench's bus, rules and substreams, opens
+ * `board` on it, and returns it.
+ *
+ * The bus is the bench's own, so the relic the bench holds is the relic that
+ * fires — no second registry and no second subscription.
+ *
+ * @param board Snapshot the stage opens on.
+ * @returns The engine.
+ */
+function engineOverBench(board: SerializedGameState): Engine {
+  const engine = new Engine({
+    config: bench.config,
+    stages: createDefaultStageConfig(),
+    streams: bench.streams,
+    hooks: bench.bus,
+    reporter: NOOP_ENGINE_REPORTER,
+  });
+
+  engine.setup(board);
+
+  return engine;
+}
+
+/**
+ * A snapshot at the default edge length holding the unplayable nine plus one
+ * tile outside the collapsed bound, so the collapse has a tile to exile.
+ *
+ * @returns The snapshot.
+ */
+function boardThatCollapsesUnplayable(): SerializedGameState {
+  const lattice = new Grid(DEFAULT_BOARD_SIZE);
+
+  for (const [x, y, value] of UNPLAYABLE_AT_COLLAPSED_SIZE) {
+    place(lattice, x as number, y as number, value as number);
+  }
+
+  place(lattice, 3, 3, 2);
+
+  return {
+    grid: lattice.serialize(),
+    score: STAGE_SCORE,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  };
+}
+
+describe('the verdict a collapse publishes and a reload reads', () => {
+  it('commits over when the collapse left no move available', () => {
+    pickUp(CURSED_ID);
+
+    const engine = engineOverBench(boardThatCollapsesUnplayable());
+
+    expect(engine.serialize().over).toBe(false);
+
+    engine.endStage(true);
+
+    const committed = engine.serialize();
+    const lattice = new Grid(committed.grid.size, committed.grid.cells);
+
+    expect(committed.grid.size).toBe(COLLAPSED_SIZE);
+    expect(movesAvailable(lattice, bench.config)).toBe(false);
+    expect(tileMatchesAvailable(lattice, bench.config)).toBe(false);
+
+    // The verdict the commit carries, which is the one the envelope wraps.
+    expect(committed.over).toBe(true);
+  });
+
+  it('persists that verdict and hands it back at the reconciled size', () => {
+    pickUp(CURSED_ID);
+
+    const engine = engineOverBench(boardThatCollapsesUnplayable());
+
+    engine.endStage(true);
+
+    const committed = engine.serialize();
+    const envelope: RunState = {
+      ...envelopeFor(
+        committed.grid,
+        bench.registry.serialize(),
+        bench.streams.snapshotCursors(),
+      ),
+
+      // The engine's own snapshot, verdict included, is what the envelope wraps.
+      board: committed,
+    };
+
+    expect(bench.store.save(envelope)).toBe(true);
+
+    const loaded = bench.store.load();
+
+    expect(loaded.reconciliation?.appliedSize).toBe(COLLAPSED_SIZE);
+    expect(loaded.state?.board.grid.size).toBe(COLLAPSED_SIZE);
+
+    // The flag survived the round trip, and the probe at the reconciled size
+    // agrees with it — which is the pair the stale verdict used to break.
+    expect(loaded.state?.board.over).toBe(true);
+    expect(
+      movesAvailable(
+        new Grid(
+          loaded.reconciliation?.appliedSize ?? 0,
+          loaded.state?.board.grid.cells ?? null,
+        ),
+        bench.config,
+      ),
+    ).toBe(false);
+  });
+
+  it('reopens the reloaded board on the verdict it was saved with', () => {
+    pickUp(CURSED_ID);
+
+    const first = engineOverBench(boardThatCollapsesUnplayable());
+
+    first.endStage(true);
+
+    const saved = first.serialize();
+    const resumed = new Engine({
+      config: bench.config,
+      stages: createDefaultStageConfig(),
+      streams: bench.streams,
+      hooks: createHookBus({ reporter: NOOP_ENGINE_REPORTER }),
+      reporter: NOOP_ENGINE_REPORTER,
+    });
+
+    resumed.setup(saved);
+
+    const reopened = resumed.serialize();
+
+    // js/game_manager.js L36-L45 adopted the saved flags verbatim and this port
+    // keeps that contract, so the reload's correctness rests entirely on the
+    // saved flag being right — which is why the commit above had to publish it.
+    expect(reopened.grid.size).toBe(COLLAPSED_SIZE);
+    expect(reopened.over).toBe(true);
+    expect(resumed.isGameTerminated()).toBe(true);
+  });
+  it('commits over when a stage-START effect left no move available', () => {
+    const engine = engineOverBench(boardThatCollapsesUnplayable());
+
+    // The board the stage opened on has a move: the tile at (3, 3) sits beside
+    // empty cells, so the verdict before any resize is legitimately false. The
+    // subscriber is registered AFTER this, so the opening stage saw none.
+    expect(engine.serialize().over).toBe(false);
+
+    // No catalogue relic resizes on `onStageStart`, so the engine's guarantee is
+    // stated with the smallest subscriber that reaches the same effect queue.
+    // Registered on the bench's own bus, which is the bus the engine dispatches
+    // through.
+    expect(
+      bench.bus.register({
+        id: 'stage-start-collapse',
+        hooks: {
+          onStageStart: (payload, context): typeof payload => {
+            context.effects.resizeBoard(COLLAPSED_SIZE);
+
+            return payload;
+          },
+        },
+      }),
+    ).toBe(true);
+
+    engine.startStage(engine.serialize());
+
+    const committed = engine.serialize();
+    const lattice = new Grid(committed.grid.size, committed.grid.cells);
+
+    expect(committed.grid.size).toBe(COLLAPSED_SIZE);
+    expect(movesAvailable(lattice, bench.config)).toBe(false);
+
+    // The point of the case: the flag published matches the board that exists.
+    expect(committed.over).toBe(true);
+    expect(engine.isGameTerminated()).toBe(true);
   });
 });

@@ -32,16 +32,15 @@
 // The dispatch driven here is the GENERIC compounding path: the bus hands each
 // handler the payload the previous one returned, in pickup order, so a second
 // `onMerge` handler transforms a payload a first has already transformed. That
-// path is to be drawn as Figure 5, "Hook Dispatch Sequence: Pickup-Order
-// Fan-Out with Charge Guard and Error Isolation", in
+// path is drawn as Figure 5, "Hook Dispatch Sequence: Pickup-Order Fan-Out
+// with Charge Guard and Error Isolation", in
 // docs/architecture/hook-dispatch-sequence.md, and the turn steps it sits in as
-// Figure 4, "Turn Data Flow", in docs/architecture/data-flow.md. NEITHER
-// DOCUMENT HAS LANDED, and the figures name no relic when they do: their
-// participants are generic. src/engine/hook-bus.ts is the authority this suite
-// asserts against.
+// Figure 4, "Turn Data Flow", in docs/architecture/data-flow.md. Both figures
+// name no relic — their participants are generic — so src/engine/hook-bus.ts
+// remains the authority this suite asserts against.
 //
-// Traceability row of docs/TRACEABILITY_MATRIX.md this suite is evidence for.
-// THAT DOCUMENT HAS NOT LANDED; the ordinal is RESERVED against it:
+// Traceability row of docs/TRACEABILITY_MATRIX.md this suite is evidence for,
+// which resolves to a row in that delivered document:
 //   TR-MERGE-02  the `alloy-forge` declaration and its `onMerge` binding
 //
 // Decisions this suite holds to the letter, argued in docs/DECISION_LOG.md and

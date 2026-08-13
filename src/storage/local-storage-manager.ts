@@ -79,6 +79,22 @@ export interface StorageErrorInfo {
    * exception code 22.
    */
   readonly quota: boolean;
+
+  /**
+   * ADDED: whether this failure is the stored TEXT failing to parse as JSON.
+   *
+   * Tagged at the one `JSON.parse` call site and `false` on every other
+   * description this module makes, so provenance is CARRIED rather than
+   * inferred. It was inferred from `name === 'SyntaxError'`, which
+   * `JSON.parse` is not the only source of: a `toJSON` member, a replacer, or
+   * an injected store method can raise one on a write, a probe or a removal,
+   * and a lost write was then described as a recovered read of a corrupt value.
+   *
+   * A consumer tiering its report on recoverability reads THIS and not the name:
+   * a value that did not parse is a read the caller recovered from, while any
+   * other `SyntaxError` is an operation that failed. DL-STORE-09.
+   */
+  readonly parse: boolean;
 }
 
 /** The outcome of the writability probe. */
@@ -165,13 +181,15 @@ const UNKNOWN_ERROR_NAME = 'StorageError';
 const UNKNOWN_ERROR_MESSAGE = 'Unknown storage error.';
 
 /**
- * ADDED: the name a stored value that is not valid JSON is reported under.
+ * The name a stored value that is not valid JSON is reported under.
  *
- * `JSON.parse` is the ONLY thing in this module that raises a `SyntaxError` —
- * `JSON.stringify` answers a circular structure with a `TypeError`, and no
- * Web Storage member raises one — so the name identifies the cause exactly.
- * Exported because the composition root tiers its report on it: a value that
- * did not parse is a recovered read, not a store that failed.
+ * CHANGED: this is the name such a failure CARRIES, and no longer the way one is
+ * IDENTIFIED. `JSON.parse` is not the only source of a `SyntaxError` reachable
+ * from this module — a `toJSON` member, a replacer or an injected store method
+ * can raise one during a write, a probe or a removal — so a consumer deciding
+ * whether a value was merely unreadable reads `StorageErrorInfo.parse`, which is
+ * tagged at the parse call site. Kept exported because the name is still part of
+ * the reported record. DL-STORE-09.
  */
 export const PARSE_ERROR_NAME = 'SyntaxError';
 
@@ -296,6 +314,9 @@ function describeOversizeRead(bytes: number, limit: number): StorageErrorInfo {
       `${String(limit)}-byte ceiling for this key; the read was refused ` +
       'and nothing was parsed.',
     quota: false,
+
+    // Nothing was parsed, so nothing failed to parse.
+    parse: false,
   };
 }
 
@@ -316,6 +337,9 @@ function describeRefusedByCaller(bytes: number): StorageErrorInfo {
       `The stored value is ${String(bytes)} bytes and was refused by the ` +
       'reading module\'s own payload limit; nothing was parsed.',
     quota: false,
+
+    // Nothing was parsed, so nothing failed to parse.
+    parse: false,
   };
 }
 
@@ -466,24 +490,31 @@ function errorName(error: unknown): string {
  *
  * @param name The allowlisted name.
  * @param quota Whether the error reports exhausted storage.
+ * @param parse Whether the caller caught the value AT THE PARSE, which is the
+ *   only thing that makes a failure a parse failure.
  * @returns One of this module's own descriptions.
  */
-function errorMessage(name: string, quota: boolean): string {
+function errorMessage(name: string, quota: boolean, parse: boolean): string {
   if (quota) {
     return QUOTA_ERROR_MESSAGE;
   }
 
-  // ADDED: the parse failure has its own description. It reached
-  // `DENIED_ERROR_MESSAGE` under neither of the two conditions below, and
-  // "Storage refused the operation." is wrong for a store that handed the text
-  // over without complaint.
-  if (name === PARSE_ERROR_NAME) {
+  // CHANGED: the parse description is chosen from the CALLER'S tag, where it was
+  // chosen from `name === PARSE_ERROR_NAME`. A `SyntaxError` raised anywhere but
+  // the parse was described as an unreadable stored value, which is a
+  // description of a different event than the one that happened.
+  if (parse) {
     return PARSE_ERROR_MESSAGE;
   }
 
-  return name === UNKNOWN_ERROR_NAME
-    ? UNKNOWN_ERROR_MESSAGE
-    : DENIED_ERROR_MESSAGE;
+  // An untagged `SyntaxError` came from somewhere this module does not model —
+  // a `toJSON` member, a replacer, an injected store method — so it is unknown
+  // rather than a refusal, which is what "Storage refused the operation." claims.
+  if (name === UNKNOWN_ERROR_NAME || name === PARSE_ERROR_NAME) {
+    return UNKNOWN_ERROR_MESSAGE;
+  }
+
+  return DENIED_ERROR_MESSAGE;
 }
 
 function isQuotaError(error: unknown, name: string): boolean {
@@ -511,16 +542,23 @@ function isQuotaError(error: unknown, name: string): boolean {
  * `StorageErrorInfo`.
  *
  * @param error Caught value, of any type.
+ * @param parse Whether the value was caught at the `JSON.parse` of a stored
+ *   text. The one caller that passes `true` is `readJson`'s parse catch; every
+ *   other call describes an operation that failed, whatever the value is named.
  * @returns The exportable description.
  */
-function describeStorageError(error: unknown): StorageErrorInfo {
+function describeStorageError(
+  error: unknown,
+  parse = false
+): StorageErrorInfo {
   const name = errorName(error);
   const quota = isQuotaError(error, readErrorText(error, 'name') ?? name);
 
   return {
     name,
-    message: errorMessage(name, quota),
+    message: errorMessage(name, quota, parse),
     quota,
+    parse,
   };
 }
 
@@ -551,6 +589,9 @@ function describeRejectedKey(): StorageErrorInfo {
       'The key is not owned by this product; the operation was refused ' +
       'and no storage was touched.',
     quota: false,
+
+    // Nothing was parsed, so nothing failed to parse.
+    parse: false,
   };
 }
 
@@ -893,7 +934,11 @@ export class LocalStorageManager {
       // CHANGED: the failure is REMEMBERED against the text that produced it,
       // where the memo used to be dropped.
       this.parsed.set(key, { raw, parsed: null, failed: true });
-      this.reportFailure('read', key, error);
+
+      // ADDED: the `true` is the tag. This is the ONE place in the module where
+      // a stored text failed to parse, so it is the one place that says so, and
+      // a consumer no longer has to read the error's name to guess. DL-STORE-09.
+      this.reportFailure('read', key, error, true);
 
       return null;
     }
@@ -1052,11 +1097,16 @@ export class LocalStorageManager {
    * @param operation Operation that failed.
    * @param key Key it targeted.
    * @param error Caught value, of any type.
+   * @param parse ADDED: whether `error` was caught at the `JSON.parse` of a
+   *   stored text. Defaults to `false`, so a call site that says nothing
+   *   describes an operation that failed rather than a value that would not
+   *   read — the one call site that passes `true` is `readJson`'s parse catch.
    */
   private reportFailure(
     operation: StorageOperation,
     key: string,
-    error: unknown
+    error: unknown,
+    parse = false
   ): void {
     if (this.reporter.onFailure === undefined) {
       return;
@@ -1066,7 +1116,7 @@ export class LocalStorageManager {
       operation,
       key,
       strategy: this.strategy,
-      error: describeStorageError(error),
+      error: describeStorageError(error, parse),
 
       // The caught value travels unconverted, so the stack, the cause chain
       // and a non-`Error` structure all survive to the logger.

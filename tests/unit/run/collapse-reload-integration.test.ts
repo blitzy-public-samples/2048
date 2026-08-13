@@ -103,6 +103,18 @@ interface Stack {
   readonly config: RulesConfig;
   readonly streams: RngStreams;
   readonly stop: () => void;
+
+  /**
+   * The stage indices `stage:end` was emitted for, in order.
+   *
+   * Observed on the engine's own event source rather than counted by the cases,
+   * so "the move list cleared a stage" is a MEASUREMENT of the run rather than
+   * an assumption about it.
+   */
+  readonly stageEnds: readonly number[];
+
+  /** The board size after each `stage:end`, in the same order. */
+  readonly sizeAfterEachStageEnd: readonly number[];
 }
 
 /**
@@ -155,9 +167,29 @@ function compose(backing: MemoryStorage): Stack {
 
   const stop = controller.observe(engine, () => streams.snapshotCursors());
 
+  // Observed BEFORE the board opens, so the first stage end is recorded too.
+  const stageEnds: number[] = [];
+  const sizeAfterEachStageEnd: number[] = [];
+  const releaseObserver = engine.events.on('stage:end', (payload): void => {
+    stageEnds.push(payload.stageIndex);
+    sizeAfterEachStageEnd.push(config.boardSize);
+  });
+
   controller.openEngineBoard(engine);
 
-  return { controller, engine, registry, config, streams, stop };
+  return {
+    controller,
+    engine,
+    registry,
+    config,
+    streams,
+    stop: (): void => {
+      releaseObserver();
+      stop();
+    },
+    stageEnds,
+    sizeAfterEachStageEnd,
+  };
 }
 
 /**
@@ -255,13 +287,21 @@ function collapseAndPersist(backing: MemoryStorage): {
   holdTheCurse(stack);
   playTakingTheCurse(stack, MOVES_PER_LEG);
 
-  // A BELT-AND-BRACES STAGE END, not the trigger this relies on. The move list
-  // above clears a stage on its own, and the collapse happens there — dispatched
-  // by the hook bus during play, which is the point of composing the stack rather
-  // than calling the handler. This call guarantees at least one cleared stage
-  // were the list ever to stop producing one; the relic's own state slot bounds
-  // the collapse, so reaching `onStageEnd` a second time narrows nothing further.
-  stack.engine.endStage(true);
+  // THE MOVE LIST DID THE WORK, asserted rather than assumed. This helper used
+  // to call `engine.endStage(true)` unconditionally right here, which guaranteed
+  // a collapse whether or not the played moves still cleared a stage — so a
+  // regression in the stage-goal evaluation, in the reward round, or in the
+  // relic's own dispatch would have left every case below green. The fallback
+  // now lives in `forceStageEndForContrast()` and is used by nothing that
+  // asserts on the collapse.
+  expect(stack.stageEnds.length).toBeGreaterThan(0);
+  expect(stack.registry.ownedIds()).toContain(CURSED_ID);
+
+  // AND THE COLLAPSE HAPPENED ON A STAGE END, not at some other moment: the
+  // board was already smaller by the time the first end was observed, which is
+  // the hook the relic binds.
+  expect(stack.sizeAfterEachStageEnd[0]).toBeLessThan(OPENING_SIZE);
+  expect(stack.config.boardSize).toBeLessThan(OPENING_SIZE);
 
   const entry = storedCurse(stack);
   const declared =
@@ -284,6 +324,20 @@ function collapseAndPersist(backing: MemoryStorage): {
   stack.stop();
 
   return outcome;
+}
+
+/**
+ * Ends the stage by hand.
+ *
+ * KEPT SEPARATE, and used by nothing that asserts on the collapse. It exists so
+ * a case whose subject IS a second `onStageEnd` — the bound the relic's own
+ * state slot enforces — can reach one without `collapseAndPersist()` reaching
+ * one for every case.
+ *
+ * @param stack Stack to end the stage on.
+ */
+function forceStageEndForContrast(stack: Stack): void {
+  stack.engine.endStage(true);
 }
 
 /* ===== 3. The collapse itself, performed rather than assumed ===== */
@@ -316,6 +370,31 @@ describe('a cursed relic collapsing the board through the hook bus', () => {
       expect(tile.y).toBeLessThan(size);
       expect(tile.value).toBeGreaterThan(0);
     }
+  });
+
+  it('collapses once, however many stage ends it sees', () => {
+    // The bound the relic's own state slot enforces, exercised through the ONE
+    // path that ends a stage by hand — kept out of `collapseAndPersist()` so no
+    // other case depends on it.
+    const stack = compose(new MemoryStorage());
+
+    holdTheCurse(stack);
+    playTakingTheCurse(stack, MOVES_PER_LEG);
+
+    const collapsedTo = stack.config.boardSize;
+    const endsFromPlay = stack.stageEnds.length;
+
+    expect(endsFromPlay).toBeGreaterThan(0);
+    expect(collapsedTo).toBeLessThan(OPENING_SIZE);
+
+    forceStageEndForContrast(stack);
+    forceStageEndForContrast(stack);
+
+    // A second and third `onStageEnd` narrow nothing further.
+    expect(stack.config.boardSize).toBe(collapsedTo);
+    expect(stack.engine.serialize().grid.size).toBe(collapsedTo);
+
+    stack.stop();
   });
 
   it('keeps each tile at the cell it is recorded at, uncompacted', () => {

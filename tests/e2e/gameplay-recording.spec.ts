@@ -8,10 +8,33 @@
 // `zIndex.diagnosticsOverlay`, above every game layer, and no case but that one
 // opens it.
 //
+// The encoded artifact is not taken on trust: after the context closes it is
+// decoded in a browser and its pixels are measured, because a `.webm` suffix and
+// a positive byte count are satisfied by a header-only, truncated, black or
+// single-colour file. The run is also played to a real loss, acknowledged
+// through the terminal control, and checked against its own summary, and the
+// deterministic outcome of the seed is pinned rather than described.
+//
 // The root playwright.config.ts is the authority for retention, the software-GL
 // launch arguments, the viewport, the output directory, the base origin and the
-// web server. Nothing here restates or overrides any of them.
-// Decisions: DL-PW-01, DL-PW-02, DL-PW-03 (docs/DECISION_LOG.md).
+// web server. Nothing here restates or overrides any of them. Each case declares
+// the TAG its project selects on — `@gameplay` for the recorded proof and
+// `@diagnostics` for the observability exercise — so the video is retained for
+// the run that is the proof and for nothing else.
+// Decisions: DL-PW-01, DL-PW-02, DL-PW-03, DL-PW-05, DL-PW-07
+// (docs/DECISION_LOG.md).
+//
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, continuing this
+// area's ordinals from the configuration above, all target-only:
+//   TR-PW-05  the seeded scenario, its pinned outcome, the merge window and the
+//             stage clear that raises the first reward round
+//   TR-PW-06  `readBoardSurface` and the screen state read from `hidden`
+//   TR-PW-07  the canvas-content verdict and the live WebGL probe
+//   TR-PW-08  `resolveOverlaysToStage`, the drive to a terminal state and the
+//             summary
+//   TR-PW-09  `fileByteSize` with `probeRecording` and the decoded-artifact gate
+//   TR-PW-10  `clearOwnedStorage`, `readRunEnvelope` and the storage teardown
+//   TR-PW-11  the observability case read through the diagnostics surface
 //
 // Provenance of the constants below:
 //   style/main.scss L22, L104, L234, L329, L430-L431, L450-L451
@@ -88,6 +111,70 @@ const POST_REWARD_MOVES = 6;
 /** Iteration bound on the loop that plays until a merge is announced. */
 const MERGE_MOVE_CAP = 40;
 
+/* --------------------------------------------------------------------------
+ * The deterministic outcome of `RUN_SEED`.
+ *
+ * Every value below was MEASURED in this browser against the built bundle and
+ * reproduced identically across three runs, two of them with deliberately
+ * different per-move settle timings, so each is a function of the seed and the
+ * fixed key sequence rather than of how fast the run was driven. Pinning them
+ * is what makes the seed load-bearing: a run that ignored the entered seed, or
+ * a spawn sequence that drifted, satisfies a move cap but not these.
+ *
+ * They hold only for `RUN_SEED` played as `MOVE_KEYS` cycled from `ArrowUp`,
+ * taking the FIRST offered card at every reward round. Changing the rules, the
+ * stage curve, the relic pool or the key order changes them by design, and the
+ * failure names the value that moved. DL-PW-05.
+ * ----------------------------------------------------------------------- */
+
+/** The two starting tiles, as the parallel board labels them, in DOM order. */
+const OPENING_CELL_LABELS = Object.freeze([
+  'Row 1, column 4, 2',
+  'Row 3, column 2, 2',
+] as const);
+
+/** The move that first merges, counted from 1. */
+const FIRST_MERGE_MOVE = 2;
+
+/** The value that first merge produces. */
+const FIRST_MERGE_PRODUCT = 4;
+
+/** The move that clears the first stage. */
+const FIRST_STAGE_CLEAR_MOVE = 15;
+
+/** The first reward round's three offers, in the order they are presented. */
+const FIRST_OFFER_IDS = Object.freeze([
+  'alloy-forge',
+  'echo-chamber',
+  'gilded-rot',
+] as const);
+
+/** The move the run is lost on. */
+const TERMINAL_MOVE = 65;
+
+/** The score the lost run finishes with. */
+const TERMINAL_SCORE = 3274;
+
+/** The stage the lost run reaches, as the summary reports it. */
+const TERMINAL_STAGE = 8;
+
+/** `schemaVersion` of the persisted envelope. */
+const RUN_STATE_SCHEMA_VERSION = 1;
+
+/** The four RNG substreams, and their cursors before any move is played. */
+const OPENING_RNG_CURSOR = Object.freeze({
+  'spawn-value': 2,
+  'spawn-position': 2,
+  'relic-draw': 0,
+  'rarity-weight': 0,
+});
+
+/** The first stage's goal, as the envelope records it. */
+const OPENING_STAGE_GOAL = Object.freeze({
+  kind: 'highest-tile',
+  target: 16,
+});
+
 /**
  * Iteration bound on the loop that clears whatever screen stands over the
  * board. One stage clear costs two steps, the interstitial and the reward,
@@ -136,6 +223,94 @@ const SCREEN_SETTLE_MS = MERGE_POP_MS + SCORE_DELTA_MS;
 /** Ceiling on a web-first wait for a state this spec drives itself. */
 const STATE_TIMEOUT_MS = 30_000;
 
+/* --------------------------------------------------------------------------
+ * Probing the encoded artifact.
+ * ----------------------------------------------------------------------- */
+
+/**
+ * Step between decoded video samples, in seconds.
+ *
+ * Playwright encodes at 25fps, so 40ms is one frame and this resolves every
+ * frame the encoder wrote.
+ */
+const FRAME_STEP_S = 0.04;
+
+/** Samples taken across the whole recording to characterise it. */
+const SWEEP_SAMPLE_COUNT = 24;
+
+/**
+ * Distinct frames a sweep of the whole recording must contain.
+ *
+ * A recording of a played run changes continuously. A static or single-colour
+ * encode collapses to one signature however many times it is sampled, which is
+ * the case this rejects.
+ */
+const MIN_DISTINCT_SWEEP_FRAMES = 6;
+
+/**
+ * Distinct frames required inside the isolated merge window.
+ *
+ * The 100ms move transition has finished before this window opens, so the
+ * merge pop is the only board motion left in it. A pop that was deleted leaves
+ * the window's frames identical.
+ */
+const MIN_DISTINCT_MERGE_FRAMES = 2;
+
+/**
+ * The recorded frame size, which playwright.config.ts sets from its `VIEWPORT`
+ * and reuses verbatim as the video size.
+ */
+const VIEWPORT_WIDTH = 1280;
+const VIEWPORT_HEIGHT = 960;
+
+/** Seconds either side of a recorded milestone that a search will accept. */
+const MILESTONE_TOLERANCE_S = 1.5;
+
+/**
+ * The counter `src/observability/metrics.ts` advances once per drawn frame.
+ *
+ * Read to establish that the render loop was live while an animation played. It
+ * advances whether or not a merge is animating, so it is corroboration and not
+ * the proof on its own; the discriminating evidence is temporal change in the
+ * decoded frames.
+ */
+const FRAMES_RENDERED_METRIC = 'game2048_frames_rendered_total';
+
+/**
+ * The collapsed counter family every reporter count lands in, declared by
+ * `REPORT_COUNTER_NAME` of src/main.ts.
+ */
+const REPORT_COUNTER_FAMILY = 'game2048_reports_total';
+
+/** `MERGE_METRIC` of src/render/three-renderer.ts, as the `report` label. */
+const RENDER_MERGE_REPORT = 'render.three.merge';
+
+/** The renderer mode that means the 2.5D WebGL board is the surface drawing. */
+const THREE_RENDERER_MODE = 'three';
+
+/**
+ * Iteration bound on the loop that plays the run out to its end.
+ *
+ * Under `RUN_SEED` the run is lost on `TERMINAL_MOVE`; this is the loop's
+ * guarantee of termination and not an expectation.
+ */
+const TERMINAL_MOVE_CAP = 200;
+
+/** The score the terminal screen reports, as `src/ui/screens/game-over.ts` words it. */
+const TERMINAL_OVERLAY_SCORE = /Score (\d+)/u;
+
+/** `runSummaryCopy.title('lost')` of src/ui/screens/run-summary.ts L354. */
+const RUN_LOST_TEXT = /Run lost/u;
+
+/** `runSummaryCopy.scoreLabel` of src/ui/screens/run-summary.ts L365. */
+const SUMMARY_SCORE_LABEL = 'Final score';
+
+/** `runSummaryCopy.stageLabel` of src/ui/screens/run-summary.ts L366. */
+const SUMMARY_STAGE_LABEL = 'Stage reached';
+
+/** The `data-outcome` a lost run writes: `RunOutcome` of src/run/run-state.ts. */
+const LOST_OUTCOME = 'lost';
+
 /* ==========================================================================
  * 3. The DOM contract
  * ========================================================================== */
@@ -178,6 +353,31 @@ const SELECTORS = Object.freeze({
   rewardCard: '#screen-reward button.relic-card',
   diagnostics: '#diagnostics-overlay',
   diagnosticsControl: '#diagnostics-overlay button',
+
+  /** The terminal screen's only control, of src/ui/screens/game-over.ts. */
+  acknowledgeTerminal: '#screen-game-over [data-action="acknowledge"]',
+
+  /**
+   * The run-summary panel, which carries `data-outcome`.
+   *
+   * The `<section>` the module builds INSIDE the screen container, not the
+   * container itself: `runSummaryClasses.panel` is what the attribute lands on.
+   */
+  runSummary: '#screen-run-summary .run-summary',
+
+  /**
+   * The summary's relic list, whose source order IS pickup order.
+   *
+   * `runSummaryClasses.relicList` is a CLASS on the `<ol>`, not an id: the
+   * module carries ids only for the elements it cross-references by `aria-*`.
+   */
+  summaryRelic: '#screen-run-summary .run-summary-relic-list [data-relic-id]',
+
+  /** The selectable seed the summary surfaces for a replay. */
+  summarySeed: '#run-summary-seed-value',
+
+  /** One readout row of the summary: a caption and a value. */
+  summaryScore: '#screen-run-summary .run-summary-score',
 });
 
 /** The screen states this spec reads back, plus its two fallbacks. */
@@ -404,6 +604,33 @@ const DIAGNOSTICS_PANEL_HEADINGS = Object.freeze([
   'Recent records',
 ] as const);
 
+/**
+ * The static dashboard template, as a file URL.
+ *
+ * Rule 3's dashboard template is delivered only where an exported snapshot
+ * actually renders in it, so this case opens the file itself and feeds it the
+ * export the session just produced. Resolved from this module's own URL rather
+ * than from a working directory or a `node:` module, because these specs are
+ * type-checked as browser-context sources and reach no Node global.
+ * Decision DL-TEST-09.
+ */
+const DASHBOARD_TEMPLATE_URL = new URL(
+  '../../docs/dashboards/dashboard.html',
+  import.meta.url,
+).href;
+
+/** Selectors of the ingest path docs/dashboards/dashboard.html declares. */
+const DASHBOARD_SELECTORS = Object.freeze({
+  pasteBox: '#snapshot-text',
+  render: '#render-pasted',
+  clear: '#clear-all',
+  status: '#status',
+  provenance: '#provenance',
+  healthPanel: '[aria-labelledby="panel-health"]',
+  runTotalsPanel: '[aria-labelledby="panel-run-totals"]',
+  tracePanel: '[aria-labelledby="panel-traces"]',
+} as const);
+
 
 /* ==========================================================================
  * 7. Reading the page
@@ -443,6 +670,9 @@ interface BoardSurface {
 
   /** Classes on the retained terminal overlay. */
   readonly terminalOverlayClasses: readonly string[];
+
+  /** Text of the terminal screen, which carries the verdict and the score. */
+  readonly terminalText: string;
 
   /** Whether a canvas is present inside the declared board host. */
   readonly canvasPresent: boolean;
@@ -535,6 +765,9 @@ async function readBoardSurface(page: Page): Promise<BoardSurface> {
       stageText: textOf(query.selectors.hudStage),
       offerIds: attributesOf(query.selectors.rewardCard, 'data-relic-id'),
       trayRelicIds: attributesOf(query.selectors.trayRelic, 'data-relic-id'),
+      terminalText: (
+        document.getElementById('screen-game-over')?.textContent ?? ''
+      ).trim(),
       terminalOverlayClasses:
         overlay === null ? [] : Array.from(overlay.classList),
       canvasPresent: canvas !== null,
@@ -645,6 +878,124 @@ async function pressMove(
 ): Promise<void> {
   await page.keyboard.press(key);
   await page.waitForTimeout(settleMs);
+}
+
+/** What the render loop did while one filmed move played. */
+interface FilmedMove {
+  /** Wall clock at the press, for locating the move inside the recording. */
+  readonly pressedAt: number;
+
+  /** Frames the render loop drew inside `MERGE_POP_MS` of the press. */
+  readonly framesInPopWindow: number;
+
+  /** Samples the recorder took inside the same window. */
+  readonly samplesInPopWindow: number;
+
+  /** Frames drawn across the whole recorded window. */
+  readonly framesDrawn: number;
+}
+
+/**
+ * Presses one move while an in-page recorder watches the render loop.
+ *
+ * The merge pop runs for `MERGE_POP_MS` from the press, and NOTHING DRIVEN FROM
+ * NODE CAN OBSERVE THAT WINDOW: a `page.screenshot` of the board takes longer
+ * than the window is open — measured at over 600ms for the first capture — and
+ * reading the WebGL canvas with `drawImage` returns a cleared buffer, because
+ * the context is not created with `preserveDrawingBuffer`. So the observation is
+ * made INSIDE the page: a `requestAnimationFrame` loop installed before the
+ * press samples the frame counter every frame at no round-trip cost, and the
+ * series is read back afterwards.
+ *
+ * The recorder replaces the settle rather than adding to it.
+ *
+ * @param page Page to drive.
+ * @param key Movement key to press.
+ * @param windowMs Milliseconds to record from the press.
+ * @returns What the render loop did.
+ */
+async function playFilmedMove(
+  page: Page,
+  key: MoveKey,
+  windowMs: number,
+): Promise<FilmedMove> {
+  const pressedAt = Date.now();
+
+  const [series] = await Promise.all([
+    page.evaluate(
+      async (request: {
+        readonly windowMs: number;
+        readonly counter: string;
+      }): Promise<readonly { readonly ms: number; readonly f: number }[]> => {
+        const surface = (
+          globalThis as unknown as {
+            readonly __blitzy2048?: {
+              readonly metrics?: {
+                readonly snapshot: () => {
+                  readonly series: readonly {
+                    readonly name: string;
+                    readonly value: number;
+                  }[];
+                };
+              };
+            };
+          }
+        ).__blitzy2048;
+
+        const readCounter = (): number => {
+          const found = surface?.metrics
+            ?.snapshot()
+            .series.find((entry): boolean => entry.name === request.counter);
+
+          return found === undefined ? -1 : found.value;
+        };
+
+        const started = performance.now();
+        const samples: { readonly ms: number; readonly f: number }[] = [];
+        const stopAt = started + request.windowMs;
+
+        await new Promise<void>((resolve): void => {
+          const step = (): void => {
+            samples.push({
+              ms: Math.round(performance.now() - started),
+              f: readCounter(),
+            });
+
+            if (performance.now() < stopAt) {
+              requestAnimationFrame(step);
+
+              return;
+            }
+
+            resolve();
+          };
+
+          requestAnimationFrame(step);
+        });
+
+        return samples;
+      },
+      { windowMs, counter: FRAMES_RENDERED_METRIC },
+    ),
+    page.keyboard.press(key),
+  ]);
+
+  const inWindow = series.filter(
+    (sample): boolean => sample.ms <= MERGE_POP_MS,
+  );
+  const span = (
+    samples: readonly { readonly ms: number; readonly f: number }[],
+  ): number =>
+    samples.length === 0
+      ? 0
+      : samples[samples.length - 1].f - samples[0].f;
+
+  return {
+    pressedAt,
+    framesInPopWindow: span(inWindow),
+    samplesInPopWindow: inWindow.length,
+    framesDrawn: span(series),
+  };
 }
 
 /**
@@ -906,6 +1257,179 @@ function expectRenderedBoard(verdict: CanvasVerdict, context: string): void {
   ).toBeGreaterThanOrEqual(MIN_CHANNEL_SPREAD);
 }
 
+/** What the run summary reports once the terminal state is acknowledged. */
+interface RunSummaryReading {
+  /** `data-outcome` on the panel. */
+  readonly outcome: string;
+
+  /** The panel's heading text. */
+  readonly outcomeText: string;
+
+  /** The `Final score` readout, or -1 when absent or unparsed. */
+  readonly score: number;
+
+  /** The `Stage reached` readout, or -1 when absent or unparsed. */
+  readonly stage: number;
+
+  /** The seed the summary surfaces for a replay. */
+  readonly seed: string;
+
+  /** Relic identifiers in list order, which the module documents as pickup order. */
+  readonly relicIds: readonly string[];
+}
+
+/**
+ * Reads the run summary structurally.
+ *
+ * The readouts are matched by their captions rather than by position, so a
+ * reordering of the row does not silently compare the wrong number.
+ *
+ * @param page Page showing the summary.
+ * @returns What the summary reports.
+ */
+async function readRunSummary(page: Page): Promise<RunSummaryReading> {
+  return await page.evaluate(
+    (request: {
+      readonly panel: string;
+      readonly rows: string;
+      readonly seed: string;
+      readonly relics: string;
+      readonly scoreLabel: string;
+      readonly stageLabel: string;
+    }): RunSummaryReading => {
+      const panel = document.querySelector(request.panel);
+
+      const readoutFor = (caption: string): number => {
+        for (const row of Array.from(
+          document.querySelectorAll(request.rows),
+        )) {
+          const label = (
+            row.querySelector('.run-summary-score-label')?.textContent ?? ''
+          ).trim();
+
+          if (label.toLowerCase() === caption.toLowerCase()) {
+            const digits = (
+              row.querySelector('.run-summary-score-value')?.textContent ?? ''
+            ).replace(/[^0-9]/gu, '');
+
+            return digits === '' ? -1 : Number(digits);
+          }
+        }
+
+        return -1;
+      };
+
+      return {
+        outcome: panel?.getAttribute('data-outcome') ?? '',
+        outcomeText: (
+          document.getElementById('run-summary-title')?.textContent ?? ''
+        ).trim(),
+        score: readoutFor(request.scoreLabel),
+        stage: readoutFor(request.stageLabel),
+        seed: (
+          document.querySelector(request.seed)?.textContent ?? ''
+        ).trim(),
+        relicIds: Array.from(
+          document.querySelectorAll(request.relics),
+        ).map((node): string => node.getAttribute('data-relic-id') ?? ''),
+      };
+    },
+    {
+      panel: SELECTORS.runSummary,
+      rows: SELECTORS.summaryScore,
+      seed: SELECTORS.summarySeed,
+      relics: SELECTORS.summaryRelic,
+      scoreLabel: SUMMARY_SCORE_LABEL,
+      stageLabel: SUMMARY_STAGE_LABEL,
+    },
+  );
+}
+
+/**
+ * Reads how many merges the RENDERER has taken for its burst and its punch.
+ *
+ * `render.three.merge` of src/render/three-renderer.ts is raised by the
+ * renderer's own merge path, not by the engine, and it collapses into the
+ * `game2048_reports_total` family under that report label. It is therefore the
+ * one signal available in the page that distinguishes "the engine merged two
+ * tiles" from "the renderer was handed that merge to animate".
+ *
+ * @param page Page holding the composed application.
+ * @returns The count, or 0 while the family carries no such series.
+ */
+async function readRenderMergeCount(page: Page): Promise<number> {
+  return await page.evaluate((request: {
+    readonly family: string;
+    readonly report: string;
+  }): number => {
+    const surface = (
+      globalThis as unknown as {
+        readonly __blitzy2048?: {
+          readonly metrics?: {
+            readonly snapshot: () => {
+              readonly series: readonly {
+                readonly name: string;
+                readonly value: number;
+                readonly labels: Readonly<Record<string, string>>;
+              }[];
+            };
+          };
+        };
+      }
+    ).__blitzy2048;
+
+    let total = 0;
+
+    for (const series of surface?.metrics?.snapshot().series ?? []) {
+      if (
+        series.name === request.family &&
+        series.labels.report === request.report
+      ) {
+        total += series.value;
+      }
+    }
+
+    return total;
+  }, { family: REPORT_COUNTER_FAMILY, report: RENDER_MERGE_REPORT });
+}
+
+/** Which board renderer the composition selected, as it reports itself. */
+interface RendererMode {
+  /** `'three'` for the 2.5D board, `'number-only'` for the accessible one. */
+  readonly mode: string;
+
+  /** Whether number-only is standing in for a WebGL board it could not serve. */
+  readonly fallback: boolean;
+}
+
+/**
+ * Reads the renderer the composition selected.
+ *
+ * @param page Page holding the composed application.
+ * @returns The selected mode, or an empty reading when the handle is absent.
+ */
+async function readRendererMode(page: Page): Promise<RendererMode> {
+  return await page.evaluate((): RendererMode => {
+    const surface = (
+      globalThis as unknown as {
+        readonly __blitzy2048?: {
+          readonly renderer?: {
+            readonly mode?: unknown;
+            readonly fallback?: unknown;
+          };
+        };
+      }
+    ).__blitzy2048;
+
+    const renderer = surface?.renderer;
+
+    return {
+      mode: typeof renderer?.mode === 'string' ? renderer.mode : '',
+      fallback: renderer?.fallback === true,
+    };
+  });
+}
+
 /**
  * Reads a live WebGL context off a throwaway canvas.
  *
@@ -987,6 +1511,325 @@ async function fileByteSize(
   }
 }
 
+/** A rectangle of the recorded frame, in the coordinates the page used. */
+interface FrameRegion {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/** One decoded frame: where it was taken, what it looked like. */
+interface FrameSample {
+  /** The timestamp actually decoded, in seconds. */
+  readonly at: number;
+
+  /** The same measurements `sampleBoardCanvas` takes of the live board. */
+  readonly verdict: CanvasVerdict;
+
+  /**
+   * A stable digest of the sampled pixels. Two frames carrying the same
+   * signature are the same picture, which is how a static encode is caught.
+   */
+  readonly signature: string;
+}
+
+/** What decoding the artifact established. */
+interface RecordingProbe {
+  /** Whether a browser could decode it at all. */
+  readonly loaded: boolean;
+
+  /** The media error, when it could not. */
+  readonly error: string;
+
+  /** Duration the container declares, in seconds. */
+  readonly duration: number;
+
+  /** Encoded frame size. */
+  readonly width: number;
+  readonly height: number;
+
+  /** One entry per requested timestamp, in the order requested. */
+  readonly frames: readonly FrameSample[];
+}
+
+/**
+ * Decodes the encoded recording and samples it at the given timestamps.
+ *
+ * The artifact is probed by PLAYING IT rather than by parsing the container:
+ * this spec compiles under `tsconfig.json`, which carries the DOM library and
+ * no Node types, so it reaches the filesystem the way `fileByteSize` does — by
+ * handing the path to a file input. Decoding through a real `<video>` element
+ * is also the stronger proof, because it establishes that a browser can play
+ * what was written rather than that the bytes resemble a container.
+ *
+ * @param browser Browser to open a throwaway context on.
+ * @param filePath Path Playwright wrote the recording to.
+ * @param region Rectangle of each frame to sample.
+ * @param timestamps Seconds to decode, in the order wanted.
+ * @returns What decoding established.
+ */
+async function probeRecording(
+  browser: Browser,
+  filePath: string,
+  region: FrameRegion,
+  timestamps: readonly number[],
+): Promise<RecordingProbe> {
+  const reader = await browser.newContext();
+
+  try {
+    const readerPage = await reader.newPage();
+
+    await readerPage.setContent(
+      '<input id="artifact" type="file">' +
+        '<video id="film" muted playsinline></video>',
+    );
+    await readerPage.setInputFiles('#artifact', filePath);
+
+    return await readerPage.evaluate(
+      async (request: {
+        readonly region: FrameRegion;
+        readonly timestamps: readonly number[];
+        readonly edge: number;
+        readonly quantisationBits: number;
+        readonly loadTimeoutMs: number;
+        readonly seekTimeoutMs: number;
+        readonly frameStep: number;
+      }): Promise<RecordingProbe> => {
+        const input = document.getElementById('artifact');
+        const film = document.getElementById('film');
+
+        if (
+          !(input instanceof HTMLInputElement) ||
+          !(film instanceof HTMLVideoElement)
+        ) {
+          return {
+            loaded: false,
+            error: 'the probe page did not mount',
+            duration: 0,
+            width: 0,
+            height: 0,
+            frames: [],
+          };
+        }
+
+        const file = input.files?.item(0) ?? null;
+
+        if (file === null) {
+          return {
+            loaded: false,
+            error: 'the recording did not reach the file input',
+            duration: 0,
+            width: 0,
+            height: 0,
+            frames: [],
+          };
+        }
+
+        // Metadata, or the reason there is none. A truncated, empty or
+        // otherwise unplayable file resolves here with `loaded: false`.
+        const opened = await new Promise<{
+          readonly ok: boolean;
+          readonly error: string;
+        }>((resolve): void => {
+          let settled = false;
+
+          const finish = (ok: boolean, error: string): void => {
+            if (!settled) {
+              settled = true;
+              resolve({ ok, error });
+            }
+          };
+
+          film.addEventListener('loadedmetadata', (): void => {
+            finish(true, '');
+          });
+          film.addEventListener('error', (): void => {
+            finish(
+              false,
+              `media error ${String(film.error?.code ?? 'unknown')}`,
+            );
+          });
+          window.setTimeout((): void => {
+            finish(false, 'the recording did not report metadata');
+          }, request.loadTimeoutMs);
+
+          film.src = URL.createObjectURL(file);
+        });
+
+        if (!opened.ok) {
+          return {
+            loaded: false,
+            error: opened.error,
+            duration: 0,
+            width: 0,
+            height: 0,
+            frames: [],
+          };
+        }
+
+        const surface = document.createElement('canvas');
+
+        surface.width = request.edge;
+        surface.height = request.edge;
+
+        const context = surface.getContext('2d', {
+          willReadFrequently: true,
+        });
+
+        if (context === null) {
+          return {
+            loaded: false,
+            error: 'the probe canvas yielded no 2d context',
+            duration: film.duration,
+            width: film.videoWidth,
+            height: film.videoHeight,
+            frames: [],
+          };
+        }
+
+        const frames: FrameSample[] = [];
+        const last = Math.max(0, film.duration - request.frameStep);
+
+        for (const wanted of request.timestamps) {
+          const target = Math.min(Math.max(0, wanted), last);
+
+          await new Promise<void>((resolve): void => {
+            let settled = false;
+
+            const finish = (): void => {
+              if (!settled) {
+                settled = true;
+                resolve();
+              }
+            };
+
+            film.addEventListener('seeked', finish, { once: true });
+            window.setTimeout(finish, request.seekTimeoutMs);
+            film.currentTime = target;
+          });
+
+          // The region is in page coordinates and the frame is the viewport at
+          // deviceScaleFactor 1, so the two share one coordinate space.
+          context.drawImage(
+            film,
+            request.region.x,
+            request.region.y,
+            request.region.width,
+            request.region.height,
+            0,
+            0,
+            request.edge,
+            request.edge,
+          );
+
+          const pixels = context.getImageData(
+            0,
+            0,
+            request.edge,
+            request.edge,
+          ).data;
+
+          const colours = new Set<number>();
+          let luminanceTotal = 0;
+          let peakLuminance = 0;
+          let floorLuminance = 255;
+          let digest = 0;
+          const low = [255, 255, 255];
+          const high = [0, 0, 0];
+
+          for (let index = 0; index < pixels.length; index += 4) {
+            const red = pixels[index];
+            const green = pixels[index + 1];
+            const blue = pixels[index + 2];
+            const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+
+            luminanceTotal += luminance;
+            peakLuminance = Math.max(peakLuminance, luminance);
+            floorLuminance = Math.min(floorLuminance, luminance);
+
+            const quantised =
+              ((red >> request.quantisationBits) << 16) |
+              ((green >> request.quantisationBits) << 8) |
+              (blue >> request.quantisationBits);
+
+            colours.add(quantised);
+            digest = (Math.imul(digest, 31) + quantised) | 0;
+
+            low[0] = Math.min(low[0], red);
+            low[1] = Math.min(low[1], green);
+            low[2] = Math.min(low[2], blue);
+            high[0] = Math.max(high[0], red);
+            high[1] = Math.max(high[1], green);
+            high[2] = Math.max(high[2], blue);
+          }
+
+          const sampled = pixels.length / 4;
+
+          frames.push({
+            at: Number(film.currentTime.toFixed(3)),
+            verdict: {
+              distinctColours: colours.size,
+              meanLuminance: luminanceTotal / sampled,
+              peakLuminance,
+              floorLuminance,
+              channelSpread: Math.max(
+                high[0] - low[0],
+                high[1] - low[1],
+                high[2] - low[2],
+              ),
+              pixelsSampled: sampled,
+            },
+            signature: digest.toString(16),
+          });
+        }
+
+        return {
+          loaded: true,
+          error: '',
+          duration: film.duration,
+          width: film.videoWidth,
+          height: film.videoHeight,
+          frames,
+        };
+      },
+      {
+        region,
+        timestamps,
+        edge: PIXEL_SAMPLE_EDGE,
+        quantisationBits: COLOUR_QUANTISATION_BITS,
+        loadTimeoutMs: STATE_TIMEOUT_MS,
+        seekTimeoutMs: STATE_TIMEOUT_MS,
+        frameStep: FRAME_STEP_S,
+      },
+    );
+  } finally {
+    await reader.close();
+  }
+}
+
+/**
+ * Builds a list of timestamps stepping across a window.
+ *
+ * @param from First timestamp, in seconds.
+ * @param to Last timestamp, in seconds.
+ * @param step Gap between timestamps, in seconds.
+ * @returns The timestamps, ascending.
+ */
+function timestampsAcross(
+  from: number,
+  to: number,
+  step: number,
+): readonly number[] {
+  const stamps: number[] = [];
+
+  for (let at = Math.max(0, from); at <= to; at += step) {
+    stamps.push(Number(at.toFixed(3)));
+  }
+
+  return stamps;
+}
+
 /* ==========================================================================
  * 10. Storage hygiene
  * ========================================================================== */
@@ -1038,66 +1881,183 @@ function clearOwnedStorage(keys: StorageKeys): void {
   }
 }
 
-/** What the persisted store holds at one instant. */
-interface StoredState {
-  /** Whether the namespaced run-state key is present. */
-  readonly runStatePresent: boolean;
+/** The persisted run envelope, parsed into the fields this spec asserts. */
+interface RunEnvelopeReading {
+  /** Whether the stored value was present and parsed as an object. */
+  readonly parsed: boolean;
 
-  /** Whether the persisted envelope carries the seed that was played. */
-  readonly runStateHoldsSeed: boolean;
+  /** Why it did not, when it did not. */
+  readonly error: string;
 
-  /** Every key present that carries the application's namespace prefix. */
+  /** `schemaVersion`, or -1 when absent or not a number. */
+  readonly schemaVersion: number;
+
+  /** `seed` exactly as stored, or the empty string when absent. */
+  readonly seed: string;
+
+  /** `runId` exactly as stored, or the empty string when absent. */
+  readonly runId: string;
+
+  /** `rngCursor` as stored, so it can be compared field by field. */
+  readonly rngCursor: Readonly<Record<string, number>>;
+
+  /** `stageIndex`, or -1 when absent or not a number. */
+  readonly stageIndex: number;
+
+  /** `stageGoal` as stored. */
+  readonly stageGoal: Readonly<Record<string, unknown>>;
+
+  /** Entries in `relics`, or -1 when it is not an array. */
+  readonly relicCount: number;
+
+  /** `board.grid.size` of the wrapped snapshot, or -1 when unreachable. */
+  readonly boardSize: number;
+
+  /** Every key carrying the application's namespace prefix. */
   readonly namespacedKeys: readonly string[];
 
-  /** Whether the legacy best-score key is present. */
+  /** Whether the frozen best-score key is present beside the envelope. */
   readonly bestScorePresent: boolean;
 }
 
 /**
- * Reads the persisted keys through the page.
+ * Parses the persisted run envelope and reports its fields.
+ *
+ * The reading this replaces asked whether the stored TEXT contains the seed. A
+ * value carrying the seed anywhere — inside `runId`, or inside the wrapped board
+ * — satisfies that without the `seed` field being right, so this reads the
+ * envelope as the structure it is and compares each field as itself.
  *
  * @param page Page whose origin owns the store.
- * @param seed Seed the run was played under.
- * @returns What the store holds, and an empty reading where it is unavailable.
+ * @returns The parsed envelope, or a reading explaining why there is none.
  */
-async function readStoredState(page: Page, seed: string): Promise<StoredState> {
+async function readRunEnvelope(page: Page): Promise<RunEnvelopeReading> {
   return await page.evaluate(
     (request: {
       readonly keys: StorageKeys;
       readonly runStateKey: string;
-      readonly seed: string;
-    }): StoredState => {
+    }): RunEnvelopeReading => {
+      const absent = (error: string): RunEnvelopeReading => ({
+        parsed: false,
+        error,
+        schemaVersion: -1,
+        seed: '',
+        runId: '',
+        rngCursor: {},
+        stageIndex: -1,
+        stageGoal: {},
+        relicCount: -1,
+        boardSize: -1,
+        namespacedKeys: [],
+        bestScorePresent: false,
+      });
+
+      let store: Storage;
+
       try {
-        const store = window.localStorage;
-        const namespacedKeys: string[] = [];
-
-        for (let index = 0; index < store.length; index += 1) {
-          const key = store.key(index);
-
-          if (key !== null && key.startsWith(request.keys.namespacePrefix)) {
-            namespacedKeys.push(key);
-          }
-        }
-
-        const runState = store.getItem(request.runStateKey);
-
-        return {
-          runStatePresent: runState !== null,
-          runStateHoldsSeed:
-            runState !== null && runState.includes(request.seed),
-          namespacedKeys,
-          bestScorePresent: store.getItem(request.keys.bestScore) !== null,
-        };
+        store = window.localStorage;
       } catch {
+        return absent('the store is unavailable on this origin');
+      }
+
+      const namespacedKeys: string[] = [];
+
+      for (let index = 0; index < store.length; index += 1) {
+        const key = store.key(index);
+
+        if (key !== null && key.startsWith(request.keys.namespacePrefix)) {
+          namespacedKeys.push(key);
+        }
+      }
+
+      const bestScorePresent =
+        store.getItem(request.keys.bestScore) !== null;
+      const raw = store.getItem(request.runStateKey);
+
+      if (raw === null) {
         return {
-          runStatePresent: false,
-          runStateHoldsSeed: false,
-          namespacedKeys: [],
-          bestScorePresent: false,
+          ...absent('no value is stored under the run-state key'),
+          namespacedKeys,
+          bestScorePresent,
         };
       }
+
+      let envelope: unknown;
+
+      try {
+        envelope = JSON.parse(raw);
+      } catch (error: unknown) {
+        return {
+          ...absent(
+            `the stored value is not JSON: ${
+              error instanceof Error ? error.message : 'unknown'
+            }`,
+          ),
+          namespacedKeys,
+          bestScorePresent,
+        };
+      }
+
+      if (typeof envelope !== 'object' || envelope === null) {
+        return {
+          ...absent('the stored value is not an object'),
+          namespacedKeys,
+          bestScorePresent,
+        };
+      }
+
+      const record = envelope as Record<string, unknown>;
+
+      const numberAt = (value: unknown): number =>
+        typeof value === 'number' && Number.isFinite(value) ? value : -1;
+
+      const stringAt = (value: unknown): string =>
+        typeof value === 'string' ? value : '';
+
+      const cursor: Record<string, number> = {};
+      const storedCursor = record.rngCursor;
+
+      if (typeof storedCursor === 'object' && storedCursor !== null) {
+        for (const [name, value] of Object.entries(
+          storedCursor as Record<string, unknown>,
+        )) {
+          cursor[name] = numberAt(value);
+        }
+      }
+
+      const board = record.board;
+      const grid =
+        typeof board === 'object' && board !== null
+          ? (board as Record<string, unknown>).grid
+          : null;
+      const boardSize =
+        typeof grid === 'object' && grid !== null
+          ? numberAt((grid as Record<string, unknown>).size)
+          : -1;
+
+      const goal: Record<string, unknown> = {};
+      const storedGoal = record.stageGoal;
+
+      if (typeof storedGoal === 'object' && storedGoal !== null) {
+        Object.assign(goal, storedGoal as Record<string, unknown>);
+      }
+
+      return {
+        parsed: true,
+        error: '',
+        schemaVersion: numberAt(record.schemaVersion),
+        seed: stringAt(record.seed),
+        runId: stringAt(record.runId),
+        rngCursor: cursor,
+        stageIndex: numberAt(record.stageIndex),
+        stageGoal: goal,
+        relicCount: Array.isArray(record.relics) ? record.relics.length : -1,
+        boardSize,
+        namespacedKeys,
+        bestScorePresent,
+      };
     },
-    { keys: STORAGE_KEYS, runStateKey: RUN_STATE_KEY, seed },
+    { keys: STORAGE_KEYS, runStateKey: RUN_STATE_KEY },
   );
 }
 
@@ -1410,6 +2370,9 @@ function seriesValue(
  */
 const EXPECTED_BOARD_CELLS = 16;
 
+/** `boardSize`, ported from js/application.js L3. */
+const EXPECTED_BOARD_SIZE = 4;
+
 /** `startTiles`, ported from js/game_manager.js L7. */
 const EXPECTED_START_TILES = 2;
 
@@ -1465,6 +2428,7 @@ test.describe('recorded gameplay proof', () => {
   test(
     'records a run that renders the board in 2.5D, plays a merge with ' +
       'its animation and takes a relic from the reward screen',
+    { tag: '@gameplay' },
     async ({ page, browser }) => {
       const video = page.video();
 
@@ -1477,6 +2441,12 @@ test.describe('recorded gameplay proof', () => {
       if (video === null) {
         throw new Error('the page carries no video to resolve');
       }
+
+      // Wall clock the recording's own timeline is measured against. Encoding
+      // begins when the context is created, a moment earlier than this, so a
+      // timestamp derived from it is approximate and every search that uses one
+      // is widened by `MILESTONE_TOLERANCE_S`.
+      const recordingEpoch = Date.now();
 
       // Relative, so the root configuration's `baseURL` and `webServer` remain
       // the single source of the origin.
@@ -1529,6 +2499,95 @@ test.describe('recorded gameplay proof', () => {
         tileValuesOf(opening.cellLabels).length,
         'the opening board did not carry the configured start tiles',
       ).toBe(EXPECTED_START_TILES);
+
+      // THE SEED IS LOAD-BEARING. The opening board is a function of `RUN_SEED`
+      // alone, so pinning it is what separates a seeded run from any run: a
+      // build that ignored the entered seed satisfies every count above and
+      // fails here.
+      expect(
+        opening.cellLabels.filter((label): boolean =>
+          POPULATED_CELL.test(label),
+        ),
+        `the opening board under seed "${RUN_SEED}" is not the board that ` +
+          'seed produces',
+      ).toEqual([...OPENING_CELL_LABELS]);
+
+      // Where the board sits on the page. The recorded frame is the viewport at
+      // deviceScaleFactor 1, so this rectangle addresses the board inside a
+      // decoded frame as well as on the page.
+      const boardBox = await page.locator(SELECTORS.boardCanvas).boundingBox();
+
+      expect(
+        boardBox,
+        'the board canvas reported no bounding box, so no region of the ' +
+          'recording can be addressed',
+      ).not.toBeNull();
+
+      if (boardBox === null) {
+        throw new Error('the board canvas reported no bounding box');
+      }
+
+      const boardRegion: FrameRegion = {
+        x: Math.round(boardBox.x),
+        y: Math.round(boardBox.y),
+        width: Math.round(boardBox.width),
+        height: Math.round(boardBox.height),
+      };
+
+      /* -- The envelope the seeded run persisted --------------------------- */
+
+      // Read here, before a single move: the cursors are still the two start
+      // spawns, and the run has not ended, so the envelope is still present.
+      // A finished run REMOVES it, which is why this cannot wait until later.
+      const openingEnvelope = await readRunEnvelope(page);
+
+      expect(
+        openingEnvelope.parsed,
+        `the persisted run state under "${RUN_STATE_KEY}" did not parse: ` +
+          openingEnvelope.error,
+      ).toBe(true);
+      expect(
+        openingEnvelope.schemaVersion,
+        'the envelope carries a schema version this spec does not know',
+      ).toBe(RUN_STATE_SCHEMA_VERSION);
+      expect(
+        openingEnvelope.seed,
+        'the envelope `seed` field is not the seed that was entered',
+      ).toBe(RUN_SEED);
+      expect(
+        openingEnvelope.runId,
+        'the envelope carries no run identifier',
+      ).toMatch(/^[0-9a-f]+$/u);
+      expect(
+        openingEnvelope.rngCursor,
+        'the persisted RNG cursors are not the two opening spawns across the ' +
+          'four declared substreams',
+      ).toEqual(OPENING_RNG_CURSOR);
+      expect(
+        openingEnvelope.stageIndex,
+        'the envelope did not open on the first stage',
+      ).toBe(0);
+      expect(
+        openingEnvelope.stageGoal,
+        'the envelope records a different first-stage goal',
+      ).toEqual(OPENING_STAGE_GOAL);
+      expect(
+        openingEnvelope.relicCount,
+        'the envelope holds relics before any reward was offered',
+      ).toBe(0);
+      expect(
+        openingEnvelope.boardSize,
+        'the wrapped board snapshot is not the configured lattice',
+      ).toBe(EXPECTED_BOARD_SIZE);
+      expect(
+        openingEnvelope.namespacedKeys,
+        'the run state was written outside the application namespace',
+      ).toContain(RUN_STATE_KEY);
+
+      // `bestScore` is deliberately NOT asserted here. The legacy key is
+      // written only when a score exceeds the stored best, so on a clean store
+      // at score zero its absence is correct; it is asserted at the run's end,
+      // where the frozen contract is observable.
       expect(
         opening.scoreText,
         'the score outlet rendered no labelled value',
@@ -1591,10 +2650,26 @@ test.describe('recorded gameplay proof', () => {
       let mergeDeltaText = '';
       let mergeCellLabels: readonly string[] = [];
 
+      let mergeFilm: FilmedMove | null = null;
+      let mergeMove = 0;
+
+      // No merge has reached the renderer yet, so its burst-and-punch counter
+      // carries nothing. The delta across the merged turn is what proves the
+      // merge was handed to the renderer to animate.
+      const mergesBefore = await readRenderMergeCount(page);
+
+      expect(
+        mergesBefore,
+        'the renderer had already taken a merge before one was played',
+      ).toBe(0);
+
       while (mergeAnnouncement === '' && moves < MERGE_MOVE_CAP) {
         const key = MOVE_KEYS[moves % MOVE_KEYS.length];
 
-        await pressMove(page, key, FILMED_MOVE_SETTLE_MS);
+        // The recorder watches the render loop across the press, so the pop
+        // window is observed while it is open rather than after it has closed.
+        const film = await playFilmedMove(page, key, FILMED_MOVE_SETTLE_MS);
+
         moves += 1;
 
         const turn = await readBoardSurface(page);
@@ -1607,6 +2682,8 @@ test.describe('recorded gameplay proof', () => {
           mergeAnnouncement = turn.announcement;
           mergeDeltaText = turn.scoreDeltaText;
           mergeCellLabels = turn.cellLabels;
+          mergeFilm = film;
+          mergeMove = moves;
         }
       }
 
@@ -1619,6 +2696,62 @@ test.describe('recorded gameplay proof', () => {
         mergeDeltaText,
         'the merged turn wrote no `+N` score delta beside the score',
       ).toMatch(SCORE_DELTA_TEXT);
+
+      // The seed decides which move merges, so the turn is pinned as well as
+      // the fact.
+      expect(
+        mergeMove,
+        `under seed "${RUN_SEED}" the first merge is move ` +
+          `${FIRST_MERGE_MOVE}`,
+      ).toBe(FIRST_MERGE_MOVE);
+
+      /* -- The merge animation, observed while it was open ---------------- */
+
+      // The 2.5D renderer is the surface that drew it. `src/main.ts` can fall
+      // back to the number-only board through five separate routes, so a run
+      // that degraded silently would still animate a board and still satisfy
+      // every board assertion above. This is the guard against that.
+      const board = await readRendererMode(page);
+
+      expect(
+        board.mode,
+        'the board on screen is not the 2.5D renderer, so the recorded ' +
+          'animation is not a 2.5D one',
+      ).toBe(THREE_RENDERER_MODE);
+      expect(
+        board.fallback,
+        'the renderer is standing in for a WebGL board it could not serve',
+      ).toBe(false);
+
+      expect(
+        mergeFilm,
+        'the merged turn was not the one the recorder watched',
+      ).not.toBeNull();
+
+      if (mergeFilm === null) {
+        throw new Error('the merged turn carried no recorder series');
+      }
+
+      expect(
+        mergeFilm.samplesInPopWindow,
+        `the recorder took no sample inside the ${MERGE_POP_MS}ms the pop is ` +
+          'open, so nothing was observed while it played',
+      ).toBeGreaterThan(1);
+      expect(
+        mergeFilm.framesInPopWindow,
+        `the render loop drew no frame inside the ${MERGE_POP_MS}ms merge ` +
+          'window, so the pop cannot have been drawn',
+      ).toBeGreaterThan(0);
+
+      // THE MERGE REACHED THE RENDERER'S ANIMATION PATH. The engine merging two
+      // tiles and the renderer animating that merge are separate facts, and only
+      // this counter carries the second one: it is raised by the renderer as it
+      // records the merge for its burst and its punch.
+      expect(
+        await readRenderMergeCount(page),
+        'the renderer never took the merge for its burst and punch, so the ' +
+          'merge was resolved without any animation being started for it',
+      ).toBeGreaterThan(mergesBefore);
 
       // The pop runs 300ms and the score delta 600ms from the merge.
       await page.waitForTimeout(MERGE_POP_MS + SCORE_DELTA_MS);
@@ -1643,6 +2776,11 @@ test.describe('recorded gameplay proof', () => {
         'the announced merge product is below the smallest one the rules can ' +
           'produce',
       ).toBeGreaterThanOrEqual(4);
+      expect(
+        mergedValue,
+        `under seed "${RUN_SEED}" the first merge produces ` +
+          `${FIRST_MERGE_PRODUCT}`,
+      ).toBe(FIRST_MERGE_PRODUCT);
 
       const merged = await readBoardSurface(page);
 
@@ -1686,6 +2824,13 @@ test.describe('recorded gameplay proof', () => {
           `${FIRST_STAGE_TARGET}`,
       ).toBe('stageClear');
 
+      // The seed decides the turn the goal is met on, so the turn is pinned.
+      expect(
+        moves,
+        `under seed "${RUN_SEED}" the first stage clears on move ` +
+          `${FIRST_STAGE_CLEAR_MOVE}`,
+      ).toBe(FIRST_STAGE_CLEAR_MOVE);
+
       const stageClearPanel = page.locator('#screen-stage-progress');
 
       await expect(
@@ -1728,6 +2873,16 @@ test.describe('recorded gameplay proof', () => {
         'one offer presented the same relic twice: ' +
           offer.offerIds.join(', '),
       ).toBe(EXPECTED_OFFER_COUNT);
+
+      // THE DRAW IS SEEDED, AND THIS IS WHERE THAT IS PROVED. The three offers
+      // and their order come from the `relic-draw` and `rarity-weight`
+      // substreams, so a draw that stopped consuming the run seed would still
+      // present three distinct relics and fail only here.
+      expect(
+        offer.offerIds,
+        `under seed "${RUN_SEED}" the first reward round offers these three ` +
+          'relics in this order',
+      ).toEqual([...FIRST_OFFER_IDS]);
 
       const firstCard = cards.first();
 
@@ -1788,11 +2943,16 @@ test.describe('recorded gameplay proof', () => {
           heldRelicIds,
           `move ${played + 1} of the stage the relic opened`,
         );
+        // `moves` counts every press, so the key sequence stays strictly
+        // increasing across the whole run and the counter remains the true
+        // number of moves played. Indexing by `moves` while incrementing it
+        // selects the same keys the previous `moves + played` form did.
         await pressMove(
           page,
-          MOVE_KEYS[(moves + played) % MOVE_KEYS.length],
+          MOVE_KEYS[moves % MOVE_KEYS.length],
           MOVE_SETTLE_MS,
         );
+        moves += 1;
       }
 
       await resolveOverlaysToStage(
@@ -1821,42 +2981,202 @@ test.describe('recorded gameplay proof', () => {
         'the board after the relic was taken',
       );
 
-      /* -- The run ended alive, and it persisted under its own key -------- */
+      /* -- The envelope the run kept while it was still running ----------- */
 
-      // The verdict classes are written with the commit; the overlay fades over
-      // 1200ms + 800ms. `TERMINAL_OVERLAY_MS` clears that whole cadence.
+      // Read while the run is STILL RUNNING. Ending a run removes its envelope,
+      // so a read taken after the terminal state finds nothing; this is the last
+      // point at which the played seed, the advanced cursors and the relics
+      // taken are all on disk together.
+      const progressEnvelope = await readRunEnvelope(page);
+
+      expect(
+        progressEnvelope.parsed,
+        `the run was not persisted under "${RUN_STATE_KEY}" while it ran: ` +
+          progressEnvelope.error,
+      ).toBe(true);
+      expect(
+        progressEnvelope.seed,
+        'the persisted envelope `seed` field is not the seed that was played',
+      ).toBe(RUN_SEED);
+      expect(
+        progressEnvelope.schemaVersion,
+        'the envelope schema version changed during the run',
+      ).toBe(RUN_STATE_SCHEMA_VERSION);
+      expect(
+        progressEnvelope.runId,
+        'the envelope lost its run identifier',
+      ).toBe(openingEnvelope.runId);
+      expect(
+        progressEnvelope.stageIndex,
+        'the envelope did not advance past the first stage',
+      ).toBeGreaterThan(openingEnvelope.stageIndex);
+      expect(
+        progressEnvelope.relicCount,
+        'the envelope holds fewer relics than were taken',
+      ).toBeGreaterThanOrEqual(heldRelicIds.length);
+      expect(
+        progressEnvelope.boardSize,
+        'the wrapped board snapshot changed lattice',
+      ).toBe(EXPECTED_BOARD_SIZE);
+      expect(
+        progressEnvelope.bestScorePresent,
+        'the frozen best-score key was never written, so the legacy contract ' +
+          'was not preserved alongside the namespaced run envelope',
+      ).toBe(true);
+      expect(
+        progressEnvelope.namespacedKeys,
+        'the run state left the application namespace during the run',
+      ).toContain(RUN_STATE_KEY);
+
+      // Every cursor advanced or held; none went backwards. The two spawn
+      // streams advance together, one value per position.
+      for (const stream of Object.keys(OPENING_RNG_CURSOR)) {
+        expect(
+          progressEnvelope.rngCursor[stream],
+          `the "${stream}" cursor went backwards during the run`,
+        ).toBeGreaterThanOrEqual(
+          OPENING_RNG_CURSOR[stream as keyof typeof OPENING_RNG_CURSOR],
+        );
+      }
+
+      expect(
+        progressEnvelope.rngCursor['spawn-value'],
+        'the spawn-value and spawn-position cursors came apart, so one spawn ' +
+          'drew a value without a position or the reverse',
+      ).toBe(progressEnvelope.rngCursor['spawn-position']);
+      expect(
+        progressEnvelope.rngCursor['relic-draw'],
+        'no relic draw was recorded although reward rounds were resolved',
+      ).toBeGreaterThan(0);
+
+      /* -- The run is played to its own end ------------------------------- */
+
+      // A run that comes to rest on a playable board proves nothing about the
+      // terminal flow, so the run is played out. Every move is taken from the
+      // `stage` state and every screen raised on the way is resolved, exactly
+      // as the earlier stages were, until the board has no move left.
+      let terminalMove = moves;
+
+      for (
+        let played = 0;
+        played < TERMINAL_MOVE_CAP && terminalMove < TERMINAL_MOVE_CAP;
+        played += 1
+      ) {
+        const surface = await readBoardSurface(page);
+
+        if (
+          surface.screen === 'gameOver' ||
+          surface.screen === 'won' ||
+          surface.screen === 'runSummary'
+        ) {
+          break;
+        }
+
+        if (surface.screen !== 'stage') {
+          await resolveOverlaysToStage(
+            page,
+            heldRelicIds,
+            'playing the run out to its end',
+          );
+
+          continue;
+        }
+
+        await pressMove(
+          page,
+          MOVE_KEYS[terminalMove % MOVE_KEYS.length],
+          MOVE_SETTLE_MS,
+        );
+        terminalMove += 1;
+      }
+
+      // The verdict is written with the commit, and the overlay fades over
+      // 1200ms + 800ms. `TERMINAL_OVERLAY_MS` clears that whole cadence, so the
+      // frames carry the finished verdict rather than a fade in progress.
       await page.waitForTimeout(TERMINAL_OVERLAY_MS);
 
-      const settled = await readBoardSurface(page);
+      const finished = await readBoardSurface(page);
 
       expect(
-        settled.terminalOverlayClasses,
-        'the retained overlay carries the loss verdict, so the recorded run ' +
-          'ended rather than continuing',
-      ).not.toContain('game-over');
+        finished.screen,
+        `the run did not reach a terminal state within ` +
+          `${TERMINAL_MOVE_CAP} moves: the state is "${finished.screen}"`,
+      ).toBe('gameOver');
       expect(
-        settled.terminalOverlayClasses,
-        'the retained overlay carries the win verdict',
-      ).not.toContain('game-won');
+        terminalMove,
+        `under seed "${RUN_SEED}" the run is lost on move ${TERMINAL_MOVE}`,
+      ).toBe(TERMINAL_MOVE);
+
+      /* -- The terminal controls, and the run summary --------------------- */
+
+      // RUN-END HYGIENE. A finished run must not be resumable, so the envelope
+      // is gone by the time the terminal state stands while the frozen
+      // best-score key survives it.
+      const afterEnd = await readRunEnvelope(page);
+
+      expect(
+        afterEnd.parsed,
+        'the finished run left its envelope on disk, so a reload would resume ' +
+          'a run that is already over',
+      ).toBe(false);
+      expect(
+        afterEnd.bestScorePresent,
+        'the frozen best-score key did not survive the end of the run',
+      ).toBe(true);
+
+      const terminalScore = TERMINAL_OVERLAY_SCORE.exec(finished.terminalText);
+
+      expect(
+        terminalScore,
+        `the terminal screen did not report a score: ` +
+          `"${finished.terminalText}"`,
+      ).not.toBeNull();
+      expect(
+        Number(terminalScore?.[1] ?? Number.NaN),
+        `under seed "${RUN_SEED}" the lost run finishes on ${TERMINAL_SCORE}`,
+      ).toBe(TERMINAL_SCORE);
+
+      const acknowledge = page.locator(SELECTORS.acknowledgeTerminal);
+
       await expect(
-        page.locator(SELECTORS.terminalOverlay),
-        'the terminal overlay is on screen with no verdict written',
-      ).toBeHidden();
+        acknowledge,
+        'the terminal screen offered no control to carry the run forward',
+      ).toBeEnabled();
+      await acknowledge.click();
+      await expectScreen(page, 'runSummary', 'acknowledging the terminal state');
 
-      const stored = await readStoredState(page, RUN_SEED);
+      // The summary is filmed for long enough to be legible in the frames.
+      await page.waitForTimeout(SCREEN_SETTLE_MS);
+
+      const summary = await readRunSummary(page);
 
       expect(
-        stored.runStatePresent,
-        `the run was not persisted under "${RUN_STATE_KEY}"`,
-      ).toBe(true);
+        summary.seed,
+        'the run summary does not surface the seed that was played, so the ' +
+          'run cannot be replayed from it',
+      ).toBe(RUN_SEED);
       expect(
-        stored.runStateHoldsSeed,
-        'the persisted run does not carry the seed that was played',
-      ).toBe(true);
+        summary.score,
+        `the run summary reports a different final score than the terminal ` +
+          `screen did`,
+      ).toBe(TERMINAL_SCORE);
       expect(
-        stored.namespacedKeys.some((key): boolean => key === RUN_STATE_KEY),
-        'the run state was written outside the application namespace',
-      ).toBe(true);
+        summary.stage,
+        `under seed "${RUN_SEED}" the lost run reaches stage ` +
+          `${TERMINAL_STAGE}`,
+      ).toBe(TERMINAL_STAGE);
+      expect(
+        summary.relicIds,
+        'the run summary does not list every relic taken, in pickup order',
+      ).toEqual(heldRelicIds);
+      expect(
+        summary.outcomeText,
+        'the run summary does not name the outcome of the run',
+      ).toMatch(RUN_LOST_TEXT);
+      expect(
+        summary.outcome,
+        'the run summary does not record the outcome as an inspectable state',
+      ).toBe(LOST_OUTCOME);
 
       /* -- The artifact --------------------------------------------------- */
 
@@ -1877,6 +3197,119 @@ test.describe('recorded gameplay proof', () => {
         recordedBytes,
         `the recording at ${recordingPath} is empty, so it carries no frames`,
       ).toBeGreaterThan(0);
+
+      /* -- The artifact is decoded, not merely counted -------------------- */
+
+      // A suffix and a byte count are satisfied by a header-only, truncated,
+      // black or single-colour encode. The gate's terms are that the video
+      // VISIBLY SHOWS the board, a merge with its animation and the reward
+      // selection, so the file is played and its pixels are measured.
+      const sweepStamps = timestampsAcross(
+        0,
+        SWEEP_SAMPLE_COUNT * FRAME_STEP_S * 10,
+        FRAME_STEP_S * 10,
+      );
+
+      // The merge window, isolated: it opens after the 100ms move transition
+      // has finished, so the merge pop is the only board motion inside it.
+      const mergeAt = (mergeFilm.pressedAt - recordingEpoch) / 1000;
+      const mergeStamps = timestampsAcross(
+        Math.max(0, mergeAt + MOVE_TRANSITION_MS / 1000),
+        mergeAt + MOVE_TRANSITION_MS / 1000 + MILESTONE_TOLERANCE_S,
+        FRAME_STEP_S,
+      );
+
+      const probe = await probeRecording(
+        browser,
+        recordingPath,
+        boardRegion,
+        [...sweepStamps, ...mergeStamps],
+      );
+
+      expect(
+        probe.loaded,
+        `the recording at ${recordingPath} could not be decoded by a ` +
+          `browser: ${probe.error}`,
+      ).toBe(true);
+      expect(
+        probe.duration,
+        'the recording reports no duration, so it carries no playable span',
+      ).toBeGreaterThan(0);
+      expect(
+        probe.width,
+        'the recording was encoded at no width',
+      ).toBe(VIEWPORT_WIDTH);
+      expect(
+        probe.height,
+        'the recording was encoded at no height',
+      ).toBe(VIEWPORT_HEIGHT);
+      expect(
+        probe.frames.length,
+        'no frame of the recording could be sampled',
+      ).toBe(sweepStamps.length + mergeStamps.length);
+
+      const sweepFrames = probe.frames.slice(0, sweepStamps.length);
+      const mergeFrames = probe.frames.slice(sweepStamps.length);
+
+      /* Criterion (a), in the artifact: the board is visibly rendered. */
+
+      // Every sampled frame of the board region is measured with the same
+      // verdict the live canvas is held to, so a black or flat encode fails
+      // here on the same thresholds.
+      const litFrames = sweepFrames.filter(
+        (frame): boolean =>
+          frame.verdict.distinctColours >= MIN_DISTINCT_COLOURS &&
+          frame.verdict.meanLuminance >= MIN_MEAN_LUMINANCE &&
+          frame.verdict.peakLuminance >= MIN_PEAK_LUMINANCE &&
+          frame.verdict.channelSpread >= MIN_CHANNEL_SPREAD,
+      );
+
+      expect(
+        litFrames.length,
+        'no sampled frame of the recording carries a rendered board: the ' +
+          'brightest sample measured ' +
+          `${Math.max(
+            ...sweepFrames.map((frame): number => frame.verdict.peakLuminance),
+            0,
+          ).toFixed(0)} peak luminance over ` +
+          `${Math.max(
+            ...sweepFrames.map(
+              (frame): number => frame.verdict.distinctColours,
+            ),
+            0,
+          )} distinct colours, which is a black or flat encode`,
+      ).toBeGreaterThan(0);
+
+      // The strongest single frame is held to the full board verdict.
+      const brightest = litFrames.reduce((best, frame) =>
+        frame.verdict.peakLuminance > best.verdict.peakLuminance ? frame : best,
+      );
+
+      expectRenderedBoard(
+        brightest.verdict,
+        `the recorded frame at ${brightest.at.toFixed(2)}s`,
+      );
+
+      /* The recording is a moving picture, not a still. */
+
+      expect(
+        new Set(sweepFrames.map((frame): string => frame.signature)).size,
+        'the recording repeats one picture across its whole span, so it is a ' +
+          'static encode rather than a played run',
+      ).toBeGreaterThanOrEqual(MIN_DISTINCT_SWEEP_FRAMES);
+
+      /* Criterion (b), in the artifact: the merge animation is visible. */
+
+      expect(
+        mergeFrames.length,
+        'the merge window fell outside the recording',
+      ).toBeGreaterThan(MIN_DISTINCT_MERGE_FRAMES);
+      expect(
+        new Set(mergeFrames.map((frame): string => frame.signature)).size,
+        'the board does not change across the merge window, which opens after ' +
+          'the move transition has finished: the pop is the only motion left ' +
+          'in it, so an unchanging board means it was never drawn',
+      ).toBeGreaterThanOrEqual(MIN_DISTINCT_MERGE_FRAMES);
     },
   );
 
@@ -1884,6 +3317,7 @@ test.describe('recorded gameplay proof', () => {
     'reports the six health checks, the module-boundary spans, the ' +
       'Prometheus exposition and the correlated log records through the ' +
       'diagnostics surface',
+    { tag: '@diagnostics' },
     async ({ page }) => {
       // The surface is a runtime opt-in, off by default, and it paints above
       // every game layer. It is opened here and in no other case.
@@ -2141,6 +3575,100 @@ test.describe('recorded gameplay proof', () => {
         (await download).suggestedFilename(),
         'the snapshot export did not offer the file the surface declares',
       ).toBe(DIAGNOSTICS_EXPORT_FILENAME);
+
+      /* -- The dashboard template, fed that very export ------------------- */
+
+      // The combined snapshot is read here rather than out of the downloaded
+      // file: it is the same text the export writes, and reading it through the
+      // page keeps this spec free of any filesystem access.
+      const combinedJson = await page.evaluate(
+        (globalName: string): string => {
+          const published = (globalThis as unknown as Record<string, unknown>)[
+            globalName
+          ];
+
+          if (published === undefined || published === null) {
+            return '';
+          }
+
+          return (published as InspectionHandle).diagnostics.snapshotJson();
+        },
+        APPLICATION_GLOBAL,
+      );
+
+      expect(
+        combinedJson.length,
+        'the diagnostics surface exported an empty combined snapshot',
+      ).toBeGreaterThan(0);
+
+      await page.goto(DASHBOARD_TEMPLATE_URL);
+
+      const dashboardStatus = page.locator(DASHBOARD_SELECTORS.status);
+
+      await expect(
+        dashboardStatus,
+        'the dashboard template did not open in its pre-load state',
+      ).toHaveAttribute('data-level', 'empty');
+
+      await page.locator(DASHBOARD_SELECTORS.pasteBox).fill(combinedJson);
+      await page.locator(DASHBOARD_SELECTORS.render).click();
+
+      await expect(
+        dashboardStatus,
+        'the dashboard template refused the combined diagnostics snapshot ' +
+          'this session exported',
+      ).toHaveAttribute('data-level', 'loaded');
+      await expect(
+        dashboardStatus,
+        'the dashboard template did not name the form it read',
+      ).toContainText('combined diagnostics snapshot');
+      await expect(
+        page.locator(DASHBOARD_SELECTORS.provenance),
+        'the dashboard template did not carry the run correlation identifier',
+      ).toContainText(reading.health.correlationId);
+
+      for (const check of HEALTH_CHECK_IDS) {
+        await expect(
+          page.locator(DASHBOARD_SELECTORS.healthPanel),
+          `the dashboard template rendered no "${check}" health row`,
+        ).toContainText(check);
+      }
+
+      await expect(
+        page.locator(DASHBOARD_SELECTORS.runTotalsPanel),
+        'the dashboard template rendered no turn total',
+      ).toContainText('turns');
+      await expect(
+        page.locator(DASHBOARD_SELECTORS.tracePanel),
+        'the dashboard template rendered no trace summary',
+      ).toContainText('spans started');
+
+      // And the other export form the surface writes, through the same page.
+      await page.locator(DASHBOARD_SELECTORS.clear).click();
+
+      await expect(
+        dashboardStatus,
+        'the dashboard template did not return to its pre-load state',
+      ).toHaveAttribute('data-level', 'empty');
+
+      await page
+        .locator(DASHBOARD_SELECTORS.pasteBox)
+        .fill(reading.metrics.text);
+      await page.locator(DASHBOARD_SELECTORS.render).click();
+
+      await expect(
+        dashboardStatus,
+        'the dashboard template refused the Prometheus exposition this ' +
+          'session exported',
+      ).toHaveAttribute('data-level', 'loaded');
+      await expect(
+        dashboardStatus,
+        'the dashboard template did not name the exposition form',
+      ).toContainText('Prometheus text exposition');
+      await expect(
+        page.locator(DASHBOARD_SELECTORS.healthPanel),
+        'the dashboard template read no health gauge out of the exposition',
+      ).toContainText('healthy');
     },
   );
 });

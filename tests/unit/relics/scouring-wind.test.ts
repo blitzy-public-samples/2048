@@ -1,8 +1,13 @@
 // The isolation suite for the `board-manipulation` relic `scouring-wind`, the
-// COLUMN clear — one column being a single `x` across every `y`, the outer
-// index of the x-major `cells[x][y]` store. Three properties, one section
-// apiece: the hooks it fires on, the effect it produces, and the charge budget
-// it carries.
+// ROW clear — one row being a single `y` across every `x`, one element taken
+// from each sub-array of the x-major `cells[x][y]` store. Three properties, one
+// section apiece: the hooks it fires on, the effect it produces, and the charge
+// budget it carries.
+//
+// CHANGED: this opening said COLUMN and described a single `x` across every `y`,
+// contradicting both the implementation and the AXIS paragraph fifteen lines
+// below it — a reader who stopped at the first sentence was told the opposite of
+// what the file proves. DL-TEST-14.
 //
 // Five relics of the catalogue declare a charge budget — `frostbind` of
 // `merge-magic`, and `temporal-anchor`, `tumbler`, `culling-blade` and
@@ -36,19 +41,18 @@
 //                               src/engine/terminal-state.ts
 //   js/tile.js        L2-L3     a tile flattens its position onto `x` and `y`
 //
-// Traceability row this suite is evidence for. docs/TRACEABILITY_MATRIX.md HAS
-// NOT LANDED; the ordinal is RESERVED against it:
+// Traceability row this suite is evidence for, which resolves to a row in the
+// delivered docs/TRACEABILITY_MATRIX.md:
 //   TR-BOARD-04 `scouring-wind` on `onAfterMove`, and the four `js/grid.js`
 //   anchors above together with js/game_manager.js L238-L268.
 //
-// Named figures, PLANNED AND NOT LANDED.
-// docs/architecture/hook-dispatch-sequence.md is to carry Figure 5, "Hook
-// Dispatch Sequence: Pickup-Order Fan-Out with Charge Guard and Error
-// Isolation", which will draw the charge-guard path this suite's budget section
-// exercises, and docs/architecture/data-flow.md is to carry Figure 4, "Turn
-// Data Flow", with the `Moves available?` decision node the terminal-board case
-// exercises. The assertions below rest on the sources named above, not on
-// either figure.
+// Named figures, both delivered.
+// docs/architecture/hook-dispatch-sequence.md carries Figure 5, "Hook Dispatch
+// Sequence: Pickup-Order Fan-Out with Charge Guard and Error Isolation", which
+// draws the charge-guard path this suite's budget section exercises, and
+// docs/architecture/data-flow.md carries Figure 4, "Turn Data Flow", with the
+// `Moves available?` decision node the terminal-board case exercises. The
+// assertions below rest on the sources named above, not on either figure.
 //
 // Decisions: DL-BOARD-01, DL-BOARD-02 (docs/DECISION_LOG.md).
 //

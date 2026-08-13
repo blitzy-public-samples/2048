@@ -109,23 +109,62 @@ describe('cloneRunState copies a relic state slot without aliasing it', () => {
   });
 
   it('drops a subtree past the depth bound rather than aliasing it', () => {
+    // Nine levels below `state`, so `i` sits one past MAX_RELIC_STATE_DEPTH of
+    // 8 and the copy must not carry it AT ALL. The previous form of this case
+    // asserted only that the flattened copy did not contain `'99'` BEFORE the
+    // mutation — true whether the subtree was dropped or aliased — and then
+    // compared a re-clone against a `String.replace` that was a no-op once the
+    // subtree really was dropped. Both halves passed for an ALIASED subtree.
     const leaf: Record<string, unknown> = { counter: 1 };
     const original = createState({
       a: { b: { c: { d: { e: { f: { g: { h: { i: leaf } } } } } } } },
+    });
+    const copy = cloneRunState(original);
+    const copied = firstRelicState(copy) as Record<string, unknown>;
+    const flattened = JSON.stringify(copied);
+
+    // THE PATH IS ABSENT AT THE BOUND, asserted key by key rather than by
+    // string search: every level down to `h` survives, and `h` is empty.
+    type Level = Record<string, Record<string, unknown>>;
+    const a = copied.a as Level;
+    const b = a.b as Level;
+    const c = b.c as Level;
+    const d = c.d as Level;
+    const e = d.e as Level;
+    const f = e.f as Level;
+
+    // `state` is depth 0, so `g` sits at depth 7 and is the last container
+    // carried; `h` at depth 8 reaches MAX_RELIC_STATE_DEPTH and is dropped,
+    // taking the aliasable `leaf` with it.
+    const g = f.g as Record<string, unknown>;
+
+    expect(Object.keys(copied)).toEqual(['a']);
+    expect(g).toEqual({});
+    expect(Object.keys(g)).not.toContain('h');
+    expect(Object.prototype.hasOwnProperty.call(g, 'h')).toBe(false);
+
+    // AND THE DROPPED SUBTREE IS NOT ALIASED. Mutating the original's leaf
+    // leaves the captured copy byte-identical, which an aliased subtree — the
+    // one hazard this bound exists to prevent — cannot survive.
+    leaf.counter = 99;
+    (original.relics[0].state as Level).a = { mutated: {} };
+
+    expect(JSON.stringify(firstRelicState(copy))).toBe(flattened);
+    expect(firstRelicState(copy)).toEqual(copied);
+  });
+
+  it('carries the deepest level the bound admits', () => {
+    // The pair to the case above, so a clone that dropped everything could not
+    // pass it: eight levels below `state` is the last one carried.
+    const original = createState({
+      a: { b: { c: { d: { e: { f: { g: 'kept' } } } } } },
     });
     const copied = firstRelicState(cloneRunState(original)) as Record<
       string,
       unknown
     >;
-    const flattened = JSON.stringify(copied);
 
-    expect(flattened).not.toContain('99');
-
-    leaf.counter = 99;
-
-    expect(JSON.stringify(firstRelicState(cloneRunState(original)))).toBe(
-      flattened.replace('"counter":1', '"counter":99'),
-    );
+    expect(JSON.stringify(copied)).toContain('kept');
   });
 
   it('copies an array entry rather than aliasing it', () => {

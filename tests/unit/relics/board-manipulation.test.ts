@@ -133,8 +133,9 @@ describe('a charge budget spent to zero', () => {
     () => {
     const target = relicBench(['scouring-wind']);
 
-    // A board with no full column: the wind finds nothing to clear, so the
+    // A board with no full ROW: the wind finds nothing to clear, so the
     // invocation asks for nothing and the declared budget stands.
+    // CHANGED: this said column. DL-TEST-14.
     place(target.grid, 0, 0, 2);
     dispatchOn(target, 'onAfterMove', afterMovePayload(target.grid, 40));
 
@@ -144,7 +145,7 @@ describe('a charge budget spent to zero', () => {
 
     expect(beforeSweep?.charges).toBe(relicById('scouring-wind').charges);
 
-    // A full board gives it a column to clear, and THAT invocation asks.
+    // A full board gives it a ROW to clear, and THAT invocation asks.
     fill(target.grid, 2);
     dispatchOn(target, 'onAfterMove', afterMovePayload(target.grid, 40));
 

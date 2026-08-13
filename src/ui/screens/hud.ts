@@ -55,10 +55,10 @@
 // of the vanilla markup was null-checked, so a renamed class was a startup
 // failure (I12).
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THAT DOCUMENT HAS
-// NOT LANDED: the ordinals below are RESERVED against it, not resolvable today.
-// HUD is one area across the TypeScript and stylesheet halves, so the ordinals
-// are unique across this module and style/_hud.scss:
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, and that document
+// is delivered, so each ordinal below resolves to a row in it. HUD is one area
+// across the TypeScript and stylesheet halves, so the ordinals are unique across
+// this module and style/_hud.scss:
 //   TR-HUD-01  js/html_actuator.js L24-L27    the write order of `actuate()`:
 //                                             score, best score, message
 //   TR-HUD-02  js/html_actuator.js L127-L131  `message(won)` and its two state
@@ -105,12 +105,16 @@
 //   DL-HUD-15  the run-not-saved line written assertively while the recovery
 //              line stays polite, and the notice element itself taking no
 //              `role="alert"`
+//   DL-HUD-16  the assertive failure withdrawn before the polite recovery line
+//              is written
+//   DL-HUD-17  `refreshPersistence()`, the status-only refresh a host calls on a
+//              persistence crossing that follows the commit already rendered
 //
 // Nothing is read or written at import time: every lookup, every report and
 // every DOM write happens inside a call.
 //
 // Decisions: DL-HUD-01, DL-HUD-02, DL-HUD-03, DL-HUD-07, DL-HUD-08, DL-HUD-09,
-// DL-HUD-10, DL-HUD-15 (docs/DECISION_LOG.md).
+// DL-HUD-10, DL-HUD-15, DL-HUD-16, DL-HUD-17 (docs/DECISION_LOG.md).
 
 import type { StageGoal } from '../../config/stage-config';
 import type { StateCommitEvent } from '../../engine/engine-events';
@@ -401,6 +405,13 @@ const RELIC_TRAY_METRIC = 'ui.hud.relic_tray';
 /** Counter raised per persistence-status CHANGE written, carrying the status. */
 const PERSISTENCE_METRIC = 'ui.hud.persistence';
 
+/**
+ * Counter raised per status-only refresh asked for, carrying the status read.
+ * Counted apart from `PERSISTENCE_METRIC`, which counts crossings alone, so a
+ * refresh that found nothing changed is still visible. DL-HUD-17.
+ */
+const PERSISTENCE_REFRESH_METRIC = 'ui.hud.persistence.refreshed';
+
 /** Counter raised once per relic first shown as degraded, and per recovery. */
 const DEGRADED_RELIC_METRIC = 'ui.hud.relic_degraded';
 
@@ -418,6 +429,12 @@ const SCORE_UNCHANGED_METRIC = 'ui.hud.score.unchanged';
 
 /** Counter raised per announcement written, carrying the kind. */
 const ANNOUNCED_METRIC = 'ui.hud.announced';
+
+/**
+ * Counter raised per assertive line withdrawn before a polite recovery is
+ * written. DL-HUD-16.
+ */
+const ASSERTIVE_WITHDRAWN_METRIC = 'ui.hud.assertive.withdrawn';
 
 /** Counter raised per injected reader that raised or answered badly. */
 const READER_FAULT_METRIC = 'ui.hud.reader.faulted';
@@ -471,11 +488,17 @@ export interface HudSnapshot {
  * The part of the announcer this screen drives, as ../a11y/live-region
  * declares it. A structural subset, so the announcer is exercisable with a
  * stand-in.
+ *
+ * CHANGED: `clearAssertive` joins the two writers, OPTIONAL so a stand-in that
+ * records lines alone still satisfies the port. It is called on exactly one
+ * transition — a run whose persistence has recovered — where the withdrawn line
+ * is the failure this screen itself raised. DL-HUD-16.
  */
 export type HudAnnouncerPort = Pick<
   LiveRegionAnnouncer,
   'announce' | 'announceText'
->;
+> &
+  Partial<Pick<LiveRegionAnnouncer, 'clearAssertive'>>;
 
 /**
  * The announcer as an option: the component itself, `null` for none, or a
@@ -656,6 +679,24 @@ export interface Hud extends Screen {
    * @returns What was written.
    */
   render(commit: StateCommitEvent): HudSnapshot;
+
+  /**
+   * Re-reads the run's persistence status and writes the run-not-saved half
+   * alone: the notice, the group's `data-ephemeral` marking, and the
+   * announcement of a CHANGE. Nothing else on screen is touched, no score is
+   * rewritten, and no focus is placed.
+   *
+   * For the host whose run reports a persistence CROSSING after the commit this
+   * screen has already rendered: the write that changes the status is performed
+   * by the run controller after every view has taken the commit, so the status
+   * shown was the one in force BEFORE that write and stayed a commit behind —
+   * indefinitely, for a store that refuses every later write too. `render` is
+   * unsuitable for the refresh because a second write of the same commit clears
+   * the rising `+N` the first one showed. DL-HUD-17.
+   *
+   * @returns The status written, and `null` after `destroy`.
+   */
+  refreshPersistence(): 'persistent' | 'ephemeral' | null;
 
   /** What the last write put on screen, or `null` before the first. */
   readRendered(): HudSnapshot | null;
@@ -1085,6 +1126,36 @@ export function createHud(options: HudOptions = {}): Hud {
   };
 
   /**
+   * Withdraws whatever the assertive region holds, where the announcer offers
+   * that operation.
+   *
+   * The one caller is the persistence RECOVERY: this screen is the only writer
+   * of an assertive line here, so the text being withdrawn is its own
+   * run-not-saved alert. The announcer's own operation drains its queue stages
+   * as well, so a failure line still queued behind the recovery cannot be
+   * written back. DL-HUD-16, DL-LIVE-07.
+   */
+  const withdrawAssertive = (): void => {
+    const announcer = readAnnouncer();
+    const withdraw = announcer?.clearAssertive?.bind(announcer);
+
+    if (withdraw === undefined) {
+      return;
+    }
+
+    try {
+      withdraw();
+      reporter.count(ASSERTIVE_WITHDRAWN_METRIC, {
+        context: REPORT_CONTEXT,
+      });
+    } catch (error: unknown) {
+      reporter.error('withdrawing the HUD alert raised', error, {
+        context: REPORT_CONTEXT,
+      });
+    }
+  };
+
+  /**
    * Announces one relic taken through the structured `relicAcquired` variant
    * of ../a11y/live-region.
    *
@@ -1265,6 +1336,15 @@ export function createHud(options: HudOptions = {}): Hud {
     // ordinary first write, which would say the run is being saved to a player
     // who has no reason to think otherwise.
     if (changed || (first && status === 'ephemeral')) {
+      // CHANGED: the assertive failure is WITHDRAWN before the polite recovery
+      // is written. An `alert` region holds its text until something replaces
+      // it, and the recovery goes to the polite region, so the run-not-saved
+      // alert stayed readable beside a line saying the run was being saved
+      // again. DL-HUD-16.
+      if (changed && status === 'persistent') {
+        withdrawAssertive();
+      }
+
       announceLine(
         status === 'ephemeral'
           ? copy.ephemeralAnnouncement
@@ -2395,6 +2475,28 @@ export function createHud(options: HudOptions = {}): Hud {
 
     render(commit: StateCommitEvent): HudSnapshot {
       return write(viewFromCommit(commit), true, 'commit');
+    },
+
+    refreshPersistence(): 'persistent' | 'ephemeral' | null {
+      if (destroyed) {
+        reportAfterDestroy('refreshPersistence');
+
+        return null;
+      }
+
+      // The group is revealed here as well: a status crossing can be the first
+      // thing this screen has to say about a run, and the notice lives inside
+      // the group index.html ships hidden.
+      revealGroup();
+
+      const status = renderPersistence(readPersistence());
+
+      reporter.count(PERSISTENCE_REFRESH_METRIC, {
+        context: REPORT_CONTEXT,
+        status,
+      });
+
+      return status;
     },
 
     readRendered: (): HudSnapshot | null => rendered,

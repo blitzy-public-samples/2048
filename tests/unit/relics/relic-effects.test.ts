@@ -12,6 +12,7 @@ import {
   defaultCanMerge,
 } from '../../../src/config/default-config';
 import type { RulesConfig } from '../../../src/config/rules-config';
+import { applyBoardEffects } from '../../../src/engine/board-effects';
 import { createHookBus } from '../../../src/engine/hook-bus';
 import type { HookBus } from '../../../src/engine/hook-bus';
 import { Grid } from '../../../src/engine/grid';
@@ -411,9 +412,26 @@ describe('frostbind (merge-magic)', () => {
     expect(target.config.merge.canMerge(moving, stationary)).toBe(false);
 
     // The board shrinks and the stage begins again, where (3,3) is gone.
-    target.grid.size = 3;
-    target.grid.cells = target.grid.empty();
-    target.config.boardSize = 3;
+    //
+    // CHANGED: driven through the PUBLIC board-effect path. This reached into
+    // `grid.size`, `grid.cells` and `config.boardSize` one field at a time,
+    // which is a shape no relic can produce and which cannot detect a
+    // divergence between the three writes `applyResize` performs together —
+    // the very reconciliation a shrinking cursed relic depends on. DL-TEST-14.
+    expect(
+      applyBoardEffects(
+        [{ kind: 'resizeBoard', size: 3 }],
+        target.grid,
+        target.config,
+      ),
+    ).toBe(1);
+
+    // The one path wrote the lattice AND the rule, so (3,3) is off the board.
+    expect(target.grid.size).toBe(3);
+    expect(target.config.boardSize).toBe(3);
+    expect(target.grid.cells).toHaveLength(3);
+    expect(target.grid.cellContent({ x: 3, y: 3 })).toBeNull();
+
     dispatch(target, 'onStageStart', stageStartPayload(3));
 
     expect(target.config.merge.canMerge(moving, stationary)).toBe(true);

@@ -26,7 +26,10 @@ import {
   type Direction,
 } from '../../../src/engine/types';
 import { createRngStreams } from '../../../src/rng/rng-streams';
-import { RelicRegistry } from '../../../src/relics/relic-registry';
+import {
+  RelicRegistry,
+  applyStandingRelicRules,
+} from '../../../src/relics/relic-registry';
 
 const CORRELATION_ID = 'charge-suite';
 
@@ -195,8 +198,8 @@ describe('frostbind spends one charge per merge it frosts', () => {
     expect(chargesOf(bus, 'frostbind')).toBe(0);
   });
 
-  it('keeps carrying its frost into a new stage once exhausted', () => {
-    const { bus, env } = rig('frostbind');
+  it('stops firing on every hook once exhausted, frost included', () => {
+    const { bus, config, env } = rig('frostbind');
     const board = new Grid(BOARD_SIZE);
     const stage = {
       stageIndex: 1,
@@ -218,11 +221,9 @@ describe('frostbind spends one charge per merge it frosts', () => {
     expect(carried.effectsApplied).toBeGreaterThan(0);
     expect(chargesOf(bus, 'frostbind')).toBe(7);
 
-    // Spend the rest of the budget on merges. The relic then stops FIRING —
-    // `onMerge` freezes nothing further — while its stage-start install goes on
-    // reinstating the ledger the spent charges built, because
-    // `STANDING_HOOK_NAMES` of src/engine/hooks.ts exempts stage preparation
-    // from the charge guard. One budget still serves every EFFECT hook.
+    // Spend the rest of the budget on merges. The relic then stops FIRING on
+    // EVERY hook: the charge guard covers all six with none exempt, so stage
+    // preparation is withheld exactly as the merge hook is (AAP R3, V6).
     for (let spent = 1; spent < 8; spent += 1) {
       bus.dispatch('onMerge', merge(2, 2), env(board));
     }
@@ -237,14 +238,53 @@ describe('frostbind spends one charge per merge it frosts', () => {
     const exhausted = bus.dispatch('onStageStart', stage, env(board));
 
     expect(exhausted.payload.goal.target).toBe(stage.goal.target);
-    expect(exhausted.invoked).toBe(1);
-    expect(exhausted.skipped).toBe(0);
-    expect(exhausted.effectsApplied).toBeGreaterThan(0);
+    expect(exhausted.invoked).toBe(0);
+    expect(exhausted.skipped).toBe(1);
+    expect(exhausted.effectsApplied).toBe(0);
+    expect(exhausted.failed).toBe(0);
 
-    // AND IT IS STILL FREE. The install asks for no charge, so an exhausted
-    // budget is not driven below zero by being carried forward.
+    // AND NOTHING IS DEDUCTED. A handler that is never reached cannot drive an
+    // exhausted budget below zero.
     expect(exhausted.chargesConsumed).toBe(0);
     expect(chargesOf(bus, 'frostbind')).toBe(0);
+
+    // THE FROST THE SPENT CHARGES BOUGHT IS STILL IN FORCE, because the rules
+    // object carries the predicate the last paid merge installed and the
+    // withheld dispatch removed nothing.
+    const moving = new Tile({ x: 0, y: 2 }, 2);
+
+    expect(config.merge.canMerge(moving, new Tile({ x: 2, y: 2 }, 2))).toBe(
+      false,
+    );
+  });
+
+  it('reinstates its frost on rehydrated rules with no dispatch', () => {
+    const { bus, registry, config, env } = rig('frostbind');
+    const board = new Grid(BOARD_SIZE);
+
+    bus.dispatch('onMerge', merge(1, 1), env(board));
+
+    const persisted = registry.serialize();
+
+    expect(persisted[0].id).toBe('frostbind');
+
+    // What a reload hands over: rules rebuilt from the defaults, so the
+    // wrapper this session installed is gone.
+    const resumed = createDefaultRulesConfig();
+
+    expect(applyStandingRelicRules(persisted, resumed)).toBe(1);
+
+    const moving = new Tile({ x: 0, y: 1 }, 2);
+
+    // The cell the spent charge froze is refused again, and its neighbour is
+    // not — without any handler having been dispatched.
+    expect(resumed.merge.canMerge(moving, new Tile({ x: 1, y: 1 }, 2))).toBe(
+      false,
+    );
+    expect(resumed.merge.canMerge(moving, new Tile({ x: 3, y: 1 }, 2))).toBe(
+      true,
+    );
+    expect(config.merge.canMerge).not.toBe(resumed.merge.canMerge);
   });
 
   it('reaches the persisted envelope with the budget that is left', () => {
@@ -456,25 +496,71 @@ describe('culling-blade spends one charge per excision', () => {
     expect(chargesOf(bus, 'culling-blade')).toBe(0);
   });
 
-  it('spends nothing when the move already points along the culling axis', () => {
+  it('stops arming once its own excision drops the count below six', () => {
+    // RENAMED AND REWRITTEN. This case was called 'spends nothing when the move
+    // already points along the culling axis', and there is NO culling axis:
+    // `cullSmallest` never reads or writes `payload.direction`, it excises the
+    // single lowest-valued tile. It passed for an unrelated reason — `armed` is
+    // one Grid shared across both dispatches, so the first excision THINNED it
+    // to five tiles at the lowest value and the second declined on the arming
+    // threshold. The real condition is asserted explicitly here, and the
+    // direction is asserted untouched, which is what 'no culling axis' means.
+    // DL-TEST-14.
     const { bus, env } = rig('culling-blade');
+
+    // Exactly the arming count: six tiles at the lowest spawn value.
     const armed = boardWith(6, 2);
-    const chosen = bus.dispatch(
+
+    expect(armed.availableCells()).toHaveLength(10);
+
+    const first = bus.dispatch(
       'onBeforeMove',
       beforeMove(armed, DIRECTION_LEFT),
       env(armed),
-    ).payload.direction;
+    );
 
+    // Armed, so a charge went and one tile left the board.
+    expect(chargesOf(bus, 'culling-blade')).toBe(1);
+    expect(armed.availableCells()).toHaveLength(11);
+
+    // The direction is handed back exactly as it arrived: the blade redirects
+    // nothing, so there is no axis for a move to already point along.
+    expect(first.payload.direction).toBe(DIRECTION_LEFT);
+
+    // The SAME grid, now five tiles, through a fresh budget: one short of the
+    // arming count, so the handler runs and asks for nothing.
     const fresh = rig('culling-blade');
-    const unchanged = fresh.bus.dispatch(
+    const second = fresh.bus.dispatch(
       'onBeforeMove',
-      beforeMove(armed, chosen),
+      beforeMove(armed, DIRECTION_LEFT),
       fresh.env(armed),
     );
 
-    expect(unchanged.invoked).toBe(1);
-    expect(unchanged.payload.direction).toBe(chosen);
+    expect(second.invoked).toBe(1);
+    expect(second.payload.direction).toBe(DIRECTION_LEFT);
     expect(chargesOf(fresh.bus, 'culling-blade')).toBe(2);
+    expect(armed.availableCells()).toHaveLength(11);
+  });
+
+  it('leaves the direction alone whichever way the move points', () => {
+    // The other half of 'no culling axis': every direction is returned as it
+    // arrived, on a board that DOES arm the blade. DL-TEST-14.
+    const everyDirection: readonly Direction[] = [0, 1, 2, 3];
+
+    for (const direction of everyDirection) {
+      const { bus, env } = rig('culling-blade');
+      const armed = boardWith(6, 2);
+      const result = bus.dispatch(
+        'onBeforeMove',
+        beforeMove(armed, direction),
+        env(armed),
+      );
+
+      expect(result.payload.direction).toBe(direction);
+
+      // And it acted, so the direction was preserved THROUGH an excision.
+      expect(chargesOf(bus, 'culling-blade')).toBe(1);
+    }
   });
 
   it('spends nothing while too few of the lowest tiles are on the board', () => {
@@ -486,10 +572,6 @@ describe('culling-blade spends one charge per excision', () => {
     expect(chargesOf(bus, 'culling-blade')).toBe(2);
   });
 });
-
-/* ==========================================================================
- * 5. scouring-wind: its single charge, spent once
- * ========================================================================== */
 
 describe('scouring-wind spends its single charge on the row it records', () => {
   it('spends nothing on a board with no full row', () => {

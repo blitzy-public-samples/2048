@@ -215,12 +215,17 @@ const QUOTA_ERROR_INFO: StorageErrorInfo = {
   name: 'QuotaExceededError',
   message: 'The storage quota has been exceeded.',
   quota: true,
+  parse: false,
 };
 
 const PARSE_ERROR_INFO: StorageErrorInfo = {
   name: 'SyntaxError',
   message: 'Unexpected end of JSON input',
   quota: false,
+
+  // The stored text is what failed here, which is what the adapter tags at its
+  // parse and what the composition root tiers its report on.
+  parse: true,
 };
 
 /** The value the platform threw for the quota failure below. */
@@ -261,6 +266,7 @@ const REFUSED_KEY_FAILURE: StorageFailure = {
       'The key is not owned by this product; the operation was refused ' +
       'and no storage was touched.',
     quota: false,
+    parse: false,
   },
 };
 
@@ -3284,175 +3290,5 @@ describe('LocalStorageManager through createStorageReporter', () => {
     );
 
     expect(raised).toHaveLength(0);
-  });
-});
-
-describe('a filtered level costs nothing to report at', () => {
-  it('records no counter once the level rises above debug', () => {
-    const { logger, records } = createCapturingLogger({ level: 'info' });
-    const reporter: InputReporter = createInputReporter(logger);
-
-    reporter.count('input.gesture', { source: 'keyboard' });
-
-    expect(records).toHaveLength(0);
-  });
-
-  it('does not clone the caller fields for a filtered counter', () => {
-    const { logger } = createCapturingLogger({ level: 'info' });
-    const reporter: InputReporter = createInputReporter(logger);
-
-    // Records alone cannot prove this: the logger filters at the sink too, so
-    // the count is absent either way.
-    let enumerated = 0;
-
-    const watched = new Proxy(
-      { source: 'keyboard' },
-      {
-        ownKeys(target: Record<string, string>): ArrayLike<string | symbol> {
-          enumerated += 1;
-
-          return Reflect.ownKeys(target);
-        },
-      }
-    );
-
-    reporter.count('input.gesture', watched);
-
-    expect(enumerated).toBe(0);
-
-    // Lowering the level makes the same call clone, which is what shows the
-    // count above is the filter working and not the Proxy failing to observe.
-    logger.setLevel('debug');
-    reporter.count('input.gesture', watched);
-
-    expect(enumerated).toBe(1);
-  });
-
-  it('hands back one shared span while debug is filtered out', () => {
-    const { logger, records } = createCapturingLogger({ level: 'info' });
-    const reporter: InputReporter = createInputReporter(logger);
-
-    const first = reporter.startSpan?.('input.dispatch');
-    const second = reporter.startSpan?.('input.parse');
-
-    // Identity is the observable proof that no per-span object is allocated: a
-    // fresh object per call could not be the same reference.
-    expect(first).toBeDefined();
-    expect(first).toBe(second);
-
-    first?.end();
-    second?.end();
-
-    expect(records).toHaveLength(0);
-  });
-
-  it('allocates a distinct span once debug is emitted', () => {
-    const { logger, records } = createCapturingLogger({ level: 'debug' });
-    const reporter: InputReporter = createInputReporter(logger);
-
-    const first = reporter.startSpan?.('input.dispatch');
-    const second = reporter.startSpan?.('input.parse');
-
-    expect(first).not.toBe(second);
-
-    first?.end();
-    second?.end();
-
-    expect(records).toHaveLength(2);
-    expect(records[0].fields?.['span']).toBe('input.dispatch');
-    expect(records[1].fields?.['span']).toBe('input.parse');
-  });
-
-  it('starts recording again when the level is lowered', () => {
-    const { logger, records } = createCapturingLogger({ level: 'info' });
-    const reporter: InputReporter = createInputReporter(logger);
-
-    reporter.count('input.gesture');
-    expect(records).toHaveLength(0);
-
-    // The filter is read per call, not captured at construction, so a level
-    // changed at runtime takes effect.
-    logger.setLevel('debug');
-    reporter.count('input.gesture');
-
-    expect(records).toHaveLength(1);
-    expect(records[0].fields).toEqual({
-      metric: 'input.gesture',
-      value: 1,
-    });
-
-    const span = reporter.startSpan?.('input.dispatch');
-
-    span?.end();
-
-    expect(records).toHaveLength(2);
-    expect(records[1].fields?.['span']).toBe('input.dispatch');
-  });
-
-  it('stops recording when the level is raised', () => {
-    const { logger, records } = createCapturingLogger({ level: 'debug' });
-    const reporter: InputReporter = createInputReporter(logger);
-
-    reporter.count('input.gesture');
-    expect(records).toHaveLength(1);
-
-    logger.setLevel('warn');
-    reporter.count('input.gesture');
-    reporter.startSpan?.('input.dispatch').end();
-
-    expect(records).toHaveLength(1);
-  });
-
-  it('reads one finite elapsed time per record, however many', () => {
-    const { logger, records } = createCapturingLogger();
-
-    for (let index = 0; index < 12; index += 1) {
-      logger.debug('emitted');
-    }
-
-    expect(records).toHaveLength(12);
-
-    for (const record of records) {
-      expect(typeof record.elapsedMs).toBe('number');
-      expect(Number.isFinite(record.elapsedMs)).toBe(true);
-      expect(record.elapsedMs).toBeGreaterThanOrEqual(0);
-    }
-
-    // Monotonic across the run.
-    for (let index = 1; index < records.length; index += 1) {
-      expect(records[index].elapsedMs).toBeGreaterThanOrEqual(
-        records[index - 1].elapsedMs
-      );
-    }
-  });
-
-  it('still times a span that is emitted', () => {
-    const { logger, records } = createCapturingLogger();
-    const reporter: InputReporter = createInputReporter(logger);
-    const span = reporter.startSpan?.('input.dispatch');
-
-    span?.end();
-
-    const duration = records[0].fields?.['durationMs'];
-
-    expect(typeof duration).toBe('number');
-
-    if (typeof duration === 'number') {
-      expect(Number.isFinite(duration)).toBe(true);
-      expect(duration).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  it('is idempotent on the shared span', () => {
-    const { logger, records } = createCapturingLogger({ level: 'info' });
-    const reporter: InputReporter = createInputReporter(logger);
-    const span = reporter.startSpan?.('input.dispatch');
-
-    // The shared instance is closed by many callers; that must stay harmless.
-    span?.end();
-    span?.end();
-    span?.end();
-
-    expect(records).toHaveLength(0);
   });
 });

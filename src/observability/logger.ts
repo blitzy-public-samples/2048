@@ -62,7 +62,7 @@ import type {
 
 const CORRELATION_ID_PREFIX = 'run-';
 
-/** Separates the seed-derived prefix from the run-instance segment. */
+/** Separates the keyed hash pair from the third, XOR-derived segment. */
 const CORRELATION_ID_INSTANCE_SEPARATOR = '-';
 
 const FNV_OFFSET_BASIS = 0x811c9dc5;

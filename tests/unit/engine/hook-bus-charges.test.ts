@@ -141,8 +141,13 @@ describe('HookContext.spendCharge', () => {
   });
 
   it('spends nothing on a handler that returns nothing but changes the payload copy', () => {
-    // A void return is adopted as the payload copy, so a void-returning
-    // handler that asked DOES spend.
+    // CHANGED: the handler now WRITES the transformable member the title claims
+    // it writes. It returned `undefined` and changed nothing, so the case proved
+    // only that a handler doing nothing spends nothing — which the test above it
+    // already proves. `cancelled` is transformable on `onBeforeMove`, the copy
+    // handed to a handler is the handler's own object, and a void return adopts
+    // that copy, so the write below is adopted and the budget is still untouched:
+    // a charge is spent for an ASK, never for a change.
     const environment = createEnvironment();
     const bus = createHookBus();
 
@@ -150,12 +155,24 @@ describe('HookContext.spendCharge', () => {
       id: 'void-quiet',
       charges: 2,
       hooks: {
-        onBeforeMove: (): void => undefined,
+        onBeforeMove: (payload): void => {
+          (payload as { cancelled: boolean }).cancelled = true;
+        },
       },
     });
-    bus.dispatch('onBeforeMove', beforeMove(environment), environment);
+
+    const result = bus.dispatch(
+      'onBeforeMove',
+      beforeMove(environment),
+      environment,
+    );
+
+    // The write reached the resolved payload, so the copy really did change.
+    expect(result.payload.cancelled).toBe(true);
+    expect(result.invoked).toBe(1);
 
     expect(budgetOf(bus, 'void-quiet')).toBe(2);
+    expect(spentBy(bus, 'void-quiet')).toBe(0);
   });
 
   it('spends for a void-returning handler that asks', () => {

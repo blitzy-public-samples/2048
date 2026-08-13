@@ -124,7 +124,7 @@ members and not others:
 | `onMerge` | once per merge, so a move resolving two merges dispatches it twice | `resultValue`, `scoreDelta` | `source`, `target` |
 | `onSpawn` | once a spawn cell is available | `position`, `value`, `count` | none |
 | `onAfterMove` | once a move has been resolved | `score`, `over`, `won` | `moved`, `board`, `terminated` |
-| `onStageEnd` | as a stage resolves | `cleared`, `score` | `stageIndex` |
+| `onStageEnd` | as a stage resolves, whether it cleared its goal or not — a lost or ended run resolves the stage it was on with `cleared: false` (`DL-RUNCTL-30`) | `cleared`, `score` | `stageIndex` |
 
 A return that is not the payload the hook declares — a changed member set, a
 substituted live object, a non-finite or out-of-range number — is discarded
@@ -231,10 +231,10 @@ graph LR
         BM["board-manipulation"]
         RR["risk-reward-cursed"]
     end
-    subgraph STANDING["Standing hook, never charge-guarded"]
+    subgraph OPENING["Stage-opening hook"]
         H1["onStageStart"]
     end
-    subgraph GUARDED["Charge-guarded hooks"]
+    subgraph TURN["In-turn and resolution hooks"]
         H2["onBeforeMove"]
         H3["onMerge"]
         H4["onSpawn"]
@@ -257,9 +257,9 @@ family module under `src/relics/families/`, and each declares **four** relics;
 each right-hand box is one of the six names in `HOOK_NAMES`. An arrow means at
 least one relic of that family binds that hook, and its label counts how many of
 the family's four do. A family with no arrow to a hook binds it nowhere. The two
-right-hand groupings are the charge guard's own division: `onStageStart` is the
-sole member of `STANDING_HOOK_NAMES` and is dispatched even to a relic whose
-budget is spent, while the other five are withheld from one (`DL-HOOKBUS-07`).
+right-hand groupings are the point in a turn each hook is reached at, not a
+difference in guarding: the charge guard withholds **all six** from a relic whose
+budget is spent, `onStageStart` included (`DL-HOOKBUS-07`).
 Arrow counts sum to 22 bindings across the sixteen relics, because six relics
 bind two hooks each.
 
@@ -316,8 +316,8 @@ dispatch point. An em dash means the relic declares nothing there.
 | `loaded-dice` | Loaded Dice | `spawn-control` | legendary | `onSpawn` | — | — | `relic-draw` | Redraws the spawn value against the configured weights reversed. |
 | `echo-chamber` | Echo Chamber | `merge-magic` | common | `onMerge` | — | — | none | Adds a quarter of the merge's produced value to the score. |
 | `alloy-forge` | Alloy Forge | `merge-magic` | uncommon | `onMerge` | — | — | none | Raises the produced value one further step and scores the increment. |
-| `frostbind` | Frostbind | `merge-magic` | rare | `onStageStart`, `onMerge` | 8 | `{ frozen: [] }` | none | Toggles the merge's destination cell in a frozen-cell ledger and re-installs the merge rule that refuses a frozen cell. |
-| `chain-catalyst` | Chain Catalyst | `merge-magic` | legendary | `onStageStart`, `onMerge` | — | — | none | Widens the merge rule to pairs one doubling step apart, then yields from the larger. |
+| `frostbind` | Frostbind | `merge-magic` | rare | `onStageStart`, `onMerge` | 8 | `{ frozen: [] }` | none | Thaws the cell the merge moved out of, toggles the cell it landed on, and re-installs the merge rule that refuses a frozen destination. |
+| `chain-catalyst` | Chain Catalyst | `merge-magic` | legendary | `onStageStart`, `onMerge` | — | — | none | Widens the merge rule to pairs one doubling step apart — inheriting any denial the rule it wrapped makes on another ground — then yields from the larger. |
 | `temporal-anchor` | Temporal Anchor | `board-manipulation` | common | `onBeforeMove`, `onAfterMove` | 3 | `{ board: null, score: 0 }` | none | Records the last board with room, and on a full board restores it and withdraws the move. |
 | `tumbler` | Tumbler | `board-manipulation` | uncommon | `onBeforeMove` | 3 | — | `relic-draw` | Under scarcity, relocates every tile to a drawn empty cell before the move resolves. |
 | `culling-blade` | Culling Blade | `board-manipulation` | rare | `onBeforeMove` | 2 | — | none | Removes the single lowest-valued tile once the smallest spawn value has piled up. |
@@ -374,8 +374,8 @@ payload members and are transformed independently (`DL-MERGE-02`).
 |---|---|---|---|---|---|
 | `echo-chamber` | Echo Chamber | common | `onMerge` | — | Returns the payload with `scoreDelta` raised by `floor(resultValue * 0.25)`. `resultValue` is left exactly as it arrived. A bonus that is not a positive finite number leaves the payload untouched. |
 | `alloy-forge` | Alloy Forge | uncommon | `onMerge` | — | Applies `config.merge.produce` to the arriving `resultValue` as both operands, and returns the payload with `resultValue` set to that result and `scoreDelta` raised by the increment. A result that is not finite, not positive, or not above the arriving value leaves the payload untouched. |
-| `frostbind` | Frostbind | rare | `onStageStart`, `onMerge` | 8 | On `onMerge`: toggles the cell `payload.target` stands in within its frozen-cell ledger — frosting a cell the ledger lacks, thawing one it holds — writes the new ledger to its state slot, records a `config.merge.canMerge` **wrapper** through `effects.setMergePredicate`, and asks for a charge. On `onStageStart`: filters the ledger to `payload.boardSize` and re-installs the same wrapper. |
-| `chain-catalyst` | Chain Catalyst | legendary | `onStageStart`, `onMerge` | — | On `onStageStart`: records a `config.merge.canMerge` wrapper that also accepts a pair whose two values are one `config.merge.produce` step apart. On `onMerge`: for a pair whose `source.value` and `target.value` differ, sets `resultValue` to the producer applied to the larger of the two and raises `scoreDelta` by the increment. |
+| `frostbind` | Frostbind | rare | `onStageStart`, `onMerge` | 8 | On `onMerge`: removes the cell `payload.source` stands in from its frozen-cell ledger, then toggles the cell `payload.target` stands in — frosting a cell the ledger lacks, thawing one it holds — writes the new ledger to its state slot, records a `config.merge.canMerge` **wrapper** through `effects.setMergePredicate`, and asks for a charge. On `onStageStart`: filters the ledger to `payload.boardSize` and re-installs the same wrapper. |
+| `chain-catalyst` | Chain Catalyst | legendary | `onStageStart`, `onMerge` | — | On `onStageStart`: records a `config.merge.canMerge` wrapper that also accepts a pair whose two values are one `config.merge.produce` step apart, **provided the predicate it wrapped would accept that same pair at equal values** — so a denial made on any ground other than the value difference is inherited rather than overridden. On `onMerge`: for a pair whose `source.value` and `target.value` differ, sets `resultValue` to the producer applied to the larger of the two and raises `scoreDelta` by the increment. |
 
 ### 7.1 Frostbind is a merge-rule wrapper, and its `onMerge` returns `void`
 
@@ -391,12 +391,26 @@ cell stands in its ledger. The wrapper carries a non-enumerable marker naming
 the predicate it delegates to, so a stage that begins against an already-wrapped
 rule installs no second wrapper.
 
+**The frost travels with the tile, and only the source thaw is reachable by
+play.** Each merge does two things to the ledger, in order: the cell
+`payload.source` moved out of is thawed, and the cell `payload.target` stands in
+is toggled. The source thaw is the one a legal move produces, because the rule
+the relic installs constrains a merge's *destination* and never its source — so
+a frosted tile that slides out and merges elsewhere releases the frost behind it
+and lays a new one where it lands. The destination toggle's thaw half is the
+defined answer for a merge that lands *on* a frosted cell, which this relic's own
+rule refuses; it is reachable only if a later relic replaces the merge rule
+outright instead of wrapping it (`DL-MERGE-04`).
+
 Its ledger is re-installed **every stage**, which is the second binding
 (`DL-MERGE-01`). A reload yields a fresh configuration carrying the untouched
-default predicate, so the install is made again on each stage of a resumed run.
-`onStageStart` is the one hook the charge guard does not withhold from an
-exhausted relic (`DL-HOOKBUS-07`), so an exhausted `frostbind` still reaches
-that re-install.
+default predicate, so the install is made again on each stage of a resumed run —
+for as long as the relic has charges. Once the budget is spent the charge guard
+withholds every hook, `onStageStart` included (`DL-HOOKBUS-07`), so the
+re-install is no longer reached; the frost those spent charges bought is put back
+instead by `applyStandingRelicRules()` of `src/relics/relic-registry.ts` when the
+envelope's relics are restored, which reads the persisted ledger and writes the
+live rules without dispatching to anything (`DL-REGISTRY-04`, `DL-MERGE-05`).
 
 It is the family's only charge-carrying relic, at **8**, and it is the one relic
 outside `board-manipulation` that carries a budget at all. See [section
@@ -411,6 +425,18 @@ has already merged during the traversal in progress. The widening reaches
 values, not turn structure (`DL-MERGE-03`). Its `onMerge` handler returns
 nothing for an equal-valued pair, so a merge the ordinary rule admitted is left
 alone.
+
+**It also inherits a denial its delegate made on any other ground.** A predicate
+returning `false` says only *no*, so before overruling one this wrapper asks the
+predicate it wrapped the same question with the value difference removed — the
+same two operands, in the same cells, with the same merge history, at equal
+values. Where the delegate refuses that too, the refusal was not about the
+values and it stands. This is what keeps the two predicate-installing relics of
+this family composing in **either** pickup order: with `frostbind` picked up
+first its ledger is the inner verdict, and a ladder-step pair aimed at a frozen
+cell is refused rather than admitted past the frost. The probe reads the
+delegate's own answers and names no relic, so it holds against any predicate a
+later relic installs (`DL-MERGE-03`).
 
 ## 8. Board manipulation
 
@@ -479,6 +505,16 @@ constructed, taking the size an active board-mutating relic implies ahead of the
 configured size and the saved size (`DL-RUNSTORE-01`, `DL-RUNSTORE-05`), so a
 saved board is never rehydrated at the wrong edge length.
 
+**A collapse can end the run, and the commit says so.** A tighter board can be
+full with no adjacent match, and `Engine.endStage()` re-derives the terminal
+verdict after the stage-end board commands are applied and before it commits
+(`DL-ENGINE-15`), so the flag published is the flag of the board the collapse
+produced. This is not the relic's own doing — the relic records lattice commands
+and reads no verdict — but it is what makes the collapse safe: the engine
+published the PRE-collapse verdict before that re-derivation, so an unplayable
+collapsed board was offered a reward and carried into a next stage as though it
+were playable.
+
 ### 9.2 Brittle Crown's save-and-restore is reload-safe
 
 The crown does not compute its skew from whatever weights it happens to find. It
@@ -489,6 +525,12 @@ and **clears the slot**, which is the pair that makes a reload mid-run safe: the
 weights a resumed run finds are the configured ones, and the crown re-derives
 its skew from them at the next stage start.
 
+The restoration runs on **either** stage outcome, and it is reached on either
+one: a run that is lost or ended resolves the stage it was on with
+`cleared: false` before it summarises (`DL-RUNCTL-30`), so the weights are
+returned to their baseline on the way out of a run and not only on the way to a
+reward. Only the clearing bounty is gated on `payload.cleared`.
+
 ### 9.3 Hollow Ascension banks before it pays
 
 The order inside the handler matters to anyone predicting a score. The bank is
@@ -496,7 +538,9 @@ raised **first**, then the bonus is computed from the value the bank held
 *before* this merge — so the first merge of a run pays nothing and banks one,
 the second pays 4, the third pays 8, and so on, clamped at a bank of 4096. Its
 state slot is a bare number rather than an object. On an uncleared stage the
-bank is zeroed outright; on a cleared one it carries forward.
+bank is zeroed outright; on a cleared one it carries forward — and the uncleared
+outcome is one the run actually produces, because a lost or ended run resolves
+its stage with `cleared: false` before summarising (`DL-RUNCTL-30`).
 
 
 ## 10. Charges
@@ -506,7 +550,7 @@ member, fire for the rest of the run, and are never charge-guarded.
 
 | `id` | Family | Charges | What one charge pays for |
 |---|---|---|---|
-| `frostbind` | `merge-magic` | 8 | One frost-or-thaw toggle of a merge's destination cell. |
+| `frostbind` | `merge-magic` | 8 | One resolution of a merge against the ledger: the source cell thawed and the destination cell toggled. |
 | `temporal-anchor` | `board-manipulation` | 3 | One rewind to the anchored board, and the withdrawal of that move. |
 | `tumbler` | `board-manipulation` | 3 | One tumble, however many tiles it relocated. |
 | `culling-blade` | `board-manipulation` | 2 | One excision of the board's lowest tile. |
@@ -552,17 +596,21 @@ the budget held, and defaults to `1`. It reports `false` for a relic carrying no
 budget, for an amount that rounds to zero, and for a call made after the handler
 has returned. Repeated calls within one dispatch accumulate.
 
-### 10.2 One exception: `onStageStart` is dispatched to an exhausted relic
+### 10.2 No exception: all six hooks are withheld from an exhausted relic
 
-`STANDING_HOOK_NAMES` names the hooks that *prepare* a stage rather than act
-inside one, and `onStageStart` is its only member. The guard does not withhold
-that hook from a relic whose budget is spent (`DL-HOOKBUS-07`), so a relic can
-still reinstall the standing rule its own persisted state records — which is
-what keeps an exhausted `frostbind`'s frozen cells in force after a reload.
+The guard covers every one of the six names, `onStageStart` included, so a relic
+whose budget is spent runs **no** handler and applies **no** effect
+(`DL-HOOKBUS-07`). That is AAP R3 and validation gate V6 read literally: a relic
+with limited charges stops firing once they are exhausted.
 
-Nothing is given away by the exemption: the bus deducts only what a handler
-*asks* for, and a budget at zero can pay for nothing. An exhausted relic still
-cannot fire on any of the five hooks that act inside a stage.
+A standing rule the spent charges had already bought is a different thing from a
+relic firing again, and it survives by a different route. `frostbind`'s frozen
+cells live in its persisted `state` slot, and `applyStandingRelicRules()` of
+`src/relics/relic-registry.ts` rebuilds the merge predicate from that slot when
+the envelope's relics are restored — a plain function over the slot and the live
+rules, with no hook, no payload, no dispatch context and no charge budget in
+sight (`DL-REGISTRY-04`, `DL-MERGE-05`). Restoring is not firing, so the guard
+has no reason to reach it.
 
 ### 10.3 One budget and one slot per relic, however many hooks it binds
 
@@ -870,4 +918,3 @@ its file name:
   `DRAW`, `REGISTRY`, `SPAWN`, `MERGE`, `BOARD` and `RISK` areas, one row per
   relic.
 - `src/relics/` — the authority for everything on this page.
-

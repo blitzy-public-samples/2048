@@ -977,6 +977,76 @@ describe('when the context comes back after the fallback committed', () => {
     expect(application.preferences.isNumberOnlyForced()).toBe(true);
   });
 
+  /**
+   * Collects the reason of every health recheck from HERE on.
+   *
+   * A sink rather than the record buffer: a renderer swap emits enough records
+   * to evict one from the ring, and the recheck is a debug record so the level
+   * is lowered first.
+   *
+   * @param app Application to observe.
+   * @returns The reasons collected so far, newest last.
+   */
+  const collectRechecks = (app: Application): (() => string[]) => {
+    const reasons: string[] = [];
+
+    app.logger.setLevel('debug');
+    app.logger.subscribe((record): void => {
+      if (record.message === 'Health rechecked.') {
+        reasons.push(String(record.fields?.['reason'] ?? ''));
+      }
+    });
+
+    return (): string[] => [...reasons];
+  };
+
+  // A performance review found the reclaim recomputing the health report twice
+  // for one restoration: the force release swaps the renderer, and a swap ends
+  // with its own recheck. DL-MAIN-41.
+  it('recomputes the health report once for a reclaim that swapped', async () => {
+    // `start` rather than `startWithRun`: beginning a run rotates the
+    // correlation identifier, which returns the health surface to its start, and
+    // `refreshHealth` is silent until a report has been produced (DL-MAIN-28).
+    application = start(document);
+    await settleFrames();
+    await commitTheFallback();
+
+    const app = application;
+    const reasons = collectRechecks(app);
+
+    fireContextEvent('webglcontextrestored');
+    await settleFrames();
+
+    expect(app.renderer.mode).toBe('three');
+    expect(reasons()).toHaveLength(1);
+    expect(reasons()[0]).toContain('a switch to the three board');
+  });
+
+  // The other half of DL-MAIN-41: a release that swaps nothing still refreshes,
+  // because the live WebGL verdict has changed even though the board has not.
+  it('still recomputes it for a release that swapped nothing', async () => {
+    application = start(document);
+    await settleFrames();
+    await commitTheFallback();
+
+    const app = application;
+
+    // The player's own choice outlives the force, so releasing the force leaves
+    // the number-only board exactly where it is.
+    app.preferences.setNumberOnlyMode(true);
+    await settleFrames();
+
+    const reasons = collectRechecks(app);
+
+    fireContextEvent('webglcontextrestored');
+    await settleFrames();
+
+    expect(app.renderer.mode).toBe('number-only');
+    expect(reasons()).toEqual([
+      'a WebGL context reclaimed after the fallback',
+    ]);
+  });
+
   it('reclaims nothing after the application is disposed', async () => {
     application = start(document);
     await settleFrames();

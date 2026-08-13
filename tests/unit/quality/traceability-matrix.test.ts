@@ -59,12 +59,19 @@ const DECLARING_ROOTS: readonly string[] = Object.freeze([
   'tests',
 ]);
 
-/** Root files that declare rows of their own. */
+/**
+ * Files outside those trees that declare rows of their own.
+ *
+ * `.github/workflows/ci.yml` declares the `CI` area's rows in its own header,
+ * exactly as a module does, so the gate reads it: a Direction B subsection
+ * naming an owner this list omits fails as an undeclared row.
+ */
 const DECLARING_FILES: readonly string[] = Object.freeze([
   'playwright.config.ts',
   'vite.config.ts',
   'vitest.config.ts',
   'vitest.snapshot.config.ts',
+  '.github/workflows/ci.yml',
 ]);
 
 /** Extensions a declaration may appear in. */
@@ -72,6 +79,25 @@ const DECLARING_EXTENSIONS: readonly string[] = Object.freeze(['.ts', '.scss']);
 
 /** Any `TR-<AREA>-<NN>` occurrence. */
 const IDENTIFIER_PATTERN = /TR-[A-Z0-9]+-\d\d/g;
+
+/**
+ * Any `TR-<AREA>-<digits>` occurrence, however many digits it carries.
+ *
+ * ADDED: `IDENTIFIER_PATTERN` requires exactly two digits and is UNANCHORED, so
+ * a malformed ordinal was either invisible to it — a one-digit ordinal matches
+ * nothing at all — or silently TRUNCATED, because a three-digit ordinal matches
+ * on its first two and therefore resolves to a different row than the one
+ * written. Collecting broadly and asserting the shape separately is what makes a
+ * malformed identifier a failure rather than a misresolution.
+ *
+ * No malformed identifier is written literally anywhere in this file: the sweep
+ * reads its own source, so an illustrative example would itself be collected as
+ * a citation and fail the gate it documents. DL-TEST-13.
+ */
+const CANDIDATE_PATTERN = /TR-[A-Z0-9]+-\d+/g;
+
+/** The shape every identifier must have: exactly two digits, nothing after. */
+const WELL_FORMED = /^TR-[A-Z0-9]+-\d\d$/;
 
 /** An identifier split into its area and ordinal. */
 const IDENTIFIER_PARTS = /^TR-([A-Z0-9]+)-(\d\d)$/;
@@ -268,6 +294,34 @@ const declaringPaths: readonly string[] = Object.freeze([
   ...DECLARING_FILES,
 ]);
 
+/**
+ * Documents that cite matrix identifiers, swept for resolution.
+ *
+ * ADDED: only `src/`, `style/`, `tests/` and the four root configs were swept,
+ * so an identifier cited from a document resolved to nothing and no gate
+ * noticed — `docs/DECISION_LOG.md` carries such a citation today. A citation in
+ * prose means "the row behind this" exactly as one in a module header does.
+ * DL-TEST-13.
+ */
+const CITING_DOCUMENTS: readonly string[] = Object.freeze([
+  'README.md',
+  'CONTRIBUTING.md',
+  'docs/DECISION_LOG.md',
+  'docs/CONFIGURATION.md',
+  'docs/OBSERVABILITY.md',
+  'docs/RELICS.md',
+  'docs/architecture/ARCHITECTURE.md',
+  'docs/architecture/component-interaction.md',
+  'docs/architecture/data-flow.md',
+  'docs/architecture/hook-dispatch-sequence.md',
+  'docs/dashboards/dashboard.html',
+  'docs/dashboards/dashboard.json',
+  'blitzy-deck/executive-summary.html',
+  'index.html',
+  'tsconfig.json',
+  'tsconfig.node.json',
+]);
+
 /** path -> the identifiers that file cites. */
 const citationsByFile: ReadonlyMap<string, ReadonlySet<string>> = new Map(
   declaringPaths.map((path): [string, ReadonlySet<string>] => [
@@ -280,9 +334,68 @@ const citedIdentifiers: ReadonlySet<string> = new Set(
   [...citationsByFile.values()].flatMap((identifiers) => [...identifiers]),
 );
 
+/**
+ * Every candidate identifier anywhere it may appear, however malformed.
+ *
+ * Read from the declaring modules, the citing documents and the matrix itself,
+ * so a malformed ordinal is caught wherever it was written. DL-TEST-13.
+ */
+const candidatesByFile: ReadonlyMap<string, readonly string[]> = new Map(
+  [...declaringPaths, ...CITING_DOCUMENTS, MATRIX_PATH].map(
+    (path): [string, readonly string[]] => [
+      path,
+      readFileSync(path, 'utf8').match(CANDIDATE_PATTERN) ?? [],
+    ],
+  ),
+);
+
 /* ==========================================================================
  * 3. The gate
  * ========================================================================== */
+
+describe('every identifier is well formed and resolves', () => {
+  it('writes every identifier with exactly two digits', () => {
+    const malformed: string[] = [];
+
+    for (const [path, candidates] of candidatesByFile) {
+      for (const candidate of candidates) {
+        if (!WELL_FORMED.test(candidate)) {
+          malformed.push(`${candidate} (${path})`);
+        }
+      }
+    }
+
+    // A one-digit ordinal is invisible to the strict pattern and a three-digit
+    // one truncates into a DIFFERENT identifier, so neither could fail before.
+    expect(malformed.sort()).toEqual([]);
+  });
+
+  it('resolves every identifier a document cites', () => {
+    const defined = new Set(directionBRows.map((row): string => row.id));
+    const unresolved: string[] = [];
+
+    for (const path of CITING_DOCUMENTS) {
+      for (const identifier of new Set(
+        readFileSync(path, 'utf8').match(CANDIDATE_PATTERN) ?? [],
+      )) {
+        if (!defined.has(identifier)) {
+          unresolved.push(`${identifier} (${path})`);
+        }
+      }
+    }
+
+    expect(unresolved.sort()).toEqual([]);
+  });
+
+  it('swept documents that actually cite identifiers', () => {
+    const carrying = CITING_DOCUMENTS.filter(
+      (path) => (readFileSync(path, 'utf8').match(CANDIDATE_PATTERN) ?? []).length > 0,
+    );
+
+    // The sweep is only worth anything if it reaches real citations.
+    expect(carrying.length).toBeGreaterThan(0);
+  });
+});
 
 describe('the matrix is structurally sound', () => {
   it('gives every row exactly one owning module', () => {

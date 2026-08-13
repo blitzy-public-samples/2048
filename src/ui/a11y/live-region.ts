@@ -25,7 +25,7 @@
 //   TR-LIVE-08  `TerminalVerdict` and its labels
 //   TR-LIVE-09  the injected report sink and the per-listener error isolation
 //
-// Decisions: DL-LIVE-01, DL-LIVE-02, DL-LIVE-03, DL-LIVE-04
+// Decisions: DL-LIVE-01, DL-LIVE-02, DL-LIVE-03, DL-LIVE-04, DL-LIVE-07
 // (docs/DECISION_LOG.md).
 
 import type {
@@ -76,6 +76,13 @@ const ASSERTIVE_DOWNGRADE_METRIC = 'ui.liveRegion.assertive.downgraded';
 
 /** Counter raised where an assertive region is created by this module. */
 const ASSERTIVE_CREATED_METRIC = 'ui.liveRegion.assertive.created';
+
+/**
+ * Counter raised per `clearAssertive` call, carrying the queued announcements
+ * and the pending utterances the clear discarded and whether the write sequence
+ * had to be restarted. DL-LIVE-07.
+ */
+const ASSERTIVE_CLEARED_METRIC = 'ui.liveRegion.assertive.cleared';
 
 /** Counter raised with the number of items a verdict superseded. */
 const SUPERSEDED_METRIC = 'ui.liveRegion.superseded';
@@ -1134,14 +1141,23 @@ export interface LiveRegionAnnouncer {
   clear(): void;
 
   /**
-   * Blanks the ASSERTIVE region alone, leaving the polite region, the queue and
-   * anything already composed untouched.
+   * Withdraws every assertive line this announcer holds: the region's text, the
+   * queued announcements that would be written assertively, and the pending
+   * utterances already composed for that region. The polite region, the polite
+   * queue entries and the polite utterances behind them are untouched, and a
+   * polite batch interrupted by the withdrawal is resumed.
    *
    * For the caller navigating away from the state that raised an assertive
    * line: an `alert` region holds its text until something replaces it, and
    * only an assertive line is ever written there, so a run verdict stayed
    * readable on a screen that had nothing to do with it. `clear()` is too broad
    * for that — it would also discard a polite batch mid-flight. DL-LIVE-06.
+   *
+   * CHANGED: the two QUEUE STAGES are drained as well, and a write step
+   * scheduled over an assertive utterance is cancelled and restarted. Blanking
+   * the node alone left the verdict queued behind the clear, so the deferred
+   * scheduler wrote it back into the region a task later and the line the caller
+   * had just withdrawn was readable again. DL-LIVE-07.
    */
   clearAssertive(): void;
 
@@ -1344,6 +1360,53 @@ function indexOfEvictable(items: readonly Announcement[]): number {
   }
 
   return items.length > 0 ? 0 : NOT_FOUND;
+}
+
+/**
+ * Whether a queued announcement would be written to the assertive region.
+ *
+ * The two producers, read off `composeAnnouncements`: a `terminal` verdict,
+ * which is composed with `ASSERTIVE_POLARITY` unconditionally, and a `text`
+ * line whose caller asked for that polarity. Every other kind composes into the
+ * gameplay line, which carries `DEFAULT_POLARITY`. DL-LIVE-07.
+ *
+ * @param item The queued announcement.
+ * @returns Whether composing it would produce an assertive utterance.
+ */
+function isAssertiveAnnouncement(item: Announcement): boolean {
+  if (item.kind === 'terminal') {
+    return true;
+  }
+
+  return item.kind === 'text' && item.polarity === ASSERTIVE_POLARITY;
+}
+
+/**
+ * Removes every entry a predicate selects, in place.
+ *
+ * Used by `clearAssertive` on both queue stages: the arrays are the live state
+ * a scheduled write reads, so they are spliced rather than replaced.
+ *
+ * @param items Array to drain.
+ * @param selects Whether one entry is to be removed.
+ * @returns How many entries were removed.
+ */
+function drainWhere<Entry>(
+  items: Entry[],
+  selects: (entry: Entry) => boolean,
+): number {
+  let removed = 0;
+
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const entry = items[index];
+
+    if (entry !== undefined && selects(entry)) {
+      items.splice(index, 1);
+      removed += 1;
+    }
+  }
+
+  return removed;
 }
 
 /**
@@ -1943,9 +2006,52 @@ export function createLiveRegionAnnouncer(
   }
 
   function clearAssertive(): void {
+    // ADDED, matching `flush`: `destroy` has already emptied both stages and
+    // released the regions, so there is nothing to withdraw and a `cleared`
+    // count here would describe work that did not happen.
+    if (destroyed) {
+      reporter.count(AFTER_DESTROY_METRIC, { method: 'clearAssertive' });
+
+      return;
+    }
+
+    // CHANGED: the queue and the outbox are drained of assertive work before the
+    // region is blanked, so nothing writes the withdrawn line back. Blanking the
+    // node alone left a queued verdict — and one already composed into a pending
+    // utterance — to be written by the deferred scheduler a task later.
+    // DL-LIVE-07.
+    const queued = drainWhere(queue, isAssertiveAnnouncement);
+    const pendingUtterances = drainWhere(
+      outbox,
+      (utterance): boolean => utterance.polarity === ASSERTIVE_POLARITY,
+    );
+
+    // THE WRITE CURSOR IS `outbox[0]`, so a step scheduled over an utterance
+    // this call has just removed would write whatever slid into its place
+    // without the clear half of the clear-then-write cycle. Cancelling and
+    // restarting rebuilds that cycle around the head that survives; a polite
+    // batch queued behind the withdrawn alert therefore still speaks.
+    const restarted = pendingUtterances > 0 && phase !== 'idle';
+
+    if (restarted) {
+      cancelWrite();
+      phase = 'idle';
+    }
+
     if (assertiveRegion !== null) {
       writeText('assertive', '');
     }
+
+    if (restarted) {
+      driveWrites();
+    }
+
+    reporter.count(ASSERTIVE_CLEARED_METRIC, {
+      queued,
+      pending: pendingUtterances,
+      restarted,
+      context,
+    });
   }
 
   function pending(): number {

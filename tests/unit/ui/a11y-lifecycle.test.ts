@@ -13,9 +13,12 @@ import type {
   UiReporter,
 } from '../../../src/ui/a11y/settings';
 import {
+  NOOP_UI_REPORTER,
   PREFERENCES_SCHEMA_VERSION,
   createPreferenceStore,
+  createSafeUiReporter,
   deserializePreferences,
+  nameThrown,
   serializePreferences,
 } from '../../../src/ui/a11y/settings';
 import {
@@ -1188,6 +1191,178 @@ describe('the two board layers agree on axis order', () => {
  * what the composition root reads and writes. DL-SETTINGS-06, DL-KEYS-04.
  * ========================================================================== */
 
+/* ==========================================================================
+ * A THEME ACTIVATOR THAT REFUSES
+ *
+ * The palette is applied through an injected activator, and every call is made
+ * through `delegateActivation`, which contains a throw from the activation
+ * itself or from any theme-change listener it notifies. Neither the containment
+ * nor its report had a test: an activator that raised would have taken the
+ * caller of `setTheme()` down with it and left the store's own idea of the theme
+ * out of step with the document, entirely unnoticed.
+ * ========================================================================== */
+
+describe('a theme activator that refuses', () => {
+  /** Collects every error and counter a store reports. */
+  const recorder = (): {
+    readonly errors: string[];
+    readonly counters: { name: string; fields?: unknown }[];
+    readonly reporter: UiReporter;
+  } => {
+    const errors: string[] = [];
+    const counters: { name: string; fields?: unknown }[] = [];
+
+    return {
+      errors,
+      counters,
+      reporter: {
+        log: (): void => {},
+        count: (name, fields): void => {
+          counters.push({ name, fields });
+        },
+        error: (message): void => {
+          errors.push(message);
+        },
+      },
+    };
+  };
+
+  it('contains the throw, reports it, and still records the theme', () => {
+    const reports = recorder();
+    const attempts: string[] = [];
+    const store = createPreferenceStore({
+      motionSource: null,
+      reporter: reports.reporter,
+      activateTheme: (id): void => {
+        attempts.push(id);
+
+        throw new Error('the palette refused');
+      },
+    });
+
+    expect(() => {
+      store.setTheme('high-contrast');
+    }).not.toThrow();
+
+    // ATTEMPTED, contained, and REPORTED on both channels.
+    expect(attempts).toEqual(['high-contrast']);
+    expect(reports.errors).toContain('theme activation threw');
+    expect(
+      reports.counters.filter(
+        (entry): boolean =>
+          entry.name === 'ui.preferences.theme_activation_failed',
+      ),
+    ).toHaveLength(1);
+
+    // The store still records the preference the player chose: the activation
+    // is the document's business, and a refused one must not silently revert
+    // the setting the envelope persists.
+    expect(store.getTheme()).toBe('high-contrast');
+
+    store.destroy();
+  });
+
+  it('names the theme it could not activate', () => {
+    const reports = recorder();
+    const store = createPreferenceStore({
+      motionSource: null,
+      reporter: reports.reporter,
+      activateTheme: (): void => {
+        throw new Error('the palette refused');
+      },
+    });
+
+    store.setTheme('colorblind-safe');
+
+    const failure = reports.counters.find(
+      (entry): boolean =>
+        entry.name === 'ui.preferences.theme_activation_failed',
+    );
+
+    expect(failure?.fields).toEqual({ theme: 'colorblind-safe' });
+
+    store.destroy();
+  });
+
+  it('contains a refusal from applyCurrentTheme as well', () => {
+    // The other caller of the same delegate: the composition root applies the
+    // restored theme at start-up, and a refusal there must not abort the start.
+    const reports = recorder();
+    const store = createPreferenceStore({
+      motionSource: null,
+      reporter: reports.reporter,
+      initial: { theme: 'high-contrast' },
+      activateTheme: (): void => {
+        throw new Error('the palette refused');
+      },
+    });
+
+    expect(() => {
+      store.applyCurrentTheme();
+    }).not.toThrow();
+    expect(reports.errors).toContain('theme activation threw');
+
+    store.destroy();
+  });
+
+  it('retries on the next change rather than giving up', () => {
+    // Containment is not suppression: a refusal is not remembered, so the very
+    // next change activates again.
+    const reports = recorder();
+    const attempts: string[] = [];
+    let refuse = true;
+    const store = createPreferenceStore({
+      motionSource: null,
+      reporter: reports.reporter,
+      activateTheme: (id): void => {
+        attempts.push(id);
+
+        if (refuse) {
+          throw new Error('the palette refused');
+        }
+      },
+    });
+
+    store.setTheme('high-contrast');
+    refuse = false;
+    store.setTheme('colorblind-safe');
+
+    expect(attempts).toEqual(['high-contrast', 'colorblind-safe']);
+    expect(
+      reports.counters.filter(
+        (entry): boolean =>
+          entry.name === 'ui.preferences.theme_activation_failed',
+      ),
+    ).toHaveLength(1);
+    expect(store.getTheme()).toBe('colorblind-safe');
+
+    store.destroy();
+  });
+
+  it('does not activate again for the theme already in force', () => {
+    // `setTheme` refuses a no-op change before it reaches the activator, so a
+    // refused activation is not retried by re-selecting the same theme.
+    const reports = recorder();
+    const attempts: string[] = [];
+    const store = createPreferenceStore({
+      motionSource: null,
+      reporter: reports.reporter,
+      activateTheme: (id): void => {
+        attempts.push(id);
+
+        throw new Error('the palette refused');
+      },
+    });
+
+    store.setTheme('high-contrast');
+    store.setTheme('high-contrast');
+
+    expect(attempts).toEqual(['high-contrast']);
+
+    store.destroy();
+  });
+});
+
 describe('the persisted preference envelope', () => {
   /** A store with no platform motion query, so the setting alone governs. */
   const store = (
@@ -1357,6 +1532,82 @@ describe('the persisted preference envelope', () => {
     ]);
   });
 
+  // CHANGED: the version this loader cannot read used to be reported as
+  // `String(version)`. The value comes from storage, so its text is content the
+  // report had no business disclosing — and the coercion ran BEFORE the safe
+  // reporter boundary, so a payload carrying a hostile `toString` threw out of
+  // the loader that promises never to throw. DL-SETTINGS-08.
+  it('names the shape of a version it cannot read, and discloses none of it', () => {
+    const fields: (UiReportFields | undefined)[] = [];
+    const sink: UiReporter = {
+      log: (_level: string, _message: string, reported): void => {
+        fields.push(reported);
+      },
+      count: (): void => {
+        return;
+      },
+      error: (): void => {
+        return;
+      },
+    };
+
+    /** A secret-bearing string version, and every shape a payload can carry. */
+    const secret = 'zzq-bearer-token-zzq';
+
+    deserializePreferences({ schemaVersion: secret }, sink);
+    deserializePreferences({ schemaVersion: null }, sink);
+    deserializePreferences({ schemaVersion: undefined }, sink);
+    deserializePreferences({ schemaVersion: [secret] }, sink);
+    deserializePreferences({ schemaVersion: { secret } }, sink);
+    deserializePreferences({ schemaVersion: true }, sink);
+
+    expect(fields.map((entry) => entry?.received)).toStrictEqual([
+      'string',
+      'null',
+      'undefined',
+      'array',
+      'object',
+      'boolean',
+    ]);
+
+    // A number is kept as it is: bounded, not content, and the one form this
+    // branch can act on.
+    deserializePreferences({ schemaVersion: 99 }, sink);
+
+    expect(fields[fields.length - 1]?.received).toBe(99);
+
+    // Nothing reported carries the value's own text.
+    for (const reported of fields) {
+      for (const value of Object.values(reported ?? {})) {
+        expect(typeof value === 'string' ? value : '').not.toContain(secret);
+      }
+    }
+  });
+
+  it('reads a hostile version without invoking its coercion', () => {
+    const invoked: string[] = [];
+    const hostile = {
+      schemaVersion: {
+        toString: (): string => {
+          invoked.push('toString');
+
+          throw new Error('coercion refused');
+        },
+        [Symbol.toPrimitive]: (): string => {
+          invoked.push('toPrimitive');
+
+          throw new Error('coercion refused');
+        },
+      },
+    };
+
+    // The loader's never-throw contract holds THROUGH the report, not only
+    // around the fields it reads.
+    expect(() => deserializePreferences(hostile)).not.toThrow();
+    expect(deserializePreferences(hostile)).toStrictEqual({});
+    expect(invoked).toStrictEqual([]);
+  });
+
   it('says nothing for a payload it read completely', () => {
     const levels: string[] = [];
     const sink: UiReporter = {
@@ -1379,5 +1630,160 @@ describe('the persisted preference envelope', () => {
     );
 
     expect(levels).toStrictEqual([]);
+  });
+});
+
+/* ==========================================================================
+ * The level-preserving failure channel
+ *
+ * `UiReporter.error` fixes the severity at `error`, so a recovered failure had
+ * nowhere to send the value it caught and stringified it into an ordinary
+ * field instead — a field nothing redacts, retained in the log buffer and
+ * downloadable with the diagnostics snapshot. `failure` carries the value
+ * itself at the caller's own severity, and the gap-filler for a sink that
+ * implements none reports the value's CLASS and nothing more.
+ * Decisions DL-SETTINGS-07, DL-SETTINGS-08, DL-SUMMARY-15.
+ * ========================================================================== */
+
+describe('the failure channel of a wrapped reporter', () => {
+  /** A caught value whose message must reach no field. */
+  const caught = new Error('refused at https://host.example.test?token=zzq');
+
+  it('delegates to a sink that implements it, value unchanged', () => {
+    const filed: {
+      level: string;
+      message: string;
+      thrown: unknown;
+      fields?: UiReportFields;
+    }[] = [];
+    const safe = createSafeUiReporter({
+      log: (): void => undefined,
+      count: (): void => undefined,
+      error: (): void => undefined,
+      failure: (level, message, thrown, fields): void => {
+        filed.push({ level, message, thrown, fields });
+      },
+    });
+
+    safe.failure?.('warn', 'it refused', caught, { reason: 'Error' });
+
+    expect(filed).toHaveLength(1);
+    expect(filed[0]?.level).toBe('warn');
+
+    // The value ITSELF, so the adapter can hand it to the logger's failure path
+    // where redaction and the record budget apply.
+    expect(filed[0]?.thrown).toBe(caught);
+    expect(filed[0]?.fields?.reason).toBe('Error');
+  });
+
+  it('fills the gap for a sink without one, carrying no caught text', () => {
+    const logged: {
+      level: string;
+      message: string;
+      fields?: UiReportFields;
+    }[] = [];
+    const safe = createSafeUiReporter({
+      log: (level, message, fields): void => {
+        logged.push({ level, message, fields });
+      },
+      count: (): void => undefined,
+      error: (): void => undefined,
+    });
+
+    safe.failure?.('warn', 'it refused', caught, { context: 'summary' });
+
+    expect(logged).toHaveLength(1);
+
+    // The caller's severity survives the fallback.
+    expect(logged[0]?.level).toBe('warn');
+    expect(logged[0]?.fields?.context).toBe('summary');
+    expect(logged[0]?.fields?.errorName).toBe('Error');
+
+    for (const value of Object.values(logged[0]?.fields ?? {})) {
+      expect(typeof value === 'string' ? value : '').not.toContain('zzq');
+      expect(typeof value === 'string' ? value : '').not.toContain('refused at');
+    }
+  });
+
+  it('contains a failure member that throws, on either path', () => {
+    const throwing = createSafeUiReporter({
+      log: (): never => {
+        throw new Error('the sink threw');
+      },
+      count: (): void => undefined,
+      error: (): void => undefined,
+      failure: (): never => {
+        throw new Error('the sink threw');
+      },
+    });
+
+    expect(() => throwing.failure?.('warn', 'it refused', caught)).not.toThrow();
+
+    const noChannel = createSafeUiReporter({
+      log: (): never => {
+        throw new Error('the sink threw');
+      },
+      count: (): void => undefined,
+      error: (): void => undefined,
+    });
+
+    expect(() => noChannel.failure?.('warn', 'it refused', caught)).not.toThrow();
+  });
+
+  it('is implemented by the no-op sink, so every member is present', () => {
+    expect(typeof NOOP_UI_REPORTER.failure).toBe('function');
+    expect(() =>
+      NOOP_UI_REPORTER.failure?.('error', 'it refused', caught),
+    ).not.toThrow();
+  });
+});
+
+describe('naming a caught value', () => {
+  it('reports the class of an Error and none of its message', () => {
+    const named = nameThrown(new TypeError('token=zzq at /srv/secret/a.json'));
+
+    expect(named).toBe('TypeError');
+  });
+
+  it('reports the type of a value that is not an object, uncoerced', () => {
+    expect(nameThrown('zzq-secret')).toBe('string');
+    expect(nameThrown(42)).toBe('number');
+    expect(nameThrown(undefined)).toBe('undefined');
+    expect(nameThrown(Symbol('zzq'))).toBe('symbol');
+  });
+
+  it('answers for null, for a nameless object and for a hostile accessor', () => {
+    expect(nameThrown(null)).toBe('object');
+    expect(nameThrown({})).toBe('unknown');
+    expect(
+      nameThrown({
+        get name(): string {
+          throw new Error('the accessor threw');
+        },
+      }),
+    ).toBe('unknown');
+  });
+
+  it('refuses a name that is not already a class identifier', () => {
+    // A `name` is platform-supplied, so it is accepted only where it already has
+    // the shape of a class name: anything else is refused whole rather than
+    // trimmed into something that reads like one.
+    expect(nameThrown({ name: 'Not An Error: token=zzq' })).toBe('unknown');
+    expect(nameThrown({ name: 'zzq-bearer-token' })).toBe('unknown');
+    expect(nameThrown({ name: 'x'.repeat(200) })).toBe('unknown');
+    expect(nameThrown({ name: '   ' })).toBe('unknown');
+    expect(nameThrown({ name: '' })).toBe('unknown');
+
+    // Every name the platform actually defines is an identifier and survives.
+    for (const name of [
+      'Error',
+      'TypeError',
+      'NotAllowedError',
+      'QuotaExceededError',
+      'SecurityError',
+      'DOMException',
+    ]) {
+      expect(nameThrown({ name })).toBe(name);
+    }
   });
 });

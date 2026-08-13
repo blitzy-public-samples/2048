@@ -26,7 +26,6 @@
 //   The absent-position dispatch below is the boundary at js/grid.js L37-L43,
 //   where `randomAvailableCell` carries no else branch and so yields no cell.
 //
-//   The substream fan-out the cursor assertions here read is to be drawn as
 //   Figure 7, "Seeded Determinism: One Run Seed Fanned into Named RNG
 //   Substreams", in docs/architecture/data-flow.md, carries the substream
 //   fan-out the cursor assertions here read, and labels its `spawn-value` edge

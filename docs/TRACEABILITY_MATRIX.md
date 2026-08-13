@@ -21,8 +21,8 @@ an identifier no row carries, a heading whose count does not match the rows
 beneath it, and a total in [§5](#5-coverage) that does not match the
 document it describes.
 
-There are **569 rows across 72 areas**. 266 of them carry a pre-migration
-construct; 303 are **target-only**, meaning the retired tree contained nothing
+There are **597 rows across 74 areas**. 272 of them carry a pre-migration
+construct; 325 are **target-only**, meaning the retired tree contained nothing
 that became them — the relic system, the seeded RNG, the run envelope, the
 screen flow, the 2.5D renderer, the accessibility layer, the observability
 surfaces, the build and the test suites are all new capability rather than
@@ -472,11 +472,17 @@ subsection exactly once.
 | `TR-TOKEN-05` | style/main.scss L404-L430 | the tile numeral sizes, mirrored as `tileNumeralSize` | `src/theme/tokens.ts` |
 | `TR-TOKEN-09` | style/main.scss L4-L22 | the fourteen-variable token block, moved here unchanged in name, value and order | `style/_tokens.scss` |
 
-### style/helpers.scss — UPDATED, 1 row
+### style/helpers.scss — UPDATED, 7 rows
 
 | TR id | Pre-migration construct | Successor construct | Owning file |
 |---|---|---|---|
 | `TR-TOKEN-06` | style/helpers.scss | the Sass colour derivations, carried here in their compiled form as `derivedColors` | `src/theme/tokens.ts` |
+| `TR-HELPER-01` | style/helpers.scss L4-L21 `exponent()` and `pow()` | the same two functions, retained in place as the stylesheet's powers-of-two arithmetic, with the ramp's TypeScript mirror in `src/theme/tile-ramp.ts` | `style/helpers.scss` |
+| `TR-HELPER-02` | style/helpers.scss L14 the negative-exponent division, and the implicit Ruby Sass `math` availability | `math.div()` at that site, with the `@use "sass:math"` load the migration requires | `style/helpers.scss` |
+| `TR-HELPER-03` | style/helpers.scss L23-L51 the vendor-prefix mixins | `transition`, `transition-property`, `animation`, `animation-fill-mode` and `transform`, retained with their prefixes for the rules that still call them | `style/helpers.scss` |
+| `TR-HELPER-04` | style/helpers.scss L53-L66 the `keyframes()` mixin | the same mixin, with the animation name interpolated as `#{$animation-name}` because Dart Sass does not interpolate a variable in an at-rule prelude | `style/helpers.scss` |
+| `TR-HELPER-05` | style/helpers.scss L68-L73 the `smaller()` media-query mixin | the same mixin, still the only breakpoint construct the two-scale strategy uses | `style/helpers.scss` |
+| `TR-HELPER-06` | style/helpers.scss L75-L82 the `clearfix` mixin | the same mixin, retained for the retained DOM layer | `style/helpers.scss` |
 
 ### style/main.css — DELETED, 2 rows
 
@@ -504,13 +510,25 @@ in exactly one subsection here, whether or not it carries a pre-migration
 source, which is what makes the reverse direction complete: a module cannot hold
 a construct this document does not account for.
 
-### `playwright.config.ts` — 3 rows, 3 target-only
+### `.github/workflows/ci.yml` — 6 rows, 6 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
-| `TR-PW-01` | the `gameplay-recording` project and its single `testMatch` | **target-only** — no pre-migration construct |
+| `TR-CI-01` | the trigger surface — push and pull request against `master` — and the read-only `permissions` block | **target-only** — no pre-migration construct |
+| `TR-CI-02` | the single `ci` job, its runner and the timeout that lets a recording finish | **target-only** — no pre-migration construct |
+| `TR-CI-03` | the pinned-runtime setup read from `.nvmrc` and the locked `npm ci` install | **target-only** — no pre-migration construct |
+| `TR-CI-04` | the Playwright browser cache and the unconditional `--with-deps` install of the browser and its system libraries | **target-only** — no pre-migration construct |
+| `TR-CI-05` | the five quality stages: type check, unit suite, seeded snapshot gate, static build and recorded gameplay proof | **target-only** — no pre-migration construct |
+| `TR-CI-06` | the three artifact uploads — the recorded video, the static bundle and the Playwright report — and their retention policy | **target-only** — no pre-migration construct |
+
+### `playwright.config.ts` — 4 rows, 4 target-only
+
+| TR id | Construct here | Origin |
+|---|---|---|
+| `TR-PW-01` | the two tag-filtered projects and their shared `testMatch` | **target-only** — no pre-migration construct |
 | `TR-PW-02` | the recording settings and the software-GL launch arguments | **target-only** — no pre-migration construct |
 | `TR-PW-03` | the preview web server and its loopback-origin assertion | **target-only** — no pre-migration construct |
+| `TR-PW-04` | the three browser-variant projects, their mobile viewport and the shared variant spec glob | **target-only** — no pre-migration construct |
 
 ### `src/audio/sound-engine.ts` — 4 rows, 4 target-only
 
@@ -563,7 +581,7 @@ a construct this document does not account for.
 | `TR-CONFIG-05` | the merge condition and the doubled value, as `MergePredicate` and `MergeProducer` | js/game_manager.js L156-L157 |
 | `TR-CONFIG-06` | `MergeTileView`, the structural operand both merge members read | **target-only** — no pre-migration construct |
 
-### `src/config/stage-config.ts` — 4 rows, 4 target-only
+### `src/config/stage-config.ts` — 6 rows, 6 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -571,6 +589,8 @@ a construct this document does not account for.
 | `TR-STAGE-02` | `evaluateStageGoal` and `StageGoalProgress` | **target-only** — no pre-migration construct |
 | `TR-STAGE-03` | `StageConfig` and `stageGoalForIndex` | **target-only** — no pre-migration construct |
 | `TR-STAGE-04` | `createDefaultStageConfig` and `DEFAULT_STAGE_CONFIG` | **target-only** — no pre-migration construct |
+| `TR-STAGE-05` | `STAGE_GOAL_KINDS` and `isStageGoalKind` | **target-only** — no pre-migration construct |
+| `TR-STAGE-06` | `MAX_STAGE_INDEX` and `isStageIndex`, the published stage-index domain `assertStageIndex`, `MAX_PERSISTED_STAGE_INDEX` of src/run/run-state.ts and `RunController.advanceStage()` all read | **target-only** — no pre-migration construct |
 
 ### `src/engine/board-effects.ts` — 10 rows, 5 target-only
 
@@ -855,7 +875,7 @@ a construct this document does not account for.
 | `TR-BOARD-04` | scouring-wind onAfterMove | **target-only** — no pre-migration construct |
 | `TR-BOARD-05` | the frozen `BOARD_MANIPULATION_FAMILY` export | **target-only** — no pre-migration construct |
 
-### `src/relics/families/merge-magic.ts` — 5 rows, 5 target-only
+### `src/relics/families/merge-magic.ts` — 6 rows, 6 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -864,6 +884,7 @@ a construct this document does not account for.
 | `TR-MERGE-03` | frostbind onMerge | **target-only** — no pre-migration construct |
 | `TR-MERGE-04` | chain-catalyst onMerge | **target-only** — no pre-migration construct |
 | `TR-MERGE-05` | the frozen `MERGE_MAGIC_FAMILY` export | **target-only** — no pre-migration construct |
+| `TR-MERGE-06` | `reinstateFrostbindRule`, the non-hook reinstatement of the frozen-cell rule on rehydrated rules | **target-only** — no pre-migration construct |
 
 ### `src/relics/families/risk-reward-cursed.ts` — 5 rows, 5 target-only
 
@@ -893,7 +914,7 @@ a construct this document does not account for.
 | `TR-DRAW-02` | the uniform selection, generalised into the selection of one relic within the winning tier, and its nothing-to-select boundary | js/grid.js L37-L43 |
 | `TR-DRAW-03` | `drawRewardOffer`, which samples WITHOUT replacement | **target-only** — no pre-migration construct |
 
-### `src/relics/relic-registry.ts` — 4 rows, 1 target-only
+### `src/relics/relic-registry.ts` — 5 rows, 2 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -901,6 +922,7 @@ a construct this document does not account for.
 | `TR-REGISTRY-02` | `serialize()` | js/game_manager.js L102-L110 |
 | `TR-REGISTRY-03` | `restore()`, the guarded rehydration branch | js/game_manager.js L36-L45 |
 | `TR-REGISTRY-04` | `RELIC_CATALOGUE`, `findRelicById` and the assembled family pool | **target-only** — no pre-migration construct |
+| `TR-REGISTRY-05` | `STANDING_RELIC_RULES` and `applyStandingRelicRules`, the non-hook reinstatement of a standing rule on rehydrated rules | **target-only** — no pre-migration construct |
 
 ### `src/relics/relic-types.ts` — 5 rows, 5 target-only
 
@@ -984,7 +1006,7 @@ a construct this document does not account for.
 | `TR-SCENE-08` | `sceneOptics` | **target-only** — no pre-migration construct |
 | `TR-SCENE-09` | `SceneStats` and the injected reporter | **target-only** — no pre-migration construct |
 
-### `src/render/three-renderer.ts` — 22 rows, 22 target-only
+### `src/render/three-renderer.ts` — 24 rows, 24 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -1010,6 +1032,8 @@ a construct this document does not account for.
 | `TR-THREE-20` | the parallel accessibility board | **target-only** — no pre-migration construct |
 | `TR-THREE-21` | the stage lighting and the stage-clear punch | **target-only** — no pre-migration construct |
 | `TR-THREE-22` | `degraded` carried by the paint plan, the same member src/render/number-only-renderer.ts carries | **target-only** — no pre-migration construct |
+| `TR-THREE-23` | the factory-scale reconciliation, which rebuilds the tile-mesh factory when the breakpoint is crossed | **target-only** — no pre-migration construct |
+| `TR-THREE-24` | the all-or-nothing engine-event subscription, rolled back when a registration refuses | **target-only** — no pre-migration construct |
 
 ### `src/render/tile-materials.ts` — 8 rows, 2 target-only
 
@@ -1068,7 +1092,7 @@ a construct this document does not account for.
 | `TR-RNG-04` | the bounded seed and resume cursor | **target-only** — no pre-migration construct |
 | `TR-RNG-05` | `pick`, `weighted` and `int` | **target-only** — no pre-migration construct |
 
-### `src/run/run-controller.ts` — 10 rows, 4 target-only
+### `src/run/run-controller.ts` — 12 rows, 6 target-only
 
 | TR id | Construct here | Origin |
 |---|---|---|
@@ -1082,6 +1106,8 @@ a construct this document does not account for.
 | `TR-RUNCTL-08` | the stage and relic commit context providers the engine reads | **target-only** — no pre-migration construct |
 | `TR-RUNCTL-09` | `measureCommittedBoard()`, the progress measurement taken while a commit is assembled | **target-only** — no pre-migration construct |
 | `TR-RUNCTL-10` | `projectRelic()`, the contained per-relic copy every projection of a held relic passes through | **target-only** — no pre-migration construct |
+| `TR-RUNCTL-11` | `openStageOn()`, the one contained stage opener both public transition paths use, with `stageOpenPending()` and `openPendingStage()` as its record and its retry | **target-only** — no pre-migration construct |
+| `TR-RUNCTL-12` | `emit()`, the containment every report this class makes passes through | **target-only** — no pre-migration construct |
 
 ### `src/run/run-state-store.ts` — 6 rows, 1 target-only
 
@@ -1434,6 +1460,21 @@ a construct this document does not account for.
 | `TR-TOKEN-10` | `_resolve-token()`, `$projection` and the `@error` that holds the two sides together | **target-only** — no pre-migration construct |
 | `TR-TOKEN-11` | the new token families: the z-index ladder extension, the depth scale and the mobile restatements | **target-only** — no pre-migration construct |
 
+### `style/helpers.scss` — 6 rows, 0 target-only
+
+The one stylesheet that is its own successor: every construct below was carried
+forward in place, so this subsection is where the reverse walk ends for the file
+rather than in a `no row` note. The `HELPER` area is unique to it.
+
+| TR id | Construct here | Origin |
+|---|---|---|
+| `TR-HELPER-01` | `exponent()` and `pow()`, the powers-of-two arithmetic the tile-value ramp iterates over | style/helpers.scss L4-L21 |
+| `TR-HELPER-02` | `math.div()` at the negative-exponent division, and the `@use "sass:math"` load it requires | style/helpers.scss L14 |
+| `TR-HELPER-03` | the vendor-prefix mixins: `transition`, `transition-property`, `animation`, `animation-fill-mode`, `transform` | style/helpers.scss L23-L51 |
+| `TR-HELPER-04` | the `keyframes()` mixin, with the animation name interpolated | style/helpers.scss L53-L66 |
+| `TR-HELPER-05` | the `smaller()` media-query mixin | style/helpers.scss L68-L73 |
+| `TR-HELPER-06` | the `clearfix` mixin | style/helpers.scss L75-L82 |
+
 ### `style/main.scss` — 8 rows, 1 target-only
 
 | TR id | Construct here | Origin |
@@ -1446,6 +1487,18 @@ a construct this document does not account for.
 | `TR-SHEET-06` | the position-generation loop, whose per-cell rules the renderer now owns | style/main.scss L299-L313 |
 | `TR-SHEET-07` | the tile-value generation loop, retained as the ramp's authority | style/main.scss L334-L402 |
 | `TR-SHEET-08` | the six screen partials loaded from here, and the diagnostics surface | **target-only** — no pre-migration construct |
+
+### `tests/e2e/gameplay-recording.spec.ts` — 7 rows, 7 target-only
+
+| TR id | Construct here | Origin |
+|---|---|---|
+| `TR-PW-05` | the seeded scenario: the run opened on a typed seed, the pinned deterministic outcome, the merge window and the stage clear that raises the first reward round | **target-only** — no pre-migration construct |
+| `TR-PW-06` | `readBoardSurface` and the screen state resolved from the `hidden` attribute of the overlay roots alone | **target-only** — no pre-migration construct |
+| `TR-PW-07` | the canvas-content verdict — `sampleBoardCanvas` with `expectRenderedBoard` — and the live WebGL context probe | **target-only** — no pre-migration construct |
+| `TR-PW-08` | `resolveOverlaysToStage` and the bounded drive to a terminal state, with the endpoint's verdict, its outgoing action and the run summary asserted | **target-only** — no pre-migration construct |
+| `TR-PW-09` | `fileByteSize` with `probeRecording`: the artifact gate over the decoded duration, the frame size and the measured frames | **target-only** — no pre-migration construct |
+| `TR-PW-10` | `clearOwnedStorage` and `readRunEnvelope`: the per-test storage teardown and the run-envelope reading either side of the endpoint | **target-only** — no pre-migration construct |
+| `TR-PW-11` | the observability case: the six health checks, the module-boundary spans, the Prometheus exposition and the correlated log records read through the diagnostics surface | **target-only** — no pre-migration construct |
 
 ### `vite.config.ts` — 6 rows, 2 target-only
 
@@ -1508,14 +1561,14 @@ decision rather than by a ported construct, and the decision is named.
 Both directions are complete, and the completeness is arithmetic rather than
 assertion:
 
-- **569 rows** across **72 areas**, enumerated from the
+- **597 rows** across **74 areas**, enumerated from the
 declarations in the tree rather than counted by hand.
-- **Direction A** accounts for the **266 rows** that carry a pre-migration
+- **Direction A** accounts for the **272 rows** that carry a pre-migration
 construct, distributed across the 16 artifacts listed in §2. Every retired
 source file appears there.
-- **Direction B** accounts for **all 569 rows**, distributed across the
-80 modules that declare them, so every row has exactly one owning module.
-- **303 rows are target-only.** Each is declared as such by its owning
+- **Direction B** accounts for **all 597 rows**, distributed across the
+83 modules that declare them, so every row has exactly one owning module.
+- **325 rows are target-only.** Each is declared as such by its owning
 module, so the reverse walk ends in a positive statement rather than in a gap.
 - The one retired artifact with no row, `.jshintrc`, is accounted for in the
 ledger above by decision `DL-BUILD-10`.
@@ -1577,10 +1630,15 @@ probe it names the health check that reuses the probe. The twelve `HTMLActuator`
 constructs are **superseded** rather than ported: the file was replaced and not
 patched.
 - **Reverse, target to source.** Every module of the `src/` tree appears in
-exactly one Direction B subsection: 68 TypeScript modules, plus the 8 stylesheet
-partials, the 4 tooling configurations and the test areas that declare rows of
-their own. A subsection states its own row count and its own target-only count,
-and the gate fails a heading whose counts do not match the rows beneath it.
+exactly one Direction B subsection: 68 TypeScript modules, plus the 9
+stylesheets — the seven partials, the `main.scss` entry point and
+`helpers.scss` — the 4 tooling configurations and the test areas that declare
+rows of their own. A subsection states its own row count and its own target-only
+count, and the gate fails a heading whose counts do not match the rows beneath
+it. `style/helpers.scss` is the one file that is its own successor: it was
+updated in place rather than replaced, so its six retained and superseded
+constructs are carried by its own subsection under the `HELPER` area instead of
+being left to the extraction rows of §7.
 - **Figure 8, node by node.** Each of the ten left-hand nodes of Figure 8 —
 `application.js`, `game_manager.js`, `grid.js`, `tile.js`, `html_actuator.js`,
 `keyboard_input_manager.js`, `local_storage_manager.js`, the three polyfills,
@@ -1611,9 +1669,11 @@ identifier cited anywhere in the tree has a row here, and that every row here is
 declared by the module that owns it. Both are checkable from the working tree:
 
 ```sh
-# Every TR identifier cited by the tree, with its declaring file.
-grep -rno 'TR-[A-Z0-9]\+-[0-9][0-9]' src style tests *.ts *.json 2>/dev/null \
-  | sort -u
+# Every TR identifier cited by the tree, with its declaring file. The workflow
+# is named explicitly because it declares the `CI` area's rows and sits outside
+# the three trees.
+grep -rno 'TR-[A-Z0-9]\+-[0-9][0-9]' src style tests *.ts *.json \
+  .github/workflows/ci.yml 2>/dev/null | sort -u
 
 # Every TR identifier this document carries a row for, in each direction.
 grep -o '^| `TR-[A-Z0-9]\+-[0-9][0-9]`' docs/TRACEABILITY_MATRIX.md \
@@ -1856,9 +1916,9 @@ each region became. Spans are pre-migration.
 
 | Construct | What it does | Carried by | Identifier | Provenance | Decision | Rows |
 |---|---|---|---|---|---|---|
-| style/helpers.scss L4-L21 exponent() and pow() | compute the powers of two the ramp iterates over | src/theme/tile-ramp.ts, style/helpers.scss, as updated | the ported ramp arithmetic; the functions are retained for the stylesheet | extracted | `DL-RAMP-01` | TR-TOKEN-06 |
-| style/helpers.scss L14 the negative-exponent division | divides with `/` inside `exponent()`, the seventh division site | style/helpers.scss, as updated | `math.div()` | superseded | `DL-SHEET-03`, `DL-DOC-04` | no row: carried with the six sites of TR-SHEET-03 |
-| style/helpers.scss L23-L82 mixin library | declares the vendor-prefix, keyframes, `smaller()` and clearfix mixins the stylesheet depends on | style/helpers.scss, as updated | retained, with the vendor prefixes the new partials no longer need left in place for the retained rules | ported | `DL-SHEET-01` | no row: retained in place |
+| style/helpers.scss L4-L21 exponent() and pow() | compute the powers of two the ramp iterates over | src/theme/tile-ramp.ts, style/helpers.scss, as updated | the ported ramp arithmetic; the functions are retained for the stylesheet | extracted | `DL-RAMP-01` | TR-TOKEN-06, TR-HELPER-01 |
+| style/helpers.scss L14 the negative-exponent division | divides with `/` inside `exponent()`, the seventh division site | style/helpers.scss, as updated | `math.div()` | superseded | `DL-SHEET-03`, `DL-DOC-04` | TR-HELPER-02 |
+| style/helpers.scss L23-L82 mixin library | declares the vendor-prefix, keyframes, `smaller()` and clearfix mixins the stylesheet depends on | style/helpers.scss, as updated | retained, with the vendor prefixes the new partials no longer need left in place for the retained rules | ported | `DL-SHEET-01` | TR-HELPER-03, TR-HELPER-04, TR-HELPER-05, TR-HELPER-06 |
 
 ### 7.14 Retired artifacts with no construct of their own — 3 rows
 

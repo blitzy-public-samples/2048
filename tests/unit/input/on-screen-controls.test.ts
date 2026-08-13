@@ -690,7 +690,21 @@ describe('an inert host withholds every control inside it', () => {
 });
 
 describe('a focus change re-applies the layer', () => {
-  it('re-reads a resolved context when focus moves', () => {
+  /**
+   * Lets the coalesced focus refresh run.
+   *
+   * The pass is scheduled on a microtask, so this queues one of its own behind
+   * it and waits for that. DL-CONTROL-12.
+   *
+   * @returns A promise that settles once the scheduled pass has run.
+   */
+  const settleFocus = async (): Promise<void> => {
+    await new Promise<void>((resolve): void => {
+      queueMicrotask(resolve);
+    });
+  };
+
+  it('re-reads a resolved context when focus moves', async () => {
     seedMarkup();
 
     const field = document.createElement('input');
@@ -718,13 +732,166 @@ describe('a focus change re-applies the layer', () => {
     field.focus();
     field.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
 
+    // CHANGED: the pass is scheduled rather than synchronous, so a transition
+    // that fires `focusout` and then `focusin` is one pass rather than two.
+    // DL-CONTROL-12.
+    await settleFocus();
+
     expect(isSuppressed('.restart-button')).toBe(true);
 
     // And back, on the blur.
     context = 'game';
     field.blur();
     field.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    await settleFocus();
 
+    expect(isSuppressed('.restart-button')).toBe(false);
+  });
+
+  /**
+   * Collects the focus-refresh counts the layer reports.
+   *
+   * The layer reports one count per focus refresh ATTEMPT, carrying whether the
+   * pass was made, so this measures the two properties directly rather than
+   * inferring them from a side effect. DL-CONTROL-12.
+   *
+   * @returns The reporter to compose with, and readers of its tally.
+   */
+  const focusCounts = (): {
+    reporter: { log: () => void; count: (metric: string, fields?: Record<string, string | number | boolean>) => void };
+    applied: () => number;
+    skipped: () => number;
+  } => {
+    let applied = 0;
+    let skipped = 0;
+
+    return {
+      reporter: {
+        log: (): void => undefined,
+        count: (
+          metric: string,
+          fields?: Record<string, string | number | boolean>,
+        ): void => {
+          if (metric !== 'input.onScreen.focus.reapplied') {
+            return;
+          }
+
+          if (fields?.['applied'] === true) {
+            applied += 1;
+          } else {
+            skipped += 1;
+          }
+        },
+      },
+      applied: (): number => applied,
+      skipped: (): number => skipped,
+    };
+  };
+
+  // A performance review found the pair of a transition running the complete
+  // pass twice, with no fast path for a transition that changes nothing.
+  // DL-CONTROL-12.
+  it('makes one pass for a transition, and none where nothing moved',
+    async () => {
+      seedMarkup();
+
+      const field = document.createElement('input');
+
+      field.type = 'text';
+      document.body.append(field);
+
+      let context: InputContext = 'game';
+      const counts = focusCounts();
+      const handle = mountOnScreenControls({
+        host: createHost(),
+        keymap: DEFAULT_KEY_BINDINGS,
+        context: (): InputContext => context,
+        reporter: counts.reporter,
+      });
+
+      mounted.push(handle);
+
+      // A transition between two controls of the same context: the pair fires
+      // `focusout` then `focusin`, and neither the keymap, the context nor the
+      // reachability has moved.
+      document.body.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      document.body.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await settleFocus();
+
+      // ONE attempt for the pair, and it made no pass.
+      expect(counts.applied()).toBe(0);
+      expect(counts.skipped()).toBe(1);
+
+      // A transition that DOES change the context makes exactly one pass for
+      // the pair.
+      context = 'textEntry';
+      field.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      field.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await settleFocus();
+
+      expect(counts.applied()).toBe(1);
+      expect(counts.skipped()).toBe(1);
+      expect(isSuppressed('.restart-button')).toBe(true);
+
+      // And back again: one more pass, not one per event.
+      context = 'game';
+      field.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      field.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await settleFocus();
+
+      expect(counts.applied()).toBe(2);
+      expect(isSuppressed('.restart-button')).toBe(false);
+    });
+
+  // The reachability term of that fast path: an inert host is a change no
+  // context reports, so the pass has to be made for it. DL-CONTROL-11,
+  // DL-CONTROL-12.
+  it('makes a pass when only the reachability moved', async () => {
+    document.body.innerHTML = [
+      '<div class="container">',
+      '<button type="button" class="restart-button">New Game</button>',
+      '<div class="game-message">',
+      '<button type="button" class="keep-playing-button">Keep going</button>',
+      '<button type="button" class="retry-button">Try again</button>',
+      '</div>',
+      '<div id="on-screen-controls"></div>',
+      '</div>',
+    ].join('');
+
+    const shell = document.querySelector<HTMLElement>('.container');
+
+    if (shell === null) {
+      throw new Error('the fixture did not build');
+    }
+
+    const counts = focusCounts();
+    const handle = mountOnScreenControls({
+      host: createHost(),
+      keymap: DEFAULT_KEY_BINDINGS,
+      context: (): InputContext => 'game',
+      reporter: counts.reporter,
+    });
+
+    mounted.push(handle);
+
+    expect(isSuppressed('.restart-button')).toBe(false);
+
+    // A dialog making the background inert, which is exactly what the settings
+    // dialog does, followed by the focus move that comes with it. The context is
+    // unchanged, so only the reachability term can have caused the pass.
+    shell.setAttribute('inert', '');
+    document.body.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    await settleFocus();
+
+    expect(counts.applied()).toBe(1);
+    expect(isSuppressed('.restart-button')).toBe(true);
+
+    // And the lift is picked up the same way.
+    shell.removeAttribute('inert');
+    document.body.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    await settleFocus();
+
+    expect(counts.applied()).toBe(2);
     expect(isSuppressed('.restart-button')).toBe(false);
   });
 

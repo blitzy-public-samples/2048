@@ -180,9 +180,9 @@ const PORT_ERROR_METRIC = 'ui.gameOver.port.error';
 /**
  * The two terminal states, in the order `TERMINAL_OVERLAY_CLASSES` keys them.
  *
- * Both are served by this one module, which is what the screen-flow figure of
- * planned docs/architecture/ documents as their seven-states-to-six-modules
- * mapping, once those land.
+ * Both are served by this one module, which is the seven-states-to-six-modules
+ * mapping Figure 6 of docs/architecture/hook-dispatch-sequence.md records,
+ * against the seven-state class-toggle model of its before half Figure 6a.
  */
 export const TERMINAL_STATES = Object.freeze([
   'won',

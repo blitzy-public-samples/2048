@@ -179,8 +179,17 @@ are not restated here.
 # Part two — screen flow
 
 Part two is a different subject from part one. It is carried here because the
-`onStageEnd` dispatch that closes a cleared stage in Figure 5 is the event the
-screen flow resolves, so the two are read together.
+bus mechanism Figure 5 draws — pickup-order fan-out, the charge guard, the
+compounding return and the error isolation, drawn there for one `onMerge`
+dispatch — is the same mechanism the `onStageEnd` dispatch runs through, and that
+dispatch is what closes a cleared stage and hands the screen flow below its first
+event. The two are therefore read together.
+
+`onStageEnd` also closes a stage that did **not** clear. A run that is lost or
+ended resolves the stage it was on with `cleared: false` before it summarises
+(`DL-RUNCTL-30`), and Figure 6 shows where that lands: the `GameOver` and
+`RunSummary` states, not `Reward`. The reward edge is guarded on the flag, so
+the two outcomes share one dispatch and one event.
 
 ## 4. The screen model as it was
 
@@ -258,21 +267,22 @@ the seven-state class-toggle model of Figure 6a.
 ```mermaid
 stateDiagram-v2
   [*] --> RunStart : cold load
-  RunStart --> Stage : begin run, seed assigned or entered
+  RunStart --> Stage : beginRun, seed assigned or entered
   Stage --> Stage : move that changed the board
-  Stage --> StageClear : stage goal met
-  StageClear --> Reward : onStageEnd
-  Reward --> Stage : relic selected, next stage starts
-  Stage --> Won : configured win value reached
-  Won --> Stage : keep playing
-  Won --> RunSummary : end run
-  Stage --> GameOver : no moves available
+  Stage --> StageClear : stageGoalMet, sent on the engine's stage-end event
+  StageClear --> Reward : stageEnd, the player's own continue
+  Reward --> Stage : rewardSelected, next stage starts
+  Stage --> Won : winReached, configured win value
+  Won --> Stage : keepPlaying
+  Won --> RunSummary : endRun
+  Stage --> GameOver : noMovesAvailable
   GameOver --> RunSummary : acknowledge
-  RunSummary --> RunStart : new run
+  RunSummary --> RunStart : newRun
   Stage --> Stage : restart within run
   note right of Reward
-    Three cards drawn without replacement
-    from the relic-draw substream, so no
+    Three cards drawn without replacement:
+    the tier from the rarity-weight substream,
+    the relic within it from relic-draw, so no
     duplicate can appear in one set.
   end note
   note right of GameOver
@@ -282,10 +292,15 @@ stateDiagram-v2
 ```
 
 **Legend.** *Figure 6 — Screen Flow State Machine: Run Start to Run Summary.*
-Each node is a **screen or board state**. Each labelled transition is the event
-that causes it, and the two self-transitions on `Stage` are two distinct events
-that leave the state unchanged. The two **notes** carry constraints inherited
-from the existing system.
+Each node is a **screen or board state**. Each transition is labelled with the
+**`ROUTER_TRIGGERS` member that takes it**, which is the name a caller passes to
+`send()`, and the two self-transitions on `Stage` are two distinct triggers that
+leave the state unchanged. Two labels name where the trigger comes from, because
+those two are the ones a reader most often merges into one step: the engine's
+`stage:end` lifecycle event is what the composition root turns into
+`stageGoalMet`, and `stageEnd` is the **player's** continue action from the stage
+clear screen. The two **notes** carry constraints inherited from the existing
+system.
 
 ### 5.1 Figure 6 is normative for the transition table
 
@@ -305,8 +320,20 @@ module's `SCREEN_NAMES` members:
 
 The table was checked against the figure at this commit and **agrees with it
 exactly**: twelve state-keyed edges plus the cold load, matching Figure 6's
-thirteen transitions, with both `Stage` self-edges present. A state name that
-drifts from this figure is a code defect, not a documentation one.
+thirteen transitions, with both `Stage` self-edges present. Every edge label is a
+member of `ROUTER_TRIGGERS`, and each resolves through `TRANSITIONS` to the
+target the figure draws. A state name or a trigger name that drifts from this
+figure is a code defect, not a documentation one.
+
+Two of those triggers are raised for the same stage clearing, one step apart, and
+conflating them is the misreading this figure exists to prevent. The engine emits
+`stage:end` when a met goal is resolved; the composition root turns that into
+`stageGoalMet`, which takes `stage` to `stageClear`. The reward offer then waits
+on the player: the continue control on the stage-clear screen raises `stageEnd`,
+which is the only trigger `stageClear` declares, and that is the edge into
+`reward`. A run resumed from storage with an unresolved offer is taken to
+`stageClear` for the same reason, so it reaches its offer through the same two
+edges a played run does (`DL-MAIN-13`).
 
 ### 5.2 What the machine changes
 
@@ -326,12 +353,19 @@ drifts from this figure is a code defect, not a documentation one.
 - The z-index ladder is extended upward rather than renumbered: the existing
   `1 / 2 / 10 / 20 / 100` gains HUD 200, screen overlays 300, modal and reward
   400, and the diagnostics overlay 500.
-- The stage goal is config-driven, evaluated at `onAfterMove` and resolved at
-  `onStageEnd` (`DL-ENGINE-07`). Its schema is the subject of
-  [`../CONFIGURATION.md`](../CONFIGURATION.md#4-the-stage-configuration).
-- The reward draw's three cards are sampled without replacement from the
-  `relic-draw` substream, which is what makes the no-duplicate rule structural
-  rather than a retry loop (`DL-DRAW-01`).
+- The stage goal is config-driven, **measured** on `move:after` and again as the
+  commit slice is assembled, and **cleared by a second evaluation the engine runs
+  after that commit** — the tail of a turn that changed the board is `commit()`
+  then `resolveMetStageGoal()`. A met goal is resolved through `endStage()`, which
+  dispatches `onStageEnd`, emits `stage:end` and commits again (`DL-ENGINE-07`,
+  `DL-STAGE-02`). Its schema is the subject of
+  [`../CONFIGURATION.md`](../CONFIGURATION.md#4-the-stage-configuration), whose
+  [4.5](../CONFIGURATION.md#45-the-evaluation-lifecycle) is the authority for the
+  order of the nine steps.
+- The reward draw's three cards are sampled without replacement across **two**
+  substreams — the rarity tier from `rarity-weight`, the relic within that tier
+  from `relic-draw` — which is what makes the no-duplicate rule structural rather
+  than a retry loop (`DL-DRAW-01`, `DL-DRAW-02`).
 - The canvas is `aria-hidden` and semantics arrive through a parallel focusable
   DOM layer with a live region; **Figure 3 — Component Interaction: Input,
   Engine, Hook Bus, Relics, Renderer, Persistence**, in

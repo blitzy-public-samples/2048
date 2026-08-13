@@ -1,7 +1,8 @@
 // TypeScript configuration for the browser-context sources: src/ and every
 // suite under tests/, the Playwright specs included, because their
-// `page.evaluate()` callbacks are authored against DOM globals. The four root
-// tooling configs belong to tsconfig.node.json, so the two projects partition
+// `page.evaluate()` callbacks are authored against DOM globals; the files that
+// read the filesystem are the exception. The four root tooling configs and those
+// filesystem readers belong to tsconfig.node.json, so the two projects partition
 // the repository's root file set. `npm run typecheck` runs both in sequence.
 //
 // Supersedes the deleted .jshintrc. Its `unused: true` is carried forward as
@@ -59,8 +60,8 @@
     "blitzy-deck",
     "js",
 
-    // Covered by tsconfig.node.json, which holds the four root configs alone;
-    // the Playwright specs stay with the browser-context sources above.
+    // Covered by tsconfig.node.json, which holds the four root configs and the
+    // suites that read the filesystem.
     "vite.config.ts",
     "vitest.config.ts",
     "vitest.snapshot.config.ts",

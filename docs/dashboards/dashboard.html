@@ -23,6 +23,15 @@
       * It reads an export you supply. `fetch` against a file:// document is
         refused by the browser's origin rules, so a snapshot arrives through the
         file picker, the drop zone or the paste box — never over the wire.
+      * It BOUNDS what it reads. Every one of those three routes carries
+        untrusted input, so each ingest step checks a limit BEFORE the work that
+        limit bounds — the file's byte count before it is read, the payload's
+        character count before it is parsed, and the line, series, family,
+        label, bucket, health-row, hook-row, log-record and frame-key counts
+        before they are folded, sorted or rendered. A payload over any one of
+        them is refused whole, with the limit named on the status line, rather
+        than read in part. The limits are stated beside their derivations in the
+        script below. DL-DIAG-23.
 
       WHAT IT PARSES — three forms, all written by
       src/observability/metrics.ts and src/observability/diagnostics-overlay.ts:
@@ -49,8 +58,8 @@
       docs/architecture/component-interaction.md and Figure 5 of
       docs/architecture/hook-dispatch-sequence.md.
 
-      Decisions: DL-DIAG-06, DL-BUILD-01, DL-HEALTH-04, DL-METRIC-04,
-      DL-METRIC-08, DL-MAIN-11 (docs/DECISION_LOG.md).
+      Decisions: DL-DIAG-06, DL-DIAG-23, DL-BUILD-01, DL-HEALTH-04,
+      DL-METRIC-04, DL-METRIC-08, DL-MAIN-11 (docs/DECISION_LOG.md).
     -->
 
     <style>
@@ -196,7 +205,7 @@
 
         /* --- Motion. ------------------------------------------------------ */
 
-        /* `transitionSpeed` / `$transition-speed`, style/main.scss L22. */
+        /* `transitionSpeed` / `$transition-speed`, style/_tokens.scss L39. */
         --transition-speed: 100ms;
       }
 
@@ -1138,21 +1147,28 @@
         }
       ];
 
+      /*
+        Each origin names where the value is declared TODAY. The token layer was
+        extracted out of style/main.scss during the migration, so the positions
+        the implementation plan cites — L22, L104, L430 and L450 — belong to the
+        549-line pre-migration source and no longer resolve against this tree.
+        src/theme/tokens.ts `motion` carries the same durations for the renderer.
+      */
       var TURN_THRESHOLDS = [
         {
           value: 100,
           label: "tile movement",
-          origin: "style/main.scss L22, $transition-speed"
+          origin: "style/_tokens.scss L39 $transition-speed, applied at style/main.scss L567"
         },
         {
           value: 200,
           label: "spawn and merge animation",
-          origin: "style/main.scss L430 appear, L450 pop"
+          origin: "style/main.scss L670 appear, L690 pop"
         },
         {
           value: 600,
           label: "score-delta rise",
-          origin: "style/main.scss L104, move-up"
+          origin: "style/main.scss L141, move-up"
         }
       ];
 
@@ -1169,6 +1185,93 @@
       var SUM_SUFFIX = "_sum";
       var COUNT_SUFFIX = "_count";
       var LABELS_LE = "le";
+
+      /*
+        Ingest limits.
+
+        Everything parsed below arrives from outside this page, so until it is
+        bounded the amount of work this page does is chosen by whatever was
+        handed to it: sixteen million short lines is sixteen million iterations
+        of the walk in `parsePrometheusText`, one `series` array of a million
+        entries is a million folds plus a sort plus a table, and one label block
+        of a million pairs is a million map insertions. Each limit is therefore
+        checked BEFORE the work it bounds,
+        and a payload over one is refused WHOLE rather than truncated — a
+        snapshot read in part would render totals the run never produced, which
+        is the one thing this page must not do.
+
+        Each limit derives from a ceiling the PRODUCER already enforces, with
+        headroom, so no export this repository can write is refused:
+        `MAX_FAMILIES` (128), `MAX_SERIES_PER_FAMILY` (256), `MAX_BUCKETS` (64)
+        and `MAX_LABELS_PER_SERIES` (8, plus the appended `le`) of
+        src/observability/metrics.ts; `MAX_LOG_BUFFER_CAPACITY` (10000) of
+        src/observability/logger.ts; the six `HEALTH_CHECK_IDS` of
+        src/observability/health.ts; and the six `HOOK_NAMES` of
+        src/engine/hooks.ts. The byte and character ceilings are the outer
+        gates; the rest bound a pathological payload that fits under them.
+        DL-DIAG-23.
+      */
+      var LIMIT_BYTES = 16777216;
+      var LIMIT_CHARACTERS = 16777216;
+      var LIMIT_LINES = 300000;
+      var LIMIT_SERIES = 40000;
+      var LIMIT_FAMILIES = 512;
+      var LIMIT_LABELS = 32;
+      var LIMIT_BUCKETS = 256;
+      var LIMIT_HEALTH_CHECKS = 256;
+      var LIMIT_HOOK_ROWS = 64;
+      var LIMIT_LOG_RECORDS = 10000;
+      var LIMIT_FRAME_KEYS = 128;
+
+      /** Renders a byte count for a refusal, in mebibytes to one place. */
+      function formatBytes(count) {
+        return (count / 1048576).toFixed(1) + " MiB";
+      }
+
+      /**
+       * Builds the error an exceeded limit raises.
+       *
+       * Marked, so `parseSnapshot` reports the sentence as written instead of
+       * wrapping it as a parse failure: a refusal is a statement about size,
+       * not about syntax, and the reader needs to be told which it hit.
+       *
+       * @param message The refusal, naming what was seen and the limit.
+       * @returns The error to throw.
+       */
+      function overLimit(message) {
+        var thrown = new Error(message);
+
+        thrown.overLimit = true;
+
+        return thrown;
+      }
+
+      /** Whether `thrown` is a refusal `overLimit` built. */
+      function isOverLimit(thrown) {
+        return isObject(thrown) && thrown.overLimit === true;
+      }
+
+      /**
+       * Refuses the payload when `seen` exceeds `limit`.
+       *
+       * @param seen How many were counted.
+       * @param limit Most this page reads.
+       * @param plural What is being counted, worded for the sentence.
+       */
+      function guardCount(seen, limit, plural) {
+        if (seen > limit) {
+          throw overLimit(
+            "That input carries more " +
+              plural +
+              " than this page reads: " +
+              seen +
+              " against a limit of " +
+              limit +
+              ". Nothing was rendered, because a snapshot read in part would " +
+              "report totals the run never produced."
+          );
+        }
+      }
 
       /**
        * Reports whether `text` is an exposition numeric literal.
@@ -1222,11 +1325,14 @@
        * appended after them, so a positional reader would misattribute it.
        *
        * @param block Text between the braces, exclusive.
-       * @returns The labels, or `null` when the block is malformed.
+       * @returns The labels, or `null` when the block is malformed. Throws the
+       *   refusal of `guardCount` past `LIMIT_LABELS` distinct names, which a
+       *   malformed line cannot be told from an attack on the map.
        */
       function parseLabels(block) {
         var labels = {};
         var index = 0;
+        var distinct = 0;
 
         while (index < block.length) {
           while (index < block.length && /[\s,]/.test(block.charAt(index))) {
@@ -1298,6 +1404,12 @@
             return null;
           }
 
+          if (!Object.prototype.hasOwnProperty.call(labels, name)) {
+            distinct += 1;
+
+            guardCount(distinct, LIMIT_LABELS, "labels on one series");
+          }
+
           labels[name] = value;
         }
 
@@ -1355,7 +1467,9 @@
        * escaped quotes, backslashes and newlines.
        *
        * @param text Exposition text.
-       * @returns A model, or `null` when no sample line was recognised.
+       * @returns A model, or `null` when no sample line was recognised. Throws
+       *   the refusal of `guardCount` past the line, family, sample, label or
+       *   bucket limit.
        */
       function parsePrometheusText(text) {
         var lines = String(text).split(/\r?\n/);
@@ -1364,9 +1478,21 @@
         var samples = [];
         var recognised = 0;
         var malformed = 0;
+        var familyCount = 0;
+
+        /*
+          The line count is bounded before the walk rather than inside it: the
+          split has already been paid for, and refusing here means the loop below
+          runs a bounded number of times whatever was handed in.
+        */
+        guardCount(lines.length, LIMIT_LINES, "lines");
 
         function family(name) {
           if (!Object.prototype.hasOwnProperty.call(families, name)) {
+            familyCount += 1;
+
+            guardCount(familyCount, LIMIT_FAMILIES, "metric families");
+
             families[name] = emptyFamily(name);
           }
 
@@ -1462,7 +1588,13 @@
             continue;
           }
 
+          // ONE PER SAMPLE LINE. This is the exposition's own unit, not a
+          // logical series: the model reports it under `readingNoun` so it is
+          // never displayed as a series count.
           recognised += 1;
+
+          guardCount(recognised, LIMIT_SERIES, "metric samples");
+
           samples.push({ name: name, labels: labels, value: readNumber(remainder) });
         }
 
@@ -1559,6 +1691,12 @@
             return;
           }
 
+          guardCount(
+            entry.buckets.length + 1,
+            LIMIT_BUCKETS,
+            "buckets on one histogram"
+          );
+
           entry.buckets.push({
             bound: readNumber(bound),
             cumulative: sample.value
@@ -1588,7 +1726,15 @@
           traces: null,
           logs: null,
           malformedLines: malformed,
-          sampleCount: recognised
+
+          // THE PROMETHEUS FORM COUNTS SAMPLE LINES, not logical series: one
+          // histogram is one MetricSeriesSnapshot in the JSON form but fifteen
+          // `_bucket` lines plus `_sum` and `_count` here. The two forms are
+          // therefore counted under different nouns rather than both being
+          // called "series", which inflated this form's figure.
+          readingCount: recognised,
+          readingNoun: "sample lines",
+          readingLabel: "Sample lines read"
         };
       }
 
@@ -1613,14 +1759,24 @@
        * `{kind, name, help, labels}` plus `value` for a counter and a gauge, and
        * `{count, sum, buckets, bucketCounts, infCount}` for a histogram — the
        * cumulative counts positionally aligned with the boundaries.
+       *
+       * Throws the refusal of `guardCount` past the series, family, label or
+       * bucket limit.
        */
       function foldSeries(series) {
         var families = {};
         var folded = 0;
+        var familyCount = 0;
 
         if (!Array.isArray(series)) {
           return { families: families, folded: folded };
         }
+
+        /*
+          Bounded before the fold, not during it: the array's length is known
+          without walking it, so the cheapest possible check comes first.
+        */
+        guardCount(series.length, LIMIT_SERIES, "metric series");
 
         series.forEach(function (entry) {
           if (!isObject(entry)) {
@@ -1634,6 +1790,10 @@
           }
 
           if (!Object.prototype.hasOwnProperty.call(families, name)) {
+            familyCount += 1;
+
+            guardCount(familyCount, LIMIT_FAMILIES, "metric families");
+
             families[name] = emptyFamily(name);
           }
 
@@ -1644,12 +1804,20 @@
 
           var labels = isObject(entry.labels) ? entry.labels : {};
 
+          guardCount(
+            Object.keys(labels).length,
+            LIMIT_LABELS,
+            "labels on one series"
+          );
+
           if (entry.kind === "histogram") {
             var bounds = Array.isArray(entry.buckets) ? entry.buckets : [];
             var counts = Array.isArray(entry.bucketCounts)
               ? entry.bucketCounts
               : [];
             var buckets = [];
+
+            guardCount(bounds.length, LIMIT_BUCKETS, "buckets on one histogram");
 
             bounds.forEach(function (bound, index) {
               buckets.push({
@@ -1694,6 +1862,8 @@
        * `report.checks` carries each result's `source` and `durationMs`;
        * `checks` carries the id, status and detail alone. The report's rows are
        * read where a report is attached, and the shorter rows where none is.
+       *
+       * Throws the refusal of `guardCount` past `LIMIT_HEALTH_CHECKS`.
        */
       function readHealthSection(section) {
         if (!isObject(section)) {
@@ -1707,6 +1877,8 @@
             ? section.checks
             : [];
         var rows = [];
+
+        guardCount(source.length, LIMIT_HEALTH_CHECKS, "health checks");
 
         source.forEach(function (entry) {
           if (!isObject(entry)) {
@@ -1741,13 +1913,19 @@
         };
       }
 
-      /** Reads the hook section of a combined `DiagnosticsSnapshot`. */
+      /**
+       * Reads the hook section of a combined `DiagnosticsSnapshot`.
+       *
+       * Throws the refusal of `guardCount` past `LIMIT_HOOK_ROWS`.
+       */
       function readHookSection(section) {
         if (!Array.isArray(section)) {
           return null;
         }
 
         var rows = [];
+
+        guardCount(section.length, LIMIT_HOOK_ROWS, "hook rows");
 
         section.forEach(function (entry) {
           if (!isObject(entry)) {
@@ -1783,7 +1961,9 @@
        * sections.
        *
        * @param text JSON text.
-       * @returns A model, or `null` when neither shape is present.
+       * @returns A model, or `null` when neither shape is present. Throws the
+       *   refusal of `guardCount` past any collection limit, and whatever
+       *   `JSON.parse` throws on malformed text.
        */
       function parseJsonSnapshot(text) {
         var payload = JSON.parse(text);
@@ -1810,6 +1990,26 @@
         });
 
         var health = combined ? readHealthSection(payload.health) : null;
+        var traces = combined && isObject(payload.traces) ? payload.traces : null;
+        var logs = combined && Array.isArray(payload.logs) ? payload.logs : null;
+
+        /*
+          Both sections are handed to a renderer that walks them: the frame
+          statistics become one table row per key, and the log records are sliced
+          to their tail only AFTER the array is held. Bounding them here keeps
+          the refusal a refusal rather than a render that fails half-drawn.
+        */
+        if (traces !== null && isObject(traces.frames)) {
+          guardCount(
+            Object.keys(traces.frames).length,
+            LIMIT_FRAME_KEYS,
+            "frame statistics"
+          );
+        }
+
+        if (logs !== null) {
+          guardCount(logs.length, LIMIT_LOG_RECORDS, "log records");
+        }
 
         return {
           form: combined ? "diagnostics-json" : "metrics-json",
@@ -1831,10 +2031,16 @@
           families: folded.families,
           health: health,
           hooks: combined ? readHookSection(payload.hooks) : null,
-          traces: combined && isObject(payload.traces) ? payload.traces : null,
-          logs: combined && Array.isArray(payload.logs) ? payload.logs : null,
+          traces: traces,
+          logs: logs,
           malformedLines: 0,
-          sampleCount: folded.folded
+
+          // The JSON form counts one per logical series, which is what
+          // `foldSeries` folds: one record per MetricSeriesSnapshot, histograms
+          // included.
+          readingCount: folded.folded,
+          readingNoun: "series",
+          readingLabel: "Series read"
         };
       }
 
@@ -1843,12 +2049,30 @@
        *
        * @param text Text of a loaded file, a drop or the paste box.
        * @returns `{ model }` on success and `{ error }` otherwise. Neither
-       *   branch throws.
+       *   branch throws — a size refusal from a parser is reported as written,
+       *   and every other failure is described.
        */
       function parseSnapshot(text) {
-        var trimmed = String(text === undefined || text === null ? "" : text)
-          .replace(/^\uFEFF/, "")
-          .trim();
+        var raw = String(text === undefined || text === null ? "" : text);
+
+        /*
+          The outer gate for the paste box and a dropped string, which arrive as
+          text and never pass a byte count. Checked before the trim, because a
+          trim of a payload this size is itself a copy of it.
+        */
+        if (raw.length > LIMIT_CHARACTERS) {
+          return {
+            error:
+              "That input is longer than this page reads: " +
+              raw.length +
+              " characters against a limit of " +
+              LIMIT_CHARACTERS +
+              ". Nothing was read. Export a fresh snapshot, or load the file " +
+              "itself rather than pasting it."
+          };
+        }
+
+        var trimmed = raw.replace(/^\uFEFF/, "").trim();
 
         if (trimmed.length === 0) {
           return { error: "That input is empty. There is nothing to render." };
@@ -1870,6 +2094,10 @@
 
             return { model: fromJson };
           } catch (thrown) {
+            if (isOverLimit(thrown)) {
+              return { error: thrown.message };
+            }
+
             return {
               error:
                 "That input begins like JSON but could not be parsed: " +
@@ -1894,6 +2122,10 @@
 
           return { model: fromText };
         } catch (thrown) {
+          if (isOverLimit(thrown)) {
+            return { error: thrown.message };
+          }
+
           return {
             error: "That input could not be parsed: " + describeThrown(thrown)
           };
@@ -3454,8 +3686,11 @@
                 : "not carried by this snapshot"
           },
           {
-            label: "Series read",
-            value: String(model.sampleCount),
+            // Labelled from the model, because the two forms count different
+            // quantities: sample lines for the Prometheus exposition, logical
+            // series for the JSON snapshot.
+            label: model.readingLabel,
+            value: String(model.readingCount),
             absent: false
           }
         ];
@@ -3616,8 +3851,10 @@
             " \u2014 " +
             outcome.model.formLabel +
             ", " +
-            outcome.model.sampleCount +
-            " series." +
+            outcome.model.readingCount +
+            " " +
+            outcome.model.readingNoun +
+            "." +
             (malformed > 0
               ? malformed === 1
                 ? " 1 line could not be read and was skipped."
@@ -3632,6 +3869,9 @@
        * Reads a dropped or chosen file.
        *
        * `File.text()` where the platform offers it, and `FileReader` otherwise.
+       * A file over `LIMIT_BYTES` is refused BEFORE either reader is reached, so
+       * an oversized one is never decoded into a string at all — `File.size` is
+       * metadata the platform already holds, so the check costs nothing.
        */
       function loadFile(file) {
         if (file === null || file === undefined) {
@@ -3641,6 +3881,20 @@
         }
 
         var name = readString(file.name) || "that file";
+        var size = readFinite(file.size);
+
+        if (size !== null && size > LIMIT_BYTES) {
+          refuse(
+            "That file is larger than this page reads: " +
+              formatBytes(size) +
+              " against a limit of " +
+              formatBytes(LIMIT_BYTES) +
+              ". It was not read. Export a fresh snapshot, or lower the log " +
+              "buffer capacity the run was configured with."
+          );
+
+          return;
+        }
 
         if (typeof file.text === "function") {
           file.text().then(

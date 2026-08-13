@@ -22,7 +22,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  MAX_STAGE_INDEX,
   createDefaultStageConfig,
+  isStageIndex,
   stageGoalForIndex,
 } from '../../../src/config/stage-config';
 import type { StageGoal } from '../../../src/config/stage-config';
@@ -151,25 +153,38 @@ const SUMMARY_MEMBERS: readonly string[] = [
 ];
 
 /**
- * Every channel the injected report sink declares.
+ * Every channel the injected report sink declares, as a coverage map.
  *
  * `onWriteFailed` is the DIAGNOSTIC half of a refused write — the key, the
  * serialised size and the cause — and `onPersistenceStatusChanged` the
  * PLAYER-FACING half, reported on a change of status rather than per refused
  * write. Decision DL-RUNCTL-20.
+ *
+ * BOUND TO THE INTERFACE IN BOTH DIRECTIONS. `Record<keyof RunReporter, true>`
+ * makes every declared channel REQUIRED here and rejects any name the interface
+ * does not declare, so this list cannot drift from `RunReporter` in either
+ * direction. It was `readonly string[]` and bound to nothing, which is how
+ * `onRelicsNormalized` came to be declared, reported on, and absent from both
+ * this list and `NOOP_RUN_REPORTER` without any gate noticing.
  */
-const REPORTER_CHANNELS: readonly string[] = [
-  'onLoadCorrupted',
-  'onVersionMigrated',
-  'onBoardSizeReconciled',
-  'onWriteFailed',
-  'onPersistenceStatusChanged',
-  'onRunStarted',
-  'onStageAdvanced',
-  'onRewardOffered',
-  'onRewardDrawn',
-  'onRunEnded',
-];
+const REPORTER_CHANNEL_COVERAGE = {
+  onLoadCorrupted: true,
+  onVersionMigrated: true,
+  onBoardSizeReconciled: true,
+  onWriteFailed: true,
+  onPersistenceStatusChanged: true,
+  onRunStarted: true,
+  onStageAdvanced: true,
+  onRewardOffered: true,
+  onRewardDrawn: true,
+  onRelicsNormalized: true,
+  onRunEnded: true,
+} satisfies Record<keyof RunReporter, true>;
+
+/** The channel names, derived from the coverage map so the two cannot differ. */
+const REPORTER_CHANNELS: readonly string[] = Object.keys(
+  REPORTER_CHANNEL_COVERAGE,
+);
 
 /** The four named RNG substreams a cursor map covers. */
 const CURSOR_STREAMS: readonly StreamName[] = RNG_STREAM_NAMES;
@@ -664,6 +679,195 @@ function occupiedCells(board: LegacyBoardSnapshot): SerializedTile[] {
   return tiles;
 }
 
+/* ==========================================================================
+ * THE CELL MATRIX MUST BE THE SQUARE THE DECLARED SIZE NAMES
+ *
+ * The validator bounded the matrix and checked each cell's SHAPE, and stopped
+ * there: a jagged matrix, a matrix with fewer columns than `board.grid.size`,
+ * and a tile whose `position` named a different cell than the one it sat in all
+ * validated. `Grid` rehydrates by reading `cells[x][y]` across `size`, so a
+ * short column yielded `undefined` where the lattice expected a cell or `null`,
+ * a long one silently dropped the tiles past the edge, and a mismatched
+ * position produced a tile the renderer drew in one place and the move resolver
+ * read in another. DL-RUN-08.
+ * ========================================================================== */
+
+/**
+ * A square matrix of empty cells.
+ *
+ * @param size Edge length.
+ * @returns The matrix, `size` columns of `size` nulls.
+ */
+function emptyMatrix(size: number): (SerializedTile | null)[][] {
+  return Array.from({ length: size }, (): (SerializedTile | null)[] =>
+    Array.from({ length: size }, (): SerializedTile | null => null)
+  );
+}
+
+/**
+ * A loosened envelope whose cell matrix is `cells` and whose declared size is
+ * `size`.
+ *
+ * @param cells The matrix to carry.
+ * @param size The size to declare. Defaults to the matrix's column count.
+ * @returns The payload.
+ */
+function envelopeWithMatrix(
+  cells: unknown,
+  size?: number
+): Record<string, unknown> {
+  const payload = loosenEnvelope();
+  const board = payload.board as Record<string, unknown>;
+  const grid = board.grid as Record<string, unknown>;
+
+  grid.cells = cells;
+  grid.size = size ?? (Array.isArray(cells) ? cells.length : 0);
+
+  return payload;
+}
+
+/** Every problem the validator reports for `payload`, as one string. */
+function problemsOf(payload: unknown): string {
+  return describeRunStateProblems(payload).join(' | ');
+}
+
+describe('the cell matrix must be the square the declared size names', () => {
+  it('accepts a square matrix that matches its declared size', () => {
+    const payload = envelopeWithMatrix(emptyMatrix(4), 4);
+
+    expect(describeRunStateProblems(payload)).toEqual([]);
+    expect(isRunStateShape(payload)).toBe(true);
+  });
+
+  it('refuses a matrix with fewer columns than the declared size', () => {
+    // Three columns declared as four: `Grid` reads `cells[3]` and finds nothing.
+    const payload = envelopeWithMatrix(emptyMatrix(3), 4);
+
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(problemsOf(payload)).toContain('board.grid.cells holds 3 columns');
+  });
+
+  it('refuses a matrix with more columns than the declared size', () => {
+    const payload = envelopeWithMatrix(emptyMatrix(5), 4);
+
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(problemsOf(payload)).toContain('board.grid.cells holds 5 columns');
+  });
+
+  it('refuses a jagged matrix whose columns disagree', () => {
+    const cells = emptyMatrix(4);
+
+    cells[2] = [null, null];
+
+    const payload = envelopeWithMatrix(cells, 4);
+
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(problemsOf(payload)).toContain(
+      'board.grid.cells[2] holds 2 cells'
+    );
+  });
+
+  it('refuses a column longer than the declared size', () => {
+    const cells = emptyMatrix(4);
+
+    cells[0] = [null, null, null, null, null];
+
+    const payload = envelopeWithMatrix(cells, 4);
+
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(problemsOf(payload)).toContain(
+      'board.grid.cells[0] holds 5 cells'
+    );
+  });
+
+  it('accepts a tile whose position names the cell it sits in', () => {
+    const cells = emptyMatrix(4);
+
+    cells[1] = [null, { position: { x: 1, y: 1 }, value: 4 }, null, null];
+
+    const payload = envelopeWithMatrix(cells, 4);
+
+    expect(describeRunStateProblems(payload)).toEqual([]);
+    expect(isRunStateShape(payload)).toBe(true);
+  });
+
+  it('refuses a tile whose position names a different cell', () => {
+    // The tile sits at (1, 1) and claims (3, 0): drawn in one place, resolved
+    // in another.
+    const cells = emptyMatrix(4);
+
+    cells[1] = [null, { position: { x: 3, y: 0 }, value: 4 }, null, null];
+
+    const payload = envelopeWithMatrix(cells, 4);
+
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(problemsOf(payload)).toContain(
+      'board.grid.cells[1][1] carries the position (3, 0)'
+    );
+  });
+
+  it('refuses a fractional tile position', () => {
+    const cells = emptyMatrix(4);
+
+    cells[0] = [{ position: { x: 0.5, y: 0 }, value: 2 }, null, null, null];
+
+    const payload = envelopeWithMatrix(cells, 4);
+
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(problemsOf(payload)).toContain('board.grid.cells[0][0]');
+  });
+
+  it('refuses a tile position outside the declared board', () => {
+    const cells = emptyMatrix(4);
+
+    cells[0] = [{ position: { x: 0, y: 9 }, value: 2 }, null, null, null];
+
+    const payload = envelopeWithMatrix(cells, 4);
+
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(problemsOf(payload)).toContain('board.grid.cells[0][0]');
+  });
+
+  it('refuses a negative tile position', () => {
+    const cells = emptyMatrix(4);
+
+    cells[0] = [{ position: { x: -1, y: 0 }, value: 2 }, null, null, null];
+
+    const payload = envelopeWithMatrix(cells, 4);
+
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(problemsOf(payload)).toContain('board.grid.cells[0][0]');
+  });
+
+  it('still reports a problem where the size itself is unreadable', () => {
+    // The size cannot be trusted, so the square check is skipped and the CELL
+    // checks still run — a validator that threw here would have refused every
+    // payload rather than describing this one.
+    const payload = envelopeWithMatrix(emptyMatrix(4), 0);
+
+    expect(() => describeRunStateProblems(payload)).not.toThrow();
+    expect(isRunStateShape(payload)).toBe(false);
+    expect(problemsOf(payload)).toContain('board.grid.size');
+  });
+
+  it('reduces every malformed matrix to a verdict without throwing', () => {
+    const hostile: readonly unknown[] = [
+      [[null], 'not-a-column'],
+      [[undefined]],
+      [[{ position: null, value: 2 }]],
+      [[{ position: { x: '0', y: 0 }, value: 2 }]],
+      [[{ value: 2 }]],
+    ];
+
+    for (const cells of hostile) {
+      const payload = envelopeWithMatrix(cells);
+
+      expect(() => describeRunStateProblems(payload)).not.toThrow();
+      expect(isRunStateShape(payload)).toBe(false);
+    }
+  });
+});
+
 describe('the board member wraps the pre-migration snapshot verbatim', () => {
   it('is a type alias of the engine snapshot, never a redeclaration', () => {
     expect(boardSnapshotAliasHolds).toBe(true);
@@ -1105,33 +1309,89 @@ describe('describeRunStateProblems names the offending field', () => {
     );
   });
 
-  // DL-RUN-07. A stage index far above the ladder is a corrupt payload, and
-  // DL-RUN-04 governs what happens to one: a payload breaking a declared bound
-  // is refused whole, never clamped to fit. The bound is inclusive, so the
-  // last accepted value and the first refused one are pinned as a pair —
-  // asserting only the refusal would pass an off-by-one bound just as happily.
-  it('refuses a stage index above the declared bound and accepts the bound', () => {
-    const atBound = loosenEnvelope();
-
-    atBound.stageIndex = MAX_PERSISTED_STAGE_INDEX;
-
-    expect(describeRunStateProblems(atBound)).toEqual([]);
-    expect(isRunStateShape(atBound)).toBe(true);
-
-    const pastBound = loosenEnvelope();
-
-    pastBound.stageIndex = MAX_PERSISTED_STAGE_INDEX + 1;
-
-    expect(describeRunStateProblems(pastBound)).toContain(
-      `stageIndex is not an integer from 0 through ${MAX_PERSISTED_STAGE_INDEX}`
-    );
-    expect(isRunStateShape(pastBound)).toBe(false);
+  // DL-RUN-07, DL-STAGE-05. THE WIRE DOMAIN IS THE RUNTIME DOMAIN, asserted as
+  // an identity rather than as a number: the bound this module refuses above is
+  // the bound src/config/stage-config.ts derives a goal up to, and the predicate
+  // is that module's own. A fixed bound declared here instead refused envelopes a
+  // run could legitimately reach and hard-locked the reward round that wrote one.
+  it('bounds a stored stage index by the stage curve own domain', () => {
+    expect(MAX_PERSISTED_STAGE_INDEX).toBe(MAX_STAGE_INDEX);
+    expect(MAX_PERSISTED_STAGE_INDEX).toBe(Number.MAX_SAFE_INTEGER);
   });
 
-  // The same bound on the round's own copy of the index. QA reached a rendered
+  // The alignment where it bites: a run that advanced past the bound this module
+  // used to fix. Every one of these indices carries a derivable goal, so refusing
+  // any of them would refuse a run the curve itself admits.
+  it('accepts every stage index the stage curve derives a goal for', () => {
+    const reachable = [
+      0,
+      1,
+      47,
+      1024,
+      1025,
+      2048,
+      100_000,
+      MAX_STAGE_INDEX - 1,
+      MAX_STAGE_INDEX,
+    ];
+
+    for (const stageIndex of reachable) {
+      expect(isStageIndex(stageIndex)).toBe(true);
+      expect(() =>
+        stageGoalForIndex(stageIndex, createDefaultStageConfig())
+      ).not.toThrow();
+
+      const payload = loosenEnvelope();
+
+      payload.stageIndex = stageIndex;
+
+      expect(describeRunStateProblems(payload)).toEqual([]);
+      expect(isRunStateShape(payload)).toBe(true);
+    }
+  });
+
+  // DL-RUN-04 still governs a payload OUTSIDE the domain: refused whole, never
+  // clamped to fit. Above `MAX_STAGE_INDEX` neither the increment that reaches an
+  // index nor the JSON that carries it is exact, so the curve rejects the value
+  // too — the two sides agree on the refusal as well as on the acceptance.
+  it('refuses a stage index outside the stage curve own domain', () => {
+    const refused = [
+      MAX_STAGE_INDEX + 1,
+      Number.MAX_VALUE,
+      Number.POSITIVE_INFINITY,
+      -1,
+      1.5,
+      Number.NaN,
+    ];
+
+    for (const stageIndex of refused) {
+      expect(isStageIndex(stageIndex)).toBe(false);
+
+      const payload = loosenEnvelope();
+
+      payload.stageIndex = stageIndex;
+
+      expect(describeRunStateProblems(payload)).toContain(
+        `stageIndex is not an integer from 0 through ${MAX_PERSISTED_STAGE_INDEX}`
+      );
+      expect(isRunStateShape(payload)).toBe(false);
+    }
+  });
+
+  // The same domain on the round's own copy of the index. QA reached a rendered
   // "Stage 100000" through the envelope, so both carriers of the field are
   // pinned rather than only the one the report happened to travel through.
-  it('refuses a round whose stage index is above the declared bound', () => {
+  it('holds a round to the same stage domain as the envelope', () => {
+    const accepted = {
+      ...loosenEnvelope(),
+      pendingReward: {
+        stageIndex: 1025,
+        offeredRelicIds: ['a'],
+      },
+    };
+
+    expect(describeRunStateProblems(accepted)).toEqual([]);
+
     const payload = {
       ...loosenEnvelope(),
       pendingReward: {

@@ -14,6 +14,8 @@ import {
   defaultCanMerge,
 } from '../../../src/config/default-config';
 import type { MergePredicate } from '../../../src/config/rules-config';
+import { Tile } from '../../../src/engine/tile';
+import { applyStandingRelicRules } from '../../../src/relics/relic-registry';
 import {
   dispatchOn,
   mergePayload,
@@ -200,26 +202,24 @@ describe('a spent charge budget', () => {
     expect(relicById('frostbind').charges).toBe(8);
   });
 
-  it('skips the effect hook at zero charges, without throwing', () => {
+  it('skips every hook at zero charges, without throwing', () => {
     const target = relicBench([{ id: 'frostbind', charges: 0 }]);
 
     place(target.grid, 0, 0, 4);
 
     const started = resultOn(target, 'onStageStart', stageStartPayload(4));
 
-    // STAGE PREPARATION IS NOT WITHHELD. `STANDING_HOOK_NAMES` of
-    // src/engine/hooks.ts exempts `onStageStart` from the charge guard, because
-    // the install reinstates the standing rule the ALREADY SPENT charges
-    // established and a reload hands the relic a fresh default to reinstate it
-    // over. It costs nothing: the handler asks for no charge.
-    expect(started.invoked).toBe(1);
-    expect(started.skipped).toBe(0);
+    // STAGE PREPARATION IS WITHHELD TOO. The charge guard covers all six hooks
+    // with none exempt, so an exhausted relic runs no handler at all — the
+    // frozen requirement of AAP R3 and V6. Nothing throws and nothing is
+    // deducted.
+    expect(started.invoked).toBe(0);
+    expect(started.skipped).toBe(1);
     expect(started.failed).toBe(0);
     expect(started.chargesConsumed).toBe(0);
 
-    // An empty ledger installs a wrapper that refuses no cell, so the rule in
-    // force is a layer over the base rule rather than the base rule itself.
-    expect(target.config.merge.canMerge).not.toBe(defaultCanMerge);
+    // No wrapper was installed, so the rule in force is the base rule itself.
+    expect(target.config.merge.canMerge).toBe(defaultCanMerge);
 
     const moving = { value: 4, mergedFrom: null };
     const stationary = { value: 4, mergedFrom: null };
@@ -234,7 +234,7 @@ describe('a spent charge budget', () => {
       mergePayload({ x: 1, y: 0 }, { x: 0, y: 0 }, 2, 2, 4, 4),
     );
 
-    // The EFFECT hook is the one the guard withholds, so nothing new is frosted
+    // The merge hook is withheld on the same guard, so nothing new is frosted
     // and the merge resolves exactly as the rules produced it.
     expect(merged.invoked).toBe(0);
     expect(merged.skipped).toBe(1);
@@ -435,7 +435,7 @@ describe('two relics that both install a merge rule', () => {
     expect(frost).toBe(defaultCanMerge);
   });
 
-  it('reinstalls a spent relic s standing layer beside an unspent one', () => {
+  it('installs only the unspent relic s layer beside a spent one', () => {
     const target = relicBench([
       { id: 'frostbind', charges: 0 },
       'chain-catalyst',
@@ -443,24 +443,70 @@ describe('two relics that both install a merge rule', () => {
 
     dispatchOn(target, 'onStageStart', stageStartPayload(4));
 
-    // TWO LAYERS, in pickup order. The exhausted relic's stage-start install is
-    // exempt from the charge guard, so its standing layer is at the bottom of
-    // the chain and the unspent relic wraps it — which is what carries a frozen
-    // ledger through a reload that restored a spent budget.
+    // ONE LAYER. The charge guard withholds ALL SIX hooks from an exhausted
+    // relic, stage preparation included, so the spent relic installs nothing
+    // and the unspent relic's layer wraps the default directly. The rule the
+    // spent budget had already bought is put back by
+    // `applyStandingRelicRules` on the rehydration path instead, which
+    // dispatches nothing.
     const ladder: unknown = (
       target.config.merge.canMerge as unknown as Record<string, unknown>
     )['__chainCatalystLadder'];
 
-    expect(ladder).toBeTypeOf('function');
-    expect(ladder).not.toBe(defaultCanMerge);
+    expect(ladder).toBe(defaultCanMerge);
 
-    const frost: unknown = (ladder as Record<string, unknown>)[
-      '__frostbindFrozenCells'
-    ];
+    const frost: unknown = (
+      target.config.merge.canMerge as unknown as Record<string, unknown>
+    )['__frostbindFrozenCells'];
 
-    expect(frost).toBe(defaultCanMerge);
+    expect(frost).toBeUndefined();
 
-    // The spent budget is still spent: nothing was deducted to reinstate it.
+    // The spent budget is untouched: a skipped handler deducts nothing.
     expect(target.bus.subscribers()[0]?.charges).toBe(0);
+  });
+
+  it('reinstates a spent relic s standing rule without dispatching', () => {
+    const target = relicBench([
+      { id: 'frostbind', charges: 0 },
+      'chain-catalyst',
+    ]);
+
+    dispatchOn(target, 'onStageStart', stageStartPayload(4));
+
+    // THE NON-HOOK PATH, over the rules the stage-start dispatch left in
+    // force. `applyStandingRelicRules` is handed the persisted entries and the
+    // live rules, so the frost the spent charges bought is layered on without
+    // any handler being reached.
+    expect(
+      applyStandingRelicRules(
+        [{ id: 'frostbind', charges: 0, state: { frozen: [{ x: 1, y: 2 }] } }],
+        target.config,
+      ),
+    ).toBe(1);
+
+    const moving = new Tile({ x: 0, y: 2 }, 4);
+
+    expect(
+      target.config.merge.canMerge(moving, new Tile({ x: 1, y: 2 }, 4)),
+    ).toBe(false);
+    expect(
+      target.config.merge.canMerge(moving, new Tile({ x: 3, y: 2 }, 4)),
+    ).toBe(true);
+
+    // Still spent, and still withheld: the merge dispatch invokes the unspent
+    // relic alone, leaves the exhausted one skipped, and the reinstated frost
+    // predicate is the one still in force afterwards.
+    const reinstated = target.config.merge.canMerge;
+    const merged = resultOn(
+      target,
+      'onMerge',
+      mergePayload({ x: 1, y: 0 }, { x: 0, y: 0 }, 2, 2, 4, 4),
+    );
+
+    expect(merged.invoked).toBe(1);
+    expect(merged.skipped).toBe(1);
+    expect(merged.chargesConsumed).toBe(0);
+    expect(target.bus.subscribers()[0]?.charges).toBe(0);
+    expect(target.config.merge.canMerge).toBe(reinstated);
   });
 });

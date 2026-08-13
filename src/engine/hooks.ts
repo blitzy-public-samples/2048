@@ -7,8 +7,8 @@
 // This module reads no DOM, performs no I/O, consumes no randomness and reads
 // no clock.
 //
-// One traceability row of docs/TRACEABILITY_MATRIX.md apiece. THAT DOCUMENT HAS
-// NOT LANDED: these ordinals are RESERVED against it:
+// One traceability row of docs/TRACEABILITY_MATRIX.md apiece, and that document
+// is delivered, so each ordinal below resolves to a row in it:
 //   TR-HOOK-01  onStageStart  js/game_manager.js L35-L59   setup()
 //   TR-HOOK-02  onBeforeMove  js/game_manager.js L134      terminal guard
 //   TR-HOOK-03  onMerge       js/game_manager.js L156-L170 merge branch
@@ -28,8 +28,8 @@
 //               receives with each live collaborator replaced by a
 //               capability view, and `HookDispatchPayloadMap`, which the
 //               engine dispatches with the live `Grid` and `Tile`
-//   DL-HOOKBUS-07  `STANDING_HOOK_NAMES`, the stage-preparation hooks the
-//                  charge guard does not withhold from an exhausted subscriber
+//   DL-HOOKBUS-07  the charge guard withholding ALL SIX hooks from an
+//                  exhausted subscriber, with no hook exempted
 
 import type { RulesConfig } from '../config/rules-config';
 import type { StageGoal } from '../config/stage-config';
@@ -67,42 +67,15 @@ export const HOOK_NAMES = Object.freeze([
 export type HookName = (typeof HOOK_NAMES)[number];
 
 /**
- * The hooks that PREPARE a stage rather than act inside one, and which
- * src/engine/hook-bus.ts therefore dispatches to a subscriber whose charge
- * budget is spent.
- *
- * `onStageStart` is the one such hook. It is where a subscriber reinstalls the
- * standing rules its own persisted `state` slot records — the merge predicate
- * `frostbind` rebuilds from its frozen-cell ledger being the case that names
- * this set — and a reload yields a fresh configuration carrying the untouched
- * default, so the install has to be made again on every stage of a resumed run.
- * Skipping it for an exhausted subscriber dropped standing state that charges
- * ALREADY SPENT had established, which is a different thing from letting an
- * exhausted relic fire again.
- *
- * The exemption withholds nothing from the charge guard: the bus deducts only
- * what a handler ASKS for through `HookContext.spendCharge`, and a budget at
- * zero can pay for nothing, so a stage-start handler that does ask still spends
- * nothing and every effect hook stays guarded. Declared by hook name, so no
- * relic declares its own exemption and the 7-member `Relic` shape AAP Contract 3
- * fixes is untouched. Decision `DL-HOOKBUS-07`.
+ * CHANGED: no hook is exempt from the charge guard, so this module declares no
+ * exemption set and src/engine/hook-bus.ts withholds every one of the six
+ * hooks above from a subscriber whose budget is spent — which is the frozen
+ * requirement that a limited-charge relic stops firing once exhausted (AAP R3,
+ * V6). Standing rules a relic's persisted `state` slot records are reinstated
+ * by `applyStandingRelicRules` of src/relics/relic-registry.ts on the
+ * rehydration path, never by dispatching to an exhausted handler.
+ * `DL-HOOKBUS-07`.
  */
-export const STANDING_HOOK_NAMES: readonly HookName[] = Object.freeze([
-  'onStageStart',
-] as const satisfies readonly HookName[]);
-
-/**
- * Whether the charge guard applies to a hook.
- *
- * Total: a name outside `HOOK_NAMES` is reported as guarded, which is the
- * conservative answer.
- *
- * @param hook Hook being dispatched.
- * @returns `true` for every hook but the standing ones.
- */
-export function isChargeGuardedHook(hook: HookName): boolean {
-  return !STANDING_HOOK_NAMES.includes(hook);
-}
 
 /**
  * Payload of `onStageStart`, dispatched once as a stage's board is prepared.

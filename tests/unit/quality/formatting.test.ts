@@ -10,13 +10,20 @@ import { describe, expect, it } from 'vitest';
 /** Directories walked in full. */
 const ROOTS: readonly string[] = ['src', 'tests', 'style'];
 
-/** Individual files outside those roots that the gate also holds. */
+/**
+ * Individual files outside those roots that the gate also holds.
+ *
+ * The CI workflow is one of them: it is a tracked text file that carries
+ * identifier citations of its own, so it is held to the same whitespace rules
+ * as every other file a reviewer reads.
+ */
 const EXTRA_FILES: readonly string[] = [
   'index.html',
   'vite.config.ts',
   'vitest.config.ts',
   'vitest.snapshot.config.ts',
   'playwright.config.ts',
+  '.github/workflows/ci.yml',
 ];
 
 /** Directory names never descended into. */
@@ -179,9 +186,19 @@ describe('no tracked file carries loose whitespace', () => {
       offences((file) =>
         file.text
           .split('\n')
-          .map((line, index) =>
-            line.startsWith('\t') ? `${file.path}:${String(index + 1)}` : null,
-          )
+          .map((line, index) => {
+            // CHANGED: the WHOLE leading-whitespace run is examined, not just
+            // its first character. `startsWith('\t')` caught a tab only in
+            // column one, so a line indented with spaces and THEN a tab — the
+            // shape an editor with a mixed-indent setting actually produces —
+            // passed the assertion its own name makes. DL-TEST-10.
+            const indent = /^[ \t]*/.exec(line)?.[0] ?? '';
+            const at = indent.indexOf('\t');
+
+            return at === -1
+              ? null
+              : `${file.path}:${String(index + 1)}:${String(at + 1)}`;
+          })
           .filter((entry): entry is string => entry !== null),
       ),
     ).toEqual([]);

@@ -20,6 +20,7 @@ import type {
   AfterMovePayload,
   BeforeMovePayload,
   MergePayload,
+  ReadonlyGridView,
   StageEndPayload,
   StageStartPayload,
 } from '../../../src/engine/hooks';
@@ -301,7 +302,16 @@ describe('onBeforeMove: the resolved direction is the one executed', () => {
     // Read inside the emission, before the move resolved the pair.
     expect(seen.valueAtEmission).toBe(2);
 
-    expect(seen.valueAtEmission).toBe(2);
+    // CHANGED: this line repeated the assertion above it. It now proves the other
+    // half of the comment: the hook path receives the CAPABILITY VIEW, which is
+    // a different object from the live board the event path receives, reporting
+    // the same size and carrying no `cells` to write engine state through.
+    const hookBoard = seen.hook as ReadonlyGridView | null;
+
+    expect(hookBoard).not.toBe(engine.grid);
+    expect(hookBoard?.size).toBe(engine.grid.size);
+    expect(hookBoard !== null && 'cells' in hookBoard).toBe(false);
+
     expect(seen.event?.cells[0]?.[0]?.value).toBe(4);
   });
 });

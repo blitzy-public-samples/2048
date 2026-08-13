@@ -897,6 +897,53 @@ interface Cell {
 
 type Row = readonly (string | Cell)[];
 
+/**
+ * ADDED: which of a panel's three bodies is on screen, or none.
+ *
+ * DL-DIAG-24.
+ */
+type PanelBodyKind = 'table' | 'empty' | 'failure' | 'none';
+
+/**
+ * ADDED: one cell of a retained panel row, beside the dynamic declaration block
+ * last applied to it.
+ *
+ * The text and the class are compared against the node itself, so a render
+ * writes only what the reading changed. The declaration block cannot be read
+ * back that way — the properties it set are indistinguishable from the static
+ * ones beside them — so the block is held, and held BY REFERENCE because every
+ * one is a frozen module constant. DL-DIAG-24.
+ */
+interface CellView {
+  readonly node: Element;
+  style: Readonly<Record<string, string>> | null;
+}
+
+/** ADDED: one retained row of a panel's table. DL-DIAG-24. */
+interface RowView {
+  readonly line: Element;
+  readonly cells: CellView[];
+}
+
+/**
+ * ADDED: one retained panel: its heading, whichever body is on screen, and the
+ * rows of its table.
+ *
+ * The three bodies are built at most once each and swapped by attachment, so an
+ * emptied panel and a failed one both keep the nodes they may need again.
+ * DL-DIAG-24.
+ */
+interface PanelView {
+  readonly heading: Element;
+  title: string;
+  table: Element | null;
+  tableBody: Element | null;
+  empty: Element | null;
+  failure: Element | null;
+  shown: PanelBodyKind;
+  readonly rows: RowView[];
+}
+
 /** The six hook names, as `HookBusMetrics` declares them. */
 type HookDispatchName = keyof HookBusMetrics['hooks'];
 
@@ -1674,9 +1721,6 @@ export function createDiagnosticsOverlay(
   /** ADDED: the collapse control, relabelled in place. DL-DIAG-16. */
   let collapseControl: HTMLElement | null = null;
 
-  /** ADDED: the panel nodes now on screen, replaced by the next render. */
-  let panelNodes: Element[] = [];
-
   /**
    * ADDED: the element OUTSIDE the host that last held the keyboard focus, and
    * the one focus returns to when the surface closes.
@@ -1870,139 +1914,456 @@ export function createDiagnosticsOverlay(
   };
 
   /**
-   * Appends one cell to a row.
+   * Writes text to a node only where it differs.
    *
-   * @param line Row the cell is appended to.
-   * @param value Cell text, or the cell.
-   * @param column Zero-based position of the cell in its row, which selects the
-   *   stated inline size. ADDED for DL-DIAG-08.
+   * ADDED: the comparison is the point. An unconditional write replaces the
+   * text node and records a character-data mutation for a value that has not
+   * changed, which is a change notification to an assistive technology and
+   * activity to anything watching the DOM. DL-DIAG-16, DL-DIAG-24.
+   *
+   * @param node Node to write to.
+   * @param text Text it should carry.
    */
-  const appendCell = (
-    line: Node,
-    value: string | Cell,
-    column: number,
-  ): void => {
-    const cell: Cell = typeof value === 'string' ? { text: value } : value;
-    const node = make('td', cell.className ?? '');
+  const setText = (node: Element, text: string): void => {
+    if (node.textContent !== text) {
+      node.textContent = text;
+    }
+  };
+
+  /**
+   * ADDED: the panels now on screen, by key, retained across every render.
+   *
+   * DL-DIAG-24.
+   */
+  const panelViews = new Map<string, PanelView>();
+
+  /**
+   * ADDED: builds one table cell, carrying the declarations that never change.
+   *
+   * @param column Zero-based position of the cell in its row, which selects the
+   *   stated inline size. DL-DIAG-08.
+   * @returns The cell, or `null` where there is no document.
+   */
+  const createCell = (column: number): CellView | null => {
+    const node = make('td');
 
     if (node === null) {
-      return;
+      return null;
     }
 
-    node.textContent = cell.text === '' ? MISSING_VALUE : cell.text;
     applyStyle(node, CELL_STYLE);
 
-    // ADDED. Written on every row's cell rather than the first row's alone:
-    // under `table-layout: fixed` the first row governs, so the later ones are
-    // inert, and a panel whose first row failed to build still states its
-    // columns. A cell's own `style` below still overrides this. DL-DIAG-08.
+    // Written on every row's cell rather than the first row's alone: under
+    // `table-layout: fixed` the first row governs, so the later ones are inert,
+    // and a panel whose first row failed to build still states its columns. A
+    // cell's own dynamic style below still overrides this. DL-DIAG-08.
     const stated = COLUMN_INLINE_SIZES[column];
 
     if (stated !== undefined) {
       applyStyle(node, { 'inline-size': stated });
     }
 
-    if (cell.style !== undefined) {
-      applyStyle(node, cell.style);
-    }
-
-    line.appendChild(node);
+    return { node, style: null };
   };
 
   /**
-   * Appends a heading and a table of rows.
+   * ADDED: brings one retained cell into line with the value it now holds.
    *
-   * @param parent Node the section is appended to.
-   * @param title Heading text.
-   * @param rows Rows, each a list of cells.
+   * Text, class and dynamic declarations are each written only where they
+   * differ, and a dynamic declaration block that has been replaced is removed
+   * before the new one is applied, so a cell that stops being a status cell
+   * stops carrying a status colour. The blocks are frozen module constants, so
+   * the comparison is by reference. DL-DIAG-24.
+   *
+   * @param view Cell to patch.
+   * @param value Cell text, or the cell.
    */
-  const section = (
-    parent: Node,
-    title: string,
-    rows: readonly Row[],
-  ): void => {
-    const heading = make('h2', HEADING_CLASS, title);
+  const patchCell = (view: CellView, value: string | Cell): void => {
+    const cell: Cell = typeof value === 'string' ? { text: value } : value;
 
-    if (heading !== null) {
-      applyStyle(heading, HEADING_STYLE);
-      parent.appendChild(heading);
+    setText(view.node, cell.text === '' ? MISSING_VALUE : cell.text);
+
+    const className = cell.className ?? '';
+
+    if (view.node.className !== className) {
+      try {
+        if (className === '') {
+          // Removed rather than assigned the empty string, which would leave
+          // `class=""` on a cell that carried no class attribute before.
+          // DL-DIAG-14.
+          view.node.removeAttribute('class');
+        } else {
+          view.node.className = className;
+        }
+      } catch (thrown) {
+        reportFailure(OVERLAY_TITLE, thrown);
+      }
     }
 
-    if (rows.length === 0) {
-      const empty = make('p', '', EMPTY_PANEL_TEXT);
+    const style = cell.style ?? null;
 
-      if (empty !== null) {
-        parent.appendChild(empty);
+    if (view.style !== style) {
+      if (view.style !== null) {
+        removeStyle(view.node, view.style);
       }
 
-      return;
+      if (style !== null) {
+        applyStyle(view.node, style);
+      }
+
+      view.style = style;
     }
+  };
 
-    const table = make('table', TABLE_CLASS);
-    const body = make('tbody');
+  /**
+   * ADDED: brings one retained row into line with the cells it now holds.
+   *
+   * @param view Row to patch.
+   * @param row Cells the row should carry.
+   */
+  const patchRow = (view: RowView, row: Row): void => {
+    for (const [column, value] of row.entries()) {
+      const existing = view.cells[column];
 
-    if (table === null || body === null) {
-      return;
-    }
+      if (existing !== undefined) {
+        patchCell(existing, value);
 
-    applyStyle(table, TABLE_STYLE);
-
-    for (const row of rows) {
-      const line = make('tr');
-
-      if (line === null) {
         continue;
       }
 
-      for (const [column, value] of row.entries()) {
-        appendCell(line, value, column);
+      const created = createCell(column);
+
+      if (created === null) {
+        continue;
       }
 
-      body.appendChild(line);
+      patchCell(created, value);
+      view.line.appendChild(created.node);
+      view.cells.push(created);
     }
 
-    table.appendChild(body);
-    parent.appendChild(table);
+    while (view.cells.length > row.length) {
+      const surplus = view.cells.pop();
+
+      if (surplus === undefined) {
+        continue;
+      }
+
+      try {
+        surplus.node.parentNode?.removeChild(surplus.node);
+      } catch {
+        // A cell the host refuses to release is left where it stands; it holds
+        // the text of a row that no longer has that column, and the next
+        // reading that does have one patches it.
+      }
+    }
   };
 
   /**
-   * Appends one panel, containing its own failure: a row builder that throws
-   * degrades to an error line inside the panel and stops no other panel.
+   * ADDED: removes whichever body a panel currently shows.
    *
-   * @param parent Node the panel is appended to.
+   * @param view Panel to take the body off.
+   */
+  const detachBody = (view: PanelView): void => {
+    const current =
+      view.shown === 'table'
+        ? view.table
+        : view.shown === 'empty'
+          ? view.empty
+          : view.shown === 'failure'
+            ? view.failure
+            : null;
+
+    view.shown = 'none';
+
+    if (current === null) {
+      return;
+    }
+
+    try {
+      current.parentNode?.removeChild(current);
+    } catch {
+      // A node the host refuses to release is left where it stands; the panel
+      // presents its next body beside it rather than failing the surface.
+    }
+  };
+
+  /**
+   * ADDED: puts one body on screen, immediately after its panel's heading.
+   *
+   * A body that is already the shown one is left attached, which is what makes
+   * a repeated render of an unchanged panel record no child-list mutation.
+   * DL-DIAG-24.
+   *
+   * @param view Panel the body belongs to.
+   * @param kind Which body it is.
+   * @param node The body node.
+   */
+  const presentBody = (
+    view: PanelView,
+    kind: PanelBodyKind,
+    node: Element,
+  ): void => {
+    if (view.shown === kind && node.parentNode !== null) {
+      return;
+    }
+
+    detachBody(view);
+
+    const parent = view.heading.parentNode;
+
+    if (parent === null) {
+      return;
+    }
+
+    try {
+      parent.insertBefore(node, view.heading.nextSibling);
+      view.shown = kind;
+    } catch (thrown) {
+      reportFailure(view.title, thrown);
+    }
+  };
+
+  /**
+   * ADDED: shows the empty line of a panel whose reading holds no row.
+   *
+   * The table is REPLACED by the paragraph rather than emptied, which is the
+   * shape docs/OBSERVABILITY.md states. DL-DIAG-24.
+   *
+   * @param view Panel to empty.
+   */
+  const presentEmpty = (view: PanelView): void => {
+    if (view.empty === null) {
+      view.empty = make('p', '', EMPTY_PANEL_TEXT);
+    }
+
+    if (view.empty === null) {
+      detachBody(view);
+
+      return;
+    }
+
+    presentBody(view, 'empty', view.empty);
+  };
+
+  /**
+   * ADDED: shows the inline error line of a panel whose row builder threw.
+   *
+   * @param view Panel that failed.
+   */
+  const presentFailure = (view: PanelView): void => {
+    if (view.failure === null) {
+      const line = make('p', PANEL_ERROR_CLASS, PANEL_ERROR_TEXT);
+
+      if (line !== null) {
+        applyStyle(line, PANEL_ERROR_STYLE);
+        view.failure = line;
+      }
+    }
+
+    if (view.failure === null) {
+      detachBody(view);
+
+      return;
+    }
+
+    presentBody(view, 'failure', view.failure);
+  };
+
+  /**
+   * ADDED: shows a panel's rows, building its table at most once.
+   *
+   * @param view Panel to fill.
+   * @param rows Rows the reading holds.
+   */
+  const presentRows = (view: PanelView, rows: readonly Row[]): void => {
+    if (rows.length === 0) {
+      presentEmpty(view);
+
+      return;
+    }
+
+    if (view.table === null) {
+      const table = make('table', TABLE_CLASS);
+      const body = make('tbody');
+
+      if (table !== null && body !== null) {
+        applyStyle(table, TABLE_STYLE);
+        table.appendChild(body);
+        view.table = table;
+        view.tableBody = body;
+      }
+    }
+
+    const table = view.table;
+
+    if (table === null) {
+      detachBody(view);
+
+      return;
+    }
+
+    // Patched before it is attached, so a table built for the first time is
+    // filled while it is still off screen.
+    const body = view.tableBody;
+
+    if (body !== null) {
+      for (const [index, row] of rows.entries()) {
+        const existing = view.rows[index];
+
+        if (existing !== undefined) {
+          patchRow(existing, row);
+
+          continue;
+        }
+
+        const line = make('tr');
+
+        if (line === null) {
+          continue;
+        }
+
+        const created: RowView = { line, cells: [] };
+
+        patchRow(created, row);
+        body.appendChild(line);
+        view.rows.push(created);
+      }
+
+      while (view.rows.length > rows.length) {
+        const surplus = view.rows.pop();
+
+        if (surplus === undefined) {
+          continue;
+        }
+
+        try {
+          surplus.line.parentNode?.removeChild(surplus.line);
+        } catch {
+          // A row the host refuses to release is left where it stands; the next
+          // reading that is long enough patches it.
+        }
+      }
+    }
+
+    presentBody(view, 'table', table);
+  };
+
+  /**
+   * ADDED: resolves one panel, building its heading at most once and attaching
+   * it ahead of the control row.
+   *
+   * The heading is re-attached rather than rebuilt, so a panel that was taken
+   * off screen by a collapse comes back as the same node. DL-DIAG-24.
+   *
+   * @param key Stable identity of the panel, which its title may not be.
+   * @param title Heading text the reading states.
+   * @returns The panel, or `null` where there is no document.
+   */
+  const ensurePanel = (key: string, title: string): PanelView | null => {
+    const existing = panelViews.get(key);
+    const view =
+      existing ??
+      ((): PanelView | null => {
+        const heading = make('h2', HEADING_CLASS, title);
+
+        if (heading === null) {
+          return null;
+        }
+
+        applyStyle(heading, HEADING_STYLE);
+
+        const built: PanelView = {
+          heading,
+          title,
+          table: null,
+          tableBody: null,
+          empty: null,
+          failure: null,
+          shown: 'none',
+          rows: [],
+        };
+
+        panelViews.set(key, built);
+
+        return built;
+      })();
+
+    if (view === null) {
+      return null;
+    }
+
+    if (view.title !== title) {
+      setText(view.heading, title);
+      view.title = title;
+    }
+
+    if (host !== null && view.heading.parentNode !== host) {
+      try {
+        // Ahead of the control row, so the rendered order — heading, panels,
+        // controls — is the order it has always been. DL-DIAG-16.
+        host.insertBefore(view.heading, controlRow);
+      } catch (thrown) {
+        reportFailure(title, thrown);
+      }
+    }
+
+    return view;
+  };
+
+  /**
+   * Brings one panel into line with the reading, containing its own failure: a
+   * row builder that throws degrades to an error line inside the panel and
+   * stops no other panel.
+   *
+   * CHANGED: the panel's nodes are RETAINED and patched rather than rebuilt and
+   * replaced. DL-DIAG-24.
+   *
+   * @param key Stable identity of the panel.
    * @param title Heading text.
    * @param build Builds the rows.
    */
   const panel = (
-    parent: Node,
+    key: string,
     title: string,
     build: () => readonly Row[],
   ): void => {
+    const view = ensurePanel(key, title);
+
+    if (view === null) {
+      return;
+    }
+
     let rows: readonly Row[];
 
     try {
       rows = build();
     } catch (thrown) {
       reportFailure(title, thrown);
-
-      const heading = make('h2', HEADING_CLASS, title);
-
-      if (heading !== null) {
-        applyStyle(heading, HEADING_STYLE);
-        parent.appendChild(heading);
-      }
-
-      const line = make('p', PANEL_ERROR_CLASS, PANEL_ERROR_TEXT);
-
-      if (line !== null) {
-        applyStyle(line, PANEL_ERROR_STYLE);
-        parent.appendChild(line);
-      }
+      presentFailure(view);
 
       return;
     }
 
-    section(parent, title, rows);
+    presentRows(view, rows);
+  };
+
+  /**
+   * ADDED: takes every panel off screen, keeping its nodes for the next expand.
+   *
+   * DL-DIAG-24.
+   */
+  const detachPanels = (): void => {
+    for (const view of panelViews.values()) {
+      detachBody(view);
+
+      try {
+        view.heading.parentNode?.removeChild(view.heading);
+      } catch {
+        // A node the host refuses to release is left where it stands; the next
+        // expand finds it already attached and inserts nothing.
+      }
+    }
   };
 
   /**
@@ -3029,24 +3390,6 @@ export function createDiagnosticsOverlay(
     }
   };
 
-  /** Removes the panel nodes the previous render appended. */
-  const clearPanels = (): void => {
-    while (panelNodes.length > 0) {
-      const node = panelNodes.pop();
-
-      if (node === undefined) {
-        continue;
-      }
-
-      try {
-        node.parentNode?.removeChild(node);
-      } catch {
-        // A node the host refuses to release is left where it stands; the
-        // next render appends beside it rather than failing the surface.
-      }
-    }
-  };
-
   /** Renders every panel from one reading. */
   const render = (): void => {
     if (destroyed || host === null || owner === null) {
@@ -3068,23 +3411,32 @@ export function createDiagnosticsOverlay(
 
     const traces = readTraces();
     const records = readLogs();
-    const fragment = owner.createDocumentFragment();
 
     // ADDED: the panels are the collapsible half. Every reading above is still
-    // TAKEN while the surface is collapsed — the fold, the metrics snapshot
+    // TAKEN on a render of a collapsed surface — the fold, the metrics snapshot
     // `lastSnapshot()` answers from and the health check all run exactly as
-    // they do expanded — so collapsing changes what is DRAWN and nothing about
-    // what is recorded or exported. DL-DIAG-11.
-    if (!collapsed) {
-      panel(fragment, RUN_PANEL_TITLE, () => runRows(taken));
-      panel(fragment, HEALTH_PANEL_TITLE, () => healthRows(health));
-      panel(fragment, TRACE_PANEL_TITLE, () => traceRows(traces, taken));
-      panel(fragment, HOOK_PANEL_TITLE, () => hookRows(hookView));
+    // they do expanded — so an expand, the refresh control and `refresh()`
+    // change what is DRAWN and nothing about what is recorded or exported.
+    // CHANGED: the SCHEDULED tick of a collapsed surface no longer reaches this
+    // function at all, so a collapsed surface left on screen takes no reading
+    // per second. DL-DIAG-11, DL-DIAG-24.
+    if (collapsed) {
+      detachPanels();
+    } else {
+      // CHANGED: each panel is PATCHED in place — its heading, its rows and its
+      // cells are written only where the reading differs — rather than rebuilt
+      // into a fragment that replaced every panel node. DL-DIAG-24.
+      panel(RUN_PANEL_TITLE, RUN_PANEL_TITLE, () => runRows(taken));
+      panel(HEALTH_PANEL_TITLE, HEALTH_PANEL_TITLE, () => healthRows(health));
+      panel(TRACE_PANEL_TITLE, TRACE_PANEL_TITLE, () =>
+        traceRows(traces, taken),
+      );
+      panel(HOOK_PANEL_TITLE, HOOK_PANEL_TITLE, () => hookRows(hookView));
 
       const series = visibleSeries(taken);
 
       panel(
-        fragment,
+        METRICS_PANEL_TITLE,
         metricsPanelTitle(series.length, taken.series.length),
         () =>
           series.map((candidate): Row => [
@@ -3094,22 +3446,7 @@ export function createDiagnosticsOverlay(
             candidate.kind === 'histogram' ? renderQuantiles(candidate) : '',
           ]),
       );
-      panel(fragment, LOG_PANEL_TITLE, () => logRows(records));
-    }
-
-    // ADDED: the outgoing panels are removed and the incoming ones inserted
-    // AHEAD OF THE CONTROL ROW, so the furniture is never detached and the
-    // rendered order — heading, panels, controls — is the order it has always
-    // been. DL-DIAG-16.
-    const built = Array.from(fragment.childNodes).filter(isElementLike);
-
-    clearPanels();
-
-    try {
-      target.insertBefore(fragment, controlRow);
-      panelNodes = built;
-    } catch (thrown) {
-      reportFailure(OVERLAY_TITLE, thrown);
+      panel(LOG_PANEL_TITLE, LOG_PANEL_TITLE, () => logRows(records));
     }
 
     // ADDED: the collapsed state is published on the host as well as on the
@@ -3205,6 +3542,18 @@ export function createDiagnosticsOverlay(
         // the moment the reader leaves. DL-DIAG-15.
         if (holdsFocus()) {
           publishRefreshState(true);
+
+          return;
+        }
+
+        // ADDED: and the SCHEDULED render is skipped while the surface is
+        // collapsed, so a tick that would draw nothing reads nothing either.
+        // The state is still published, because the surface is live rather than
+        // standing off. Every other path into `render` — the expand, the
+        // refresh control, `refresh()` — reads as it always did, and every
+        // export folds and reads its own sources. DL-DIAG-24.
+        if (collapsed) {
+          publishRefreshState(false);
 
           return;
         }
@@ -3635,7 +3984,10 @@ export function createDiagnosticsOverlay(
       headingNode = null;
       controlRow = null;
       collapseControl = null;
-      panelNodes = [];
+
+      // CHANGED: the retained panels go with them, so a destroyed overlay holds
+      // no heading, table, row or cell of the reading it last drew. DL-DIAG-24.
+      panelViews.clear();
       focusOrigin = null;
       focusTracked = false;
 

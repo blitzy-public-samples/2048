@@ -22,6 +22,7 @@ import {
   SPAN_NAMES,
   SPAN_OUTCOMES,
 } from '../../../src/observability/tracer';
+import { Tile } from '../../../src/engine/tile';
 import { resetWebGLSupportProbe } from '../../../src/render/webgl-support';
 import { BOUNDARY_SPAN_NAMES } from '../../../src/observability/tracer';
 import type { TraceSnapshot } from '../../../src/observability/tracer';
@@ -31,6 +32,7 @@ import {
   RUN_STATE_KEY,
   namespacedKey,
 } from '../../../src/storage/storage-keys';
+import { NEAR_WIN_BOARD, copyBoard } from '../../fixtures/boards';
 import { COMPOSITION_MARKUP, beginRun } from '../../fixtures/composition';
 import { clearOwnedStorage } from '../../fixtures/storage';
 
@@ -1399,7 +1401,7 @@ describe('the correlation identifier', () => {
   });
 });
 
-describe('the stage span of a run that ended without resolving a stage', () => {
+describe('the stage span of a run that ended without clearing its stage', () => {
   it('closes on an explicit end-run rather than staying open', () => {
     application = startPlaying();
     playEveryDirection();
@@ -1415,18 +1417,37 @@ describe('the stage span of a run that ended without resolving a stage', () => {
       (span) => span.name === SPAN_NAMES.engineStage,
     );
 
-    // The stage the run was playing files its record, closed as `unwound` with
-    // the run outcome on it. Before this it stayed open until a LATER stage
-    // superseded it, so the stage a reader saw was dated to the whole gap
-    // between runs. DL-MAIN-29.
+    // The stage the run was playing files its record. CHANGED: it closes as a
+    // RESOLVED stage carrying `cleared: false`, because `RunController.finish()`
+    // now ends that stage through the engine before it summarises — so the span
+    // records the transition that actually happened rather than the absence of
+    // one. It used to close as `unwound` from the run reporter, and before that
+    // it stayed open until a LATER stage superseded it, dating the stage span to
+    // the whole gap between runs. DL-MAIN-29, DL-RUNCTL-30.
     expect(stages.length).toBeGreaterThan(0);
     expect(stages.at(-1)?.attributes[SPAN_ATTRIBUTES.outcome]).toBe(
-      SPAN_OUTCOMES.unwound,
+      SPAN_OUTCOMES.committed,
     );
-    expect(stages.at(-1)?.attributes[SPAN_ATTRIBUTES.action]).toBe(
-      'abandoned',
-    );
+    expect(stages.at(-1)?.attributes[SPAN_ATTRIBUTES.cleared]).toBe(false);
     expect(spans.open).toBeLessThan(openBefore);
+  });
+
+  it('reports the run outcome through the completion record', () => {
+    application = startPlaying();
+    playEveryDirection();
+
+    application.run.endRun('abandoned');
+
+    // The run outcome left the stage span when the stage began resolving on its
+    // own transition, so it is read where it has always also been recorded: the
+    // completion report the run controller emits. DL-MAIN-29.
+    expect(
+      application.logger
+        .snapshot()
+        .records.some((record) =>
+          JSON.stringify(record).includes('abandoned'),
+        ),
+    ).toBe(true);
   });
 });
 
@@ -2410,6 +2431,66 @@ describe('the relic registry is wired', () => {
     expect(started.relics.find(FROSTBIND_ID)?.charges).toBe(before - 1);
   });
 
+  it('reinstates an exhausted relic s standing rule on the resumed rules', () => {
+    // What a session that spent every Frostbind charge leaves behind: the relic
+    // held at zero, and the cells those charges froze in its state slot. The
+    // envelope is written before `start()`, because the run is read once during
+    // composition.
+    window.localStorage.setItem(
+      RUN_STATE_KEY,
+      JSON.stringify({
+        schemaVersion: 1,
+        runId: 'exhausted-frost-run',
+        seed: 'exhausted-frost-seed',
+        rngCursor: {
+          'spawn-value': 4,
+          'spawn-position': 4,
+          'relic-draw': 1,
+          'rarity-weight': 1,
+        },
+        stageIndex: 0,
+        stageGoal: { kind: 'highest-tile', target: 16 },
+        goalProgress: 0,
+        relics: [
+          { id: FROSTBIND_ID, charges: 0, state: { frozen: [{ x: 1, y: 1 }] } },
+        ],
+        board: {
+          grid: {
+            size: 4,
+            cells: [
+              [{ position: { x: 0, y: 0 }, value: 2 }, null, null, null],
+              [null, null, null, null],
+              [null, null, null, null],
+              [null, null, null, null],
+            ],
+          },
+          score: 0,
+          over: false,
+          won: false,
+          keepPlaying: false,
+        },
+      }),
+    );
+
+    const started = start(document);
+
+    application = started;
+
+    // The relic is held with the spent budget the envelope carried.
+    expect(started.relics.ownedIds()).toEqual([FROSTBIND_ID]);
+    expect(started.relics.find(FROSTBIND_ID)?.charges).toBe(0);
+
+    // THE STANDING RULE IS BACK, on the rules this boot rebuilt from the
+    // defaults — reinstated by the registry's rehydration path and not by
+    // dispatching to an exhausted handler, which the charge guard now withholds
+    // on all six hooks. DL-HOOKBUS-07, DL-REGISTRY-04, DL-MAIN-39.
+    const rules = started.config.merge.canMerge;
+    const moving = new Tile({ x: 0, y: 1 }, 2);
+
+    expect(rules(moving, new Tile({ x: 1, y: 1 }, 2))).toBe(false);
+    expect(rules(moving, new Tile({ x: 3, y: 1 }, 2))).toBe(true);
+  });
+
   it('carries the held relics into every commit', () => {
     application = startPlaying();
     application.run.recordRewardOffer([RELIC_CATALOGUE[0].id]);
@@ -2534,6 +2615,64 @@ describe('the storage sink separates a refusal from a failure', () => {
     // The boot itself performs the two reads, so one record for the pair is
     // already the proof: before the memo remembered the failure it produced
     // two.
+  });
+
+  it('reports a SyntaxError from a WRITE at error, as a lost write', () => {
+    // ADDED with the corrected DL-STORE-09. The tier above read
+    // `error.name === 'SyntaxError'`, so ANY failure carrying that name was
+    // reported as a recovered read of an unreadable value — including a write
+    // that never reached storage. `JSON.parse` is not the only source of the
+    // name: a `toJSON` member, a replacer or a patched store member raises one
+    // too, and each of those LOST DATA. The classification now reads the tag
+    // the adapter sets at its parse, so this record says what happened.
+    const prototype = window.Storage.prototype;
+    const native = prototype.setItem;
+
+    prototype.setItem = function raising(
+      this: Storage,
+      key: string,
+      value: string,
+    ): void {
+      if (key === GAME_STATE_KEY) {
+        throw new SyntaxError('Unexpected token from a patched store member.');
+      }
+
+      native.call(this, key, value);
+    };
+
+    try {
+      application = startPlaying();
+      playEveryDirection();
+    } finally {
+      prototype.setItem = native;
+    }
+
+    const lost = storageRecords().filter(
+      (record) =>
+        record.fields?.key === GAME_STATE_KEY &&
+        record.fields?.operation === 'write',
+    );
+
+    expect(lost.length).toBeGreaterThan(0);
+
+    for (const record of lost) {
+      // A failure, at the failure tier, worded as one.
+      expect(record.level).toBe('error');
+      expect(record.message).toBe('Storage write failed for gameState.');
+      expect(record.fields?.unreadable).toBe(false);
+      expect(record.fields?.refused).toBe(false);
+
+      // The name is unchanged and is simply no longer the classifier.
+      expect(record.error?.name).toBe('SyntaxError');
+      expect(record.error?.message).not.toContain('not valid JSON');
+    }
+
+    // And nothing on this boot claims a value could not be read.
+    expect(
+      storageRecords().filter((record) =>
+        record.message.includes('unreadable'),
+      ),
+    ).toEqual([]);
   });
 
   it('fabricates no error for a run refused on its size', () => {
@@ -2792,6 +2931,75 @@ describe('a run-state write that storage refuses', () => {
     ).toBeGreaterThan(0);
   });
 
+  // ADDED: the same scenario measured ONE COMMIT EARLIER. The controller writes
+  // after every view has taken the commit, so the status the HUD read during
+  // the refused turn was the one in force BEFORE that write — and a store whose
+  // quota is exhausted refuses every later write too, so with no follow-up
+  // commit the interface kept saying the run was being saved for the rest of the
+  // run. The crossing itself now reaches the screen. DL-MAIN-38, DL-HUD-17.
+  it('tells the player on the very turn the write was refused', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+
+    // THE RUN STARTS SAVED. The refusal begins mid-run, after a turn that was
+    // written, so the status the next commit's HUD write reads is `persistent`
+    // and only the crossing itself can correct it.
+    application = startPlaying();
+    press('ArrowDown', 'ArrowDown');
+
+    const hud = document.querySelector('[data-screen="hud"]');
+    const notice = (): HTMLElement | null =>
+      hud?.querySelector<HTMLElement>('.hud-ephemeral') ?? null;
+
+    expect((application as Application).run.persistenceStatus()).toBe(
+      'persistent',
+    );
+    expect(hud?.hasAttribute('data-ephemeral')).toBe(false);
+
+    withRefusedRunWrites(() => {
+      // ONE move under the refusal, so exactly one write has been refused and no
+      // later commit can have carried the corrected status.
+      press('ArrowLeft', 'ArrowLeft');
+    });
+
+    expect((application as Application).run.persistenceStatus()).toBe(
+      'ephemeral',
+    );
+    expect(hud?.getAttribute('data-ephemeral')).toBe('true');
+    expect(notice()?.hidden).toBe(false);
+    expect(notice()?.textContent ?? '').toContain('not being saved');
+
+    // The turn's own score is still on screen: the refresh writes the status
+    // alone and never re-renders the commit.
+    expect(
+      document.querySelector('.score-container')?.textContent ?? '',
+    ).not.toBe('');
+  });
+
+  it('takes the notice back down on the turn the store recovers', () => {
+    window.localStorage.setItem(RUN_STATE_KEY, SEEDED_ENVELOPE);
+
+    withRefusedRunWrites(() => {
+      application = startPlaying();
+      press('ArrowDown', 'ArrowDown');
+    });
+
+    const hud = document.querySelector('[data-screen="hud"]');
+
+    expect(hud?.getAttribute('data-ephemeral')).toBe('true');
+
+    // The refusal is lifted, and the next turn's write succeeds: the crossing
+    // back is reported the same way and the notice must not outlive it.
+    press('ArrowLeft', 'ArrowLeft');
+
+    expect((application as Application).run.persistenceStatus()).toBe(
+      'persistent',
+    );
+    expect(hud?.hasAttribute('data-ephemeral')).toBe(false);
+    expect(
+      hud?.querySelector<HTMLElement>('.hud-ephemeral')?.hidden,
+    ).toBe(true);
+  });
+
   // The observability review's INFO finding on the health surface: at the exact
   // moment the run stopped being saved and the HUD said so, the `storage` health
   // row still read `pass` / "Web Storage is writable." and readiness still said
@@ -2919,5 +3127,221 @@ describe('a run-state write that storage refuses', () => {
     expect(counted.length).toBe(1);
     expect(counted[0]?.kind === 'counter' ? counted[0].value : -1).toBe(1);
     expect(authoritative().length).toBeGreaterThan(1);
+  });
+});
+
+/* ==========================================================================
+ * A caught value a screen reports
+ *
+ * The run-summary screen's clipboard refusal used to reduce the rejection to
+ * `Error.name: Error.message` and put that text in an ORDINARY field. Fields
+ * are shape-normalised and never sensitivity-redacted, so a rejection message
+ * written by a browser implementation — or by an injected rejection — was
+ * retained in the log ring buffer and downloadable with the diagnostics
+ * snapshot. The field now carries the rejection's CLASS, and the value itself
+ * travels on the level-preserving failure channel, where the logger's
+ * redaction model and its record budget apply to it.
+ * Decisions DL-SETTINGS-07, DL-SUMMARY-15, DL-LOG-08, DL-LOG-10.
+ * ========================================================================== */
+
+describe('a clipboard rejection reaches no unredacted field', () => {
+  /** A URL carrying a credential-like query value. */
+  const SECRET_URL = 'https://internal.example.test/cb?token=zzq-secret-zzq';
+
+  /** An absolute path of the form a stack frame writes. */
+  const SECRET_PATH = '/srv/private/zzq-user/profile.json';
+
+  /** A PII-like value, in the form a platform message might embed. */
+  const SECRET_PII = 'ada.zzq-lovelace@example.test';
+
+  /** The whole message the injected rejection carries. */
+  const REJECTION_MESSAGE =
+    `write refused at ${SECRET_URL} reading ${SECRET_PATH} ` +
+    `for ${SECRET_PII}`;
+
+  /** Every fragment no field may carry, whole or in part. */
+  const SECRETS: readonly string[] = Object.freeze([
+    SECRET_URL,
+    SECRET_PATH,
+    SECRET_PII,
+    'zzq-secret-zzq',
+    'write refused',
+  ]);
+
+  /**
+   * Boots the application onto the run summary, the state that renders the
+   * seed and its copy control.
+   *
+   * The board carries two tiles of half the win value side by side, so one
+   * leftward move merges them into it, and the stored stage goal sits far above
+   * that tile so the stage does not clear on the way. The win takes the
+   * `winReached` edge, and the terminal screen's `End run` control takes the
+   * `endRun` edge to the summary.
+   *
+   * @returns The started application, with the summary on screen.
+   */
+  const openRunSummary = (): Application => {
+    const board = copyBoard(NEAR_WIN_BOARD);
+
+    window.localStorage.setItem(GAME_STATE_KEY, JSON.stringify(board));
+    window.localStorage.setItem(
+      RUN_STATE_KEY,
+      JSON.stringify({
+        schemaVersion: 1,
+        runId: 'clipboard-report-run',
+        seed: 'clipboard-report-seed',
+        rngCursor: {
+          'spawn-value': 0,
+          'spawn-position': 0,
+          'relic-draw': 0,
+          'rarity-weight': 0,
+        },
+        stageIndex: 0,
+        stageGoal: { kind: 'highest-tile', target: 4096 },
+        goalProgress: 0,
+        relics: [],
+        board,
+      }),
+    );
+
+    const started = start(document);
+
+    application = started;
+
+    press('ArrowLeft', 'ArrowLeft');
+
+    expect(started.engine.won).toBe(true);
+
+    const control = (host: string, label: string): HTMLElement | undefined =>
+      [
+        ...(document
+          .getElementById(host)
+          ?.querySelectorAll<HTMLElement>('button') ?? []),
+      ].find((button): boolean => button.textContent === label);
+
+    control('screen-game-over', 'End run')?.click();
+
+    expect(document.getElementById('screen-run-summary')?.hidden).toBe(false);
+
+    return started;
+  };
+
+  /** Installs a clipboard whose write rejects with the crafted message. */
+  const installRefusingClipboard = (): void => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: (): Promise<void> =>
+          Promise.reject(new Error(REJECTION_MESSAGE)),
+      },
+    });
+  };
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  it('reports the class in the field and the value on the failure channel', async () => {
+    const started = openRunSummary();
+
+    installRefusingClipboard();
+
+    const copy = [
+      ...(document
+        .getElementById('screen-run-summary')
+        ?.querySelectorAll<HTMLElement>('button') ?? []),
+    ].find((button): boolean => button.textContent === 'Copy seed');
+
+    expect(copy).toBeDefined();
+    copy?.click();
+
+    // The write is asynchronous, so the rejection is reported a microtask
+    // later. Two turns of the queue cover the `await` and its `catch`.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const refusals = started.logger
+      .recent()
+      .filter((record) => record.message === 'the clipboard refused the seed');
+
+    expect(refusals).toHaveLength(1);
+
+    const refusal = refusals[0] as LogRecord;
+
+    // The severity the caller chose, preserved across the channel: the refusal
+    // is recovered from by the selection path. DL-SUMMARY-14.
+    expect(refusal.level).toBe('warn');
+    expect(refusal.subsystem).toBe('ui/a11y');
+    expect(refusal.fields?.reason).toBe('Error');
+
+    // The value itself travelled, so the failure is still diagnosable.
+    expect(refusal.error).toBeDefined();
+
+    // NO FIELD of any record carries any part of the caught text. This is the
+    // total property the fix delivers: fields are the surface nothing redacts.
+    for (const record of started.logger.recent()) {
+      for (const value of Object.values(record.fields ?? {})) {
+        for (const secret of SECRETS) {
+          expect(
+            typeof value === 'string' ? value : '',
+            `${record.message} field carries "${secret}"`,
+          ).not.toContain(secret);
+        }
+      }
+    }
+  });
+
+  it('redacts the enumerated forms from every export surface', async () => {
+    const started = openRunSummary();
+
+    installRefusingClipboard();
+
+    started.diagnostics.mount();
+
+    const copy = [
+      ...(document
+        .getElementById('screen-run-summary')
+        ?.querySelectorAll<HTMLElement>('button') ?? []),
+    ].find((button): boolean => button.textContent === 'Copy seed');
+
+    copy?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const surfaces: readonly [string, string][] = [
+      ['log records', started.logger.toJsonLines()],
+      ['logger snapshot', JSON.stringify(started.logger.snapshot())],
+      ['overlay snapshot', JSON.stringify(started.diagnostics.snapshot())],
+      ['metrics text', started.metrics.toPrometheusText()],
+    ];
+
+    for (const [name, text] of surfaces) {
+      expect(text.length, name).toBeGreaterThan(0);
+
+      // The URL and the credential inside it, and the absolute path: the three
+      // location forms DL-LOG-08 enumerates plus the credential assignment
+      // DL-LOG-10 adds, replaced wherever the caught message reached.
+      expect(text, name).not.toContain(SECRET_URL);
+      expect(text, name).not.toContain('zzq-secret-zzq');
+      expect(text, name).not.toContain(SECRET_PATH);
+    }
+
+    // The record that carries the rejection carries the redaction marker in its
+    // place, so the message is bounded rather than merely absent.
+    expect(JSON.stringify(started.logger.snapshot())).toContain('[redacted]');
+
+    // What the enumerated forms do NOT cover is stated rather than implied: a
+    // PII-like fragment inside a caught MESSAGE is carried by the record's
+    // serialised error, which is why no caller copies caught text into a field
+    // and why `errorDetail` defaults to `'redacted'`. DL-LOG-10 bounds this to
+    // the enumerated forms and says so in as many words.
+    for (const value of Object.values(
+      started.logger
+        .recent()
+        .find((record) => record.message === 'the clipboard refused the seed')
+        ?.fields ?? {},
+    )) {
+      expect(typeof value === 'string' ? value : '').not.toContain(SECRET_PII);
+    }
   });
 });

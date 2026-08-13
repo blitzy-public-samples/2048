@@ -24,6 +24,9 @@ import type {
   MergePredicate,
   RulesConfig,
 } from '../../../src/config/rules-config';
+import { createDefaultStageConfig } from '../../../src/config/stage-config';
+import { Engine } from '../../../src/engine/engine';
+import type { StateCommitEvent } from '../../../src/engine/engine-events';
 import { Grid } from '../../../src/engine/grid';
 import {
   createHookBus,
@@ -53,6 +56,7 @@ import type {
   CellMatrix,
   CorrelationId,
   Position,
+  SerializedGameState,
   SerializedGrid,
   SerializedTile,
 } from '../../../src/engine/types';
@@ -68,7 +72,10 @@ import type {
 import {
   RISK_REWARD_CURSED_FAMILY,
 } from '../../../src/relics/families/risk-reward-cursed';
-import { findRelicById } from '../../../src/relics/relic-registry';
+import {
+  RelicRegistry,
+  findRelicById,
+} from '../../../src/relics/relic-registry';
 import { RARITIES } from '../../../src/relics/relic-types';
 import type { Relic } from '../../../src/relics/relic-types';
 import {
@@ -1431,4 +1438,203 @@ describe('the collapsing-vault suite leaves no shared state behind', () => {
       expect(second.config.boardSize).toBe(first.config.boardSize);
       expect(slotOf(first)).toEqual(firstSlot);
     });
+});
+
+/* ==========================================================================
+ * The terminal verdict the collapse leaves behind
+ *
+ * Every section above dispatches `onStageEnd` on a bus and asserts what the
+ * handler did to the lattice. None of them asks what the ENGINE then published,
+ * and that is where the defect lived: `Engine.endStage()` applied the stage-end
+ * board commands and committed without re-deriving the loss flag, so a collapse
+ * that left a full board with no adjacent match published `over: false` and the
+ * run carried a stale playable verdict into its reward screen and its next stage.
+ *
+ * These cases therefore drive a real `Engine` and read the verdict off the
+ * commit, not off the handler. The board is a nine-tile arrangement in which no
+ * two orthogonal neighbours are equal, so at the collapsed edge length it is
+ * full and unplayable — the exact state the stale verdict misreported.
+ *
+ * Decisions: DL-RISK-01, DL-ENGINE-15.
+ * ========================================================================== */
+
+/**
+ * Nine cells filling a 3x3 lattice with no two orthogonal neighbours equal, so
+ * the default merge rule finds no match anywhere on it.
+ */
+const NO_MATCH_AT_FLOOR: readonly { x: number; y: number; value: number }[] =
+  Object.freeze([
+    { x: 0, y: 0, value: 2 },
+    { x: 1, y: 0, value: 8 },
+    { x: 2, y: 0, value: 32 },
+    { x: 0, y: 1, value: 128 },
+    { x: 1, y: 1, value: 512 },
+    { x: 2, y: 1, value: 2048 },
+    { x: 0, y: 2, value: 4 },
+    { x: 1, y: 2, value: 16 },
+    { x: 2, y: 2, value: 64 },
+  ]);
+
+/** One tile outside the collapsed bound, so the collapse has work to do. */
+const OUTSIDE_THE_BOUND = Object.freeze({ x: 3, y: 3, value: 2 });
+
+/**
+ * A board snapshot from a sparse list of occupied cells.
+ *
+ * @param size Edge length.
+ * @param occupied Cells to fill.
+ * @returns The snapshot, empty cells kept as `null`.
+ */
+function verdictBoard(
+  size: number,
+  occupied: readonly { x: number; y: number; value: number }[],
+): SerializedGameState {
+  const cells: (SerializedTile | null)[][] = [];
+
+  for (let x = 0; x < size; x += 1) {
+    const column: (SerializedTile | null)[] = [];
+
+    for (let y = 0; y < size; y += 1) {
+      const found = occupied.find((cell) => cell.x === x && cell.y === y);
+
+      column.push(
+        found === undefined ? null : { position: { x, y }, value: found.value },
+      );
+    }
+
+    cells.push(column);
+  }
+
+  return {
+    grid: { size, cells },
+    score: 0,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  };
+}
+
+/** A run composed as src/main.ts composes it, holding the relic under test. */
+interface VerdictRun {
+  readonly config: RulesConfig;
+  readonly engine: Engine;
+  readonly commits: StateCommitEvent[];
+}
+
+/**
+ * Composes engine, bus and registry with the relic held, and opens `board`.
+ *
+ * @param board Snapshot the stage opens on.
+ * @returns The composed run and the commits it emits from here on.
+ */
+function composeVerdictRun(board: SerializedGameState): VerdictRun {
+  const live = createDefaultRulesConfig();
+  const bus = createHookBus({ correlationId: CORRELATION_ID });
+  const registry = new RelicRegistry({
+    bus,
+    catalogue: RISK_REWARD_CURSED_FAMILY.relics,
+  });
+
+  expect(registry.pickUp(RELIC_ID)).not.toBeUndefined();
+
+  const engine = new Engine({
+    config: live,
+    stages: createDefaultStageConfig(),
+    streams: createRngStreams(SEED),
+    hooks: bus,
+    relicContext: registry.commitContextProvider(),
+  });
+
+  engine.setup(board);
+
+  const commits: StateCommitEvent[] = [];
+
+  engine.events.on('state:commit', (event): void => {
+    commits.push(event);
+  });
+
+  return { config: live, engine, commits };
+}
+
+describe('the terminal verdict a collapse leaves on the committed board', () => {
+  it('publishes over on a collapse that left no move available', () => {
+    const run = composeVerdictRun(
+      verdictBoard(DEFAULT_BOARD_SIZE, [
+        ...NO_MATCH_AT_FLOOR,
+        OUTSIDE_THE_BOUND,
+      ]),
+    );
+
+    // The board is playable before the collapse: the tile outside the bound has
+    // room to move, so nothing here starts out terminal.
+    expect(run.engine.serialize().over).toBe(false);
+
+    run.engine.endStage(true);
+
+    const committed = run.engine.serialize();
+
+    // The collapse landed.
+    expect(committed.grid.size).toBe(SIZE_FLOOR);
+    expect(run.config.boardSize).toBe(SIZE_FLOOR);
+
+    // And the verdict describes the board the collapse produced, not the board
+    // it replaced. Both readings are asserted, because the defect was exactly a
+    // disagreement between them.
+    expect(
+      movesAvailable(
+        new Grid(committed.grid.size, committed.grid.cells),
+        run.config,
+      ),
+    ).toBe(false);
+    expect(committed.over).toBe(true);
+
+    // The commit a subscriber received carries the same verdict, so a view and
+    // the run envelope cannot read a playable board off a terminal one.
+    expect(run.commits.at(-1)?.over).toBe(true);
+  });
+
+  it('leaves a playable collapse playable', () => {
+    const run = composeVerdictRun(
+      verdictBoard(DEFAULT_BOARD_SIZE, [
+        { x: 0, y: 0, value: 2 },
+        { x: 1, y: 0, value: 2 },
+        OUTSIDE_THE_BOUND,
+      ]),
+    );
+
+    run.engine.endStage(true);
+
+    const committed = run.engine.serialize();
+
+    expect(committed.grid.size).toBe(SIZE_FLOOR);
+    expect(
+      movesAvailable(
+        new Grid(committed.grid.size, committed.grid.cells),
+        run.config,
+      ),
+    ).toBe(true);
+    expect(committed.over).toBe(false);
+  });
+
+  it('agrees with the loss probe on every collapse it makes', () => {
+    for (const occupied of [
+      [...NO_MATCH_AT_FLOOR, OUTSIDE_THE_BOUND],
+      [...NO_MATCH_AT_FLOOR.slice(0, 8), OUTSIDE_THE_BOUND],
+      [{ x: 3, y: 0, value: 4 }, { x: 3, y: 1, value: 4 }],
+    ]) {
+      const run = composeVerdictRun(verdictBoard(DEFAULT_BOARD_SIZE, occupied));
+
+      run.engine.endStage(true);
+
+      const committed = run.engine.serialize();
+      const probe = movesAvailable(
+        new Grid(committed.grid.size, committed.grid.cells),
+        run.config,
+      );
+
+      // The invariant, stated once and asserted for every collapse: the
+      // published flag is the negation of the probe on the board it published.
+      expect(committed.over).toBe(!probe);
+    }
+  });
 });

@@ -2092,6 +2092,145 @@ const RECONCILIATION_MEMBERS: readonly string[] = [
   'reportable',
 ];
 
+/* ==========================================================================
+ * A MALFORMED CELL MATRIX IS NEITHER WRITTEN NOR LOADED
+ *
+ * `isWritable` gates every save on `isRunStateShape`, and the validator now
+ * requires the matrix to be the SQUARE the declared size names and every tile's
+ * `position` to name the cell it sits in. These cases prove the store acts on
+ * that, in both directions: a malformed envelope handed to `save` never reaches
+ * storage, and one already stored is refused by `load` rather than rehydrated
+ * into a lattice that disagrees with itself. DL-RUN-08.
+ * ========================================================================== */
+
+/**
+ * An envelope whose grid carries `cells` and declares `size`.
+ *
+ * Built by mutating a JSON projection, because a malformed matrix cannot be
+ * produced through `Grid.serialize()` — which is the point: the only way one
+ * reaches storage is a hand-edited or truncated payload.
+ *
+ * @param cells The matrix to carry.
+ * @param size The size to declare.
+ * @returns The envelope, typed as one so it can be handed to `save`.
+ */
+function envelopeWithGrid(cells: unknown, size: number): RunState {
+  const loose = JSON.parse(JSON.stringify(buildEnvelope())) as {
+    board: { grid: Record<string, unknown> };
+  };
+
+  loose.board.grid.cells = cells;
+  loose.board.grid.size = size;
+
+  return loose as unknown as RunState;
+}
+
+/** A square matrix of empty cells. */
+function emptyCells(size: number): (SerializedGameState['grid']['cells'][number][number])[][] {
+  return Array.from({ length: size }, () =>
+    Array.from({ length: size }, () => null)
+  );
+}
+
+describe('a malformed cell matrix is neither written nor loaded', () => {
+  it('writes a square matrix that matches its declared size', () => {
+    const world = createWorld();
+
+    expect(world.store.save(envelopeWithGrid(emptyCells(4), 4))).toBe(true);
+    expect(readRunStateRaw(world.storage)).not.toBeNull();
+  });
+
+  it('refuses to write a matrix with fewer columns than declared', () => {
+    const world = createWorld();
+
+    expect(world.store.save(envelopeWithGrid(emptyCells(3), 4))).toBe(false);
+
+    // NOTHING REACHED STORAGE, so a run whose board went malformed keeps the
+    // last envelope that was actually coherent.
+    expect(readRunStateRaw(world.storage)).toBeNull();
+  });
+
+  it('refuses to write a jagged matrix', () => {
+    const world = createWorld();
+    const cells = emptyCells(4);
+
+    cells[1] = [null, null];
+
+    expect(world.store.save(envelopeWithGrid(cells, 4))).toBe(false);
+    expect(readRunStateRaw(world.storage)).toBeNull();
+  });
+
+  it('refuses to write a tile whose position names a different cell', () => {
+    const world = createWorld();
+    const cells = emptyCells(4);
+
+    cells[0] = [{ position: { x: 2, y: 2 }, value: 8 }, null, null, null];
+
+    expect(world.store.save(envelopeWithGrid(cells, 4))).toBe(false);
+    expect(readRunStateRaw(world.storage)).toBeNull();
+  });
+
+  it('leaves an already-stored envelope untouched by a refused write', () => {
+    const world = createWorld();
+    const sound = buildEnvelope();
+
+    expect(world.store.save(sound)).toBe(true);
+
+    const stored = readRunStateRaw(world.storage);
+
+    expect(world.store.save(envelopeWithGrid(emptyCells(2), 4))).toBe(false);
+    expect(readRunStateRaw(world.storage)).toBe(stored);
+    expect(world.store.load().state).toEqual(sound);
+  });
+
+  it('refuses to load a stored matrix that is not square', () => {
+    const world = createWorld({
+      seed: {
+        [RUN_STATE_KEY]: JSON.stringify(envelopeWithGrid(emptyCells(3), 4)),
+      },
+    });
+    const loaded = world.store.load();
+
+    expect(loaded.state).toBeNull();
+    expect(loaded.outcome).toBe('fresh-fallback');
+    expect((loaded.problems ?? []).join(' | ')).toContain('board.grid.cells');
+  });
+
+  it('refuses to load a stored tile that names a different cell', () => {
+    const cells = emptyCells(4);
+
+    cells[3] = [null, null, null, { position: { x: 0, y: 0 }, value: 2 }];
+
+    const world = createWorld({
+      seed: {
+        [RUN_STATE_KEY]: JSON.stringify(envelopeWithGrid(cells, 4)),
+      },
+    });
+    const loaded = world.store.load();
+
+    expect(loaded.state).toBeNull();
+    expect(loaded.outcome).toBe('fresh-fallback');
+    expect((loaded.problems ?? []).join(' | ')).toContain(
+      'board.grid.cells[3][3] carries the position (0, 0)'
+    );
+  });
+
+  it('reports the refusal rather than throwing', () => {
+    const world = createWorld({
+      seed: {
+        [RUN_STATE_KEY]: JSON.stringify(envelopeWithGrid(emptyCells(5), 4)),
+      },
+    });
+
+    expect(() => world.store.load()).not.toThrow();
+    expect(
+      world.records.some(
+        (record) => record.channel === 'onLoadCorrupted'
+      )
+    ).toBe(true);
+  });
+});
+
 describe('a load surfaces the reconciled outcome and its record', () => {
   const OTHER_BOARD_SIZE = 5;
 

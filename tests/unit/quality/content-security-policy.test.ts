@@ -86,10 +86,38 @@ function parsePolicy(policy: string): Map<string, string[]> {
   return directives;
 }
 
+/** The declared policy, verbatim, before anything is parsed out of it. */
+const POLICY_TEXT = POLICY_ELEMENTS[0]?.getAttribute('content') ?? '';
+
 /** The declared policy, parsed. */
-const POLICY = parsePolicy(
-  POLICY_ELEMENTS[0]?.getAttribute('content') ?? '',
-);
+const POLICY = parsePolicy(POLICY_TEXT);
+
+/**
+ * Every directive name the policy states, one entry per CLAUSE.
+ *
+ * ADDED: the duplicate check has to count clauses rather than parsed keys.
+ * `parsePolicy` returns a `Map`, so a repeated directive collapses into one
+ * entry — with the LAST clause silently winning — which made asserting that the
+ * parsed keys hold no duplicate a tautology. A browser applies the *first*
+ * occurrence of a directive and ignores the rest, so a policy stating
+ * `script-src` twice does not do what its second clause says, and the gate read
+ * the second clause as the policy. DL-TEST-11.
+ *
+ * @returns The stated names in declaration order, repeats included.
+ */
+function statedDirectiveNames(policy: string): string[] {
+  const names: string[] = [];
+
+  for (const clause of policy.split(';')) {
+    const name = clause.trim().split(/\s+/u)[0];
+
+    if (name !== undefined && name.length > 0) {
+      names.push(name.toLowerCase());
+    }
+  }
+
+  return names;
+}
 
 /**
  * Every `.ts` file under `src/`, read once.
@@ -175,11 +203,24 @@ describe('the policy declares exactly the intended directives', () => {
   });
 
   it('declares each directive exactly once', () => {
-    const names = MARKUP.includes('Content-Security-Policy')
-      ? [...POLICY.keys()]
-      : [];
+    // CHANGED: read off the policy TEXT, so a directive stated twice is
+    // reported. Reading the parsed keys could not fail. DL-TEST-11.
+    const names = statedDirectiveNames(POLICY_TEXT);
+    const seen = new Set<string>();
+    const repeated: string[] = [];
 
-    expect(new Set(names).size).toBe(names.length);
+    for (const name of names) {
+      if (seen.has(name)) {
+        repeated.push(name);
+      }
+
+      seen.add(name);
+    }
+
+    expect(repeated).toEqual([]);
+
+    // The policy is non-empty, so the check above has something to say.
+    expect(names.length).toBeGreaterThan(0);
   });
 
   for (const [name, sources] of EXPECTED) {
@@ -330,24 +371,135 @@ describe('the markup carries nothing `script-src` would block', () => {
   });
 });
 
+/**
+ * Whether a line is comment prose rather than code.
+ *
+ * The sources cite specifications, the upstream repository and the names of the
+ * very APIs these scans refuse, so a match inside a comment is a citation and
+ * not a call.
+ *
+ * @param line Line to judge.
+ * @returns Whether it opens as a comment.
+ */
+function isCommentLine(line: string): boolean {
+  return /^\s*(?:\/\/|\*|\/\*)/u.test(line);
+}
+
+/**
+ * Every code-line match of a pattern across the sources.
+ *
+ * ADDED: one matcher for all three refusal scans, reporting file, line and the
+ * matched text so a failure names what to remove. The scans previously tested
+ * whole-file `RegExp`s and reported a path alone. DL-TEST-12.
+ *
+ * @param pattern Global pattern to apply.
+ * @returns One entry per match, outside comments.
+ */
+function offendingMatches(pattern: RegExp): string[] {
+  const offenders: string[] = [];
+
+  for (const [path, source] of SOURCES) {
+    for (const match of source.matchAll(pattern)) {
+      const lineStart = source.lastIndexOf('\n', match.index) + 1;
+      const lineEnd = source.indexOf('\n', match.index);
+      const line = source.slice(
+        lineStart,
+        lineEnd === -1 ? source.length : lineEnd,
+      );
+
+      if (!isCommentLine(line)) {
+        const number = source.slice(0, match.index).split('\n').length;
+
+        offenders.push(`${path}:${String(number)}: ${match[0].trim()}`);
+      }
+    }
+  }
+
+  return offenders;
+}
+
 describe('the sources carry nothing the policy would block', () => {
-  it('constructs no Worker, which `worker-src` admits no blob for', () => {
+  it('constructs no worker in any form, which `worker-src` bounds', () => {
     // `worker-src 'self'` does not admit a `blob:` script, which is how a
     // Worker is normally constructed from generated source. No module
     // constructs one, so the directive bounds nothing the code does.
-    const offenders = SOURCES.filter(([, source]) =>
-      /new\s+(?:Shared)?Worker\s*\(/u.test(source),
-    ).map(([path]) => path);
+    //
+    // CHANGED: the QUALIFIED and INDIRECT forms are covered too. The scan read
+    // `new Worker(` alone, so `new window.Worker(...)`, `new globalThis.Worker`,
+    // `Reflect.construct(Worker, ...)`, a worker reached through
+    // `navigator.serviceWorker` and `importScripts` were all invisible to a gate
+    // whose name claims to cover them. DL-TEST-12.
+    const offenders = offendingMatches(
+      new RegExp(
+        [
+          // `new Worker(`, `new SharedWorker(`, and either behind any receiver.
+          String.raw`new\s+(?:[\w$]+\s*\.\s*)*(?:Shared)?Worker\b`,
+          // `Reflect.construct(Worker, …)` and any other bare reference used
+          // as a value rather than with `new`.
+          String.raw`Reflect\s*\.\s*construct\s*\(\s*(?:[\w$]+\s*\.\s*)*(?:Shared)?Worker\b`,
+          // The service worker registry, and the classic-worker importer.
+          String.raw`\bserviceWorker\b`,
+          String.raw`\bimportScripts\s*\(`,
+        ].join('|'),
+        'gu',
+      ),
+    );
 
     expect(offenders).toEqual([]);
   });
 
-  it('calls no `eval` and constructs no `Function`', () => {
-    // `script-src 'self'` carries no `'unsafe-eval'`, so either would throw at
-    // runtime.
-    const offenders = SOURCES.filter(([, source]) =>
-      /(?:^|[^.\w])eval\s*\(|new\s+Function\s*\(/u.test(source),
-    ).map(([path]) => path);
+  it('evaluates no string as code in any form', () => {
+    // `script-src 'self'` carries no `'unsafe-eval'`, so every one of these
+    // would throw at runtime.
+    //
+    // CHANGED: the scan's `[^.\w]` prefix EXCLUDED the qualified forms by
+    // construction, so `window.eval(...)` and `globalThis.eval(...)` — the two
+    // spellings a bundler is most likely to leave behind — passed a gate named
+    // 'calls no eval'. Indirect eval, a bare `Function(...)` call without `new`,
+    // and the string form of the two timer functions are covered as well.
+    // DL-TEST-12.
+    const offenders = offendingMatches(
+      new RegExp(
+        [
+          // Bare, and behind any receiver: `eval(`, `window.eval(`.
+          String.raw`(?:[\w$]+\s*\.\s*)*\beval\s*\(`,
+          // Indirect eval: `(0, eval)(…)`.
+          String.raw`\(\s*0\s*,\s*eval\s*\)`,
+          // `new Function(…)`, and `Function(…)` called without `new`.
+          String.raw`new\s+(?:[\w$]+\s*\.\s*)*Function\s*\(`,
+          String.raw`(?<![\w$.])Function\s*\(`,
+          // A timer handed a string rather than a callable.
+          String.raw`\bset(?:Timeout|Interval)\s*\(\s*['"\x60]`,
+        ].join('|'),
+        'gu',
+      ),
+    );
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('names no scheme the policy refuses', () => {
+    // `default-src 'self'` admits only the origin, and the policy adds `data:`
+    // for images alone. Every other scheme below would be refused, and each is
+    // a real exfiltration or code-loading channel rather than a hypothetical.
+    //
+    // ADDED: `ws:`, `wss:`, `blob:`, `filesystem:` and the protocol-relative
+    // form. The remote-origin scan read `https?://` only, so a WebSocket — which
+    // `connect-src 'self'` refuses and which no `http` scan can see — was
+    // outside every check. DL-TEST-12.
+    const offenders = offendingMatches(
+      new RegExp(
+        [
+          String.raw`wss?:\/\/[^\s'"\x60)]*`,
+          String.raw`blob:[^\s'"\x60)]*`,
+          String.raw`filesystem:[^\s'"\x60)]*`,
+          // Protocol-relative, inside a string literal: `'//cdn.example.com'`
+          // inherits the page's scheme and is a remote origin.
+          String.raw`['"\x60]\/\/[a-zA-Z0-9-]+\.[a-zA-Z][^\s'"\x60)]*`,
+        ].join('|'),
+        'gu',
+      ),
+    );
 
     expect(offenders).toEqual([]);
   });

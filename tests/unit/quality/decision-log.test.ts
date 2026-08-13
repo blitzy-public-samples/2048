@@ -56,11 +56,51 @@ const LOG_PATH = 'docs/DECISION_LOG.md';
 /** The area registry Rule 1 makes authoritative. */
 const REGISTRY_PATH = 'CONTRIBUTING.md';
 
-/** Roots walked for citations. */
-const CITING_ROOTS: readonly string[] = Object.freeze(['src', 'tests']);
+/**
+ * Directories never walked for citations.
+ *
+ * CHANGED: the sweep is now stated as an EXCLUSION list over the whole
+ * repository rather than an inclusion list of two roots. `['src', 'tests']`
+ * over `['.ts']` alone left real citation sites unswept — `tsconfig.node.json`
+ * cites `DL-BUILD-14`, both `docs/dashboards/` artifacts cite twenty-one
+ * identifiers between them, `index.html` and every `style/*.scss` file cite
+ * their own — so an identifier could be cited from one of those and resolve to
+ * no row without this gate noticing. Inverting the list inverts the failure
+ * mode: a newly added citing file is swept by default, and only a deliberate
+ * entry below escapes. DL-TEST-13.
+ */
+const EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'coverage',
+  'test-results',
+  'playwright-report',
 
-/** Extensions a citation may appear in. */
-const CITING_EXTENSIONS: readonly string[] = Object.freeze(['.ts']);
+  // The superseded vanilla sources, kept for reference and citing nothing.
+  'js',
+]);
+
+/**
+ * Files excluded from the citation sweep, with the reason each is excluded.
+ *
+ * The log is the ONE file whose identifiers need not resolve: it records the
+ * next free ordinal of every area in prose, and those deliberately name rows
+ * that do not exist yet.
+ */
+const EXCLUDED_FILES: ReadonlySet<string> = new Set([LOG_PATH]);
+
+/** Extensions a citation may appear in: every tracked text form. */
+const CITING_EXTENSIONS: readonly string[] = Object.freeze([
+  '.ts',
+  '.scss',
+  '.css',
+  '.html',
+  '.json',
+  '.md',
+  '.yml',
+  '.yaml',
+]);
 
 /** Cell counts a row may carry: five for a decision, three for a conflict. */
 const DECISION_CELLS = 5;
@@ -150,11 +190,19 @@ function collectCitations(): ReadonlyMap<string, readonly string[]> {
 
   const walk = (directory: string): void => {
     for (const entry of readdirSync(directory)) {
-      const path = join(directory, entry);
+      if (EXCLUDED_DIRECTORIES.has(entry)) {
+        continue;
+      }
+
+      const path = directory === '.' ? entry : join(directory, entry);
 
       if (statSync(path).isDirectory()) {
         walk(path);
 
+        continue;
+      }
+
+      if (EXCLUDED_FILES.has(path)) {
         continue;
       }
 
@@ -177,9 +225,7 @@ function collectCitations(): ReadonlyMap<string, readonly string[]> {
     }
   };
 
-  for (const root of CITING_ROOTS) {
-    walk(root);
-  }
+  walk('.');
 
   return found;
 }
@@ -297,7 +343,7 @@ describe('the identifier namespace holds', () => {
     expect(offending).toEqual([]);
   });
 
-  it('resolves every identifier cited from src or tests', () => {
+  it('resolves every identifier cited from any tracked text file', () => {
     const defined = new Set(definitions.map((entry): string => entry.id));
     const dangling = [...citations.entries()]
       .filter(([id]): boolean => !defined.has(id))

@@ -82,31 +82,31 @@ exports[`a run played through the production reward path > reproduces its record
     TAKEN loaded-dice       legendary   charges -  hooks onSpawn
           fertile-ground    uncommon    charges -  hooks onSpawn
   stage 3
-          echo-chamber      common      charges -  hooks onMerge
+          collapsing-vault  common      charges -  hooks onStageEnd
           alloy-forge       uncommon    charges -  hooks onMerge
-    TAKEN twin-seed         common      charges -  hooks onSpawn
+    TAKEN temporal-anchor   common      charges 3  hooks onBeforeMove, onAfterMove
 
-relics held, in pickup order: frostbind, loaded-dice, twin-seed
+relics held, in pickup order: frostbind, loaded-dice, temporal-anchor
 stage reached: 4
-moves played: 60
+moves played: 77
 
 run summary
   seed reward-seed-alpha
-  score 436
+  score 624
   stage 4
-  relics frostbind (0 left), loaded-dice, twin-seed
+  relics frostbind (0 left), loaded-dice, temporal-anchor (0 left)
 
 board as played
-size 4  score 436  over true  won false  keepPlaying false
-     4     4     4     4
-    16     2    16     4
-     2    64     8     4
-     4     8    16     8
+size 4  score 624  over true  won false  keepPlaying false
+     4     4    16     8
+     8    32     2     4
+    16     8    64     2
+     2    16    32     4
 
 rngCursor
-  spawn-value     58
-  spawn-position  58
-  relic-draw      29
+  spawn-value     74
+  spawn-position  74
+  relic-draw      48
   rarity-weight   9"
 `;
 
@@ -154,29 +154,32 @@ exports[`a run played through the production reward path > reproduces its record
           echo-chamber      common      charges -  hooks onMerge
     TAKEN collapsing-vault  common      charges -  hooks onStageEnd
           brittle-crown     rare        charges -  hooks onStageStart, onStageEnd
+  stage 3
+          temporal-anchor   common      charges 3  hooks onBeforeMove, onAfterMove
+          echo-chamber      common      charges -  hooks onMerge
+    TAKEN fertile-ground    uncommon    charges -  hooks onSpawn
 
-relics held, in pickup order: frostbind, collapsing-vault
-stage reached: 3
-moves played: 56
+relics held, in pickup order: frostbind, collapsing-vault, fertile-ground
+stage reached: 4
+moves played: 60
 
 run summary
   seed reward-seed-charlie
-  score 324
-  stage 3
-  relics frostbind (0 left), collapsing-vault
+  score 472
+  stage 4
+  relics frostbind (0 left), collapsing-vault, fertile-ground
 
 board as played
-size 4  score 324  over true  won false  keepPlaying false
-     8     2     4     2
-    16     4    32     4
-     2    32     4     2
-     2     4     2     2
+size 3  score 472  over true  won false  keepPlaying false
+     4     2     8
+    64     4     2
+     2     8    32
 
 rngCursor
-  spawn-value     57
-  spawn-position  57
-  relic-draw      6
-  rarity-weight   6"
+  spawn-value     61
+  spawn-position  61
+  relic-draw      11
+  rarity-weight   9"
 `;
 
 exports[`the draw tables > reproduces its recorded family order 1`] = `

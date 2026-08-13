@@ -230,7 +230,8 @@ describe('the relic catalogue', () => {
 describe('charge accounting through the registry and the bus', () => {
   it('spends a charge for every turn a charge relic acted on, and stops', () => {
     // `scouring-wind` carries exactly one charge and clears the first
-    // fully-occupied column after a move.
+    // fully-occupied ROW after a move — a row being one fixed `y` across every
+    // `x`. CHANGED: this said column. DL-TEST-14.
     const full = boardFrom([
       [2, 4, 8, 16],
       [2, 32, 64, 128],
@@ -272,10 +273,23 @@ describe('charge accounting through the registry and the bus', () => {
     const bus = createHookBus();
     const registry = new RelicRegistry({ bus });
 
-    expect(registry.restore([{ id: 'scouring-wind', charges: 0 }])).toBe(
-      undefined,
-    );
+    registry.restore([{ id: 'scouring-wind', charges: 0 }]);
+
+    // CHANGED: this was `expect(registry.restore(...)).toBe(undefined)`, and
+    // `restore` returns `void`, so the assertion held for every possible
+    // implementation — including one that restored nothing at all. What the
+    // restore is FOR is asserted instead: the relic is held at the persisted
+    // budget, it is subscribed to the bus so its handlers can be reached, and
+    // the projection reports it. DL-TEST-14.
     expect(registry.find('scouring-wind')?.charges).toBe(0);
+    expect(registry.ownedIds()).toEqual(['scouring-wind']);
+    expect(registry.size()).toBe(1);
+    expect(bus.subscribers().map((subscriber) => subscriber.id)).toContain(
+      'scouring-wind',
+    );
+    expect(registry.relicContext()).toEqual([
+      { id: 'scouring-wind', charges: 0 },
+    ]);
 
     const config = createDefaultRulesConfig();
     const engine = new Engine({
@@ -390,15 +404,42 @@ describe('the board-manipulation family', () => {
       ]);
 
     const first = compose(['tumbler'], { board: tight() });
-    const before = values(first.engine.serialize()).slice().sort((a, b) => a - b);
+    const beforeArrangement = values(first.engine.serialize());
+    const before = beforeArrangement.slice().sort((a, b) => a - b);
 
     first.engine.move(DIRECTION_LEFT);
 
     const after = first.engine.serialize();
+    const afterArrangement = values(after);
+    const sortedAfter = afterArrangement.slice().sort((a, b) => a - b);
 
     // A permutation neither creates nor destroys material.
-    expect(values(after).slice().sort((a, b) => a - b).join(',')).not.toBe('');
-    expect(before.length).toBeGreaterThan(0);
+    //
+    // CHANGED: `before` was computed, sorted and then never compared with
+    // anything. The two assertions here were `join(',')` not being the empty
+    // string — true of any non-empty board — and `before.length > 0`, so the
+    // conservation this case is named for was entirely unproved. DL-TEST-14.
+    expect(sortedAfter).toEqual(before);
+    expect(afterArrangement).toHaveLength(beforeArrangement.length);
+    expect(sortedAfter.reduce((sum, value) => sum + value, 0)).toBe(
+      before.reduce((sum, value) => sum + value, 0),
+    );
+
+    // No merge resolved, so conservation is exact rather than net of a merge.
+    expect(after.score).toBe(0);
+
+    // NON-VACUITY. Conservation is trivially satisfied by doing nothing, so the
+    // arrangement must have actually moved — and the same board and the same
+    // move WITHOUT the relic must leave it alone, which is what attributes the
+    // permutation to the tumbler rather than to the slide.
+    expect(afterArrangement).not.toEqual(beforeArrangement);
+
+    const unaided = compose([], { board: tight() });
+    const unaidedBefore = values(unaided.engine.serialize());
+
+    unaided.engine.move(DIRECTION_LEFT);
+
+    expect(values(unaided.engine.serialize())).toEqual(unaidedBefore);
 
     // And it is reproducible: the same seed and the same move yield the same
     // board, which is what keeps a recorded run replayable.

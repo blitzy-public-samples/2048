@@ -17,8 +17,13 @@
 //   TR-REGISTRY-04  target-only row              `RELIC_CATALOGUE`,
 //                                                `findRelicById` and the
 //                                                assembled family pool
+//   TR-REGISTRY-05  target-only row              `STANDING_RELIC_RULES` and
+//                                                `applyStandingRelicRules`,
+//                                                the non-hook reinstatement of
+//                                                a standing rule on rehydrated
+//                                                rules
 //
-// Decisions: DL-REGISTRY-01, DL-REGISTRY-02, DL-REGISTRY-03
+// Decisions: DL-REGISTRY-01, DL-REGISTRY-02, DL-REGISTRY-03, DL-REGISTRY-04
 // (docs/DECISION_LOG.md).
 
 import {
@@ -32,9 +37,13 @@ import {
   type RelicFamilyName,
   type RelicHooks,
 } from './relic-types';
+import type { RulesConfig } from '../config/rules-config';
 import { HOOK_NAMES } from '../engine/hooks';
 import { BOARD_MANIPULATION_FAMILY } from './families/board-manipulation';
-import { MERGE_MAGIC_FAMILY } from './families/merge-magic';
+import {
+  MERGE_MAGIC_FAMILY,
+  reinstateFrostbindRule,
+} from './families/merge-magic';
 import { RISK_REWARD_CURSED_FAMILY } from './families/risk-reward-cursed';
 import { SPAWN_CONTROL_FAMILY } from './families/spawn-control';
 import type {
@@ -76,6 +85,12 @@ const RESTORE_MALFORMED_METRIC = 'relics.restore.malformed';
 const RESTORE_REJECTED_METRIC = 'relics.restore.rejected';
 
 const CLEARED_METRIC = 'relics.cleared';
+
+/**
+ * ADDED: counter raised with the number of standing rules a restore
+ * reinstated on the live rules. `DL-REGISTRY-04`.
+ */
+const STANDING_RULE_METRIC = 'relics.standing_rule.reinstated';
 
 /** Counter raised for an activation that reached the bus. */
 const ACTIVATE_METRIC = 'relics.activate';
@@ -628,6 +643,91 @@ export function findRelicById(id: string): Relic | undefined {
 }
 
 /**
+ * ADDED: reinstates one relic's STANDING rule on a set of rehydrated rules.
+ *
+ * Handed the relic's persisted `state` slot and the live rules, and returns
+ * whether it installed anything. It is not a hook handler: it receives no
+ * dispatch context, no payload and no charge budget, and it cannot reach the
+ * board.
+ */
+export type StandingRelicRule = (
+  state: unknown,
+  rules: RulesConfig,
+) => boolean;
+
+/**
+ * ADDED: the relics whose effect is a STANDING rule on the live rules, mapped
+ * to the function that reinstates it from a persisted slot.
+ *
+ * A standing rule is one that outlives the turn that established it and is
+ * carried by the rules object rather than by the board — `frostbind`'s
+ * frozen-cell merge predicate is the one such rule in the catalogue. A reload
+ * builds fresh rules carrying the defaults, so without this the frost a spent
+ * budget had already paid for was silently lost.
+ *
+ * Declared HERE and keyed by identifier, so the engine and the hook bus contain
+ * no knowledge of any individual relic and the 7-member `Relic` shape AAP
+ * Contract 3 fixes takes no eighth member. A family module owning a standing
+ * rule exports its reinstatement function and is named in this table; every
+ * other relic is absent from it and needs no entry. `DL-REGISTRY-04`.
+ */
+const STANDING_RELIC_RULES: ReadonlyMap<string, StandingRelicRule> = new Map<
+  string,
+  StandingRelicRule
+>([['frostbind', reinstateFrostbindRule]]);
+
+/**
+ * ADDED: reinstates the standing rules a set of persisted relics implies, on
+ * rules that were just rehydrated.
+ *
+ * THE NON-HOOK REHYDRATION PATH, and the counterpart of the charge guard: the
+ * bus withholds all six hooks from a relic whose budget is spent (AAP R3, V6,
+ * `DL-HOOKBUS-07`), so an exhausted relic reinstalls nothing of its own. What a
+ * spent budget must not undo is the rule those charges ALREADY BOUGHT, and this
+ * puts that rule back without dispatching to anything. Charges are therefore
+ * not consulted at all: reinstatement is restoration, not firing.
+ *
+ * Order is the array's own order, which is pickup order on the load path, so a
+ * later relic's rule wraps an earlier one exactly as a dispatch would have
+ * layered them.
+ *
+ * @param relics Persisted entries, in pickup order. A nullish or non-array
+ *   argument reinstates nothing.
+ * @param rules Live rules to write into.
+ * @returns How many standing rules were reinstated.
+ */
+export function applyStandingRelicRules(
+  relics: readonly PersistedRelic[] | null | undefined,
+  rules: RulesConfig,
+): number {
+  if (!isArrayValue(relics)) {
+    return 0;
+  }
+
+  let applied = 0;
+
+  for (const entry of readEntries(relics)) {
+    const id: unknown = readPersisted(entry, 'id');
+
+    if (typeof id !== 'string') {
+      continue;
+    }
+
+    const reinstate = STANDING_RELIC_RULES.get(id);
+
+    if (reinstate === undefined) {
+      continue;
+    }
+
+    if (reinstate(readPersisted(entry, 'state'), rules)) {
+      applied += 1;
+    }
+  }
+
+  return applied;
+}
+
+/**
  * Reports whether `value` carries the two declaration members a registration
  * reads: a non-empty string `id` and an object `hooks`.
  *
@@ -889,6 +989,20 @@ export interface RelicRegistryOptions {
    * src/observability/logger.ts.
    */
   readonly correlationId?: CorrelationSource;
+
+  /**
+   * ADDED: the LIVE rules a restored relic's standing rule is reinstated into.
+   *
+   * Supplied by a composition that resumes a run, where the rules are rebuilt
+   * from the defaults while the relics come back from the persisted envelope.
+   * `restore()` reinstates every standing rule the restored entries imply
+   * through `applyStandingRelicRules`, so the frost a spent budget already
+   * bought survives the reload without any handler being dispatched.
+   *
+   * Absent on a registry that tracks relics alone, which reinstates nothing.
+   * `DL-REGISTRY-04`.
+   */
+  readonly rules?: RulesConfig;
 }
 
 /** The relics one run holds, in pickup order. */
@@ -900,6 +1014,12 @@ export class RelicRegistry {
   private readonly index: ReadonlyMap<string, Relic>;
 
   private readonly bus: HookBus | undefined;
+
+  /**
+   * ADDED: the live rules `restore()` reinstates standing rules into, or
+   * `undefined` on a registry composed without them. `DL-REGISTRY-04`.
+   */
+  private readonly rules: RulesConfig | undefined;
 
   private readonly reporter: EngineReporter;
 
@@ -938,6 +1058,7 @@ export class RelicRegistry {
         : Object.freeze(adoptCatalogue(supplied));
     this.index = indexRelics(this.pool);
     this.bus = options.bus;
+    this.rules = options.rules;
     this.reporter = options.reporter ?? NOOP_ENGINE_REPORTER;
     this.readCorrelationId = correlationReader(options.correlationId);
 
@@ -1413,6 +1534,12 @@ export class RelicRegistry {
    * js/game_manager.js L36-L45. The array's own order becomes pickup order, so
    * a resumed run dispatches in the order the saved run dispatched in.
    *
+   * ADDED: a registry composed with live rules also reinstates the STANDING
+   * rules the restored entries imply, through `applyStandingRelicRules` and
+   * without dispatching to any handler — so a relic whose budget the saved run
+   * had already spent keeps the rule those charges bought while still being
+   * withheld from every one of the six hooks. `DL-REGISTRY-04`.
+   *
    * @param persisted Entries to restore.
    */
   restore(persisted: readonly PersistedRelic[] | null | undefined): void {
@@ -1432,6 +1559,33 @@ export class RelicRegistry {
     // so neither the array's iterator nor a `Proxy` trap runs on this path.
     for (const entry of readEntries(persisted)) {
       this.reseat(entry);
+    }
+
+    this.reinstateStandingRules(persisted);
+  }
+
+  /**
+   * ADDED: reinstates the standing rules the restored relics imply, reporting
+   * how many landed.
+   *
+   * A registry composed without live rules reinstates nothing and reports
+   * nothing. `DL-REGISTRY-04`.
+   *
+   * @param persisted Entries just restored, in pickup order.
+   */
+  private reinstateStandingRules(
+    persisted: readonly PersistedRelic[],
+  ): void {
+    const rules = this.rules;
+
+    if (rules === undefined) {
+      return;
+    }
+
+    const applied = applyStandingRelicRules(persisted, rules);
+
+    if (applied > 0) {
+      this.count(STANDING_RULE_METRIC, applied);
     }
   }
 

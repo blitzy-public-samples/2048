@@ -5,9 +5,13 @@
 // so the deferral is observable without waiting on a real frame and without
 // building the real application more than once.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { bootstrap, start } from '../../../src/main';
+import {
+  PREFERENCE_WRITE_COALESCE_MS,
+  bootstrap,
+  start,
+} from '../../../src/main';
 import type { Application } from '../../../src/main';
 import { resetWebGLSupportProbe } from '../../../src/render/webgl-support';
 import {
@@ -709,5 +713,150 @@ describe('the persisted preferences the root restores and records', () => {
     expect(stored()?.['theme']).toBe('high-contrast');
     expect(readOwnedStorage('roguelike2048:runState')).toBe(runBefore);
     expect(readOwnedStorage('gameState')).toBe(boardBefore);
+  });
+});
+
+/* ==========================================================================
+ * The write cadence of that persistence. A performance review found every
+ * notification writing the whole envelope synchronously: a number-only force
+ * and an operating-system motion change each wrote a payload whose persisted
+ * choice had not moved, and the volume slider wrote once per `input` event.
+ * DL-MAIN-40.
+ * ========================================================================== */
+
+describe('the cadence of the preference write', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(
+      globalThis as unknown as Record<string, unknown>,
+      '__blitzy2048',
+    );
+    document.documentElement.removeAttribute('data-theme');
+    vi.restoreAllMocks();
+  });
+
+  /** Composes the real application synchronously and hands it back. */
+  const compose = (): Application => {
+    const scheduled: (() => void)[] = [];
+
+    bootstrap({
+      ownerDocument: document,
+      schedule: (callback): void => {
+        scheduled.push(callback);
+      },
+    });
+
+    scheduled[0]?.();
+
+    return (globalThis as unknown as Record<string, Application>)[
+      '__blitzy2048'
+    ] as Application;
+  };
+
+  /** Counts the writes of the preference key alone. */
+  const preferenceWrites = (): (() => number) => {
+    const spy = vi.spyOn(Storage.prototype, 'setItem');
+
+    return (): number =>
+      spy.mock.calls.filter(
+        (call): boolean => call[0] === 'roguelike2048:preferences',
+      ).length;
+  };
+
+  /** The persisted volume, or `null` where no envelope is stored. */
+  const storedVolume = (): number | null => {
+    const raw = readOwnedStorage('roguelike2048:preferences');
+
+    return raw === null
+      ? null
+      : ((JSON.parse(raw) as Record<string, unknown>)['volume'] as number);
+  };
+
+  it('writes nothing for a change the persisted envelope does not carry', () => {
+    application = compose();
+
+    // An envelope on disk to compare against.
+    application.preferences.setTheme('high-contrast');
+
+    const writes = preferenceWrites();
+
+    // Both of these are real changes of the EFFECTIVE number-only value and
+    // neither touches the persisted CHOICE, which is what `DL-SETTINGS-06`
+    // projects.
+    application.preferences.forceNumberOnlyMode('a probe imposed it');
+    application.preferences.releaseNumberOnlyForce();
+
+    expect(writes()).toBe(0);
+
+    // A change the envelope does carry still writes, once.
+    application.preferences.setMuted(true);
+
+    expect(writes()).toBe(1);
+
+    // And the store notifies nothing for a value that is already set, so the
+    // count does not move for a repeat either.
+    application.preferences.setMuted(true);
+
+    expect(writes()).toBe(1);
+  });
+
+  it('folds a run of volume changes into one write per window', () => {
+    vi.useFakeTimers();
+
+    try {
+      application = compose();
+
+      const app = application;
+      const writes = preferenceWrites();
+
+      for (let step = 1; step <= 30; step += 1) {
+        app.preferences.setVolume(step / 100);
+      }
+
+      // The FIRST of a run is written at once, so a single nudge of the slider
+      // is on disk before the next statement reads it.
+      expect(writes()).toBe(1);
+      expect(storedVolume()).toBe(0.01);
+
+      vi.advanceTimersByTime(PREFERENCE_WRITE_COALESCE_MS);
+
+      // The remaining 29 are one write, carrying the last value.
+      expect(writes()).toBe(2);
+      expect(storedVolume()).toBe(0.3);
+
+      // The window that closed on a held change opens another, which closes
+      // with nothing pending and writes nothing.
+      vi.advanceTimersByTime(PREFERENCE_WRITE_COALESCE_MS * 4);
+
+      expect(writes()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('flushes a held volume change on disposal rather than dropping it', () => {
+    vi.useFakeTimers();
+
+    try {
+      application = compose();
+
+      const app = application;
+
+      app.preferences.setVolume(0.2);
+      app.preferences.setVolume(0.9);
+
+      expect(storedVolume()).toBe(0.2);
+
+      app.dispose();
+      application = null;
+
+      expect(storedVolume()).toBe(0.9);
+
+      // And the window the root armed writes nothing after the disposal.
+      vi.advanceTimersByTime(PREFERENCE_WRITE_COALESCE_MS * 4);
+
+      expect(storedVolume()).toBe(0.9);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

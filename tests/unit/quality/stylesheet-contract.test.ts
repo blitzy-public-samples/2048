@@ -15,8 +15,48 @@ const ROOT = resolve(import.meta.dirname, '..', '..', '..');
 const read = (relativePath: string): string =>
   readFileSync(resolve(ROOT, relativePath), 'utf8');
 
+/** One warning Dart Sass raised while compiling, as the gate reports it. */
+interface CompileWarning {
+  readonly message: string;
+  readonly deprecation: boolean;
+  readonly kind: string;
+}
+
+/**
+ * Every warning the compile raised, in order.
+ *
+ * ADDED: the compile took `.css` and discarded everything else, so Dart Sass
+ * deprecation warnings were invisible to the suite AND to `npm test`. V8 of the
+ * AAP requires the Sass build to be free of deprecation warnings once the nine
+ * division sites are migrated, and nothing held that: the migration could
+ * regress — a `@import` reintroduced, a slash division added — and every gate
+ * would still report green while the stylesheet moved onto a path Dart Sass has
+ * announced it will remove. DL-TEST-13.
+ */
+const compileWarnings: CompileWarning[] = [];
+
 /** The compiled stylesheet, compiled once for the whole file. */
-const compiled = ((): string => compile(resolve(ROOT, 'style/main.scss')).css)();
+const compiled = ((): string =>
+  compile(resolve(ROOT, 'style/main.scss'), {
+    logger: {
+      warn: (message: string, options): void => {
+        const raw: unknown = options;
+        const carried =
+          typeof raw === 'object' && raw !== null
+            ? (raw as {
+                deprecation?: unknown;
+                deprecationType?: { id?: unknown };
+              })
+            : {};
+
+        compileWarnings.push({
+          message: String(message),
+          deprecation: carried.deprecation === true,
+          kind: String(carried.deprecationType?.id ?? 'warning'),
+        });
+      },
+    },
+  }).css)();
 
 /**
  * Reads one `--theme-*` declaration out of the compiled sheet and renders it
@@ -64,6 +104,36 @@ const compiledColor = (property: string, from: string = compiled): string => {
 
   return `#${rendered}`;
 };
+
+describe('the Sass build raises no deprecation warning', () => {
+  it('compiles style/main.scss with no deprecation at all', () => {
+    // FAIL-CLOSED. V8 of the AAP requires the migrated stylesheet to compile
+    // clean, and this is the only place that holds it: the nine `math.div()`
+    // sites and the two `@use` conversions can all regress silently otherwise.
+    // The message is carried into the failure so the offending construct and its
+    // line are named rather than merely counted.
+    const deprecations = compileWarnings
+      .filter((warning): boolean => warning.deprecation)
+      .map((warning): string => `${warning.kind}: ${warning.message}`);
+
+    expect(deprecations).toEqual([]);
+  });
+
+  it('compiles style/main.scss with no warning of any kind', () => {
+    // A Sass `@warn` is not a deprecation, and none is expected either: the
+    // stylesheet raises no advisory of its own.
+    const raised = compileWarnings.map(
+      (warning): string => `${warning.kind}: ${warning.message}`,
+    );
+
+    expect(raised).toEqual([]);
+  });
+
+  it('produced a stylesheet, so the two assertions above are not vacuous', () => {
+    // A compile that emitted nothing would raise no warning either.
+    expect(compiled.length).toBeGreaterThan(0);
+  });
+});
 
 describe('style/_tokens.scss declares each function once', () => {
   it('declares `quantised` exactly once', () => {

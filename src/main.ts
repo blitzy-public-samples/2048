@@ -181,10 +181,7 @@ import type {
 } from './run/run-state';
 import { RunStateStore } from './run/run-state-store';
 import type { StorageFailure } from './storage/local-storage-manager';
-import {
-  LocalStorageManager,
-  PARSE_ERROR_NAME,
-} from './storage/local-storage-manager';
+import { LocalStorageManager } from './storage/local-storage-manager';
 import {
   KEYMAP_KEY,
   PREFERENCES_KEY,
@@ -579,6 +576,23 @@ function createPreferenceSink(reporter: RenderReporter): UiReporter {
         // cannot.
         error: describeRenderError(caught),
         thrown: caught,
+      });
+    },
+
+    // ADDED: the same reduction at the caller's own severity. `error` above
+    // fixes the level at `error`, so a RECOVERED failure had to either overstate
+    // itself or stringify what it caught into an ordinary field — and ordinary
+    // fields are never sensitivity-redacted. Routed here, the caught value
+    // reaches `logger.failure` through `createSink`, where redaction and the
+    // record budget apply to it. DL-SETTINGS-07, DL-SUMMARY-17.
+    failure(level, message, thrown, fields): void {
+      reporter.onDiagnostic({
+        level: level === 'warn' ? 'warning' : level,
+        source: 'ui/a11y',
+        message,
+        detail: fields === undefined ? undefined : Object.freeze({ ...fields }),
+        error: describeRenderError(thrown),
+        thrown,
       });
     },
   };
@@ -1173,6 +1187,15 @@ interface BoardRenderer {
 export const CONTEXT_RESTORE_GRACE_MS = motion.fadeIn.delay;
 
 /**
+ * How long a run of volume changes is folded into one persisted write.
+ *
+ * READ FROM THE TOKEN LAYER, not restated: two movement transitions of
+ * ./theme/tokens, which is `$transition-speed * 2` of style/main.scss and
+ * resolves to 200. DL-MAIN-40.
+ */
+export const PREFERENCE_WRITE_COALESCE_MS = motion.movement.duration * 2;
+
+/**
  * Reads whether the renderer in force is reporting a lost context.
  *
  * @param renderer The renderer in force.
@@ -1676,7 +1699,15 @@ export function start(ownerDocument: Document): Application {
     // storage fault occurred. Reporting it at `error` claimed one, once per
     // corrupt value, on a path whose whole design is to survive corruption.
     // The caught `SyntaxError` still travels as `thrown`. DL-STORE-09.
-    const unreadable = failure.error.name === PARSE_ERROR_NAME;
+    //
+    // CHANGED: read from `error.parse`, the adapter's tag, where this read
+    // `error.name === PARSE_ERROR_NAME`. `JSON.parse` is not the only source of
+    // a `SyntaxError` the adapter can catch — a `toJSON` member, a replacer or
+    // an injected store method can raise one on a write, a probe or a removal —
+    // and each of those is an operation that FAILED, so tiering it as a
+    // recovered read demoted a lost write to a warning and told the reader a
+    // stored value was unreadable when none had been read.
+    const unreadable = failure.error.parse;
     const recovered = refused || unreadable;
 
     // ONE ATTEMPT, ONE AUTHORITATIVE RECORD. A write to the run-state key is
@@ -1772,8 +1803,16 @@ export function start(ownerDocument: Document): Application {
   // takes the injected path, which adopts a fresh copy of every declaration and
   // would replace the array the seeded reward snapshots resolve their drawn
   // indices against. DL-REGISTRY-01.
+  //
+  // ADDED: the live rules are handed over as well, so a run RESUMED from the
+  // stored envelope reinstates the standing rules its relics had already
+  // established — `frostbind`'s frozen cells being the one such rule — onto the
+  // rules this page rebuilt from the defaults. The reinstatement dispatches
+  // nothing, so a relic whose budget the saved run spent is still withheld from
+  // every one of the six hooks. DL-MAIN-39, DL-REGISTRY-04, DL-HOOKBUS-07.
   const registry = new RelicRegistry({
     bus: hooks,
+    rules: config,
     correlationId: readCorrelationId,
     reporter: engineReporter,
   });
@@ -1820,6 +1859,17 @@ export function start(ownerDocument: Document): Application {
    */
   let settleTracedStage: (outcome: string) => void = (): void => undefined;
 
+  /**
+   * ADDED: puts the run's persistence status on screen, or does nothing before
+   * the HUD exists.
+   *
+   * A slot for the same reason as `settleTracedStage`: the run sink is composed
+   * here, `run.begin()` runs before the screens are built, and a load that is
+   * refused already reports a crossing — so this cannot close over the HUD and
+   * is filled at the HUD's own construction. DL-MAIN-38.
+   */
+  let showRunPersistence: () => void = (): void => undefined;
+
   // The run: the versioned envelope's load, save and clear, the stage and relic
   // slices of every commit, and stage advancement. Composed before the
   // substreams, which are built from the seed and cursors it supplies.
@@ -1834,6 +1884,16 @@ export function start(ownerDocument: Document): Application {
     // `readLiveStorageFailure` below reads the controller's own status.
     onPersistenceStatusChanged: (status): void => {
       refreshHealth(`run persistence became ${status}`);
+
+      // CHANGED: the PLAYER is told as well as the health surface. The
+      // controller writes after every view has taken the commit, so the status
+      // the HUD read during that commit is the one in force before the write
+      // that changed it — and for a store that refuses every later write too,
+      // that value stayed wrong for the rest of the run. Written after the
+      // health refresh, so the two surfaces are never inconsistent in the other
+      // direction, and through the HUD's status-only member so the turn's
+      // rising score delta is not cleared. DL-MAIN-38, DL-HUD-17.
+      showRunPersistence();
     },
   });
 
@@ -2164,12 +2224,19 @@ export function start(ownerDocument: Document): Application {
   run.restoreHeldRelics();
 
   // The frame callback is the system's only asynchronous boundary.
+  //
+  // CHANGED: the failure channel travels with the pair. The loop CONTAINS a
+  // throw from a frame callback or from either hook, so a frame that failed was
+  // reported through `reporter` and still closed a `render.frame` span that read
+  // as a clean frame; `onFrameError` is what marks that span as the failure it
+  // was. DL-TRACE-14, DL-LOOP-05.
   const frameLifecycle = tracer.frameLifecycleHooks();
   const loop = createRenderLoop({
     reporter,
     autoStopWhenIdle: true,
     onFrameBegin: frameLifecycle.onFrameBegin,
     onFrameEnd: frameLifecycle.onFrameEnd,
+    onFrameError: frameLifecycle.onFrameError,
   });
 
   /**
@@ -2208,21 +2275,121 @@ export function start(ownerDocument: Document): Application {
   });
 
   /**
-   * ADDED: writes the envelope every time a persisted preference changes.
+   * ADDED: the envelope text last written, or `null` where none has been
+   * written or the last write was refused. DL-MAIN-40.
+   */
+  let persistedPreferences: string | null = null;
+
+  /**
+   * ADDED: the open coalescing window, or `null` when none is. DL-MAIN-40.
+   */
+  let preferenceWriteWindow: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * ADDED: whether a change arrived while the window was open. DL-MAIN-40.
+   */
+  let preferenceWritePending = false;
+
+  /**
+   * ADDED: writes the envelope, and only where it differs from the one on disk.
    *
-   * DL-MAIN-34.
+   * CHANGED: the write was unconditional. DL-MAIN-34, DL-MAIN-40.
    */
   const persistPreferences = (): void => {
-    const written = storage.writeJson(
-      PREFERENCES_KEY,
-      serializePreferences(preferences.getPreferences()),
-    );
+    // The write carries every persisted field, so it satisfies whatever the
+    // window was holding.
+    preferenceWritePending = false;
+
+    const envelope = serializePreferences(preferences.getPreferences());
+    let serialised: string | null = null;
+
+    try {
+      serialised = JSON.stringify(envelope);
+    } catch {
+      // Left null, so the write goes through `writeJson` below, which owns the
+      // report of a value that will not serialise.
+      serialised = null;
+    }
+
+    if (serialised !== null && serialised === persistedPreferences) {
+      reporter.onCount({
+        name: 'ui.preferences.persist',
+        value: 1,
+        detail: Object.freeze({ written: false, unchanged: true }),
+      });
+
+      return;
+    }
+
+    // `writeRaw` for the text that was compared, so the bytes on disk are the
+    // bytes the memo holds; `writeJson` where there is no text, which is the
+    // path that reports the serialisation failure.
+    const written =
+      serialised === null
+        ? storage.writeJson(PREFERENCES_KEY, envelope)
+        : storage.writeRaw(PREFERENCES_KEY, serialised);
+
+    // A refused write leaves nothing on disk to compare against, so the memo is
+    // dropped and the next change writes again.
+    persistedPreferences = written ? serialised : null;
 
     reporter.onCount({
       name: 'ui.preferences.persist',
       value: 1,
-      detail: Object.freeze({ written }),
+      detail: Object.freeze({ written, unchanged: false }),
     });
+  };
+
+  /**
+   * ADDED: opens the window that folds a run of changes into one write.
+   *
+   * DL-MAIN-40.
+   */
+  const openPreferenceWriteWindow = (): void => {
+    preferenceWriteWindow = setTimeout((): void => {
+      preferenceWriteWindow = null;
+
+      if (!preferenceWritePending) {
+        return;
+      }
+
+      persistPreferences();
+
+      // A window that closed on a held change opens another, so a gesture still
+      // under way keeps writing at the coalesced cadence rather than at its own.
+      openPreferenceWriteWindow();
+    }, PREFERENCE_WRITE_COALESCE_MS);
+  };
+
+  /**
+   * ADDED: writes a coalesced change: the first of a run at once, the rest of it
+   * when the window closes.
+   *
+   * DL-MAIN-40.
+   */
+  const coalescePreferences = (): void => {
+    if (preferenceWriteWindow !== null) {
+      preferenceWritePending = true;
+
+      return;
+    }
+
+    persistPreferences();
+    openPreferenceWriteWindow();
+  };
+
+  /**
+   * ADDED: closes the window, writing whatever it was holding. DL-MAIN-40.
+   */
+  const flushPreferences = (): void => {
+    if (preferenceWriteWindow !== null) {
+      clearTimeout(preferenceWriteWindow);
+      preferenceWriteWindow = null;
+    }
+
+    if (preferenceWritePending) {
+      persistPreferences();
+    }
   };
 
   const reflectMotion = (reduced: boolean): void => {
@@ -2678,10 +2845,16 @@ export function start(ownerDocument: Document): Application {
   );
 
   // The slot declared beside the run sink is filled: from here a finished run
-  // closes the span of the stage it was playing. `unwound` is the outcome of a
-  // stage that ended without resolving, which is what a loss and an explicit
-  // end-run leave behind, and the run outcome that ended it travels on the
-  // closing record. DL-MAIN-29.
+  // closes the span of the stage it was playing.
+  //
+  // CHANGED: THIS IS NOW THE FALLBACK, NOT THE NORMAL PATH.
+  // `RunController.finish()` resolves the stage in force through the engine
+  // before it summarises, so `stage:end` fires with `cleared: false` and the
+  // ordinary stage listener closes the span as a resolved stage. `settleStage`
+  // answers `false` for a span already closed, so this call is a no-op on that
+  // path; it still closes a span left open by a run that ended with no engine
+  // attached or whose resolution threw. `unwound` is therefore the outcome of a
+  // stage nothing resolved at all. DL-MAIN-29, DL-RUNCTL-30.
   settleTracedStage = (outcome): void => {
     stopEngineTracing.settleStage(SPAN_OUTCOMES.unwound, {
       [SPAN_ATTRIBUTES.action]: outcome,
@@ -2752,6 +2925,16 @@ export function start(ownerDocument: Document): Application {
   let switchingRenderer = false;
 
   /**
+   * ADDED: how many renderer swaps have completed, each of which recomputed the
+   * health report.
+   *
+   * Read by a caller that has just done something which MIGHT have caused a
+   * swap, so it can tell whether the health report has already been recomputed
+   * on its behalf. DL-MAIN-41.
+   */
+  let rendererSwitches = 0;
+
+  /**
    * Brings the renderer in force into line with the effective preference.
    *
    * Called whenever `numberOnlyMode` changes, which is how the accessible
@@ -2798,6 +2981,10 @@ export function start(ownerDocument: Document): Application {
       onRendererWork();
       reportSelection();
 
+      // ADDED: counted beside the refresh it performs, so a caller that
+      // triggered this indirectly can tell that the report is already current.
+      // DL-MAIN-41.
+      rendererSwitches += 1;
       refreshHealth(`a switch to the ${next.mode} board`);
     } finally {
       switchingRenderer = false;
@@ -2897,6 +3084,18 @@ export function start(ownerDocument: Document): Application {
     reporter: createPreferenceSink(reporter),
   });
 
+  // ADDED: the slot the run sink's persistence observer calls, filled now that
+  // the screen holding the notice exists. The status-only member, never
+  // `render`: a second write of the turn's commit would clear the rising `+N`
+  // that commit put on screen. DL-MAIN-38, DL-HUD-17.
+  // NOT CALLED HERE, for a crossing `run.begin()` above already reported: the
+  // HUD reads the status on its own first write and shows an ALREADY ephemeral
+  // run then, and calling it now would release the run-status group's `hidden`
+  // before any commit has filled it. DL-MAIN-38.
+  showRunPersistence = (): void => {
+    hud.refreshPersistence();
+  };
+
   // The HUD is a screen module, not an engine subscriber: src/ui/screens/hud.ts
   // subscribes to no emitter and takes a commit through `render`. Taken from the
   // SHARED BUS CHANNEL, like every other peer, and registered BEFORE the
@@ -2939,7 +3138,17 @@ export function start(ownerDocument: Document): Application {
     // ADDED: every preference key is persisted, so the write is unconditional
     // on WHICH one changed. The store notifies only on a real change, so this
     // is one write per change and none per read. DL-MAIN-34.
-    persistPreferences();
+    //
+    // CHANGED: a change that leaves the persisted envelope byte-identical writes
+    // nothing, and a run of volume-only changes — which is what a dragged
+    // slider emits, one per `input` event — is folded into one write per
+    // `PREFERENCE_WRITE_COALESCE_MS`. The live gain is unaffected: the sound
+    // engine follows the store's own notification, not this write. DL-MAIN-40.
+    if (changed.length === 1 && changed[0] === 'volume') {
+      coalescePreferences();
+    } else {
+      persistPreferences();
+    }
 
     if (changed.includes('numberOnlyMode')) {
       // The board renderer follows the effective value, so number-only mode is
@@ -3025,6 +3234,10 @@ export function start(ownerDocument: Document): Application {
         }),
       });
 
+      // ADDED: read across the release, which reaches `applyRenderMode` through
+      // the preference commit. DL-MAIN-41.
+      const switchesBefore = rendererSwitches;
+
       preferences.releaseNumberOnlyForce();
 
       // Reported only for a release that actually put the 2.5D board back: the
@@ -3039,7 +3252,15 @@ export function start(ownerDocument: Document): Application {
         );
       }
 
-      refreshHealth('a WebGL context reclaimed after the fallback');
+      // CHANGED: only where the release did NOT swap the renderer. A swap
+      // recomputes the report itself, so the refresh that used to follow every
+      // reclaim recomputed a report one statement old. A release the persisted
+      // number-only choice holds swaps nothing, and that case still refreshes:
+      // the live WebGL verdict has changed even though the board has not.
+      // DL-MAIN-41.
+      if (rendererSwitches === switchesBefore) {
+        refreshHealth('a WebGL context reclaimed after the fallback');
+      }
     };
 
     surface.addEventListener('webglcontextrestored', onRestored);
@@ -3988,6 +4209,12 @@ export function start(ownerDocument: Document): Application {
     let resolution: FinalMoveResolution = 'failed';
     let committed = false;
 
+    // ADDED: the direction that actually RESOLVED, which an `onBeforeMove`
+    // handler may have redirected. It travels with the outcome so the turn span
+    // names the move that happened rather than the one that was requested; the
+    // requested direction is what the span was opened with. DL-TRACE-16.
+    let resolvedDirection: number = direction;
+
     try {
       // The structured outcome, not the boolean: `move()` returns `false` alike
       // for a turn refused on a terminated board, a turn a listener or an
@@ -4001,13 +4228,18 @@ export function start(ownerDocument: Document): Application {
 
       resolution = attempt.resolution;
       committed = attempt.committed;
+      resolvedDirection = attempt.resolvedDirection;
     } finally {
       // An attempt that moved nothing emits no `move:after`, so no event
       // listener can close the turn span; the caller holding the outcome closes
       // it. Settled INSIDE the input span, which is still open for the length
       // of this listener. A committed turn has closed its own span and a
       // blocked move opened none, so both are no-ops here.
-      stopEngineTracing.settleMove({ resolution, committed });
+      stopEngineTracing.settleMove({
+        resolution,
+        committed,
+        resolvedDirection,
+      });
     }
   });
 
@@ -4354,7 +4586,20 @@ export function start(ownerDocument: Document): Application {
       // rather than rebuilding one per switch; this is the call that says the
       // canvas is finished with, and it is made here and nowhere else.
       // DL-MAIN-36, DL-THREE-06.
-      releaseParkedRenderer(ownerDocument.querySelector(SELECTORS.boardCanvas));
+      //
+      // CHANGED: the sink travels with the call, and the outcome is recorded.
+      // This is the ONE release an ordinary session performs, and it was the one
+      // release nothing counted: the release count, a refusal and a failed
+      // unpack reset are all reported by the module now, and the boolean it
+      // answers with says whether a renderer was there to release. DL-THREE-12.
+      const releasedSurface = releaseParkedRenderer(
+        ownerDocument.querySelector(SELECTORS.boardCanvas),
+        reporter,
+      );
+
+      logger.debug('The parked canvas renderer was released.', {
+        released: releasedSurface,
+      });
 
       // THE ROUTER IS THE ONE OWNER OF SCREEN TEARDOWN. Every module this root
       // constructs is registered with it, `destroy()` drains the set it mounted,
@@ -4380,6 +4625,11 @@ export function start(ownerDocument: Document): Application {
       stopEventRelay();
       frameSubscription.remove();
       stopMotion();
+
+      // ADDED: before the subscription is released, so a change the coalescing
+      // window was still holding is written rather than dropped, and no timer of
+      // this root's outlives it. DL-MAIN-40.
+      flushPreferences();
       stopPreferences();
 
       // ADDED: released with the other root-owned subscriptions, so a disposed

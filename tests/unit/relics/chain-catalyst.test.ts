@@ -1,7 +1,13 @@
 // Isolation suite of `chain-catalyst`, the rarity-index-3 relic of the
 // `merge-magic` family declared in src/relics/families/merge-magic.ts.
 //
-// Decisions: DL-MERGE-01, DL-MERGE-02, DL-CONFIG-01 (docs/DECISION_LOG.md).
+// Sections 1 through 6 are isolation sections. Section 7 is COMPOSED — a real
+// engine, bus and registry holding this relic beside `frostbind` — because the
+// inherited-denial contract it pins is a property of the two wrappers together
+// and neither relic alone can exhibit it.
+//
+// Decisions: DL-MERGE-01, DL-MERGE-02, DL-MERGE-03, DL-MERGE-04, DL-CONFIG-01
+// (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -16,7 +22,9 @@ import type {
   MergeTileView,
   RulesConfig,
 } from '../../../src/config/rules-config';
+import { Engine } from '../../../src/engine/engine';
 import { Grid } from '../../../src/engine/grid';
+import { createHookBus } from '../../../src/engine/hook-bus';
 import { HOOK_NAMES } from '../../../src/engine/hooks';
 import type {
   BoardEffect,
@@ -31,13 +39,23 @@ import type {
   StageStartPayload,
 } from '../../../src/engine/hooks';
 import { Tile } from '../../../src/engine/tile';
+import {
+  movesAvailable,
+  tileMatchesAvailable,
+} from '../../../src/engine/terminal-state';
 import type {
   CorrelationId,
   Position,
+  SerializedGameState,
   SerializedGrid,
+  SerializedTile,
 } from '../../../src/engine/types';
 import { MERGE_MAGIC_FAMILY } from '../../../src/relics/families/merge-magic';
-import { findRelicById } from '../../../src/relics/relic-registry';
+import {
+  RELIC_CATALOGUE,
+  RelicRegistry,
+  findRelicById,
+} from '../../../src/relics/relic-registry';
 import type { Relic } from '../../../src/relics/relic-types';
 import {
   RNG_STREAM_NAMES,
@@ -1506,4 +1524,247 @@ describe('the declaration and the shared defaults after this suite', () => {
     expect(bench.effects.requested()).toEqual([]);
     expect(bench.chargeRequests).toBe(0);
   });
+});
+
+/* ==========================================================================
+ * 7. Composed: chain-catalyst wrapping frostbind, in BOTH pickup orders
+ *
+ * Every section above is an isolation section. This one is not: it builds a real
+ * `Engine` over a real `HookBus` and a real `RelicRegistry` holding both
+ * predicate-installing relics of this family, because the defect it pins is a
+ * property of the COMPOSITION and is invisible to either relic alone.
+ *
+ * The ladder branch used to read every refusal the delegate returned as a
+ * refusal about the two face values. `frostbind`'s wrapper refuses by destination
+ * CELL, so where `chain-catalyst` was picked up second — and its wrapper was
+ * therefore the outer one — a ladder-step pair merged onto a frozen cell and the
+ * frost was overridden. Pickup order `[chain-catalyst, frostbind]` never showed
+ * it, because the frost was then the outer verdict, so both orders are asserted.
+ *
+ * The verdict is read three ways: off the installed predicate, through
+ * `movesAvailable` — the loss probe, which asks the same predicate up to four
+ * times per tile — and through `Engine.move`, which is the only one of the three
+ * that can actually move a tile onto the cell.
+ *
+ * Decisions: DL-MERGE-03, DL-MERGE-04, DL-CONFIG-01.
+ * ========================================================================== */
+
+/** Pickup order in which `chain-catalyst`'s wrapper ends up the OUTER one. */
+const CATALYST_OUTERMOST: readonly string[] = ['frostbind', 'chain-catalyst'];
+
+/** Pickup order in which `frostbind`'s wrapper ends up the outer one. */
+const FROST_OUTERMOST: readonly string[] = ['chain-catalyst', 'frostbind'];
+
+/** Both orders, so neither is asserted at the other's expense. */
+const PICKUP_ORDERS: readonly (readonly string[])[] = [
+  CATALYST_OUTERMOST,
+  FROST_OUTERMOST,
+];
+
+/** Charge budget the restored `frostbind` entry carries. */
+const RESTORED_FROST_CHARGES = 8;
+
+/**
+ * A board snapshot from a sparse list of occupied cells.
+ *
+ * @param size Edge length.
+ * @param occupied Cells to fill.
+ * @returns The snapshot, with every other cell `null` as js/grid.js L109 left it.
+ */
+function composedBoard(
+  size: number,
+  occupied: readonly { x: number; y: number; value: number }[],
+): SerializedGameState {
+  const cells: (SerializedTile | null)[][] = [];
+
+  for (let x = 0; x < size; x += 1) {
+    const column: (SerializedTile | null)[] = [];
+
+    for (let y = 0; y < size; y += 1) {
+      const found = occupied.find((cell) => cell.x === x && cell.y === y);
+
+      column.push(
+        found === undefined ? null : { position: { x, y }, value: found.value },
+      );
+    }
+
+    cells.push(column);
+  }
+
+  return {
+    grid: { size, cells },
+    score: 0,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  };
+}
+
+/**
+ * A full board holding sixteen values no two of which are equal or one rung
+ * apart on the doubling ladder, so the ONLY merge either relic could admit is
+ * the pair this suite plants at `(0,0)`/`(1,0)`.
+ *
+ * @returns The occupied-cell list, x-outer as the serialised grid is ordered.
+ */
+function noMatchFullBoard(): { x: number; y: number; value: number }[] {
+  const rows: readonly (readonly number[])[] = [
+    [2, 4, 32, 128],
+    [512, 2048, 8192, 32768],
+    [4, 16, 64, 256],
+    [1024, 4096, 16384, 65536],
+  ];
+
+  const occupied: { x: number; y: number; value: number }[] = [];
+
+  rows.forEach((row, y): void => {
+    row.forEach((value, x): void => {
+      occupied.push({ x, y, value });
+    });
+  });
+
+  return occupied;
+}
+
+/**
+ * Composes engine, bus and registry with both relics held in `order`, and with
+ * `frostbind`'s ledger restored to `frozen`.
+ *
+ * The ledger arrives through `RelicRegistry.restore`, which is the run-state
+ * rehydration path, so the frost under test is one a reload would produce rather
+ * than one this suite reached into a state slot to write.
+ *
+ * @param order Pickup order, which is the order the wrappers install in.
+ * @param frozen Cells `frostbind`'s ledger holds.
+ * @param board Snapshot the stage opens on.
+ * @returns The live rules and the engine over them.
+ */
+function composeOrdered(
+  order: readonly string[],
+  frozen: readonly Position[],
+  board: SerializedGameState,
+): { readonly config: RulesConfig; readonly engine: Engine } {
+  const config = createDefaultRulesConfig();
+  const bus = createHookBus();
+  const registry = new RelicRegistry({ bus, catalogue: RELIC_CATALOGUE });
+
+  registry.restore(
+    order.map((id) =>
+      id === 'frostbind'
+        ? {
+            id,
+            charges: RESTORED_FROST_CHARGES,
+            state: { frozen: frozen.map((cell) => ({ ...cell })) },
+          }
+        : { id },
+    ),
+  );
+
+  const engine = new Engine({
+    config,
+    streams: createRngStreams(`${SUITE_SEED}-composed`),
+    hooks: bus,
+    relicContext: registry.commitContextProvider(),
+  });
+
+  // Opens the stage, which is where both wrappers install.
+  engine.setup(board);
+
+  return { config, engine };
+}
+
+describe('chain-catalyst wrapping frostbind in both pickup orders', () => {
+  for (const order of PICKUP_ORDERS) {
+    const label = order.join(' then ');
+
+    it(`refuses a ladder pair onto a frozen cell (${label})`, () => {
+      const { config: live } = composeOrdered(
+        order,
+        [{ x: 0, y: 0 }],
+        composedBoard(4, [
+          { x: 0, y: 0, value: PROBE_VALUE * 2 },
+          { x: 2, y: 0, value: PROBE_VALUE },
+        ]),
+      );
+
+      const mover = new Tile({ x: 1, y: 0 }, PROBE_VALUE);
+      const frosted = new Tile({ x: 0, y: 0 }, PROBE_VALUE * 2);
+
+      // The pair IS a ladder step, so the widening is what would admit it.
+      expect(defaultCanMerge(mover, frosted)).toBe(false);
+      expect(live.merge.canMerge(mover, frosted)).toBe(false);
+
+      // And the widening still works where no frost stands in its way, so the
+      // fix narrows the relic's reach rather than disabling it.
+      const free = new Tile({ x: 3, y: 3 }, PROBE_VALUE * 2);
+
+      expect(live.merge.canMerge(mover, free)).toBe(true);
+    });
+
+    it(`keeps a frozen no-match board terminal under movesAvailable (${label})`, () => {
+      const occupied = noMatchFullBoard();
+      const frozenPair: readonly Position[] = [
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+      ];
+
+      const frosted = composeOrdered(
+        order,
+        frozenPair,
+        composedBoard(4, occupied),
+      );
+      const frostedGrid = new Grid(4, composedBoard(4, occupied).grid.cells);
+
+      // BOTH cells of the pair are frosted, because `movesAvailable` probes all
+      // four directions and would otherwise find the pair from the other side.
+      expect(movesAvailable(frostedGrid, frosted.config)).toBe(false);
+      expect(tileMatchesAvailable(frostedGrid, frosted.config)).toBe(false);
+
+      // The same board with an EMPTY ledger is playable, which is what proves
+      // the refusal above came from the frost and not from the board's shape.
+      const thawed = composeOrdered(order, [], composedBoard(4, occupied));
+      const thawedGrid = new Grid(4, composedBoard(4, occupied).grid.cells);
+
+      expect(tileMatchesAvailable(thawedGrid, thawed.config)).toBe(true);
+      expect(movesAvailable(thawedGrid, thawed.config)).toBe(true);
+    });
+
+    it(`resolves no merge onto the frozen cell through a move (${label})`, () => {
+      const { engine } = composeOrdered(
+        order,
+        [{ x: 0, y: 0 }],
+
+        // Row 0 is frosted at its left edge; row 1 is the control row, identical
+        // in every respect except that no cell of it is frosted.
+        composedBoard(4, [
+          { x: 0, y: 0, value: PROBE_VALUE * 2 },
+          { x: 2, y: 0, value: PROBE_VALUE },
+          { x: 0, y: 1, value: PROBE_VALUE * 2 },
+          { x: 2, y: 1, value: PROBE_VALUE },
+        ]),
+      );
+
+      const merged: { x: number; y: number; value: number }[] = [];
+
+      engine.events.on('tile:merge', (event): void => {
+        merged.push({
+          x: event.target.x,
+          y: event.target.y,
+          value: event.resultValue,
+        });
+      });
+
+      expect(engine.move(3)).toBe(true);
+
+      const cells = engine.serialize().grid.cells;
+
+      // The frozen row: the mover arrived beside the frosted tile and stopped.
+      expect(cells[0]?.[0]?.value).toBe(PROBE_VALUE * 2);
+      expect(cells[1]?.[0]?.value).toBe(PROBE_VALUE);
+
+      // The control row: the same pair, one rung apart, merged.
+      expect(cells[0]?.[1]?.value).toBe(PROBE_VALUE * 4);
+      expect(merged).toEqual([{ x: 0, y: 1, value: PROBE_VALUE * 4 }]);
+    });
+  }
 });

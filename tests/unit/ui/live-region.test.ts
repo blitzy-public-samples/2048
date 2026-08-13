@@ -497,3 +497,223 @@ describe('the assertive region can be blanked on its own', () => {
     }).not.toThrow();
   });
 });
+
+/* ==========================================================================
+ * ADDED: the withdrawal holds against the DEFERRED scheduler (DL-LIVE-07).
+ * Every case above ran its write steps on the spot, so nothing ever sat in the
+ * queue or the outbox across the clear — which is exactly where the verdict was
+ * surviving it.
+ * ========================================================================== */
+
+/** A scheduler whose tasks run only when the test releases them. */
+function createManualScheduler(): {
+  readonly schedule: (callback: () => void) => { cancel(): void };
+  readonly runAll: () => number;
+  readonly outstanding: () => number;
+} {
+  const tasks: (() => void)[] = [];
+
+  return {
+    schedule: (callback): { cancel(): void } => {
+      const entry = (): void => {
+        callback();
+      };
+
+      tasks.push(entry);
+
+      return {
+        cancel: (): void => {
+          const index = tasks.indexOf(entry);
+
+          if (index >= 0) {
+            tasks.splice(index, 1);
+          }
+        },
+      };
+    },
+
+    // Drains until nothing new is scheduled, because one write step schedules
+    // the next.
+    runAll: (): number => {
+      let ran = 0;
+
+      while (tasks.length > 0) {
+        const next = tasks.shift();
+
+        next?.();
+        ran += 1;
+      }
+
+      return ran;
+    },
+
+    outstanding: (): number => tasks.length,
+  };
+}
+
+describe('withdrawing the alert holds against a deferred scheduler', () => {
+  it('never writes a verdict that was queued when the clear arrived', () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    // The run ends, and the screen is left before the queue is flushed: the
+    // verdict is still an ANNOUNCEMENT, not yet an utterance.
+    region.announce(terminal(1234));
+
+    expect(region.pending()).toBe(1);
+
+    region.clearAssertive();
+
+    expect(region.pending()).toBe(0);
+
+    // Everything the announcer had outstanding runs, including the flush the
+    // announcement scheduled. The verdict must not reappear.
+    region.flush();
+    scheduler.runAll();
+
+    expect(assertive?.textContent).toBe('');
+  });
+
+  it('never writes a verdict already composed into a pending utterance', () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    region.announce(terminal(4321));
+    region.flush();
+
+    // Composed and waiting on the write step, which the manual scheduler is
+    // holding: the outbox is where the verdict now is.
+    expect(region.pending()).toBe(1);
+    expect(assertive?.textContent).toBe('');
+
+    region.clearAssertive();
+    scheduler.runAll();
+
+    expect(region.pending()).toBe(0);
+    expect(assertive?.textContent).toBe('');
+  });
+
+  it('resumes the polite batch the withdrawn alert was ahead of', () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const polite = document.querySelector('#live-region');
+    const assertive = document.querySelector('#live-region-assertive');
+
+    // Two lines in one batch: the free text is composed first and the verdict
+    // last, so the verdict is behind a polite utterance in the outbox.
+    region.announceText('Run start.');
+    region.announce(terminal(99));
+    region.flush();
+
+    expect(region.pending()).toBe(2);
+
+    region.clearAssertive();
+    scheduler.runAll();
+
+    // The polite line still speaks — `clear()` would have discarded it — and
+    // the alert region stays empty.
+    expect(polite?.textContent).toBe('Run start.');
+    expect(assertive?.textContent).toBe('');
+    expect(region.pending()).toBe(0);
+  });
+
+  it('leaves an assertive line queued AFTER the clear free to speak', () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+    });
+    const assertive = document.querySelector('#live-region-assertive');
+
+    region.announce(terminal(7));
+    region.clearAssertive();
+
+    // A NEW alert, raised after the withdrawal: the withdrawal is not a mute.
+    region.announceText('The board renderer fell back.', 'assertive');
+    region.flush();
+    scheduler.runAll();
+
+    expect(assertive?.textContent).toBe('The board renderer fell back.');
+  });
+
+  it('cancels the write step it invalidated and reports what it dropped', () => {
+    seedBothRegions();
+
+    const scheduler = createManualScheduler();
+    const reporter = createRecorder();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      schedule: scheduler.schedule,
+      reporter,
+    });
+
+    region.announce(terminal(11));
+    region.announce({ kind: 'text', text: 'Saved again.' });
+    region.flush();
+
+    expect(scheduler.outstanding()).toBeGreaterThan(0);
+
+    region.clearAssertive();
+
+    const cleared = reporter.counts.filter(
+      (entry) => entry.metric === 'ui.liveRegion.assertive.cleared',
+    );
+
+    expect(cleared).toHaveLength(1);
+    expect(cleared[0]?.fields?.queued).toBe(0);
+    expect(cleared[0]?.fields?.pending).toBe(1);
+    expect(cleared[0]?.fields?.restarted).toBe(true);
+
+    scheduler.runAll();
+
+    expect(document.querySelector('#live-region-assertive')?.textContent).toBe(
+      '',
+    );
+    expect(region.pending()).toBe(0);
+  });
+
+  it('counts a withdrawal asked for after destroy as one', () => {
+    seedBothRegions();
+
+    const reporter = createRecorder();
+    const region = announcer({
+      assertiveSelector: '#live-region-assertive',
+      reporter,
+    });
+
+    region.destroy();
+    region.clearAssertive();
+
+    expect(
+      reporter.counts.filter(
+        (entry) => entry.metric === 'ui.liveRegion.assertive.cleared',
+      ),
+    ).toEqual([]);
+    expect(
+      reporter.counts.some(
+        (entry) =>
+          entry.metric === 'ui.liveRegion.afterDestroy' &&
+          entry.fields?.method === 'clearAssertive',
+      ),
+    ).toBe(true);
+  });
+});

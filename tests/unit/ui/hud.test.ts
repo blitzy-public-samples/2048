@@ -1213,24 +1213,38 @@ function recorder(): {
   readonly lines: string[];
   readonly written: { text: string; polarity?: string }[];
   readonly structured: { kind: string; name?: string; rarity?: string }[];
+
+  /**
+   * ADDED: every call in arrival order, so the ORDER of the withdrawal and the
+   * recovery line is assertable — the withdrawal has to come first or the alert
+   * outlives the line saying it is over. DL-HUD-16.
+   */
+  readonly calls: string[];
 } {
   const lines: string[] = [];
   const written: { text: string; polarity?: string }[] = [];
   const structured: { kind: string; name?: string; rarity?: string }[] = [];
+  const calls: string[] = [];
 
   return {
     announcer: {
       announce: (input): void => {
         structured.push({ ...input });
+        calls.push(`announce:${input.kind}`);
       },
       announceText: (text, polarity): void => {
         lines.push(text);
         written.push({ text, polarity });
+        calls.push(`announceText:${polarity ?? 'polite'}`);
+      },
+      clearAssertive: (): void => {
+        calls.push('clearAssertive');
       },
     },
     lines,
     written,
     structured,
+    calls,
   };
 }
 
@@ -2019,6 +2033,182 @@ describe('a run that is no longer reaching storage', () => {
     });
 
     hud.destroy();
+  });
+
+  // ADDED: an `alert` region holds its text until something replaces it, and the
+  // recovery is written to the POLITE region — so the failure has to be
+  // withdrawn, and withdrawn BEFORE the recovery speaks. DL-HUD-16.
+  it('withdraws the assertive failure before announcing the recovery', () => {
+    runFixture();
+
+    const sink = recorder();
+    let status: 'persistent' | 'ephemeral' = 'ephemeral';
+    const hud = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => status,
+      announcer: (): HudAnnouncerPort => sink.announcer,
+    });
+
+    hud.render(commit(10));
+
+    expect(sink.calls).toEqual(['announceText:assertive']);
+
+    status = 'persistent';
+    hud.render(commit(20));
+
+    expect(sink.calls).toEqual([
+      'announceText:assertive',
+      'clearAssertive',
+      'announceText:polite',
+    ]);
+
+    hud.destroy();
+  });
+
+  it('withdraws nothing while the run is still unsaved', () => {
+    runFixture();
+
+    const sink = recorder();
+    const hud = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => 'ephemeral',
+      announcer: (): HudAnnouncerPort => sink.announcer,
+    });
+
+    hud.render(commit(10));
+    hud.render(commit(20));
+
+    // The failure stands, so the alert stands: a withdrawal here would blank the
+    // one line the player needs left readable.
+    expect(sink.calls).toEqual(['announceText:assertive']);
+
+    hud.destroy();
+  });
+
+  it('survives an announcer that offers no withdrawal, and one that raises', () => {
+    runFixture();
+
+    const lines: string[] = [];
+    let status: 'persistent' | 'ephemeral' = 'ephemeral';
+    const withoutWithdrawal = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => status,
+      announcer: (): HudAnnouncerPort => ({
+        announce: (): void => {
+          return;
+        },
+        announceText: (text): void => {
+          lines.push(text);
+        },
+      }),
+    });
+
+    withoutWithdrawal.render(commit(10));
+    status = 'persistent';
+
+    expect(() => {
+      withoutWithdrawal.render(commit(20));
+    }).not.toThrow();
+    expect(lines).toEqual([
+      hudCopy.ephemeralAnnouncement,
+      hudCopy.persistentAnnouncement,
+    ]);
+
+    withoutWithdrawal.destroy();
+
+    status = 'ephemeral';
+
+    const raising = createHud({
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => status,
+      announcer: (): HudAnnouncerPort => ({
+        announce: (): void => {
+          return;
+        },
+        announceText: (text): void => {
+          lines.push(text);
+        },
+        clearAssertive: (): void => {
+          throw new Error('the region would not blank');
+        },
+      }),
+    });
+
+    raising.render(commit(10));
+    status = 'persistent';
+
+    // The recovery still speaks: a withdrawal that raises is reported and the
+    // line it was clearing the way for is still written.
+    expect(() => {
+      raising.render(commit(20));
+    }).not.toThrow();
+    expect(lines.at(-1)).toBe(hudCopy.persistentAnnouncement);
+
+    raising.destroy();
+  });
+
+  // ADDED: the status-only refresh a host calls when the run reports a crossing
+  // AFTER the commit every view has already taken. DL-HUD-17.
+  it('refreshes the status alone, without a commit', () => {
+    const outlets = runFixture();
+    const sink = recorder();
+    let status: 'persistent' | 'ephemeral' = 'persistent';
+    const hud = createHud({
+      scoreContainer: document.querySelector<HTMLElement>('.score-container'),
+      document,
+      persistence: (): 'persistent' | 'ephemeral' => status,
+      announcer: (): HudAnnouncerPort => sink.announcer,
+    });
+
+    hud.render(commit(0));
+    hud.render(commit(10));
+
+    const rendered = hud.readRendered();
+
+    expect(outlets.hudGroup.hasAttribute('data-ephemeral')).toBe(false);
+
+    // The write the run controller performs after the views have taken the
+    // commit is what changes the status, so the refresh is the only thing that
+    // can put it on screen before the NEXT commit.
+    status = 'ephemeral';
+
+    expect(hud.refreshPersistence()).toBe('ephemeral');
+    expect(outlets.hudGroup.getAttribute('data-ephemeral')).toBe('true');
+    expect(
+      outlets.hudGroup.querySelector<HTMLElement>('.hud-ephemeral')?.hidden,
+    ).toBe(false);
+    expect(sink.written).toContainEqual({
+      text: hudCopy.ephemeralAnnouncement,
+      polarity: 'assertive',
+    });
+
+    // Nothing but the status: the snapshot is what the commit left, and the
+    // score outlets are untouched, so the rising `+N` of that commit survives.
+    expect(hud.readRendered()).toEqual(rendered);
+    expect(
+      document.querySelector('.score-container .score-addition')?.textContent,
+    ).toBe('+10');
+
+    // A refresh that finds the same status says nothing a second time.
+    expect(hud.refreshPersistence()).toBe('ephemeral');
+    expect(
+      sink.written.filter(
+        (entry) => entry.text === hudCopy.ephemeralAnnouncement,
+      ),
+    ).toHaveLength(1);
+
+    status = 'persistent';
+
+    expect(hud.refreshPersistence()).toBe('persistent');
+    expect(outlets.hudGroup.hasAttribute('data-ephemeral')).toBe(false);
+    expect(sink.calls.at(-2)).toBe('clearAssertive');
+    expect(sink.calls.at(-1)).toBe('announceText:polite');
+
+    hud.destroy();
+
+    // Every member is safe after teardown, and the refresh reports rather than
+    // writing.
+    expect(hud.refreshPersistence()).toBeNull();
   });
 
   it('leaves nothing behind when the HUD is destroyed', () => {

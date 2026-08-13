@@ -18,11 +18,13 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
+    "lint:styles": "sass --fatal-deprecation=1.102.0 --no-source-map style/main.scss > /dev/null",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
     "test:snapshot": "vitest run --config vitest.snapshot.config.ts",
+    "test:dashboard": "vitest run --config vitest.config.ts tests/unit/observability/dashboard.test.ts",
     "test:e2e": "playwright test --config playwright.config.ts",
-    "e2e:install": "playwright install chromium"
+    "e2e:install": "playwright install --with-deps chromium"
   },
   "dependencies": {
     "three": "0.185.1"

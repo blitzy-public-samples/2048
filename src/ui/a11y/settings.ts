@@ -48,8 +48,8 @@
  *                                                 `deserializePreferences`
  *
  * Decisions: DL-SETTINGS-01, DL-SETTINGS-02, DL-SETTINGS-03, DL-SETTINGS-04,
- * DL-SETTINGS-05, DL-SETTINGS-06, DL-THEME-01, DL-THEME-02
- * (docs/DECISION_LOG.md).
+ * DL-SETTINGS-05, DL-SETTINGS-06, DL-SETTINGS-07, DL-SETTINGS-08, DL-THEME-01,
+ * DL-THEME-02 (docs/DECISION_LOG.md).
  */
 
 import {
@@ -86,6 +86,103 @@ export interface UiReporter {
   log(level: UiReportLevel, message: string, fields?: UiReportFields): void;
   count(metric: string, fields?: UiReportFields): void;
   error(message: string, error: unknown, fields?: UiReportFields): void;
+
+  /**
+   * ADDED: reports a caught value AT A LEVEL THE CALLER CHOOSES.
+   *
+   * `error` above fixes the severity at `error`, so a RECOVERED failure — a
+   * clipboard refusal the selection path carries — had nowhere to send the value
+   * it caught and stringified it into an ordinary field instead. Ordinary fields
+   * are shape-normalised and never sensitivity-redacted, so arbitrary caught
+   * text reached the log buffer and every export of it. This channel carries the
+   * value ITSELF, which the adapter hands to the observability layer's failure
+   * path where redaction and the record budget apply.
+   *
+   * Optional so an existing sink stays valid: `createSafeUiReporter` fills the
+   * gap for one that implements none, and does so WITHOUT copying the caught
+   * value's own text. `InputReporter.failure` of src/input/keymap.ts is the
+   * shape this follows. DL-SETTINGS-07.
+   *
+   * @param level Severity the report is filed at.
+   * @param message Message the report carries.
+   * @param thrown The caught value, passed through unchanged.
+   * @param fields Structured fields, which carry no caught text.
+   */
+  failure?(
+    level: UiReportLevel,
+    message: string,
+    thrown: unknown,
+    fields?: UiReportFields,
+  ): void;
+}
+
+/** Value reported where a caught value offered no usable name. */
+const UNKNOWN_THROWN_NAME = 'unknown';
+
+/**
+ * The shape a caught value's `name` must already have to be reported.
+ *
+ * An error class is an identifier — `TypeError`, `NotAllowedError`,
+ * `QuotaExceededError` — so a `name` that is not one is not a class and is
+ * refused rather than trimmed into something that looks like one. Bounded at 64
+ * characters, which is longer than every name the platform defines.
+ * DL-SETTINGS-08.
+ */
+const THROWN_NAME_PATTERN = /^[A-Za-z_$][\w$]{0,63}$/u;
+
+/**
+ * ADDED: names a caught value in a form that carries no caught text.
+ *
+ * The name of an `Error` — `NotAllowedError`, `SecurityError`, `TypeError` — is
+ * a CLASS, so it says what kind of failure occurred without carrying the
+ * message, the stack or any value the failure was about. It is read through a
+ * guard because a hostile or exotic throwable can define a `name` accessor that
+ * itself throws, and it is accepted only where it ALREADY has the shape of a
+ * class name: a `name` is platform-supplied rather than chosen here, and text
+ * that is not an identifier is refused whole rather than trimmed into something
+ * that reads like one. Anything that is not an object is named by its TYPE alone
+ * and never coerced. DL-SETTINGS-08.
+ *
+ * @param thrown The caught value.
+ * @returns A bounded name, never the value's own message.
+ */
+export function nameThrown(thrown: unknown): string {
+  if (typeof thrown !== 'object' || thrown === null) {
+    return typeof thrown;
+  }
+
+  let read: unknown;
+
+  try {
+    read = (thrown as { name?: unknown }).name;
+  } catch {
+    return UNKNOWN_THROWN_NAME;
+  }
+
+  return typeof read === 'string' && THROWN_NAME_PATTERN.test(read)
+    ? read
+    : UNKNOWN_THROWN_NAME;
+}
+
+/**
+ * ADDED: names the SHAPE of an untrusted value without coercing it.
+ *
+ * `typeof` reads a value's kind without invoking anything on it, so a value with
+ * a hostile `toString` or `Symbol.toPrimitive` is described rather than executed
+ * — and the description carries none of the value's content. `null` and an array
+ * are named apart from the plain objects `typeof` groups them with, because a
+ * loader rejecting a payload is usually rejecting one of those two.
+ * DL-SETTINGS-08.
+ *
+ * @param value Value of unknown provenance.
+ * @returns One bounded word naming its shape.
+ */
+function describeShape(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+
+  return Array.isArray(value) ? 'array' : typeof value;
 }
 
 /**
@@ -102,15 +199,22 @@ export const NOOP_UI_REPORTER: UiReporter = Object.freeze({
   error(): void {
     return;
   },
+
+  // ADDED with the channel above, so the no-op sink implements every member of
+  // the contract rather than falling through the wrapper's gap-filler.
+  failure(): void {
+    return;
+  },
 });
 
 /**
  * Wraps a reporter so no member of it can throw into its caller.
  *
- * A `log`, `count` or `error` that throws is contained at this boundary: the
- * throw reaches neither the resolver, nor a setter, nor a media-query
- * listener, and it is not reported back through the sink that produced it. A
- * reporter that is missing a member is contained on the same path.
+ * A `log`, `count`, `error` or `failure` that throws is contained at this
+ * boundary: the throw reaches neither the resolver, nor a setter, nor a
+ * media-query listener, and it is not reported back through the sink that
+ * produced it. A reporter that is missing a member is contained on the same
+ * path.
  *
  * Every entry point in this module wraps its reporter here once before using
  * it.
@@ -142,6 +246,39 @@ export function createSafeUiReporter(reporter: UiReporter): UiReporter {
     error(message: string, error: unknown, fields?: UiReportFields): void {
       try {
         reporter.error(message, error, fields);
+      } catch {
+        return;
+      }
+    },
+
+    // ADDED: the level-preserving failure channel, with the gap-filler for a
+    // sink that implements none. The fallback reports the caught value's NAME
+    // and nothing else: copying its message here would put arbitrary caught
+    // text into an ordinary field, which is the leak this channel exists to
+    // close. DL-SETTINGS-07.
+    failure(
+      level: UiReportLevel,
+      message: string,
+      thrown: unknown,
+      fields?: UiReportFields,
+    ): void {
+      const report = reporter.failure;
+
+      if (report !== undefined) {
+        try {
+          report.call(reporter, level, message, thrown, fields);
+        } catch {
+          return;
+        }
+
+        return;
+      }
+
+      try {
+        reporter.log(level, message, {
+          ...(fields ?? {}),
+          errorName: nameThrown(thrown),
+        });
       } catch {
         return;
       }
@@ -1020,9 +1157,18 @@ export function deserializePreferences(
   // payload written by a build this one does not know may spell a field the
   // same way and mean something else by it.
   if (version !== PREFERENCES_SCHEMA_VERSION) {
+    // CHANGED: an unrecognised version is reported by its TYPE, where it used to
+    // be reported as `String(version)`. The value comes from storage, so it is
+    // untrusted on two counts: its text is content this report has no business
+    // disclosing into the log buffer and every export of it, and the coercion
+    // itself ran BEFORE the safe reporter boundary below, so an injected object
+    // with a hostile `toString` or `Symbol.toPrimitive` threw out of the loader
+    // that promises never to throw. A number is kept as it is: a version number
+    // is bounded, is not content, and is the one form this branch can act on.
+    // DL-SETTINGS-08.
     sink.log('warn', 'stored preferences carried an unreadable version', {
       expected: PREFERENCES_SCHEMA_VERSION,
-      received: typeof version === 'number' ? version : String(version),
+      received: typeof version === 'number' ? version : describeShape(version),
     });
     sink.count('ui.preferences.payload_rejected', { cause: 'version' });
 

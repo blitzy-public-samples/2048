@@ -80,6 +80,10 @@
 //   DL-SUMMARY-12  `lastSummary()` outranking `summary()` on this screen
 //   DL-SUMMARY-14  the error severity moved from the clipboard refusal to the
 //                  failure of both copy tiers
+//   DL-SUMMARY-15  the published snapshot revised as the copy state changes
+//   DL-SUMMARY-16  the copy control's busy mark released unconditionally
+//   DL-SUMMARY-17  the clipboard rejection carried on the failure channel, with
+//                  its class rather than its text in the field beside it
 //   DL-A11Y-06     the seed value's monospace treatment
 //   DL-A11Y-07     the copy confirmation delivered as text
 
@@ -104,6 +108,7 @@ import type { PreferenceStore, UiReporter } from '../a11y/settings';
 import {
   NOOP_UI_REPORTER,
   createSafeUiReporter,
+  nameThrown,
   resolveMount,
 } from '../a11y/settings';
 import type { RelicCard } from '../components/relic-card';
@@ -243,31 +248,6 @@ const SEED_MISSING_METRIC = 'ui.runSummary.seed_missing';
 
 /** Counter raised per copy attempt, carrying the outcome and the path. */
 const COPY_METRIC = 'ui.runSummary.seed_copy';
-
-/**
- * ADDED: renders a caught value as one reportable string.
- *
- * The clipboard refusal is reported at `warn`, and `warn` carries no error
- * object, so the value's own message has to travel as a field or be lost — and
- * losing it is what makes a recovered failure undiagnosable. Total: it throws
- * for no input and answers for a value carrying no message at all.
- * DL-SUMMARY-14.
- */
-const describeThrown = (value: unknown): string => {
-  if (typeof value === 'string') {
-    return value;
-  }
-
-  if (value instanceof Error && value.message.length > 0) {
-    return `${value.name}: ${value.message}`;
-  }
-
-  try {
-    return String(value);
-  } catch {
-    return 'unreadable thrown value';
-  }
-};
 
 /** Counter raised per relic identifier the catalogue does not carry. */
 const RELIC_UNKNOWN_METRIC = 'ui.runSummary.relic_unknown';
@@ -1452,6 +1432,15 @@ export function createRunSummaryScreen(
   const setCopyState = (next: RunSummaryCopyState): void => {
     copyState = next;
 
+    // ADDED: the published snapshot carries this member, and it was frozen at
+    // `render()` and never revised — so `snapshot().copyState` read `'idle'`
+    // while the panel's own attribute and the status line both said `'copied'`
+    // or `'failed'`. Anything reading the snapshot rather than the DOM was told
+    // the copy had not happened. DL-SUMMARY-15.
+    if (snapshot !== null) {
+      snapshot = Object.freeze({ ...snapshot, copyState: next });
+    }
+
     if (panel !== null) {
       panel.setAttribute(runSummaryAttributes.copyState, next);
     }
@@ -1692,17 +1681,27 @@ export function createRunSummaryScreen(
           // The refusal is reported and the selection path below is taken.
           // Decision DL-SUMMARY-05.
           //
-          // CHANGED: reported at `warn`, where it used to be reported at
-          // `error`. A clipboard refusal is the ORDINARY outcome outside a
-          // secure context or without the permission, and it is recovered from
-          // by the selection path immediately below — so an error severity
-          // claimed a failure the feature had already survived. The error's own
-          // message is carried in a field, because `warn` takes no error object;
-          // the tier-2 failure below is where the error severity now belongs.
-          // DL-SUMMARY-14.
-          reporter.log('warn', 'the clipboard refused the seed', {
+          // Reported at `warn`, not at `error`: a clipboard refusal is the
+          // ORDINARY outcome outside a secure context or without the
+          // permission, and it is recovered from by the selection path
+          // immediately below, so an error severity claimed a failure the
+          // feature had already survived. The tier-2 failure below is where the
+          // error severity belongs. DL-SUMMARY-14.
+          //
+          // CHANGED: the rejection travels through the FAILURE CHANNEL as the
+          // value it is, and the field beside it carries the rejection's CLASS
+          // rather than its text. The field used to carry
+          // `Error.name: Error.message`, or `String(value)` for a non-`Error`
+          // — arbitrary text supplied by a browser implementation or by an
+          // injected rejection, in an ordinary field that is shape-normalised
+          // and never sensitivity-redacted, retained in the log buffer and
+          // downloadable with the diagnostics snapshot. The channel hands the
+          // value itself to the observability layer's failure path, where
+          // redaction and the record budget apply to it, and the severity is
+          // still this caller's own. DL-SUMMARY-15.
+          reporter.failure?.('warn', 'the clipboard refused the seed', error, {
             context: REPORT_CONTEXT,
-            reason: describeThrown(error),
+            reason: nameThrown(error),
           });
 
           if (stale()) {
@@ -1757,10 +1756,16 @@ export function createRunSummaryScreen(
     } finally {
       copyInFlight = false;
 
-      // The busy mark comes off only for the visit that made the attempt.
-      if (!stale()) {
-        setCopyControlBusy(false);
-      }
+      // CHANGED: the busy mark comes off ALWAYS. It came off only for the visit
+      // that made the attempt, so a seed updated — or the screen left or
+      // destroyed — while a write was in flight left `aria-disabled` on the
+      // control for the rest of the page's life: assistive technology read the
+      // one control on this screen as permanently unavailable, and no later
+      // press could clear it because `copyInFlight` was already false.
+      // Releasing unconditionally is safe precisely because `copyInFlight`
+      // serialises attempts: there is never a second in-flight write whose
+      // busy mark this could be taking off. DL-SUMMARY-16.
+      setCopyControlBusy(false);
     }
   };
 

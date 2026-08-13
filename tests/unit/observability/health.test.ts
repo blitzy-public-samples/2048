@@ -742,7 +742,13 @@ describe('storage', () => {
       expect(writes).toEqual([]);
     });
 
-    it('reads the probe result alone where the reader raises', () => {
+    // CHANGED: this case used to assert `PASS`. The reader's throw was
+    // discarded and the construction-time probe result stood alone, so the row
+    // an operator trusts most stayed green — and readiness stayed
+    // `persistent`/`ready` — while the live verdict path was broken. A reader
+    // that answered NOTHING is not evidence that the store is writable.
+    // DL-HEALTH-09.
+    it('fails the check where the reader raises, and says why', () => {
       const live = createHealthSurface({
         logger,
         metrics,
@@ -752,11 +758,63 @@ describe('storage', () => {
       });
       const result = live.checkOne(STORAGE);
 
-      // Contained: a reader that raises is a reader that answered nothing, not a
-      // storage failure of its own.
-      expect(result.status).toBe(PASS);
-      expect(readData(result, 'live')).toBeUndefined();
+      expect(result.status).toBe(FAIL);
+      expect(result.detail).toContain('could not be read');
+
+      // Named as the READER's fault, not as a refusal the reader reported:
+      // there was no verdict to report.
+      expect(readData(result, 'liveReaderFailed')).toBe(true);
+      expect(readData(result, 'live')).toBe(false);
+      expect(readData(result, 'liveFailure')).toBeUndefined();
+
+      // The probe's own account of the store survives beside the failure, so
+      // the strategy the readiness verdicts read is still the real one.
+      expect(readData(result, 'strategy')).toBe('localStorage');
+
+      // Serialised onto the result, so the value the reader threw is kept.
+      expect(result.error?.name).toBe('Error');
+      expect(result.error?.message).toContain('the reader exploded');
+
+      // Contained all the same: the throw reached no caller, and the fault is
+      // still counted where it always was.
       expect(live.reporterFaults).toBeGreaterThan(0);
+    });
+
+    it('reports that failure on the gauge, the record and readiness', () => {
+      const live = createHealthSurface({
+        logger,
+        metrics,
+        webglProbe: (): WebGLProbeView => ({
+          supported: true,
+          level: 'webgl2',
+        }),
+        storageLiveFailure: (): string => {
+          throw new Error('the reader exploded');
+        },
+      });
+      const verdicts = live.readiness();
+
+      // The readiness half: a store that cannot be reported as writable is not
+      // a store a run persists to. DL-HEALTH-09.
+      expect(verdicts.storageStatus).toBe(FAIL);
+      expect(verdicts.storage).toBe('ephemeral');
+      expect(verdicts.ready).toBe(false);
+
+      // The renderer half is untouched, so the pair degrades on the storage
+      // side alone rather than collapsing wholesale.
+      expect(verdicts.mayMountWebGLRenderer).toBe(true);
+      expect(verdicts.renderer).toBe('webgl');
+      expect(verdicts.storageStrategy).toBe('localStorage');
+
+      expect(readHealthGauges(metrics).get(STORAGE)).toBe(
+        HEALTH_GAUGE_VALUES[FAIL],
+      );
+
+      const record = readCheckRecords(logger).get(STORAGE);
+
+      expect(record?.level).toBe('warn');
+      expect(record?.fields?.status).toBe(FAIL);
+      expect(record?.error?.message).toContain('the reader exploded');
     });
 
     it('answers from the probe alone where no reader was supplied', () => {

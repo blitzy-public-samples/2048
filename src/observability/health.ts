@@ -339,6 +339,11 @@ export type StorageProbe = () => StorageProbeView;
  * Answers the reason writes are being refused as this check runs, or `null`
  * where they are not. Read at check time and never cached, so a store that
  * recovers reports `pass` again on the next check. DL-HEALTH-08.
+ *
+ * A reader that THROWS answers nothing, and the check fails on it: the throw is
+ * contained, serialised onto the result and reported, and the store is not
+ * reported as writable on the strength of a boot-time probe alone.
+ * DL-HEALTH-09.
  */
 export type StorageLiveFailureReader = () => string | null;
 
@@ -538,14 +543,33 @@ interface ProbeOutcome {
   readonly status: HealthStatus;
   readonly detail: string;
   readonly data: HealthCheckData;
+
+  /**
+   * ADDED: the value a reader this probe consulted threw, where one threw.
+   *
+   * Present means the outcome beside it is the account of a FAULT rather than
+   * of a capability, so `evaluate` serialises the value onto the result and
+   * reports the check through the failure channel. A wrapper rather than a bare
+   * member because a thrown `undefined` is a value a reader can throw.
+   * DL-HEALTH-09.
+   */
+  readonly contained?: ContainedThrow;
+}
+
+/** One value a probe's reader threw and this module contained. */
+interface ContainedThrow {
+  readonly thrown: unknown;
 }
 
 function outcome(
   status: HealthStatus,
   detail: string,
   data: HealthCheckData,
+  contained?: ContainedThrow,
 ): ProbeOutcome {
-  return { status, detail, data };
+  return contained === undefined
+    ? { status, detail, data }
+    : { status, detail, data, contained };
 }
 
 /**
@@ -689,16 +713,39 @@ function probePointerEvents(probe: PointerFamilyProbe): ProbeOutcome {
 }
 
 /**
+ * ADDED: what the live-verdict reader answered, as one value.
+ *
+ * `failure` is the reason writes are being refused now, or `null`. `contained`
+ * is present only where the reader THREW, and a verdict carrying it names no
+ * failure of its own — the reader answered nothing, and answering nothing about
+ * a store cannot be reported as a store that is writable. DL-HEALTH-09.
+ */
+interface LiveStorageVerdict {
+  readonly failure: string | null;
+  readonly contained?: ContainedThrow;
+}
+
+/**
+ * Detail the `storage` check reports where its live-verdict reader threw.
+ * DL-HEALTH-09.
+ */
+const LIVE_STORAGE_UNREADABLE_DETAIL =
+  'The live storage verdict could not be read, so whether writes are being ' +
+  'refused is unknown.';
+
+/**
  * Check 5, `storage`.
  *
  * @param view The probe result and the live strategy.
+ * @param verdict What the live-verdict reader answered.
  * @returns `'pass'` where a store is in use, `'fail'` where the probe caught
- *   a throw, and `'not-applicable'` where no global store exists at all, which
+ *   a throw, where the live verdict names a refusal or where the live reader
+ *   threw, and `'not-applicable'` where no global store exists at all, which
  *   the probe reports as an unsupported result carrying no error.
  */
 function evaluateStorage(
   view: StorageStateView,
-  liveFailure: string | null,
+  verdict: LiveStorageVerdict,
 ): ProbeOutcome {
   const probeResult = view.probe;
   const error = probeResult.error;
@@ -713,7 +760,23 @@ function evaluateStorage(
     data.quotaExceeded = error.quota === true;
   }
 
-  // ADDED, and evaluated FIRST: the live verdict outranks the probe result.
+  // CHANGED: a reader that THREW now fails the check, where it used to leave
+  // the probe result standing alone. Evaluated before the refusal below,
+  // because a reader that threw named no refusal to report. The probe's own
+  // account of the store is kept in the data beside it, so the strategy the
+  // readiness verdicts read is still the real one, and the thrown value travels
+  // on the outcome for `evaluate` to serialise and report. DL-HEALTH-09.
+  const contained = verdict.contained;
+
+  if (contained !== undefined) {
+    data.liveReaderFailed = true;
+    data.live = false;
+
+    return outcome('fail', LIVE_STORAGE_UNREADABLE_DETAIL, data, contained);
+  }
+
+  // ADDED, and evaluated FIRST among the probe branches: the live verdict
+  // outranks the probe result.
   //
   // The probe describes the store as it was at construction, and the branches
   // below all read that description. A caller reporting refused writes NOW is
@@ -722,13 +785,13 @@ function evaluateStorage(
   // operator trusts most was green at exactly the moment it should not have
   // been. The detail names the live cause, and the probe's own account of the
   // store is kept in the data beside it. DL-HEALTH-08.
-  if (isNonEmptyString(liveFailure)) {
-    data.liveFailure = liveFailure;
+  if (isNonEmptyString(verdict.failure)) {
+    data.liveFailure = verdict.failure;
     data.live = true;
 
     return outcome(
       'fail',
-      asSentence(`Web Storage is refusing writes: ${liveFailure}`),
+      asSentence(`Web Storage is refusing writes: ${verdict.failure}`),
       data,
     );
   }
@@ -947,7 +1010,11 @@ const UNKNOWN_CHECK_SOURCE: HealthCheckSource = Object.freeze({
   disposition: 'added',
 });
 
-/** One evaluated check, and the value its probe threw if it threw. */
+/**
+ * One evaluated check, and the value that was thrown if anything was: the
+ * probe's own throw, or one a reader it consulted raised and it contained.
+ * DL-HEALTH-09.
+ */
 interface EvaluatedCheck {
   readonly result: HealthCheckResult;
 
@@ -1294,7 +1361,8 @@ export class HealthSurface {
    *
    * @param id Check to run.
    * @param refresh Whether the held Web Storage result is discarded first.
-   * @returns The result, and the value the probe threw if it threw.
+   * @returns The result, and the value that was thrown if anything was —
+   *   whether the probe itself threw or it contained a reader's throw.
    */
   private evaluate(id: HealthCheckId, refresh: boolean): EvaluatedCheck {
     const source = HEALTH_CHECK_SOURCES[id] ?? UNKNOWN_CHECK_SOURCE;
@@ -1302,6 +1370,7 @@ export class HealthSurface {
 
     try {
       const probed = this.runProbe(id, refresh);
+      const contained = probed.contained;
       const result: HealthCheckResult = {
         id,
         status: probed.status,
@@ -1309,13 +1378,28 @@ export class HealthSurface {
         data: Object.freeze({ ...probed.data }),
         source,
         durationMs: elapsedSince(startedAt),
+
+        // ADDED: a probe that CONTAINED a throw carries it here, so a fault a
+        // reader raised is serialised onto the result exactly as one raised by
+        // the probe itself is. DL-HEALTH-09.
+        ...(contained === undefined
+          ? {}
+          : { error: serializeError(contained.thrown) }),
       };
 
-      return {
-        result: Object.freeze(result),
-        thrown: undefined,
-        hasThrown: false,
-      };
+      // ADDED: reported through the failure channel where a throw was
+      // contained, which is what carries the value to the logger.
+      return contained === undefined
+        ? {
+            result: Object.freeze(result),
+            thrown: undefined,
+            hasThrown: false,
+          }
+        : {
+            result: Object.freeze(result),
+            thrown: contained.thrown,
+            hasThrown: true,
+          };
     } catch (error) {
       const result: HealthCheckResult = {
         id,
@@ -1351,7 +1435,7 @@ export class HealthSurface {
       case 'storage':
         return evaluateStorage(
           this.resolveStorageState(refresh),
-          this.readLiveStorageFailure(),
+          this.readLiveStorageVerdict(),
         );
       case 'webgl':
         return evaluateWebGL(this.webglProbe);
@@ -1362,23 +1446,30 @@ export class HealthSurface {
 
   /**
    * ADDED: reads the live storage verdict inside a no-throw boundary.
-   *
-   * A reader that raises is contained here rather than failing the check for a
-   * reason of its own: the probe result is then the only account of the store,
-   * which is the behaviour of a surface that was given no reader at all.
    * DL-HEALTH-08.
    *
-   * @returns The reason writes are being refused now, or `null`.
+   * CHANGED: a reader that raises is still contained here — the throw reaches
+   * neither `check` nor its caller — but it is now REPORTED AS A FAULT OF THE
+   * CHECK rather than discarded: the returned verdict carries the thrown value,
+   * `evaluateStorage` fails the check on it, and `evaluate` serialises and
+   * reports it. The fault count is still raised, so a reader that fails
+   * repeatedly is visible on `reporterFaults` as well as on the check.
+   * DL-HEALTH-09.
+   *
+   * @returns The reason writes are being refused now, or the value the reader
+   *   threw.
    */
-  private readLiveStorageFailure(): string | null {
+  private readLiveStorageVerdict(): LiveStorageVerdict {
     try {
       const read = this.storageLiveFailure();
 
-      return typeof read === 'string' && read.length > 0 ? read : null;
-    } catch {
+      return {
+        failure: typeof read === 'string' && read.length > 0 ? read : null,
+      };
+    } catch (error) {
       this.faultCount += 1;
 
-      return null;
+      return { failure: null, contained: { thrown: error } };
     }
   }
 

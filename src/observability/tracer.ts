@@ -33,7 +33,8 @@
 //
 // Decisions: DL-TRACE-01, DL-TRACE-02, DL-TRACE-03, DL-TRACE-04, DL-TRACE-05,
 // DL-TRACE-06, DL-TRACE-07, DL-TRACE-08, DL-TRACE-09, DL-TRACE-10,
-// DL-TRACE-11, DL-TRACE-12, DL-TRACE-13 (docs/DECISION_LOG.md).
+// DL-TRACE-11, DL-TRACE-12, DL-TRACE-13, DL-TRACE-14, DL-TRACE-15,
+// DL-TRACE-16 (docs/DECISION_LOG.md).
 
 import type {
   EngineEventListener,
@@ -166,6 +167,12 @@ export const SPAN_ATTRIBUTES = Object.freeze({
 
   /** Commits the turn observed: one for a turn, two where a stage resolved. */
   commits: 'commits',
+
+  /**
+   * ADDED: which part of a frame threw, on a `render.frame` span that closed
+   * over a contained failure. DL-TRACE-14.
+   */
+  failureSource: 'failureSource',
 } as const);
 
 /**
@@ -238,6 +245,18 @@ export interface FinalMoveResult {
   readonly resolution: FinalMoveResolution;
 
   /**
+   * ADDED: the direction the move RESOLVED in, as `MoveAttempt.resolvedDirection`
+   * of src/engine/engine.ts reports it.
+   *
+   * An `onBeforeMove` handler may redirect a move, and the turn span's
+   * `direction` attribute was set from the direction the caller ASKED for — read
+   * at the tracer's own `move:before` listener, before the hook dispatch that
+   * can change it. Optional, because a caller holding the resolution alone still
+   * reports the path it took. DL-TRACE-16.
+   */
+  readonly resolvedDirection?: number;
+
+  /**
    * Whether the attempt committed state, as `MoveAttempt.committed` of
    * src/engine/engine.ts reports it.
    *
@@ -292,6 +311,12 @@ function moveSpanOutcome(result: FinalMoveResult): SpanOutcome {
     ? SPAN_OUTCOMES.effect
     : MOVE_SPAN_OUTCOMES[result.resolution];
 }
+
+/**
+ * ADDED: named on a `render.frame` span whose failure arrived without one.
+ * DL-TRACE-14.
+ */
+const UNNAMED_FRAME_FAILURE = 'unnamed';
 
 /**
  * The value `settledStageIndex` carries while no closed stage span is
@@ -861,12 +886,38 @@ export interface EngineTracingSubscription {
 }
 
 /**
- * The `onFrameBegin`/`onFrameEnd` pair src/render/render-loop.ts accepts,
- * filled by `Tracer.frameLifecycleHooks`.
+ * ADDED: what `onFrameError` reads off one failure a frame contained.
+ *
+ * Structural and every member optional, so `FrameFailure` of
+ * src/render/render-loop.ts satisfies it without this module importing the
+ * render layer — the same one-way independence the rest of these hooks keep.
+ * DL-TRACE-14.
+ */
+export interface FrameFailureView {
+  /** Which part of the frame threw: a hook, or a registered callback. */
+  readonly source?: string;
+
+  /** The value that was thrown, unconverted. */
+  readonly thrown?: unknown;
+}
+
+/**
+ * The `onFrameBegin`/`onFrameEnd`/`onFrameError` triple
+ * src/render/render-loop.ts accepts, filled by `Tracer.frameLifecycleHooks`.
  */
 export interface FrameLifecycleHooks {
   readonly onFrameBegin: (context?: unknown) => void;
   readonly onFrameEnd: (context: unknown, durationMs: number) => void;
+
+  /**
+   * ADDED: marks the open frame span as the failure it was.
+   *
+   * The loop CONTAINS a throw from its begin hook, from a registered callback
+   * and from its end hook, so without this channel the pair above was told the
+   * frame began and ended and never that anything inside it failed — and a
+   * contained failure closed a span that read as a clean frame. DL-TRACE-14.
+   */
+  readonly onFrameError: (context: unknown, failure: FrameFailureView) => void;
 }
 
 /**
@@ -1460,6 +1511,13 @@ export class Tracer {
 
   private pendingFrameStart = 0;
 
+  /**
+   * ADDED: whether the open frame contained a failure. Read and cleared as that
+   * frame's span closes; the source itself is written onto the span as the
+   * failure is announced, so it survives however the span closes. DL-TRACE-14.
+   */
+  private pendingFrameFailed = false;
+
   constructor(options: TracerOptions) {
     this.logger = options.logger.child(TRACER_SUBSYSTEM);
     this.metrics = options.metrics;
@@ -1960,6 +2018,7 @@ export class Tracer {
     this.unstacked.clear();
     this.pendingFrameSpan = undefined;
     this.pendingFrameStart = 0;
+    this.pendingFrameFailed = false;
     this.nextIndex = 0;
     this.stored = 0;
     this.dropped = 0;
@@ -2114,6 +2173,48 @@ export class Tracer {
 
         this.pendingFrameSpan = span instanceof LiveSpan ? span : undefined;
         this.pendingFrameStart = readNow();
+
+        // ADDED: a new frame carries no failure until one is announced, and a
+        // superseded frame's mark must not be read onto its successor.
+        // DL-TRACE-14.
+        this.pendingFrameFailed = false;
+      },
+
+      // ADDED: the failure channel. The error is recorded on the OPEN span, so
+      // it closes as the failure it was; `recordError` serialises the value
+      // through the logger's redacting path and writes the `failed` attribute.
+      // Nothing is logged from here: the loop reports every throw it contains
+      // through its own sink, and a second record of one event is what
+      // DL-STORE-08 exists to avoid. DL-TRACE-14.
+      onFrameError: (_context: unknown, failure: FrameFailureView): void => {
+        const span = this.pendingFrameSpan;
+
+        if (span === undefined) {
+          if (this.enabled) {
+            this.reportAnomaly('frame failed with no frame span open', {
+              frame: this.frames + 1,
+            });
+          }
+
+          return;
+        }
+
+        const read: FrameFailureView =
+          typeof failure === 'object' && failure !== null ? failure : {};
+        const source = read.source;
+
+        this.pendingFrameFailed = true;
+
+        // Written NOW rather than at the close, so a frame whose end hook threw
+        // — and whose span the next frame therefore supersedes — still names
+        // what failed inside it.
+        span.setAttribute(
+          SPAN_ATTRIBUTES.failureSource,
+          typeof source === 'string' && source.length > 0
+            ? source
+            : UNNAMED_FRAME_FAILURE,
+        );
+        span.recordError(read.thrown);
       },
       onFrameEnd: (_context: unknown, durationMs: number): void => {
         const span = this.pendingFrameSpan;
@@ -2133,6 +2234,12 @@ export class Tracer {
         const frame = this.frames + 1;
         const overBudget = measured > this.frameBudgetMs;
 
+        // ADDED: read and cleared here, so the mark belongs to the frame that
+        // is closing and to no later one. DL-TRACE-14.
+        const failed = this.pendingFrameFailed;
+
+        this.pendingFrameFailed = false;
+
         this.recordFrameSample(measured, overBudget);
 
         if (span === undefined) {
@@ -2141,7 +2248,7 @@ export class Tracer {
           return;
         }
 
-        this.endFrameSpan(span, frame, measured, overBudget);
+        this.endFrameSpan(span, frame, measured, overBudget, failed);
       },
     });
   }
@@ -2151,11 +2258,18 @@ export class Tracer {
     frame: number,
     durationMs: number,
     overBudget: boolean,
+    failed = false,
   ): void {
     const attributes: SpanAttributes = {
       [SPAN_ATTRIBUTES.frame]: frame,
       [SPAN_ATTRIBUTES.overBudget]: overBudget,
       [SPAN_ATTRIBUTES.budgetMs]: this.frameBudgetMs,
+
+      // ADDED: a frame that contained a failure closes under the failed
+      // outcome. The part of the frame that threw is already on the span, from
+      // the announcement. A frame that contained no failure closes exactly as it
+      // did before. DL-TRACE-14.
+      ...(failed ? { [SPAN_ATTRIBUTES.outcome]: SPAN_OUTCOMES.failed } : {}),
     };
 
     if (span instanceof LiveSpan) {
@@ -2654,6 +2768,16 @@ export function attachEngineTracing(
         // No earlier idle turn's commit can be accounted for once a new turn
         // has begun.
         idleTurnNumber = null;
+
+        // CHANGED: the per-turn tallies are cleared HERE as well as at the
+        // close. `endTurn` clears them, so a turn that closed left them at
+        // zero — but an emission that arrived with NO turn span open never
+        // reached a close, and the engine emits `tile:spawn` twice while
+        // `setup()` opens the board. Those two lifecycle spawns were then
+        // written onto the first real turn's `spawns` attribute, which is the
+        // one turn a reader is most likely to look at. DL-TRACE-15.
+        merges = 0;
+        spawns = 0;
         turnStart = readNow();
         turnSpan = tracer.startSpan(SPAN_NAMES.engineTurn, {
           attributes: {
@@ -2680,9 +2804,12 @@ export function attachEngineTracing(
     events.on(
       'tile:merge',
       guarded('tile:merge', (payload): void => {
-        merges += 1;
-
+        // CHANGED: counted only while a turn span is open, so the tally is a
+        // per-TURN figure rather than a running total that the next turn to open
+        // inherits. The span event beside it was already conditional on the same
+        // thing. DL-TRACE-15.
         if (turnSpan !== undefined) {
+          merges += 1;
           turnSpan.addEvent(SPAN_EVENT_NAMES.merge, {
             [SPAN_ATTRIBUTES.resultValue]: payload.resultValue,
             [SPAN_ATTRIBUTES.scoreDelta]: payload.scoreDelta,
@@ -2696,9 +2823,15 @@ export function attachEngineTracing(
     events.on(
       'tile:spawn',
       guarded('tile:spawn', (payload): void => {
-        spawns += 1;
-
+        // CHANGED: counted only while a turn span is open. `setup()`, `restart()`
+        // and `startStage()` each open a board by spawning the configured start
+        // tiles OUTSIDE any turn, and tracing is attached before the first board
+        // opens, so those spawns used to be carried into the first turn's
+        // `spawns` attribute. The per-emission `spawns_total` counter of
+        // src/observability/metrics.ts still counts every spawn, turn or not,
+        // and is where a lifecycle spawn belongs. DL-TRACE-15.
         if (turnSpan !== undefined) {
+          spawns += 1;
           turnSpan.addEvent(SPAN_EVENT_NAMES.spawn, {
             [SPAN_ATTRIBUTES.value]: payload.value,
             [SPAN_ATTRIBUTES.inserted]: payload.position !== undefined,
@@ -2953,6 +3086,34 @@ export function attachEngineTracing(
     endStage(SPAN_OUTCOMES.detached);
   };
 
+  /**
+   * ADDED: writes the attempt's own account of the turn onto the open span.
+   *
+   * Called from `settleMove` alone, before the close, and does nothing where no
+   * span is open — a committed turn closed its own span, and a blocked move
+   * opened none. DL-TRACE-16.
+   *
+   * @param result The attempt's outcome as its caller reports it.
+   */
+  const reconcileTurnAttributes = (result: FinalMoveResult): void => {
+    const span = turnSpan;
+
+    if (span === undefined) {
+      return;
+    }
+
+    span.setAttribute(
+      SPAN_ATTRIBUTES.cancelled,
+      result.resolution === 'cancelled',
+    );
+
+    const resolved = result.resolvedDirection;
+
+    if (typeof resolved === 'number' && Number.isFinite(resolved)) {
+      span.setAttribute(SPAN_ATTRIBUTES.direction, resolved);
+    }
+  };
+
   // THE ONE CLOSER. Both members below reach it, so an idle turn is closed the
   // same way whichever a caller holds. Reported as `unmoved` by default, the
   // outcome an idle turn already has, so the turn-latency histogram records
@@ -2972,6 +3133,19 @@ export function attachEngineTracing(
   // The outcome of A WHOLE ATTEMPT, not of the boolean it projects to, and
   // `effect` where that attempt committed without moving.
   const settleMove = (result: FinalMoveResult): boolean => {
+    // ADDED: the two attributes the ATTEMPT is the authority for are reconciled
+    // before the span closes.
+    //
+    // Both were written at this subscription's own `move:before` turn, from the
+    // payload as it stood THEN: the engine dispatches `onBeforeMove` afterwards
+    // and adopts whatever veto and redirection those handlers cast, so a turn
+    // withdrawn by a handler — or by a listener registered after this one —
+    // closed under `outcome="cancelled"` while still carrying
+    // `cancelled=false`, and a redirected turn named the direction the player
+    // asked for rather than the one that resolved. A span that contradicts
+    // itself is worse than one that says less. DL-TRACE-16.
+    reconcileTurnAttributes(result);
+
     const closed = settleTurn(moveSpanOutcome(result));
 
     // THE WITHDRAWN EFFECT-ONLY TURN, ACCOUNTED FOR. Its commit reached the

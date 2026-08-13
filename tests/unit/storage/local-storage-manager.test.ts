@@ -691,6 +691,7 @@ describe('probeWebStorage() — the reused capability probe (L29-L40)', () => {
         name: quota.name,
         message: 'Storage is full; the operation was refused.',
         quota: true,
+        parse: false,
       },
 
       // The failure channel carries the original alongside the description, so
@@ -916,6 +917,7 @@ describe('write failure paths (L47-L49, L57-L59)', () => {
         name: quota.name,
         message: 'Storage is full; the operation was refused.',
         quota: true,
+        parse: false,
       },
       thrown: quota,
     });
@@ -1048,6 +1050,7 @@ describe('clearGameState() (L61-L63)', () => {
         name: denied.name,
         message: 'Storage refused the operation.',
         quota: false,
+        parse: false,
       },
       thrown: denied,
     });
@@ -1224,6 +1227,7 @@ describe('generic namespaced API — the run-state persistence port', () => {
         name: quota.name,
         message: 'Storage is full; the operation was refused.',
         quota: true,
+        parse: false,
       },
       thrown: quota,
     });
@@ -1249,6 +1253,7 @@ describe('generic namespaced API — the run-state persistence port', () => {
         name: denied.name,
         message: 'Storage refused the operation.',
         quota: false,
+        parse: false,
       },
       thrown: denied,
     });
@@ -1277,6 +1282,7 @@ describe('reporter fault containment (reporterFaults)', () => {
       name: 'StorageError',
       message: 'Unknown storage error.',
       quota: false,
+      parse: false,
     });
     expect(manager.lastReporterFault?.message).not.toBe(fault.message);
   });
@@ -1609,5 +1615,224 @@ describe('writeJson refuses a value that cannot be serialised', () => {
         ok: true,
       },
     ]);
+  });
+});
+
+/**
+ * ADDED: parse provenance is CARRIED, not inferred from the error's name.
+ *
+ * `JSON.parse` is not the only source of a `SyntaxError` this adapter can
+ * catch. A `toJSON` member raises one during serialisation, and an injected or
+ * hostile store member can raise one during a write, a probe or a removal.
+ * Each of those is an operation that FAILED, and describing it as "The stored
+ * value is not valid JSON; it was ignored." named an event that never happened
+ * and, in the composition root, demoted a lost write to a recovered read.
+ *
+ * Every case below therefore fixes both halves of the classification: the
+ * `parse` tag and the message that follows from it. DL-STORE-09.
+ */
+describe('SyntaxError provenance — parse tag over error name', () => {
+  /** A `SyntaxError` from somewhere that is not the stored-text parse. */
+  function createSyntaxFault(): SyntaxError {
+    return new SyntaxError('Unexpected token in a hostile store member.');
+  }
+
+  it('tags the stored-text parse, the one true parse failure', () => {
+    const store = new InstrumentedStorage();
+
+    store.setItem(GAME_STATE_KEY, CORRUPT_TEXTS[0].text);
+
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: store,
+      reporter: collector,
+    });
+
+    expect(manager.getGameState()).toBeNull();
+    expect(collector.failures).toHaveLength(1);
+
+    const failure = collector.failures[0];
+
+    expect(failure.operation).toBe('read');
+    expect(failure.error.name).toBe(PARSE_ERROR_NAME);
+
+    // The tag, which is what a consumer reads.
+    expect(failure.error.parse).toBe(true);
+    expect(failure.error.message).toBe(
+      'The stored value is not valid JSON; it was ignored.'
+    );
+  });
+
+  it('does not tag a SyntaxError raised by a store write', () => {
+    const fault = createSyntaxFault();
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: new InstrumentedStorage({ setItem: fault }),
+      reporter: collector,
+    });
+
+    expect(expectNoThrow(() => manager.setBestScore(2048))).toBe(false);
+    expect(collector.failures).toHaveLength(1);
+
+    const failure = collector.failures[0];
+
+    // Nothing was read and nothing was parsed: a write was lost.
+    expect(failure.operation).toBe('write');
+    expect(failure.error.name).toBe(PARSE_ERROR_NAME);
+    expect(failure.error.parse).toBe(false);
+    expect(failure.error.message).toBe('Unknown storage error.');
+    expect(failure.error.message).not.toBe(
+      'The stored value is not valid JSON; it was ignored.'
+    );
+
+    // A lost write is not a refusal either, so the caught value still travels.
+    expect(failure.thrown).toBe(fault);
+  });
+
+  it('does not tag a SyntaxError raised by a store removal', () => {
+    const fault = createSyntaxFault();
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: new InstrumentedStorage({ removeItem: fault }),
+      reporter: collector,
+    });
+
+    expect(expectNoThrow(() => manager.clearGameState())).toBe(false);
+    expect(collector.failures).toHaveLength(1);
+    expect(collector.failures[0]).toStrictEqual({
+      operation: 'remove',
+      key: GAME_STATE_KEY,
+      strategy: 'injected',
+      error: {
+        name: PARSE_ERROR_NAME,
+        message: 'Unknown storage error.',
+        quota: false,
+        parse: false,
+      },
+      thrown: fault,
+    });
+  });
+
+  it('does not tag a SyntaxError raised by a store read', () => {
+    const fault = createSyntaxFault();
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: new InstrumentedStorage({ getItem: fault }),
+      reporter: collector,
+    });
+
+    // A read whose `getItem` threw never reached a parse, so it is a failed
+    // operation and not a recovered value — the distinction the name erased.
+    expect(expectNoThrow(() => manager.readJson(RUN_STATE_KEY))).toBeNull();
+    expect(collector.failures).toHaveLength(1);
+    expect(collector.failures[0].operation).toBe('read');
+    expect(collector.failures[0].error.name).toBe(PARSE_ERROR_NAME);
+    expect(collector.failures[0].error.parse).toBe(false);
+    expect(collector.failures[0].error.message).toBe('Unknown storage error.');
+  });
+
+  it('does not tag a SyntaxError raised by the construction probe', () => {
+    const fault = createSyntaxFault();
+
+    replaceWebStorage(new InstrumentedStorage({ setItem: fault }));
+
+    const collector = createReportCollector();
+    const manager = expectNoThrow(
+      () => new LocalStorageManager({ reporter: collector })
+    );
+
+    expect(manager.strategy).toBe('memory');
+    expect(collector.failures).toHaveLength(1);
+    expect(collector.failures[0]).toStrictEqual({
+      operation: 'probe',
+      key: STORAGE_PROBE_KEY,
+      strategy: 'memory',
+      error: {
+        name: PARSE_ERROR_NAME,
+        message: 'Unknown storage error.',
+        quota: false,
+        parse: false,
+      },
+      thrown: fault,
+    });
+  });
+
+  it('does not tag a SyntaxError raised during serialisation', () => {
+    const fault = createSyntaxFault();
+    const collector = createReportCollector();
+    const store = new InstrumentedStorage();
+    const manager = new LocalStorageManager({
+      storage: store,
+      reporter: collector,
+    });
+
+    // The realistic in-product route: a value whose own `toJSON` throws. The
+    // store is never touched, so no stored text exists to have failed a parse.
+    const hostile = {
+      toJSON: (): never => {
+        throw fault;
+      },
+    };
+
+    expect(expectNoThrow(() => manager.writeJson(RUN_STATE_KEY, hostile)))
+      .toBe(false);
+    expect(store.operations).toStrictEqual([]);
+    expect(collector.failures).toHaveLength(1);
+    expect(collector.failures[0].operation).toBe('write');
+    expect(collector.failures[0].error.name).toBe(PARSE_ERROR_NAME);
+    expect(collector.failures[0].error.parse).toBe(false);
+    expect(collector.failures[0].error.message).toBe('Unknown storage error.');
+  });
+
+  it('separates two failures the error name cannot tell apart', () => {
+    const store = new InstrumentedStorage();
+
+    store.setItem(GAME_STATE_KEY, CORRUPT_TEXTS[0].text);
+
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: store,
+      reporter: collector,
+    });
+
+    expect(manager.getGameState()).toBeNull();
+    expect(
+      manager.writeJson(RUN_STATE_KEY, {
+        toJSON: (): never => {
+          throw createSyntaxFault();
+        },
+      })
+    ).toBe(false);
+    expect(collector.failures).toHaveLength(2);
+
+    const [parsed, written] = collector.failures;
+
+    // Identical names. The name is therefore not a classifier.
+    expect(parsed.error.name).toBe(written.error.name);
+    expect(parsed.error.name).toBe(PARSE_ERROR_NAME);
+
+    // Different events, and now distinguishable.
+    expect(parsed.error.parse).toBe(true);
+    expect(written.error.parse).toBe(false);
+    expect(parsed.error.message).not.toBe(written.error.message);
+  });
+
+  it('reports parse false on every description this module builds', () => {
+    const collector = createReportCollector();
+    const manager = new LocalStorageManager({
+      storage: new InstrumentedStorage({ setItem: createQuotaError() }),
+      reporter: collector,
+    });
+
+    // An unowned key, refused before the store: a refusal, never a parse.
+    expect(manager.readJson(UNOWNED_KEYS[0].key as OwnedStorageKey)).toBeNull();
+
+    // A quota-exhausted write: a failure, never a parse.
+    expect(manager.setGameState(createEmptyBoard())).toBe(false);
+    expect(collector.failures.length).toBeGreaterThanOrEqual(2);
+
+    for (const failure of collector.failures) {
+      expect(failure.error.parse).toBe(false);
+    }
   });
 });

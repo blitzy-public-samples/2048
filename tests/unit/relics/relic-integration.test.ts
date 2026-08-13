@@ -130,8 +130,11 @@ describe('relic subsystem composed with the engine', () => {
   it('reports the held relics in every commit, in pickup order', () => {
     const taken = RELIC_CATALOGUE.slice(0, 3);
     const { engine } = compose(taken);
-    const commits: readonly string[][] = [];
-    const seen: string[][] = commits.slice();
+
+    // CHANGED: a `commits` array was declared, never written to, and used only
+    // to seed `seen` with a copy of itself — always empty, and asserting
+    // nothing. DL-TEST-14.
+    const seen: string[][] = [];
 
     engine.events.on('state:commit', (payload) => {
       seen.push(payload.relics.map((entry) => entry.id));
@@ -139,8 +142,21 @@ describe('relic subsystem composed with the engine', () => {
 
     engine.setup();
 
-    expect(seen.length).toBeGreaterThan(0);
-    expect(seen[seen.length - 1]).toEqual(taken.map((relic) => relic.id));
+    // Moves as well as the setup, because `setup()` commits exactly ONCE — over
+    // a single commit an 'every commit' assertion is indistinguishable from a
+    // last-commit one, so the case has to produce several to mean anything.
+    engine.move(DIRECTION_LEFT);
+    engine.move(DIRECTION_UP);
+
+    const expected = taken.map((relic) => relic.id);
+
+    expect(seen.length).toBeGreaterThan(2);
+
+    // EVERY commit, which is what this case is named for — asserting the last
+    // one alone would pass while an earlier commit reported a different order.
+    for (const reported of seen) {
+      expect(reported).toEqual(expected);
+    }
   });
 
   it('reports no relic when the run holds none', () => {

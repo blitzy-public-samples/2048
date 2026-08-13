@@ -42,9 +42,12 @@ interface Harness {
 
   /** Text the region currently holds, with whitespace collapsed. */
   read(): string;
+
+  /** Empties every live region, so a later read measures only new text. */
+  clear(): void;
 }
 
-const setup = (): Harness => {
+const setup = (options: { readonly subscribe?: boolean } = {}): Harness => {
   const region = document.querySelector<HTMLElement>('#live-region');
 
   if (region === null) {
@@ -85,7 +88,9 @@ const setup = (): Harness => {
   announcer = built;
   translator = bridge;
 
-  bridge.subscribe(emitter);
+  if (options.subscribe !== false) {
+    bridge.subscribe(emitter);
+  }
 
   return {
     events: emitter,
@@ -102,6 +107,14 @@ const setup = (): Harness => {
         .join(' ')
         .replace(/\s+/g, ' ')
         .trim();
+    },
+    clear: (): void => {
+      built.flush();
+      drain();
+
+      for (const live of document.querySelectorAll('[aria-live]')) {
+        live.textContent = '';
+      }
     },
   };
 };
@@ -376,12 +389,248 @@ describe('an unestablished status reaches the region', () => {
   });
 });
 
-describe('the translator lifecycle', () => {
-  it('stops announcing once its subscription is released', () => {
-    const harness = setup();
-    const release = harness.translator.subscribe(harness.events);
+/* ==========================================================================
+ * A SUBSCRIPTION GROUP THAT CANNOT BE COMPLETED
+ *
+ * The six registrations were taken in one array literal, so a refusal from a
+ * later `on()` discarded the half-built array and left every listener before it
+ * attached to the emitter with no reference to it anywhere — the announcer went
+ * on announcing for a subscription it had reported it did not hold, unreachable
+ * by `destroy()` or the returned release. DL-ANNOUNCE-03.
+ * ========================================================================== */
+
+/** The six names `EngineAnnouncer.subscribe()` registers, in order. */
+const ANNOUNCED_EVENT_NAMES: readonly string[] = Object.freeze([
+  'move:before',
+  'tile:merge',
+  'tile:spawn',
+  'move:after',
+  'stage:end',
+  'state:commit',
+]);
+
+/**
+ * An emitter that refuses the `ordinal`-th registration.
+ *
+ * @param inner The real emitter every admitted registration reaches.
+ * @param ordinal Zero-based index of the registration that raises.
+ * @returns The wrapper, and a reader over what stays attached.
+ */
+const refusingEmitter = (
+  inner: EngineEvents,
+  ordinal: number,
+): {
+  readonly events: EngineEvents;
+  readonly attached: () => readonly string[];
+  readonly admit: () => void;
+} => {
+  const held: string[] = [];
+  let refuse = true;
+  let seen = 0;
+
+  const events = {
+    ...inner,
+    on: ((name: string, listener: never): (() => void) => {
+      const index = seen;
+
+      seen += 1;
+
+      if (refuse && index === ordinal) {
+        throw new Error(`the emitter refused ${name}`);
+      }
+
+      const release = (
+        inner.on as unknown as (
+          eventName: string,
+          handler: never,
+        ) => () => void
+      )(name, listener);
+
+      held.push(name);
+
+      return (): void => {
+        const at = held.indexOf(name);
+
+        if (at >= 0) {
+          held.splice(at, 1);
+        }
+
+        release();
+      };
+    }) as EngineEvents['on'],
+  } as EngineEvents;
+
+  return {
+    events,
+    attached: (): readonly string[] => [...held],
+    admit: (): void => {
+      refuse = false;
+      seen = 0;
+    },
+  };
+};
+
+describe('a subscription group that cannot be completed', () => {
+  for (
+    let ordinal = 0;
+    ordinal < ANNOUNCED_EVENT_NAMES.length;
+    ordinal += 1
+  ) {
+    const failing = ANNOUNCED_EVENT_NAMES[ordinal] ?? '';
+
+    it(`rolls back the listeners taken before ${failing}`, () => {
+      const harness = setup({ subscribe: false });
+      const source = refusingEmitter(harness.events, ordinal);
+
+      expect(() => harness.translator.subscribe(source.events)).toThrow(
+        /refused/,
+      );
+
+      // NOTHING IS LEFT ATTACHED, so the emitter is exactly as it was.
+      expect(source.attached()).toEqual([]);
+
+      // AND NOTHING IS ANNOUNCED for the half-subscription.
+      source.events.emit('tile:spawn', {
+        turn: 1,
+        position: { x: 0, y: 0 },
+        value: 2,
+      });
+      source.events.emit('state:commit', commit(4));
+
+      expect(harness.read()).toBe('');
+    });
+  }
+
+  it('subscribes cleanly on a retry once the emitter admits', () => {
+    const harness = setup({ subscribe: false });
+    const source = refusingEmitter(harness.events, 2);
+
+    expect(() => harness.translator.subscribe(source.events)).toThrow(
+      /refused/,
+    );
+    expect(source.attached()).toEqual([]);
+
+    source.admit();
+
+    const release = harness.translator.subscribe(source.events);
+
+    expect(source.attached()).toEqual(ANNOUNCED_EVENT_NAMES);
+
+    source.events.emit('tile:spawn', {
+      turn: 1,
+      position: { x: 0, y: 0 },
+      value: 2,
+    });
+
+    expect(harness.read()).not.toBe('');
 
     release();
+
+    expect(source.attached()).toEqual([]);
+  });
+
+  it('releases every listener even where one release refuses', () => {
+    const harness = setup({ subscribe: false });
+    const inner = harness.events;
+    let refusals = 0;
+    const events = {
+      ...inner,
+      on: ((name: string, listener: never): (() => void) => {
+        const release = (
+          inner.on as unknown as (
+            eventName: string,
+            handler: never,
+          ) => () => void
+        )(name, listener);
+
+        if (name !== 'tile:spawn') {
+          return release;
+        }
+
+        return (): void => {
+          refusals += 1;
+          release();
+
+          throw new Error('this release refuses');
+        };
+      }) as EngineEvents['on'],
+    } as EngineEvents;
+
+    const release = harness.translator.subscribe(events);
+
+    harness.clear();
+
+    expect(() => {
+      release();
+    }).toThrow(/refuses/);
+    expect(refusals).toBe(1);
+
+    // Every listener came off despite the refusal, so nothing is announced.
+    events.emit('tile:merge', {
+      turn: 1,
+      source: new Tile({ x: 0, y: 0 }, 2),
+      target: new Tile({ x: 0, y: 1 }, 2),
+      resultValue: 4,
+      scoreDelta: 4,
+    });
+    events.emit('state:commit', commit(4));
+
+    expect(harness.read()).toBe('');
+
+    // And `destroy()` does not call the released listeners a second time.
+    harness.translator.destroy();
+
+    expect(refusals).toBe(1);
+  });
+});
+
+describe('the translator lifecycle', () => {
+  it('stops announcing once its SOLE subscription is released', () => {
+    // The previous form of this case released a SECOND subscription while the
+    // one the harness makes stayed attached, and then asserted that something
+    // WAS announced — so it proved the opposite of its own name and would have
+    // passed for a release that detached nothing at all.
+    const harness = setup({ subscribe: false });
+    const release = harness.translator.subscribe(harness.events);
+
+    // Announcing works while it is attached, so the silence below is a release
+    // and not a broken fixture.
+    harness.events.emit('tile:spawn', {
+      turn: 1,
+      position: { x: 0, y: 0 },
+      value: 2,
+    });
+
+    expect(harness.read()).not.toBe('');
+
+    harness.clear();
+    release();
+
+    harness.events.emit('tile:spawn', {
+      turn: 2,
+      position: { x: 1, y: 1 },
+      value: 4,
+    });
+    harness.events.emit('tile:merge', {
+      turn: 2,
+      source: new Tile({ x: 0, y: 0 }, 2),
+      target: new Tile({ x: 0, y: 1 }, 2),
+      resultValue: 4,
+      scoreDelta: 4,
+    });
+    harness.events.emit('state:commit', commit(4));
+
+    expect(harness.read()).toBe('');
+  });
+
+  it('releases only its own subscription, leaving another attached', () => {
+    // The pair to the case above: two subscriptions, one released.
+    const harness = setup({ subscribe: false });
+    const first = harness.translator.subscribe(harness.events);
+
+    harness.translator.subscribe(harness.events);
+    harness.clear();
+    first();
 
     harness.events.emit('tile:spawn', {
       turn: 1,

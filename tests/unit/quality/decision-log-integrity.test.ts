@@ -34,25 +34,44 @@ const LOG_PATH = 'docs/DECISION_LOG.md';
 const REGISTRY_PATH = 'CONTRIBUTING.md';
 
 /**
- * Directories the citation sweep descends into.
+ * Directories never descended into.
  *
- * The documentation tree is deliberately excluded from THIS sweep: the log
- * itself names identifiers that do not resolve, because it records the next
- * free ordinal of every area in prose. What this sweep asserts is that every
- * identifier the SHIPPING SOURCES and their tests cite resolves to a row.
- * `SIBLING_DOCUMENTS` below carries the documents that are swept separately.
+ * CHANGED: the sweep is stated as an EXCLUSION list over the whole repository.
+ * Three inclusion lists — two roots plus a hand-kept file list and a hand-kept
+ * sibling-document list — left real citation sites out: `tsconfig.node.json`
+ * cites `DL-BUILD-14` and the two `docs/dashboards/` artifacts cite twenty-one
+ * identifiers between them, and none was swept by either decision-log gate. An
+ * exclusion list inverts the failure mode, so a citing file added tomorrow is
+ * swept by default. DL-TEST-13.
  */
-const CITING_ROOTS: readonly string[] = ['src', 'style', 'tests'];
+const EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'coverage',
+  'test-results',
+  'playwright-report',
+
+  // The superseded vanilla sources, kept for reference and citing nothing.
+  'js',
+]);
 
 /**
- * Documents outside the log that cite identifiers, swept separately.
+ * The documents REQUIRED to cite at least one identifier, asserted one by one.
  *
- * A citation here means "the row behind this", exactly as one in a source file
- * does, so it must resolve. The log is the one document excluded, because its
- * next-free-ordinal pointers are deliberately unresolved.
+ * That is a different property from "its citations resolve": a document that
+ * stopped explaining itself would pass the resolution sweep trivially. The
+ * whole-repository sweep above covers resolution for these and for every other
+ * file, so this list carries only the obligation to explain.
+ *
+ * Two documents are deliberately absent. `README.md` is build-and-run
+ * instructions for a reader who has not opened the log, and `blitzy-deck/`'s
+ * deck addresses non-technical leadership; neither is a place a decision
+ * identifier belongs, and neither carries one. Asserting the whole list rather
+ * than a count of more than five is what surfaced that — the threshold was met
+ * while both explained nothing. DL-TEST-13.
  */
 const SIBLING_DOCUMENTS: readonly string[] = [
-  'README.md',
   'CONTRIBUTING.md',
   'docs/CONFIGURATION.md',
   'docs/OBSERVABILITY.md',
@@ -62,7 +81,8 @@ const SIBLING_DOCUMENTS: readonly string[] = [
   'docs/architecture/component-interaction.md',
   'docs/architecture/data-flow.md',
   'docs/architecture/hook-dispatch-sequence.md',
-  'blitzy-deck/executive-summary.html',
+  'docs/dashboards/dashboard.html',
+  'docs/dashboards/dashboard.json',
 ];
 
 /** Files the citation sweep reads, by extension. */
@@ -71,19 +91,43 @@ const CITING_EXTENSIONS: ReadonlySet<string> = new Set([
   '.scss',
   '.css',
   '.html',
+
+  // ADDED: the two forms the previously unswept citation sites use — the
+  // dashboard template and the tooling configs are JSON, and every document
+  // that explains itself is Markdown. DL-TEST-13.
+  '.json',
+  '.md',
+  '.yml',
+  '.yaml',
 ]);
 
-/** Single files at the root that may carry a citation. */
-const CITING_FILES: readonly string[] = [
-  'index.html',
-  'vite.config.ts',
-  'vitest.config.ts',
-  'vitest.snapshot.config.ts',
-  'playwright.config.ts',
-];
+/**
+ * The one file excluded from the identifier sweep.
+ *
+ * The log records each area's next free ordinal in prose, so it deliberately
+ * names rows that do not exist yet. Everything else is read, including
+ * `.github/workflows/ci.yml`, which cites the decisions behind the pipeline it
+ * declares: a citation that resolves to no row is the failure this suite exists
+ * to catch wherever the citation is written.
+ */
+const EXCLUDED_FILES: ReadonlySet<string> = new Set([LOG_PATH]);
 
 /** Matches one decision identifier anywhere in a file. */
 const CITATION_PATTERN = /DL-[A-Z0-9]+-\d+/gu;
+
+/**
+ * The shape every identifier must have: exactly two digits, nothing after.
+ *
+ * ADDED: `CITATION_PATTERN` and `ROW_PATTERN` both accept any number of digits,
+ * so a row written with one digit DEFINED that identifier and every citation of
+ * it resolved — the malformed shape passed the gate end to end. `ordinalOf`
+ * parses it too, so it could even satisfy the contiguity assertion in place of
+ * the two-digit form it was meant to be. DL-TEST-13.
+ *
+ * No malformed identifier is written literally in this file: the sweep reads its
+ * own source, so an example would be collected as a citation.
+ */
+const WELL_FORMED = /^DL-[A-Z0-9]+-\d\d$/u;
 
 /**
  * Matches a table row that DEFINES an identifier: a leading pipe, the
@@ -99,17 +143,26 @@ const AREA_PATTERN = /^\s*\|\s*`([A-Z0-9]+)`\s*\|\s*`/gmu;
 const read = (relativePath: string): string =>
   readFileSync(resolve(ROOT, relativePath), 'utf8');
 
-/** Every file under one directory, recursively. */
+/** Every file under one directory, recursively, excluded names skipped. */
 const walk = (relativeDirectory: string): string[] => {
   const absolute = resolve(ROOT, relativeDirectory);
   const collected: string[] = [];
 
   for (const entry of readdirSync(absolute)) {
-    const relative = join(relativeDirectory, entry);
+    if (EXCLUDED_DIRECTORIES.has(entry)) {
+      continue;
+    }
+
+    const relative =
+      relativeDirectory === '.' ? entry : join(relativeDirectory, entry);
 
     if (statSync(resolve(ROOT, relative)).isDirectory()) {
       collected.push(...walk(relative));
 
+      continue;
+    }
+
+    if (EXCLUDED_FILES.has(relative)) {
       continue;
     }
 
@@ -122,12 +175,9 @@ const walk = (relativeDirectory: string): string[] => {
 /** Every identifier cited by the sources and their tests, to the files citing it. */
 const citations = ((): Map<string, string[]> => {
   const found = new Map<string, string[]>();
-  const paths = [
-    ...CITING_ROOTS.flatMap((directory) => walk(directory)).filter((path) =>
-      CITING_EXTENSIONS.has(extname(path)),
-    ),
-    ...CITING_FILES,
-  ];
+  const paths = walk('.').filter((path) =>
+    CITING_EXTENSIONS.has(extname(path)),
+  );
 
   for (const path of paths) {
     for (const identifier of read(path).match(CITATION_PATTERN) ?? []) {
@@ -207,12 +257,47 @@ describe('every identifier a sibling document cites resolves to a row', () => {
     expect(unresolved.sort()).toEqual([]);
   });
 
-  it('swept documents that actually carry citations', () => {
-    const carrying = SIBLING_DOCUMENTS.filter(
-      (path) => (read(path).match(CITATION_PATTERN) ?? []).length > 0,
+  it('leaves no listed document without a citation', () => {
+    // CHANGED: EVERY listed document must carry one, rather than more than five
+    // of them. A threshold could be met while a named document explained none
+    // of itself, which is the property the list exists to hold — and it is a
+    // different property from resolution, since a document that stopped citing
+    // anything passes the sweep above trivially. DL-TEST-13.
+    const silent = SIBLING_DOCUMENTS.filter(
+      (path) => (read(path).match(CITATION_PATTERN) ?? []).length === 0,
     );
 
-    expect(carrying.length).toBeGreaterThan(5);
+    expect(silent).toEqual([]);
+    expect(SIBLING_DOCUMENTS.length).toBeGreaterThan(5);
+  });
+});
+
+describe('every identifier is written with exactly two digits', () => {
+  it('accepts no malformed ordinal in any citation', () => {
+    const malformed: string[] = [];
+
+    for (const [identifier, paths] of citations) {
+      if (!WELL_FORMED.test(identifier)) {
+        malformed.push(`${identifier} (${paths.join(', ')})`);
+      }
+    }
+
+    expect(malformed.sort()).toEqual([]);
+  });
+
+  it('accepts no malformed ordinal in any row the log defines', () => {
+    const malformed = definitions.filter(
+      (identifier): boolean => !WELL_FORMED.test(identifier),
+    );
+
+    // A malformed ROW is the worse half: it defines the identifier, so every
+    // citation of it resolves and nothing else in this file objects.
+    expect(malformed.sort()).toEqual([]);
+  });
+
+  it('collected identifiers to judge, so neither check is vacuous', () => {
+    expect(citations.size).toBeGreaterThan(0);
+    expect(definitions.length).toBeGreaterThan(0);
   });
 });
 

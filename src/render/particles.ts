@@ -17,7 +17,7 @@
 //   TR-PARTICLE-04  the reduced-motion gate that suppresses a burst
 //
 // Decisions: DL-PARTICLE-01, DL-PARTICLE-02, DL-PARTICLE-03, DL-PARTICLE-04,
-// DL-PARTICLE-05 (docs/DECISION_LOG.md).
+// DL-PARTICLE-05, DL-PARTICLE-07 (docs/DECISION_LOG.md).
 
 import type { Object3D, Vector3Like } from 'three';
 import {
@@ -37,6 +37,10 @@ import {
 
 import type { Theme, ThemeId } from '../theme/themes';
 import { getActiveTheme, getTheme } from '../theme/themes';
+
+// CHANGED: a type import beside the value imports, for the board geometry the
+// spray is measured against. DL-PARTICLE-07.
+import type { GeometryScale } from '../theme/tokens';
 import {
   depthScale,
   gridSpacing,
@@ -102,6 +106,18 @@ const INVALID_DELTA_METRIC = 'render.particles.delta.invalid';
 
 const INVALID_OPTION_METRIC = 'render.particles.option.invalid';
 
+/**
+ * Counter raised per spread re-measured against a new board geometry, carrying
+ * the pitch it moved to. DL-PARTICLE-07.
+ */
+const GEOMETRY_METRIC = 'render.particles.geometry';
+
+/**
+ * Counter raised where a geometry is offered to a system whose spread a caller
+ * pinned, so the refusal is visible rather than silent. DL-PARTICLE-07.
+ */
+const GEOMETRY_PINNED_METRIC = 'render.particles.geometry.pinned';
+
 const PREFERENCE_CLEARED_METRIC = 'render.particles.preference.cleared';
 
 const BURST_TWEEN_NAME = 'merge-burst';
@@ -164,6 +180,12 @@ export const particleDefaults = Object.freeze({
   // the tile's own half-extent confines the whole spray inside the footprint of
   // the tile it leaves; the pitch carries the outermost motes a full cell clear
   // of it. DL-PARTICLE-06.
+  //
+  // The DESKTOP pitch, and the fallback alone: a system handed a `GeometryScale`
+  // — or handed one later through `useGeometry` — derives the pitch from that
+  // scale instead, so the spray keeps the same relationship to the cell it
+  // leaves at the mobile scale and on a board of any configured size.
+  // DL-PARTICLE-07.
   spread: tileSize + gridSpacing,
 
   // CHANGED from `depthScale.board`: TWICE THE BLOCK'S OWN DEPTH, so a mote
@@ -178,6 +200,29 @@ export const particleDefaults = Object.freeze({
   maskResolution: 32,
   maskFalloffExponent: 2,
 } as const);
+
+/**
+ * The planar spread one board geometry calls for: ONE CELL PITCH of that
+ * geometry.
+ *
+ * `lift` and `size` have no counterpart here on purpose. Both are expressions on
+ * `depthScale`, which is arithmetic on the desktop `gridSpacing` alone and is
+ * what src/render/tile-mesh-factory.ts extrudes every block by at BOTH scales —
+ * so a block is the same depth whichever scale is in force and a lift measured
+ * against it needs no scaling. `spread` is the only planar magnitude, and the
+ * planar lengths are exactly what a scale changes. DL-PARTICLE-07.
+ *
+ * @param geometry The scale and board size in force.
+ * @returns The pitch, or the desktop default where the scale states no usable
+ *   lengths.
+ */
+export function particleSpreadFor(geometry: GeometryScale): number {
+  const pitch = geometry.tileSize + geometry.gridSpacing;
+
+  return Number.isFinite(pitch) && pitch > 0
+    ? pitch
+    : particleDefaults.spread;
+}
 
 /** The ceilings the two count parameters and the mask edge are confined to. */
 export const particleLimits = Object.freeze({
@@ -214,6 +259,14 @@ export const particleLimits = Object.freeze({
 export interface ParticleSystemOptions {
   readonly particlesPerBurst?: number;
   readonly maxConcurrentBursts?: number;
+
+  /**
+   * The board geometry the spray is measured against. Supplied, `spread`
+   * defaults to one cell pitch of THIS geometry rather than of the desktop
+   * scale; `useGeometry` replaces it whenever the renderer rebuilds its board.
+   * An explicit `spread` outranks both. DL-PARTICLE-07.
+   */
+  readonly geometry?: GeometryScale;
   readonly spread?: number;
   readonly lift?: number;
   readonly size?: number;
@@ -257,6 +310,15 @@ export interface ParticleSystemStats {
 
   /** Length of one burst, in ms: the `pop` delay plus its duration. */
   readonly lifetimeMs: number;
+
+  /**
+   * Planar travel one full-intensity burst reaches, in px: one cell pitch of
+   * the geometry in force, or the magnitude a caller pinned. DL-PARTICLE-07.
+   */
+  readonly spread: number;
+
+  /** Whether an explicit `spread` option pinned that value. */
+  readonly spreadPinned: boolean;
   readonly disposed: boolean;
 }
 
@@ -325,6 +387,24 @@ export interface ParticleSystem {
    * @returns Bursts currently running, from zero to the concurrency budget.
    */
   activeBurstCount(): number;
+
+  /**
+   * Measures the spray against a different board geometry.
+   *
+   * Called by the renderer from every path that rebuilds its board — a
+   * configured board size that changed, the breakpoint crossing that swaps the
+   * scale, and the rebuild after a restored context — so the spray keeps the
+   * same relationship to the cell it leaves at either scale and on a board of
+   * any size. Running bursts keep the spread they were emitted under; the next
+   * burst takes the new one.
+   *
+   * A system constructed with an explicit `spread` is PINNED: the request is
+   * reported and the stated magnitude stands. DL-PARTICLE-07.
+   *
+   * @param geometry The scale and board size now in force.
+   * @returns The spread in force after the call.
+   */
+  useGeometry(geometry: GeometryScale): number;
 
   /**
    * @returns The reduced-motion preference in force, read at the call.
@@ -752,9 +832,18 @@ export function createParticleSystem(
     particleLimits.maxConcurrentBursts,
   );
 
-  const spread = resolveMagnitude(
+  /**
+   * CHANGED: `let`, and seeded from the geometry the caller supplied. An
+   * explicit `spread` PINS the value — `useGeometry` reports and keeps it — so a
+   * caller that stated a magnitude is never overridden by a rebuild.
+   * DL-PARTICLE-07.
+   */
+  const spreadPinned = options.spread !== undefined;
+  let spread = resolveMagnitude(
     options.spread,
-    particleDefaults.spread,
+    options.geometry === undefined
+      ? particleDefaults.spread
+      : particleSpreadFor(options.geometry),
     'spread',
     optionContext,
   );
@@ -1228,6 +1317,40 @@ export function createParticleSystem(
     isActive: (): boolean => activeBursts > 0,
     activeParticleCount: (): number => activeBursts * particlesPerBurst,
     activeBurstCount: (): number => activeBursts,
+
+    useGeometry: (geometry: GeometryScale): number => {
+      if (spreadPinned) {
+        reporter.onCount({
+          name: GEOMETRY_PINNED_METRIC,
+          value: 1,
+          detail: Object.freeze({ spread, requested: null }),
+        });
+
+        return spread;
+      }
+
+      const next = particleSpreadFor(geometry);
+
+      if (next === spread) {
+        return spread;
+      }
+
+      const previous = spread;
+
+      spread = next;
+      reporter.onCount({
+        name: GEOMETRY_METRIC,
+        value: 1,
+        detail: Object.freeze({
+          spread: next,
+          previous,
+          gridRowCells: geometry.gridRowCells,
+        }),
+      });
+
+      return spread;
+    },
+
     isReducedMotion: readReducedMotion,
     reset: clearAll,
 
@@ -1267,6 +1390,8 @@ export function createParticleSystem(
         invalidDeltas,
         invalidOptions,
         lifetimeMs,
+        spread,
+        spreadPinned,
         disposed,
       }),
 

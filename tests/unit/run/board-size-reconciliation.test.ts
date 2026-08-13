@@ -46,11 +46,11 @@
 //   snapshot read                          js/local_storage_manager.js
 //                                          L25-L26, L52-L55
 //
-// Figure this suite will be the mechanical proof of: Figure 4 (Turn Data Flow),
-// PLANNED for docs/architecture/data-flow.md AND NOT LANDED. Its win check is
-// to read `config.winValue` and its loss check to be the `Moves available?`
-// decision; both reads are asserted here over the reconciled edge length, which
-// is the size that figure's COMMIT stage will persist. The assertions rest on
+// Figure this suite is the mechanical proof of: Figure 4 (Turn Data Flow), in
+// the delivered docs/architecture/data-flow.md. Its win check reads
+// `config.winValue` and its loss check is the `Moves available?` decision; both
+// reads are asserted here over the reconciled edge length, which is the size
+// that figure's COMMIT stage persists. The assertions rest on
 // src/engine/terminal-state.ts and src/run/run-state-store.ts, not on the
 // figure.
 //

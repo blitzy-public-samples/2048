@@ -10,8 +10,12 @@
  *   TR-STAGE-02  `evaluateStageGoal` and `StageGoalProgress`
  *   TR-STAGE-03  `StageConfig` and `stageGoalForIndex`
  *   TR-STAGE-04  `createDefaultStageConfig` and `DEFAULT_STAGE_CONFIG`
+ *   TR-STAGE-05  `STAGE_GOAL_KINDS` and `isStageGoalKind`
+ *   TR-STAGE-06  `MAX_STAGE_INDEX` and `isStageIndex`, the stage-index domain
+ *                this module publishes
  *
- * Decisions: DL-STAGE-01, DL-STAGE-02, DL-STAGE-03 (docs/DECISION_LOG.md).
+ * Decisions: DL-STAGE-01, DL-STAGE-02, DL-STAGE-03, DL-STAGE-04, DL-STAGE-05
+ * (docs/DECISION_LOG.md).
  */
 
 /**
@@ -36,6 +40,33 @@ interface ScoreThresholdStageGoal {
  * error at every exhaustive consumer.
  */
 export type StageGoal = HighestTileStageGoal | ScoreThresholdStageGoal;
+
+/**
+ * ADDED: every `StageGoalKind`, as data. `StageGoalKind` is erased at compile
+ * time, so a validator handed a goal at runtime — src/engine/hook-bus.ts weighs
+ * the goal an `onStageStart` handler returns — had no list to measure `kind`
+ * against and admitted any string. Declared here beside the type, and
+ * `satisfies` keeps the two in step: a kind added to the union without being
+ * added here fails to compile. DL-STAGE-04.
+ */
+export const STAGE_GOAL_KINDS = Object.freeze([
+  'highest-tile',
+  'score-threshold',
+] as const) satisfies readonly StageGoalKind[];
+
+/**
+ * ADDED: reports whether `value` is one of the declared goal kinds.
+ * DL-STAGE-04.
+ *
+ * @param value Candidate kind.
+ * @returns `true` for exactly the members of `STAGE_GOAL_KINDS`.
+ */
+export function isStageGoalKind(value: unknown): value is StageGoalKind {
+  return (
+    typeof value === 'string' &&
+    (STAGE_GOAL_KINDS as readonly string[]).includes(value)
+  );
+}
 
 export interface StageProgressInput {
   readonly score: number;
@@ -72,6 +103,49 @@ export interface StageGoalProgress {
  */
 const ABSOLUTE_TARGET_CEILING = Number.MAX_SAFE_INTEGER;
 
+/**
+ * ADDED: the highest stage index this module derives a goal for, and therefore
+ * the highest index a run may occupy.
+ *
+ * THE ONE AUTHORITATIVE STAGE DOMAIN. The domain was declared twice and the two
+ * declarations disagreed: this module admitted every non-negative integer while
+ * src/run/run-state.ts refused a persisted `stageIndex` above a fixed 1024, so a
+ * run that advanced past 1024 produced an envelope its own store rejected and
+ * the reward transaction that produced it rolled back. `MAX_PERSISTED_STAGE_INDEX`
+ * of src/run/run-state.ts is now this number, and `RunController.advanceStage()`
+ * of src/run/run-controller.ts refuses to leave it, on the pattern
+ * `MAX_SUPPORTED_BOARD_SIZE` already follows for the board edge length.
+ *
+ * `Number.MAX_SAFE_INTEGER` is the bound because a stage index is reached by
+ * repeated increment and is carried through `JSON.stringify`: above it neither
+ * operation is exact. `stageGoalForIndex` is total over the whole domain — the
+ * default curve's targets saturate at their own ceiling roughly forty stages
+ * past the ladder, and every index beyond that resolves to the saturated goal.
+ *
+ * DL-STAGE-05, DL-RUN-07.
+ */
+export const MAX_STAGE_INDEX = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Whether `value` is a stage index: a non-negative safe integer no greater than
+ * `MAX_STAGE_INDEX`.
+ *
+ * Total and non-throwing for every input, so the persistence guards of
+ * src/run/run-state.ts can delegate to it without their own no-throw guarantee
+ * resting on anything else.
+ *
+ * @param value Value to test.
+ * @returns `true` when `value` is a stage index this build accepts.
+ */
+export function isStageIndex(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= MAX_STAGE_INDEX
+  );
+}
+
 function assertFinite(name: string, value: number): void {
   if (!Number.isFinite(value)) {
     throw new RangeError(
@@ -81,11 +155,15 @@ function assertFinite(name: string, value: number): void {
   }
 }
 
+// CHANGED: the check is `isStageIndex`, which reads the published domain, where
+// it was `Number.isInteger(stageIndex) && stageIndex >= 0` — a test that
+// admitted an index above `MAX_STAGE_INDEX` that no increment reaches and no
+// envelope carries. DL-STAGE-05.
 function assertStageIndex(stageIndex: number): void {
-  if (!Number.isInteger(stageIndex) || stageIndex < 0) {
+  if (!isStageIndex(stageIndex)) {
     throw new RangeError(
-      `stage-config: stageIndex must be a non-negative integer, ` +
-        `received ${String(stageIndex)}`,
+      `stage-config: stageIndex must be a non-negative integer no greater ` +
+        `than ${String(MAX_STAGE_INDEX)}, received ${String(stageIndex)}`,
     );
   }
 }
@@ -198,8 +276,9 @@ export interface StageConfig {
  * Deterministic: consumes no randomness and reads no clock. Returns a freshly
  * allocated goal on every call, never a reference into `stageConfig`.
  *
- * @throws RangeError when `stageIndex` is not a non-negative integer, or
- *   when the resolved entry carries a `kind` outside `StageGoalKind`.
+ * @throws RangeError when `stageIndex` is not a stage index `isStageIndex`
+ *   accepts, or when the resolved entry carries a `kind` outside
+ *   `StageGoalKind`.
  */
 export function stageGoalForIndex(
   stageIndex: number,

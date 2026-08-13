@@ -215,8 +215,39 @@ describe('a run interrupted and resumed from storage', () => {
       composition.stop();
     }
 
-    expect(formatBoard(uninterrupted.engine.serialize())).toBe(expected);
-    expect(formatBoard(compose(stepwise).engine.serialize())).toBe(expected);
+    // CHANGED: this read `expect(formatBoard(uninterrupted.engine.serialize()))
+    // .toBe(expected)`, and `expected` had just been read from that same engine
+    // — the assertion compared a value with itself and held for every possible
+    // implementation. An INDEPENDENT composition over its own backing store is
+    // what actually states the property. DL-TEST-15.
+    const independent = new MemoryStorage();
+    const control = compose(independent);
+
+    play(control.engine, MOVES);
+    control.stop();
+
+    expect(formatBoard(control.engine.serialize())).toBe(expected);
+
+    // The twelve-composition leg, which is the one this case exists for.
+    const rebuilt = compose(stepwise);
+
+    expect(formatBoard(rebuilt.engine.serialize())).toBe(expected);
+
+    // ADDED: the board alone is half the V2 guarantee. A resume that recovered
+    // the lattice while losing the draw counts would satisfy every assertion
+    // above and silently break reproducibility from that point on, so the
+    // cursors, the stage and the persisted envelope are compared too.
+    expect(rebuilt.streams.snapshotCursors()).toEqual(
+      control.streams.snapshotCursors(),
+    );
+    expect(rebuilt.controller.stageContext().stageIndex).toBe(
+      control.controller.stageContext().stageIndex,
+    );
+    expect(formatRunState(storedRun(stepwise), { showRunId: false })).toBe(
+      formatRunState(storedRun(independent), { showRunId: false }),
+    );
+
+    rebuilt.stop();
   });
 
   it('takes no opening spawn on resume', () => {

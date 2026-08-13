@@ -1,10 +1,15 @@
 // Per-relic isolation suite for the `merge-magic` relic `frostbind`.
 //
+// The final section is COMPOSED rather than isolated: it drives a real engine,
+// because the thaw transition is reachable only by MOVING a tile out of a frosted
+// cell and a bus dispatch made by hand can assert the toggle without proving any
+// move produces it.
+//
 // This suite reads no DOM, no storage and no clock, calls no `Math.random`,
 // installs no timer and no mock library, and runs under the `test` script with
 // no server, browser or network.
 //
-// Decisions: DL-MERGE-01, DL-MERGE-02 (docs/DECISION_LOG.md).
+// Decisions: DL-MERGE-01, DL-MERGE-02, DL-MERGE-04 (docs/DECISION_LOG.md).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -17,6 +22,7 @@ import type {
   MergePredicate,
   RulesConfig,
 } from '../../../src/config/rules-config';
+import { Engine } from '../../../src/engine/engine';
 import { Grid } from '../../../src/engine/grid';
 import {
   createHookBus,
@@ -37,11 +43,17 @@ import type {
 } from '../../../src/engine/hooks';
 import { Tile } from '../../../src/engine/tile';
 import { NOOP_ENGINE_REPORTER } from '../../../src/engine/types';
-import type { CorrelationId, Position } from '../../../src/engine/types';
+import type {
+  CorrelationId,
+  Position,
+  SerializedGameState,
+  SerializedTile,
+} from '../../../src/engine/types';
 import { MERGE_MAGIC_FAMILY } from '../../../src/relics/families/merge-magic';
 import {
   RELIC_CATALOGUE,
   RelicRegistry,
+  applyStandingRelicRules,
   findRelicById,
 } from '../../../src/relics/relic-registry';
 import type { Relic } from '../../../src/relics/relic-types';
@@ -273,6 +285,19 @@ function benchWithRelic(
     bus,
     environment: { config, rng: streams, grid: board },
   };
+}
+
+/**
+ * The frosted-cell ledger the relic's one state slot holds on a bench.
+ *
+ * @param bench Bench whose single subscriber is the relic.
+ * @returns The cells the ledger holds, in ledger order.
+ */
+function frostedLedger(bench: Bench): readonly Position[] {
+  const slot = bench.bus.subscribers()[0]?.state as { frozen?: unknown };
+  const held: unknown = slot.frozen;
+
+  return Array.isArray(held) ? (held as readonly Position[]) : [];
 }
 
 /**
@@ -727,7 +752,13 @@ describe('frostbind records the frozen-cell merge predicate', () => {
     expect(config.merge.canMerge(moving, frosted)).toBe(false);
   });
 
-  it('accepts that merge again once a second merge there thaws it', () => {
+  // THE DEFENSIVE HALF OF THE DESTINATION TOGGLE, and only that. A merge that
+  // LANDS on a frosted cell is refused by the very rule this relic installs, so
+  // the dispatch below is not a merge any legal move produces — it is the state
+  // a merge would leave if a later relic replaced the merge rule outright rather
+  // than wrapping it. The reachable thaw is the SOURCE thaw, asserted through
+  // `Engine.move` in the composed section at the end of this suite. DL-MERGE-04.
+  it('thaws the destination when a merge lands on a frosted cell anyway', () => {
     const bench = benchWithRelic();
     const moving = new Tile(ORIGIN, OPERAND_VALUE);
     const frosted = new Tile(DESTINATION, OPERAND_VALUE);
@@ -736,12 +767,52 @@ describe('frostbind records the frozen-cell merge predicate', () => {
 
     expect(config.merge.canMerge(moving, frosted)).toBe(false);
 
+    // Which is exactly the merge the predicate above refuses; dispatched
+    // directly, it exercises the toggle's thaw branch and nothing else.
     bench.bus.dispatch('onMerge', mergeDispatch().payload, bench.environment);
 
     expect(config.merge.canMerge(moving, frosted)).toBe(
       defaultCanMerge(moving, frosted),
     );
     expect(config.merge.canMerge(moving, frosted)).toBe(true);
+  });
+
+  it('thaws the cell a merge moved OUT of, leaving the destination frosted', () => {
+    const bench = benchWithRelic();
+
+    // First merge: ORIGIN -> DESTINATION, which frosts DESTINATION.
+    bench.bus.dispatch('onMerge', mergeDispatch().payload, bench.environment);
+
+    expect(frostedLedger(bench)).toEqual([DESTINATION]);
+
+    // Second merge: DESTINATION -> a free cell. The frosted cell is the SOURCE,
+    // which the installed rule never constrains, so this merge is legal.
+    const onward: Position = { x: 0, y: 1 };
+    const source = new Tile(DESTINATION, OPERAND_VALUE);
+    const target = new Tile(onward, OPERAND_VALUE);
+    const produced = defaultProduceMergeValue(source, target);
+
+    bench.bus.dispatch(
+      'onMerge',
+      { source, target, resultValue: produced, scoreDelta: produced },
+      bench.environment,
+    );
+
+    // The frost travelled with the tile: released where it left, applied where
+    // it landed.
+    expect(frostedLedger(bench)).toEqual([onward]);
+    expect(
+      config.merge.canMerge(
+        new Tile(ORIGIN, OPERAND_VALUE),
+        new Tile(DESTINATION, OPERAND_VALUE),
+      ),
+    ).toBe(true);
+    expect(
+      config.merge.canMerge(
+        new Tile({ x: 0, y: 2 }, OPERAND_VALUE),
+        new Tile(onward, OPERAND_VALUE),
+      ),
+    ).toBe(false);
   });
 
   it('accepts a merge onto a cell the ledger does not hold', () => {
@@ -1433,11 +1504,16 @@ describe('a frosted ledger carried through a reload', () => {
  * 4b. Standing state across a reload
  *
  * A reload rebuilds the configuration from the defaults, so the wrapper an
- * earlier session installed is gone and `onStageStart` is the one dispatch that
- * puts it back. The ledger it rebuilds from is the persisted `state` slot, and
- * the charges that FROZE those cells have already been spent — so the budget a
- * resumed run restores is legitimately zero, and the standing rule must survive
- * that. `STANDING_HOOK_NAMES` of src/engine/hooks.ts is what makes it survive.
+ * earlier session installed is gone while the frosted cells that session
+ * persisted are not. Two properties settle who puts the wrapper back.
+ *
+ * The charge guard withholds ALL SIX hooks from a relic whose budget is spent
+ * (AAP R3, V6), stage preparation included, so an exhausted `frostbind`
+ * dispatches nothing and installs nothing of its own. The rule those spent
+ * charges already bought is reinstated instead by `applyStandingRelicRules` of
+ * src/relics/relic-registry.ts — the non-hook rehydration path, which reads the
+ * persisted slot, writes the live rules, and reaches no handler and no charge
+ * budget. `DL-HOOKBUS-07`, `DL-REGISTRY-04`, `DL-MERGE-05`.
  * ========================================================================== */
 
 describe('restoring the frozen ledger at zero charges', () => {
@@ -1485,7 +1561,18 @@ describe('restoring the frozen ledger at zero charges', () => {
     };
   }
 
-  it('reinstalls the merge predicate the persisted ledger implies', () => {
+  /** The envelope entry a session that spent every charge writes. */
+  function persistedEntry(charges: number): PersistedRelic {
+    return {
+      id: RELIC_ID,
+      charges,
+
+      // Plain JSON, as `RunState.relics[i].state` carries it.
+      state: JSON.parse(JSON.stringify(PERSISTED_LEDGER)) as unknown,
+    };
+  }
+
+  it('dispatches nothing at zero charges, on stage start included', () => {
     const bench = reloaded(0);
     const before = config.merge.canMerge;
 
@@ -1495,18 +1582,27 @@ describe('restoring the frozen ledger at zero charges', () => {
       bench.environment,
     );
 
-    // INVOKED, not skipped: the charge guard is withheld from every hook that
-    // acts inside a stage and not from the one that prepares it.
-    expect(resolved.invoked).toBe(1);
-    expect(resolved.skipped).toBe(0);
+    // SKIPPED, not invoked: the charge guard withholds all six hooks from an
+    // exhausted subscriber, so no handler runs and no effect is applied.
+    expect(resolved.invoked).toBe(0);
+    expect(resolved.skipped).toBe(1);
     expect(resolved.failed).toBe(0);
-    expect(resolved.effectsApplied).toBe(1);
+    expect(resolved.effectsApplied).toBe(0);
 
-    // AND IT COSTS NOTHING. The handler asks for no charge, so the budget the
-    // envelope restored is the budget it is left at.
+    // And nothing is deducted: a handler never reached asks for nothing.
     expect(resolved.chargesConsumed).toBe(0);
     expect(bench.bus.subscribers()[0]?.charges).toBe(0);
 
+    // The rules are exactly as the reload built them.
+    expect(config.merge.canMerge).toBe(before);
+  });
+
+  it('reinstates the merge predicate the persisted ledger implies', () => {
+    const before = config.merge.canMerge;
+
+    // THE NON-HOOK PATH: the entries the envelope carried, and the rules the
+    // reload rebuilt. No bus, no dispatch, no context.
+    expect(applyStandingRelicRules([persistedEntry(0)], config)).toBe(1);
     expect(config.merge.canMerge).not.toBe(before);
 
     const moving = new Tile(ORIGIN, OPERAND_VALUE);
@@ -1526,11 +1622,7 @@ describe('restoring the frozen ledger at zero charges', () => {
   it('still refuses to freeze anything further at zero charges', () => {
     const bench = reloaded(0);
 
-    bench.bus.dispatch(
-      'onStageStart',
-      stageStartPayload(config.boardSize),
-      bench.environment,
-    );
+    applyStandingRelicRules([persistedEntry(0)], config);
 
     const restored = config.merge.canMerge;
     const resolved = bench.bus.dispatch(
@@ -1539,8 +1631,8 @@ describe('restoring the frozen ledger at zero charges', () => {
       bench.environment,
     );
 
-    // The effect hook stays guarded, so the ledger gains no cell and the
-    // predicate in force is the one the restoration installed.
+    // The merge hook is guarded on the same rule, so the ledger gains no cell
+    // and the predicate in force is the one the reinstatement installed.
     expect(resolved.invoked).toBe(0);
     expect(resolved.skipped).toBe(1);
     expect(resolved.chargesConsumed).toBe(0);
@@ -1555,17 +1647,11 @@ describe('restoring the frozen ledger at zero charges', () => {
 
   it('drops a persisted cell the resumed board no longer holds', () => {
     const shrunk = 2;
-    const bench = reloaded(0, new Grid(shrunk));
 
-    bench.bus.dispatch(
-      'onStageStart',
-      stageStartPayload(shrunk),
-      bench.environment,
-    );
+    // The reconciled edge length the reload rebuilt the rules at.
+    config.boardSize = shrunk;
 
-    const slot = bench.bus.subscribers()[0]?.state as { frozen?: unknown };
-
-    expect(slot.frozen).toEqual([DESTINATION]);
+    expect(applyStandingRelicRules([persistedEntry(0)], config)).toBe(1);
 
     const moving = new Tile(ORIGIN, OPERAND_VALUE);
 
@@ -1578,25 +1664,13 @@ describe('restoring the frozen ledger at zero charges', () => {
   });
 
   it('restores the same standing rule whatever budget the envelope carried', () => {
-    const exhausted = reloaded(0);
-
-    exhausted.bus.dispatch(
-      'onStageStart',
-      stageStartPayload(config.boardSize),
-      exhausted.environment,
-    );
+    expect(applyStandingRelicRules([persistedEntry(0)], config)).toBe(1);
 
     const fromExhausted = config.merge.canMerge;
 
     config.merge.canMerge = defaultCanMerge;
 
-    const remaining = reloaded(1);
-
-    remaining.bus.dispatch(
-      'onStageStart',
-      stageStartPayload(config.boardSize),
-      remaining.environment,
-    );
+    expect(applyStandingRelicRules([persistedEntry(1)], config)).toBe(1);
 
     const moving = new Tile(ORIGIN, OPERAND_VALUE);
 
@@ -1608,6 +1682,43 @@ describe('restoring the frozen ledger at zero charges', () => {
       );
       expect(config.merge.canMerge(moving, target)).toBe(false);
     }
+  });
+
+  it('reinstates through a registry restore, over the live rules', () => {
+    const bus = createHookBus({
+      correlationId: CORRELATION_ID,
+      reporter: NOOP_ENGINE_REPORTER,
+    });
+    const registry = new RelicRegistry({
+      bus,
+      rules: config,
+      correlationId: CORRELATION_ID,
+    });
+
+    registry.restore([persistedEntry(0)]);
+
+    // The relic is held with the spent budget the envelope carried, and the
+    // frost it bought is in force on the rules the registry was composed with.
+    expect(registry.has(RELIC_ID)).toBe(true);
+    expect(registry.persistedEntry(RELIC_ID)?.charges).toBe(0);
+
+    const moving = new Tile(ORIGIN, OPERAND_VALUE);
+
+    expect(
+      config.merge.canMerge(moving, new Tile(DESTINATION, OPERAND_VALUE)),
+    ).toBe(false);
+
+    // A registry composed WITHOUT rules reinstates nothing, so the capability
+    // is opt-in rather than a side effect of restoring.
+    const bare = createDefaultRulesConfig();
+    const isolated = new RelicRegistry({
+      bus: createHookBus({ correlationId: CORRELATION_ID }),
+      correlationId: CORRELATION_ID,
+    });
+
+    isolated.restore([persistedEntry(0)]);
+
+    expect(bare.merge.canMerge).toBe(defaultCanMerge);
   });
 });
 
@@ -1716,5 +1827,186 @@ describe('the catalogue declaration after every dispatch above', () => {
     expect(Object.isFrozen(declaredRelic().hooks)).toBe(true);
     expect(Object.isFrozen(MERGE_MAGIC_FAMILY)).toBe(true);
     expect(Object.isFrozen(MERGE_MAGIC_FAMILY.relics)).toBe(true);
+  });
+});
+
+/* ==========================================================================
+ * Composed: the thaw driven through a real engine
+ *
+ * Every section above dispatches `onMerge` on a bus directly, which is what an
+ * isolation suite is for — and which is exactly why the thaw went unexercised.
+ * The relic's only thaw was the destination toggle, and the merge rule the relic
+ * installs refuses precisely the merge that would reach it, so no legal move
+ * could thaw anything: the ledger only ever grew.
+ *
+ * This section builds a real `Engine` over a real `HookBus` and a real
+ * `RelicRegistry` and reaches the transition by MOVING: the rule constrains a
+ * merge's destination and never its source, so a frosted cell whose tile slides
+ * out and merges elsewhere is reachable, and that is where the frost is released.
+ *
+ * Decisions: DL-MERGE-01, DL-MERGE-04.
+ * ========================================================================== */
+
+/** Direction constant for a move left, as `Engine.move` takes it. */
+const MOVE_LEFT = 3;
+
+/** Direction constant for a move down. */
+const MOVE_DOWN = 2;
+
+/** A composed run: the live rules, the engine over them, and the registry. */
+interface ComposedRun {
+  readonly config: RulesConfig;
+  readonly engine: Engine;
+  readonly registry: RelicRegistry;
+}
+
+/**
+ * The ledger the registry holds for the relic, read the way the run envelope
+ * reads it.
+ *
+ * @param run Composed run.
+ * @returns The cells the ledger holds.
+ */
+function ledgerOf(run: ComposedRun): readonly Position[] {
+  const entry = run.registry
+    .serialize()
+    .find((relic): boolean => relic.id === RELIC_ID);
+  const slot = entry?.state as { frozen?: unknown } | undefined;
+  const held: unknown = slot?.frozen;
+
+  return Array.isArray(held) ? (held as readonly Position[]) : [];
+}
+
+/**
+ * Composes engine, bus and registry with the relic held, and opens `board`.
+ *
+ * @param board Snapshot the stage opens on.
+ * @returns The composed run.
+ */
+function composeRun(board: SerializedGameState): ComposedRun {
+  const live = createDefaultRulesConfig();
+  const bus = createHookBus({ reporter: NOOP_ENGINE_REPORTER });
+  const registry = new RelicRegistry({ bus, catalogue: RELIC_CATALOGUE });
+
+  expect(registry.pickUp(RELIC_ID)).not.toBeUndefined();
+
+  const engine = new Engine({
+    config: live,
+    streams: createRngStreams(`${RELIC_ID}-composed`),
+    hooks: bus,
+    relicContext: registry.commitContextProvider(),
+  });
+
+  engine.setup(board);
+
+  return { config: live, engine, registry };
+}
+
+/**
+ * A board snapshot from a sparse list of occupied cells.
+ *
+ * @param occupied Cells to fill, on a board of the default edge length.
+ * @returns The snapshot, with every other cell `null`.
+ */
+function runBoard(
+  occupied: readonly { x: number; y: number; value: number }[],
+): SerializedGameState {
+  const size = 4;
+  const cells: (SerializedTile | null)[][] = [];
+
+  for (let x = 0; x < size; x += 1) {
+    const column: (SerializedTile | null)[] = [];
+
+    for (let y = 0; y < size; y += 1) {
+      const found = occupied.find((cell) => cell.x === x && cell.y === y);
+
+      column.push(
+        found === undefined ? null : { position: { x, y }, value: found.value },
+      );
+    }
+
+    cells.push(column);
+  }
+
+  return {
+    grid: { size, cells },
+    score: 0,
+    over: false,
+    won: false,
+    keepPlaying: false,
+  };
+}
+
+describe('the thaw a legal move produces', () => {
+  it('frosts the cell a merge lands on, through Engine.move', () => {
+    const run = composeRun(
+      runBoard([
+        { x: 0, y: 0, value: OPERAND_VALUE },
+        { x: 1, y: 0, value: OPERAND_VALUE },
+        { x: 0, y: 1, value: OPERAND_VALUE * 2 },
+      ]),
+    );
+
+    expect(run.engine.move(MOVE_LEFT)).toBe(true);
+    expect(ledgerOf(run)).toEqual([{ x: 0, y: 0 }]);
+
+    // The frost is in force: the rule refuses a merge INTO the cell.
+    expect(
+      run.config.merge.canMerge(
+        new Tile({ x: 1, y: 0 }, OPERAND_VALUE * 2),
+        new Tile({ x: 0, y: 0 }, OPERAND_VALUE * 2),
+      ),
+    ).toBe(false);
+  });
+
+  it('releases the frost when the frosted tile merges away', () => {
+    const run = composeRun(
+      runBoard([
+        { x: 0, y: 0, value: OPERAND_VALUE },
+        { x: 1, y: 0, value: OPERAND_VALUE },
+        { x: 0, y: 1, value: OPERAND_VALUE * 2 },
+      ]),
+    );
+
+    expect(run.engine.move(MOVE_LEFT)).toBe(true);
+    expect(ledgerOf(run)).toEqual([{ x: 0, y: 0 }]);
+
+    // The frosted tile at (0,0) now moves DOWN into the tile below it, which is
+    // a merge whose SOURCE is the frosted cell — legal under the installed rule.
+    expect(run.engine.move(MOVE_DOWN)).toBe(true);
+
+    // Thawed where it left; frosted where it landed. Reached entirely by moving.
+    expect(ledgerOf(run)).not.toContainEqual({ x: 0, y: 0 });
+    expect(ledgerOf(run)).toHaveLength(1);
+    expect(
+      run.config.merge.canMerge(
+        new Tile({ x: 1, y: 0 }, OPERAND_VALUE),
+        new Tile({ x: 0, y: 0 }, OPERAND_VALUE),
+      ),
+    ).toBe(true);
+  });
+
+  it('reaches the thaw while the relic still has charges to spend', () => {
+    const run = composeRun(
+      runBoard([
+        { x: 0, y: 0, value: OPERAND_VALUE },
+        { x: 1, y: 0, value: OPERAND_VALUE },
+        { x: 0, y: 1, value: OPERAND_VALUE * 2 },
+      ]),
+    );
+
+    const budget = declaredRelic().charges ?? 0;
+
+    run.engine.move(MOVE_LEFT);
+    run.engine.move(MOVE_DOWN);
+
+    const spent = run.registry
+      .serialize()
+      .find((relic): boolean => relic.id === RELIC_ID)?.charges;
+
+    // Two merges, two charges: the thaw is not paid for out of a separate budget
+    // and it is not free either.
+    expect(spent).toBe(budget - 2);
+    expect(spent).toBeGreaterThan(0);
   });
 });

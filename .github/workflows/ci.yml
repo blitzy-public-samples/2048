@@ -13,7 +13,36 @@
 # test-results/ from the tree, so the upload step below is where that artifact
 # is retained.
 #
-# Decisions behind this file are recorded in docs/DECISION_LOG.md.
+# Decisions behind this file are recorded in docs/DECISION_LOG.md: DL-CI-01 the
+# single sequential job, DL-CI-02 the stage order, DL-CI-03 the locked install,
+# DL-CI-04 the browser cache and its unconditional install, DL-CI-05 the
+# artifact retention policy, and DL-CI-06 the commit-pinned actions with a
+# read-only token that is not persisted.
+#
+# Constructs of this file are mapped in docs/TRACEABILITY_MATRIX.md:
+# TR-CI-01 the trigger surface and permissions, TR-CI-02 the job and its
+# timeout, TR-CI-03 the pinned runtime and locked install, TR-CI-04 the browser
+# provisioning, TR-CI-05 the five quality stages, and TR-CI-06 the uploads.
+#
+# THIRD-PARTY ACTIONS ARE PINNED TO A COMMIT, NOT A TAG. Every `uses:` below
+# names the full 40-character commit SHA of one published release, and the tag
+# that release carries is the comment at the end of the same line. A tag is a
+# mutable pointer its owner can move, so `@v5` is a different tree on two
+# different days; a SHA is the tree itself. Decision `DL-CI-06`.
+#
+# To move an action to a newer release, in one edit:
+#   1. Read the SHA that release's tag points at. Either
+#      `gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha`, or
+#      `git ls-remote https://github.com/<owner>/<repo> refs/tags/<tag>`, or
+#      the commit shown on the release page. A tag object dereferences to its
+#      commit; use the COMMIT SHA.
+#   2. Replace the SHA in `uses:` and the tag comment beside it together, so the
+#      two never disagree.
+#   3. Read that release's notes for a required input change, because a major
+#      release is where one lands.
+# The pinned releases, current at the time of writing: actions/checkout
+# v5.1.0, actions/setup-node v6.5.0, actions/cache v5.1.0 and
+# actions/upload-artifact v6.0.0.
 
 name: CI
 
@@ -41,12 +70,20 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v5
+        # Every action is pinned to the commit its release tag named when this
+        # file was written, with the tag kept alongside for a reader; a tag is
+        # mutable and a commit is not, and Dependabot reads that trailing
+        # comment. See DL-BUILD-16. The checkout token is not written into the
+        # local git config, because no step after this one performs an
+        # authenticated git operation.
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Select the pinned Node.js
         # .nvmrc is the single home of the pinned version; this step reads it.
         # The npm cache is keyed on the committed lockfile.
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -59,18 +96,24 @@ jobs:
         run: npm ci
 
       - name: Restore the Playwright browser cache
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           # Where `playwright install` unpacks the browser build and ffmpeg.
+          # The cache holds that directory and nothing else: the browser's
+          # system libraries are installed outside it, by the step below.
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             playwright-${{ runner.os }}-
 
-      - name: Install the recording browser
-        # Around 115 MB of download on a cache miss. On a restored cache the
-        # install finds the build the pinned @playwright/test asks for and
-        # short-circuits.
+      - name: Install the recording browser and its system libraries
+        # `e2e:install` of package.json is `playwright install --with-deps
+        # chromium`, so this step does two things: it installs the apt packages
+        # headless Chromium links against, and it unpacks the browser build —
+        # around 115 MB of download on a cache miss, short-circuited on a
+        # restored cache. The library half runs either way, because a restored
+        # cache carries no system packages, and it is not conditional on the
+        # cache outcome for that reason.
         run: npm run e2e:install
 
       - name: Type-check
@@ -78,6 +121,13 @@ jobs:
         # sources and the suites, then tsconfig.node.json for the four root
         # tooling configs, so neither set falls through the gap.
         run: npm run typecheck
+
+      - name: Stylesheet deprecation gate
+        # Dart Sass exits 0 on a deprecation by default, so a bare compile
+        # would pass with one present. --fatal-deprecation carries the pinned
+        # compiler version, which promotes every deprecation that version
+        # knows about to an error. See DL-BUILD-17.
+        run: npm run lint:styles
 
       - name: Unit suite
         run: npm test
@@ -87,16 +137,40 @@ jobs:
         # snapshots. No update flag is passed, so a mismatch fails here.
         run: npm run test:snapshot
 
+      - name: Dashboard template gate
+        # Named as its own step although the unit suite above already collects
+        # it: Rule 3 admits a dashboard template only where it can be
+        # exercised, so the step that exercises both templates — the static
+        # page's parser and renderer against a real export, and every Grafana
+        # expression against the canonical families and labels — is visible in
+        # the log rather than folded into a suite of six thousand.
+        run: npm run test:dashboard
+
       - name: Static build
+        # The R12 deployment-parity gate, and the bundle the step below records
+        # against: dist/ is produced HERE and once per job.
         run: npm run build
 
-      - name: Recorded gameplay proof
-        # Both cases of tests/e2e/gameplay-recording.spec.ts run under this one
-        # script, on a workstation exactly as they run here.
+      - name: Recorded gameplay proof and browser variants
+        # No --project filter, so this one script runs every project the
+        # configuration declares: the two cases of
+        # tests/e2e/gameplay-recording.spec.ts under `gameplay-recording` and
+        # `diagnostics-surface`, then the three cases of
+        # tests/e2e/browser-variants.spec.ts under `variant-webgl-unavailable`,
+        # `variant-reduced-motion` and `variant-mobile`. Five tests, serially, on
+        # a workstation exactly as they run here, with one difference:
+        # PLAYWRIGHT_PREVIEW_ONLY makes playwright.config.ts's web server preview
+        # the dist/ the step above just built instead of building a second time.
+        # A workstation run leaves the variable unset and builds, so the script
+        # stays self-contained there. Only the recording project captures video,
+        # so the upload below still finds exactly the R11 artifact. DL-PW-04,
+        # DL-PW-06, DL-PW-07.
+        env:
+          PLAYWRIGHT_PREVIEW_ONLY: '1'
         run: npm run test:e2e
 
       - name: Upload the recorded gameplay video
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: recorded-gameplay
           # playwright.config.ts writes one directory per test under its
@@ -107,7 +181,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload the static bundle
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: static-bundle
           # vite.config.ts's build.outDir: the folder a static host serves.
@@ -117,7 +191,7 @@ jobs:
       - name: Upload the Playwright report
         # Kept for a failing run as well as a passing one.
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: playwright-report
           # playwright.config.ts's html reporter outputFolder.
